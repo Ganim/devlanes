@@ -1,0 +1,29 @@
+[package]
+name = "devlanes-sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+globset = "0.4"
+hex = "0.4"
+notify = "8.2"
+serde.workspace = true
+sha2 = "0.10"
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+walkdir = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
