@@ -1,5 +1,5 @@
 use crate::{
-    BuiltinExtensions, ConfigDuration, Env, Extensions, FnoxConfig, HostConfig, ReadyConfig, Run,
+    ConfigDuration, Env, Extensions, FnoxConfig, HostConfig, OpaqueExtensions, ReadyConfig, Run,
     RunScript, SyncConfig, Templated,
 };
 use indexmap::IndexMap;
@@ -31,7 +31,7 @@ macro_rules! service_fields {
         #[derive(Debug, Clone, JsonSchema)]
         #[schemars(bound = "E: Extensions", deny_unknown_fields)]
         #[schemars(extend("examples" = [{"run_script":"apps/api/package.json#dev","hosts":["api.${{ lane.domain }}"],"tags":["api"]}]))]
-        pub struct ServiceConfig<E: Extensions = BuiltinExtensions> {
+        pub struct ServiceConfig<E: Extensions = OpaqueExtensions> {
             $($(#[$meta])* pub $field: Option<$ty>,)*
             /// Service-specific environment overrides, above global_env.
             #[schemars(default)]
@@ -65,12 +65,27 @@ macro_rules! service_fields {
         }
 
         impl<E: Extensions> PartialService<E> {
-            /// Template inheritance and local overlays replace service fields and preset blocks
-            /// atomically so one-of settings such as ready and run/run_script cannot mix forms.
-            /// Env entries merge per key; fnox retains unspecified fields.
+            /// Apply a local override or an `extends` child. Mappings (`ready`, `stop`, `fnox`,
+            /// `{ source, name }` scripts, `env`, preset options) merge per key; lists and
+            /// scalars replace. `run` and `run_script` are alternatives, so setting one clears
+            /// the other. Merged values keep the overlay's source position for diagnostics.
             pub(crate) fn merge(&mut self, mut overlay: Self) {
                 if overlay.run.is_some() { self.run_script = None; }
                 if overlay.run_script.is_some() { self.run = None; }
+                if let (Some(base), Some(local)) = (&self.run_script, &mut overlay.run_script) {
+                    let mut merged = base.value.clone();
+                    crate::loader::merge_script(&mut merged, local.value.clone());
+                    local.value = merged;
+                }
+                if let (Some(base), Some(local)) = (&self.ready, &mut overlay.ready) {
+                    let mut merged = base.value.clone();
+                    crate::loader::merge_ready(&mut merged, local.value.clone());
+                    local.value = merged;
+                }
+                if let (Some(base), Some(local)) = (&self.stop, &mut overlay.stop) {
+                    if local.value.signal.is_none() { local.value.signal = base.value.signal.clone(); }
+                    if local.value.timeout.is_none() { local.value.timeout = base.value.timeout.clone(); }
+                }
                 if let (Some(base), Some(local)) = (&self.fnox, &mut overlay.fnox) {
                     if local.value.profile.is_none() { local.value.profile = base.value.profile.clone(); }
                 }
@@ -79,7 +94,14 @@ macro_rules! service_fields {
                     if let Some(base) = &mut self.env { base.value.extend(overlay.value); }
                     else { self.env = Some(overlay); }
                 }
-                self.preset_candidates.extend(overlay.preset_candidates);
+                for (key, mut value) in overlay.preset_candidates {
+                    if let Some(base) = self.preset_candidates.get(&key) {
+                        let mut merged = base.value.clone();
+                        crate::loader::merge_json(&mut merged, value.value);
+                        value.value = merged;
+                    }
+                    self.preset_candidates.insert(key, value);
+                }
             }
 
             /// Classify unknown keys against the effective preset only after merging and inheritance.
@@ -89,7 +111,7 @@ macro_rules! service_fields {
                 for (key, value) in self.preset_candidates {
                     let fail = |message| crate::ConfigError::plain(format!("{path}.{key}: {message}"));
                     if preset != Some(key.as_str()) {
-                        return Err(fail(unknown_service_key::<E>(&key, preset)));
+                        return Err(fail(unknown_service_key::<E>(&key, preset, value.value.is_object())));
                     }
                     if !value.value.is_object() {
                         return Err(fail(format!("preset options `{key}` must be a mapping")));
@@ -142,8 +164,13 @@ macro_rules! service_fields {
             }
         }
 
-        /// Suggest service fields or the selected integration without interpreting unrelated keys as options.
-        pub(crate) fn unknown_service_key<E: Extensions>(key: &str, preset: Option<&str>) -> String {
+        /// Suggest service fields or the selected integration without interpreting unrelated keys
+        /// as options. Only a mapping can be preset options; without a registry every mapping key
+        /// may name a preset, with one only registered names do.
+        pub(crate) fn unknown_service_key<E: Extensions>(key: &str, preset: Option<&str>, mapping: bool) -> String {
+            if key == "on" {
+                return crate::loader::ON_HINT.into();
+            }
             let fields = [$(stringify!($field),)* "env"];
             let suggestion = fields.into_iter().chain(preset).chain(E::preset_names().iter().copied())
                 .filter(|candidate| *candidate != key)
@@ -152,10 +179,10 @@ macro_rules! service_fields {
             if let Some(suggestion) = suggestion {
                 return format!("unknown key `{key}`; did you mean `{suggestion}`?");
             }
-            if preset.is_none() && (E::accepts_unregistered_presets() || E::preset_names().contains(&key)) {
+            if preset.is_none() && mapping && (E::accepts_unregistered_presets() || E::preset_names().contains(&key)) {
                 return format!("unknown key `{key}`; set `preset: {key}` to use these options");
             }
-            match preset {
+            match preset.filter(|_| mapping) {
                 Some(preset) => format!("unknown key `{key}`; options must use the selected preset key `{preset}`"),
                 None => format!("unknown key `{key}`"),
             }

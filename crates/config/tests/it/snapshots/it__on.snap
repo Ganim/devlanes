@@ -1,11 +1,12 @@
 ---
 source: crates/config/tests/it/main.rs
+assertion_line: 162
 expression: output
 ---
-  × unknown key `on`; use `when` for lifecycle hooks
+  × unknown key `on`; lifecycle hooks are tasks with `when`
    ╭─[devlanes.yaml:5:5]
  4 │     run: migrate
  5 │     on: lane.start
    ·     ┬
-   ·     ╰── unknown key `on`; use `when` for lifecycle hooks
+   ·     ╰── unknown key `on`; lifecycle hooks are tasks with `when`
    ╰────

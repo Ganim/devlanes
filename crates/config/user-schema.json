@@ -6,6 +6,7 @@
       "examples": [
         "5GiB"
       ],
+      "pattern": "^[0-9]+(B|KB|MB|GB|KiB|MiB|GiB)$",
       "type": "string"
     },
     "CaKind": {
@@ -61,6 +62,7 @@
         "15s",
         "10m"
       ],
+      "pattern": "^[0-9]+(ms|s|m|h|d)$",
       "type": "string"
     },
     "DnsProvider": {
@@ -148,15 +150,7 @@
         "dns_provider": {
           "anyOf": [
             {
-              "$ref": "#/$defs/DnsProvider",
-              "description": "Reserved DNS-01 provider configuration; not supported yet.",
-              "examples": [
-                {
-                  "cloudflare": {
-                    "token": "${{ env.CF_API_TOKEN }}"
-                  }
-                }
-              ]
+              "$ref": "#/$defs/DnsProvider"
             },
             {
               "type": "null"
@@ -175,13 +169,7 @@
         "hosts_file": {
           "anyOf": [
             {
-              "$ref": "#/$defs/HostsFile",
-              "description": "Whether project hostnames are also written to the system hosts file.",
-              "examples": [
-                "auto",
-                "never",
-                "always"
-              ]
+              "$ref": "#/$defs/HostsFile"
             },
             {
               "type": "null"
@@ -340,6 +328,7 @@
         "75%",
         "12.5%"
       ],
+      "pattern": "^\\s*([0-9]+\\.?[0-9]*|\\.[0-9]+)\\s*%\\s*$",
       "type": "string"
     },
     "PortsConfig": {
@@ -357,6 +346,7 @@
           "examples": [
             "20000-32767"
           ],
+          "pattern": "^[0-9]+-[0-9]+$",
           "type": "string"
         }
       },
@@ -598,16 +588,17 @@
           "type": "string"
         },
         {
-          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "description": "Text containing `${{ ... }}`, evaluated for each lane; write `${{ '${{' }}` for a literal `${{`.",
           "examples": [
-            "${{ lane.value }}"
+            "${{ lane.index }}"
           ],
+          "pattern": "\\$\\{\\{",
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
       "examples": [
-        "${{ lane.value }}"
+        "${{ lane.index }}"
       ]
     },
     "Terminal": {
@@ -686,7 +677,7 @@
         },
         "trust": {
           "default": [],
-          "description": "Trust stores that should accept the local CA; mobile targets are reserved and unsupported.",
+          "description": "Trust stores that should accept the local CA; mobile targets are ignored with a warning for now.",
           "examples": [
             [
               "system",
@@ -748,7 +739,7 @@
         },
         {
           "const": "ios-simulator",
-          "description": "Reserved iOS simulator trust target; not supported yet.",
+          "description": "Reserved iOS simulator trust target; not supported yet, so it is ignored with a warning.",
           "examples": [
             "ios-simulator"
           ],
@@ -756,7 +747,7 @@
         },
         {
           "const": "android-emulator",
-          "description": "Reserved Android emulator trust target; not supported yet.",
+          "description": "Reserved Android emulator trust target; not supported yet, so it is ignored with a warning.",
           "examples": [
             "android-emulator"
           ],
@@ -915,15 +906,7 @@
     "terminal": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Terminal",
-          "description": "Terminal application used by open-in-terminal actions.",
-          "examples": [
-            "iterm2",
-            "ghostty",
-            "wezterm",
-            "kitty",
-            "terminal"
-          ]
+          "$ref": "#/$defs/Terminal"
         },
         {
           "type": "null"

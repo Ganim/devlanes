@@ -3,7 +3,7 @@ source: crates/config/tests/it/main.rs
 expression: "parse_project(MINIMAL, None).expect(\"minimal reference\")"
 ---
 {
-  "project": "myapp",
+  "project": "acme",
   "tags": {},
   "templates": {},
   "lanes": {
@@ -28,15 +28,15 @@ expression: "parse_project(MINIMAL, None).expect(\"minimal reference\")"
     "hidden": null,
     "containers": {},
     "setup": {
-      "database": "docker compose exec -T postgres createdb -U postgres myapp_${{ lane.name }}"
+      "database": "docker compose exec -T postgres createdb -U postgres acme_${{ lane.name }}"
     },
     "teardown": {
-      "database": "docker compose exec -T postgres dropdb -U postgres --if-exists myapp_${{ lane.name }}"
+      "database": "docker compose exec -T postgres dropdb -U postgres --if-exists acme_${{ lane.name }}"
     }
   },
   "fnox": null,
   "global_env": {
-    "DATABASE_URL": "postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/myapp_${{ lane.name }}"
+    "DATABASE_URL": "postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/acme_${{ lane.name }}"
   },
   "tasks": {
     "migrate": {

@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use devlanes_config::{BuiltinExtensions, ExpressionContext};
+use devlanes_config::{ExpressionContext, OpaqueExtensions};
 use devlanes_core::{LaunchSpec, TerminalSize, ports::PortName};
 use devlanes_proto::{
     Context, ExecParams, Page, RpcError, RunParams, Selection, UnitSummary, events,
@@ -827,7 +827,7 @@ impl Inner {
         let known = crate::platforms::known(&self.integ.contributors);
         let path = file.clone();
         let (report, unknown) = tokio::task::spawn_blocking(move || {
-            let config = devlanes_config::load_project_with::<BuiltinExtensions>(&path)?;
+            let config = devlanes_config::load_project_with::<OpaqueExtensions>(&path)?;
             let validator = |name: &str, options: Option<&Value>| -> Result<(), String> {
                 match presets.iter().find(|preset| preset.name == name) {
                     Some(preset) => (preset.parse)(options),

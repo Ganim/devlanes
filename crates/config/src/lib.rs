@@ -19,6 +19,7 @@ mod model;
 mod scalar;
 mod schema_docs;
 mod service;
+mod shape;
 mod tags;
 mod user;
 mod validation;
@@ -27,21 +28,23 @@ pub use error::{ConfigError, SourceLocation};
 pub use expression::{
     ExpressionContext, evaluate, evaluate_env, evaluate_typed, references, resolve_lane_vars,
 };
-pub use extensions::{BuiltinExtensions, Extensions};
-pub use loader::{check, load_project, load_project_with, parse_project, parse_project_with};
+pub use extensions::{Extensions, OpaqueExtensions};
+pub use loader::{
+    ConfigSources, check, load_project, load_project_with, parse_project, parse_project_with,
+};
 pub use model::*;
 pub use scalar::{ByteSize, ConfigDuration, Percent, Scalar, Templated};
 pub use service::{ServiceConfig, StopConfig};
 pub use tags::{TagColor, TagConfig};
 pub use user::*;
 pub use validation::{
-    CheckReport, ConfigWarning, PresetValidator, validate, validate_with_compose_services,
-    validate_with_presets,
+    CheckReport, ConfigWarning, PresetPorts, PresetValidator, validate,
+    validate_with_compose_services, validate_with_preset_ports, validate_with_presets,
 };
 
 /// Generate the project JSON Schema, including the selected extension schemas.
 pub fn schema() -> schemars::Schema {
-    schema_with::<BuiltinExtensions>()
+    schema_with::<OpaqueExtensions>()
 }
 
 /// Generate a schema using the binary's registered integration types.
@@ -91,8 +94,24 @@ pub fn project_schema_with_presets(presets: &[(&str, schemars::Schema)]) -> serd
                 serde_json::json!({"type":"object","$ref":reference}),
             );
         }
+        // An options key only works with its own preset. The preset may come from a template,
+        // so the rule constrains `preset` when present instead of requiring it.
+        let agreement: Vec<_> = presets
+            .iter()
+            .map(|(name, _)| {
+                serde_json::json!({
+                    "if": {"required": [name]},
+                    "then": {"properties": {"preset": {
+                        "const": name,
+                        "description": format!("`{name}` options require `preset: {name}`."),
+                        "examples": [name],
+                    }}},
+                })
+            })
+            .collect();
         for (name, definition) in defs {
             if name.starts_with("ServiceConfig") {
+                definition["allOf"] = agreement.clone().into();
                 definition["additionalProperties"] = false.into();
                 if let Some(fields) = definition
                     .get_mut("properties")

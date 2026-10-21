@@ -1,12 +1,13 @@
-# Personal overrides merged over devlanes.yaml: maps merge by key, lists and scalars replace.
-# Requires a base that defines admin-web. The reference base does not.
+# Personal overrides merged over devlanes.yaml: mappings merge by key at every level (a
+# service's ready, stop or env keeps the keys left out here), lists and scalars replace.
+# Setting run, run_script or steps drops the other two; setting one ready check drops the rest.
 lanes:
   max: 3
 global_env:
   LOG_LEVEL: debug
 services:
   # Changes one setting of a service the base defines.
-  admin-web:
+  user-web:
     autostart: false
   # A service only this machine runs.
   scratch-api:
@@ -14,4 +15,4 @@ services:
     run: node scratch/server.mjs
     hosts: ["scratch.${{ lane.domain }}"]
 profiles:
-  default: [+essential, admin-web]
+  default: [+essential, user-web]

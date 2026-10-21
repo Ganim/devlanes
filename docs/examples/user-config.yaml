@@ -1,5 +1,4 @@
 # Per-user settings, normally at ~/.devlanes/config.yaml.
-# This source example includes unsupported trust targets; see README.md.
 
 # How lane hostnames resolve on this machine.
 hostnames:
@@ -16,8 +15,7 @@ tls:
   # Certificate authority: devlanes keeps its own under ~/.devlanes/ca; mkcert reuses mkcert's.
   ca: devlanes
   # Stores that devlanes certs trust installs the CA into.
-  # ios-simulator and android-emulator are rejected in v1.
-  trust: [system, firefox, ios-simulator, android-emulator]
+  trust: [system, firefox]
 # Ports the HTTPS proxy listens on; lan: true also accepts other machines.
 proxy:
   https_port: 443

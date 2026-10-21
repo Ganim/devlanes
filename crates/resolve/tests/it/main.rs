@@ -406,7 +406,7 @@ async fn multi_profile_task_filter() {
 /// Public URLs and origins carry the proxy's HTTPS port unless it is 443.
 async fn public_https_port() {
     let config = parse(MINIMAL);
-    let facts = facts("myapp", 1, Some("x"));
+    let facts = facts("acme", 1, Some("x"));
     let (block, offsets) = allocation(&config, 21_000, &[]);
     let infra = json!({"postgres": {"port": 15432, "ports": {"5432": 15432}}});
     let runners: [Arc<dyn ScriptRunner>; 1] = [Arc::new(FakeRunner::new())];
@@ -423,8 +423,8 @@ async fn public_https_port() {
         let layout = lane_layout(&input).expect("layout");
         let lane = resolve_lane(input).await.expect("resolves");
         assert!(lane.errors.is_empty(), "{:?}", lane.errors);
-        let api_url = format!("https://api.myapp-1.localhost{suffix}");
-        let web_url = format!("https://myapp-1.localhost{suffix}");
+        let api_url = format!("https://api.acme-1.localhost{suffix}");
+        let web_url = format!("https://acme-1.localhost{suffix}");
         assert_eq!(
             layout.services["api"].public_url.as_deref(),
             Some(api_url.as_str())
@@ -447,11 +447,7 @@ async fn public_https_port() {
         let origins = &api.launch.env.values["DEVLANES_ORIGINS"];
         assert!(origins.split(',').any(|o| o == api_url), "{origins}");
         // Routes keep bare hostnames: the proxy matches on Host without the port.
-        assert!(
-            lane.routes
-                .iter()
-                .any(|r| r.host == "api.myapp-1.localhost")
-        );
+        assert!(lane.routes.iter().any(|r| r.host == "api.acme-1.localhost"));
     }
     assert_eq!(
         devlanes_resolve::https_url("a.localhost", Some(443)),
@@ -535,13 +531,13 @@ fn profile_summaries_for_clients() {
 /// The default domain follows the lane index; lane vars see lane values.
 async fn domain_and_lane_vars() {
     let main = plain(MINIMAL, 0).await;
-    assert_eq!(main.domain, "myapp.localhost");
-    assert_eq!(main.services["web"].hosts, ["myapp.localhost"]);
+    assert_eq!(main.domain, "acme.localhost");
+    assert_eq!(main.services["web"].hosts, ["acme.localhost"]);
     let third = plain(MINIMAL, 3).await;
-    assert_eq!(third.domain, "myapp-3.localhost");
+    assert_eq!(third.domain, "acme-3.localhost");
     assert_eq!(
         third.services["web"].launch.env.values["VITE_API_URL"],
-        "https://api.myapp-3.localhost"
+        "https://api.acme-3.localhost"
     );
     let full = plain(FULL, 2).await;
     assert_eq!(full.domain, "acme-2.localhost");
@@ -1038,7 +1034,7 @@ services:
 /// Snapshot of examples/minimal.yaml in lane 1 with fake integrations.
 async fn snapshot_minimal() {
     let config = parse(MINIMAL);
-    let facts = facts("myapp", 1, Some("feature/login"));
+    let facts = facts("acme", 1, Some("feature/login"));
     let node: Arc<dyn Contributor> = Arc::new(FakeContributor {
         env: vec![("FORCE_COLOR", "1")],
         ..FakeContributor::platform("fake-node", 50, "node", FakeContributor::node_detection())

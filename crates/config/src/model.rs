@@ -1,4 +1,4 @@
-use crate::{BuiltinExtensions, ConfigDuration, Extensions, Scalar, ServiceConfig, Templated};
+use crate::{ConfigDuration, Extensions, OpaqueExtensions, Scalar, ServiceConfig, Templated};
 use indexmap::IndexMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,11 @@ pub type Env = IndexMap<String, Templated<Scalar>>;
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, bound = "E: Extensions")]
 #[schemars(extend("examples" = [{"project":"acme","services":{"api":{"run_script":"apps/api/package.json#dev"}}}]))]
-pub struct ProjectConfig<E: Extensions = BuiltinExtensions> {
+pub struct ProjectConfig<E: Extensions = OpaqueExtensions> {
+    /// Source documents retained in memory for diagnostics after integration validation.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub sources: crate::ConfigSources,
     /// Project identity shared by every worktree; lowercase letters, digits, dots, underscores, and dashes.
     #[schemars(extend("examples" = ["acme"]))]
     pub project: String,
@@ -125,7 +129,7 @@ pub enum HostsFile {
 }
 
 /// Shell text runs in a shell; argv is passed directly to the executable.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("examples" = ["pnpm dev",["node","server.mjs","--port","${{ self.port }}"]]))]
 pub enum Run {
@@ -137,7 +141,7 @@ pub enum Run {
     Argv(Vec<Templated<String>>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("examples" = ["apps/api/package.json#dev",{"source":"justfile","name":"fixtures"}]))]
 /// Script selected from a package manifest, Makefile, or justfile.
@@ -156,10 +160,14 @@ pub enum RunScript {
 /// A source file and the script or target to run from it.
 pub struct ScriptSource {
     /// Script source relative to the worktree, such as package.json, Makefile, or justfile.
+    /// Required, unless an override or extends child keeps the inherited source.
     #[schemars(extend("examples" = ["apps/api/package.json","Makefile","justfile"]))]
+    #[serde(default)]
     pub source: String,
     #[schemars(extend("examples" = ["dev","fixtures"]))]
     /// Script, target, or recipe name within the source file.
+    /// Required, unless an override or extends child keeps the inherited name.
+    #[serde(default)]
     pub name: String,
 }
 
@@ -274,7 +282,7 @@ pub enum TaskAfter {
     Services,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("examples" = [["+api","+web"],{"include":["+web"],"infra":false}]))]
 /// Named service selection with optional environment, infrastructure, and script overrides.
@@ -327,7 +335,7 @@ fn script_remaps_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     })
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("examples" = ["api.${{ lane.domain }}",{"host":"*.${{ lane.domain }}","fallback":true}]))]
 /// Hostname routed by the HTTP proxy, optionally with route settings.
@@ -371,7 +379,7 @@ pub enum HostHeader {
     Upstream,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("examples" = ["started",{"http":{"path":"/healthz"}},{"tcp":true}]))]
 /// Readiness policy; defaults to TCP for services with hosts and started for other services.
@@ -414,7 +422,7 @@ pub struct ReadyCheck {
     pub timeout: Option<Templated<ConfigDuration>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("examples" = [true,"inspector"]))]
 /// TCP port to probe for readiness.
@@ -460,7 +468,7 @@ pub struct SyncConfig {
     pub ignore: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("examples" = ["docker-compose.yml",["docker-compose.yml","docker-compose.dev.yml"]]))]
 /// Compose files used to resolve and start infrastructure.
@@ -546,7 +554,7 @@ pub struct ContainerConfig {
     pub ready: Option<ReadyConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("examples" = ["docker compose exec -T postgres createdb acme_${{ lane.name }}",{"run":["aws","s3","mb","s3://${{ lane.bucket }}"],"ignore_errors":true}]))]
 /// Named infrastructure command in shorthand or object form.

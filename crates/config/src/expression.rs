@@ -1,4 +1,5 @@
 use crate::ConfigError;
+use indexmap::IndexMap;
 use minijinja::{Environment, UndefinedBehavior, syntax::SyntaxConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -92,70 +93,105 @@ fn parts(text: &str) -> Result<Vec<(usize, usize, &str)>, ConfigError> {
     Ok(parts)
 }
 
-/// Add underscore aliases recursively; ambiguous names are configuration errors.
-fn aliases(value: &mut Value) -> Result<(), ConfigError> {
+/// Whether any mapping key in the tree contains a dash and so needs an underscore alias.
+fn has_dashed_keys(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| key.contains('-') || has_dashed_keys(value)),
+        Value::Array(values) => values.iter().any(has_dashed_keys),
+        _ => false,
+    }
+}
+
+/// Add underscore aliases recursively. An alias is added only when exactly one dashed key
+/// maps to it and no key already has that name, so `A-B` beside `A_B` keeps both literal.
+fn aliases(value: &mut Value) {
     match value {
         Value::Object(map) => {
             for value in map.values_mut() {
-                aliases(value)?;
+                aliases(value);
             }
-            let extra: Vec<_> = map
-                .iter()
-                .filter(|(key, _)| key.contains('-'))
-                .map(|(key, value)| (key.replace('-', "_"), value.clone()))
-                .collect();
+            let mut extra: IndexMap<String, Option<Value>> = IndexMap::new();
+            for (key, value) in map.iter().filter(|(key, _)| key.contains('-')) {
+                extra
+                    .entry(key.replace('-', "_"))
+                    .and_modify(|slot| *slot = None)
+                    .or_insert_with(|| Some(value.clone()));
+            }
             for (key, value) in extra {
-                if map.contains_key(&key) {
-                    return Err(ConfigError::plain(format!(
-                        "ambiguous underscore alias `{key}`"
-                    )));
+                if let Some(value) = value
+                    && !map.contains_key(&key)
+                {
+                    map.insert(key, value);
                 }
-                map.insert(key, value);
             }
         }
         Value::Array(values) => {
             for value in values {
-                aliases(value)?;
+                aliases(value);
             }
         }
         _ => {}
     }
-    Ok(())
 }
 
 /// Evaluate a scalar, preserving a single expression's native JSON type.
 /// Mixed text always produces a string. Missing values fail unless filtered with `default`.
+/// Write `${{ '${{' }}` for a literal `${{`.
 pub fn evaluate(text: &str, context: &ExpressionContext) -> Result<Value, ConfigError> {
     let chunks = parts(text)?;
     if chunks.is_empty() {
         return Ok(Value::String(text.into()));
     }
-    let mut context =
-        serde_json::to_value(context).map_err(|e| ConfigError::plain(e.to_string()))?;
-    aliases(&mut context)?;
-    for reference in references(text)?
+    let projects: Vec<_> = references(text)?
         .into_iter()
         .filter(|r| r.starts_with("projects."))
-    {
-        let components: Vec<_> = reference.split('.').collect();
-        let mut node = &mut context;
-        for component in components.iter().take(components.len().saturating_sub(1)) {
-            if let Some(map) = node.as_object_mut() {
-                node = map
-                    .entry(*component)
-                    .or_insert_with(|| serde_json::json!({}));
-            } else {
-                break;
+        .collect();
+    let namespaces = [
+        &context.project,
+        &context.lane,
+        &context.lanes,
+        &context.service,
+        &context.svc,
+        &context.infra,
+        &context.env,
+        &context.projects,
+        &context.replica,
+    ];
+    // Copy the context only when aliases or project placeholders must be added to it.
+    let owned = if projects.is_empty() && !namespaces.into_iter().any(has_dashed_keys) {
+        None
+    } else {
+        let mut value =
+            serde_json::to_value(context).map_err(|e| ConfigError::plain(e.to_string()))?;
+        aliases(&mut value);
+        for reference in projects {
+            let components: Vec<_> = reference.split('.').collect();
+            let mut node = &mut value;
+            for component in components.iter().take(components.len().saturating_sub(1)) {
+                if let Some(map) = node.as_object_mut() {
+                    node = map
+                        .entry(*component)
+                        .or_insert_with(|| serde_json::json!({}));
+                } else {
+                    break;
+                }
             }
         }
-    }
+        Some(value)
+    };
+    let context = match &owned {
+        Some(value) => minijinja::Value::from(minijinja::value::Serde(value)),
+        None => minijinja::Value::from(minijinja::value::Serde(context)),
+    };
     let env = environment()?;
     if chunks.len() == 1 && chunks[0].0 == 0 && chunks[0].1 == text.len() {
         let expression = env
             .compile_expression(chunks[0].2)
             .map_err(|e| ConfigError::plain(format!("invalid expression: {e}")))?;
         let value = expression
-            .eval(minijinja::value::Serde(&context))
+            .eval(&context)
             .map_err(|e| ConfigError::plain(format!("expression failed: {e}")))?;
         if value.is_undefined() {
             return Err(ConfigError::plain(
@@ -164,9 +200,44 @@ pub fn evaluate(text: &str, context: &ExpressionContext) -> Result<Value, Config
         }
         return serde_json::to_value(value).map_err(|e| ConfigError::plain(e.to_string()));
     }
-    env.render_str(text, minijinja::value::Serde(&context))
+    env.render_str(text, context)
         .map(Value::String)
         .map_err(|e| ConfigError::plain(format!("expression failed: {e}")))
+}
+
+/// Offsets added to `lane.port` in literal sums such as `lane.port + 5`, `lane['port'] + 5`
+/// or `5 + lane.port`, which must stay inside the lane's port block.
+pub(crate) fn lane_port_offsets(text: &str) -> Result<Vec<u64>, ConfigError> {
+    let mut offsets = Vec::new();
+    for (_, _, body) in parts(text)? {
+        let (normalized, _) = normalize_static_subscripts(body);
+        let compact: String = normalized.chars().filter(|c| !c.is_whitespace()).collect();
+        let digits = |s: &str| -> Option<u64> {
+            let number: String = s.chars().take_while(char::is_ascii_digit).collect();
+            number.parse().ok()
+        };
+        for (index, _) in compact.match_indices("lane.port") {
+            let after = &compact[index + "lane.port".len()..];
+            let identifier = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
+            // `lane.ports`, `lane.port_name` and `other.lane.port` are other variables.
+            if after.starts_with(identifier) || compact[..index].ends_with(identifier) {
+                continue;
+            }
+            if let Some(offset) = after.strip_prefix('+').and_then(digits) {
+                offsets.push(offset);
+            }
+            let before = &compact[..index];
+            if let Some(head) = before.strip_suffix('+') {
+                let start = head
+                    .rfind(|c: char| !c.is_ascii_digit())
+                    .map_or(0, |i| i + 1);
+                if let Ok(offset) = head[start..].parse() {
+                    offsets.push(offset);
+                }
+            }
+        }
+    }
+    Ok(offsets)
 }
 
 /// Return static dotted references using MiniJinja's own expression analysis.
@@ -213,9 +284,9 @@ pub fn evaluate_typed<T: Serialize + serde::de::DeserializeOwned>(
     evaluate_tree(&mut value, context, "")?;
     serde_path_to_error::deserialize(value).map_err(|error| {
         ConfigError::plain(format!(
-            "{}: evaluated configuration has the wrong type; expected {}",
+            "{}: expression result has the wrong type: {}",
             error.path(),
-            std::any::type_name::<T>()
+            crate::scalar::plain_type_names(&error.inner().to_string())
         ))
     })
 }
@@ -249,8 +320,9 @@ pub(crate) fn validate_constants<T: Serialize + serde::de::DeserializeOwned>(
     visit(&mut encoded)?;
     let _: T = serde_path_to_error::deserialize(encoded).map_err(|error| {
         ConfigError::plain(format!(
-            "{}: constant expression has the wrong type",
-            error.path()
+            "{}: constant expression has the wrong type: {}",
+            error.path(),
+            crate::scalar::plain_type_names(&error.inner().to_string())
         ))
     })?;
     Ok(())

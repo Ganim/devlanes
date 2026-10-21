@@ -10,7 +10,7 @@ use std::{
 };
 
 use devlanes_config::{
-    BuiltinExtensions, ExpressionContext, NewWorktrees, ProjectConfig, RemovedWorktrees, Templated,
+    ExpressionContext, NewWorktrees, OpaqueExtensions, ProjectConfig, RemovedWorktrees, Templated,
 };
 use devlanes_core::{
     WorktreeId,
@@ -148,7 +148,7 @@ pub(crate) async fn load_config(lane_dir: PathBuf, primary_dir: PathBuf) -> Conf
             local_file = primary_dir.join("devlanes.local.yaml");
             local = std::fs::read_to_string(&local_file).ok();
         }
-        match devlanes_config::parse_project_with::<BuiltinExtensions>(&source, local.as_deref()) {
+        match devlanes_config::parse_project_with::<OpaqueExtensions>(&source, local.as_deref()) {
             Ok(config) => ConfigState::Loaded(Arc::new(config)),
             Err(error) => {
                 let mut shaped = config_error(&error);

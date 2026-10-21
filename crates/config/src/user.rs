@@ -16,6 +16,10 @@ pub const DEFAULT_MAX_SIZE_BYTES: u64 = 512 * 1024 * 1024;
 #[serde(default, deny_unknown_fields)]
 #[schemars(extend("examples" = [{"hostnames":{"resolver":"localhost"},"ports":{"range":"20000-32767"},"terminal":"ghostty"}]))]
 pub struct UserConfig {
+    /// Settings that loading ignored, reported by [`UserConfig::warnings`].
+    #[serde(skip)]
+    #[schemars(skip)]
+    warnings: Vec<crate::ConfigWarning>,
     /// Hostname resolution strategy and optional hosts-file policy.
     pub hostnames: HostnamesConfig,
     /// Machine-wide pool shared by all project lane blocks.
@@ -163,19 +167,19 @@ impl StartupConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         if self.target_cpu.0 <= 0.0 || self.target_cpu.0 > 100.0 {
             return Err(ConfigError::plain(
-                "startup.target_cpu must be above 0% and at most 100%",
+                "startup.target_cpu: must be above 0% and at most 100%",
             ));
         }
         if self.slot_timeout.0.is_zero() {
             return Err(ConfigError::plain(
-                "startup.slot_timeout must be longer than 0s",
+                "startup.slot_timeout: must be longer than 0s",
             ));
         }
         if let (Some(initial), Some(max)) = (self.initial, self.max)
             && initial > max
         {
             return Err(ConfigError::plain(
-                "startup.initial must not be larger than startup.max",
+                "startup.initial: must not be larger than startup.max",
             ));
         }
         Ok(())
@@ -246,7 +250,7 @@ pub struct CloudflareDns {
 #[schemars(extend("examples" = [{"range":"20000-32767"}]))]
 pub struct PortsConfig {
     /// Inclusive port range, written start-end; defaults to 20000-32767.
-    #[schemars(extend("examples" = ["20000-32767"]))]
+    #[schemars(extend("pattern" = "^[0-9]+-[0-9]+$", "examples" = ["20000-32767"]))]
     pub range: String,
 }
 
@@ -268,7 +272,7 @@ impl PortsConfig {
             .and_then(|(a, b)| Some((a.parse::<u16>().ok()?, b.parse::<u16>().ok()?)));
         bounds.filter(|(a, b)| *a > 0 && a <= b).ok_or_else(|| {
             ConfigError::plain(
-                "ports.range must be an ascending nonzero range, such as 20000-32767",
+                "ports.range: must be an ascending nonzero range, such as 20000-32767",
             )
         })
     }
@@ -281,7 +285,7 @@ impl PortsConfig {
 pub struct TlsConfig {
     /// Use devlanes' own CA by default, or reuse mkcert's CA.
     pub ca: CaKind,
-    /// Trust stores that should accept the local CA; mobile targets are reserved and unsupported.
+    /// Trust stores that should accept the local CA; mobile targets are ignored with a warning for now.
     #[schemars(extend("examples" = [["system","firefox"],["chrome"]]))]
     pub trust: Vec<TrustTarget>,
 }
@@ -314,10 +318,10 @@ pub enum TrustTarget {
     /// Trust the local CA in Chrome's certificate database where required.
     #[schemars(extend("examples" = ["chrome"]))]
     Chrome,
-    /// Reserved iOS simulator trust target; not supported yet.
+    /// Reserved iOS simulator trust target; not supported yet, so it is ignored with a warning.
     #[schemars(extend("examples" = ["ios-simulator"]))]
     IosSimulator,
-    /// Reserved Android emulator trust target; not supported yet.
+    /// Reserved Android emulator trust target; not supported yet, so it is ignored with a warning.
     #[schemars(extend("examples" = ["android-emulator"]))]
     AndroidEmulator,
 }
@@ -422,68 +426,105 @@ pub enum Terminal {
 }
 
 impl UserConfig {
-    /// Reject deferred v2 settings and invalid machine-wide resource ranges.
+    /// Reject the deferred public resolver and invalid machine-wide resource ranges.
+    /// Messages start with the offending field path.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.state.max_size.0 == 0 {
             return Err(ConfigError::plain(
-                "state.max_size must be greater than zero",
+                "state.max_size: must be greater than zero",
             ));
         }
-        if self.hostnames.resolver == Resolver::Public
-            || self.hostnames.base_domain.is_some()
-            || self.hostnames.dns_provider.is_some()
-        {
-            return Err(ConfigError::plain(
-                "public resolver and DNS-01 settings are not supported yet",
-            ));
-        }
-        if self
-            .tls
-            .trust
-            .iter()
-            .any(|t| matches!(t, TrustTarget::IosSimulator | TrustTarget::AndroidEmulator))
-        {
-            return Err(ConfigError::plain(
-                "iOS simulator and Android emulator certificate trust are not supported yet",
-            ));
+        for (path, deferred) in [
+            (
+                "hostnames.resolver",
+                self.hostnames.resolver == Resolver::Public,
+            ),
+            (
+                "hostnames.base_domain",
+                self.hostnames.base_domain.is_some(),
+            ),
+            (
+                "hostnames.dns_provider",
+                self.hostnames.dns_provider.is_some(),
+            ),
+        ] {
+            if deferred {
+                return Err(ConfigError::plain(format!(
+                    "{path}: the public resolver and DNS-01 settings are not supported yet"
+                )));
+            }
         }
         self.ports.bounds()?;
-        if self.proxy.http_port == 0
-            || self.proxy.https_port == 0
-            || self.proxy.http_port == self.proxy.https_port
-        {
+        for (path, port) in [
+            ("proxy.http_port", self.proxy.http_port),
+            ("proxy.https_port", self.proxy.https_port),
+        ] {
+            if port == 0 {
+                return Err(ConfigError::plain(format!("{path}: must be nonzero")));
+            }
+        }
+        if self.proxy.http_port == self.proxy.https_port {
             return Err(ConfigError::plain(
-                "proxy ports must be nonzero and distinct",
+                "proxy.https_port: must differ from proxy.http_port",
             ));
         }
         if self.hostnames.resolver == Resolver::Resolver
             && self.hostnames.tld.as_ref().is_none_or(String::is_empty)
         {
             return Err(ConfigError::plain(
-                "hostnames.tld is required for the resolver strategy",
+                "hostnames.tld: required for the resolver strategy",
             ));
         }
         self.startup.validate()?;
         Ok(())
     }
+
+    /// Settings that [`parse_user`] and [`load_user`] ignored, such as mobile trust targets,
+    /// for display in `devlanes doctor`.
+    pub fn warnings(&self) -> &[crate::ConfigWarning] {
+        &self.warnings
+    }
+
+    /// Drop deferred trust targets with a warning instead of passing them to trust adapters.
+    fn ignore_deferred_trust(&mut self) {
+        for (index, target) in self.tls.trust.iter().enumerate() {
+            if matches!(
+                target,
+                TrustTarget::IosSimulator | TrustTarget::AndroidEmulator
+            ) {
+                self.warnings.push(crate::ConfigWarning {
+                    path: format!("tls.trust.{index}"),
+                    message: "mobile certificate trust is not supported yet; target ignored".into(),
+                });
+            }
+        }
+        self.tls.trust.retain(|target| {
+            !matches!(
+                target,
+                TrustTarget::IosSimulator | TrustTarget::AndroidEmulator
+            )
+        });
+    }
 }
 
 /// Parse machine settings separately from project settings and validate v1 support.
 pub fn parse_user(source: &str) -> Result<UserConfig, ConfigError> {
-    let config: UserConfig = crate::loader::parse_yaml("config.yaml", source)?;
-    config
-        .validate()
-        .map_err(|e| ConfigError::at("config.yaml", source, 0, e.message))?;
-    Ok(config)
+    parse_user_named("config.yaml", source)
 }
 
 /// Load an explicitly selected user config file; absence is an I/O error.
 pub fn load_user(path: impl AsRef<Path>) -> Result<UserConfig, ConfigError> {
     let path = path.as_ref();
     let source = std::fs::read_to_string(path).map_err(|e| ConfigError::io(path, e))?;
-    let config: UserConfig = crate::loader::parse_yaml(&path.display().to_string(), &source)?;
+    parse_user_named(&path.display().to_string(), &source)
+}
+
+/// Parse, validate with errors located at their field, then drop deferred settings.
+fn parse_user_named(file: &str, source: &str) -> Result<UserConfig, ConfigError> {
+    let mut config: UserConfig = crate::loader::parse_yaml(file, source)?;
     config
         .validate()
-        .map_err(|e| ConfigError::at(&path.display().to_string(), &source, 0, e.message))?;
+        .map_err(|e| crate::loader::locate(e, file, source, None))?;
+    config.ignore_deferred_trust();
     Ok(config)
 }

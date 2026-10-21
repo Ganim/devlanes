@@ -40,8 +40,8 @@ expression: "parse_project(base, Some(LOCAL)).expect(\"local with matching base\
   },
   "tasks": {},
   "services": {
-    "admin-web": {
-      "run": "node admin.mjs",
+    "user-web": {
+      "run": "node web.mjs",
       "tags": [
         "essential"
       ],
@@ -59,7 +59,7 @@ expression: "parse_project(base, Some(LOCAL)).expect(\"local with matching base\
   "profiles": {
     "default": [
       "+essential",
-      "admin-web"
+      "user-web"
     ]
   }
 }

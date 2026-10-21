@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc, time::Duration};
 
-use devlanes_config::{BuiltinExtensions, Extensions, ProjectConfig, Scalar, TaskWhen};
+use devlanes_config::{Extensions, OpaqueExtensions, ProjectConfig, Scalar, TaskWhen};
 use devlanes_core::{
     LaunchSpec, StopPolicy, TerminalSize,
     contrib::{Contributor, PreparedFile, ScriptInfo, ScriptRunner, SecretsProvider},
@@ -21,7 +21,7 @@ static EMPTY_NAMESPACE: Value = Value::Null;
 
 /// Everything [`crate::resolve_lane`] needs for one lane. Construct with
 /// [`ResolveInput::new`] and set the fields that apply.
-pub struct ResolveInput<'a, E: Extensions = BuiltinExtensions> {
+pub struct ResolveInput<'a, E: Extensions = OpaqueExtensions> {
     pub config: &'a ProjectConfig<E>,
     pub facts: &'a LaneFacts,
     /// The lane's block from the machine-wide pool.

@@ -17,9 +17,7 @@ expression: user
     "ca": "devlanes",
     "trust": [
       "system",
-      "firefox",
-      "ios-simulator",
-      "android-emulator"
+      "firefox"
     ]
   },
   "proxy": {

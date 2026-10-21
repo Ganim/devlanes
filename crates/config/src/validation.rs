@@ -6,25 +6,34 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
 
+/// A problem that does not stop loading, such as an unused template or an ignored setting.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigWarning {
+    /// Dotted field path, such as `templates.api` or `tls.trust.0`.
     pub path: String,
+    /// Human-readable explanation, without the path.
     pub message: String,
 }
 
+/// Result of a successful project check: the project name and its warnings.
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckReport {
+    /// Project name from the base file.
     pub project: String,
+    /// Nonfatal findings in declaration order.
     pub warnings: Vec<ConfigWarning>,
 }
 
 /// Validate project structure and references that do not require a resolved Compose model.
 pub fn validate<E: Extensions>(config: &ProjectConfig<E>) -> Result<CheckReport, ConfigError> {
-    validate_inner(config, None)
+    validate_inner(config, None, None)
 }
 
 /// Integration-owned parser callback; the optional object is absent when no block was given.
 pub type PresetValidator<'a> = dyn Fn(&str, Option<&serde_json::Value>) -> Result<(), String> + 'a;
+
+/// Named ports a registered preset allocates for a service, keyed by preset name.
+pub type PresetPorts<'a> = dyn Fn(&str) -> Vec<String> + 'a;
 
 /// Validate each service's opaque preset options using the composition root's registry.
 /// Callers may validate evaluated services when an integration requires concrete scalar types.
@@ -32,11 +41,30 @@ pub fn validate_with_presets(
     config: &ProjectConfig,
     validator: &PresetValidator<'_>,
 ) -> Result<CheckReport, ConfigError> {
-    let report = validate(config)?;
+    validate_with_preset_ports(config, validator, &|_| Vec::new())
+}
+
+/// Like [`validate_with_presets`], also counting each preset's named ports against a fixed
+/// `lanes.block_size`.
+pub fn validate_with_preset_ports(
+    config: &ProjectConfig,
+    validator: &PresetValidator<'_>,
+    ports: &PresetPorts<'_>,
+) -> Result<CheckReport, ConfigError> {
+    let report = validate_inner(config, None, Some(ports))?;
     for (name, service) in &config.services {
         if let Some(preset) = &service.preset {
-            validator(preset, service.preset_options.get(preset))
-                .map_err(|message| fail(&format!("services.{name}.{preset}"), message))?;
+            validator(preset, service.preset_options.get(preset)).map_err(|message| {
+                // Point at the offending option when the integration names it.
+                let field = message
+                    .split_once("unknown field `")
+                    .and_then(|(_, rest)| rest.split_once('`'))
+                    .map(|(key, _)| format!(".{key}"))
+                    .unwrap_or_default();
+                config
+                    .sources
+                    .locate(fail(&format!("services.{name}.{preset}{field}"), message))
+            })?;
         }
     }
     Ok(report)
@@ -47,7 +75,7 @@ pub fn validate_with_compose_services<E: Extensions>(
     config: &ProjectConfig<E>,
     names: &HashSet<String>,
 ) -> Result<CheckReport, ConfigError> {
-    validate_inner(config, Some(names))
+    validate_inner(config, Some(names), None)
 }
 
 /// Add a precise configuration path to a semantic error.
@@ -147,6 +175,7 @@ fn selector<E: Extensions>(
 fn validate_inner<E: Extensions>(
     config: &ProjectConfig<E>,
     compose: Option<&HashSet<String>>,
+    preset_ports: Option<&PresetPorts<'_>>,
 ) -> Result<CheckReport, ConfigError> {
     let name = &config.project;
     if name.is_empty()
@@ -178,7 +207,7 @@ fn validate_inner<E: Extensions>(
             if template.preset.as_ref() != Some(key) {
                 return Err(fail(
                     &format!("templates.{name}.{key}"),
-                    crate::service::unknown_service_key::<E>(key, template.preset.as_deref()),
+                    crate::service::unknown_service_key::<E>(key, template.preset.as_deref(), true),
                 ));
             }
         }
@@ -193,6 +222,9 @@ fn validate_inner<E: Extensions>(
     }
     for (name, service) in &config.services {
         let path = format!("services.{name}");
+        if service.run.is_none() && service.run_script.is_none() {
+            return Err(fail(&path, "service requires run or run_script"));
+        }
         command(&path, &service.run, &service.run_script, false)?;
         if let Some(ready) = &service.ready {
             readiness(&format!("{path}.ready"), ready)?;
@@ -210,7 +242,11 @@ fn validate_inner<E: Extensions>(
             if service.preset.as_ref() != Some(option) {
                 return Err(fail(
                     &format!("{path}.{option}"),
-                    crate::service::unknown_service_key::<E>(option, service.preset.as_deref()),
+                    crate::service::unknown_service_key::<E>(
+                        option,
+                        service.preset.as_deref(),
+                        true,
+                    ),
                 ));
             }
         }
@@ -402,13 +438,31 @@ fn validate_inner<E: Extensions>(
         }
     }
     expression_graph(config)?;
+    if let Some(matrix) = &config.lanes.matrix {
+        // Each matrix row is the lane's vars for one lane, so each row gets its own graph.
+        for (index, row) in matrix.iter().enumerate() {
+            let mut lane_config = config.clone();
+            lane_config.lanes.vars = row.clone();
+            lane_config.lanes.matrix = None;
+            expression_graph(&lane_config).map_err(|e| {
+                ConfigError::plain(e.message.replacen(
+                    "lanes.vars.",
+                    &format!("lanes.matrix.{index}."),
+                    1,
+                ))
+            })?;
+        }
+    }
     crate::expression::validate_constants(config)?;
-    validate_port_capacity(config)?;
+    validate_port_capacity(config, preset_ports)?;
     Ok(report)
 }
 
-/// Count distinct allocated names, including contributor ports, before accepting a fixed block.
-fn validate_port_capacity<E: Extensions>(config: &ProjectConfig<E>) -> Result<(), ConfigError> {
+/// Count distinct allocated names, including preset ports, before accepting a fixed block.
+fn validate_port_capacity<E: Extensions>(
+    config: &ProjectConfig<E>,
+    preset_ports: Option<&PresetPorts<'_>>,
+) -> Result<(), ConfigError> {
     let Some(Templated::Literal(capacity)) = config.lanes.block_size else {
         return Ok(());
     };
@@ -417,9 +471,11 @@ fn validate_port_capacity<E: Extensions>(config: &ProjectConfig<E>) -> Result<()
         if !service.env.contains_key("PORT") {
             ports.insert((name.clone(), "default".to_owned()));
         }
-        if let Some(preset) = &service.preset {
-            for port in E::required_ports(preset) {
-                ports.insert((name.clone(), (*port).to_owned()));
+        if let Some(preset) = &service.preset
+            && let Some(preset_ports) = preset_ports
+        {
+            for port in preset_ports(preset) {
+                ports.insert((name.clone(), port));
             }
         }
         if let Some(hosts) = &service.hosts {
@@ -451,12 +507,8 @@ fn validate_port_capacity<E: Extensions>(config: &ProjectConfig<E>) -> Result<()
                     ports.insert((name.clone(), port.to_owned()));
                 }
             }
-            let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-            for tail in compact.split("lane.port+").skip(1) {
-                let number: String = tail.chars().take_while(char::is_ascii_digit).collect();
-                if let Ok(offset) = number.parse::<u64>()
-                    && offset >= u64::from(capacity)
-                {
+            for offset in crate::expression::lane_port_offsets(&text)? {
+                if offset >= u64::from(capacity) {
                     return Err(fail(
                         "lanes.block_size",
                         format!("explicit port offset {offset} exceeds the block"),
@@ -484,7 +536,7 @@ fn validate_port_capacity<E: Extensions>(config: &ProjectConfig<E>) -> Result<()
     Ok(())
 }
 
-/// Collect templates from serialized typed fields, excluding unused template declarations.
+/// Collect expressions from serialized typed fields, including unused templates.
 fn expressions(value: &serde_json::Value, path: &str, result: &mut Vec<(String, String)>) {
     match value {
         serde_json::Value::String(text) if text.contains("${{") => {
@@ -519,25 +571,48 @@ fn expression_graph<E: Extensions>(config: &ProjectConfig<E>) -> Result<(), Conf
     let mut all = Vec::new();
     if let Some(map) = value.as_object() {
         for (key, value) in map {
-            if key != "templates" {
-                expressions(value, key, &mut all);
-            }
+            expressions(value, key, &mut all);
         }
     }
+    // Only fields that determine a service's endpoint are graph nodes: env.PORT sets
+    // `svc.X.port` (and so `url`), hosts set `public_url`. Other fields only read endpoints, so
+    // two services may reference each other's URLs, and a service its own.
     let mut graph: IndexMap<String, Vec<String>> = IndexMap::new();
     let mut origins = IndexMap::new();
     for name in config.lanes.vars.keys() {
         graph.insert(format!("lane.{}", name.replace('-', "_")), Vec::new());
     }
     for name in config.services.keys() {
-        graph.insert(format!("svc.{name}"), Vec::new());
+        graph.insert(format!("svc.{name}.port"), Vec::new());
+        // Without hosts, public_url falls back to the local URL.
+        graph.insert(
+            format!("svc.{name}.public_url"),
+            vec![format!("svc.{name}.port")],
+        );
     }
     for (path, text) in all {
         let refs = crate::references(&text).map_err(|e| fail(&path, e.message))?;
         let mut edges = BTreeSet::new();
-        let current_service = path
-            .strip_prefix("services.")
-            .and_then(|p| p.split('.').next());
+        let current_service = config
+            .services
+            .keys()
+            .filter(|name| path.starts_with(&format!("services.{name}.")))
+            .max_by_key(|name| name.len())
+            .map(String::as_str);
+        let node = if let Some(name) = path.strip_prefix("lanes.vars.") {
+            Some(format!("lane.{}", name.replace('-', "_")))
+        } else {
+            current_service.and_then(|name| {
+                let field = &path[format!("services.{name}.").len()..];
+                if field == "env.PORT" {
+                    Some(format!("svc.{name}.port"))
+                } else if field.starts_with("hosts.") {
+                    Some(format!("svc.{name}.public_url"))
+                } else {
+                    None
+                }
+            })
+        };
         for reference in &refs {
             let mut components = reference.split('.');
             let root = components.next().unwrap_or_default();
@@ -553,18 +628,6 @@ fn expression_graph<E: Extensions>(config: &ProjectConfig<E>) -> Result<(), Conf
                     ),
                 ));
             }
-            if root == "svc"
-                && let Some(alias) = components.next()
-            {
-                let name = service_name(config, alias)
-                    .ok_or_else(|| fail(&path, format!("unknown service reference `{alias}`")))?;
-                edges.insert(format!("svc.{name}"));
-            }
-            if root == "lane"
-                && let Some(name) = components.next()
-            {
-                edges.insert(format!("lane.{name}"));
-            }
             if path.ends_with(".env.PORT")
                 && (reference == "self.port"
                     || reference.starts_with("self.url")
@@ -575,26 +638,74 @@ fn expression_graph<E: Extensions>(config: &ProjectConfig<E>) -> Result<(), Conf
                     "expression cycle: env.PORT determines self.port and cannot reference it",
                 ));
             }
+            let target = match root {
+                "svc" => match components.next() {
+                    Some(alias) => Some(service_name(config, alias).ok_or_else(|| {
+                        fail(&path, format!("unknown service reference `{alias}`"))
+                    })?),
+                    None => None,
+                },
+                "self" => current_service,
+                _ => None,
+            };
+            if let Some(target) = target {
+                match components.next() {
+                    Some("public_url") => {
+                        edges.insert(format!("svc.{target}.public_url"));
+                    }
+                    // Named ports are allocated, never computed.
+                    Some("ports") => {}
+                    Some("port" | "url") => {
+                        edges.insert(format!("svc.{target}.port"));
+                    }
+                    _ => {
+                        edges.insert(format!("svc.{target}.port"));
+                        edges.insert(format!("svc.{target}.public_url"));
+                    }
+                }
+            }
+            if root == "lane"
+                && let Some(name) = components.next()
+            {
+                edges.insert(format!("lane.{}", name.replace('-', "_")));
+            }
+            if root == "infra"
+                && config.infra.compose.is_none()
+                && let Some(name) = components.next()
+                && !config
+                    .infra
+                    .containers
+                    .keys()
+                    .any(|key| key == name || key.replace('-', "_") == name)
+            {
+                return Err(fail(
+                    &path,
+                    format!(
+                        "unknown container `{name}`; infra.containers does not declare it and there is no compose file"
+                    ),
+                ));
+            }
+            if let Some(alias) = reference
+                .strip_prefix("lanes.main.svc.")
+                .and_then(|rest| rest.split('.').next())
+                && service_name(config, alias).is_none()
+            {
+                return Err(fail(
+                    &path,
+                    format!("unknown service reference `{alias}` in lanes.main"),
+                ));
+            }
         }
-        if let Some(name) = path.strip_prefix("lanes.vars.") {
-            let key = format!("lane.{}", name.replace('-', "_"));
-            origins.insert(key.clone(), path.clone());
-            graph.entry(key).or_default().extend(edges);
-        } else if let Some(name) = current_service {
-            origins.insert(format!("svc.{name}"), path.clone());
-            graph
-                .entry(format!("svc.{name}"))
-                .or_default()
-                .extend(edges);
+        if let Some(node) = node {
+            origins.entry(node.clone()).or_insert_with(|| path.clone());
+            graph.entry(node).or_default().extend(edges);
         }
     }
     crate::expression::check_cycles(&graph).map_err(|error| {
-        let first = error
+        let path = error
             .message
             .split_once(": ")
-            .and_then(|(_, chain)| chain.split(" -> ").next());
-        let path = first
-            .and_then(|node| origins.get(node))
+            .and_then(|(_, chain)| chain.split(" -> ").find_map(|node| origins.get(node)))
             .map_or("lanes.vars", String::as_str);
         fail(path, error.message)
     })

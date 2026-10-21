@@ -1,6 +1,9 @@
 mod dogfood;
 
 mod artifacts;
+mod diagnostics;
+mod merging;
+mod references;
 mod retention;
 mod schema_docs;
 mod service_keys;
@@ -63,25 +66,22 @@ fn reference_examples() {
         "minimal",
         parse_project(MINIMAL, None).expect("minimal reference")
     );
-    let base = "project: acme\ntemplates:\n  fastify-api:\n    platform: node\nservices:\n  admin-web:\n    run: node admin.mjs\n    tags: [essential]\n";
+    let base = "project: acme\ntemplates:\n  fastify-api:\n    platform: node\nservices:\n  user-web:\n    run: node web.mjs\n    tags: [essential]\n";
     insta::assert_json_snapshot!(
         "local",
         parse_project(base, Some(LOCAL)).expect("local with matching base")
     );
+    parse_project(FULL, Some(LOCAL)).expect("the example pair merges");
     let user: UserConfig = serde_saphyr::from_str(USER).expect("typed user syntax");
     insta::assert_json_snapshot!("user", user);
-    assert!(
-        user.validate()
-            .expect_err("mobile deferred")
-            .message
-            .contains("not supported yet")
-    );
+    user.validate().expect("the user example is valid");
 }
 
 /// Local partial services cannot silently introduce a service with no executable.
 #[test]
 fn local_missing_service_is_rejected() {
-    let error = parse_project(FULL, Some(LOCAL)).expect_err("admin-web missing");
+    let local = "services:\n  admin-web:\n    autostart: false\n";
+    let error = parse_project(FULL, Some(local)).expect_err("admin-web missing");
     assert!(error.message.contains("admin-web"));
     assert_eq!(error.location.file, "devlanes.local.yaml");
 }
@@ -276,35 +276,66 @@ fn cross_project_default() {
 /// Invalid lifecycle, infra, and command references must fail before runtime.
 #[test]
 fn structural_validation() {
-    for yaml in [
-        "project: invalid@name",
-        "project: demo\nservices: { api: { run: a, run_script: 'package.json#b' } }",
-        "project: demo\ntasks: { a: { run: a, interactive: true, when: lane.start } }",
-        "project: demo\ntasks: { a: { run: a, after: services } }",
-        "project: demo\ntasks: { a: { steps: [missing] } }",
-        "project: demo\ntasks: { a: { steps: [b] }, b: { steps: [a] } }",
-        "project: demo\nprofiles: { bad: [missing] }",
-        "project: demo\ninfra: { hidden: [missing] }",
-        "project: demo\nservices: { api: { run: a, ready: { tcp: true, log: ready } } }",
-        "project: demo\nservices: { api: { run: a, gui: {} } }",
-        "project: demo\nservices: { api: { run: a, wrangler: {} } }",
-        "project: demo\nservices: { api: { run: a, env: { PORT: '${{ self.port }}' } } }",
-        "project: demo\ntemplates: { a: { extends: b }, b: { extends: a } }",
+    for (yaml, expected) in [
+        ("project: invalid@name", "project: expected"),
+        (
+            "project: demo\nservices: { api: { run: a, run_script: 'package.json#b' } }",
+            "services.api: exactly one of run, run_script",
+        ),
+        (
+            "project: demo\ntasks: { a: { run: a, interactive: true, when: lane.start } }",
+            "tasks.a.interactive: interactive tasks cannot have when",
+        ),
+        (
+            "project: demo\ntasks: { a: { run: a, after: services } }",
+            "tasks.a.after: after: services requires when",
+        ),
+        (
+            "project: demo\ntasks: { a: { steps: [missing] } }",
+            "tasks.a.steps: unknown step `missing`",
+        ),
+        (
+            "project: demo\ntasks: { a: { steps: [b] }, b: { steps: [a] } }",
+            "tasks: expression/reference cycle: a -> b -> a",
+        ),
+        (
+            "project: demo\nprofiles: { bad: [missing] }",
+            "profiles.bad: selector `missing` matches no services",
+        ),
+        (
+            "project: demo\ninfra: { hidden: [missing] }",
+            "infra: unknown container or Compose service `missing`",
+        ),
+        (
+            "project: demo\nservices: { api: { run: a, ready: { tcp: true, log: ready } } }",
+            "services.api.ready: ready requires exactly one of tcp, http, log, or cmd",
+        ),
+        (
+            "project: demo\nservices: { api: { run: a, gui: {} } }",
+            "`gui` is not supported yet",
+        ),
+        (
+            "project: demo\nservices: { api: { run: a, wrangler: {} } }",
+            "services.api.wrangler: unknown key `wrangler`; set `preset: wrangler`",
+        ),
+        (
+            "project: demo\nservices: { api: { run: a, env: { PORT: '${{ self.port }}' } } }",
+            "services.api.env.PORT: expression cycle: env.PORT determines self.port",
+        ),
+        (
+            "project: demo\ntemplates: { a: { extends: b }, b: { extends: a } }",
+            "templates.a.extends: template cycle: a -> b -> a",
+        ),
+        (
+            "project: demo\nservices: { api: { tags: [x] } }",
+            "services.api: service requires run or run_script",
+        ),
     ] {
-        assert!(parse_project(yaml, None).is_err(), "accepted: {yaml}");
-    }
-}
-
-/// Both dotted aliases and bracket references must participate in cycle analysis.
-#[test]
-fn service_expression_cycles() {
-    for reference in ["svc.api_a.url", "svc['api-a'].url"] {
-        let source = format!(
-            "project: demo\nservices:\n  api-a:\n    run: server\n    env: {{ URL: '${{{{ svc.api_b.url }}}}' }}\n  api-b:\n    run: server\n    env:\n      URL: \"${{{{ {reference} }}}}\"\n"
-        );
+        let error = parse_project(yaml, None).expect_err(yaml);
         assert!(
-            parse_project(&source, None).is_err(),
-            "cycle missed: {reference}"
+            error.message.contains(expected),
+            "{yaml}\nexpected `{expected}` in: {}",
+            error.message
         );
     }
 }
@@ -361,14 +392,14 @@ fn yaml_language_server_schemas() {
         assert!(errors.is_empty(), "{name}: {errors:#?}");
     }
     let config = parse_project(FULL, None).expect("reference example");
-    if let Some(ProfileConfig::Object(profile)) = config.profiles.get("e2e") {
-        assert_eq!(profile.remap_script("dev"), "start");
-        assert_eq!(config.tasks["build"].when, Some(TaskWhen::Start));
-    }
-    // Deferred trust targets remain syntax-valid because UserConfig parses them before validation.
+    let Some(ProfileConfig::Object(profile)) = config.profiles.get("e2e") else {
+        panic!("the reference example declares an e2e profile mapping")
+    };
+    assert_eq!(profile.remap_script("dev"), "start");
+    assert_eq!(config.tasks["build"].when, Some(TaskWhen::Start));
 }
 
-/// Unsupported v2 user settings parse but fail explicit semantic validation.
+/// The deferred public resolver fails validation; mobile trust targets only warn.
 #[test]
 fn user_validation() {
     assert!(
@@ -377,11 +408,12 @@ fn user_validation() {
             .message
             .contains("not supported yet")
     );
-    assert!(
+    assert_eq!(
         parse_user("tls: { trust: [ios-simulator] }")
-            .expect_err("deferred trust")
-            .message
-            .contains("not supported yet")
+            .expect("deferred trust is ignored")
+            .warnings()
+            .len(),
+        1
     );
     assert!(parse_user("ports: { range: 32767-20000 }").is_err());
     assert_eq!(
@@ -406,8 +438,7 @@ fn startup_settings() {
     assert_eq!(defaults.windows(4), (2, 4));
     assert_eq!(defaults.windows(1), (1, 1));
 
-    let user = parse_user(USER.replace("ios-simulator, android-emulator", "").as_str())
-        .expect("example without deferred trust targets");
+    let user = parse_user(USER).expect("user example");
     assert_eq!(user.startup.mode, StartupMode::Adaptive);
     assert_eq!(user.startup.windows(32), (2, 8));
     assert_eq!(user.startup.settle_cpu, Percent(10.0));
@@ -453,75 +484,29 @@ fn local_error_location() {
     assert_eq!(error.location.line, 3);
 }
 
-/// Service objects replace atomically while profile lists can be explicitly cleared.
+/// Nested mappings keep omitted keys while profile lists can be explicitly cleared.
 #[test]
 fn nested_map_and_empty_list_overrides() {
     let base = "project: demo\nservices:\n  api:\n    run: server\n    ready: { http: { path: /health, timeout: 1s } }\n    stop: { signal: SIGINT, timeout: 10s }\nprofiles:\n  default:\n    include: [api]\n    exclude: [api]\n";
     let local = "services:\n  api:\n    ready: { http: { timeout: 5s } }\n    stop: { timeout: 20s }\nprofiles:\n  default:\n    include: []\n    exclude: []\n";
     let config = parse_project(base, Some(local)).expect("nested override");
     let service = &config.services["api"];
-    assert_eq!(service.stop.as_ref().expect("stop").signal.as_deref(), None);
+    assert_eq!(
+        service.stop.as_ref().expect("stop").signal.as_deref(),
+        Some("SIGINT")
+    );
     let ReadyConfig::Check(ready) = service.ready.as_ref().expect("ready") else {
         panic!("check")
     };
-    assert_eq!(ready.http.as_ref().expect("http").path, None);
+    assert_eq!(
+        ready.http.as_ref().expect("http").path,
+        Some(Templated::Literal("/health".into()))
+    );
     let ProfileConfig::Object(profile) = &config.profiles["default"] else {
         panic!("profile")
     };
     assert_eq!(profile.include, Some(vec![]));
     assert_eq!(profile.exclude, Some(vec![]));
-}
-
-/// Service and local overrides replace one-of settings while env keys retain their precedence.
-#[test]
-fn atomic_service_inheritance_and_local_overrides() {
-    let source = "project: demo\ntemplates:\n  base:\n    run: server\n    ready: { http: { path: /-/health } }\n    env: { KEEP: base, VALUE: base }\nservices:\n  api:\n    extends: base\n    run_script: package.json#dev\n    ready: { tcp: true }\n    env: { VALUE: service }\n";
-    let config = parse_project(source, None).expect("service replaces template forms");
-    let service = &config.services["api"];
-    assert!(service.run.is_none());
-    assert_eq!(
-        service
-            .run_script
-            .as_ref()
-            .expect("script")
-            .source_and_name()
-            .expect("source"),
-        ("package.json", "dev")
-    );
-    let ReadyConfig::Check(ready) = service.ready.as_ref().expect("ready") else {
-        panic!("check")
-    };
-    assert!(ready.http.is_none());
-    assert!(matches!(ready.tcp, Some(TcpReady::Enabled(true))));
-    assert_eq!(
-        service.env["KEEP"],
-        Templated::Literal(Scalar::String("base".into()))
-    );
-    assert_eq!(
-        service.env["VALUE"],
-        Templated::Literal(Scalar::String("service".into()))
-    );
-
-    let local = "services:\n  api:\n    run: local-server\n    ready: { log: listening }\n    env: { VALUE: local, EXTRA: local }\n";
-    let config = parse_project(source, Some(local)).expect("local replaces service forms");
-    let service = &config.services["api"];
-    assert!(service.run.is_some());
-    assert!(service.run_script.is_none());
-    let ReadyConfig::Check(ready) = service.ready.as_ref().expect("ready") else {
-        panic!("check")
-    };
-    assert!(ready.http.is_none());
-    assert!(ready.tcp.is_none());
-    assert_eq!(ready.log, Some(Templated::Literal("listening".into())));
-    assert_eq!(
-        service.env["KEEP"],
-        Templated::Literal(Scalar::String("base".into()))
-    );
-    assert_eq!(
-        service.env["VALUE"],
-        Templated::Literal(Scalar::String("local".into()))
-    );
-    assert!(service.env.contains_key("EXTRA"));
 }
 
 /// The caller can resolve lane/env graphs and then evaluate typed service fields.
@@ -632,28 +617,6 @@ fn schema_parser_type_agreement() {
     }
 }
 
-/// Sanitized deployment shapes exercise the monorepo and desktop requirements together.
-#[test]
-fn dogfood_shapes() {
-    let schema = registered_schema();
-    let validator = jsonschema::validator_for(&schema).expect("schema");
-    for (name, source) in [
-        (
-            "dogfood_monorepo",
-            include_str!("../fixtures/dogfood-monorepo.yaml"),
-        ),
-        (
-            "dogfood_desktop",
-            include_str!("../fixtures/dogfood-desktop.yaml"),
-        ),
-    ] {
-        let config = parse_project(source, None).expect("dogfood configuration");
-        let value: serde_json::Value = serde_saphyr::from_str(source).expect("YAML");
-        assert!(validator.is_valid(&value));
-        insta::assert_json_snapshot!(name, config);
-    }
-}
-
 /// Compose adapters supply resolved names without config spawning Docker subprocesses.
 #[test]
 fn compose_reference_validation() {
@@ -715,10 +678,6 @@ impl Extensions for TestExtensions {
     /// Delegate strict option parsing to the integration's typed options.
     fn parse_preset_options(_: &str, value: serde_json::Value) -> Result<Self::Options, String> {
         serde_json::from_value(value).map_err(|e| e.to_string())
-    }
-    /// A single required option replaces its base value.
-    fn merge_preset_options(base: &mut Self::Options, overlay: Self::Options) {
-        *base = overlay;
     }
     /// Contribute an inline test schema at the declared integration key.
     fn extend_schema(schema: &mut schemars::Schema) {
@@ -834,7 +793,7 @@ fn opaque_preset_options_and_registry_validation() {
     let custom = parse_project("project: demo\ntemplates:\n  base:\n    preset: custom\n    custom: { nested: { keep: true, replace: old }, args: [old] }\nservices:\n  api:\n    extends: base\n    run: server\n    custom: { nested: { replace: new }, args: [] }\n",None).expect("unregistered preset before integration validation");
     assert_eq!(
         custom.services["api"].preset_options["custom"],
-        json!({"nested":{"replace":"new"},"args":[]})
+        json!({"nested":{"keep":true,"replace":"new"},"args":[]})
     );
     assert!(
         validate_with_presets(&custom, &registered_validator)

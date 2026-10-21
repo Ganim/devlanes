@@ -44,6 +44,7 @@
         "15s",
         "10m"
       ],
+      "pattern": "^[0-9]+(ms|s|m|h|d)$",
       "type": "string"
     },
     "ContainerConfig": {
@@ -63,17 +64,7 @@
         "command": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Run",
-              "description": "Shell text runs in a shell; argv is passed directly to the executable.",
-              "examples": [
-                "pnpm dev",
-                [
-                  "node",
-                  "server.mjs",
-                  "--port",
-                  "${{ self.port }}"
-                ]
-              ]
+              "$ref": "#/$defs/Run"
             },
             {
               "type": "null"
@@ -90,9 +81,9 @@
         "env": {
           "additionalProperties": {
             "$ref": "#/$defs/Templated_Scalar",
-            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
             "examples": [
-              "${{ lane.value }}"
+              "${{ lane.index }}"
             ]
           },
           "default": {},
@@ -107,11 +98,7 @@
         "image": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_string"
             },
             {
               "type": "null"
@@ -125,11 +112,7 @@
         "per_lane": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_boolean"
             },
             {
               "type": "null"
@@ -144,9 +127,9 @@
         "ports": {
           "additionalProperties": {
             "$ref": "#/$defs/Templated_uint16",
-            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
             "examples": [
-              "${{ lane.value }}"
+              "${{ lane.index }}"
             ]
           },
           "default": {},
@@ -162,19 +145,7 @@
         "ready": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadyConfig",
-              "description": "Readiness policy; defaults to TCP for services with hosts and started for other services.",
-              "examples": [
-                "started",
-                {
-                  "http": {
-                    "path": "/healthz"
-                  }
-                },
-                {
-                  "tcp": true
-                }
-              ]
+              "$ref": "#/$defs/ReadyConfig"
             },
             {
               "type": "null"
@@ -202,9 +173,9 @@
           ],
           "items": {
             "$ref": "#/$defs/Templated_string",
-            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
             "examples": [
-              "${{ lane.value }}"
+              "${{ lane.index }}"
             ]
           },
           "type": [
@@ -227,11 +198,7 @@
         "profile": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_string"
             },
             {
               "type": "null"
@@ -317,11 +284,7 @@
         "fallback": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_boolean"
             },
             {
               "type": "null"
@@ -344,12 +307,7 @@
         "host_header": {
           "anyOf": [
             {
-              "$ref": "#/$defs/HostHeader",
-              "description": "Host header sent to the upstream HTTP server.",
-              "examples": [
-                "preserve",
-                "upstream"
-              ]
+              "$ref": "#/$defs/HostHeader"
             },
             {
               "type": "null"
@@ -425,11 +383,7 @@
         "path": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_string"
             },
             {
               "type": "null"
@@ -444,11 +398,7 @@
         "status": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_uint16",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_uint16"
             },
             {
               "type": "null"
@@ -462,11 +412,7 @@
         "timeout": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_ConfigDuration",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_ConfigDuration"
             },
             {
               "type": "null"
@@ -539,11 +485,7 @@
         "cwd": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_string"
             },
             {
               "type": "null"
@@ -557,9 +499,9 @@
         "env": {
           "additionalProperties": {
             "$ref": "#/$defs/Templated_Scalar",
-            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
             "examples": [
-              "${{ lane.value }}"
+              "${{ lane.index }}"
             ]
           },
           "default": {},
@@ -574,11 +516,7 @@
         "ignore_errors": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_boolean"
             },
             {
               "type": "null"
@@ -593,17 +531,7 @@
         "run": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Run",
-              "description": "Shell text runs in a shell; argv is passed directly to the executable.",
-              "examples": [
-                "pnpm dev",
-                [
-                  "node",
-                  "server.mjs",
-                  "--port",
-                  "${{ self.port }}"
-                ]
-              ]
+              "$ref": "#/$defs/Run"
             },
             {
               "type": "null"
@@ -623,15 +551,7 @@
         "run_script": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RunScript",
-              "description": "Script selected from a package manifest, Makefile, or justfile.",
-              "examples": [
-                "apps/api/package.json#dev",
-                {
-                  "name": "fixtures",
-                  "source": "justfile"
-                }
-              ]
+              "$ref": "#/$defs/RunScript"
             },
             {
               "type": "null"
@@ -649,11 +569,7 @@
         "timeout": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_ConfigDuration",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_ConfigDuration"
             },
             {
               "type": "null"
@@ -683,15 +599,7 @@
         "compose": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ComposeFiles",
-              "description": "Compose files used to resolve and start infrastructure.",
-              "examples": [
-                "docker-compose.yml",
-                [
-                  "docker-compose.yml",
-                  "docker-compose.dev.yml"
-                ]
-              ]
+              "$ref": "#/$defs/ComposeFiles"
             },
             {
               "type": "null"
@@ -739,9 +647,9 @@
         "env": {
           "additionalProperties": {
             "$ref": "#/$defs/Templated_Scalar",
-            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
             "examples": [
-              "${{ lane.value }}"
+              "${{ lane.index }}"
             ]
           },
           "default": {},
@@ -864,11 +772,7 @@
         "project_name": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_string"
             },
             {
               "type": "null"
@@ -1142,11 +1046,7 @@
         "block_size": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_uint16",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_uint16"
             },
             {
               "type": "null"
@@ -1160,13 +1060,7 @@
         "hosts_file": {
           "anyOf": [
             {
-              "$ref": "#/$defs/HostsFile",
-              "description": "Whether project hostnames are also written to the system hosts file.",
-              "examples": [
-                "auto",
-                "never",
-                "always"
-              ]
+              "$ref": "#/$defs/HostsFile"
             },
             {
               "type": "null"
@@ -1196,9 +1090,9 @@
           "items": {
             "additionalProperties": {
               "$ref": "#/$defs/Templated_Scalar",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
               "examples": [
-                "${{ lane.value }}"
+                "${{ lane.index }}"
               ]
             },
             "description": "Explicit lane values; entry N describes lane N. Mutually exclusive with vars.",
@@ -1222,11 +1116,7 @@
         "max": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_uint32",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_uint32"
             },
             {
               "type": "null"
@@ -1240,13 +1130,7 @@
         "new_worktrees": {
           "anyOf": [
             {
-              "$ref": "#/$defs/NewWorktrees",
-              "description": "Action when a new worktree appears; defaults to register.",
-              "examples": [
-                "register",
-                "setup",
-                "start"
-              ]
+              "$ref": "#/$defs/NewWorktrees"
             },
             {
               "type": "null"
@@ -1272,12 +1156,7 @@
         "removed_worktrees": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RemovedWorktrees",
-              "description": "Action when a worktree disappears; defaults to stop and retain its data.",
-              "examples": [
-                "stop",
-                "clean"
-              ]
+              "$ref": "#/$defs/RemovedWorktrees"
             },
             {
               "type": "null"
@@ -1292,9 +1171,9 @@
         "vars": {
           "additionalProperties": {
             "$ref": "#/$defs/Templated_Scalar",
-            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
             "examples": [
-              "${{ lane.value }}"
+              "${{ lane.index }}"
             ]
           },
           "default": {},
@@ -1309,11 +1188,7 @@
         "worktree_dir": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_string"
             },
             {
               "type": "null"
@@ -1429,9 +1304,9 @@
         "env": {
           "additionalProperties": {
             "$ref": "#/$defs/Templated_Scalar",
-            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
             "examples": [
-              "${{ lane.value }}"
+              "${{ lane.index }}"
             ]
           },
           "default": {},
@@ -1492,11 +1367,7 @@
         "infra": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_boolean"
             },
             {
               "type": "null"
@@ -1558,17 +1429,7 @@
         "cmd": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Run",
-              "description": "Shell text runs in a shell; argv is passed directly to the executable.",
-              "examples": [
-                "pnpm dev",
-                [
-                  "node",
-                  "server.mjs",
-                  "--port",
-                  "${{ self.port }}"
-                ]
-              ]
+              "$ref": "#/$defs/Run"
             },
             {
               "type": "null"
@@ -1582,15 +1443,7 @@
         "http": {
           "anyOf": [
             {
-              "$ref": "#/$defs/HttpReady",
-              "description": "HTTP readiness probe against the unit's local server.",
-              "examples": [
-                {
-                  "path": "/healthz",
-                  "status": 200,
-                  "timeout": "60s"
-                }
-              ]
+              "$ref": "#/$defs/HttpReady"
             },
             {
               "type": "null"
@@ -1608,11 +1461,7 @@
         "log": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_string"
             },
             {
               "type": "null"
@@ -1626,12 +1475,7 @@
         "tcp": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TcpReady",
-              "description": "TCP port to probe for readiness.",
-              "examples": [
-                true,
-                "inspector"
-              ]
+              "$ref": "#/$defs/TcpReady"
             },
             {
               "type": "null"
@@ -1646,11 +1490,7 @@
         "timeout": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_ConfigDuration",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_ConfigDuration"
             },
             {
               "type": "null"
@@ -1746,9 +1586,9 @@
           ],
           "items": {
             "$ref": "#/$defs/Templated_string",
-            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
             "examples": [
-              "${{ lane.value }}"
+              "${{ lane.index }}"
             ]
           },
           "type": "array"
@@ -1846,7 +1686,8 @@
       ],
       "properties": {
         "name": {
-          "description": "Script, target, or recipe name within the source file.",
+          "default": "",
+          "description": "Script, target, or recipe name within the source file.\nRequired, unless an override or extends child keeps the inherited name.",
           "examples": [
             "dev",
             "fixtures"
@@ -1854,7 +1695,8 @@
           "type": "string"
         },
         "source": {
-          "description": "Script source relative to the worktree, such as package.json, Makefile, or justfile.",
+          "default": "",
+          "description": "Script source relative to the worktree, such as package.json, Makefile, or justfile.\nRequired, unless an override or extends child keeps the inherited source.",
           "examples": [
             "apps/api/package.json",
             "Makefile",
@@ -1863,14 +1705,84 @@
           "type": "string"
         }
       },
-      "required": [
-        "source",
-        "name"
-      ],
       "type": "object"
     },
     "ServiceConfig": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "vite"
+            ]
+          },
+          "then": {
+            "properties": {
+              "preset": {
+                "const": "vite",
+                "description": "`vite` options require `preset: vite`.",
+                "examples": [
+                  "vite"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "next"
+            ]
+          },
+          "then": {
+            "properties": {
+              "preset": {
+                "const": "next",
+                "description": "`next` options require `preset: next`.",
+                "examples": [
+                  "next"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "wrangler"
+            ]
+          },
+          "then": {
+            "properties": {
+              "preset": {
+                "const": "wrangler",
+                "description": "`wrangler` options require `preset: wrangler`.",
+                "examples": [
+                  "wrangler"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "tauri"
+            ]
+          },
+          "then": {
+            "properties": {
+              "preset": {
+                "const": "tauri",
+                "description": "`tauri` options require `preset: tauri`.",
+                "examples": [
+                  "tauri"
+                ]
+              }
+            }
+          }
+        }
+      ],
       "description": "Service settings after typed local and template merging.",
       "examples": [
         {
@@ -1887,11 +1799,7 @@
         "autostart": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_boolean"
             },
             {
               "type": "null"
@@ -1906,11 +1814,7 @@
         "cwd": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_string"
             },
             {
               "type": "null"
@@ -1924,9 +1828,9 @@
         "env": {
           "additionalProperties": {
             "$ref": "#/$defs/Templated_Scalar",
-            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
             "examples": [
-              "${{ lane.value }}"
+              "${{ lane.index }}"
             ]
           },
           "default": {},
@@ -1951,13 +1855,7 @@
         "fnox": {
           "anyOf": [
             {
-              "$ref": "#/$defs/FnoxConfig",
-              "description": "Secrets profile selection for the project or a single unit.",
-              "examples": [
-                {
-                  "profile": "dev"
-                }
-              ]
+              "$ref": "#/$defs/FnoxConfig"
             },
             {
               "type": "null"
@@ -1973,11 +1871,7 @@
         "hidden": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_boolean"
             },
             {
               "type": "null"
@@ -2066,11 +1960,7 @@
         "pty": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_boolean"
             },
             {
               "type": "null"
@@ -2085,19 +1975,7 @@
         "ready": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadyConfig",
-              "description": "Readiness policy; defaults to TCP for services with hosts and started for other services.",
-              "examples": [
-                "started",
-                {
-                  "http": {
-                    "path": "/healthz"
-                  }
-                },
-                {
-                  "tcp": true
-                }
-              ]
+              "$ref": "#/$defs/ReadyConfig"
             },
             {
               "type": "null"
@@ -2119,11 +1997,7 @@
         "replicas": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_uint16",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_uint16"
             },
             {
               "type": "null"
@@ -2138,17 +2012,7 @@
         "run": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Run",
-              "description": "Shell text runs in a shell; argv is passed directly to the executable.",
-              "examples": [
-                "pnpm dev",
-                [
-                  "node",
-                  "server.mjs",
-                  "--port",
-                  "${{ self.port }}"
-                ]
-              ]
+              "$ref": "#/$defs/Run"
             },
             {
               "type": "null"
@@ -2168,15 +2032,7 @@
         "run_script": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RunScript",
-              "description": "Script selected from a package manifest, Makefile, or justfile.",
-              "examples": [
-                "apps/api/package.json#dev",
-                {
-                  "name": "fixtures",
-                  "source": "justfile"
-                }
-              ]
+              "$ref": "#/$defs/RunScript"
             },
             {
               "type": "null"
@@ -2194,14 +2050,7 @@
         "stop": {
           "anyOf": [
             {
-              "$ref": "#/$defs/StopConfig",
-              "description": "Signal and grace period used when stopping a process tree.",
-              "examples": [
-                {
-                  "signal": "SIGINT",
-                  "timeout": "15s"
-                }
-              ]
+              "$ref": "#/$defs/StopConfig"
             },
             {
               "type": "null"
@@ -2357,11 +2206,7 @@
         "timeout": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_ConfigDuration",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_ConfigDuration"
             },
             {
               "type": "null"
@@ -2415,11 +2260,7 @@
         "to": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_string"
             },
             {
               "type": "null"
@@ -2582,24 +2423,7 @@
         "color": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TagColor",
-              "description": "Fixed terminal palette for tag color overrides.",
-              "examples": [
-                "red",
-                "green",
-                "yellow",
-                "blue",
-                "magenta",
-                "cyan",
-                "white",
-                "gray",
-                "bright-red",
-                "bright-green",
-                "bright-yellow",
-                "bright-blue",
-                "bright-magenta",
-                "bright-cyan"
-              ]
+              "$ref": "#/$defs/TagColor"
             },
             {
               "type": "null"
@@ -2666,11 +2490,7 @@
         "after": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TaskAfter",
-              "description": "Move a create/start task to a later startup phase.",
-              "examples": [
-                "services"
-              ]
+              "$ref": "#/$defs/TaskAfter"
             },
             {
               "type": "null"
@@ -2684,11 +2504,7 @@
         "confirm": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_string"
             },
             {
               "type": "null"
@@ -2702,11 +2518,7 @@
         "cwd": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_string"
             },
             {
               "type": "null"
@@ -2720,9 +2532,9 @@
         "env": {
           "additionalProperties": {
             "$ref": "#/$defs/Templated_Scalar",
-            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
             "examples": [
-              "${{ lane.value }}"
+              "${{ lane.index }}"
             ]
           },
           "default": {},
@@ -2737,13 +2549,7 @@
         "fnox": {
           "anyOf": [
             {
-              "$ref": "#/$defs/FnoxConfig",
-              "description": "Secrets profile selection for the project or a single unit.",
-              "examples": [
-                {
-                  "profile": "dev"
-                }
-              ]
+              "$ref": "#/$defs/FnoxConfig"
             },
             {
               "type": "null"
@@ -2759,11 +2565,7 @@
         "interactive": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_boolean"
             },
             {
               "type": "null"
@@ -2799,11 +2601,7 @@
         "pty": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_boolean"
             },
             {
               "type": "null"
@@ -2818,17 +2616,7 @@
         "run": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Run",
-              "description": "Shell text runs in a shell; argv is passed directly to the executable.",
-              "examples": [
-                "pnpm dev",
-                [
-                  "node",
-                  "server.mjs",
-                  "--port",
-                  "${{ self.port }}"
-                ]
-              ]
+              "$ref": "#/$defs/Run"
             },
             {
               "type": "null"
@@ -2848,15 +2636,7 @@
         "run_script": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RunScript",
-              "description": "Script selected from a package manifest, Makefile, or justfile.",
-              "examples": [
-                "apps/api/package.json#dev",
-                {
-                  "name": "fixtures",
-                  "source": "justfile"
-                }
-              ]
+              "$ref": "#/$defs/RunScript"
             },
             {
               "type": "null"
@@ -2899,11 +2679,7 @@
         "timeout": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_ConfigDuration",
-              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
-              "examples": [
-                "${{ lane.value }}"
-              ]
+              "$ref": "#/$defs/Templated_ConfigDuration"
             },
             {
               "type": "null"
@@ -2918,14 +2694,7 @@
         "when": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TaskWhen",
-              "description": "Lifecycle event that runs a task automatically.",
-              "examples": [
-                "lane.create",
-                "lane.start",
-                "lane.stop",
-                "lane.clean"
-              ]
+              "$ref": "#/$defs/TaskWhen"
             },
             {
               "type": "null"
@@ -3012,47 +2781,40 @@
       "anyOf": [
         {
           "$ref": "#/$defs/ConfigDuration",
-          "description": "Literal value used without expression evaluation.",
-          "examples": [
-            "15s",
-            "10m"
-          ]
+          "description": "Literal value used without expression evaluation."
         },
         {
-          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "description": "Text containing `${{ ... }}`, evaluated for each lane; write `${{ '${{' }}` for a literal `${{`.",
           "examples": [
-            "${{ lane.value }}"
+            "${{ lane.index }}"
           ],
+          "pattern": "\\$\\{\\{",
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
       "examples": [
-        "${{ lane.value }}"
+        "${{ lane.index }}"
       ]
     },
     "Templated_Scalar": {
       "anyOf": [
         {
           "$ref": "#/$defs/Scalar",
-          "description": "Literal value used without expression evaluation.",
-          "examples": [
-            "acme",
-            20000,
-            true
-          ]
+          "description": "Literal value used without expression evaluation."
         },
         {
-          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "description": "Text containing `${{ ... }}`, evaluated for each lane; write `${{ '${{' }}` for a literal `${{`.",
           "examples": [
-            "${{ lane.value }}"
+            "${{ lane.index }}"
           ],
+          "pattern": "\\$\\{\\{",
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
       "examples": [
-        "${{ lane.value }}"
+        "${{ lane.index }}"
       ]
     },
     "Templated_boolean": {
@@ -3062,16 +2824,17 @@
           "type": "boolean"
         },
         {
-          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "description": "Text containing `${{ ... }}`, evaluated for each lane; write `${{ '${{' }}` for a literal `${{`.",
           "examples": [
-            "${{ lane.value }}"
+            "${{ lane.index }}"
           ],
+          "pattern": "\\$\\{\\{",
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
       "examples": [
-        "${{ lane.value }}"
+        "${{ lane.index }}"
       ]
     },
     "Templated_string": {
@@ -3081,16 +2844,17 @@
           "type": "string"
         },
         {
-          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "description": "Text containing `${{ ... }}`, evaluated for each lane; write `${{ '${{' }}` for a literal `${{`.",
           "examples": [
-            "${{ lane.value }}"
+            "${{ lane.index }}"
           ],
+          "pattern": "\\$\\{\\{",
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
       "examples": [
-        "${{ lane.value }}"
+        "${{ lane.index }}"
       ]
     },
     "Templated_uint16": {
@@ -3103,16 +2867,17 @@
           "type": "integer"
         },
         {
-          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "description": "Text containing `${{ ... }}`, evaluated for each lane; write `${{ '${{' }}` for a literal `${{`.",
           "examples": [
-            "${{ lane.value }}"
+            "${{ lane.index }}"
           ],
+          "pattern": "\\$\\{\\{",
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
       "examples": [
-        "${{ lane.value }}"
+        "${{ lane.index }}"
       ]
     },
     "Templated_uint32": {
@@ -3124,16 +2889,17 @@
           "type": "integer"
         },
         {
-          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "description": "Text containing `${{ ... }}`, evaluated for each lane; write `${{ '${{' }}` for a literal `${{`.",
           "examples": [
-            "${{ lane.value }}"
+            "${{ lane.index }}"
           ],
+          "pattern": "\\$\\{\\{",
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
       "examples": [
-        "${{ lane.value }}"
+        "${{ lane.index }}"
       ]
     }
   },
@@ -3155,13 +2921,7 @@
     "fnox": {
       "anyOf": [
         {
-          "$ref": "#/$defs/FnoxConfig",
-          "description": "Secrets profile selection for the project or a single unit.",
-          "examples": [
-            {
-              "profile": "dev"
-            }
-          ]
+          "$ref": "#/$defs/FnoxConfig"
         },
         {
           "type": "null"
@@ -3177,9 +2937,9 @@
     "global_env": {
       "additionalProperties": {
         "$ref": "#/$defs/Templated_Scalar",
-        "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+        "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
         "examples": [
-          "${{ lane.value }}"
+          "${{ lane.index }}"
         ]
       },
       "default": {},

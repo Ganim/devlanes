@@ -1,11 +1,13 @@
 ---
-source: "../tests/it/main.rs"
+source: crates/config/tests/it/main.rs
+assertion_line: 162
 expression: output
 ---
-  × invalid type: string "banana", expected u16 at line 3, column 15
+  × invalid type: string "banana", expected a whole number from 0 to 65535; a
+  │ `${{ ... }}` expression is also allowed at line 3, column 15
    ╭─[devlanes.yaml:3:15]
  2 │ lanes:
  3 │   block_size: banana
    ·               ┬
-   ·               ╰── invalid type: string "banana", expected u16 at line 3, column 15
+   ·               ╰── invalid type: string "banana", expected a whole number from 0 to 65535; a `${{ ... }}` expression is also allowed at line 3, column 15
    ╰────

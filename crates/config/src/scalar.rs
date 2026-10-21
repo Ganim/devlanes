@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::{fmt, str::FromStr, time::Duration};
 
 /// A scalar suitable for environment variables and free-form lane variables.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("examples" = ["acme",20000,true]))]
 pub enum Scalar {
@@ -34,15 +34,16 @@ impl fmt::Display for Scalar {
 }
 
 /// A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.
+/// Write `${{ '${{' }}` for a literal `${{`.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(rename = "Templated_{T}")]
-#[schemars(extend("examples" = ["${{ lane.value }}"]))]
+#[schemars(extend("examples" = ["${{ lane.index }}"]))]
 pub enum Templated<T> {
     /// Literal value used without expression evaluation.
     Literal(T),
-    /// Expression or interpolated string resolved from the lane's runtime context.
-    #[schemars(extend("examples" = ["${{ lane.value }}"]))]
+    /// Text containing `${{ ... }}`, evaluated for each lane; write `${{ '${{' }}` for a literal `${{`.
+    #[schemars(extend("pattern" = "\\$\\{\\{", "examples" = ["${{ lane.index }}"]))]
     Expression(String),
 }
 
@@ -55,8 +56,32 @@ impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Templated<T> {
         }
         serde_json::from_value(value)
             .map(Self::Literal)
-            .map_err(serde::de::Error::custom)
+            .map_err(|error| {
+                serde::de::Error::custom(format!(
+                    "{}; a `${{{{ ... }}}}` expression is also allowed",
+                    plain_type_names(&error.to_string())
+                ))
+            })
     }
+}
+
+/// Replace Rust primitive names in serde messages with the words used in YAML docs.
+pub(crate) fn plain_type_names(message: &str) -> String {
+    let mut message = message.to_owned();
+    for (rust, plain) in [
+        ("expected u16", "expected a whole number from 0 to 65535"),
+        (
+            "expected u32",
+            "expected a whole number from 0 to 4294967295",
+        ),
+        ("expected u64", "expected a nonnegative whole number"),
+        ("expected i64", "expected a whole number"),
+        ("expected f64", "expected a number"),
+        ("expected a boolean", "expected true or false"),
+    ] {
+        message = message.replace(rust, plain);
+    }
+    message
 }
 
 impl<T: Clone + serde::de::DeserializeOwned> Templated<T> {
@@ -65,10 +90,10 @@ impl<T: Clone + serde::de::DeserializeOwned> Templated<T> {
         match self {
             Self::Literal(value) => Ok(value.clone()),
             Self::Expression(text) => serde_json::from_value(crate::evaluate(text, context)?)
-                .map_err(|_| {
+                .map_err(|error| {
                     crate::ConfigError::plain(format!(
-                        "expression has the wrong type; expected {}",
-                        std::any::type_name::<T>()
+                        "expression result has the wrong type: {}",
+                        plain_type_names(&error.to_string())
                     ))
                 }),
         }
@@ -79,7 +104,7 @@ impl<T: Clone + serde::de::DeserializeOwned> Templated<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(into = "String")]
 #[schemars(with = "String")]
-#[schemars(extend("examples" = ["15s","10m"]))]
+#[schemars(extend("pattern" = "^[0-9]+(ms|s|m|h|d)$", "examples" = ["15s","10m"]))]
 pub struct ConfigDuration(pub Duration);
 
 impl FromStr for ConfigDuration {
@@ -129,7 +154,7 @@ impl<'de> Deserialize<'de> for ConfigDuration {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, JsonSchema)]
 #[serde(into = "String")]
 #[schemars(with = "String")]
-#[schemars(extend("examples" = ["75%","12.5%"]))]
+#[schemars(extend("pattern" = "^\\s*([0-9]+\\.?[0-9]*|\\.[0-9]+)\\s*%\\s*$", "examples" = ["75%","12.5%"]))]
 pub struct Percent(pub f64);
 
 impl FromStr for Percent {
@@ -169,7 +194,7 @@ impl<'de> Deserialize<'de> for Percent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(into = "String")]
 #[schemars(with = "String")]
-#[schemars(extend("examples" = ["5GiB"]))]
+#[schemars(extend("pattern" = "^[0-9]+(B|KB|MB|GB|KiB|MiB|GiB)$", "examples" = ["5GiB"]))]
 pub struct ByteSize(pub u64);
 
 impl FromStr for ByteSize {

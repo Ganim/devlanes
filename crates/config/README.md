@@ -32,9 +32,11 @@ Use `load_project(path)` for a file or directory. It also reads the sibling `dev
 
 ## Merge and expression rules
 
-Local overrides merge before `extends` resolution. Top-level maps merge by key. Inside a service, `ready`, commands, `stop`, host/sync/tag lists, `cwd`, and each preset option block replace as a whole; `env` merges by key. Setting `run` replaces an inherited `run_script`, and vice versa. Task declaration order is preserved.
+Local overrides merge before `extends` resolution, and both follow one rule: mappings merge by key at every level (services, tasks, infra commands, containers, `ready`, `stop`, `env`, `vars`, `tags`, preset options), while lists and scalars replace. Alternative forms clear each other: setting `run`, `run_script` or task `steps` drops the others, setting one of `tcp`, `http`, `log` or `cmd` under `ready` drops the rest, and `ready: started` replaces a check mapping. So `stop: { timeout: 20s }` keeps an inherited `signal`. Task declaration order is preserved.
 
-`${{ env.X }}` reads the supplied outer environment, including inside an env override map. Lane variables can reference other lane variables; cycles are rejected. Parsing does not read the process environment or run integration commands.
+`${{ env.X }}` reads the supplied outer environment, including inside an env override map. Lane variables can reference other lane variables; cycles are rejected. Write `${{ '${{' }}` for a literal `${{`. Parsing does not read the process environment or run integration commands.
+
+`validate_with_preset_ports` also counts each registered preset's named ports against a fixed `lanes.block_size`. `UserConfig::warnings()` lists settings that loading ignored, such as mobile trust targets.
 
 ## Schema
 

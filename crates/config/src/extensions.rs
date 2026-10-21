@@ -17,9 +17,6 @@ pub trait Extensions: Clone + std::fmt::Debug + Default + JsonSchema + 'static {
     /// Parse an integration's options without accepting unrelated unknown fields.
     fn parse_preset_options(name: &str, value: Value) -> Result<Self::Options, String>;
 
-    /// Merge object options using the same map-merge/scalar-replace contract as services.
-    fn merge_preset_options(base: &mut Self::Options, overlay: Self::Options);
-
     /// Declare named ports before expressions are evaluated; presets without extras return none.
     fn required_ports(_preset: &str) -> &'static [&'static str] {
         &[]
@@ -30,11 +27,10 @@ pub trait Extensions: Clone + std::fmt::Debug + Default + JsonSchema + 'static {
 }
 
 /// Opaque preset options validated by integrations registered at the composition root.
-/// The historical name remains available to callers using the default generic parameter.
 #[derive(Debug, Clone, Default, JsonSchema)]
-pub struct BuiltinExtensions;
+pub struct OpaqueExtensions;
 
-impl Extensions for BuiltinExtensions {
+impl Extensions for OpaqueExtensions {
     type Options = Value;
 
     /// Preset registration belongs to the binary, not the config crate.
@@ -53,22 +49,6 @@ impl Extensions for BuiltinExtensions {
             return Err(format!("preset options `{name}` must be a mapping"));
         }
         Ok(value)
-    }
-
-    /// Recursively merge opaque option maps while replacing lists and scalars.
-    fn merge_preset_options(base: &mut Value, overlay: Value) {
-        match (base, overlay) {
-            (Value::Object(base), Value::Object(overlay)) => {
-                for (key, value) in overlay {
-                    if let Some(base) = base.get_mut(&key) {
-                        Self::merge_preset_options(base, value);
-                    } else {
-                        base.insert(key, value);
-                    }
-                }
-            }
-            (base, overlay) => *base = overlay,
-        }
     }
 
     /// Unregistered option keys can only be mappings; loading enforces preset/key agreement.

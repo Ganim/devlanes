@@ -12,7 +12,7 @@ pub(crate) fn prepare(schema: &mut schemars::Schema, title: &str) {
 /// Keep examples on their Rust declarations; this pass only copies existing annotations.
 pub(crate) fn prepare_value(schema: &mut Value, title: &str) {
     let source = schema.clone();
-    visit(schema, &source);
+    visit(schema, &source, true);
     if let Some(object) = schema.as_object_mut() {
         object.insert("title".into(), title.into());
     }
@@ -58,10 +58,12 @@ fn annotation(node: &Value, root: &Value, key: &str, seen: &mut Vec<String>) -> 
 }
 
 /// Visit schema keywords only; examples and defaults contain instance data, not schemas.
-fn visit(node: &mut Value, root: &Value) {
+/// Union branches (`inject` false) keep only their own annotations: copying the referenced
+/// definition's generic text there would repeat it beside the field's own description.
+fn visit(node: &mut Value, root: &Value, inject: bool) {
     let metadata: Vec<_> = ["description", "examples"]
         .into_iter()
-        .filter(|key| node.get(key).is_none())
+        .filter(|key| inject && node.get(key).is_none())
         .filter_map(|key| annotation(node, root, key, &mut Vec::new()).map(|value| (key, value)))
         .collect();
     let Some(object) = node.as_object_mut() else {
@@ -91,14 +93,14 @@ fn visit(node: &mut Value, root: &Value) {
     ] {
         if let Some(children) = object.get_mut(keyword).and_then(Value::as_object_mut) {
             for child in children.values_mut() {
-                visit(child, root);
+                visit(child, root, true);
             }
         }
     }
     for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
         if let Some(children) = object.get_mut(keyword).and_then(Value::as_array_mut) {
             for child in children {
-                visit(child, root);
+                visit(child, root, keyword == "prefixItems");
             }
         }
     }
@@ -114,7 +116,7 @@ fn visit(node: &mut Value, root: &Value) {
         "unevaluatedProperties",
     ] {
         if let Some(child) = object.get_mut(keyword) {
-            visit(child, root);
+            visit(child, root, true);
             // Map/array members can reuse instances already written on their containing field.
             if matches!(keyword, "items" | "additionalProperties") {
                 let samples = examples

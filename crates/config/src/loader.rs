@@ -1,11 +1,44 @@
 use crate::{
-    BuiltinExtensions, ConfigError, Env, Extensions, FnoxConfig, InfraCommand, InfraConfig,
-    LanesConfig, ProfileConfig, ProjectConfig, TaskConfig, service::PartialService,
+    CheckReport, ConfigError, Env, Extensions, FnoxConfig, InfraCommand, InfraCommandOptions,
+    InfraConfig, LanesConfig, OpaqueExtensions, ProfileConfig, ProfileOptions, ProjectConfig,
+    TaskConfig, service::PartialService,
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_saphyr::Spanned;
 use std::{collections::HashSet, path::Path};
+
+/// Hint for `on:`, which users borrow from CI syntax for task hooks and service lifecycles.
+pub(crate) const ON_HINT: &str = "unknown key `on`; lifecycle hooks are tasks with `when`";
+
+/// Original YAML documents kept in memory so later integration checks can point at a line.
+#[derive(Clone, Default)]
+pub struct ConfigSources {
+    base: Option<(String, String)>,
+    local: Option<(String, String)>,
+}
+
+impl std::fmt::Debug for ConfigSources {
+    /// Hide source contents, which may contain credentials, from debug output.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConfigSources { .. }")
+    }
+}
+
+impl ConfigSources {
+    /// Attach an error whose message starts with a field path to that field's YAML position.
+    pub fn locate(&self, error: ConfigError) -> ConfigError {
+        match &self.base {
+            Some((file, source)) => locate(
+                error,
+                file,
+                source,
+                self.local.as_ref().map(|(f, s)| (f.as_str(), s.as_str())),
+            ),
+            None => error,
+        }
+    }
+}
 
 /// Parsed before defaults, so an omitted local field never erases a base field.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -82,13 +115,27 @@ fn merge_lanes(base: &mut LanesConfig, overlay: LanesConfig) {
     base.vars.extend(overlay.vars);
 }
 
-/// Retain unspecified task options across local overlays.
-fn merge_task(base: &mut TaskConfig, overlay: TaskConfig) {
+/// Merge a local task per key; `run`, `run_script` and `steps` are alternatives, so setting
+/// one clears the others.
+fn merge_task(base: &mut TaskConfig, mut overlay: TaskConfig) {
+    if overlay.run.is_some() || overlay.steps.is_some() {
+        base.run_script = None;
+    }
+    if overlay.run_script.is_some() || overlay.steps.is_some() {
+        base.run = None;
+    }
+    if overlay.run.is_some() || overlay.run_script.is_some() {
+        base.steps = None;
+    }
+    merge_option(
+        &mut base.run_script,
+        overlay.run_script.take(),
+        merge_script,
+    );
     replace!(
         base,
         overlay,
         run,
-        run_script,
         cwd,
         when,
         after,
@@ -120,24 +167,76 @@ pub(crate) fn merge_option<T>(
     }
 }
 
-/// Merge named infra command objects, replacing shorthand commands wholesale.
-fn merge_command(base: &mut InfraCommand, overlay: InfraCommand) {
-    match (base, overlay) {
-        (InfraCommand::Object(base), InfraCommand::Object(overlay)) => {
-            replace!(
-                base,
-                overlay,
-                run,
-                run_script,
-                container,
-                ignore_errors,
-                cwd,
-                timeout
-            );
-            base.env.extend(overlay.env);
-        }
-        (base, overlay) => *base = overlay,
+/// Read command shorthand as the mapping `{ run: ... }` it abbreviates.
+fn command_options(command: InfraCommand) -> InfraCommandOptions {
+    match command {
+        InfraCommand::Object(options) => *options,
+        InfraCommand::Command(run) => InfraCommandOptions {
+            run: Some(run),
+            ..Default::default()
+        },
     }
+}
+
+/// Merge named infra commands per key; shorthand counts as `run`, which clears `run_script`.
+fn merge_command(base: &mut InfraCommand, overlay: InfraCommand) {
+    if matches!(
+        (&*base, &overlay),
+        (InfraCommand::Command(_), InfraCommand::Command(_))
+    ) {
+        *base = overlay;
+        return;
+    }
+    let mut merged = command_options(std::mem::replace(
+        base,
+        InfraCommand::Object(Box::default()),
+    ));
+    let mut overlay = command_options(overlay);
+    if overlay.run.is_some() {
+        merged.run_script = None;
+    }
+    if overlay.run_script.is_some() {
+        merged.run = None;
+    }
+    merge_option(
+        &mut merged.run_script,
+        overlay.run_script.take(),
+        merge_script,
+    );
+    replace!(merged, overlay, run, container, ignore_errors, cwd, timeout);
+    merged.env.extend(overlay.env);
+    *base = InfraCommand::Object(Box::new(merged));
+}
+
+/// Read a selector list as the `{ include: [...] }` mapping it abbreviates.
+fn profile_options(profile: ProfileConfig) -> ProfileOptions {
+    match profile {
+        ProfileConfig::Object(options) => options,
+        ProfileConfig::Selectors(include) => ProfileOptions {
+            include: Some(include),
+            ..Default::default()
+        },
+    }
+}
+
+/// Merge profiles per key; a selector list replaces only `include`.
+fn merge_profile(base: &mut ProfileConfig, overlay: ProfileConfig) {
+    if matches!(
+        (&*base, &overlay),
+        (ProfileConfig::Selectors(_), ProfileConfig::Selectors(_))
+    ) {
+        *base = overlay;
+        return;
+    }
+    let mut merged = profile_options(std::mem::replace(
+        base,
+        ProfileConfig::Selectors(Vec::new()),
+    ));
+    let overlay = profile_options(overlay);
+    replace!(merged, overlay, include, exclude, infra);
+    merged.env.extend(overlay.env);
+    merged.run_scripts.extend(overlay.run_scripts);
+    *base = ProfileConfig::Object(merged);
 }
 
 /// Merge infra maps including individual container declarations.
@@ -164,10 +263,31 @@ fn merge_infra(base: &mut InfraConfig, overlay: InfraConfig) {
     });
 }
 
-/// Preserve HTTP readiness fields when an override changes only its timeout.
+/// Merge readiness checks per key. `started` and the check mapping are alternatives, and so
+/// are `tcp`, `http`, `log` and `cmd`: setting one clears the others.
 pub(crate) fn merge_ready(base: &mut crate::ReadyConfig, overlay: crate::ReadyConfig) {
     match (base, overlay) {
         (crate::ReadyConfig::Check(base), crate::ReadyConfig::Check(overlay)) => {
+            let probes = [
+                overlay.tcp.is_some(),
+                overlay.http.is_some(),
+                overlay.log.is_some(),
+                overlay.cmd.is_some(),
+            ];
+            if probes.contains(&true) {
+                if !probes[0] {
+                    base.tcp = None;
+                }
+                if !probes[1] {
+                    base.http = None;
+                }
+                if !probes[2] {
+                    base.log = None;
+                }
+                if !probes[3] {
+                    base.cmd = None;
+                }
+            }
             replace!(base, overlay, tcp, log, cmd, timeout);
             merge_option(&mut base.http, overlay.http, |base, overlay| {
                 replace!(base, overlay, path, status, timeout);
@@ -177,8 +297,41 @@ pub(crate) fn merge_ready(base: &mut crate::ReadyConfig, overlay: crate::ReadyCo
     }
 }
 
+/// Merge `{ source, name }` per key; the `file#name` shorthand replaces the whole selection.
+pub(crate) fn merge_script(base: &mut crate::RunScript, overlay: crate::RunScript) {
+    match (base, overlay) {
+        (crate::RunScript::Object(base), crate::RunScript::Object(overlay)) => {
+            if !overlay.source.is_empty() {
+                base.source = overlay.source;
+            }
+            if !overlay.name.is_empty() {
+                base.name = overlay.name;
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
+
+/// Merge opaque preset mappings per key, recursively; lists and scalars replace.
+pub(crate) fn merge_json(base: &mut serde_json::Value, overlay: serde_json::Value) {
+    match (base, overlay) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                match base.get_mut(&key) {
+                    Some(base) => merge_json(base, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
+
 impl<E: Extensions> PartialProject<E> {
-    /// Apply local settings before any template is expanded.
+    /// Apply local settings before any template is expanded. Mappings merge per key at every
+    /// level; lists and scalars replace.
     fn merge(&mut self, overlay: Self) {
         replace!(self, overlay, project);
         merge_spanned(&mut self.lanes, overlay.lanes, merge_lanes);
@@ -199,18 +352,7 @@ impl<E: Extensions> PartialProject<E> {
         merge_map(&mut self.tags, overlay.tags, |base, overlay| {
             replace!(base, overlay, color, description);
         });
-        merge_map(
-            &mut self.profiles,
-            overlay.profiles,
-            |base, overlay| match (base, overlay) {
-                (ProfileConfig::Object(base), ProfileConfig::Object(overlay)) => {
-                    replace!(base, overlay, include, exclude, infra);
-                    base.env.extend(overlay.env);
-                    base.run_scripts.extend(overlay.run_scripts);
-                }
-                (base, overlay) => *base = overlay,
-            },
-        );
+        merge_map(&mut self.profiles, overlay.profiles, merge_profile);
     }
 
     /// Expand all templates, including unused ones so hidden cycles cannot survive checks.
@@ -238,6 +380,7 @@ impl<E: Extensions> PartialProject<E> {
             );
         }
         Ok(ProjectConfig {
+            sources: ConfigSources::default(),
             project: self
                 .project
                 .ok_or_else(|| ConfigError::plain("project: missing required project name"))?
@@ -289,29 +432,35 @@ pub(crate) fn parse_yaml<T: DeserializeOwned>(file: &str, source: &str) -> Resul
         });
         // Miette owns source rendering; nesting serde-saphyr's snippet would duplicate it.
         let mut message = error.without_snippet().to_string();
-        if message.contains("unknown field `gui`") {
-            message = "`gui` is not supported yet".into();
-        }
-        if message.contains("unknown field `on`") {
-            message = "unknown key `on`; use `when` for lifecycle hooks".into();
-        }
         if let Some((_, unknown)) = message.split_once("unknown field `")
             && let Some((key, expected)) = unknown.split_once('`')
+            && let Some(hint) = unknown_key_hint(key, expected)
         {
-            let candidates: Vec<_> = expected
-                .split('`')
-                .enumerate()
-                .filter_map(|(i, s)| (i % 2 == 1).then_some(s))
-                .collect();
-            if let Some(suggestion) = candidates.into_iter().max_by(|a, b| {
-                strsim::jaro_winkler(key, a).total_cmp(&strsim::jaro_winkler(key, b))
-            }) && strsim::jaro_winkler(key, suggestion) > 0.75
-            {
-                message = format!("unknown key `{key}`; did you mean `{suggestion}`?");
-            }
+            message = hint;
         }
         ConfigError::at(file, source, offset, message)
     })
+}
+
+/// Name the closest expected key for an unknown-field error. serde-saphyr lists the expected
+/// names after "expected" or "expected one of", with or without backticks.
+fn unknown_key_hint(key: &str, expected: &str) -> Option<String> {
+    if key == "on" {
+        return Some(ON_HINT.into());
+    }
+    let expected = expected.split(" at line").next().unwrap_or(expected);
+    let expected = expected
+        .trim_start_matches(',')
+        .trim_start()
+        .trim_start_matches("expected ")
+        .trim_start_matches("one of ");
+    expected
+        .split(", ")
+        .map(|name| name.trim().trim_matches('`'))
+        .filter(|name| !name.is_empty() && !name.contains(' '))
+        .max_by(|a, b| strsim::jaro_winkler(key, a).total_cmp(&strsim::jaro_winkler(key, b)))
+        .filter(|name| strsim::jaro_winkler(key, name) > 0.75)
+        .map(|name| format!("unknown key `{key}`; did you mean `{name}`?"))
 }
 
 /// Translate character-based YAML positions into miette byte spans.
@@ -404,25 +553,38 @@ fn source_position(source: &str, path: &str) -> Option<(usize, usize)> {
     let node: SourceNode = serde_saphyr::from_str(source).ok()?;
     let mut children = &node.children;
     let mut found = None;
-    for (depth, component) in path.split('.').enumerate() {
-        let Some(child) = children.get(component) else {
+    let mut remaining = path;
+    let mut depth = 0;
+    while !remaining.is_empty() {
+        // Keys may contain dots, so match the longest key that ends at a path separator.
+        let Some((key, child)) = children
+            .iter()
+            .filter(|(key, _)| {
+                remaining
+                    .strip_prefix(key.as_str())
+                    .is_some_and(|tail| tail.is_empty() || tail.starts_with('.'))
+            })
+            .max_by_key(|(key, _)| key.len())
+        else {
             break;
         };
+        depth += key.len();
         found = Some((
-            depth + 1,
+            depth,
             line_offset(
                 source,
                 child.referenced.line() as usize,
                 child.referenced.column() as usize,
             ),
         ));
+        remaining = remaining[key.len()..].trim_start_matches('.');
         children = &child.value.children;
     }
     found
 }
 
 /// Attribute semantic failures to the most specific source, preferring local overrides.
-fn locate(
+pub(crate) fn locate(
     error: ConfigError,
     file: &str,
     source: &str,
@@ -444,7 +606,7 @@ fn locate(
 
 /// Parse and validate an in-memory project plus an optional local overlay.
 pub fn parse_project(source: &str, local: Option<&str>) -> Result<ProjectConfig, ConfigError> {
-    parse_project_with::<BuiltinExtensions>(source, local)
+    parse_project_with::<OpaqueExtensions>(source, local)
 }
 
 /// Parse a project with the binary's registered integration schemas.
@@ -457,6 +619,7 @@ pub fn parse_project_with<E: Extensions>(
         source,
         local.map(|s| ("devlanes.local.yaml", s)),
     )
+    .map(|(config, _)| config)
 }
 
 /// Apply named sources so all returned diagnostics identify their original file.
@@ -464,28 +627,71 @@ fn parse_named<E: Extensions>(
     file: &str,
     source: &str,
     local: Option<(&str, &str)>,
-) -> Result<ProjectConfig<E>, ConfigError> {
+) -> Result<(ProjectConfig<E>, CheckReport), ConfigError> {
     let mut partial: PartialProject<E> = parse_yaml(file, source)?;
-    if let Some((name, local)) = local {
-        partial.merge(parse_yaml(name, local)?);
+    if partial.project.is_none() {
+        // A project name set only in the local file would differ between checkouts.
+        return Err(ConfigError::at(
+            file,
+            source,
+            0,
+            format!("project: {file} must set the project name"),
+        ));
     }
-    let config = partial
+    let base_services: Vec<String> = partial.services.keys().cloned().collect();
+    let mut local_services = Vec::new();
+    if let Some((name, local)) = local {
+        let overlay: PartialProject<E> = parse_yaml(name, local)?;
+        local_services.extend(
+            overlay
+                .services
+                .keys()
+                .filter(|service| !base_services.contains(service))
+                .cloned(),
+        );
+        partial.merge(overlay);
+    }
+    let mut config = partial
         .finish()
         .map_err(|e| locate(e, file, source, local))?;
-    crate::validate(&config).map_err(|e| locate(e, file, source, local))?;
-    Ok(config)
+    config.sources = ConfigSources {
+        base: Some((file.into(), source.into())),
+        local: local.map(|(f, s)| (f.into(), s.into())),
+    };
+    for name in &local_services {
+        let service = &config.services[name];
+        if service.run.is_none() && service.run_script.is_none() {
+            let suggestion = base_services
+                .iter()
+                .max_by(|a, b| {
+                    strsim::jaro_winkler(name, a).total_cmp(&strsim::jaro_winkler(name, b))
+                })
+                .filter(|candidate| strsim::jaro_winkler(name, candidate) > 0.75)
+                .map(|candidate| format!("; did you mean `{candidate}`?"))
+                .unwrap_or_default();
+            return Err(config.sources.locate(ConfigError::plain(format!(
+                "services.{name}: service is defined only in the local file and needs run or run_script{suggestion}"
+            ))));
+        }
+    }
+    let report = crate::validate(&config).map_err(|e| locate(e, file, source, local))?;
+    Ok((config, report))
 }
 
 /// Load a project file (or a directory containing it) and its sibling local override.
 pub fn load_project(path: impl AsRef<Path>) -> Result<ProjectConfig, ConfigError> {
-    load_project_with::<BuiltinExtensions>(path)
+    load_project_with::<OpaqueExtensions>(path)
 }
 
 /// Load with custom integration parsing; no external commands are executed.
 pub fn load_project_with<E: Extensions>(
     path: impl AsRef<Path>,
 ) -> Result<ProjectConfig<E>, ConfigError> {
-    let path = path.as_ref();
+    load_named(path.as_ref()).map(|(config, _)| config)
+}
+
+/// Read the base file and its sibling local file, returning the validation report as well.
+fn load_named<E: Extensions>(path: &Path) -> Result<(ProjectConfig<E>, CheckReport), ConfigError> {
     let file = if path.is_dir() {
         path.join("devlanes.yaml")
     } else {
@@ -508,8 +714,8 @@ pub fn load_project_with<E: Extensions>(
 }
 
 /// Load and return warnings for `config check`; validation failures are errors.
-pub fn check(path: impl AsRef<Path>) -> Result<crate::CheckReport, ConfigError> {
-    crate::validate(&load_project(path)?)
+pub fn check(path: impl AsRef<Path>) -> Result<CheckReport, ConfigError> {
+    load_named::<OpaqueExtensions>(path.as_ref()).map(|(_, report)| report)
 }
 
 /// Determine all transitively referenced templates for unused-template warnings.
