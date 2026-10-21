@@ -838,6 +838,41 @@ async fn identity_cycles_are_rejected() {
     );
 }
 
+#[test]
+/// Evaluated hosts follow DNS rules: an underscore from a lane var fails at the
+/// service's `hosts`, and case and a trailing dot are normalised before routes
+/// are deduplicated.
+fn evaluated_hosts_are_checked_and_normalised() {
+    let config = parse(
+        "project: demo\nlanes:\n  vars: { sub: api_v2 }\nservices:\n  api: { run: a, hosts: [\"${{ lane.sub }}.acme.localhost\"] }\n",
+    );
+    let facts = facts("demo", 1, None);
+    let (block, offsets) = allocation(&config, 21_000, &[]);
+    let error =
+        lane_layout(&ResolveInput::new(&config, &facts, block, &offsets)).expect_err("underscore");
+    assert_eq!(
+        error,
+        ResolveError::Invalid {
+            path: "services.api.hosts".into(),
+            message: "`api_v2.acme.localhost`: `_` is not allowed in a hostname; use letters, digits and hyphens".into(),
+        }
+    );
+
+    let config = parse(
+        "project: demo\nservices:\n  web: { run: a, hosts: [\"Web.${{ lane.domain }}.\", \"web.${{ lane.domain }}\"] }\n",
+    );
+    let (block, offsets) = allocation(&config, 21_000, &[]);
+    let layout = lane_layout(&ResolveInput::new(&config, &facts, block, &offsets)).expect("layout");
+    let hosts: Vec<&str> = layout.routes.iter().map(|r| r.host.as_str()).collect();
+    assert_eq!(hosts, ["web.demo-1.localhost"]);
+    assert_eq!(layout.routes[0].port_name, "default");
+    assert!(
+        layout.warnings.iter().any(|w| w.contains("already routed")),
+        "{:?}",
+        layout.warnings
+    );
+}
+
 #[tokio::test]
 /// Platform comes from files in the working directory when not configured.
 async fn platform_inference() {

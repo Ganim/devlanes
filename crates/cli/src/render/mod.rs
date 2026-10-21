@@ -91,6 +91,15 @@ impl Ctx<'_> {
         }
     }
 
+    /// Advice that blocked nothing: `! text` in human mode, `warn text` otherwise.
+    pub fn warning(&self, text: &str) -> String {
+        if self.human() {
+            format!("{} {text}", self.mark(Outcome::Skip))
+        } else {
+            format!("warn {text}")
+        }
+    }
+
     /// A skipped step: `! seed skipped: why` in human mode, `skipped seed: why` otherwise.
     pub fn skipped(&self, subject: &str, reason: Option<&str>) -> String {
         let reason = reason.map(|r| format!(": {r}")).unwrap_or_default();
@@ -185,6 +194,22 @@ pub(crate) fn event(method: Method, event: &Event, cx: &Ctx<'_>) -> Vec<String> 
         events::TASK if starting => other::task_line(&event.data, cx).into_iter().collect(),
         // The final result lists every unit; transitions would only repeat it.
         events::UNIT_CHANGED | events::LANE_CHANGED if starting => Vec::new(),
+        // `wait` streams its lane's events for the progress bar only.
+        events::PHASE | events::TASK | events::UNIT_CHANGED | events::LANE_CHANGED
+            if method == Method::Wait =>
+        {
+            Vec::new()
+        }
+        // `{lane, code, data}`; a start names its own lane already.
+        events::LANE_WARNING => {
+            let line = words::lane_warning(&text(&event.data, "code"), &event.data["data"]);
+            let lane = text(&event.data, "lane");
+            vec![if starting || lane.is_empty() {
+                cx.warning(&line)
+            } else {
+                cx.warning(&format!("{lane}: {line}"))
+            }]
+        }
         _ => vec![other::event_line(event)],
     }
 }

@@ -591,6 +591,7 @@ async fn proxy(
     ProxyRoutes {
         proxy,
         status: Value::Object(status),
+        rejected: Mutex::new(Vec::new()),
     }
 }
 
@@ -598,11 +599,19 @@ async fn proxy(
 struct ProxyRoutes {
     proxy: devlanes_proxy::Proxy,
     status: Value,
+    /// Entries the last snapshot dropped: `{host, lane, unit, reason}`.
+    rejected: Mutex<Vec<Value>>,
 }
 
 impl RouteSink for ProxyRoutes {
-    /// Converts and swaps the table; an invalid snapshot keeps the previous one.
+    /// Converts and swaps the table. Invalid and duplicate entries are dropped
+    /// one by one (and listed in `status().rejected`) so they never hold back
+    /// the routes of other lanes.
     fn publish(&self, routes: Vec<RouteEntry>) {
+        let owners: Vec<(String, String)> = routes
+            .iter()
+            .map(|entry| (entry.lane.clone(), entry.unit.clone()))
+            .collect();
         let routes = routes
             .into_iter()
             .map(|entry| {
@@ -630,15 +639,39 @@ impl RouteSink for ProxyRoutes {
                 route
             })
             .collect();
-        match devlanes_proxy::RouteTable::new(routes) {
-            Ok(table) => self.proxy.replace_routes(table),
-            Err(error) => tracing::warn!(%error, "route snapshot rejected"),
-        }
+        let (table, rejected) = devlanes_proxy::RouteTable::accept(routes);
+        self.proxy.replace_routes(table);
+        let rejected: Vec<Value> = rejected
+            .into_iter()
+            .map(|rejected| {
+                tracing::warn!(host = %rejected.host, error = %rejected.error, "route dropped");
+                let (lane, unit) = owners.get(rejected.index).cloned().unwrap_or_default();
+                json!({
+                    "host": rejected.host,
+                    "lane": lane,
+                    "unit": unit,
+                    "reason": rejected.error.to_string(),
+                })
+            })
+            .collect();
+        *self.rejected.lock().unwrap_or_else(|e| e.into_inner()) = rejected;
     }
 
-    /// Bind results plus the accept loops' live health.
+    /// Bind results plus the accept loops' live health, and the entries the last
+    /// snapshot dropped.
     fn status(&self) -> Value {
-        listener_status(&self.status, &self.proxy.listener_health())
+        let mut status = listener_status(&self.status, &self.proxy.listener_health());
+        let rejected = self
+            .rejected
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(map) = status.as_object_mut()
+            && !rejected.is_empty()
+        {
+            map.insert("rejected".into(), Value::Array(rejected));
+        }
+        status
     }
 }
 
@@ -1588,6 +1621,62 @@ mod tests {
         );
         assert_eq!(data["status"], "HTTP 404");
         assert_eq!(data["stderr"], "No such image: postgres:16");
+    }
+
+    /// A route entry of `lane:unit` for `host`.
+    fn entry(host: &str, lane: &str, unit: &str, port: u16) -> RouteEntry {
+        RouteEntry {
+            host: host.into(),
+            port,
+            fallback: false,
+            host_header_upstream: false,
+            status: RouteStatus::Ready,
+            start_hint: String::new(),
+            project: "acme".into(),
+            lane: lane.into(),
+            unit: unit.into(),
+            certificate_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    /// An invalid host and a trailing-dot duplicate are dropped and reported by
+    /// owner; every other lane's routes still reach the proxy.
+    fn proxy_routes_drop_bad_entries_one_by_one() {
+        let sink = ProxyRoutes {
+            proxy: devlanes_proxy::Proxy::new(
+                devlanes_proxy::ProxyConfig::default(),
+                devlanes_proxy::RouteTable::default(),
+            ),
+            status: json!({}),
+            rejected: Mutex::new(Vec::new()),
+        };
+        sink.publish(vec![
+            entry("web.acme.localhost", "acme@0", "web", 3000),
+            entry("api_v2.acme.localhost", "acme@0", "api", 3001),
+            entry("web.acme.localhost.", "acme@1", "web", 3010),
+            entry("docs.acme-1.localhost", "acme@1", "docs", 3011),
+        ]);
+        let routes = sink.proxy.routes();
+        let hosts: Vec<&str> = routes.routes().iter().map(|r| r.host.as_str()).collect();
+        assert_eq!(hosts, ["docs.acme-1.localhost", "web.acme.localhost"]);
+        let rejected = &sink.status()["rejected"];
+        assert_eq!(rejected[0]["host"], "api_v2.acme.localhost");
+        assert_eq!(rejected[0]["lane"], "acme@0");
+        assert_eq!(rejected[0]["unit"], "api");
+        assert_eq!(rejected[1]["host"], "web.acme.localhost.");
+        assert_eq!(rejected[1]["lane"], "acme@1");
+        assert!(
+            rejected[1]["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("duplicate")),
+            "{rejected}"
+        );
+        sink.publish(vec![entry("web.acme.localhost", "acme@0", "web", 3000)]);
+        assert!(
+            sink.status().get("rejected").is_none(),
+            "a clean snapshot clears them"
+        );
     }
 
     /// A fake `mkcert` that prints `caroot` for `-CAROOT`.

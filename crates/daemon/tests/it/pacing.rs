@@ -84,7 +84,7 @@ impl devlanes_metrics::MetricsSource for FakeMetrics {
 
 /// Metrics that never let a `ready: started` unit settle, so it holds its
 /// slot until the slot timeout.
-fn busy_metrics() -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
+pub(crate) fn busy_metrics() -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
     vec![Arc::new(FakeMetrics {
         cpu_percent: 50.0,
         footprint_bytes: 64 << 20,
@@ -92,7 +92,7 @@ fn busy_metrics() -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
 }
 
 /// A fixed gate on the real clock with a short slot timeout.
-fn gate(max: usize, slot_timeout: Duration) -> Arc<FixedWindow> {
+pub(crate) fn gate(max: usize, slot_timeout: Duration) -> Arc<FixedWindow> {
     Arc::new(FixedWindow::new(
         max,
         GateOptions {

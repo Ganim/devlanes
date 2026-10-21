@@ -8,7 +8,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Write},
-    path::{Path, PathBuf},
 };
 
 use devlanes_proto::{Event, LaneSummary, UnitSummary, events};
@@ -272,17 +271,6 @@ impl<W: Write> Drop for ProgressBar<W> {
     }
 }
 
-/// Which lanes a tracker follows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StartScope {
-    /// One lane by reference (`--lane`).
-    Lane(String),
-    /// The lane whose worktree contains this directory, as the daemon picks it.
-    Cwd(PathBuf),
-    /// Every lane that starts while the tracker runs (`lane resume`, `lane new --start`).
-    Any,
-}
-
 /// What the tracker knows about one lane.
 #[derive(Debug, Default)]
 struct Followed {
@@ -291,31 +279,42 @@ struct Followed {
     phase: Option<String>,
     /// A phase or a unit failed during this start.
     failed: bool,
-    /// The lane started while the tracker ran.
-    started: bool,
     /// Units whose state changed while the tracker ran; older failures do not count.
     fresh: BTreeSet<String>,
+    /// The start the phase events belong to (`start_id`), from daemons that send one.
+    start: Option<u64>,
+    /// The units the start's services phase spawns (`services:started` `units`):
+    /// exactly what the start waits for, without the units already running.
+    planned: Option<Vec<String>>,
 }
 
-/// Start progress from `status` and `subscribe` events: ready units over the
-/// units in the start, indeterminate while infra, setup or tasks run or before
-/// any unit is queued, a warning while every waiting unit is held for memory,
-/// and an error once a phase or a unit fails.
+impl Followed {
+    /// Forgets the previous start: its failures, changes and plan.
+    fn restart(&mut self) {
+        self.failed = false;
+        self.fresh.clear();
+        self.planned = None;
+    }
+}
+
+/// Start progress from lane events: ready units over the units in the start,
+/// indeterminate while infra, setup or tasks run or before any unit is queued,
+/// a warning while every waiting unit is held for memory, and an error once a
+/// phase or a unit fails.
 #[derive(Debug)]
 pub struct StartTracker {
-    scope: StartScope,
-    /// A command keeps following its lanes after they are ready; the TUI
-    /// follows only lanes that are starting now.
+    /// A command follows every lane its request streams events for, also once
+    /// ready; the TUI follows only lanes that are starting now.
     keep: bool,
     units: Vec<String>,
     lanes: BTreeMap<String, Followed>,
 }
 
 impl StartTracker {
-    /// For a command following its own start in `scope`.
-    pub fn command(scope: StartScope) -> Self {
+    /// For a command following the lane events of its own request (`start`,
+    /// `restart`, `wait`, ...), which carry only its lanes and its own starts.
+    pub fn command() -> Self {
         Self {
-            scope,
             keep: true,
             units: Vec::new(),
             lanes: BTreeMap::new(),
@@ -326,7 +325,7 @@ impl StartTracker {
     pub fn viewer() -> Self {
         Self {
             keep: false,
-            ..Self::command(StartScope::Any)
+            ..Self::command()
         }
     }
 
@@ -338,11 +337,13 @@ impl StartTracker {
         self
     }
 
-    /// Takes a status snapshot, as after subscribing or a `resync`.
+    /// Takes a status snapshot, as after subscribing or a `resync`. A restarted
+    /// daemon numbers its starts from 1 again, so the known start ids go too.
     pub fn seed(&mut self, lanes: &[LaneSummary]) {
         for lane in lanes {
             let followed = self.lanes.entry(lane.reference.clone()).or_default();
             followed.summary = Some(lane.clone());
+            followed.start = None;
         }
     }
 
@@ -362,7 +363,6 @@ impl StartTracker {
                         }
                     }
                 }
-                followed.started |= lane.state == "starting";
                 followed.summary = Some(lane);
             }
             events::UNIT_CHANGED => {
@@ -371,11 +371,14 @@ impl StartTracker {
                 };
                 let followed = self.lanes.entry(unit.lane.clone()).or_default();
                 followed.fresh.insert(unit.name.clone());
-                if let Some(summary) = &mut followed.summary {
-                    match summary.units.iter_mut().find(|u| u.name == unit.name) {
-                        Some(existing) => *existing = unit,
-                        None => summary.units.push(unit),
-                    }
+                // A restart's stream may carry no `lane.changed` before its units change.
+                let summary = followed.summary.get_or_insert_with(|| LaneSummary {
+                    reference: unit.lane.clone(),
+                    ..LaneSummary::default()
+                });
+                match summary.units.iter_mut().find(|u| u.name == unit.name) {
+                    Some(existing) => *existing = unit,
+                    None => summary.units.push(unit),
                 }
             }
             events::PHASE => {
@@ -386,13 +389,28 @@ impl StartTracker {
                     return;
                 };
                 let followed = self.lanes.entry(lane.to_owned()).or_default();
-                followed.started = true;
+                match event.data.get("start_id").and_then(Value::as_u64) {
+                    // An earlier start still finishing must not undo the newer one.
+                    Some(id) if followed.start.is_some_and(|current| id < current) => return,
+                    Some(id) if followed.start != Some(id) => {
+                        followed.start = Some(id);
+                        followed.restart();
+                    }
+                    Some(_) => {}
+                    // Daemons without start ids: a start always begins with infra.
+                    None if state == "started" && phase == "infra" => followed.restart(),
+                    None => {}
+                }
                 match state {
                     "started" => {
-                        // The first phase of a new start: earlier failures are history.
-                        if phase == "infra" {
-                            followed.failed = false;
-                            followed.fresh.clear();
+                        if let Some(units) = event.data.get("units").and_then(Value::as_array) {
+                            followed.planned = Some(
+                                units
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned)
+                                    .collect(),
+                            );
                         }
                         followed.phase = Some(phase.to_owned());
                     }
@@ -430,36 +448,40 @@ impl StartTracker {
             };
         }
         let filter = self.unit_filter(&lanes);
-        let (mut ready, mut total, mut held) = (0_usize, 0_usize, 0_usize);
-        let (mut failed, mut busy) = (false, false);
+        let mut tally = Tally::default();
+        let mut busy = false;
         for (reference, followed) in &lanes {
-            failed |= followed.failed;
+            tally.failed |= followed.failed;
             busy |= followed.phase.as_deref().is_some_and(|p| p != "services");
-            let Some(summary) = &followed.summary else {
-                continue;
+            let wanted = |name: &str| filter.is_empty() || named(&filter, reference, name);
+            let unit = |name: &str| {
+                followed
+                    .summary
+                    .as_ref()
+                    .and_then(|summary| summary.units.iter().find(|unit| unit.name == name))
             };
-            for unit in summary.units.iter().filter(|unit| counted(unit)) {
-                if !filter.is_empty() && !named(&filter, reference, &unit.name) {
-                    continue;
+            match &followed.planned {
+                Some(planned) => {
+                    for name in planned.iter().filter(|name| wanted(name)) {
+                        tally.add(unit(name), followed.fresh.contains(name), true);
+                    }
                 }
-                match unit.state.as_str() {
-                    "ready" | "running" => {
-                        ready += 1;
-                        total += 1;
+                // Before services the start's units are unknown; what runs already is not its share.
+                None if matches!(followed.phase.as_deref(), Some("infra" | "setup" | "tasks")) => {}
+                None => {
+                    let units = followed.summary.iter().flat_map(|s| &s.units);
+                    for unit in units.filter(|unit| counted(unit) && wanted(&unit.name)) {
+                        tally.add(Some(unit), followed.fresh.contains(&unit.name), false);
                     }
-                    "queued" => {
-                        total += 1;
-                        held += usize::from(memory_hold(unit));
-                    }
-                    "starting" => total += 1,
-                    "failed" if followed.fresh.contains(&unit.name) => {
-                        total += 1;
-                        failed = true;
-                    }
-                    _ => {}
                 }
             }
         }
+        let Tally {
+            ready,
+            total,
+            held,
+            failed,
+        } = tally;
         let percent = (ready * 100)
             .checked_div(total)
             .map_or(0, |share| u8::try_from(share).unwrap_or(100));
@@ -476,54 +498,69 @@ impl StartTracker {
 
     /// The lanes the bar is about, by reference.
     fn followed(&self) -> Vec<(&String, &Followed)> {
-        if !self.keep {
-            return self
-                .lanes
-                .iter()
-                .filter(|(_, f)| {
-                    f.phase.is_some()
-                        || f.failed
-                        || f.summary.as_ref().is_some_and(|s| s.state == "starting")
-                })
-                .collect();
-        }
-        match &self.scope {
-            StartScope::Lane(wanted) => self
-                .lanes
-                .iter()
-                .filter(|(reference, _)| *reference == wanted)
-                .collect(),
-            StartScope::Cwd(cwd) => match self.lane_at(cwd) {
-                Some(reference) => self.lanes.iter().filter(|(r, _)| *r == reference).collect(),
-                None => self.lanes.iter().filter(|(_, f)| f.started).collect(),
-            },
-            StartScope::Any => self.lanes.iter().filter(|(_, f)| f.started).collect(),
-        }
-    }
-
-    /// The lane whose worktree holds `cwd`, the deepest one when worktrees nest.
-    fn lane_at(&self, cwd: &Path) -> Option<&String> {
         self.lanes
             .iter()
-            .filter_map(|(reference, f)| Some((reference, &f.summary.as_ref()?.path)))
-            .filter(|(_, path)| !path.as_os_str().is_empty() && cwd.starts_with(path))
-            .max_by_key(|(_, path)| path.components().count())
-            .map(|(reference, _)| reference)
+            .filter(|(_, f)| {
+                self.keep
+                    || f.phase.is_some()
+                    || f.failed
+                    || f.summary.as_ref().is_some_and(|s| s.state == "starting")
+            })
+            .collect()
     }
 
     /// The unit filter, or nothing when it names no unit of the followed lanes.
     fn unit_filter(&self, lanes: &[(&String, &Followed)]) -> Vec<String> {
         let matches = lanes.iter().any(|(reference, f)| {
-            f.summary.as_ref().is_some_and(|s| {
-                s.units
-                    .iter()
-                    .any(|unit| named(&self.units, reference, &unit.name))
-            })
+            let summary = f
+                .summary
+                .iter()
+                .flat_map(|s| s.units.iter().map(|u| &u.name));
+            f.planned
+                .iter()
+                .flatten()
+                .chain(summary)
+                .any(|name| named(&self.units, reference, name))
         });
         if matches {
             self.units.clone()
         } else {
             Vec::new()
+        }
+    }
+}
+
+/// Unit counts behind the bar.
+#[derive(Debug, Default)]
+struct Tally {
+    ready: usize,
+    total: usize,
+    /// Queued units waiting for memory.
+    held: usize,
+    failed: bool,
+}
+
+impl Tally {
+    /// Counts one unit in its current state (`None` before its first change). A
+    /// `fresh` failure happened during this start; a `planned` unit is waited for
+    /// whatever its state, so one not yet queued still counts as pending.
+    fn add(&mut self, unit: Option<&UnitSummary>, fresh: bool, planned: bool) {
+        match unit.map_or("", |unit| unit.state.as_str()) {
+            "ready" | "running" => {
+                self.ready += 1;
+                self.total += 1;
+            }
+            "queued" => {
+                self.total += 1;
+                self.held += usize::from(unit.is_some_and(memory_hold));
+            }
+            "starting" => self.total += 1,
+            "failed" if fresh => {
+                self.total += 1;
+                self.failed = true;
+            }
+            _ if planned => self.total += 1,
+            _ => {}
         }
     }
 }
@@ -783,52 +820,79 @@ mod tests {
         )
     }
 
+    /// A phase event of start `id`, with the planned `units` on `services:started`.
+    fn phase_of(lane: &str, phase: &str, state: &str, id: u64, units: &[&str]) -> Event {
+        let mut data = json!({"lane": lane, "phase": phase, "state": state, "start_id": id});
+        if !units.is_empty() {
+            data["units"] = json!(units);
+        }
+        event(events::PHASE, data)
+    }
+
     fn changed(unit: UnitSummary) -> Event {
         event(events::UNIT_CHANGED, json!({ "unit": unit }))
     }
 
     #[test]
-    fn a_start_goes_from_indeterminate_to_a_share_of_ready_units() {
-        let idle = |name| unit("acme@1", name, "idle");
-        let mut tracker = StartTracker::command(StartScope::Cwd("/work/acme-1/apps/api".into()));
-        tracker.seed(&[
-            lane(
-                "acme@0",
-                "/work/acme",
-                "running",
-                vec![unit("acme@0", "api", "ready")],
-            ),
-            lane(
-                "acme@1",
-                "/work/acme-1",
-                "idle",
-                vec![idle("api"), idle("web"), idle("worker")],
-            ),
-        ]);
+    fn a_start_goes_from_indeterminate_to_a_share_of_planned_units() {
+        let mut tracker = StartTracker::command();
         // Nothing queued yet: no share to show.
         assert_eq!(tracker.progress(), Progress::Indeterminate);
-        tracker.event(&phase("acme@1", "infra", "started"));
+        // `db` already ran before this partial start, so it is not part of it.
+        tracker.event(&event(
+            events::LANE_CHANGED,
+            json!({"lane": lane("acme@1", "/work/acme-1", "starting", vec![
+                unit("acme@1", "db", "ready"),
+                unit("acme@1", "api", "idle"),
+                unit("acme@1", "web", "idle"),
+                unit("acme@1", "worker", "idle"),
+            ])}),
+        ));
+        tracker.event(&phase_of("acme@1", "infra", "started", 7, &[]));
         assert_eq!(tracker.progress(), Progress::Indeterminate);
-        tracker.event(&phase("acme@1", "infra", "done"));
-        tracker.event(&phase("acme@1", "tasks", "started"));
+        tracker.event(&phase_of("acme@1", "infra", "done", 7, &[]));
+        tracker.event(&phase_of("acme@1", "tasks", "started", 7, &[]));
         assert_eq!(tracker.progress(), Progress::Indeterminate);
-        tracker.event(&phase("acme@1", "tasks", "done"));
-        tracker.event(&phase("acme@1", "services", "started"));
-        for name in ["api", "web", "worker"] {
-            tracker.event(&changed(unit("acme@1", name, "starting")));
-        }
+        tracker.event(&phase_of("acme@1", "tasks", "done", 7, &[]));
+        tracker.event(&phase_of(
+            "acme@1",
+            "services",
+            "started",
+            7,
+            &["api", "web", "worker"],
+        ));
+        // The plan is the total before any unit is queued.
         assert_eq!(tracker.progress(), Progress::Percent(0));
+        tracker.event(&changed(unit("acme@1", "api", "starting")));
         tracker.event(&changed(unit("acme@1", "api", "ready")));
         assert_eq!(tracker.progress(), Progress::Percent(33));
         tracker.event(&changed(unit("acme@1", "web", "ready")));
         tracker.event(&changed(unit("acme@1", "worker", "ready")));
-        tracker.event(&phase("acme@1", "services", "done"));
+        tracker.event(&phase_of("acme@1", "services", "done", 7, &[]));
         assert_eq!(tracker.progress(), Progress::Percent(100));
     }
 
     #[test]
+    fn an_older_start_does_not_undo_a_newer_one() {
+        let mut tracker = StartTracker::viewer();
+        tracker.event(&phase_of("acme@1", "services", "started", 4, &["api"]));
+        tracker.event(&phase_of("acme@1", "services", "started", 5, &["web"]));
+        // Start 4's failure arrives after start 5 began: start 5 stays green.
+        tracker.event(&phase_of("acme@1", "services", "failed", 4, &[]));
+        tracker.event(&changed(unit("acme@1", "web", "ready")));
+        assert_eq!(tracker.progress(), Progress::Percent(100));
+        // A newer start forgets the previous one's failure.
+        tracker.event(&phase_of("acme@1", "services", "failed", 5, &[]));
+        assert_eq!(tracker.progress(), Progress::Error(100));
+        tracker.event(&phase_of("acme@1", "infra", "started", 6, &[]));
+        assert_eq!(tracker.progress(), Progress::Indeterminate);
+        tracker.event(&phase_of("acme@1", "infra", "done", 6, &[]));
+        assert_eq!(tracker.progress(), Progress::Clear);
+    }
+
+    #[test]
     fn failures_and_memory_holds_change_the_state() {
-        let mut tracker = StartTracker::command(StartScope::Lane("acme@1".into()));
+        let mut tracker = StartTracker::command();
         let mut held = unit("acme@1", "web", "queued");
         held.reason = Some(RpcError::new("queued", json!({"hold": "memory"}), 0));
         // A failure from an earlier run does not turn this start red.
@@ -850,7 +914,7 @@ mod tests {
         tracker.event(&changed(unit("acme@1", "web", "failed")));
         assert_eq!(tracker.progress(), Progress::Error(50));
         // A failed phase is an error too.
-        let mut tracker = StartTracker::command(StartScope::Any);
+        let mut tracker = StartTracker::command();
         tracker.event(&phase("acme@2", "infra", "started"));
         tracker.event(&phase("acme@2", "infra", "failed"));
         assert_eq!(tracker.progress(), Progress::Error(0));
@@ -858,8 +922,8 @@ mod tests {
 
     #[test]
     fn a_restart_counts_only_its_units() {
-        let mut tracker = StartTracker::command(StartScope::Lane("acme@0".into()))
-            .with_units(vec!["acme@0:api".into()]);
+        // Without a plan (an older daemon), the named units of the lane.
+        let mut tracker = StartTracker::command().with_units(vec!["acme@0:api".into()]);
         tracker.seed(&[lane(
             "acme@0",
             "/work/acme",
@@ -873,9 +937,15 @@ mod tests {
         assert_eq!(tracker.progress(), Progress::Indeterminate);
         tracker.event(&changed(unit("acme@0", "api", "starting")));
         assert_eq!(tracker.progress(), Progress::Percent(0));
+        // With one, exactly the planned units.
+        let mut tracker = StartTracker::command();
+        tracker.event(&phase_of("acme@0", "services", "started", 3, &["api"]));
+        tracker.event(&changed(unit("acme@0", "web", "ready")));
+        assert_eq!(tracker.progress(), Progress::Percent(0));
+        tracker.event(&changed(unit("acme@0", "api", "ready")));
+        assert_eq!(tracker.progress(), Progress::Percent(100));
         // A tag selector names no unit, so every unit counts.
-        let tracker = StartTracker::command(StartScope::Lane("acme@0".into()))
-            .with_units(vec!["frontend".into()]);
+        let tracker = StartTracker::command().with_units(vec!["frontend".into()]);
         assert_eq!(
             tracker.unit_filter(&tracker.followed()),
             Vec::<String>::new()

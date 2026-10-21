@@ -1,10 +1,11 @@
 //! Draws a start's progress in the terminal tab while a command follows it.
 //!
-//! A start request carries no progress events, so a second connection
-//! subscribes to the event bus, seeds a [`StartTracker`] with `status`, and
-//! writes [`Progress`] to this process's stdout. The bar is resent every second
-//! (Ghostty drops a stale one) and cleared on success, after a short red
-//! error on failure, on Ctrl-C and on drop.
+//! The start request streams its own lane events (`"events": true`); the
+//! command hands each one to [`Follower::event`], which feeds a [`StartTracker`]
+//! and writes [`Progress`] to this process's stdout. The bar is resent every
+//! second (Ghostty drops a stale one) and cleared on success, after a short red
+//! error on failure, on Ctrl-C and on drop. A daemon too old to stream them
+//! sends none, and the bar stays indeterminate until the command ends.
 
 use std::{
     io::Write,
@@ -13,12 +14,13 @@ use std::{
 };
 
 use devlanes_cli::{ERROR_HOLD, Runtime, start_tracker};
-use devlanes_client::{Client, Paths};
-use devlanes_ipc::Frame;
-use devlanes_proto::{Context, Control, LaneSummary, Method, Page, Request, events};
+use devlanes_client::Paths;
+use devlanes_proto::{Event, Request};
 use devlanes_term::{Progress, ProgressBar, ProgressMode, StartTracker, Wrap};
-use serde_json::json;
-use tokio::{sync::oneshot, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 
 /// The wrap of a bar on screen (0 none, 1 bare, 2 tmux), for the panic hook.
 static SHOWN: AtomicU8 = AtomicU8::new(0);
@@ -45,6 +47,7 @@ pub fn wrap(paths: &Paths, runtime: &Runtime) -> Option<Wrap> {
 
 /// A running follower; [`Follower::finish`] ends it and clears the bar.
 pub struct Follower {
+    events: Option<mpsc::UnboundedSender<Event>>,
     done: Option<oneshot::Sender<bool>>,
     task: Option<JoinHandle<()>>,
 }
@@ -56,24 +59,20 @@ impl Follower {
         if start_tracker(request).is_none() {
             return Self::idle();
         }
-        Self::start_with(paths, wrap(paths, runtime), request)
+        Self::start_with(wrap(paths, runtime), request)
     }
 
     /// Like [`Follower::start`] with the bar's [`wrap`] already resolved.
-    pub fn start_with(paths: &Paths, wrap: Option<Wrap>, request: &Request) -> Self {
+    pub fn start_with(wrap: Option<Wrap>, request: &Request) -> Self {
         let (Some(tracker), Some(wrap)) = (start_tracker(request), wrap) else {
             return Self::idle();
         };
         install_panic_hook();
+        let (events, received) = mpsc::unbounded_channel();
         let (done, finished) = oneshot::channel();
-        let task = tokio::spawn(follow(
-            paths.clone(),
-            request.context.clone(),
-            tracker,
-            wrap,
-            finished,
-        ));
+        let task = tokio::spawn(follow(tracker, wrap, received, finished));
         Self {
+            events: Some(events),
             done: Some(done),
             task: Some(task),
         }
@@ -82,8 +81,16 @@ impl Follower {
     /// A follower that draws nothing.
     fn idle() -> Self {
         Self {
+            events: None,
             done: None,
             task: None,
+        }
+    }
+
+    /// One event of the followed request; a no-op when nothing is drawn.
+    pub fn event(&self, event: &Event) {
+        if let Some(events) = &self.events {
+            let _ = events.send(event.clone());
         }
     }
 
@@ -112,42 +119,33 @@ impl Drop for Follower {
     }
 }
 
-/// Follows events until `finished` fires, keeping the bar current.
+/// Applies events until `finished` fires, keeping the bar current.
 async fn follow(
-    paths: Paths,
-    context: Context,
     mut tracker: StartTracker,
     wrap: Wrap,
+    mut events: mpsc::UnboundedReceiver<Event>,
     mut finished: oneshot::Receiver<bool>,
 ) {
     let mut bar = ProgressBar::new(std::io::stdout(), Some(wrap));
     show(&mut bar, tracker.progress(), wrap);
-    // The bar is decoration: without a subscription it stays indeterminate
-    // until the command ends, and the failure is not worth a message.
-    let mut client = subscribe(&paths, &context).await.ok();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             result = &mut finished => {
+                // Events sent before the end still count: the last failure turns it red.
+                while let Ok(event) = events.try_recv() {
+                    tracker.event(&event);
+                }
                 if matches!(result, Ok(false)) {
                     show(&mut bar, failed(tracker.progress()), wrap);
                     tokio::time::sleep(ERROR_HOLD).await;
                 }
                 break;
             }
-            frame = next_event(client.as_mut()) => match frame {
-                Some(event) => {
-                    // Sent once the subscription is registered, and after an overflow.
-                    if event.event == events::RESYNC
-                        && let Ok(lanes) = status(&paths, &context).await
-                    {
-                        tracker.seed(&lanes);
-                    }
-                    tracker.event(&event);
-                    show(&mut bar, tracker.progress(), wrap);
-                }
-                None => client = None,
-            },
+            Some(event) = events.recv() => {
+                tracker.event(&event);
+                show(&mut bar, tracker.progress(), wrap);
+            }
             _ = tick.tick() => show(&mut bar, tracker.progress(), wrap),
         }
     }
@@ -173,44 +171,6 @@ fn failed(progress: Progress) -> Progress {
         Progress::Percent(p) | Progress::Paused(p) | Progress::Error(p) => Progress::Error(p),
         Progress::Clear | Progress::Indeterminate => Progress::Error(0),
     }
-}
-
-/// The next event, or `None` when the subscription ended; never resolves
-/// without a subscription, so the other branches drive the loop.
-async fn next_event(client: Option<&mut Client>) -> Option<devlanes_proto::Event> {
-    let Some(client) = client else {
-        return std::future::pending().await;
-    };
-    loop {
-        match client.next_frame().await {
-            Ok(Frame::Control(Control::Event(event))) => return Some(event),
-            Ok(_) => {}
-            Err(_) => return None,
-        }
-    }
-}
-
-/// A connection streaming every event.
-async fn subscribe(paths: &Paths, context: &Context) -> Result<Client, devlanes_client::Error> {
-    let mut client = Client::connect(paths).await?;
-    client
-        .begin_request(Method::Subscribe, json!({}), context.clone())
-        .await?;
-    Ok(client)
-}
-
-/// Every lane, on its own connection: the subscription's is streaming.
-async fn status(
-    paths: &Paths,
-    context: &Context,
-) -> Result<Vec<LaneSummary>, devlanes_client::Error> {
-    let mut client = Client::connect(paths).await?;
-    let value = client
-        .request(Method::Status, json!({"all": true}), context.clone())
-        .await?;
-    Ok(serde_json::from_value::<Page<LaneSummary>>(value)
-        .map(|page| page.items)
-        .unwrap_or_default())
 }
 
 /// Writes the clear sequence straight to stdout.

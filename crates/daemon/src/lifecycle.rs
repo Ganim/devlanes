@@ -22,6 +22,7 @@ use devlanes_state::{DesiredState, TaskRunInput};
 use futures_util::future::{BoxFuture, join_all};
 use serde_json::{Value, json};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     Session,
@@ -252,6 +253,17 @@ pub(crate) enum PhaseResult {
     Error(RpcError),
 }
 
+impl PhaseResult {
+    /// The `state` and `reason` of the phase's closing `lane.phase` event.
+    fn event_state(&self) -> (&'static str, Option<&RpcError>) {
+        match self {
+            Self::Done => ("done", None),
+            Self::Skipped(why) => ("skipped", Some(why)),
+            Self::Halt(why) | Self::Error(why) => ("failed", Some(why)),
+        }
+    }
+}
+
 /// Mutable context threaded through the start pipeline.
 pub(crate) struct StartCx {
     pub project: Arc<ProjectRt>,
@@ -281,6 +293,16 @@ pub(crate) struct StartCx {
     pub timed_out: bool,
     /// Bypass the start gate (`Selection.all_at_once`).
     pub all_at_once: bool,
+    /// On this start's `lane.phase` events and its result.
+    pub start_id: u64,
+    /// Fired by a stop, clean or reset of the lane (or daemon shutdown); phases
+    /// end early and stop the task they run.
+    pub cancel: CancellationToken,
+    /// The config the services were selected from. Resolution uses it too, so a
+    /// reload in the middle of the start cannot change what it plans.
+    pub config: Arc<devlanes_config::ProjectConfig>,
+    /// Place in the start gate's line, taken when the request arrived.
+    pub arrival: Option<devlanes_core::gate::Arrival>,
 }
 
 /// One ordered step of the lane pipeline (plan 5.5).
@@ -324,6 +346,11 @@ fn start_pipeline() -> Vec<Box<dyn LanePhase>> {
 /// A reason value for skipped phases.
 fn reason(code: &str, data: Value) -> RpcError {
     RpcError::new(code, data, 0)
+}
+
+/// A stop, clean or reset of the lane (or daemon shutdown) interrupted the start.
+fn start_cancelled(cx: &StartCx) -> RpcError {
+    RpcError::new("start_cancelled", json!({"lane": cx.reference}), 1)
 }
 
 /// Why infra and setup were skipped for the lane's profiles.
@@ -380,7 +407,11 @@ impl LanePhase for InfraPhase {
         };
         let result = match &skip {
             Some(_) => engine.integ.infra.namespace(&spec).await,
-            None => engine.integ.infra.up(&spec).await,
+            // A hung `up` must not keep a stop waiting for the lane.
+            None => tokio::select! {
+                up = engine.integ.infra.up(&spec) => up,
+                () = cx.cancel.cancelled() => return PhaseResult::Error(start_cancelled(cx)),
+            },
         };
         match result {
             Ok(up) => {
@@ -413,7 +444,10 @@ impl LanePhase for ResolvePhase {
 
     async fn run(&self, engine: &Arc<Inner>, cx: &mut StartCx) -> PhaseResult {
         engine.refresh_views(&cx.project).await;
-        match engine.resolve_full(&cx.project, &cx.lane).await {
+        match engine
+            .resolve_config(&cx.project, &cx.lane, cx.config.clone())
+            .await
+        {
             Ok(resolved) => {
                 // Infra came up already when it was on; this governs `infra.setup`.
                 cx.infra_enabled &= resolved.infra_enabled;
@@ -489,12 +523,13 @@ impl LanePhase for SetupPhase {
             let actor = cx.actor.clone();
             let resolved = resolved.clone();
             let name = name.clone();
+            let cancel = cx.cancel.clone();
             async move {
                 let Some(command) = resolved.setup.get(&name) else {
                     return (name, Err(RpcError::new("not_found", json!({}), 3)));
                 };
                 let result = engine
-                    .run_command(&project, &lane, "setup", command, &actor)
+                    .run_command(&project, &lane, "setup", command, &actor, &cancel)
                     .await;
                 (name, result)
             }
@@ -506,7 +541,9 @@ impl LanePhase for SetupPhase {
                 cx.leftovers
                     .extend(ended_leftovers(&cx.lane, &format!("setup.{name}"), host));
             }
-            let ignore = resolved.setup.get(&name).is_some_and(|c| c.ignore_errors);
+            // An entry a stop interrupted did not run, whatever `ignore_errors` says.
+            let ignore = resolved.setup.get(&name).is_some_and(|c| c.ignore_errors)
+                && !cx.cancel.is_cancelled();
             let ok = matches!(&result, Ok((outcome, _)) if outcome.code == Some(0));
             if ok || ignore {
                 let started_at = pending
@@ -602,7 +639,11 @@ impl LanePhase for TasksPhase {
                     .filter_map(|unit| st.units.get(unit).map(|rec| rec.host.clone()))
                     .collect()
             };
-            if !wait_settled(&hosts, cx.deadline).await {
+            let settled = tokio::select! {
+                settled = wait_settled(&hosts, cx.deadline) => settled,
+                () = cx.cancel.cancelled() => return PhaseResult::Error(start_cancelled(cx)),
+            };
+            if !settled {
                 cx.timed_out = true;
                 for (name, _) in &chosen {
                     cx.skipped_tasks.push(name.clone());
@@ -655,9 +696,13 @@ impl LanePhase for TasksPhase {
                     hook,
                     &cx.actor,
                     cx.session.as_ref(),
+                    &cx.cancel,
                     0,
                 )
                 .await;
+            if cx.cancel.is_cancelled() {
+                return PhaseResult::Error(start_cancelled(cx));
+            }
             if let Ok(outcome) = &outcome {
                 cx.leftovers.extend(outcome.leftovers.iter().cloned());
             }
@@ -819,6 +864,12 @@ pub(crate) struct StartOptions {
     pub setup_only: bool,
     /// Bypass the start gate for this request.
     pub all_at_once: bool,
+    /// The `start_id` to use, chosen by a caller that streams this start's
+    /// events; `None` takes the next one.
+    pub start_id: Option<u64>,
+    /// Place in the start gate's line, taken when the request arrived; `None`
+    /// takes one when the services phase begins.
+    pub arrival: Option<devlanes_core::gate::Arrival>,
 }
 
 type Spawned = (UnitHost, Arc<dyn ManagedUnit>);
@@ -831,6 +882,12 @@ impl Inner {
         lane: &Arc<LaneRt>,
         request: SpawnRequest,
     ) -> Result<Spawned, RpcError> {
+        // Counted before the shutdown check: once shutdown saw no spawn in flight,
+        // every later one sees the cancelled token and refuses.
+        let _spawning = lane.spawn_guard();
+        if self.shutdown.is_cancelled() {
+            return Err(crate::engine::daemon_stopping());
+        }
         let (lane_path, record, reference, previous, color) = {
             let st = lane.st();
             let color = request
@@ -1135,13 +1192,54 @@ impl Inner {
         self.bus.emit(events::TASK, data);
     }
 
-    /// Emits a `lane.phase` event.
-    fn phase_event(&self, lane: &str, phase: &str, state: &str, reason: Option<&RpcError>) {
-        let mut data = json!({"lane": lane, "phase": phase, "state": state});
+    /// Emits a `lane.phase` event of the start `cx`; `units` are the units the
+    /// services phase is about to spawn.
+    fn phase_event(
+        &self,
+        cx: &StartCx,
+        phase: &str,
+        state: &str,
+        reason: Option<&RpcError>,
+        units: Option<Vec<String>>,
+    ) {
+        let mut data = json!({
+            "lane": cx.reference,
+            "phase": phase,
+            "state": state,
+            "start_id": cx.start_id,
+        });
         if let Some(reason) = reason {
             data["reason"] = json!({"code": reason.code, "data": reason.data});
         }
+        if let Some(units) = units {
+            data["units"] = json!(units);
+        }
         self.bus.emit(events::PHASE, data);
+    }
+
+    /// A fresh `start_id`.
+    pub(crate) fn new_start_id(&self) -> u64 {
+        self.next_start
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The units the services phase of `cx` will spawn: every replica of the
+    /// selected services that neither runs already nor is a previous daemon's
+    /// orphan. Units already up are not part of this start's progress.
+    fn planned_units(cx: &StartCx) -> Vec<String> {
+        let Some(resolved) = &cx.resolved else {
+            return Vec::new();
+        };
+        let st = cx.lane.st();
+        cx.services
+            .iter()
+            .flat_map(|name| resolved.units_of(name))
+            .map(|service| service.unit.clone())
+            .filter(|unit| {
+                !st.orphans.contains_key(unit)
+                    && !st.units.get(unit).is_some_and(|rec| rec.host.is_alive())
+            })
+            .collect()
     }
 
     /// The other lane and unit currently running a literal `port`.
@@ -1190,17 +1288,21 @@ impl Inner {
         phase: &str,
         command: &ResolvedCommand,
         actor: &Actor,
+        cancel: &CancellationToken,
     ) -> Result<(ExitOutcome, UnitHost), RpcError> {
         let extra = lane.st().setup_env.clone();
         let name = format!("{phase}.{}", command.name);
         let request =
             SpawnRequest::oneshot(&name, Kind::Task, &command.launch, false, &extra, actor);
         let (host, _) = self.spawn_unit(project, lane, request).await?;
-        let outcome = finish(&host, command.timeout).await;
+        let outcome = finish(&host, command.timeout, cancel).await;
         Ok((outcome, host))
     }
 
-    /// Runs a task (or its steps) to completion, recording `task_runs`.
+    /// Runs a task (or its steps) to completion, recording `task_runs`. When
+    /// `cancel` fires, the running unit is stopped and no further step starts;
+    /// the outcome then has no exit code. The row is finished and the closing
+    /// `task` event emitted on every path, a dropped future included.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_task<'a>(
         self: &'a Arc<Self>,
@@ -1211,6 +1313,7 @@ impl Inner {
         trigger: &'a str,
         actor: &'a Actor,
         session: Option<&'a Session>,
+        cancel: &'a CancellationToken,
         depth: usize,
     ) -> BoxFuture<'a, Result<TaskOutcome, RpcError>> {
         Box::pin(async move {
@@ -1250,7 +1353,14 @@ impl Inner {
                 .await
                 .map_err(store_error)?;
             // Every exit path finishes the row: an unfinished task run would block
-            // `lane clean` until the next daemon start abandons it.
+            // `lane clean` until the next daemon start abandons it. The guard covers
+            // a future dropped before the end (a client's limit, a cancelled request).
+            let mut guard = TaskRunGuard {
+                engine: self.clone(),
+                run: Some(run.id),
+                reference: reference.clone(),
+                task: name.to_owned(),
+            };
             let result: Result<TaskOutcome, RpcError> = async {
                 let mut outcome = TaskOutcome {
                     code: Some(0),
@@ -1261,27 +1371,35 @@ impl Inner {
                 match &task.launch {
                     None => {
                         for step in &task.steps {
-                            let step_outcome = if let Some(entry) =
-                                step.strip_prefix("infra.setup.")
-                            {
-                                self.step_command(project, lane, resolved, "setup", entry, actor)
+                            if cancel.is_cancelled() {
+                                outcome.code = None;
+                                break;
+                            }
+                            let step_outcome =
+                                if let Some(entry) = step.strip_prefix("infra.setup.") {
+                                    self.step_command(
+                                        project, lane, resolved, "setup", entry, actor, cancel,
+                                    )
                                     .await?
-                            } else if let Some(entry) = step.strip_prefix("infra.teardown.") {
-                                self.step_command(project, lane, resolved, "teardown", entry, actor)
+                                } else if let Some(entry) = step.strip_prefix("infra.teardown.") {
+                                    self.step_command(
+                                        project, lane, resolved, "teardown", entry, actor, cancel,
+                                    )
                                     .await?
-                            } else {
-                                self.run_task(
-                                    project,
-                                    lane,
-                                    resolved,
-                                    step,
-                                    "step",
-                                    actor,
-                                    session,
-                                    depth + 1,
-                                )
-                                .await?
-                            };
+                                } else {
+                                    self.run_task(
+                                        project,
+                                        lane,
+                                        resolved,
+                                        step,
+                                        "step",
+                                        actor,
+                                        session,
+                                        cancel,
+                                        depth + 1,
+                                    )
+                                    .await?
+                                };
                             leftovers.extend(step_outcome.leftovers.iter().cloned());
                             if step_outcome.code != Some(0) {
                                 outcome = step_outcome;
@@ -1305,10 +1423,10 @@ impl Inner {
                             Some(session) => {
                                 let follower = stream_logs(host.clone(), session.clone());
                                 let (exit, ()) =
-                                    tokio::join!(finish(&host, task.timeout), follower);
+                                    tokio::join!(finish(&host, task.timeout, cancel), follower);
                                 exit
                             }
-                            None => finish(&host, task.timeout).await,
+                            None => finish(&host, task.timeout, cancel).await,
                         };
                         leftovers.extend(ended_leftovers(lane, name, &host));
                         outcome = TaskOutcome {
@@ -1323,21 +1441,40 @@ impl Inner {
             }
             .await;
             let code = result.as_ref().ok().and_then(|outcome| outcome.code);
-            if let Err(error) = self.store.finish_task_run(run.id, code).await {
-                tracing::warn!(%error, task = name, "task run not recorded as finished");
-            }
-            let outcome = result?;
-            let state = if outcome.code == Some(0) {
-                "done"
-            } else {
-                "failed"
+            let (state, reason) = match &result {
+                Ok(outcome) if outcome.code == Some(0) => ("done", None),
+                Ok(_) if cancel.is_cancelled() => ("failed", Some(json!({"code": "cancelled"}))),
+                Ok(_) => ("failed", None),
+                Err(error) => (
+                    "failed",
+                    Some(json!({"code": error.code, "data": error.data})),
+                ),
             };
-            self.task_event(&reference, name, state, outcome.code, None);
-            Ok(outcome)
+            self.close_task_run(run.id, &reference, name, code, state, reason)
+                .await;
+            guard.run = None;
+            result
         })
     }
 
+    /// Finishes a task run row and emits its closing `task` event.
+    async fn close_task_run(
+        &self,
+        id: devlanes_state::TaskRunId,
+        reference: &str,
+        task: &str,
+        code: Option<i32>,
+        state: &str,
+        reason: Option<Value>,
+    ) {
+        if let Err(error) = self.store.finish_task_run(id, code).await {
+            tracing::warn!(%error, task, "task run not recorded as finished");
+        }
+        self.task_event(reference, task, state, code, reason);
+    }
+
     /// Runs a setup/teardown entry as a task step and updates its done-record.
+    #[allow(clippy::too_many_arguments)]
     async fn step_command(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
@@ -1346,6 +1483,7 @@ impl Inner {
         phase: &str,
         entry: &str,
         actor: &Actor,
+        cancel: &CancellationToken,
     ) -> Result<TaskOutcome, RpcError> {
         let commands = if phase == "setup" {
             &resolved.setup
@@ -1360,9 +1498,10 @@ impl Inner {
             )
         })?;
         let (outcome, host) = self
-            .run_command(project, lane, phase, command, actor)
+            .run_command(project, lane, phase, command, actor, cancel)
             .await?;
-        let ok = outcome.code == Some(0) || command.ignore_errors;
+        // An interrupted entry did not do its work, whatever `ignore_errors` says.
+        let ok = !cancel.is_cancelled() && (outcome.code == Some(0) || command.ignore_errors);
         let lane_id = lane.st().record.as_ref().map(|r| r.id);
         if let Some(lane_id) = lane_id {
             if phase == "setup" && ok {
@@ -1395,6 +1534,10 @@ impl Inner {
         options: StartOptions,
     ) -> Result<StartResult, RpcError> {
         let op = lane.op.lock().await;
+        // Installed once `op` is ours: a stop that fires it waits for `op` next,
+        // and a start after this one installs its own.
+        let cancel = self.shutdown.child_token();
+        lane.st().start_cancel = Some(cancel.clone());
         let initial = lane.st().reference(&project.name());
         let fail = |error: RpcError| with_ownership(error, &initial, &[]);
         {
@@ -1471,7 +1614,9 @@ impl Inner {
                     if matches!(options.infra, Some(Templated::Expression(_)))
             )
         });
-        let whole_lane = !lane.st().any_alive();
+        // A previous daemon's orphan is part of the lane: with one running, this
+        // start only adds units, like with a live unit.
+        let whole_lane = !lane.st().any_running();
         {
             let mut st = lane.st();
             st.busy = Some("starting");
@@ -1506,25 +1651,38 @@ impl Inner {
             infra_needs: Vec::new(),
             timed_out: false,
             all_at_once: options.all_at_once,
+            start_id: options.start_id.unwrap_or_else(|| self.new_start_id()),
+            cancel,
+            config: config.clone(),
+            arrival: options.arrival,
         };
         let mut hard_error = None;
         let mut failed_phase: Option<(&'static str, RpcError)> = None;
         for phase in start_pipeline() {
+            if cx.cancel.is_cancelled() {
+                let error = start_cancelled(&cx);
+                failed_phase = Some((phase.name(), error.clone()));
+                hard_error = Some(error);
+                break;
+            }
             if phase.visible() {
-                self.phase_event(&reference, phase.name(), "started", None);
+                // Resolution ran before services, so the plan is known by now.
+                let units = (phase.name() == "services" && !cx.setup_only)
+                    .then(|| Self::planned_units(&cx));
+                self.phase_event(&cx, phase.name(), "started", None, units);
             }
             // Reaching services is what makes earlier phase failures stale.
             if phase.name() == "services" && !cx.setup_only {
                 lane.st().phase_reasons.clear();
             }
-            let result = phase.run(self, &mut cx).await;
-            let (state, why) = match &result {
-                PhaseResult::Done => ("done", None),
-                PhaseResult::Skipped(why) => ("skipped", Some(why)),
-                PhaseResult::Halt(why) | PhaseResult::Error(why) => ("failed", Some(why)),
-            };
+            let mut result = phase.run(self, &mut cx).await;
+            // Whatever the phase made of it, an interrupted start ends here.
+            if cx.cancel.is_cancelled() && !matches!(result, PhaseResult::Error(_)) {
+                result = PhaseResult::Error(start_cancelled(&cx));
+            }
+            let (state, why) = result.event_state();
             if phase.visible() {
-                self.phase_event(&reference, phase.name(), state, why);
+                self.phase_event(&cx, phase.name(), state, why, None);
             }
             match result {
                 PhaseResult::Done | PhaseResult::Skipped(_) => {}
@@ -1551,15 +1709,13 @@ impl Inner {
             } else {
                 DesiredState::Running
             };
-            let _ = self
-                .store
-                .set_lane_desired_profiles(record.id, desired, selection.profiles.clone())
+            self.save_desired(lane, &record, desired, selection.profiles.clone())
                 .await;
-            if let Some(updated) = self.store.lane(record.id).await.ok().flatten() {
-                lane.st().record = Some(updated);
-            }
         }
-        let _ = self.store.mark_project_started(project.id).await;
+        persist("project start time", || {
+            self.store.mark_project_started(project.id)
+        })
+        .await;
         {
             let mut st = lane.st();
             st.busy = None;
@@ -1650,6 +1806,7 @@ impl Inner {
             skipped_tasks: cx.skipped_tasks,
             leftovers: cx.leftovers,
             units,
+            start_id: Some(cx.start_id),
         }
     }
 
@@ -1681,10 +1838,30 @@ impl Inner {
         selectors: Option<Vec<String>>,
         mine: Option<&Actor>,
     ) -> Result<Vec<UnitSummary>, RpcError> {
-        // Before the lock: a start holding it may be waiting on these queued units.
+        // Before the lock: a start holding it may be waiting on these queued units,
+        // or on a task that never ends (a whole-lane stop interrupts that start).
         let queued_reference = lane.st().reference(&project.name());
         self.cancel_queued(lane, &queued_reference, selectors.as_deref(), mine);
+        let whole = selectors.as_ref().is_none_or(Vec::is_empty) && mine.is_none();
+        if whole {
+            lane.cancel_start();
+        }
         let _op = lane.op.lock().await;
+        self.stop_locked(project, lane, selectors, mine).await
+    }
+
+    /// [`Inner::stop_lane`] for a caller that holds `op` and already withdrew the
+    /// queued starts it covers.
+    async fn stop_locked(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        lane: &Arc<LaneRt>,
+        selectors: Option<Vec<String>>,
+        mine: Option<&Actor>,
+    ) -> Result<Vec<UnitSummary>, RpcError> {
+        // A unit between its last cancellation check and its record would be
+        // missed by the target list below.
+        lane.spawns_settled().await;
         let reference = lane.st().reference(&project.name());
         let whole = selectors.as_ref().is_none_or(Vec::is_empty) && mine.is_none();
         let runnable = {
@@ -1766,17 +1943,13 @@ impl Inner {
         }
         let record = lane.st().record.clone();
         if whole && let Some(record) = record {
-            let _ = self
-                .store
-                .set_lane_desired_profiles(
-                    record.id,
-                    DesiredState::Stopped,
-                    record.profiles.clone(),
-                )
-                .await;
-            if let Some(updated) = self.store.lane(record.id).await.ok().flatten() {
-                lane.st().record = Some(updated);
-            }
+            self.save_desired(
+                lane,
+                &record,
+                DesiredState::Stopped,
+                record.profiles.clone(),
+            )
+            .await;
         }
         lane.st().busy = None;
         self.emit_lane(project, lane);
@@ -1811,12 +1984,16 @@ impl Inner {
             TaskWhen::Start => "lane.start",
         };
         let mut results = Vec::new();
+        // Daemon shutdown interrupts a hook that never ends; it waits for this lane.
+        let cancel = self.shutdown.child_token();
         for (name, task) in &resolved.tasks {
             if task.when != Some(hook) || !task.active {
                 continue;
             }
             let outcome = self
-                .run_task(project, lane, &resolved, name, trigger, actor, None, 0)
+                .run_task(
+                    project, lane, &resolved, name, trigger, actor, None, &cancel, 0,
+                )
                 .await;
             results.push(match outcome {
                 Ok(outcome) => json!({"task": name, "exit_code": outcome.code}),
@@ -1855,17 +2032,13 @@ impl Inner {
                 lane.st().profiles = selection.profiles.clone();
                 let record = lane.st().record.clone();
                 if let Some(record) = record {
-                    let _ = self
-                        .store
-                        .set_lane_desired_profiles(
-                            record.id,
-                            record.desired_state,
-                            selection.profiles.clone(),
-                        )
-                        .await;
-                    if let Some(updated) = self.store.lane(record.id).await.ok().flatten() {
-                        lane.st().record = Some(updated);
-                    }
+                    self.save_desired(
+                        lane,
+                        &record,
+                        record.desired_state,
+                        selection.profiles.clone(),
+                    )
+                    .await;
                 }
             }
         }
@@ -1882,8 +2055,15 @@ impl Inner {
                 .unwrap_or_default()
         };
         let units = crate::engine::match_units(selectors, &candidates, &reference)?;
+        let config = lane.st().config.loaded().cloned().ok_or_else(|| {
+            with_ownership(
+                RpcError::new("no_config", json!({"lane": reference}), 1),
+                &reference,
+                &[],
+            )
+        })?;
         let resolved = self
-            .resolve_full(project, lane)
+            .resolve_config(project, lane, config.clone())
             .await
             .map_err(|e| with_ownership(e, &reference, &[]))?;
         // A previous daemon's process is replaced like a running one: terminate it
@@ -1971,8 +2151,17 @@ impl Inner {
             infra_needs: Vec::new(),
             timed_out: false,
             all_at_once: options.all_at_once,
+            start_id: options.start_id.unwrap_or_else(|| self.new_start_id()),
+            cancel: self.shutdown.child_token(),
+            config,
+            arrival: options.arrival,
         };
+        // A restart is a services phase alone; its events carry the plan as a start's do.
+        let phase = ServicesPhase.name();
+        self.phase_event(&cx, phase, "started", None, Some(Self::planned_units(&cx)));
         let result = ServicesPhase.run(self, &mut cx).await;
+        let (state, why) = result.event_state();
+        self.phase_event(&cx, phase, state, why, None);
         // Replicas not named by the selectors stay as they are.
         cx.already_running.retain(|unit| units.contains(unit));
         drop(op);
@@ -1997,8 +2186,15 @@ impl Inner {
     ) -> Result<Value, RpcError> {
         let actor = actor.cloned().unwrap_or_default();
         let reference = lane.st().reference(&project.name());
-        let stopped = self.stop_lane(project, lane, None, None).await?;
+        // One hold of `op` from the stop to the release of the records: a start
+        // waiting for the lane must not run in between.
+        self.cancel_queued(lane, &reference, None, None);
+        lane.cancel_start();
         let _op = lane.op.lock().await;
+        let stopped = self.stop_locked(project, lane, None, None).await?;
+        // A unit whose stop timed out (or an orphan that would not end) still runs;
+        // releasing the lane would leave it untracked.
+        self.refuse_running(project, lane)?;
         let mut tasks = Vec::new();
         let mut teardown = Vec::new();
         let runnable = {
@@ -2008,9 +2204,10 @@ impl Inner {
         if runnable {
             tasks = self.run_hook(project, lane, TaskWhen::Clean, &actor).await;
             if let Ok(resolved) = self.resolve_full(project, lane).await {
+                let cancel = self.shutdown.child_token();
                 for (name, command) in &resolved.teardown {
                     let result = self
-                        .run_command(project, lane, "teardown", command, &actor)
+                        .run_command(project, lane, "teardown", command, &actor, &cancel)
                         .await;
                     teardown.push(match result {
                         Ok((outcome, _)) => json!({"entry": name, "exit_code": outcome.code, "ignored": command.ignore_errors}),
@@ -2018,6 +2215,8 @@ impl Inner {
                     });
                 }
             }
+            // A clean task or teardown entry may have left a unit that would not stop.
+            self.refuse_running(project, lane)?;
         }
         let index = lane.st().index();
         let infra = match index {
@@ -2031,11 +2230,13 @@ impl Inner {
         };
         let record = lane.st().record.clone();
         if let Some(record) = &record {
-            // Every run must be finished before the lane's records may be released.
+            // Every run must be finished before the lane's records may be released;
+            // none is alive by now, so each row records a real exit.
             let runs: Vec<_> = lane
                 .st()
                 .units
                 .values()
+                .filter(|rec| !rec.host.is_alive())
                 .filter_map(|rec| rec.run_id.map(|id| (id, rec.host.exit_outcome())))
                 .collect();
             for (id, outcome) in runs {
@@ -2105,6 +2306,8 @@ impl Inner {
                 session: None,
                 setup_only,
                 all_at_once: false,
+                start_id: None,
+                arrival: None,
             },
         )
         .await
@@ -2113,9 +2316,34 @@ impl Inner {
 
     /// Daemon shutdown: stops every live unit with its policy; returns the count.
     pub(crate) async fn stop_everything(self: &Arc<Self>) -> usize {
+        let lanes = self.all_lanes();
+        let _ops = self.lock_lanes(&lanes).await;
+        Self::stop_lanes_locked(&lanes).await
+    }
+
+    /// Withdraws every queued start, interrupts running starts and takes the `op`
+    /// lock of each of `lanes`, in order, so nothing starts in them meanwhile.
+    pub(crate) async fn lock_lanes<'a>(
+        &self,
+        lanes: &'a [crate::engine::LanePair],
+    ) -> Vec<tokio::sync::MutexGuard<'a, ()>> {
         self.pacing.cancel_all();
+        for (_, lane) in lanes {
+            lane.cancel_start();
+        }
+        let mut guards = Vec::with_capacity(lanes.len());
+        for (_, lane) in lanes {
+            guards.push(lane.op.lock().await);
+        }
+        guards
+    }
+
+    /// Stops every live unit of `lanes`, whose `op` locks the caller holds, once
+    /// their spawns in flight landed; returns the count.
+    pub(crate) async fn stop_lanes_locked(lanes: &[crate::engine::LanePair]) -> usize {
         let mut stops = Vec::new();
-        for (_, lane) in self.all_lanes() {
+        for (_, lane) in lanes {
+            lane.spawns_settled().await;
             let st = lane.st();
             for rec in st.units.values().filter(|rec| rec.host.is_alive()) {
                 stops.push((rec.host.clone(), rec.stop));
@@ -2124,6 +2352,45 @@ impl Inner {
         let count = stops.len();
         join_all(stops.iter().map(|(host, policy)| host.stop(*policy))).await;
         count
+    }
+
+    /// `lane_running` while a unit or a previous daemon's orphan still runs in `lane`.
+    fn refuse_running(&self, project: &ProjectRt, lane: &LaneRt) -> Result<(), RpcError> {
+        let st = lane.st();
+        let mut units: Vec<String> = st
+            .units
+            .iter()
+            .filter(|(_, rec)| rec.host.is_alive())
+            .map(|(name, _)| name.clone())
+            .collect();
+        units.extend(st.orphans.keys().cloned());
+        if units.is_empty() {
+            return Ok(());
+        }
+        Err(RpcError::new(
+            "lane_running",
+            json!({"lane": st.reference(&project.name()), "units": units}),
+            1,
+        ))
+    }
+
+    /// Stores the lane's desired state and profiles, then refreshes its record.
+    async fn save_desired(
+        &self,
+        lane: &LaneRt,
+        record: &devlanes_state::Lane,
+        desired: DesiredState,
+        profiles: Vec<String>,
+    ) {
+        let id = record.id;
+        let saved = persist("lane desired state", || {
+            self.store
+                .set_lane_desired_profiles(id, desired, profiles.clone())
+        })
+        .await;
+        if saved && let Some(updated) = self.store.lane(id).await.ok().flatten() {
+            lane.st().record = Some(updated);
+        }
     }
 
     /// The lane's profiles and the services they select, for `why`.
@@ -2143,15 +2410,101 @@ impl Inner {
             st.infra_containers = up.containers;
             st.setup_env = up.setup_env;
         }
-        self.resolve_full(&cx.project, &cx.lane)
+        self.resolve_config(&cx.project, &cx.lane, cx.config.clone())
             .await
             .ok()
             .is_none_or(|resolved| resolved.infra_enabled)
     }
 }
 
+/// Runs a state.db write, retrying briefly as [`Inner::finish_run`] does; a
+/// write that still fails is logged. True once written.
+pub(crate) async fn persist<T, F, Fut>(what: &str, write: F) -> bool
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, devlanes_state::Error>>,
+{
+    const ATTEMPTS: u32 = 3;
+    let mut delay = Duration::from_millis(100);
+    for attempt in 1..=ATTEMPTS {
+        match write().await {
+            Ok(_) => return true,
+            // Shutdown closed the store; nothing more can be written.
+            Err(devlanes_state::Error::Closed) => return false,
+            Err(error) if attempt == ATTEMPTS => {
+                tracing::warn!(%error, what, "state.db write failed");
+            }
+            Err(_) => {
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+        }
+    }
+    false
+}
+
+/// Finishes the row and emits the closing `task` event of a task run whose
+/// future was dropped before it got there.
+struct TaskRunGuard {
+    engine: Arc<Inner>,
+    /// `None` once the run closed normally.
+    run: Option<devlanes_state::TaskRunId>,
+    reference: String,
+    task: String,
+}
+
+impl Drop for TaskRunGuard {
+    /// Drop cannot wait for state.db, so the row is finished on the runtime.
+    fn drop(&mut self) {
+        let Some(id) = self.run.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let engine = self.engine.clone();
+        let reference = std::mem::take(&mut self.reference);
+        let task = std::mem::take(&mut self.task);
+        runtime.spawn(async move {
+            engine
+                .close_task_run(
+                    id,
+                    &reference,
+                    &task,
+                    None,
+                    "failed",
+                    Some(json!({"code": "cancelled"})),
+                )
+                .await;
+        });
+    }
+}
+
+/// Waits for a one-shot unit, stopping it after `timeout` or once `cancel`
+/// fires; an interrupted unit has no exit code.
+async fn finish(
+    host: &UnitHost,
+    timeout: Option<Duration>,
+    cancel: &CancellationToken,
+) -> ExitOutcome {
+    tokio::select! {
+        // An exit that is already there wins over a cancellation.
+        biased;
+        outcome = finish_within(host, timeout) => outcome,
+        () = cancel.cancelled() => {
+            if let Err(error) = host.stop(StopPolicy::default()).await {
+                tracing::warn!(code = %error.code, unit = %host.info().name, "interrupted unit did not stop");
+            }
+            ExitOutcome {
+                code: None,
+                signal: host.exit_outcome().and_then(|o| o.signal),
+            }
+        }
+    }
+}
+
 /// Waits for a one-shot unit, stopping it after `timeout`.
-async fn finish(host: &UnitHost, timeout: Option<Duration>) -> ExitOutcome {
+async fn finish_within(host: &UnitHost, timeout: Option<Duration>) -> ExitOutcome {
     match timeout {
         Some(limit) => match tokio::time::timeout(limit, host.wait_exit()).await {
             Ok(outcome) => outcome,
@@ -2214,5 +2567,49 @@ pub(crate) async fn stream_logs(host: UnitHost, session: Session) {
             () = disconnected.cancelled() => return,
             () = tokio::time::sleep(Duration::from_millis(200)) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    /// A failing write is retried up to three times; a closed store is not retried.
+    async fn persist_retries_then_gives_up() {
+        let calls = AtomicU32::new(0);
+        let flaky = persist("test", || {
+            let call = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if call < 2 {
+                    Err(devlanes_state::Error::Invalid("busy".into()))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert!(flaky);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        calls.store(0, Ordering::SeqCst);
+        let failing = persist("test", || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(devlanes_state::Error::Invalid("busy".into())) }
+        })
+        .await;
+        assert!(!failing);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        calls.store(0, Ordering::SeqCst);
+        let closed = persist("test", || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(devlanes_state::Error::Closed) }
+        })
+        .await;
+        assert!(!closed);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -216,6 +216,45 @@ fn routing_precedence_and_validation() -> Result {
     Ok(())
 }
 
+/// `accept` drops an invalid host and a trailing-dot duplicate one by one and
+/// keeps every other route of the snapshot.
+#[test]
+fn accept_drops_bad_entries_only() -> Result {
+    let (table, rejected) = RouteTable::accept(vec![
+        Route::new("web.acme.localhost", Upstream::Local(1)),
+        Route::new("api_v2.acme.localhost", Upstream::Local(2)),
+        Route::new("WEB.acme.localhost.", Upstream::Local(3)),
+        Route::new("docs.other.localhost", Upstream::Local(4)),
+    ]);
+    let hosts: Vec<&str> = table
+        .routes()
+        .iter()
+        .map(|route| route.host.as_str())
+        .collect();
+    assert_eq!(hosts, ["docs.other.localhost", "web.acme.localhost"]);
+    assert_eq!(
+        table.lookup("web.acme.localhost").ok_or("kept")?.target(),
+        &Upstream::Local(1),
+        "the first claim keeps the host"
+    );
+    assert_eq!(
+        rejected,
+        [
+            devlanes_proxy::Rejected {
+                index: 1,
+                host: "api_v2.acme.localhost".into(),
+                error: devlanes_proxy::RouteError::InvalidHost("api_v2.acme.localhost".into()),
+            },
+            devlanes_proxy::Rejected {
+                index: 2,
+                host: "WEB.acme.localhost.".into(),
+                error: devlanes_proxy::RouteError::Duplicate("web.acme.localhost".into()),
+            },
+        ]
+    );
+    Ok(())
+}
+
 /// Host, forwarded metadata and hop headers are checked against a real upstream socket.
 #[tokio::test]
 async fn forwarding_headers_named_port_and_snapshot_updates() -> Result {

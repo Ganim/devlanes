@@ -1,0 +1,33 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+acme@2 · feat/billing
+✓ services  5 of 5 ready
+  ✓  api     https://api.acme-2.localhost
+  ✓  web     https://web.acme-2.localhost
+  ✓  admin   https://admin.acme-2.localhost
+  ✓  mailer  https://mailer.acme-2.localhost
+  …1 more ready (devlanes status acme@2)
+! api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
+! this lane's units peak at 8.0 GiB together, more than the 4.0 GiB available; starts may wait for memory
+--- plain (exit 0)
+acme@2 · feat/billing
+ok services  5 of 5 ready
+  ok  api     https://api.acme-2.localhost
+  ok  web     https://web.acme-2.localhost
+  ok  admin   https://admin.acme-2.localhost
+  ok  mailer  https://mailer.acme-2.localhost
+  +1 more ready (devlanes status acme@2)
+warn api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
+warn this lane's units peak at 8.0 GiB together, more than the 4.0 GiB available; starts may wait for memory
+--- agent (exit 0)
+acme@2 (feat/billing): 5/5 ready
+ready api https://api.acme-2.localhost
+ready web https://web.acme-2.localhost
+ready admin https://admin.acme-2.localhost
+ready mailer https://mailer.acme-2.localhost
+ready +1 (devlanes status acme@2)
+warn api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
+warn this lane's units peak at 8.0 GiB together, more than the 4.0 GiB available; starts may wait for memory

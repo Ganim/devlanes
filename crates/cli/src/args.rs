@@ -675,6 +675,11 @@ impl Cli {
         let timeout_ms = self
             .timeout
             .map(|v| u64::try_from(v.as_millis()).unwrap_or(u64::MAX));
+        // Starts stream their lane events for phase lines, NDJSON and CI groups;
+        // agent output prints none of them. `wait` streams them only for the bar.
+        let start_events = runtime.mode != OutputMode::Agent;
+        let wait_events =
+            runtime.mode == OutputMode::Human && runtime.stdout_tty && runtime.ci.is_none();
         let selection =
             |units: &[String], env: &[(String, String)], profiles: &[String], mine, all_at_once| {
                 serde_json::to_value(Selection {
@@ -703,6 +708,7 @@ impl Cli {
                     profiles: args.profiles.clone(),
                     timeout_ms: Some(timeout_ms.unwrap_or(180_000)),
                     all_at_once: args.all_at_once,
+                    events: start_events,
                     ..Selection::default()
                 })?;
                 return Ok(Action::With(crate::WithPlan {
@@ -726,16 +732,22 @@ impl Cli {
                     args.all_at_once,
                 )?;
                 params["timeout_ms"] = json!(timeout_ms.unwrap_or(180_000));
+                if start_events {
+                    params["events"] = json!(true);
+                }
                 (Method::Start, params)
             }
             Some(Command::Stop(args)) => (
                 Method::Stop,
                 selection(&args.units, &[], &[], args.mine, false)?,
             ),
-            Some(Command::Restart(args)) => (
-                Method::Restart,
-                selection(&args.units, &self.env, &[], false, args.all_at_once)?,
-            ),
+            Some(Command::Restart(args)) => {
+                let mut params = selection(&args.units, &self.env, &[], false, args.all_at_once)?;
+                if start_events {
+                    params["events"] = json!(true);
+                }
+                (Method::Restart, params)
+            }
             Some(Command::Status(args)) => {
                 if runtime.mode == OutputMode::Agent && args.watch && self.timeout.is_none() {
                     return Err(Error::Usage(
@@ -780,7 +792,7 @@ impl Cli {
             }
             Some(Command::Wait { target }) => (
                 Method::Wait,
-                json!({"target": target, "timeout_ms": timeout_ms}),
+                json!({"target": target, "timeout_ms": timeout_ms, "events": wait_events}),
             ),
             Some(Command::Debug { command }) => match command {
                 DebugCommand::Why { unit } => (Method::Why, json!({"unit": unit})),
@@ -830,12 +842,13 @@ impl Cli {
             Some(Command::Lane { command }) => match command {
                 LaneCommand::Resume { all_at_once } => (
                     Method::Resume,
-                    json!({"timeout_ms": timeout_ms, "all_at_once": all_at_once}),
+                    json!({"timeout_ms": timeout_ms, "all_at_once": all_at_once, "events": start_events}),
                 ),
                 LaneCommand::Ls => (Method::LaneList, json!({})),
-                LaneCommand::New { branch, start } => {
-                    (Method::LaneNew, json!({"branch": branch, "start": start}))
-                }
+                LaneCommand::New { branch, start } => (
+                    Method::LaneNew,
+                    json!({"branch": branch, "start": start, "events": *start && start_events}),
+                ),
                 LaneCommand::Clean { lane } => {
                     context.lane = Some(lane.clone());
                     (Method::LaneClean, json!({"lane": lane}))

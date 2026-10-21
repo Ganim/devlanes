@@ -29,6 +29,7 @@ mod resolve;
 mod routes;
 mod sampler;
 pub mod secrets;
+mod stream;
 pub mod units;
 pub mod update;
 
@@ -67,6 +68,10 @@ pub enum Error {
     Worker(#[from] tokio::task::JoinError),
     #[error("shutdown failed: {0}")]
     Shutdown(String),
+    /// Startup reconciliation failed; the message reads `CODE: message`, like
+    /// other startup reasons, so the spawning client keeps the code.
+    #[error("{0}")]
+    Reconcile(String),
 }
 
 /// Paths are supplied explicitly so tests never touch the user's daemon.
@@ -212,21 +217,33 @@ impl Server {
     }
 
     /// Reconciliation precedes the callback so a connecting client sees coherent state.
+    /// A failed reconciliation still runs the handler's shutdown (records exits,
+    /// closes the store) and returns [`Error::Reconcile`] for the spawning client.
     pub async fn run(
         self,
         handler: Arc<dyn Handler>,
         ready: impl FnOnce() -> std::io::Result<()>,
     ) -> Result<(), Error> {
-        handler
-            .reconcile()
-            .await
-            .map_err(|error| Error::Shutdown(error.code))?;
+        if let Err(error) = handler.reconcile().await {
+            if let Err(stopped) = handler.shutdown().await {
+                tracing::warn!(code = %stopped.code, "shutdown after a failed reconcile");
+            }
+            let _ = tokio::fs::remove_file(&self.options.socket).await;
+            return Err(Error::Reconcile(startup_reason(&error)));
+        }
         ready()?;
+        let Self {
+            listener,
+            options,
+            started,
+            shutdown,
+            _lock,
+        } = self;
         let mut clients = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
-                () = self.shutdown.cancelled() => break,
-                accepted = self.listener.accept() => {
+                () = shutdown.cancelled() => break,
+                accepted = listener.accept() => {
                     // One client's failure must never end the daemon: a peer that closes
                     // before its credentials are read (macOS: ENOTCONN) used to exit here.
                     let stream = match accepted {
@@ -247,9 +264,8 @@ impl Server {
                         }
                     }
                     let handler = handler.clone();
-                    let shutdown = self.shutdown.clone();
-                    let started = self.started;
-                    let socket = self.options.socket.clone();
+                    let shutdown = shutdown.clone();
+                    let socket = options.socket.clone();
                     clients.spawn(async move {
                         if let Err(error) = serve_client(stream, handler, shutdown, started, socket).await {
                             tracing::debug!(%error, "client connection ended");
@@ -261,15 +277,43 @@ impl Server {
                 }
             }
         }
+        // No new connection from here on; connected clients get `daemon_stopping`
+        // for anything that would start work.
+        drop(listener);
         // Stop resources before closing subscribers so they can observe final state.
         let stopped = handler.shutdown().await;
         clients.abort_all();
         while clients.join_next().await.is_some() {}
-        let remove = tokio::fs::remove_file(&self.options.socket).await;
+        let remove = tokio::fs::remove_file(&options.socket).await;
         stopped.map_err(|error| Error::Shutdown(error.code))?;
         remove?;
         Ok(())
     }
+}
+
+/// The error reply that replaces response `id` when it does not fit in a frame.
+fn too_large(id: u64) -> Frame {
+    let error = RpcError::new(
+        "response_too_large",
+        json!({
+            "limit_bytes": devlanes_proto::MAX_FRAME_SIZE,
+            "message": devlanes_ipc::Error::TooLarge.to_string(),
+        }),
+        1,
+    );
+    Frame::Control(Control::Response(Response {
+        id,
+        result: Outcome::Error { error },
+    }))
+}
+
+/// `CODE: message` from a handler error, the shape startup failures report in.
+fn startup_reason(error: &RpcError) -> String {
+    let message = match error.data.get("message").and_then(Value::as_str) {
+        Some(message) => message.to_owned(),
+        None => error.data.to_string(),
+    };
+    format!("{}: {message}", error.code.to_uppercase())
 }
 
 /// Uses no-follow opens inside owner-only directories to protect the singleton lock.
@@ -342,7 +386,10 @@ async fn serve_client(
     let Frame::Control(Control::Hello(peer)) = first else {
         return Err(devlanes_ipc::Error::InvalidFrame);
     };
-    let hello = Hello::current(handler.managed_processes());
+    let mut hello = Hello::current(handler.managed_processes());
+    hello
+        .features
+        .push(devlanes_proto::features::START_EVENTS.into());
     connection
         .send(Frame::Control(Control::Hello(hello.clone())))
         .await?;
@@ -358,7 +405,8 @@ async fn serve_client(
             "build_id": hello.build_id,
             "managed_processes": hello.managed_processes,
         }),
-        1,
+        // Plan 3.5: incompatible daemons exit 4, like unreachable ones.
+        4,
     );
 
     let (sender, mut outgoing) = mpsc::channel(128);
@@ -376,8 +424,27 @@ async fn serve_client(
             tokio::select! {
                 frame = outgoing.recv() => {
                     if let Some(Outgoing { frame, delivered }) = frame {
-                        connection.send(frame).await?;
+                        // An empty frame ends an attach stream; its input queue goes with it.
+                        let ended = match &frame {
+                            Frame::Bytes { stream_id, data } if data.is_empty() => Some(*stream_id),
+                            _ => None,
+                        };
+                        let response = match &frame {
+                            Frame::Control(Control::Response(response)) => Some(response.id),
+                            _ => None,
+                        };
+                        match (connection.send(frame).await, response) {
+                            (Ok(()), _) => {}
+                            // Nothing was written yet: the client still gets an answer.
+                            (Err(devlanes_ipc::Error::TooLarge), Some(id)) => {
+                                connection.send(too_large(id)).await?;
+                            }
+                            (Err(error), _) => return Err(error),
+                        }
                         let _ = delivered.send(());
+                        if let Some(stream_id) = ended {
+                            inputs.end(stream_id);
+                        }
                     }
                 }
                 received = connection.recv() => {
@@ -393,13 +460,29 @@ async fn serve_client(
                                 let id = request.id;
                                 let stop = request.method == Method::DaemonShutdown;
                                 let result = match request.method {
-                                    Method::DaemonStatus => Ok(json!({
-                                        "version": env!("CARGO_PKG_VERSION"),
-                                        "pid": std::process::id(),
-                                        "uptime_ms": started.elapsed().as_millis(),
-                                        "managed_processes": handler.managed_processes(),
-                                        "socket": socket,
-                                    })),
+                                    Method::DaemonStatus => {
+                                        let mut status = json!({
+                                            "version": env!("CARGO_PKG_VERSION"),
+                                            "pid": std::process::id(),
+                                            "uptime_ms": started.elapsed().as_millis(),
+                                            "managed_processes": handler.managed_processes(),
+                                            "socket": socket,
+                                        });
+                                        // Release checks and update notices come from the
+                                        // engine; another protocol gets the frozen fields only.
+                                        if compatible {
+                                            match handler.handle(request, session.clone()).await {
+                                                Ok(Value::Object(extra)) => {
+                                                    if let Some(fields) = status.as_object_mut() {
+                                                        fields.extend(extra);
+                                                    }
+                                                }
+                                                Ok(_) => {}
+                                                Err(error) => tracing::debug!(code = %error.code, "daemon.status without engine fields"),
+                                            }
+                                        }
+                                        Ok(status)
+                                    }
                                     Method::DaemonShutdown if handler.managed_processes() > 0 && !request.context.yes => {
                                         Err(RpcError::new("confirmation_required", json!({"processes": handler.managed_processes()}), 2))
                                     }
@@ -462,5 +545,140 @@ mod tests {
             Err(Error::UnsafeDirectory(_))
         ));
         Ok(())
+    }
+
+    /// Answers every request with `reply`; reconciliation fails when `broken`.
+    struct Fixed {
+        reply: Value,
+        broken: bool,
+        shut_down: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl Handler for Fixed {
+        fn managed_processes(&self) -> usize {
+            0
+        }
+        async fn reconcile(&self) -> Result<(), RpcError> {
+            if self.broken {
+                return Err(RpcError::new(
+                    "state_error",
+                    json!({"message": "state.db is unreadable"}),
+                    1,
+                ));
+            }
+            Ok(())
+        }
+        async fn handle(&self, _: Request, _: Session) -> Result<Value, RpcError> {
+            Ok(self.reply.clone())
+        }
+        async fn input(&self, _: u64, _: Bytes, _: Session) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), RpcError> {
+            self.shut_down
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Options under a short temporary directory (socket paths are bounded).
+    fn short_options() -> (tempfile::TempDir, Options) {
+        let dir = tempfile::Builder::new()
+            .prefix("dls-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
+        let home = dir.path().join("h");
+        let options = Options {
+            socket: home.join("run/d.sock"),
+            home,
+        };
+        (dir, options)
+    }
+
+    /// Sends request `id` and waits for its outcome.
+    async fn ask(connection: &mut Connection<UnixStream>, id: u64, method: Method) -> Outcome {
+        connection
+            .send(Frame::Control(Control::Request(Request {
+                id,
+                method,
+                params: Value::Null,
+                context: devlanes_proto::Context::default(),
+            })))
+            .await
+            .expect("send");
+        loop {
+            if let Frame::Control(Control::Response(response)) =
+                connection.recv().await.expect("recv")
+                && response.id == id
+            {
+                return response.result;
+            }
+        }
+    }
+
+    #[tokio::test]
+    /// A response larger than a frame becomes an error reply on a connection
+    /// that keeps working.
+    async fn an_oversized_response_becomes_an_error() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (_dir, options) = short_options();
+            let socket = options.socket.clone();
+            let server = Server::bind(options).await.expect("bind");
+            let token = server.shutdown_token();
+            let handler = Arc::new(Fixed {
+                reply: json!("x".repeat(devlanes_proto::MAX_FRAME_SIZE + 1)),
+                broken: false,
+                shut_down: Default::default(),
+            });
+            let running = tokio::spawn(server.run(handler, || Ok(())));
+            let mut connection =
+                Connection::new(UnixStream::connect(&socket).await.expect("connect"));
+            connection
+                .send(Frame::Control(Control::Hello(Hello::current(0))))
+                .await
+                .expect("hello");
+            connection.recv().await.expect("hello reply");
+            for id in [1, 2] {
+                let Outcome::Error { error } = ask(&mut connection, id, Method::Status).await
+                else {
+                    panic!("an error reply");
+                };
+                assert_eq!(error.code, "response_too_large");
+                assert_eq!(error.data["limit_bytes"], devlanes_proto::MAX_FRAME_SIZE);
+            }
+            token.cancel();
+            running.await.expect("join").expect("clean shutdown");
+        })
+        .await
+        .expect("timeout");
+    }
+
+    #[tokio::test]
+    /// A failed reconcile still shuts the handler down (records exits, closes
+    /// the store), removes the socket and reports `CODE: message`.
+    async fn a_failed_reconcile_shuts_down_and_reports() {
+        let (_dir, options) = short_options();
+        let socket = options.socket.clone();
+        let server = Server::bind(options).await.expect("bind");
+        let handler = Arc::new(Fixed {
+            reply: Value::Null,
+            broken: true,
+            shut_down: Default::default(),
+        });
+        let mut announced = false;
+        let result = server
+            .run(handler.clone(), || {
+                announced = true;
+                Ok(())
+            })
+            .await;
+        let Err(Error::Reconcile(message)) = result else {
+            panic!("a reconcile error: {result:?}");
+        };
+        assert_eq!(message, "STATE_ERROR: state.db is unreadable");
+        assert!(!announced, "never announced ready");
+        assert!(handler.shut_down.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!socket.exists());
     }
 }

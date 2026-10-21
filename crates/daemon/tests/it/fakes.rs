@@ -4,9 +4,12 @@
 //! (`;`-separated): `echo <text>`, `printenv <KEY>`, `serve` (binds `$PORT` and stays
 //! up), `tcp-echo` (echoes every connection on `$PORT`), `http <body>` (answers
 //! every request on `$PORT` with `<body>`), `sleep` (stays up), `exit <code>`,
-//! `fail` (prints `boom`, exits 1), `deaf` (stops reading input: writes block
+//! `fail` (prints `boom`, exits 1), `nap <ms>` (waits, then goes on),
+//! `deaf` (stops reading input: writes block
 //! until the unit stops), `daemonize <name>` and `escape <name>` (report a
-//! process left running or escaped once the unit ends).
+//! process left running or escaped once the unit ends), `stubborn` (ignores
+//! its first stop request; with [`FakeRunner::stubborn_identity`] set it also
+//! carries that real identity, so an overdue stop finds it alive).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -51,6 +54,8 @@ pub struct FakeRunner {
     pub journal: Journal,
     /// `<unit pid> <columns>x<rows>` for every resize, in order.
     pub resizes: Journal,
+    /// Identity given to `stubborn` units, e.g. the test process's own.
+    pub stubborn_identity: Arc<Mutex<Option<ProcessIdentity>>>,
 }
 
 /// Extracts the script from `/bin/sh -c <script>` or argv.
@@ -74,12 +79,24 @@ impl UnitRunner for FakeRunner {
         }
         let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
         let (sender, first) = broadcast::channel(256);
+        let stubborn = script
+            .split(';')
+            .any(|command| command.trim() == "stubborn");
+        let real = if stubborn {
+            self.stubborn_identity
+                .lock()
+                .ok()
+                .and_then(|identity| *identity)
+        } else {
+            None
+        };
         let unit = Arc::new(FakeUnit {
-            identity: ProcessIdentity {
+            identity: real.unwrap_or(ProcessIdentity {
                 pid,
                 sid: pid,
                 start_time: 1,
-            },
+            }),
+            stubborn: AtomicBool::new(stubborn),
             sender: Mutex::new(Some(sender)),
             first: Mutex::new(Some(first)),
             exit: watch::channel(None).0,
@@ -97,6 +114,8 @@ impl UnitRunner for FakeRunner {
 /// A scripted process.
 pub struct FakeUnit {
     identity: ProcessIdentity,
+    /// Set by `stubborn`: the next stop request is ignored.
+    stubborn: AtomicBool,
     sender: Mutex<Option<broadcast::Sender<OutputChunk>>>,
     first: Mutex<Option<broadcast::Receiver<OutputChunk>>>,
     exit: watch::Sender<Option<ExitOutcome>>,
@@ -142,6 +161,13 @@ impl FakeUnit {
             let (word, rest) = command.split_once(' ').unwrap_or((command, ""));
             match word {
                 "echo" => self.print(rest),
+                "nap" => {
+                    let ms = rest.trim().parse().unwrap_or(0);
+                    tokio::select! {
+                        _ = stopped.wait_for(|s| *s) => return,
+                        () = tokio::time::sleep(Duration::from_millis(ms)) => {}
+                    }
+                }
                 "deaf" => self.deaf.store(true, Ordering::SeqCst),
                 "printenv" => self.print(env.get(rest).map_or("", String::as_str)),
                 "daemonize" | "escape" => {
@@ -299,8 +325,11 @@ impl Unit for FakeUnit {
         }
         Ok(())
     }
-    /// Ends the unit with the requested signal.
+    /// Ends the unit with the requested signal (`stubborn`: from the second request).
     async fn stop(&self, policy: StopPolicy) -> Result<(), Error> {
+        if self.stubborn.swap(false, Ordering::SeqCst) {
+            return Ok(());
+        }
         self.stop.send_replace(true);
         self.end(ExitOutcome {
             code: None,

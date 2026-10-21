@@ -14,6 +14,7 @@ use crate::{
     engine::{Inner, LanePair, params, required},
     model::{ConfigState, is_mine, lane_summary},
     registry::internal,
+    stream::LaneEvents,
     units::{UnitHost, UnitState, now_ms, query_log_dir},
 };
 
@@ -43,6 +44,9 @@ struct WaitParams {
     target: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// Stream the lane's (or unit's) events on the request while waiting.
+    #[serde(default)]
+    events: bool,
 }
 
 /// `errors` parameters.
@@ -80,6 +84,9 @@ struct SubscribeParams {
     follow: Option<bool>,
 }
 
+/// Byte budget of a log query that names none (the logs crate's default).
+const LOG_BUDGET: usize = 1024 * 1024;
+
 /// Parses `5m`, `30s`, `2h`, `1d` or milliseconds into a duration.
 fn parse_duration(text: &str) -> Option<Duration> {
     let text = text.trim();
@@ -89,9 +96,9 @@ fn parse_duration(text: &str) -> Option<Duration> {
     let seconds = match unit {
         "" | "ms" => return Some(Duration::from_millis(value)),
         "s" => value,
-        "m" => value * 60,
-        "h" => value * 3600,
-        "d" => value * 86_400,
+        "m" => value.checked_mul(60)?,
+        "h" => value.checked_mul(3600)?,
+        "d" => value.checked_mul(86_400)?,
         _ => return None,
     };
     Some(Duration::from_secs(seconds))
@@ -192,9 +199,11 @@ impl Inner {
         if args.watch {
             let scope: BTreeSet<String> = items.iter().map(|lane| lane.reference.clone()).collect();
             let everything = args.all || context.lane.is_none() && context.project.is_none();
-            // The first snapshot goes to this watcher only, after it subscribed.
+            // The first snapshot goes to this watcher only. It is built once the
+            // watcher subscribed: a change between `items` and the subscription
+            // would otherwise reach the watcher in neither.
             let snapshot = |seq: u64| {
-                items
+                self.summaries(&lanes, mine)
                     .iter()
                     .map(|item| devlanes_proto::Event {
                         seq,
@@ -312,10 +321,16 @@ impl Inner {
         query.units = Vec::new();
         query.mine = false;
         let follow = std::mem::take(&mut query.follow);
+        // One response carries every unit's page, so they share the byte budget.
+        let mut each = query.clone();
+        if units.len() > 1 {
+            let budget = query.max_bytes.unwrap_or(LOG_BUDGET);
+            each.max_bytes = Some((budget / units.len()).max(1));
+        }
         if args.all {
             let mut groups = Vec::new();
             for unit in &units {
-                let page = self.unit_logs(&pair, unit, query.clone()).await?;
+                let page = self.unit_logs(&pair, unit, each.clone()).await?;
                 groups
                     .push(json!({"unit": unit, "lines": page.items, "truncated": page.truncated}));
             }
@@ -327,7 +342,7 @@ impl Inner {
             let mut items = Vec::new();
             let mut truncated = false;
             for unit in &units {
-                let page = self.unit_logs(&pair, unit, query.clone()).await?;
+                let page = self.unit_logs(&pair, unit, each.clone()).await?;
                 truncated |= page.truncated;
                 items.extend(page.items);
             }
@@ -406,6 +421,7 @@ impl Inner {
         self: &Arc<Self>,
         value: Value,
         context: &Context,
+        session: &Session,
     ) -> Result<Value, RpcError> {
         let args: WaitParams = required(value)?;
         let deadline = Instant::now()
@@ -436,70 +452,85 @@ impl Inner {
             }
         };
         let reference = lane.st().reference(&project.name());
-        loop {
-            let (hosts, busy): (Vec<(String, UnitHost)>, bool) = {
-                let st = lane.st();
-                let hosts = match &unit {
-                    Some(unit) => st
-                        .units
-                        .get(unit)
-                        .map(|rec| vec![(unit.clone(), rec.host.clone())])
-                        .unwrap_or_default(),
-                    None => st
-                        .units
-                        .iter()
-                        .filter(|(_, rec)| rec.kind == crate::model::Kind::Service)
-                        .map(|(name, rec)| (name.clone(), rec.host.clone()))
-                        .collect(),
+        let stream = args.events.then(|| {
+            let mut summary = lane_summary(&project.name(), &lane.st());
+            self.fill_queued(&mut summary);
+            LaneEvents::lane(project.clone(), lane.clone(), unit.clone()).with_snapshot(summary)
+        });
+        let disconnected = session.disconnected();
+        let wait = async {
+            loop {
+                let (hosts, busy): (Vec<(String, UnitHost)>, bool) = {
+                    let st = lane.st();
+                    let hosts = match &unit {
+                        Some(unit) => st
+                            .units
+                            .get(unit)
+                            .map(|rec| vec![(unit.clone(), rec.host.clone())])
+                            .unwrap_or_default(),
+                        None => st
+                            .units
+                            .iter()
+                            .filter(|(_, rec)| rec.kind == crate::model::Kind::Service)
+                            .map(|(name, rec)| (name.clone(), rec.host.clone()))
+                            .collect(),
+                    };
+                    (hosts, st.busy.is_some())
                 };
-                (hosts, st.busy.is_some())
-            };
-            let states: Vec<UnitState> = hosts.iter().map(|(_, host)| host.state()).collect();
-            let failed: Vec<usize> = states
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| matches!(s, UnitState::Failed(_)))
-                .map(|(i, _)| i)
-                .collect();
-            if let Some(&first) = failed.first() {
-                let (name, host) = &hosts[first];
-                let failure = crate::lifecycle::failure_of(&reference, name, host).await;
-                return Ok(json!({
-                    "lane": reference, "unit": unit, "state": "failed", "ready": false,
-                    "failed": failed.iter().map(|i| hosts[*i].0.clone()).collect::<Vec<_>>(),
-                    "reason": failure.reason, "exit_code": failure.exit_code, "log_tail": failure.log_tail,
-                }));
+                let states: Vec<UnitState> = hosts.iter().map(|(_, host)| host.state()).collect();
+                let failed: Vec<usize> = states
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| matches!(s, UnitState::Failed(_)))
+                    .map(|(i, _)| i)
+                    .collect();
+                if let Some(&first) = failed.first() {
+                    let (name, host) = &hosts[first];
+                    let failure = crate::lifecycle::failure_of(&reference, name, host).await;
+                    return Ok(json!({
+                        "lane": reference, "unit": unit, "state": "failed", "ready": false,
+                        "failed": failed.iter().map(|i| hosts[*i].0.clone()).collect::<Vec<_>>(),
+                        "reason": failure.reason, "exit_code": failure.exit_code, "log_tail": failure.log_tail,
+                    }));
+                }
+                let all_ready =
+                    !states.is_empty() && states.iter().all(|s| matches!(s, UnitState::Ready));
+                if all_ready && !busy {
+                    return Ok(
+                        json!({"lane": reference, "unit": unit, "state": "ready", "ready": true}),
+                    );
+                }
+                if hosts.is_empty() && !busy {
+                    return Ok(
+                        json!({"lane": reference, "unit": unit, "state": "idle", "ready": false}),
+                    );
+                }
+                if let Some((name, host)) = hosts
+                    .iter()
+                    .find(|(_, h)| matches!(h.state(), UnitState::Exited(_)))
+                    .filter(|_| unit.is_some())
+                {
+                    return Ok(
+                        json!({"lane": reference, "unit": name, "state": host.state().word(), "ready": false, "exit_code": host.exit_outcome().and_then(|o| o.code)}),
+                    );
+                }
+                if Instant::now() >= deadline {
+                    return Err(RpcError::new(
+                        "timeout",
+                        json!({"lane": reference, "unit": unit}),
+                        124,
+                    ));
+                }
+                // Nobody is left to tell; polling on would only hold the lane's state.
+                tokio::select! {
+                    () = disconnected.cancelled() => {
+                        return Err(RpcError::new("client_disconnected", Value::Null, 4));
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(150)) => {}
+                }
             }
-            let all_ready =
-                !states.is_empty() && states.iter().all(|s| matches!(s, UnitState::Ready));
-            if all_ready && !busy {
-                return Ok(
-                    json!({"lane": reference, "unit": unit, "state": "ready", "ready": true}),
-                );
-            }
-            if hosts.is_empty() && !busy {
-                return Ok(
-                    json!({"lane": reference, "unit": unit, "state": "idle", "ready": false}),
-                );
-            }
-            if let Some((name, host)) = hosts
-                .iter()
-                .find(|(_, h)| matches!(h.state(), UnitState::Exited(_)))
-                .filter(|_| unit.is_some())
-            {
-                return Ok(
-                    json!({"lane": reference, "unit": name, "state": host.state().word(), "ready": false, "exit_code": host.exit_outcome().and_then(|o| o.code)}),
-                );
-            }
-            if Instant::now() >= deadline {
-                return Err(RpcError::new(
-                    "timeout",
-                    json!({"lane": reference, "unit": unit}),
-                    124,
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(150)).await;
-        }
+        };
+        self.with_lane_events(session, stream, wait).await
     }
 
     /// `errors`: exit codes, crash counts, last error lines and port conflicts.
@@ -904,6 +935,8 @@ impl Inner {
             "ca": self.integ.ca_status,
             // Routed hosts the CA cannot certify (`host_outside_ca`, see `certs`).
             "ca_warnings": self.all_ca_warnings(),
+            // Hostnames two lanes claim and names that are not valid DNS names.
+            "route_warnings": self.route_warnings(),
             "projects": self.all_projects().len(),
             "subscribers": self.bus.subscribers(),
             "hosts": self.hosts_status(),
@@ -930,5 +963,7 @@ mod tests {
         assert_eq!(parse_duration("250"), Some(Duration::from_millis(250)));
         assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
         assert_eq!(parse_duration("x"), None);
+        // Overflow is no duration rather than a panic (debug) or a wrap (release).
+        assert_eq!(parse_duration(&format!("{}d", u64::MAX)), None);
     }
 }

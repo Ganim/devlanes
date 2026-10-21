@@ -16,12 +16,12 @@ const CONFIG: &str = "project: churn\nservices:\n  one: { run: sleep }\n  two: {
 const ANSWER: Duration = Duration::from_secs(2);
 
 /// A handshaken client connection.
-async fn client(socket: &std::path::Path) -> Connection<UnixStream> {
+pub(crate) async fn client(socket: &std::path::Path) -> Connection<UnixStream> {
     client_with(socket, Hello::current(0)).await
 }
 
 /// A connection that introduced itself with `hello`.
-async fn client_with(socket: &std::path::Path, hello: Hello) -> Connection<UnixStream> {
+pub(crate) async fn client_with(socket: &std::path::Path, hello: Hello) -> Connection<UnixStream> {
     let stream = UnixStream::connect(socket).await.expect("connect");
     let mut connection = Connection::new(stream);
     connection
@@ -35,7 +35,7 @@ async fn client_with(socket: &std::path::Path, hello: Hello) -> Connection<UnixS
 }
 
 /// Sends a request and waits for its response, skipping events and bytes.
-async fn request(
+pub(crate) async fn request(
     connection: &mut Connection<UnixStream>,
     id: u64,
     method: Method,
@@ -320,6 +320,8 @@ async fn other_protocols_and_unknown_frames_keep_the_connection() {
             panic!("status needs the same protocol");
         };
         assert_eq!(error.code, "protocol_mismatch");
+        // Plan 3.5: incompatible is exit 4.
+        assert_eq!(error.exit_code, 4);
         assert_eq!(
             error.data["client_protocol"],
             Hello::current(0).protocol + 1

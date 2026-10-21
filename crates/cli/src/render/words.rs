@@ -282,12 +282,7 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             Some(Hint::command(["daemon", "restart"])),
         ),
         "incompatible" | "protocol_mismatch" => (
-            format!(
-                "daemon v{} (build {}) runs {} processes; protocol is incompatible",
-                field(data, "version"),
-                field(data, "build_id"),
-                field(data, "managed_processes")
-            ),
+            protocol_mismatch(data),
             Some(Hint::command(["daemon", "restart"])),
         ),
         // The daemon's own message names the unit and pid; the hint stops it.
@@ -342,6 +337,11 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             },
             Some(Hint::command(["daemon", "install"])),
         ),
+        // The daemon's message already names the command; the hint carries it instead.
+        "helper_version_mismatch" => (
+            helper_mismatch(data.get("helper").unwrap_or(data)),
+            Some(Hint::command(["certs", "trust", "--hosts"])),
+        ),
         "helper_missing"
         | "sudo_denied"
         | "helper_outdated"
@@ -365,6 +365,77 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             },
             None,
         ),
+    }
+}
+
+/// A daemon of another protocol: what runs, and what restarting it costs.
+fn protocol_mismatch(data: &Value) -> String {
+    let cost = match int(data, "managed_processes").unwrap_or(0) {
+        0 => String::new(),
+        1 => "; restarting it stops its 1 managed process".into(),
+        processes => format!("; restarting it stops its {processes} managed processes"),
+    };
+    let protocols = match (int(data, "protocol"), int(data, "client_protocol")) {
+        (Some(daemon), Some(client)) => format!(" (protocol {daemon}, this CLI speaks {client})"),
+        _ => String::new(),
+    };
+    format!(
+        "the running daemon is devlanes {}{protocols} and cannot serve this CLI{cost}",
+        field(data, "version")
+    )
+}
+
+/// The hosts helper against this devlanes, from doctor's `hosts.helper`
+/// (`{state, installed, expected}`); without versions, a general sentence.
+pub(crate) fn helper_mismatch(helper: &Value) -> String {
+    let expected = text(helper, "expected");
+    match (
+        helper.get("installed").and_then(Value::as_str),
+        helper.get("state").and_then(Value::as_str),
+    ) {
+        (_, Some("missing")) => "the /etc/hosts helper is not installed".into(),
+        (_, Some("unrunnable")) => "the installed /etc/hosts helper cannot run".into(),
+        (_, Some("incompatible")) => format!(
+            "the installed /etc/hosts helper speaks another protocol than devlanes {expected}; /etc/hosts updates fail"
+        ),
+        (Some(installed), _) if !expected.is_empty() => format!(
+            "the installed /etc/hosts helper is version {}, devlanes is {expected}",
+            super::clean(installed)
+        ),
+        _ => "the installed /etc/hosts helper does not match this devlanes".into(),
+    }
+}
+
+/// A byte count field as `1.5 GiB`, `?` when absent.
+fn memory(data: &Value, key: &str) -> String {
+    data.get(key)
+        .and_then(Value::as_u64)
+        .map_or_else(|| "?".into(), super::bytes)
+}
+
+/// A lane warning (`StartResult.warnings`, `lane.warning`, doctor's `ca_warnings`)
+/// as one line: `api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test`.
+pub(crate) fn lane_warning(code: &str, data: &Value) -> String {
+    match code {
+        "host_outside_ca" => {
+            let mut line = format!(
+                "{} is outside the CA's names; HTTPS will fail",
+                field(data, "host")
+            );
+            if let Some(suggestion) = data.get("suggestion").and_then(Value::as_str) {
+                line.push_str(&format!("; try {}", super::clean(suggestion)));
+            }
+            line
+        }
+        "memory_baseline" => format!(
+            "this lane's units peak at {} together, more than the {} available; starts may wait for memory",
+            memory(data, "peak_memory_bytes"),
+            memory(data, "available_memory_bytes")
+        ),
+        other => match data.get("message").and_then(Value::as_str) {
+            Some(message) => super::clean(message),
+            None => super::clean(other).replace('_', " "),
+        },
     }
 }
 
@@ -472,11 +543,14 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
             format!("could not start: {}", text(data, "message")),
             Some(Hint::logs(lane, unit, 200)),
         ),
-        "helper_missing" | "sudo_denied" | "helper_outdated" => {
+        "helper_missing" | "sudo_denied" | "helper_outdated" | "helper_version_mismatch" => {
             let hosts: Vec<String> = list(data, "hosts").iter().map(display_value).collect();
             let problem = match code {
                 "helper_missing" => "the /etc/hosts helper is not installed",
                 "sudo_denied" => "sudo will not run the /etc/hosts helper without a password",
+                "helper_version_mismatch" => {
+                    "the installed /etc/hosts helper does not match this devlanes"
+                }
                 _ => "the installed /etc/hosts helper is outdated",
             };
             (

@@ -400,10 +400,12 @@ fn service_layout<E: Extensions>(
             HostConfig::Name(name) => name,
             HostConfig::Route(route) => &route.host,
         };
+        let host = template
+            .evaluate(&context)
+            .map_err(|e| ResolveError::expression(format!("{path}.hosts"), e))?;
         hosts.push(
-            template
-                .evaluate(&context)
-                .map_err(|e| ResolveError::expression(format!("{path}.hosts"), e))?,
+            devlanes_config::normalize_host(&host)
+                .map_err(|message| ResolveError::invalid(format!("{path}.hosts"), message))?,
         );
     }
     let public_url = hosts
@@ -454,14 +456,18 @@ fn route_spec(
 ) -> Result<RouteSpec, ResolveError> {
     let path = format!("services.{name}.hosts");
     let evaluate = |t: &Templated<String>| {
-        t.evaluate(context)
-            .map_err(|e| ResolveError::expression(path.clone(), e))
+        let host = t
+            .evaluate(context)
+            .map_err(|e| ResolveError::expression(path.clone(), e))?;
+        devlanes_config::normalize_host(&host)
+            .map_err(|message| ResolveError::invalid(path.clone(), message))
     };
     let mut route = RouteSpec {
         host: String::new(),
         service: name.to_owned(),
         unit: layout.unit.clone(),
         port: layout.port,
+        port_name: DEFAULT_PORT.to_owned(),
         fallback: false,
         host_header_upstream: false,
     };
@@ -478,6 +484,7 @@ fn route_spec(
                             unit: layout.unit.clone(),
                             name: port.to_owned(),
                         })?;
+                route.port_name = port.to_owned();
             }
             if let Some(fallback) = &spec.fallback {
                 route.fallback = fallback

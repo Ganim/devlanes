@@ -24,3 +24,9 @@ error: invalid config: devlanes.yaml:2:1: unknown field `serivces`
 hint: devlanes config check
 error: the daemon restarted and has no shell environment for this lane
 hint: devlanes start --lane acme@2
+error: the running daemon is devlanes 0.2.0 (protocol 7, this CLI speaks 8) and cannot serve this CLI; restarting it stops its 6 managed processes
+hint: devlanes daemon restart
+error: the running daemon is devlanes 0.2.0 (protocol 7, this CLI speaks 8) and cannot serve this CLI
+hint: devlanes daemon restart
+error: the installed /etc/hosts helper is version 0.1.0, devlanes is 0.2.0
+hint: devlanes certs trust --hosts

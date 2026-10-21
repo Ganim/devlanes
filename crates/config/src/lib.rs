@@ -14,6 +14,7 @@
 mod error;
 mod expression;
 mod extensions;
+mod hostname;
 mod loader;
 mod model;
 mod scalar;
@@ -29,6 +30,7 @@ pub use expression::{
     ExpressionContext, evaluate, evaluate_env, evaluate_typed, references, resolve_lane_vars,
 };
 pub use extensions::{Extensions, OpaqueExtensions};
+pub use hostname::normalize_host;
 pub use loader::{
     ConfigSources, check, load_project, load_project_with, parse_project, parse_project_with,
 };

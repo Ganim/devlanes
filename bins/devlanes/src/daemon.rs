@@ -13,6 +13,7 @@ use devlanes_daemon::{
 };
 use devlanes_proto::RpcError;
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 /// Rotates once at startup; a dev daemon log never needs more than one old file.
 const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
@@ -90,10 +91,22 @@ pub fn run() -> ExitCode {
             pid = std::process::id(),
             "daemon started"
         );
-        match server.run(handler, move || readiness.ready()).await {
+        watch_signals(server.shutdown_token());
+        // Taken by whichever comes first: readiness, or a failed reconcile.
+        let readiness = std::sync::Mutex::new(Some(readiness));
+        let take = || readiness.lock().ok().and_then(|mut slot| slot.take());
+        let served = server
+            .run(handler, || take().map_or(Ok(()), Readiness::ready))
+            .await;
+        match served {
             Ok(()) => 0,
             Err(error) => {
                 tracing::error!(%error, "daemon stopped with an error");
+                if let (devlanes_daemon::Error::Reconcile(message), Some(readiness)) =
+                    (&error, take())
+                {
+                    let _ = readiness.failed(message);
+                }
                 1
             }
         }
@@ -102,6 +115,31 @@ pub fn run() -> ExitCode {
     // watchers), which can keep a stopped daemon alive indefinitely; bound the wait.
     tokio.shutdown_timeout(std::time::Duration::from_secs(5));
     ExitCode::from(code)
+}
+
+/// SIGTERM and SIGINT (a service manager, logout, `kill`) shut the daemon down
+/// like `devlanes daemon stop`: units stop, exits are recorded, state.db closes.
+fn watch_signals(shutdown: CancellationToken) {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (mut term, mut interrupt) = match (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) {
+        (Ok(term), Ok(interrupt)) => (term, interrupt),
+        (Err(error), _) | (_, Err(error)) => {
+            tracing::warn!(%error, "signal handlers not installed; signals end the daemon without a shutdown");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let name = tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = interrupt.recv() => "SIGINT",
+            () = shutdown.cancelled() => return,
+        };
+        tracing::info!(signal = name, "shutting down");
+        shutdown.cancel();
+    });
 }
 
 /// The daemon never prints to stdout; everything goes to `logs/daemon.log`.
@@ -238,8 +276,8 @@ fn service_definition(
     #[cfg(not(target_os = "macos"))]
     {
         let path = home.join(".config/systemd/user/devlanes.service");
-        // KillMode=process: stopping the unit must not kill lanes (decision 16); the daemon
-        // decides what to stop on an explicit `devlanes daemon stop`.
+        // KillMode=process: systemd signals only the daemon, never the lanes' processes
+        // (decision 16); its SIGTERM is a graceful shutdown that stops units by policy.
         let unit = format!(
             "[Unit]\nDescription=devlanes daemon\n\n[Service]\nExecStart={exe} daemon run\nEnvironment=DEVLANES_HOME={home}\nKillMode=process\n\n[Install]\nWantedBy=default.target\n",
             exe = exe.display(),
@@ -376,6 +414,18 @@ pub fn utc_stamp(seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    /// SIGTERM cancels the server's shutdown token, the path `daemon stop` takes.
+    async fn sigterm_starts_the_graceful_shutdown() {
+        let shutdown = CancellationToken::new();
+        watch_signals(shutdown.clone());
+        rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)
+            .expect("signal");
+        tokio::time::timeout(std::time::Duration::from_secs(5), shutdown.cancelled())
+            .await
+            .expect("shutdown requested");
+    }
 
     #[test]
     /// Known instants, including a leap day.

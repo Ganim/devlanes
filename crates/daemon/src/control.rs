@@ -22,6 +22,7 @@ use crate::{
     lifecycle::{SpawnRequest, StartOptions},
     model::{EnvMap, Kind, lane_summary, lock, unit_summary},
     registry::{internal, store_error},
+    stream::LaneEvents,
 };
 
 /// `resume` parameters.
@@ -29,6 +30,13 @@ use crate::{
 struct ResumeParams {
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// Stream the starts' lane events on the request.
+    #[serde(default)]
+    events: bool,
+    /// Bypass the start gate, as `start --all-at-once` does. The lanes start
+    /// concurrently either way; without it they queue in the gate together.
+    #[serde(default)]
+    all_at_once: bool,
 }
 
 /// `lane.new` parameters.
@@ -37,6 +45,9 @@ struct LaneNewParams {
     branch: String,
     #[serde(default)]
     start: bool,
+    /// Stream the start's lane events on the request.
+    #[serde(default)]
+    events: bool,
 }
 
 /// `lane.clean` parameters.
@@ -89,27 +100,35 @@ impl Inner {
         self: &Arc<Self>,
         value: Value,
         context: &Context,
-        _session: &Session,
+        session: &Session,
     ) -> Result<Value, RpcError> {
+        // First of all: the start gate serves requests in the order they came in,
+        // whatever their lane lookup, infra or tasks take.
+        let arrival = self.arrive();
         let selection: Selection = params(value)?;
         let ((project, lane), selectors) = self.selection_lane(&selection.units, context).await?;
-        let result = self
-            .start_lane(
-                &project,
-                &lane,
-                StartOptions {
-                    selectors,
-                    profiles: selection.profile_names(),
-                    env: carries_env(context),
-                    overrides: selection.env.clone(),
-                    actor: context.actor.clone(),
-                    timeout: self.timeout(selection.timeout_ms),
-                    session: None,
-                    setup_only: false,
-                    all_at_once: selection.all_at_once,
-                },
-            )
-            .await?;
+        let start_id = self.new_start_id();
+        let stream = selection
+            .events
+            .then(|| LaneEvents::starts(vec![(project.clone(), lane.clone())], vec![start_id]));
+        let start = self.start_lane(
+            &project,
+            &lane,
+            StartOptions {
+                selectors,
+                profiles: selection.profile_names(),
+                env: carries_env(context),
+                overrides: selection.env.clone(),
+                actor: context.actor.clone(),
+                timeout: self.timeout(selection.timeout_ms),
+                session: None,
+                setup_only: false,
+                all_at_once: selection.all_at_once,
+                start_id: Some(start_id),
+                arrival,
+            },
+        );
+        let result = self.with_lane_events(session, stream, start).await?;
         serde_json::to_value(result).map_err(|e| internal("encode", e))
     }
 
@@ -121,13 +140,21 @@ impl Inner {
     ) -> Result<Value, RpcError> {
         let selection: Selection = params(value)?;
         let mut stopped: Vec<UnitSummary> = Vec::new();
+        // `stop --mine` across lanes: one lane's failure must not leave the rest running.
+        let mut errors: Vec<Value> = Vec::new();
         if selection.mine && selection.units.is_empty() && context.lane.is_none() {
             for (project, lane) in self.all_lanes() {
                 if lane.st().any_running() {
-                    stopped.extend(
-                        self.stop_lane(&project, &lane, None, Some(&context.actor))
-                            .await?,
-                    );
+                    match self
+                        .stop_lane(&project, &lane, None, Some(&context.actor))
+                        .await
+                    {
+                        Ok(units) => stopped.extend(units),
+                        Err(error) => errors.push(json!({
+                            "lane": lane.st().reference(&project.name()),
+                            "error": error,
+                        })),
+                    }
                 }
             }
         } else {
@@ -137,7 +164,12 @@ impl Inner {
             let mine = selection.mine.then_some(&context.actor);
             stopped = self.stop_lane(&project, &lane, selectors, mine).await?;
         }
-        serde_json::to_value(Page::complete(stopped)).map_err(|e| internal("encode", e))
+        let mut result =
+            serde_json::to_value(Page::complete(stopped)).map_err(|e| internal("encode", e))?;
+        if !errors.is_empty() {
+            result["errors"] = json!(errors);
+        }
+        Ok(result)
     }
 
     /// `restart`: stops and starts named units with fresh plans.
@@ -145,31 +177,37 @@ impl Inner {
         self: &Arc<Self>,
         value: Value,
         context: &Context,
-        _session: &Session,
+        session: &Session,
     ) -> Result<Value, RpcError> {
+        let arrival = self.arrive();
         let selection: Selection = params(value)?;
         if selection.units.is_empty() {
             return Err(RpcError::new("units_required", json!({}), 2));
         }
         let ((project, lane), selectors) = self.lane_for_units(&selection.units, context).await?;
-        let result = self
-            .restart_units(
-                &project,
-                &lane,
-                &selectors,
-                StartOptions {
-                    selectors: selectors.clone(),
-                    profiles: selection.profile_names(),
-                    env: carries_env(context),
-                    overrides: selection.env.clone(),
-                    actor: context.actor.clone(),
-                    timeout: self.timeout(selection.timeout_ms),
-                    session: None,
-                    setup_only: false,
-                    all_at_once: selection.all_at_once,
-                },
-            )
-            .await?;
+        let start_id = self.new_start_id();
+        let stream = selection
+            .events
+            .then(|| LaneEvents::starts(vec![(project.clone(), lane.clone())], vec![start_id]));
+        let restart = self.restart_units(
+            &project,
+            &lane,
+            &selectors,
+            StartOptions {
+                selectors: selectors.clone(),
+                profiles: selection.profile_names(),
+                env: carries_env(context),
+                overrides: selection.env.clone(),
+                actor: context.actor.clone(),
+                timeout: self.timeout(selection.timeout_ms),
+                session: None,
+                setup_only: false,
+                all_at_once: selection.all_at_once,
+                start_id: Some(start_id),
+                arrival,
+            },
+        );
+        let result = self.with_lane_events(session, stream, restart).await?;
         serde_json::to_value(result).map_err(|e| internal("encode", e))
     }
 
@@ -178,15 +216,17 @@ impl Inner {
         self: &Arc<Self>,
         value: Value,
         context: &Context,
-        _session: &Session,
+        session: &Session,
     ) -> Result<Value, RpcError> {
+        let arrival = self.arrive();
         let args: ResumeParams = params(value)?;
         let Some(env) = carries_env(context) else {
-            return Err(RpcError::new("needs_env", json!({}), 2));
+            return Err(RpcError::new("needs_env", json!({}), 1));
         };
-        let mut items = Vec::new();
-        for (project, lane) in self.all_lanes() {
-            let wanted = {
+        let wanted: Vec<LanePair> = self
+            .all_lanes()
+            .into_iter()
+            .filter(|(_, lane)| {
                 let st = lane.st();
                 st.present
                     && !st.services_alive()
@@ -194,33 +234,49 @@ impl Inner {
                         .record
                         .as_ref()
                         .is_some_and(|r| r.desired_state == DesiredState::Running)
-            };
-            if !wanted {
-                continue;
+            })
+            .collect();
+        let starts: Vec<u64> = wanted.iter().map(|_| self.new_start_id()).collect();
+        let stream = args
+            .events
+            .then(|| LaneEvents::starts(wanted.clone(), starts.clone()));
+        // Concurrently, under the one arrival of this request: the lanes queue in
+        // the start gate together instead of one after another's readiness.
+        let resume = async {
+            let results = futures_util::future::join_all(wanted.iter().zip(starts).map(
+                |((project, lane), start_id)| {
+                    self.start_lane(
+                        project,
+                        lane,
+                        StartOptions {
+                            selectors: Vec::new(),
+                            profiles: Vec::new(),
+                            env: Some(env.clone()),
+                            overrides: EnvMap::new(),
+                            actor: context.actor.clone(),
+                            timeout: self.timeout(args.timeout_ms),
+                            session: None,
+                            setup_only: false,
+                            all_at_once: args.all_at_once,
+                            start_id: Some(start_id),
+                            arrival,
+                        },
+                    )
+                },
+            ))
+            .await;
+            let mut items = Vec::new();
+            for result in results {
+                items.push(match result {
+                    Ok(result) => {
+                        serde_json::to_value(result).map_err(|e| internal("encode", e))?
+                    }
+                    Err(error) => json!({"lane": error.data.get("lane"), "error": error}),
+                });
             }
-            let result = self
-                .start_lane(
-                    &project,
-                    &lane,
-                    StartOptions {
-                        selectors: Vec::new(),
-                        profiles: Vec::new(),
-                        env: Some(env.clone()),
-                        overrides: EnvMap::new(),
-                        actor: context.actor.clone(),
-                        timeout: self.timeout(args.timeout_ms),
-                        session: None,
-                        setup_only: false,
-                        all_at_once: false,
-                    },
-                )
-                .await;
-            items.push(match result {
-                Ok(result) => serde_json::to_value(result).map_err(|e| internal("encode", e))?,
-                Err(error) => json!({"lane": error.data.get("lane"), "error": error}),
-            });
-        }
-        Ok(json!({"items": items, "truncated": false, "next_cursor": null}))
+            Ok(json!({"items": items, "truncated": false, "next_cursor": null}))
+        };
+        self.with_lane_events(session, stream, resume).await
     }
 
     /// `lane.new`: `git worktree add` under `lanes.worktree_dir`, then registration.
@@ -228,8 +284,9 @@ impl Inner {
         self: &Arc<Self>,
         value: Value,
         context: &Context,
-        _session: &Session,
+        session: &Session,
     ) -> Result<Value, RpcError> {
+        let arrival = self.arrive();
         let args: LaneNewParams = required(value)?;
         let project = self
             .project_for_cwd(&context.cwd)
@@ -288,23 +345,28 @@ impl Inner {
         let mut result = json!({"lane": summary});
         if args.start {
             let env = carries_env(context).or_else(|| project.st().last_env.clone());
-            let start = self
-                .start_lane(
-                    &project,
-                    &lane,
-                    StartOptions {
-                        selectors: Vec::new(),
-                        profiles: Vec::new(),
-                        env,
-                        overrides: EnvMap::new(),
-                        actor: context.actor.clone(),
-                        timeout: self.opts.start_timeout,
-                        session: None,
-                        setup_only: false,
-                        all_at_once: false,
-                    },
-                )
-                .await?;
+            let start_id = self.new_start_id();
+            let stream = args
+                .events
+                .then(|| LaneEvents::starts(vec![(project.clone(), lane.clone())], vec![start_id]));
+            let start = self.start_lane(
+                &project,
+                &lane,
+                StartOptions {
+                    selectors: Vec::new(),
+                    profiles: Vec::new(),
+                    env,
+                    overrides: EnvMap::new(),
+                    actor: context.actor.clone(),
+                    timeout: self.opts.start_timeout,
+                    session: None,
+                    setup_only: false,
+                    all_at_once: false,
+                    start_id: Some(start_id),
+                    arrival,
+                },
+            );
+            let start = self.with_lane_events(session, stream, start).await?;
             result["start"] = serde_json::to_value(start).map_err(|e| internal("encode", e))?;
         }
         Ok(result)
@@ -339,16 +401,24 @@ impl Inner {
             let _ = self.relist(&project).await;
         }
         let mut cleaned = Vec::new();
+        let mut kept_running = Vec::new();
         for (project, lane) in self.all_lanes() {
-            let (present, assigned, reference) = {
+            let (present, assigned, reference, running) = {
                 let st = lane.st();
                 (
                     st.present,
                     st.record.is_some(),
                     st.reference(&project.name()),
+                    st.any_running() || st.busy.is_some(),
                 )
             };
             if present {
+                continue;
+            }
+            // A presence flag can be wrong (a re-list from elsewhere, a racing
+            // watcher); a lane that runs something is never collected.
+            if running {
+                kept_running.push(reference);
                 continue;
             }
             if assigned {
@@ -410,7 +480,7 @@ impl Inner {
         for project in self.all_projects() {
             self.refresh_views(&project).await;
         }
-        Ok(json!({"cleaned": cleaned, "offsets_removed": removed}))
+        Ok(json!({"cleaned": cleaned, "kept_running": kept_running, "offsets_removed": removed}))
     }
 
     /// `exec`: an ad-hoc unit in the cwd's lane (kind `exec`).
@@ -435,6 +505,31 @@ impl Inner {
             ));
         }
         let (project, lane) = self.target_lane(context).await?;
+        // An exec unit under a configured name would take that unit's place: its
+        // logs, its stop and the next start of the real one.
+        let taken = {
+            let st = lane.st();
+            let config = st.config.loaded();
+            let service = config.is_some_and(|c| c.services.contains_key(&args.name))
+                || st
+                    .view
+                    .as_ref()
+                    .is_some_and(|view| view.services.iter().any(|s| s.unit == args.name));
+            let task = config.is_some_and(|c| c.tasks.contains_key(&args.name));
+            match (service, task) {
+                (true, _) => Some("service"),
+                (_, true) => Some("task"),
+                _ => None,
+            }
+            .map(|kind| (kind, st.reference(&project.name())))
+        };
+        if let Some((kind, reference)) = taken {
+            return Err(RpcError::new(
+                "name_taken",
+                json!({"name": args.name, "kind": kind, "lane": reference}),
+                2,
+            ));
+        }
         if let Some(env) = carries_env(context) {
             lane.st().env = Some(env.clone());
             project.st().last_env = Some(env);
@@ -545,6 +640,8 @@ impl Inner {
             let name = run.task.clone();
             let (task_project, task_lane) = (project.clone(), lane.clone());
             let resolved = resolved.clone();
+            // Ends with the daemon; `stop` of the task's unit ends it otherwise.
+            let cancel = self.shutdown.child_token();
             tokio::spawn(async move {
                 let _ = engine
                     .run_task(
@@ -555,6 +652,7 @@ impl Inner {
                         "manual",
                         &actor,
                         None,
+                        &cancel,
                         0,
                     )
                     .await;
@@ -581,23 +679,39 @@ impl Inner {
                 "detached": run.detach && !task.interactive,
             }));
         }
-        let limit = args.timeout_ms.map(Duration::from_millis);
-        let future = self.run_task(
-            &project,
-            &lane,
-            &resolved,
-            &run.task,
-            "manual",
-            &context.actor,
-            Some(session),
-            0,
-        );
-        let outcome = match limit {
-            Some(limit) => tokio::time::timeout(limit, future)
-                .await
-                .map_err(|_| RpcError::new("timeout", json!({"task": run.task}), 124))??,
-            None => future.await?,
-        };
+        // The limit fires the task's token, so `run_task` itself stops the unit,
+        // finishes the row and emits the closing event before it returns.
+        let cancel = self.shutdown.child_token();
+        let timer = args.timeout_ms.map(|ms| {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                cancel.cancel();
+            })
+        });
+        let outcome = self
+            .run_task(
+                &project,
+                &lane,
+                &resolved,
+                &run.task,
+                "manual",
+                &context.actor,
+                Some(session),
+                &cancel,
+                0,
+            )
+            .await;
+        if let Some(timer) = timer {
+            timer.abort();
+        }
+        // Only the timer fires this token, unless the daemon is shutting down; a
+        // task that succeeded just as it fired still succeeded.
+        let succeeded = matches!(&outcome, Ok(outcome) if outcome.code == Some(0));
+        if cancel.is_cancelled() && !self.shutdown.is_cancelled() && !succeeded {
+            return Err(RpcError::new("timeout", json!({"task": run.task}), 124));
+        }
+        let outcome = outcome?;
         let mut result = json!({
             "task": run.task,
             "lane": reference,
@@ -733,7 +847,11 @@ impl Inner {
                 json!({"processes": self.all_lanes().iter().map(|(_, l)| l.st().units.values().filter(|u| u.host.is_alive()).count()).sum::<usize>(), "flag": "--yes"}),
             ));
         }
-        let stopped = self.stop_everything().await;
+        // Every lane stays locked until the reset is done, so no start spawns a
+        // unit after the stop and before the records it would need are gone.
+        let lanes = self.all_lanes();
+        let _ops = self.lock_lanes(&lanes).await;
+        let stopped = Self::stop_lanes_locked(&lanes).await;
         // The reset would erase the only record of orphans (of known and unknown
         // lanes) and their escaped descendants, so they are terminated first.
         let terminated = self.end_recorded_runs().await?;
@@ -742,6 +860,13 @@ impl Inner {
         }
         // A refused reset leaves the loaded projects in place.
         self.store.reset().await.map_err(store_error)?;
+        // A start waiting for one of these lanes finds it unassigned once it runs.
+        for (_, lane) in &lanes {
+            let mut st = lane.st();
+            st.record = None;
+            st.units.clear();
+            st.orphans.clear();
+        }
         lock(&self.projects).clear();
         self.secrets.forget(None);
         self.publish_routes();
@@ -879,6 +1004,7 @@ impl Inner {
                         "suggestion": data["suggestion"],
                     }));
                 }
+                list.extend(self.config_check_warnings(&st.reference(&project.name()), &st));
             }
         }
         Ok(json!({"project": report.project, "path": file, "warnings": warnings}))

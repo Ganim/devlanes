@@ -45,19 +45,20 @@ impl EventBus {
         }
     }
 
-    /// Publishes an event; having no subscribers is normal.
+    /// Publishes an event; having no subscribers is normal. The sequence number
+    /// is taken and the event sent under one lock, so subscribers receive events
+    /// in sequence order even when several threads emit at once.
     pub fn emit(&self, name: &str, data: Value) {
+        let mut recent = crate::model::lock(&self.recent);
         let event = Event {
             seq: self.seq.fetch_add(1, Ordering::Relaxed),
             event: name.to_owned(),
             data,
         };
-        if let Ok(mut recent) = self.recent.lock() {
-            if recent.len() == RECENT {
-                recent.pop_front();
-            }
-            recent.push_back(event.clone());
+        if recent.len() == RECENT {
+            recent.pop_front();
         }
+        recent.push_back(event.clone());
         let _ = self.sender.send(event);
     }
 
@@ -84,18 +85,23 @@ impl EventBus {
         self.forward_from(session, |_| Vec::new(), filter).await;
     }
 
-    /// Like [`Self::forward`], but subscribes first and then sends `initial`
-    /// (built with the current sequence number) to this session only, so a
-    /// snapshot never misses a change and other subscribers never see it.
+    /// Like [`Self::forward`], but subscribes first and then sends `initial` to
+    /// this session only, so a snapshot never misses a change and other
+    /// subscribers never see it. `initial` gets a sequence number of its own,
+    /// after every event the subscription missed and before every one it gets.
     pub async fn forward_from(
         &self,
         session: &Session,
         initial: impl FnOnce(u64) -> Vec<Event>,
         filter: impl Fn(&Event) -> bool,
     ) {
-        let mut receiver = self.subscribe();
+        let (mut receiver, seq) = {
+            // Emits take their number under this lock, so none falls in between.
+            let _emits = crate::model::lock(&self.recent);
+            (self.subscribe(), self.seq.fetch_add(1, Ordering::Relaxed))
+        };
         let disconnected = session.disconnected();
-        for event in initial(self.seq.load(Ordering::Relaxed)) {
+        for event in initial(seq) {
             if session.event(event).await.is_err() {
                 return;
             }
@@ -119,5 +125,38 @@ impl EventBus {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    /// Events emitted from many threads at once arrive in sequence order.
+    fn concurrent_emits_arrive_in_sequence_order() {
+        let bus = std::sync::Arc::new(EventBus::with_capacity(64 * 1024));
+        let mut receiver = bus.subscribe();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let bus = bus.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..2000 {
+                        bus.emit("test", Value::Null);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("emitter");
+        }
+        let mut last = 0;
+        let mut count = 0;
+        while let Ok(event) = receiver.try_recv() {
+            assert!(event.seq > last, "{} after {last}", event.seq);
+            last = event.seq;
+            count += 1;
+        }
+        assert_eq!(count, 16_000);
     }
 }

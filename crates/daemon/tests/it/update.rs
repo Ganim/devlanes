@@ -202,6 +202,68 @@ async fn failures_keep_the_cached_release() {
     .expect("timed out");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+/// Through the socket, `daemon.status` carries the engine's release check for
+/// a client of the same protocol, and the frozen fields alone for another.
+async fn daemon_status_through_the_server_reports_the_release() {
+    use devlanes_proto::{Hello, Outcome};
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let tmp = crate::temp();
+        let (url, _) = manifest_server("200 OK", json!({"version": "99.0.0"}).to_string()).await;
+        let engine = engine(&tmp.path.join("home"), checks(&url, Duration::ZERO), true).await;
+        status_until(&engine, |s| s.get("update").is_some()).await;
+        let options = devlanes_daemon::Options {
+            home: tmp.path.join("srv"),
+            socket: tmp.path.join("srv/run/d.sock"),
+        };
+        let socket = options.socket.clone();
+        let server = devlanes_daemon::Server::bind(options).await.expect("bind");
+        let token = server.shutdown_token();
+        let handler: Arc<dyn Handler> = Arc::new(engine.clone());
+        let running = tokio::spawn(server.run(handler, || Ok(())));
+
+        let mut same = crate::server::client(&socket).await;
+        let Outcome::Ok { data } = crate::server::request(
+            &mut same,
+            1,
+            Method::DaemonStatus,
+            json!({}),
+            Context::default(),
+        )
+        .await
+        else {
+            panic!("daemon.status");
+        };
+        assert_eq!(data["update"]["latest"], "99.0.0", "{data}");
+        assert_eq!(data["release_check"]["state"], "ok", "{data}");
+        assert!(data["managed_processes"].is_u64() && data["socket"].is_string());
+
+        let mut newer = Hello::current(0);
+        newer.protocol += 1;
+        let mut other = crate::server::client_with(&socket, newer).await;
+        let Outcome::Ok { data } = crate::server::request(
+            &mut other,
+            2,
+            Method::DaemonStatus,
+            json!({}),
+            Context::default(),
+        )
+        .await
+        else {
+            panic!("frozen daemon.status");
+        };
+        assert!(data.get("release_check").is_none(), "{data}");
+        assert!(data.get("update").is_none(), "{data}");
+        assert!(data["version"].is_string() && data["pid"].is_u64());
+
+        token.cancel();
+        running.await.expect("join").expect("clean shutdown");
+    })
+    .await
+    .expect("timed out");
+}
+
 #[tokio::test]
 async fn disabled_checks_make_no_request() {
     tokio::time::timeout(Duration::from_secs(30), async {

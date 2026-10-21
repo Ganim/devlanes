@@ -91,13 +91,37 @@ impl Inner {
         lane: &Arc<LaneRt>,
         fallback: Option<Arc<EnvMap>>,
     ) -> Result<Arc<ResolvedLane>, RpcError> {
+        self.resolve_planned(project, lane, fallback, None).await
+    }
+
+    /// Like [`Self::resolve_full`], against `config` instead of the lane's current
+    /// one: a start keeps planning what it selected even if the file reloads.
+    pub(crate) async fn resolve_config(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        lane: &Arc<LaneRt>,
+        config: Arc<devlanes_config::ProjectConfig>,
+    ) -> Result<Arc<ResolvedLane>, RpcError> {
+        self.resolve_planned(project, lane, None, Some(config))
+            .await
+    }
+
+    /// Shared body of the resolve methods; `config` overrides the lane's.
+    async fn resolve_planned(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        lane: &Arc<LaneRt>,
+        fallback: Option<Arc<EnvMap>>,
+        config: Option<Arc<devlanes_config::ProjectConfig>>,
+    ) -> Result<Arc<ResolvedLane>, RpcError> {
         let reference = lane.st().reference(&project.name());
         let (config, allocation, env, overrides, profiles, infra_ns, index) = {
             let st = lane.st();
-            let config = match &st.config {
-                ConfigState::Loaded(config) => config.clone(),
-                ConfigState::Invalid(error) => return Err(error.clone()),
-                ConfigState::Missing => {
+            let config = match (config, &st.config) {
+                (Some(config), _) => config,
+                (None, ConfigState::Loaded(config)) => config.clone(),
+                (None, ConfigState::Invalid(error)) => return Err(error.clone()),
+                (None, ConfigState::Missing) => {
                     return Err(RpcError::new("no_config", json!({"lane": reference}), 1));
                 }
             };

@@ -340,7 +340,9 @@ fn script_remaps_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
 #[schemars(extend("examples" = ["api.${{ lane.domain }}",{"host":"*.${{ lane.domain }}","fallback":true}]))]
 /// Hostname routed by the HTTP proxy, optionally with route settings.
 pub enum HostConfig {
-    /// Hostname routed to the service's primary port.
+    /// Hostname routed to the service's primary port. Dot-separated labels of letters,
+    /// digits and inner hyphens, with an optional leading `*.` wildcard; case and a
+    /// trailing dot are ignored.
     #[schemars(extend("examples" = ["api.${{ lane.domain }}"]))]
     Name(Templated<String>),
     /// Hostname with optional named port, fallback, and Host-header policy.
@@ -353,7 +355,8 @@ pub enum HostConfig {
 #[schemars(extend("examples" = [{"host":"inspect.${{ lane.domain }}","port":"inspector"},{"host":"*.${{ lane.domain }}","fallback":true}]))]
 /// HTTP proxy route to a service or container port.
 pub struct HostRoute {
-    /// Exact hostname or wildcard pattern, evaluated for the current lane.
+    /// Exact hostname or `*.` wildcard pattern, evaluated for the current lane. Labels
+    /// hold letters, digits and inner hyphens; case and a trailing dot are ignored.
     #[schemars(extend("examples" = ["api.${{ lane.domain }}","*.${{ lane.domain }}"]))]
     pub host: Templated<String>,
     #[schemars(extend("examples" = ["inspector"]))]

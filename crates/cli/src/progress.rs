@@ -3,7 +3,7 @@
 //! binary follows events and writes the bar.
 
 use devlanes_proto::{Method, Request};
-use devlanes_term::{ProgressMode, StartScope, StartTracker, Wrap, progress_support};
+use devlanes_term::{ProgressMode, StartTracker, Wrap, progress_support};
 use serde_json::Value;
 
 use crate::{OutputMode, Runtime};
@@ -13,12 +13,9 @@ pub const ERROR_HOLD: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The tracker for a request that follows a start: `start`, `restart`,
 /// `lane resume`, `lane new --start` and `wait`. `None` for everything else.
+/// It reads the request's own lane events, which the daemon limits to the
+/// request's lanes and starts, so it needs no lane of its own.
 pub fn start_tracker(request: &Request) -> Option<StartTracker> {
-    let context = &request.context;
-    let scope = || match &context.lane {
-        Some(lane) => StartScope::Lane(lane.clone()),
-        None => StartScope::Cwd(context.cwd.clone()),
-    };
     let units = || -> Vec<String> {
         request
             .params
@@ -34,23 +31,17 @@ pub fn start_tracker(request: &Request) -> Option<StartTracker> {
             .unwrap_or_default()
     };
     match request.method {
-        Method::Start | Method::Restart => Some(StartTracker::command(scope()).with_units(units())),
-        // Every lane that should be running, or a lane that does not exist yet.
-        Method::Resume => Some(StartTracker::command(StartScope::Any)),
+        Method::Start | Method::Restart => Some(StartTracker::command().with_units(units())),
+        Method::Resume => Some(StartTracker::command()),
         Method::LaneNew if request.params.get("start").and_then(Value::as_bool) == Some(true) => {
-            Some(StartTracker::command(StartScope::Any))
+            Some(StartTracker::command())
         }
-        Method::Wait => {
-            let target = request.params.get("target").and_then(Value::as_str)?;
-            Some(match target.split_once(':') {
-                Some((lane, _)) => StartTracker::command(StartScope::Lane(lane.to_owned()))
-                    .with_units(vec![target.to_owned()]),
-                None if target.contains('@') => {
-                    StartTracker::command(StartScope::Lane(target.to_owned()))
-                }
-                None => StartTracker::command(scope()).with_units(vec![target.to_owned()]),
-            })
-        }
+        // The daemon streams only the unit a unit target names.
+        Method::Wait => request
+            .params
+            .get("target")
+            .and_then(Value::as_str)
+            .map(|_| StartTracker::command()),
         _ => None,
     }
 }

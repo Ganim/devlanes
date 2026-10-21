@@ -54,6 +54,7 @@ ports:
 - Client environments, `secrets unlock` values and secret-provider output stay in memory. After a daemon restart, lanes that should run report `needs_env` until a `start` or `lane resume` from a shell.
 - At startup, unfinished `unit_runs` are killed only when the recorded PID still has the recorded start time; containers are re-adopted by label and never stopped.
 - Every service start, replicas and restarts included, waits for a slot from the start gate (`pacing.rs`). Waiting units are `queued` in `status` and `debug why`; `stop` withdraws them, and `Selection.all_at_once` skips the gate for one request. A start whose timeout passes while units are still queued returns `timed_out`, and those units start when their slot comes. A `lane.warning` event reports when the units being started usually peak above the available memory.
+- Each start and restart gets a `start_id`, on its `lane.phase` events and its `StartResult`; `services:started` lists in `units` the units it spawns. `start`, `restart`, `resume`, `lane.new` and `wait` given `"events": true` stream their lanes' `lane.phase` (own starts only), `task`, `unit.changed` and `lane.changed` events on the request (`stream.rs`), so a client needs no `subscribe` connection.
 
 Lane discovery and port blocks are in `registry.rs`, the start pipeline and stop/restart/clean in `lifecycle.rs`, method handlers in `control.rs` and `query.rs`, startup reconciliation in `reconcile.rs`. Integration tests with fake runner, infra and process table are in `tests/it/`.
 

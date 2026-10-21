@@ -38,7 +38,7 @@ fn draw(tty: bool, tracker: &StartTracker) -> std::io::Result<()> {
 - `Progress::sequence` encodes `OSC 9;4` (`ESC ] 9 ; 4 ; state ; percent ESC \`).
 - `progress_support` decides whether to draw the bar from the setting, the TTY and the environment.
 - `ProgressBar` writes it and clears it on drop, including while a panic unwinds.
-- `StartTracker` turns `status` and `subscribe` events into progress: ready services over the services in the start.
+- `StartTracker` turns lane events into progress: ready services over the units the start's `services:started` event plans, newest `start_id` per lane. `command()` reads the events a start request streams; `viewer()` reads `subscribe` and `status` for the TUI.
 
 ## Progress bar
 

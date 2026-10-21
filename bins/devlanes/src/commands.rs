@@ -401,6 +401,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                     answer_prompt(&mut client, &event).await?;
                 }
                 Frame::Control(Control::Event(event)) => {
+                    progress.event(&event);
                     let rendered = match log_stream.as_mut() {
                         Some(stream) => stream.event(&event),
                         None => reporter.event(method, &event),

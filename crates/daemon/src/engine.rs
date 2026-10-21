@@ -88,6 +88,8 @@ pub(crate) struct Inner {
     pub attach: Mutex<crate::attach::AttachTable>,
     pub metrics: Mutex<crate::sampler::MetricsState>,
     pub next_stream: AtomicU64,
+    /// Next `start_id` for `lane.phase` events and start results.
+    pub next_start: AtomicU64,
     pub remote: crate::remote::Remotes,
     pub pacing: crate::pacing::Pacing,
     /// Embedded DNS server state for `doctor` (`null` without the resolver strategy).
@@ -96,6 +98,8 @@ pub(crate) struct Inner {
     pub last_prune: Mutex<Option<crate::maintenance::LastPrune>>,
     /// The latest release the background check read.
     pub update: crate::update::UpdateState,
+    /// Coalesces route snapshots for the proxy and `/etc/hosts`.
+    pub route_publisher: crate::routes::RoutePublisher,
 }
 
 /// Cheap handle implementing [`Handler`].
@@ -128,11 +132,13 @@ impl Engine {
                 attach: Mutex::new(crate::attach::AttachTable::default()),
                 metrics: Mutex::new(crate::sampler::MetricsState::default()),
                 next_stream: AtomicU64::new(1),
+                next_start: AtomicU64::new(1),
                 remote: crate::remote::Remotes::default(),
                 pacing: crate::pacing::Pacing::default(),
                 dns: Mutex::new(Value::Null),
                 last_prune: Mutex::new(None),
                 update: crate::update::UpdateState::default(),
+                route_publisher: crate::routes::RoutePublisher::default(),
             }),
         }
     }
@@ -178,6 +184,9 @@ impl Handler for Engine {
     /// Stops every unit with its stop policy; containers keep running. Records
     /// the exits, then closes state.db so its WAL is checkpointed before exit.
     async fn shutdown(&self) -> Result<(), RpcError> {
+        // Usually the server's token already fired; an embedder may call this
+        // directly. Either way, new mutations and spawns are refused from here on.
+        self.inner.shutdown.cancel();
         self.inner.remote_shutdown().await;
         let stopped = self.inner.stop_everything().await;
         tracing::info!(stopped, "daemon shutdown stopped units");
@@ -240,6 +249,38 @@ pub(crate) fn reference_error(error: ReferenceError) -> RpcError {
     }
 }
 
+/// Methods that change lanes, units, infra or state; refused once shutdown began.
+fn mutating(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::DaemonResetState
+            | Method::Start
+            | Method::Stop
+            | Method::Restart
+            | Method::Resume
+            | Method::LaneNew
+            | Method::LaneClean
+            | Method::LaneGc
+            | Method::Exec
+            | Method::Run
+            | Method::InfraUp
+            | Method::InfraDown
+            | Method::Unlock
+            | Method::Connect
+            | Method::Disconnect
+            | Method::HostsRetry
+    )
+}
+
+/// The daemon is shutting down: it stops everything itself and takes no new work.
+pub(crate) fn daemon_stopping() -> RpcError {
+    RpcError::new(
+        "daemon_stopping",
+        json!({"message": "the daemon is shutting down; retry once it is gone"}),
+        4,
+    )
+}
+
 /// Error for operations that need `--yes`.
 pub(crate) fn confirmation(data: Value) -> RpcError {
     RpcError::new("confirmation_required", data, 2)
@@ -285,6 +326,9 @@ impl Inner {
             context,
             ..
         } = request;
+        if self.shutdown.is_cancelled() && mutating(&method) {
+            return Err(daemon_stopping());
+        }
         match method {
             Method::DaemonStatus => Ok(self.with_update(json!({
                 "version": env!("CARGO_PKG_VERSION"),
@@ -313,7 +357,7 @@ impl Inner {
             Method::TaskList => self.task_list(&context).await,
             Method::ProfileList => self.profile_list(&context).await,
             Method::Logs => self.logs_method(params, &context, &session).await,
-            Method::Wait => self.wait_method(params, &context).await,
+            Method::Wait => self.wait_method(params, &context, &session).await,
             Method::Attach => self.attach_method(params, &context, &session).await,
             Method::Input => Err(RpcError::new(
                 "bad_request",

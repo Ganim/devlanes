@@ -506,11 +506,14 @@ fn reason_text(reason: &Value) -> Option<String> {
 }
 
 /// A finished start phase: `✓ infra`, `✗ setup: reason`, `! seed skipped: reason`.
-/// Phases skipped because the project has nothing for them print nothing.
+/// Phases skipped because the project has nothing for them print nothing, and
+/// so do finished task and services phases: their task lines and the result's
+/// services line already say it.
 pub(super) fn phase_line(data: &Value, cx: &Ctx<'_>) -> Option<String> {
     let phase = text(data, "phase");
     let reason = data.get("reason").and_then(reason_text);
     match text(data, "state").as_str() {
+        "done" if matches!(phase.as_str(), "tasks" | "services" | "after-services") => None,
         "done" => Some(format!("{} {phase}", cx.mark(Outcome::Ok))),
         "failed" => Some(format!(
             "{} {phase}{}",
@@ -622,11 +625,53 @@ impl Check {
     }
 }
 
+/// Why a bound listener kind is not serving, from its `listeners`: each stopped
+/// accept loop and each pending accept error with its count.
+fn not_serving(entry: &Value) -> String {
+    let problems: Vec<String> = list(entry, "listeners")
+        .iter()
+        .filter_map(|listener| {
+            let address = text(listener, "address");
+            let errors = int(listener, "accept_errors").unwrap_or(0);
+            match listener.get("last_error").and_then(Value::as_str) {
+                Some(error) => Some(format!(
+                    "{address}: {} ({})",
+                    clean(error),
+                    plural(usize::try_from(errors).unwrap_or(0), "accept error")
+                )),
+                None if listener.get("running").and_then(Value::as_bool) == Some(false) => {
+                    Some(format!("{address} stopped accepting connections"))
+                }
+                None => None,
+            }
+        })
+        .collect();
+    if problems.is_empty() {
+        "no listener is running".into()
+    } else {
+        problems.join("; ")
+    }
+}
+
 /// Listener checks for `http` or `https`.
 fn listener(proxy: &Value, name: &'static str) -> Option<Check> {
     let entry = proxy.get(name)?;
     if entry.get("bound").and_then(Value::as_bool) == Some(true) {
         let port = display_value(&entry["port"]);
+        // Bound once is not enough: an accept loop can stop or keep failing.
+        if entry.get("serving").and_then(Value::as_bool) == Some(false) {
+            return Some(
+                Check::new(
+                    "proxy",
+                    Outcome::Fail,
+                    format!(
+                        "{name} on port {port} is not serving: {}",
+                        not_serving(entry)
+                    ),
+                )
+                .fix("devlanes daemon restart; if it persists, devlanes daemon logs"),
+            );
+        }
         return Some(match entry.get("fallback_reason").and_then(Value::as_str) {
             Some(reason) => Check::new(
                 "proxy",
@@ -788,6 +833,28 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
             .fix("devlanes certs trust"),
         );
     }
+    // Routed hosts the CA cannot certify: HTTPS fails for them, plain HTTP works.
+    for warning in list(data, "ca_warnings") {
+        let warning_data = &warning["data"];
+        let line = words::lane_warning(&text(warning, "code"), warning_data);
+        let lane = text(warning_data, "lane");
+        let unit = text(warning_data, "unit");
+        let owner = match (lane.is_empty(), unit.is_empty()) {
+            (false, false) => format!(" ({lane}:{unit})"),
+            (false, true) => format!(" ({lane})"),
+            _ => String::new(),
+        };
+        let check = Check::new("tls", Outcome::Skip, format!("{line}{owner}"));
+        checks.push(match warning_data.get("fix").and_then(Value::as_str) {
+            Some(fix) => check.fix(clean(fix)),
+            None => check,
+        });
+    }
+    // Hostnames two lanes claim, invalid ones, and entries the proxy dropped.
+    for line in super::lanes::route_warnings(data) {
+        let line = line.strip_prefix("warning: ").unwrap_or(&line).to_owned();
+        checks.push(Check::new("proxy", Outcome::Skip, line));
+    }
     let hosts = &data["hosts"];
     if hosts.is_object() {
         let mode = text(hosts, "mode");
@@ -830,7 +897,11 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
                 ),
             ));
         }
+        if let Some(check) = helper_check(hosts) {
+            checks.push(check);
+        }
     }
+    checks.extend(user_config_checks(&data["user_config"]));
     checks.push(Check::new(
         "daemon",
         Outcome::Ok,
@@ -852,6 +923,76 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
             cx.runtime.reason
         ),
     ));
+    checks
+}
+
+/// `hosts.helper` (`{state, level, installed, expected, fix}`, `null` before the
+/// daemon checked it). A failed write that already blames the helper version says
+/// the same, so it is not repeated.
+fn helper_check(hosts: &Value) -> Option<Check> {
+    let helper = hosts.get("helper").filter(|helper| helper.is_object())?;
+    if text(&hosts["last_error"], "code") == "helper_version_mismatch" {
+        return None;
+    }
+    if text(helper, "level") == "ok" {
+        return Some(Check::new(
+            "hosts",
+            Outcome::Ok,
+            format!("hosts helper {}", text(helper, "installed")),
+        ));
+    }
+    let fix = helper
+        .get("fix")
+        .and_then(Value::as_str)
+        .map_or_else(|| "devlanes certs trust --hosts".to_owned(), clean);
+    Some(Check::new("hosts", Outcome::Skip, words::helper_mismatch(helper)).fix(fix))
+}
+
+/// `user_config` (`{path, valid, error {message, file, line, column}, warnings}`):
+/// an invalid file fails with its location; ignored settings warn.
+fn user_config_checks(config: &Value) -> Vec<Check> {
+    if !config.is_object() {
+        return Vec::new();
+    }
+    let path = text(config, "path");
+    let mut checks = Vec::new();
+    if config.get("valid").and_then(Value::as_bool) == Some(false) {
+        let error = &config["error"];
+        let file = match text(error, "file") {
+            file if file.is_empty() => path.clone(),
+            file => file,
+        };
+        let location = match (int(error, "line"), int(error, "column")) {
+            (Some(line), Some(column)) => format!("{file}:{line}:{column}"),
+            (Some(line), None) => format!("{file}:{line}"),
+            _ => file,
+        };
+        checks.push(
+            Check::new(
+                "config",
+                Outcome::Fail,
+                format!("user config {location}: {}", text(error, "message")),
+            )
+            .fix(format!("edit {path}, then devlanes daemon restart")),
+        );
+    } else {
+        checks.push(Check::new(
+            "config",
+            Outcome::Ok,
+            format!("user config {path}"),
+        ));
+    }
+    for warning in list(config, "warnings") {
+        checks.push(Check::new(
+            "config",
+            Outcome::Skip,
+            format!(
+                "user config {}: {}",
+                text(warning, "path"),
+                text(warning, "message")
+            ),
+        ));
+    }
     checks
 }
 
@@ -1001,6 +1142,8 @@ pub(super) fn config_check(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
                     known.join(", ")
                 )
             }
+            // `{path, code, host, suggestion, message}`, worded like start's warning.
+            "host_outside_ca" => words::lane_warning("host_outside_ca", warning),
             _ => text(warning, "message"),
         };
         lines.push(format!(

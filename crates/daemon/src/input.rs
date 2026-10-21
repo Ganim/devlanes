@@ -4,7 +4,7 @@
 //! order per stream; a full queue drops its oldest input and tells the client.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -30,6 +30,8 @@ struct State {
     closed: bool,
     /// An overflow warning went out and the queue has not emptied since.
     warned: bool,
+    /// The attach stream ended: the writer leaves once the queue is empty.
+    ended: bool,
 }
 
 /// One stream's queue and the signal that wakes its writer.
@@ -44,6 +46,8 @@ pub(crate) struct Inputs {
     handler: Arc<dyn Handler>,
     session: Session,
     streams: HashMap<u64, Arc<Queue>>,
+    /// Streams that ended; their late input is dropped without a new writer.
+    ended: HashSet<u64>,
 }
 
 impl Inputs {
@@ -53,11 +57,31 @@ impl Inputs {
             handler,
             session,
             streams: HashMap::new(),
+            ended: HashSet::new(),
         }
+    }
+
+    /// The attach stream `stream_id` ended (its unit exited): drops its queue,
+    /// and its writer once that delivered what was already queued.
+    pub(crate) fn end(&mut self, stream_id: u64) {
+        self.ended.insert(stream_id);
+        if let Some(queue) = self.streams.remove(&stream_id) {
+            lock(&queue.state).ended = true;
+            queue.ready.notify_one();
+        }
+    }
+
+    /// How many streams still have a queue (tests).
+    #[cfg(test)]
+    fn queues(&self) -> usize {
+        self.streams.len()
     }
 
     /// Queues `data` for `stream_id` without waiting on the unit.
     pub(crate) fn push(&mut self, stream_id: u64, data: Bytes) {
+        if self.ended.contains(&stream_id) {
+            return;
+        }
         let queue = self
             .streams
             .entry(stream_id)
@@ -130,7 +154,7 @@ async fn dropped(session: &Session, stream_id: u64, code: &str, frames: usize, b
 async fn write(queue: Arc<Queue>, stream_id: u64, handler: Arc<dyn Handler>, session: Session) {
     let disconnected = session.disconnected();
     loop {
-        let next = {
+        let (next, ended) = {
             let mut state = lock(&queue.state);
             let next = state.items.pop_front();
             if let Some(data) = &next {
@@ -138,8 +162,11 @@ async fn write(queue: Arc<Queue>, stream_id: u64, handler: Arc<dyn Handler>, ses
             } else {
                 state.warned = false;
             }
-            next
+            (next, state.ended)
         };
+        if next.is_none() && ended {
+            return;
+        }
         let Some(data) = next else {
             tokio::select! {
                 () = queue.ready.notified() => continue,
@@ -162,5 +189,67 @@ async fn write(queue: Arc<Queue>, stream_id: u64, handler: Arc<dyn Handler>, ses
             dropped(&session, stream_id, &error.code, frames, bytes).await;
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devlanes_proto::{Request, RpcError};
+    use serde_json::Value;
+
+    /// Records the input it gets.
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<(u64, Bytes)>>);
+
+    #[async_trait::async_trait]
+    impl Handler for Recorder {
+        fn managed_processes(&self) -> usize {
+            0
+        }
+        async fn reconcile(&self) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn handle(&self, _: Request, _: Session) -> Result<Value, RpcError> {
+            Ok(Value::Null)
+        }
+        async fn input(&self, stream_id: u64, data: Bytes, _: Session) -> Result<(), RpcError> {
+            lock(&self.0).push((stream_id, data));
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), RpcError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    /// An ended stream's idle queue and writer go away, and its late input
+    /// starts no new writer; other streams keep theirs.
+    async fn ended_streams_drop_their_queue_and_writer() {
+        let recorder = Arc::new(Recorder::default());
+        let (session, _frames) = Session::local(1);
+        let mut inputs = Inputs::new(recorder.clone(), session);
+        inputs.push(1, Bytes::from_static(b"a"));
+        inputs.push(2, Bytes::from_static(b"b"));
+        let queue = Arc::downgrade(&inputs.streams[&1]);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while lock(&recorder.0).len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("input delivered");
+
+        inputs.end(1);
+        assert_eq!(inputs.queues(), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while queue.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the writer of the ended stream left");
+        inputs.push(1, Bytes::from_static(b"late"));
+        assert_eq!(inputs.queues(), 1, "no queue for an ended stream");
     }
 }

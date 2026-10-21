@@ -20,5 +20,5 @@ mod server;
 
 pub use health::ListenerHealth;
 pub use listener::{BoundListeners, bind_listeners};
-pub use routes::{HostHeader, Route, RouteError, RouteState, RouteTable, Upstream};
+pub use routes::{HostHeader, Rejected, Route, RouteError, RouteState, RouteTable, Upstream};
 pub use server::{Proxy, ProxyConfig, ProxyLimits, is_loopback};

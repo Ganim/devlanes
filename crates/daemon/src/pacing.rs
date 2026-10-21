@@ -171,10 +171,10 @@ impl Inner {
     /// the deadline keep their place and spawn later; they count as started and
     /// the start reports a timeout.
     ///
-    /// The request's place in line is taken when its services phase begins,
-    /// before the baseline lookups. Earlier phases (infra, setup, tasks) run
-    /// before that, so a request that arrived earlier but has slow infra can
-    /// see a later request's services go first.
+    /// The request's place in line is the one `start` took when the request
+    /// arrived ([`StartCx::arrival`]), so requests are served in arrival order
+    /// however long their earlier phases (infra, setup, tasks) take. Starts
+    /// without one (auto-start) take their place when the services phase begins.
     pub(crate) async fn spawn_services(
         self: &Arc<Self>,
         cx: &mut StartCx,
@@ -185,7 +185,9 @@ impl Inner {
             return;
         }
         let gate = self.integ.start_gate.clone().filter(|_| !cx.all_at_once);
-        let arrival = gate.as_ref().map(|gate| gate.arrive());
+        let arrival = gate
+            .as_ref()
+            .map(|gate| cx.arrival.unwrap_or_else(|| gate.arrive()));
         let series = self.unit_series(cx, services);
         let (needs, run_peaks) = if gate.is_some() || self.integ.pressure.is_some() {
             tokio::join!(
@@ -320,6 +322,9 @@ impl Inner {
         // Dropped when this function returns, after the spawn: that lets the
         // next unit of the request spawn.
         let _done = done;
+        // Counted before leaving the queue: from here a stop can no longer
+        // withdraw it, so it waits for the unit to be recorded and stops that.
+        let _spawning = lane.spawn_guard();
         self.pacing.unregister(lane.worktree, &name, id);
         if token.is_cancelled() {
             // Dropping a granted slot gives it straight back.
@@ -613,6 +618,12 @@ impl Inner {
                 entry.token.cancel();
             }
         }
+    }
+
+    /// A place in the start gate's line for a request arriving now; `None`
+    /// without a gate. An unused place holds nobody up.
+    pub(crate) fn arrive(&self) -> Option<devlanes_core::gate::Arrival> {
+        self.integ.start_gate.as_ref().map(|gate| gate.arrive())
     }
 
     /// The start gate's current snapshot, taken once per status call.

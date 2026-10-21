@@ -195,6 +195,8 @@ pub struct RouteSpec {
     pub unit: String,
     /// Upstream port on 127.0.0.1 (`self.port` or a named port).
     pub port: u16,
+    /// Which of the unit's ports `port` is: `default` or the route's named port.
+    pub port_name: String,
     /// Used only when no other host matches.
     pub fallback: bool,
     /// Send `Host: 127.0.0.1:<port>` upstream instead of the browser's Host.

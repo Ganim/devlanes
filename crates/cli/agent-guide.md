@@ -13,5 +13,6 @@ This repository runs its dev services with devlanes. A per-user daemon owns the 
 - Ctrl-C detaches from services. Foreground tasks started with `devlanes run TASK` are the exception.
 - A status line starts with the state: `ready`, `starting`, `queued` (waiting for a start slot), `running`, `failed`, `stopping`, `stopped`, `exited` (a task or exec that ended), `idle` or `orphaned`.
 - `orphaned` means a previous daemon left the process running and nothing supervises it. Run `devlanes stop UNIT --lane LANE`, then start it again.
+- If a command fails because the running daemon cannot serve this CLI (`protocol_mismatch` in JSON), ask the user before running `devlanes daemon restart`: it stops every service the daemon runs.
 - Add `--json` for complete structured output.
 - Inside a sandbox (Codex sets `CODEX_SANDBOX`) the CLI does not start the daemon. If a command fails with `auto-spawn refused in sandbox`, ask the user to run `devlanes daemon install` outside the sandbox, then retry.

@@ -280,6 +280,18 @@ pub fn rpc_error(error: ClientError) -> RpcError {
         ClientError::Sandbox(reason) => {
             RpcError::new("daemon_sandboxed", json!({"message": reason}), 4)
         }
+        // Same shape as the daemon's own `protocol_mismatch`, so both read alike.
+        ClientError::Incompatible { peer } => RpcError::new(
+            "protocol_mismatch",
+            json!({
+                "protocol": peer.protocol,
+                "client_protocol": devlanes_proto::PROTOCOL_VERSION,
+                "version": peer.version,
+                "build_id": peer.build_id,
+                "managed_processes": peer.managed_processes,
+            }),
+            4,
+        ),
         other => RpcError::new(
             "daemon_unreachable",
             json!({"message": other.to_string()}),
@@ -338,7 +350,7 @@ impl WithDriver for ClientDriver {
         events: &mut (dyn FnMut(Event) + Send),
     ) -> Result<WithStart, RpcError> {
         // The tab's progress bar covers the start only; it is gone before the command runs.
-        let progress = crate::progress::Follower::start_with(&self.paths, self.progress, request);
+        let progress = crate::progress::Follower::start_with(self.progress, request);
         let result: Result<WithStart, RpcError> = async {
             if let Some(stop) = self.pending_signal() {
                 return Err(interrupted(stop));
@@ -391,6 +403,7 @@ impl WithDriver for ClientDriver {
                         {
                             lane = Some(name.to_owned());
                         }
+                        progress.event(&event);
                         events(event)
                     }
                     Frame::Control(Control::Response(response)) if response.id == id => {
@@ -831,6 +844,22 @@ mod tests {
         })
         .await
         .expect("in time");
+    }
+
+    /// A daemon of another protocol reads like the daemon's own `protocol_mismatch`.
+    #[test]
+    fn incompatible_daemon_is_a_protocol_mismatch() {
+        let mut peer = devlanes_proto::Hello::current(6);
+        peer.protocol += 1;
+        let error = rpc_error(ClientError::Incompatible { peer });
+        assert_eq!(error.code, "protocol_mismatch");
+        // Plan 3.5: an incompatible daemon exits 4.
+        assert_eq!(error.exit_code, 4);
+        assert_eq!(error.data["managed_processes"], 6);
+        assert_eq!(
+            error.data["client_protocol"],
+            devlanes_proto::PROTOCOL_VERSION
+        );
     }
 
     /// Startup reasons keep their code, so hints match it instead of the wording.

@@ -6,11 +6,14 @@ expression: text
 ok acme (/work/acme/devlanes.yaml)
 warn templates.unused: template is never used
 warn services.api.platform: unknown platform elixir for service api; it starts without platform setup. Known: node, python. Fix the name or drop platform: to detect it
+warn services.api.hosts: api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
 --- plain (exit 0)
 ok acme (/work/acme/devlanes.yaml)
 warn templates.unused: template is never used
 warn services.api.platform: unknown platform elixir for service api; it starts without platform setup. Known: node, python. Fix the name or drop platform: to detect it
+warn services.api.hosts: api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
 --- agent (exit 0)
 ok acme (/work/acme/devlanes.yaml)
 warn templates.unused: template is never used
 warn services.api.platform: unknown platform elixir for service api; it starts without platform setup. Known: node, python. Fix the name or drop platform: to detect it
+warn services.api.hosts: api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test

@@ -38,6 +38,15 @@ impl Hello {
     }
 }
 
+/// Names a daemon lists in [`Hello::features`].
+pub mod features {
+    /// `start`, `restart`, `resume`, `lane.new` with `start` and `wait` given
+    /// `"events": true` stream their lanes' `lane.phase` (own starts only, by
+    /// `start_id`), `task`, `unit.changed` and `lane.changed` events on the
+    /// request itself, all before its response. Older daemons ignore the flag.
+    pub const START_EVENTS: &str = "start_events";
+}
+
 /// Attribution is supplied by clients and never inferred by the daemon.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Actor {
@@ -302,6 +311,9 @@ pub struct Selection {
     /// request only (`start --all-at-once`).
     #[serde(default)]
     pub all_at_once: bool,
+    /// Stream the start's lane events on this request (see [`features::START_EVENTS`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub events: bool,
 }
 
 /// Profile name that resets a lane to its default selection (see [`Selection::profiles`]).
@@ -488,6 +500,12 @@ pub struct LaneSummary {
     /// the ports of the non-hidden ones.
     #[serde(default)]
     pub containers: Vec<ContainerSummary>,
+    /// Conditions that need attention but do not stop the lane, each with a
+    /// `message`: `ports_pending` (the edited config needs ports the running
+    /// lane's block lacks; they are allocated at its next whole-lane start) and
+    /// `host_conflict` (another lane routes the same hostname).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<LaneWarning>,
 }
 
 /// A container a lane uses (shared or per-lane) and its published host ports.
@@ -586,6 +604,9 @@ pub struct StartResult {
     /// Advice that did not block the start, as in `lane.warning` events.
     #[serde(default)]
     pub warnings: Vec<LaneWarning>,
+    /// The `start_id` of this start's `lane.phase` events; unique per daemon run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_id: Option<u64>,
     /// Tasks and setup commands of this start that left processes behind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub leftovers: Vec<Leftovers>,
@@ -730,7 +751,9 @@ pub mod events {
     pub const LANE_REMOVED: &str = "lane.removed";
     /// `{unit: UnitSummary}` on every unit state transition.
     pub const UNIT_CHANGED: &str = "unit.changed";
-    /// `{lane, phase, state: started|done|failed|skipped, reason?}` for start pipeline progress.
+    /// `{lane, phase, state: started|done|failed|skipped, reason?, start_id?, units?}`
+    /// for start pipeline progress. `start_id` tells concurrent starts of one lane
+    /// apart; `services:started` lists in `units` the units this start spawns.
     pub const PHASE: &str = "lane.phase";
     /// `{lane, task, state, exit_code?}` for task runs.
     pub const TASK: &str = "task";

@@ -7,8 +7,8 @@
 pub mod progress;
 
 pub use progress::{
-    PROGRESS_ENV, Progress, ProgressBar, ProgressMode, StartScope, StartTracker, Wrap,
-    progress_support, progress_support_from_env,
+    PROGRESS_ENV, Progress, ProgressBar, ProgressMode, StartTracker, Wrap, progress_support,
+    progress_support_from_env,
 };
 
 use std::{

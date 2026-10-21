@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use devlanes_cli::*;
-use devlanes_proto::{Context, Method, Request};
+use devlanes_proto::{Context, Event, Method, Request};
 use devlanes_term::{Progress, ProgressMode, Wrap};
 use serde_json::{Value, json};
 
@@ -95,4 +95,85 @@ fn starting_commands_follow_progress_and_others_do_not() {
             "{method:?}"
         );
     }
+}
+
+/// The request `args` builds in `runtime`.
+fn built(args: &[&str], runtime: &Runtime) -> Request {
+    let cli = Cli::parse_from(args);
+    match cli.action_with(runtime, "/work/acme-1".into(), Default::default) {
+        Ok(Action::Rpc(request)) => request,
+        _ => panic!("{args:?} builds no request"),
+    }
+}
+
+#[test]
+fn starts_ask_for_their_lane_events() {
+    let human = runtime(&["devlanes"], true, false);
+    let agent = runtime(&["devlanes", "--output", "agent"], false, false);
+    let piped = runtime(&["devlanes", "--output", "plain"], false, false);
+    let events = |args: &[&str], runtime: &Runtime| built(args, runtime).params["events"] == true;
+    for args in [
+        &["devlanes", "start"][..],
+        &["devlanes", "restart", "api"][..],
+        &["devlanes", "lane", "resume"][..],
+        &["devlanes", "lane", "new", "feat", "--start"][..],
+    ] {
+        assert!(events(args, &human), "{args:?}");
+        assert!(events(args, &piped), "{args:?}");
+        // Agent output prints no progress, so the events would be wasted.
+        assert!(!events(args, &agent), "{args:?}");
+    }
+    assert!(!events(&["devlanes", "lane", "new", "feat"], &human));
+    // `wait` streams them only for the bar.
+    assert!(events(&["devlanes", "wait", "api"], &human));
+    assert!(!events(&["devlanes", "wait", "api"], &piped));
+}
+
+/// What a human terminal shows for each of `events` while `method` runs.
+fn shown(method: Method, events: &[(&str, Value)]) -> String {
+    let reporter = runtime(&["devlanes"], true, false).reporter();
+    events
+        .iter()
+        .map(|(name, data)| {
+            let event = Event {
+                seq: 1,
+                event: (*name).into(),
+                data: data.clone(),
+            };
+            reporter.event(method, &event).expect("event").stdout
+        })
+        .collect()
+}
+
+#[test]
+fn a_start_prints_its_phase_lines_in_human_mode() {
+    let phase = |phase: &str, state: &str| json!({"lane": "acme@1", "phase": phase, "state": state, "start_id": 4});
+    let start = [
+        ("lane.phase", phase("infra", "started")),
+        ("lane.phase", phase("infra", "done")),
+        ("lane.phase", phase("setup", "skipped")),
+        ("lane.phase", phase("tasks", "started")),
+        (
+            "task",
+            json!({"lane": "acme@1", "task": "migrate", "state": "done", "exit_code": 0}),
+        ),
+        ("lane.phase", phase("tasks", "done")),
+        ("lane.phase", {
+            let mut started = phase("services", "started");
+            started["units"] = json!(["api"]);
+            started
+        }),
+        (
+            "unit.changed",
+            json!({"unit": {"name": "api", "lane": "acme@1", "state": "ready"}}),
+        ),
+        ("lane.phase", phase("services", "done")),
+    ];
+    // The services line is the result's; task phases speak through their tasks.
+    assert_eq!(
+        shown(Method::Start, &start),
+        "\u{2713} infra\n! setup skipped\n\u{2713} migrate\n"
+    );
+    // `wait` streams the same events for the bar and prints none of them.
+    assert_eq!(shown(Method::Wait, &start), "");
 }

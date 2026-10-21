@@ -144,6 +144,25 @@ fn readiness(path: &str, ready: &ReadyConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Check routed hostnames: literal names fully, templates by their literal text.
+fn hosts<'a>(
+    path: &str,
+    entries: impl IntoIterator<Item = &'a crate::HostConfig>,
+) -> Result<(), ConfigError> {
+    for entry in entries {
+        let host = match entry {
+            crate::HostConfig::Name(host) => host,
+            crate::HostConfig::Route(route) => &route.host,
+        };
+        let checked = match host {
+            Templated::Literal(host) => crate::normalize_host(host).map(drop),
+            Templated::Expression(template) => crate::hostname::check_host_template(template),
+        };
+        checked.map_err(|message| fail(path, message))?;
+    }
+    Ok(())
+}
+
 /// Match profile selectors with the same literal, tag, and glob syntax used at start.
 fn selector<E: Extensions>(
     config: &ProjectConfig<E>,
@@ -253,6 +272,7 @@ fn validate_inner<E: Extensions>(
         if matches!(service.replicas, Some(Templated::Literal(0))) {
             return Err(fail(&format!("{path}.replicas"), "must be positive"));
         }
+        hosts(&format!("{path}.hosts"), service.hosts.iter().flatten())?;
         if let Some(stop) = &service.stop
             && let Some(signal) = &stop.signal
             && ![
@@ -397,6 +417,9 @@ fn validate_inner<E: Extensions>(
                 format!("unknown container or Compose service `{name}`"),
             ));
         }
+    }
+    for (name, entries) in &config.infra.hosts {
+        hosts(&format!("infra.hosts.{name}"), entries)?;
     }
     for (name, container) in &config.infra.containers {
         if container.image.is_none() {

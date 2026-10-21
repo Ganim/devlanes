@@ -87,7 +87,7 @@ impl Route {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum RouteError {
     #[error("invalid DNS route name: {0}")]
     InvalidHost(String),
@@ -106,43 +106,55 @@ pub struct RouteTable {
     routes: Vec<Route>,
 }
 
+/// A route [`RouteTable::accept`] left out of its table, and why.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Rejected {
+    /// Position of the route in the snapshot passed to `accept`.
+    pub index: usize,
+    /// The route's host as given, before normalisation.
+    pub host: String,
+    pub error: RouteError,
+}
+
 impl RouteTable {
     /// Validates a complete snapshot before it can replace live routes.
     pub fn new(mut routes: Vec<Route>) -> Result<Self, RouteError> {
         let mut seen = std::collections::HashSet::new();
         for route in &mut routes {
-            route.host = route.host.trim_end_matches('.').to_ascii_lowercase();
-            if !valid_pattern(&route.host) {
-                return Err(RouteError::InvalidHost(route.host.clone()));
-            }
+            normalize(route)?;
             if !seen.insert((route.host.clone(), route.fallback)) {
                 return Err(RouteError::Duplicate(route.host.clone()));
             }
-            if let Some(port) = &route.port
-                && !route.named_ports.contains_key(port)
-            {
-                return Err(RouteError::MissingPort {
-                    host: route.host.clone(),
-                    port: port.clone(),
-                });
-            }
-            let authority = route.target().authority();
-            let invalid_hostname = matches!(route.target(), Upstream::Host { hostname, .. }
-                if hostname.starts_with("*.") || !valid_pattern(hostname.trim_end_matches('.')));
-            if invalid_hostname || authority.parse::<hyper::http::uri::Authority>().is_err() {
-                return Err(RouteError::InvalidUpstream(authority));
-            }
-            for name in &mut route.certificate_names {
-                *name = name.trim_end_matches('.').to_ascii_lowercase();
-                if !valid_pattern(name)
-                    || name
-                        .strip_prefix("*.")
-                        .is_some_and(|suffix| !suffix.contains('.'))
-                {
-                    return Err(RouteError::InvalidHost(name.clone()));
+        }
+        Ok(Self::sorted(routes))
+    }
+
+    /// Builds a table from the valid routes of a snapshot and lists the others:
+    /// invalid ones, and every later route whose normalised host (and fallback
+    /// flag) an earlier route already claimed. One bad entry never blocks the rest.
+    pub fn accept(routes: Vec<Route>) -> (Self, Vec<Rejected>) {
+        let mut seen = std::collections::HashSet::new();
+        let mut kept = Vec::with_capacity(routes.len());
+        let mut rejected = Vec::new();
+        for (index, mut route) in routes.into_iter().enumerate() {
+            let host = route.host.clone();
+            let checked = normalize(&mut route).and_then(|()| {
+                if seen.insert((route.host.clone(), route.fallback)) {
+                    Ok(())
+                } else {
+                    Err(RouteError::Duplicate(route.host.clone()))
                 }
+            });
+            match checked {
+                Ok(()) => kept.push(route),
+                Err(error) => rejected.push(Rejected { index, host, error }),
             }
         }
+        (Self::sorted(kept), rejected)
+    }
+
+    /// Orders validated routes for lookup.
+    fn sorted(mut routes: Vec<Route>) -> Self {
         // Matches the config contract that a fallback host is used only when nothing else matches.
         routes.sort_by_key(|route| {
             (
@@ -151,7 +163,7 @@ impl RouteTable {
                 std::cmp::Reverse(route.host.len()),
             )
         });
-        Ok(Self { routes })
+        Self { routes }
     }
 
     /// Looks up a normalized hostname, never a URL or a host:port authority.
@@ -169,6 +181,40 @@ impl RouteTable {
     pub fn routes(&self) -> &[Route] {
         &self.routes
     }
+}
+
+/// Lowercases and trims one route's names in place and checks everything except
+/// duplicates, which need the whole snapshot.
+fn normalize(route: &mut Route) -> Result<(), RouteError> {
+    route.host = route.host.trim_end_matches('.').to_ascii_lowercase();
+    if !valid_pattern(&route.host) {
+        return Err(RouteError::InvalidHost(route.host.clone()));
+    }
+    if let Some(port) = &route.port
+        && !route.named_ports.contains_key(port)
+    {
+        return Err(RouteError::MissingPort {
+            host: route.host.clone(),
+            port: port.clone(),
+        });
+    }
+    let authority = route.target().authority();
+    let invalid_hostname = matches!(route.target(), Upstream::Host { hostname, .. }
+        if hostname.starts_with("*.") || !valid_pattern(hostname.trim_end_matches('.')));
+    if invalid_hostname || authority.parse::<hyper::http::uri::Authority>().is_err() {
+        return Err(RouteError::InvalidUpstream(authority));
+    }
+    for name in &mut route.certificate_names {
+        *name = name.trim_end_matches('.').to_ascii_lowercase();
+        if !valid_pattern(name)
+            || name
+                .strip_prefix("*.")
+                .is_some_and(|suffix| !suffix.contains('.'))
+        {
+            return Err(RouteError::InvalidHost(name.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// Wildcards route subdomains at any depth; TLS adds an exact SAN for deeper names.

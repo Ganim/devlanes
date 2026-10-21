@@ -122,6 +122,20 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
     vec![
         ("start", Method::Start, start_result()),
         ("start_queued", Method::Start, start_queued),
+        ("start_warnings", Method::Start, {
+            let mut ready = start_result();
+            ready["ready"] = json!(true);
+            ready["failures"] = json!([]);
+            ready["skipped_tasks"] = json!([]);
+            ready["units"][2] = unit("admin", "ready");
+            ready["warnings"] = json!([
+                {"code": "host_outside_ca", "data": {"lane": "acme@2", "unit": "api", "host": "api.example.com",
+                 "permitted": ["localhost", "test"], "suggestion": "api.acme.test"}},
+                {"code": "memory_baseline", "data": {"peak_memory_bytes": 8_589_934_592_u64,
+                 "available_memory_bytes": 4_294_967_296_u64, "units": []}},
+            ]);
+            ready
+        }),
         (
             "restart_ready",
             Method::Restart,
@@ -392,6 +406,44 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
             }),
         ),
         (
+            "doctor_findings",
+            Method::Doctor,
+            json!({
+                "version": "0.2.0", "pid": 4242, "home": "/home/u/.devlanes", "db_path": "/home/u/.devlanes/state.db",
+                "schema_version": 5, "supported_schema_version": 5, "socket": "/home/u/.devlanes/run/daemon.sock",
+                "sandbox": {"codex_sandbox": false, "app_sandbox": false},
+                "infra": {"docker": {"reachable": true, "version": "27.1.1"}, "compose": {"version": "2.29.1", "supports_lane_overrides": true}},
+                "proxy": {
+                    "http": {"bound": true, "port": 80, "fallback_reason": null, "serving": false, "listeners": [
+                        {"address": "127.0.0.1:80", "running": true, "accept_errors": 3, "last_error": "Too many open files (os error 24)"},
+                        {"address": "[::1]:80", "running": false, "accept_errors": 0, "last_error": null},
+                    ]},
+                    "https": {"bound": true, "port": 443, "fallback_reason": null, "serving": true, "listeners": [
+                        {"address": "127.0.0.1:443", "running": true, "accept_errors": 0, "last_error": null},
+                    ]},
+                },
+                "ca": {"present": true, "kind": "devlanes", "path": "/home/u/.devlanes/ca/ca.pem", "trusted": "unknown",
+                       "name_constrained": false,
+                       "hint": "the devlanes CA has no name constraints (it predates them), so a leaked key could sign certificates for any site",
+                       "fix": "devlanes certs untrust && rm -r /home/u/.devlanes/ca && devlanes certs trust && devlanes daemon restart"},
+                "ca_warnings": [{"code": "host_outside_ca", "data": {
+                    "lane": "acme@2", "unit": "api", "host": "api.example.com",
+                    "permitted": ["localhost", "test"], "suggestion": "api.acme-2.localhost",
+                }}],
+                "projects": 2, "subscribers": 1,
+                "hosts": {"mode": "auto", "probe": "loopback", "state": "applied", "names": 3, "desired": 3, "skipped": 0,
+                          "last_error": null, "tld_error": null,
+                          "helper": {"state": "mismatch", "level": "warning", "installed": "0.1.0", "expected": "0.2.0",
+                                     "message": "The installed hosts helper is version 0.1.0 and devlanes is 0.2.0.",
+                                     "fix": "devlanes certs trust --hosts"}},
+                "user_config": {
+                    "path": "/home/u/.devlanes/config.yaml", "valid": false,
+                    "error": {"message": "unknown field `proxyy`", "file": "/home/u/.devlanes/config.yaml", "line": 4, "column": 1},
+                    "warnings": [{"path": "tls.trust.1", "message": "mobile certificate trust is not supported yet; target ignored"}],
+                },
+            }),
+        ),
+        (
             "config_check",
             Method::ConfigCheck,
             json!({"project": "acme", "path": "/work/acme/devlanes.yaml", "warnings": [
@@ -399,6 +451,9 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
                 {"code": "unknown_platform", "path": "services.api.platform",
                  "message": "no contributor provides platform `elixir`",
                  "data": {"service": "api", "platform": "elixir", "known": ["node", "python"]}},
+                {"code": "host_outside_ca", "path": "services.api.hosts",
+                 "message": "api.example.com is outside the names the devlanes CA can certify",
+                 "host": "api.example.com", "suggestion": "api.acme.test"},
             ]}),
         ),
         (
@@ -608,6 +663,7 @@ fn agent_status_lines_start_with_a_stable_lowercase_word() {
         "started",
         "created",
         "cleaned",
+        "warn",
     ];
     for (name, method, data) in fixtures() {
         if !matches!(
@@ -743,6 +799,65 @@ fn start_progress_prints_finished_steps_once() {
     );
 }
 
+/// A matching helper and a valid user config show as ok; a failed /etc/hosts write
+/// that already blames the helper version is not repeated by the helper check.
+#[test]
+fn doctor_helper_and_user_config_checks() {
+    let data = json!({
+        "hosts": {"mode": "auto", "probe": "loopback", "state": "applied", "names": 2, "last_error": null,
+                  "helper": {"state": "ok", "level": "ok", "installed": "0.2.0", "expected": "0.2.0"}},
+        "user_config": {"path": "/home/u/.devlanes/config.yaml", "valid": true, "error": null, "warnings": []},
+    });
+    let text = render_text(Method::Doctor, &data);
+    assert!(text.contains("ok hosts: hosts helper 0.2.0"), "{text}");
+    assert!(
+        text.contains("ok config: user config /home/u/.devlanes/config.yaml"),
+        "{text}"
+    );
+    let failed = json!({"hosts": {"mode": "auto", "state": "failed",
+        "last_error": {"code": "helper_version_mismatch", "message": "The installed hosts helper is version 0.1.0 and devlanes is 0.2.0."},
+        "helper": {"state": "mismatch", "level": "warning", "installed": "0.1.0", "expected": "0.2.0"}}});
+    let text = render_text(Method::Doctor, &failed);
+    assert!(
+        !text.contains("helper is version 0.1.0, devlanes"),
+        "{text}"
+    );
+    assert!(text.contains("fix: devlanes certs trust --hosts"), "{text}");
+}
+
+/// `lane.warning` events are one line in every mode; outside a start they name the lane.
+#[test]
+fn lane_warning_events_are_one_line() {
+    let event = Event {
+        seq: 1,
+        event: "lane.warning".into(),
+        data: json!({"lane": "acme@2", "code": "host_outside_ca", "data": {
+            "lane": "acme@2", "unit": "api", "host": "api.example.com",
+            "permitted": ["localhost"], "suggestion": "api.acme.test",
+        }}),
+    };
+    let mut output = String::new();
+    for mode in [OutputMode::Human, OutputMode::Plain, OutputMode::Agent] {
+        for method in [Method::Start, Method::Subscribe] {
+            output.push_str(
+                &runtime(mode)
+                    .reporter()
+                    .event(method, &event)
+                    .expect("event")
+                    .stdout,
+            );
+        }
+    }
+    insta::assert_snapshot!(output, @r"
+    ! api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
+    ! acme@2: api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
+    warn api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
+    warn acme@2: api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
+    warn acme@2: api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
+    ");
+    // Agents see a start's warnings once, in its result.
+}
+
 #[test]
 fn daemon_errors_are_worded_with_hints() {
     let errors = [
@@ -795,6 +910,23 @@ fn daemon_errors_are_worded_with_hints() {
             1,
         ),
         RpcError::new("needs_env", json!({"lane": "acme@2"}), 1),
+        RpcError::new(
+            "protocol_mismatch",
+            json!({"protocol": 7, "client_protocol": 8, "version": "0.2.0", "build_id": "a1b2c3", "managed_processes": 6}),
+            4,
+        ),
+        RpcError::new(
+            "protocol_mismatch",
+            json!({"protocol": 7, "client_protocol": 8, "version": "0.2.0", "build_id": "a1b2c3", "managed_processes": 0}),
+            4,
+        ),
+        RpcError::new(
+            "helper_version_mismatch",
+            json!({"message": "The installed hosts helper is version 0.1.0 and devlanes is 0.2.0. Run `devlanes certs trust --hosts` to reinstall it.",
+                   "fix": "devlanes certs trust --hosts",
+                   "helper": {"state": "mismatch", "level": "warning", "installed": "0.1.0", "expected": "0.2.0"}}),
+            1,
+        ),
     ];
     let reporter = runtime(OutputMode::Agent).reporter();
     let mut output = String::new();

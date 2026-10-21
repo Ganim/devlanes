@@ -217,7 +217,7 @@
       "anyOf": [
         {
           "$ref": "#/$defs/Templated_string",
-          "description": "Hostname routed to the service's primary port.",
+          "description": "Hostname routed to the service's primary port. Dot-separated labels of letters,\ndigits and inner hyphens, with an optional leading `*.` wildcard; case and a\ntrailing dot are ignored.",
           "examples": [
             "api.${{ lane.domain }}"
           ]
@@ -298,7 +298,7 @@
         },
         "host": {
           "$ref": "#/$defs/Templated_string",
-          "description": "Exact hostname or wildcard pattern, evaluated for the current lane.",
+          "description": "Exact hostname or `*.` wildcard pattern, evaluated for the current lane. Labels\nhold letters, digits and inner hyphens; case and a trailing dot are ignored.",
           "examples": [
             "api.${{ lane.domain }}",
             "*.${{ lane.domain }}"

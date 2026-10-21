@@ -254,6 +254,15 @@ fn split_ready<'a>(ready: &[&'a UnitSummary]) -> (Vec<&'a UnitSummary>, usize) {
     (shown.clone(), ready.len() - shown.len())
 }
 
+/// One line per [`devlanes_proto::LaneWarning`] of a start: advice, never a failure.
+fn start_warnings(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
+    result
+        .warnings
+        .iter()
+        .map(|warning| cx.warning(&words::lane_warning(&warning.code, &warning.data)))
+        .collect()
+}
+
 /// The cli-design 3.5 start summary.
 fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
     let view = StartView::new(result);
@@ -332,6 +341,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
             ));
         }
         lines.extend(start_leftovers(result, ""));
+        lines.extend(start_warnings(result, cx));
         return lines;
     }
     lines.push(match &result.branch {
@@ -409,6 +419,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
         };
         lines.push(format!("{prefix}timed out before every unit was ready"));
     }
+    lines.extend(start_warnings(result, cx));
     let cause = view
         .failed
         .first()
@@ -543,6 +554,9 @@ fn lane_notes(lane: &LaneSummary) -> Vec<String> {
     }
     if lane.state == "no-config" && lane.reason.is_none() {
         notes.push("no devlanes.yaml".into());
+    }
+    for warning in &lane.warnings {
+        notes.push(words::lane_warning(&warning.code, &warning.data));
     }
     notes
 }
@@ -896,7 +910,18 @@ pub(super) fn lane_gc(data: &Value) -> Vec<String> {
     } else {
         format!("cleaned {}", cleaned.join(", "))
     };
-    vec![format!("{lanes}; removed {offsets} unused port offsets")]
+    let mut lines = vec![format!("{lanes}; removed {offsets} unused port offsets")];
+    let kept: Vec<String> = list(data, "kept_running")
+        .iter()
+        .map(display_value)
+        .collect();
+    if !kept.is_empty() {
+        lines.push(format!(
+            "kept {} (worktree missing, but units still run; stop them first)",
+            kept.join(", ")
+        ));
+    }
+    lines
 }
 
 /// `exec`: the adopted unit and how to follow or stop it.
@@ -1124,6 +1149,32 @@ pub(super) fn hosts(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         if !parts.is_empty() {
             lines.push(format!("proxy: {}", parts.join(", ")));
         }
+    }
+    lines.extend(route_warnings(data));
+    lines
+}
+
+/// `host_conflict` and `host_rejected` warnings, then the entries the proxy
+/// dropped, one line each (`hosts` and `doctor`).
+pub(super) fn route_warnings(data: &Value) -> Vec<String> {
+    let mut lines: Vec<String> = list(data, "warnings")
+        .iter()
+        .chain(list(data, "route_warnings").iter())
+        .map(|warning| {
+            format!(
+                "warning: {}",
+                words::lane_warning(&text(warning, "code"), &warning["data"])
+            )
+        })
+        .collect();
+    for rejected in list(&data["proxy"], "rejected") {
+        lines.push(format!(
+            "warning: proxy dropped {} ({}:{}): {}",
+            text(rejected, "host"),
+            text(rejected, "lane"),
+            text(rejected, "unit"),
+            text(rejected, "reason")
+        ));
     }
     lines
 }

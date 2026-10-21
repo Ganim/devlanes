@@ -291,6 +291,41 @@ fn dotted_keys_are_located() {
     assert_project_error(source, "A.B", "unknown service reference `missing`");
 }
 
+/// Hostnames that DNS cannot carry are refused at their `hosts:` line, literal or
+/// templated; case and a trailing dot are accepted.
+#[test]
+fn invalid_hostnames_are_located() {
+    for (source, needle, expected) in [
+        (
+            "project: demo\nservices:\n  api:\n    run: server\n    hosts: [api_v2.acme.localhost]\n",
+            "hosts:",
+            "services.api.hosts: `api_v2.acme.localhost`: `_` is not allowed",
+        ),
+        (
+            "project: demo\nservices:\n  api:\n    run: server\n    hosts: [\"api_v2.${{ lane.domain }}\"]\n",
+            "hosts:",
+            "services.api.hosts: `api_v2.${{ lane.domain }}`: `_` is not allowed",
+        ),
+        (
+            "project: demo\nservices:\n  api:\n    run: server\n    hosts: [{ host: \"api.*.localhost\" }]\n",
+            "hosts:",
+            "a wildcard is only allowed as a leading `*.` label",
+        ),
+        (
+            "project: demo\ninfra:\n  containers:\n    db: { image: postgres }\n  hosts:\n    db: [db_admin.localhost]\n",
+            "db_admin",
+            "infra.hosts.db: `db_admin.localhost`",
+        ),
+    ] {
+        assert_project_error(source, needle, expected);
+    }
+    parse_project(
+        "project: demo\nservices:\n  api:\n    run: server\n    hosts: [API.acme.localhost., \"*.${{ lane.domain }}\"]\n",
+        None,
+    )
+    .expect("case and a trailing dot are normalised later");
+}
+
 /// The project name must come from the shared base file.
 #[test]
 fn project_only_in_local_file_is_refused() {

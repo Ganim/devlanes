@@ -600,6 +600,18 @@ impl Inner {
         Ok(report)
     }
 
+    /// Assigns lanes to worktrees whose config appeared, without re-listing:
+    /// unlike [`Self::sync_worktrees`] it never marks a worktree missing.
+    async fn assign_pending(self: &Arc<Self>, project: &Arc<ProjectRt>) -> Result<(), RpcError> {
+        let _sync = project.sync.lock().await;
+        let assigned = self.assign_lanes(project).await?;
+        self.update_moves(project);
+        for lane in assigned {
+            self.emit_lane(project, &lane);
+        }
+        Ok(())
+    }
+
     /// Gives present worktrees with a config a lane index and port block
     /// (decision 2: lane 0 for the primary branch, else lowest free index >= 1).
     async fn assign_lanes(
@@ -710,10 +722,11 @@ impl Inner {
     ) -> Result<(), RpcError> {
         let _sync = project.sync.lock().await;
         self.update_moves(project);
-        let (target, record) = {
+        let target = {
             let st = lane.st();
-            match (st.moves_to, st.record.clone()) {
-                (Some(target), Some(record)) => (target, record),
+            // A lane that runs something keeps its index, domain and ports.
+            match st.moves_to {
+                Some(target) if st.record.is_some() && !st.any_running() => target,
                 _ => return Ok(()),
             }
         };
@@ -721,7 +734,12 @@ impl Inner {
             && let Some(holder) = project.lane_by_index(0)
             && !Arc::ptr_eq(&holder, lane)
         {
-            if holder.st().any_running() {
+            // A start, stop or clean in flight holds the holder's `op`; holding it
+            // here keeps one from beginning while the holder is renumbered.
+            let Ok(_holder_op) = holder.op.try_lock() else {
+                return Ok(());
+            };
+            if holder.st().any_running() || holder.st().busy.is_some() {
                 return Ok(());
             }
             let used: BTreeSet<u32> = project
@@ -739,7 +757,6 @@ impl Inner {
         {
             return Ok(());
         }
-        let _ = record;
         self.set_index(project, lane, target).await?;
         self.update_moves(project);
         Ok(())
@@ -808,12 +825,30 @@ impl Inner {
         let fixed_start =
             devlanes_resolve::fixed_block_start(&config, &facts, &client_env, &dotenv)
                 .map_err(|error| crate::resolve::resolve_error(&error))?;
+        let fixed_size = literal(&config.lanes.block_size);
+        {
+            // Running units keep the block they were spawned with (plan 5.8): a
+            // config that needs other ports waits for the next whole-lane start.
+            let mut st = lane.st();
+            if st.any_running()
+                && let Some(current) = st.allocation.clone()
+            {
+                st.ports_pending = names.iter().any(|name| !current.offsets.contains_key(name))
+                    || needs
+                        .reserved
+                        .iter()
+                        .any(|offset| !current.reserved.contains(offset))
+                    || fixed_size.is_some_and(|size| size != current.block.size)
+                    || fixed_start.is_some_and(|start| start != current.block.start);
+                return Ok(current);
+            }
+        }
         let allocation = self
             .store
             .allocate(AllocationRequest {
                 owner: BlockOwner::Lane(record.id),
                 pool,
-                fixed_size: literal(&config.lanes.block_size),
+                fixed_size,
                 fixed_start,
                 names,
                 reserved: needs.reserved.clone(),
@@ -838,7 +873,11 @@ impl Inner {
                 .await
                 .map_err(store_error)?;
         }
-        lane.st().allocation = Some(allocation.clone());
+        {
+            let mut st = lane.st();
+            st.allocation = Some(allocation.clone());
+            st.ports_pending = false;
+        }
         Ok(allocation)
     }
 
@@ -919,8 +958,22 @@ impl Inner {
                 continue;
             }
             // A config that gained ports needs offsets before its layout resolves.
-            if self.missing_offsets(&lane) {
+            let pending = if self.needs_allocation(&lane) {
                 let _ = self.allocate_lane(project, &lane, &[]).await;
+                let st = lane.st();
+                st.ports_pending && st.any_running()
+            } else {
+                lane.st().ports_pending = false;
+                false
+            };
+            // While the block waits for the next whole-lane start, the running
+            // units' layout stays; the new config cannot resolve without it.
+            let kept = lane.st().view.clone().filter(|_| pending);
+            if let Some(view) = kept {
+                if index == Some(0) {
+                    main_svc = Some(view.svc.clone());
+                }
+                continue;
             }
             let view = self.compute_view(project, &lane, main_svc.as_ref()).await;
             match view {
@@ -950,12 +1003,16 @@ impl Inner {
         self.publish_routes();
     }
 
-    /// True when the lane's config names a port without a persisted offset.
-    fn missing_offsets(&self, lane: &LaneRt) -> bool {
+    /// True when the lane's config names a port without a persisted offset or
+    /// fixes a block size other than the lane's.
+    fn needs_allocation(&self, lane: &LaneRt) -> bool {
         let st = lane.st();
         let (Some(config), Some(allocation)) = (st.config.loaded(), &st.allocation) else {
             return false;
         };
+        if literal(&config.lanes.block_size).is_some_and(|size| size != allocation.block.size) {
+            return true;
+        }
         devlanes_resolve::port_needs(config, &self.integ.contributors).is_ok_and(|needs| {
             needs
                 .names
@@ -1037,11 +1094,20 @@ impl Inner {
 
     /// Emits `lane.changed` with a fresh summary and republishes routes.
     pub(crate) fn emit_lane(&self, project: &ProjectRt, lane: &LaneRt) {
-        let mut summary = lane_summary(&project.name(), &lane.st());
+        self.emit_lane_event(project, lane);
+        self.publish_routes();
+    }
+
+    /// Emits `lane.changed` with a summary taken now. The lane's publish lock
+    /// spans taking and sending it, so concurrent callers cannot deliver an older
+    /// summary after a newer one.
+    pub(crate) fn emit_lane_event(&self, project: &ProjectRt, lane: &LaneRt) {
+        let name = project.name();
+        let _publish = lock(&lane.publish);
+        let mut summary = lane_summary(&name, &lane.st());
         self.fill_queued(&mut summary);
         self.bus
             .emit(events::LANE_CHANGED, json!({"lane": summary}));
-        self.publish_routes();
     }
 
     /// Starts git and config watchers for a project once.
@@ -1088,6 +1154,7 @@ impl Inner {
     /// across editors that replace files and needs no per-lane OS watch handles.
     async fn watch_configs(self: Arc<Self>, project: Arc<ProjectRt>) {
         let mut stamps: BTreeMap<WorktreeId, Vec<Option<std::time::SystemTime>>> = BTreeMap::new();
+        let mut deferred: BTreeSet<WorktreeId> = BTreeSet::new();
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         loop {
             tokio::select! {
@@ -1114,15 +1181,33 @@ impl Inner {
                 })
                 .await
                 .unwrap_or_default();
-                let previous = stamps.insert(lane.worktree, current.clone());
-                if previous.is_some_and(|previous| previous != current) {
+                let Some(previous) = stamps.insert(lane.worktree, current.clone()) else {
+                    continue;
+                };
+                let changed = previous != current;
+                if changed {
                     self.reload_config(&project, &lane).await;
-                    if lane.st().record.is_none() {
-                        let _ = self.sync_worktrees(&project, Vec::new()).await;
-                    }
-                    self.refresh_views(&project).await;
-                    self.emit_lane(&project, &lane);
+                } else if !deferred.contains(&lane.worktree) {
+                    continue;
                 }
+                // A start or stop in progress owns the lane's block and layout:
+                // the new config is recorded now (`config_changed`), its ports
+                // and views once that operation has finished.
+                let Ok(_op) = lane.op.try_lock() else {
+                    deferred.insert(lane.worktree);
+                    if changed {
+                        self.emit_lane_event(&project, &lane);
+                    }
+                    continue;
+                };
+                deferred.remove(&lane.worktree);
+                if lane.st().record.is_none()
+                    && let Err(error) = self.assign_pending(&project).await
+                {
+                    tracing::warn!(code = %error.code, "lane assignment failed");
+                }
+                self.refresh_views(&project).await;
+                self.emit_lane(&project, &lane);
             }
         }
     }
@@ -1201,6 +1286,7 @@ fn new_lane(worktree: WorktreeId, st: LaneSt) -> Arc<LaneRt> {
         worktree,
         op: tokio::sync::Mutex::new(()),
         st: std::sync::Mutex::new(st),
+        publish: std::sync::Mutex::new(()),
         watch: tokio_util::sync::CancellationToken::new(),
     })
 }

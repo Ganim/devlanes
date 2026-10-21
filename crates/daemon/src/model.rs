@@ -17,6 +17,8 @@ use devlanes_proto::{Actor, ActorKind, LaneSummary, RpcError, UnitSummary};
 use devlanes_resolve::RouteSpec;
 use devlanes_state::{Allocation, DesiredState, Lane};
 use serde_json::{Value, json};
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::units::{UnitHost, UnitState};
 
@@ -195,6 +197,22 @@ pub(crate) struct LaneSt {
     pub phase_reasons: BTreeMap<String, RpcError>,
     /// Units left running by a previous daemon, by unit name.
     pub orphans: BTreeMap<String, Orphan>,
+    /// The token of the start holding `op`; stop, clean and reset fire it before
+    /// they wait for the lock. Each start installs a fresh one, so a firing never
+    /// reaches a start that begins later.
+    pub start_cancel: Option<CancellationToken>,
+    /// Spawns in flight ([`SpawnGuard`]). A stop waits until none is left before
+    /// it picks its targets, so no unit appears after it looked.
+    pub spawning: usize,
+    /// Woken whenever `spawning` drops.
+    pub spawned: Arc<Notify>,
+    /// The config needs ports the block lacks (or another block size or start)
+    /// while the lane runs something; the block moves at the next whole-lane
+    /// start (plan 5.8).
+    pub ports_pending: bool,
+    /// `host_conflict` warnings from the latest route snapshot: hostnames of this
+    /// lane another lane routes.
+    pub host_conflicts: Vec<devlanes_proto::LaneWarning>,
 }
 
 impl LaneSt {
@@ -231,6 +249,11 @@ impl LaneSt {
             moves_to: None,
             phase_reasons: BTreeMap::new(),
             orphans: BTreeMap::new(),
+            start_cancel: None,
+            spawning: 0,
+            spawned: Arc::new(Notify::new()),
+            ports_pending: false,
+            host_conflicts: Vec::new(),
         }
     }
 
@@ -247,6 +270,24 @@ impl LaneSt {
     /// True while a supervised unit or a previous daemon's orphan runs here.
     pub(crate) fn any_running(&self) -> bool {
         self.any_alive() || !self.orphans.is_empty()
+    }
+
+    /// `ports_pending` and `host_conflict` warnings for the lane's summary.
+    pub(crate) fn warnings(&self, reference: &str) -> Vec<devlanes_proto::LaneWarning> {
+        let mut warnings = Vec::new();
+        if self.ports_pending {
+            warnings.push(devlanes_proto::LaneWarning {
+                code: "ports_pending".into(),
+                data: json!({
+                    "lane": reference,
+                    "message": format!(
+                        "the edited config needs a different port block; running units keep their ports, and the lane gets the new block when it starts again after `devlanes stop --lane {reference}`"
+                    ),
+                }),
+            });
+        }
+        warnings.extend(self.host_conflicts.iter().cloned());
+        warnings
     }
 
     /// `unit_orphaned` when `name` is a previous daemon's process still running:
@@ -341,6 +382,9 @@ pub(crate) struct LaneRt {
     pub worktree: WorktreeId,
     pub op: tokio::sync::Mutex<()>,
     pub st: Mutex<LaneSt>,
+    /// Held while a `lane.changed` summary is built and emitted, so summaries
+    /// reach the bus in the order they were taken.
+    pub publish: Mutex<()>,
     /// Stops the config watcher when the lane goes away.
     pub watch: tokio_util::sync::CancellationToken,
 }
@@ -349,6 +393,51 @@ impl LaneRt {
     /// Locks the lane state for a short critical section.
     pub(crate) fn st(&self) -> MutexGuard<'_, LaneSt> {
         lock(&self.st)
+    }
+
+    /// Interrupts the start running on this lane, if any. Called before waiting
+    /// for `op`, which that start holds.
+    pub(crate) fn cancel_start(&self) {
+        if let Some(token) = &self.st().start_cancel {
+            token.cancel();
+        }
+    }
+
+    /// Counts a spawn in flight until the guard drops.
+    pub(crate) fn spawn_guard(self: &Arc<Self>) -> SpawnGuard {
+        self.st().spawning += 1;
+        SpawnGuard(self.clone())
+    }
+
+    /// Waits until no spawn is in flight on this lane.
+    pub(crate) async fn spawns_settled(&self) {
+        loop {
+            let spawned = self.st().spawned.clone();
+            let notified = spawned.notified();
+            tokio::pin!(notified);
+            // Registered before the check, so a drop in between still wakes us.
+            notified.as_mut().enable();
+            if self.st().spawning == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// One spawn in flight on a lane, from just before its last cancellation check
+/// until its unit is recorded (or the spawn gave up).
+pub(crate) struct SpawnGuard(Arc<LaneRt>);
+
+impl Drop for SpawnGuard {
+    /// Uncounts the spawn and wakes waiting stops.
+    fn drop(&mut self) {
+        let spawned = {
+            let mut st = self.0.st();
+            st.spawning = st.spawning.saturating_sub(1);
+            st.spawned.clone()
+        };
+        spawned.notify_waiters();
     }
 }
 
@@ -600,6 +689,7 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
         lane.profiles.clone()
     };
     LaneSummary {
+        warnings: lane.warnings(&reference),
         reference,
         project: project.to_owned(),
         index: lane.index(),
