@@ -225,15 +225,18 @@ impl Inner {
                         latest,
                         first_seen_at,
                     };
-                    self.update.set(cached.clone());
-                    let path = path.clone();
-                    let written = tokio::task::spawn_blocking(move || write_cache(&path, &cached))
-                        .await
-                        .map_err(std::io::Error::other)
-                        .and_then(|result| result);
+                    // Cached on disk before it is reported, so a status that shows
+                    // the release also survives a restart.
+                    let (path, written_cached) = (path.clone(), cached.clone());
+                    let written =
+                        tokio::task::spawn_blocking(move || write_cache(&path, &written_cached))
+                            .await
+                            .map_err(std::io::Error::other)
+                            .and_then(|result| result);
                     if let Err(error) = written {
                         tracing::debug!(%error, "release check cache not written");
                     }
+                    self.update.set(cached);
                 }
                 Err(error) => tracing::debug!(%error, "release check failed"),
             }

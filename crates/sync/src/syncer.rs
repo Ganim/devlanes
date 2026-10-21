@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
-use notify::event::{AccessKind, AccessMode};
+use notify::event::{AccessKind, AccessMode, ModifyKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
@@ -643,7 +643,9 @@ async fn follow(
         if watch.overflow.swap(false, Ordering::Relaxed) {
             batch.full = true;
         }
-        if root_identity(&engine.root).await != watch.identity {
+        // The removal event matters on its own: a directory recreated at once can
+        // get the freed inode back (ext4 does), and the old watch is dead either way.
+        if batch.root_gone || root_identity(&engine.root).await != watch.identity {
             // Mirror whatever is there now (nothing, if it was deleted), then rewatch.
             engine.pass(None).await;
             return Follow::Rewatch;
@@ -661,6 +663,8 @@ async fn follow(
 struct Batch {
     paths: BTreeSet<RelPath>,
     full: bool,
+    /// The root itself was removed or renamed.
+    root_gone: bool,
 }
 
 impl Batch {
@@ -693,6 +697,12 @@ impl Batch {
             };
             if relative.as_os_str().is_empty() {
                 self.full = true;
+                if matches!(
+                    event.kind,
+                    EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+                ) {
+                    self.root_gone = true;
+                }
                 continue;
             }
             match RelPath::from_path(relative) {

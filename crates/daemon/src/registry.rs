@@ -1466,9 +1466,16 @@ impl Inner {
                 update = updates.recv() => update,
             };
             let Some(update) = update else { break };
-            let Ok(list) = update else { continue };
-            let trees = list.iter().map(tree).collect();
-            match self.sync_worktrees(project, trees).await {
+            let result = match update {
+                Ok(list) => {
+                    self.sync_worktrees(project, list.iter().map(tree).collect())
+                        .await
+                }
+                // The watcher lists from the worktree the project was found in,
+                // which fails once that worktree is removed; `relist` asks another.
+                Err(_) => self.relist(project).await,
+            };
+            match result {
                 Ok(report) => self.apply_policies(project, report).await,
                 Err(error) => tracing::warn!(code = %error.code, "worktree sync failed"),
             }
@@ -1565,13 +1572,20 @@ impl Inner {
             });
         }
         for lane in report.removed {
-            let Some(config) = lane.st().config.loaded().cloned() else {
-                continue;
+            // The config poller can read the removed worktree's config as missing
+            // before this runs; its running units still stop, but only a config
+            // that says so cleans.
+            let policy = {
+                let st = lane.st();
+                match st.config.loaded() {
+                    Some(config) => config
+                        .lanes
+                        .removed_worktrees
+                        .unwrap_or(RemovedWorktrees::Stop),
+                    None if st.any_running() => RemovedWorktrees::Stop,
+                    None => continue,
+                }
             };
-            let policy = config
-                .lanes
-                .removed_worktrees
-                .unwrap_or(RemovedWorktrees::Stop);
             let engine = self.clone();
             let project = project.clone();
             tokio::spawn(async move {

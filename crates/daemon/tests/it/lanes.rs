@@ -217,6 +217,73 @@ async fn gc_keeps_lanes_that_run() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+/// A removed worktree's running lane stops even when the config poller read its
+/// config as missing before the worktree watcher saw the removal.
+async fn removed_worktree_stops_after_its_config_vanished() {
+    removed_worktree_stops(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// The same when the daemon first saw the project from the removed worktree,
+/// so the worktree watcher can no longer list from there.
+async fn removed_worktree_stops_when_the_project_was_found_there() {
+    removed_worktree_stops(true).await;
+}
+
+/// Starts a linked worktree's lane, deletes its config until the poller sees
+/// it missing, removes the worktree and waits for the lane to stop. The
+/// project is first seen from the primary worktree, or from the linked one.
+async fn removed_worktree_stops(found_in_linked: bool) {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", WEB);
+        let wt = tmp.path.join("wt");
+        worktree(&main, &wt, "feat/x");
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                watch: true,
+                ..Setup::default()
+            },
+        )
+        .await;
+        if !found_in_linked {
+            h.call(Method::LaneList, json!({}), cx(&main))
+                .await
+                .expect("lane list");
+        }
+        h.call(Method::Start, json!({}), cx(&wt))
+            .await
+            .expect("start wt");
+        std::fs::remove_file(wt.join("devlanes.yaml")).expect("drop config");
+        eventually(Duration::from_secs(10), || async {
+            let lane = lane_at(&h, &main, &wt).await;
+            lane.config_changed.then_some(lane)
+        })
+        .await
+        .expect("the poller reads the config as missing");
+
+        git(
+            &main,
+            &["worktree", "remove", "--force", &wt.display().to_string()],
+        );
+        let stopped = eventually(Duration::from_secs(10), || async {
+            let lane = lane_at(&h, &main, &wt).await;
+            (lane.state != "running").then_some(lane)
+        })
+        .await
+        .expect("the removed worktree's lane stops");
+        assert!(
+            stopped.units.iter().all(|unit| unit.state == "stopped"),
+            "{stopped:?}"
+        );
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 /// Editing the config of a running lane so it needs another block leaves the
 /// block and the routed ports alone and reports `ports_pending`; the next
 /// whole-lane start moves the block.
