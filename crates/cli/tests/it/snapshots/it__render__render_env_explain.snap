@@ -1,0 +1,19 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+KEY        VALUE        LAYER
+PORT       20101        devlanes
+API_TOKEN  <secret>     secrets
+NODE_ENV   development  service
+--- plain (exit 0)
+KEY        VALUE        LAYER
+PORT       20101        devlanes
+API_TOKEN  <secret>     secrets
+NODE_ENV   development  service
+--- agent (exit 0)
+KEY        VALUE        LAYER
+PORT       20101        devlanes
+API_TOKEN  <secret>     secrets
+NODE_ENV   development  service

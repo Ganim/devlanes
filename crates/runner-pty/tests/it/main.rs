@@ -409,6 +409,46 @@ async fn leftovers_swept_after_leader_exit() -> Result<(), Error> {
     .await
 }
 
+/// Stops landing right as the leader exits on its own still produce one report
+/// that every waiter, early or late, receives.
+#[tokio::test]
+async fn stop_racing_natural_exit_reports_once() -> Result<(), Error> {
+    bounded(async {
+        for round in 0..40_u64 {
+            let lifetime = format!("0.0{}", round % 10);
+            let pty = round % 2 == 0;
+            let unit = runner()
+                .spawn_unit(shell(&format!("sleep {lifetime}"), pty))
+                .await?;
+            let mut cleanup = Cleanup::default();
+            cleanup.unit(&unit);
+            let early = {
+                let unit = Arc::clone(&unit);
+                tokio::spawn(async move { unit.wait_report().await })
+            };
+            tokio::time::sleep(Duration::from_millis((round % 10) * 10)).await;
+            let stopped = unit
+                .stop_with_report(StopPolicy {
+                    signal: 15,
+                    timeout: Duration::from_secs(2),
+                })
+                .await?;
+            let early = early
+                .await
+                .map_err(|e| Error::Integration(e.to_string()))??;
+            assert_eq!(early, stopped, "round {round}");
+            assert_eq!(unit.wait_report().await?, stopped, "round {round}");
+            let outcome = stopped.outcome;
+            assert!(
+                outcome.code == Some(0) || outcome.signal == Some(15),
+                "round {round}: {outcome:?}"
+            );
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// Many waiters, including late ones, observe the same outcome.
 #[tokio::test]
 async fn concurrent_waiters_share_exit() -> Result<(), Error> {

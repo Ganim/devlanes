@@ -12,6 +12,39 @@ pub fn detach() -> std::io::Result<()> {
     }
 }
 
+/// Routes panics through `tracing`, so a crash leaves its message, location and
+/// backtrace in `daemon.log` (the daemon has no terminal). The previous hook still
+/// runs afterwards. Call once, after logging is initialized.
+pub fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".into());
+        let location = info
+            .location()
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
+            .unwrap_or_default();
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_owned();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(%message, %location, %thread, %backtrace, "panic");
+        previous(info);
+    }));
+}
+
 /// The spawning client reads exactly one line from stdout, then the pipe must close.
 pub struct Readiness {
     enabled: bool,

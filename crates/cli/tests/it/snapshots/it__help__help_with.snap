@@ -1,0 +1,78 @@
+---
+source: crates/cli/tests/it/help.rs
+expression: long_help(path)
+---
+Start the lane, run a command against it, then stop what was started.
+
+Waits for ready first; when a unit fails it prints the failure and exits 1
+without running the command. The command gets the lane's environment, including
+DEVLANES_PUBLIC_URL_<SERVICE> for every service. Afterwards devlanes writes
+--logs-dir, prints peak CPU and memory, stops what it started (and the daemon,
+if it started it) and exits with the command's exit code.
+
+Usage: devlanes with [OPTIONS] [UNIT]... -- <COMMAND>...
+
+Arguments:
+  [UNIT]...
+          Units to start ([lane:]unit, globs, +tag) [default: the whole lane]
+
+  <COMMAND>...
+          Command and arguments to run once the lane is ready
+
+Options:
+      --profile <PROFILE>
+          Start the units of this profile from devlanes.yaml; repeat to combine profiles (later ones win on env)
+
+      --logs-dir <DIR>
+          Write every unit's log of the run to DIR as text files, for CI artifacts
+
+      --keep
+          Leave the lane running afterwards, for debugging
+
+      --all-at-once
+          Start every selected service immediately, bypassing the machine-wide start gate for this run
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Global options:
+      --json
+          Print JSON: one document, or NDJSON for streams (same as --output json)
+
+      --output <MODE>
+          Output mode [default: agent when an AI agent runs devlanes, plain in CI or without a terminal, else human]
+
+          Possible values:
+          - human: Colors and symbols, for a terminal
+          - plain: The same information without color, one line per event
+          - agent: Terse lines for AI agents: failures first, with next commands, size-capped
+          - json:  The daemon's data as JSON, or NDJSON for streams
+
+      --project <PROJECT>
+          Use this project instead of the one containing the current directory
+
+      --lane <LANE>
+          Use this lane ([project@]lane) instead of the current worktree's
+
+      --host <HOST>
+          Run the command on a connected box (see devlanes remote connect)
+
+      --yes
+          Confirm actions that would ask first; needed when no terminal can prompt
+
+      --quiet
+          Print nothing on success; errors still go to stderr
+
+      --env <KEY=VALUE>
+          Set a variable for started processes (start, restart, run TASK, exec); repeatable
+
+      --timeout <DURATION>
+          Limit waits and streams, such as 30s, 5m or 1h [default for start and wait: 180s]
+
+      --budget <BYTES>
+          Cap agent-mode output at this many bytes [default: 16384, minimum: 256]
+
+Examples:
+  devlanes with -- pnpm test
+  devlanes with --profile e2e -- pnpm test:e2e
+  devlanes with api --logs-dir devlanes-logs -- cargo test --test api

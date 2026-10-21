@@ -857,11 +857,6 @@ async fn no_config_and_reset_state() {
             .await
             .expect("reset");
         assert_eq!(reset["stopped"], 0);
-        let unsupported = h
-            .call(Method::Connect, json!({}), cx(&main))
-            .await
-            .expect_err("m14");
-        assert_eq!(unsupported.code, "not_supported_yet");
         h.close().await;
     })
     .await

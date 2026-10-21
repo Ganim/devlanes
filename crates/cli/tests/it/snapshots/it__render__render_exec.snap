@@ -1,0 +1,16 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+ready acme@2:probe pid=4100
+  logs: devlanes logs acme@2:probe -f
+  stop: devlanes stop acme@2:probe
+--- plain (exit 0)
+ready acme@2:probe pid=4100
+  logs: devlanes logs acme@2:probe -f
+  stop: devlanes stop acme@2:probe
+--- agent (exit 0)
+ready acme@2:probe pid=4100
+  logs: devlanes logs acme@2:probe -f
+  stop: devlanes stop acme@2:probe

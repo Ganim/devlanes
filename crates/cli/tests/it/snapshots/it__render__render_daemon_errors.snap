@@ -1,0 +1,26 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: output
+---
+error: acme@9 not found; candidates: acme@0, acme@2
+hint: devlanes lane ls
+error: feat matches several lanes: acme@feat, shop@feat
+hint: devlanes status acme@feat
+error: this removes lane acme@2 and its data; rerun with --yes
+error: task reset asks: Drop the database?; rerun with --yes
+error: task console is interactive; run it from a terminal
+error: project acme is already running from /work/other-acme
+hint: devlanes stop --project acme
+error: port 5173 is used by web in lane shop@1
+hint: devlanes stop shop@1:web
+error: secrets for fnox profile dev are locked
+hint: devlanes secrets unlock
+error: Docker is not reachable
+hint: devlanes doctor
+error: timed out waiting for acme@2:api
+hint: devlanes debug why acme@2:api
+error: remote unlock is not supported yet
+error: invalid config: devlanes.yaml:2:1: unknown field `serivces`
+hint: devlanes config check
+error: the daemon restarted and has no shell environment for this lane
+hint: devlanes start --lane acme@2

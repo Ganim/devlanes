@@ -4,7 +4,7 @@ This crate implements the `/etc/hosts` fallback for resolvers that cannot handle
 `*.localhost` names (macOS 15 and older, musl, pure-Go binaries, workerd). The
 daemon uses it to decide which routed names to write and to send them to the
 root helper from `devlanes-hosts-helper` through `sudo -n`. The CLI uses it for
-`devlanes trust --hosts` and `devlanes untrust --hosts`.
+`devlanes certs trust --hosts` and `devlanes certs untrust --hosts`.
 
 ## Usage
 

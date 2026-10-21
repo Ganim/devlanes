@@ -94,12 +94,22 @@ impl ManagedUnit for CoreUnit {
     }
 }
 
-/// Infra failures carry a machine code (`docker_unavailable`, `compose_failed`, ...).
+/// Lines of a failed command's stderr kept in errors; the end explains most failures.
+pub const STDERR_TAIL_LINES: usize = 40;
+
+/// Infra failures carry a machine code (`docker_unavailable`, `compose_failed`, ...)
+/// and, when a command or API call failed, what ran, how it ended and its stderr.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct InfraError {
     pub code: String,
     pub message: String,
+    /// Full command line (`docker compose -p acme up ...`) or API call description.
+    pub command: Option<String>,
+    /// Exit status or signal (`exit status: 1`), HTTP status, or health state.
+    pub status: Option<String>,
+    /// Last [`STDERR_TAIL_LINES`] lines of stderr (or the engine's message), ANSI stripped.
+    pub stderr: Option<String>,
 }
 
 impl InfraError {
@@ -108,8 +118,51 @@ impl InfraError {
         Self {
             code: code.into(),
             message: message.into(),
+            command: None,
+            status: None,
+            stderr: None,
         }
     }
+
+    /// Adds what failed. `stderr` is ANSI-stripped and cut to its last lines here, so
+    /// every adapter reports the same shape.
+    pub fn with_command(
+        mut self,
+        command: impl Into<String>,
+        status: Option<String>,
+        stderr: Option<&str>,
+    ) -> Self {
+        self.command = Some(command.into());
+        self.status = status;
+        self.stderr = stderr.map(stderr_tail);
+        self
+    }
+
+    /// Error data for clients: `{message, command, status, stderr}`; unknown fields are null.
+    pub fn data(&self) -> Value {
+        serde_json::json!({
+            "message": self.message,
+            "command": self.command,
+            "status": self.status,
+            "stderr": self.stderr,
+        })
+    }
+}
+
+impl From<InfraError> for devlanes_proto::RpcError {
+    /// Keeps the infra code; exit code 1.
+    fn from(error: InfraError) -> Self {
+        let data = error.data();
+        devlanes_proto::RpcError::new(error.code, data, 1)
+    }
+}
+
+/// ANSI-stripped last [`STDERR_TAIL_LINES`] lines of `text`.
+fn stderr_tail(text: &str) -> String {
+    let plain = strip_ansi_escapes::strip_str(text);
+    let lines: Vec<&str> = plain.trim_end().lines().collect();
+    let start = lines.len().saturating_sub(STDERR_TAIL_LINES);
+    lines[start..].join("\n")
 }
 
 /// A plain container from `infra.containers`, after expression evaluation.
@@ -298,7 +351,11 @@ pub enum RouteStatus {
     Ready,
     Idle,
     Starting,
-    Failed { log_tail: String },
+    Failed {
+        log_tail: String,
+    },
+    /// A mirrored route whose box connection is down and retrying.
+    Reconnecting,
 }
 
 /// One hostname route, independent of the proxy crate's types.
@@ -419,11 +476,11 @@ impl ProcessTable for SysProcesses {
 /// Validates a preset's opaque option block; `None` when the service has none.
 pub type PresetParser = dyn Fn(Option<&Value>) -> Result<(), String> + Send + Sync;
 
-/// A registered preset: its config key, option schema and option parser.
+/// A registered preset: its config key and option parser. The option schemas are
+/// generated into the config crate's schema files at build time.
 #[derive(Clone)]
 pub struct PresetEntry {
     pub name: &'static str,
-    pub schema: schemars::Schema,
     pub parse: Arc<PresetParser>,
 }
 
@@ -462,9 +519,97 @@ pub struct Integrations {
     pub ca_env: BTreeMap<String, String>,
     /// CA facts for `doctor` (`present`, `path`).
     pub ca_status: Value,
-    /// Preset option schemas and parsers for `schema` and `config check`.
+    /// Preset option parsers that `config check` uses.
     pub presets: Vec<PresetEntry>,
     pub launch_checks: Vec<Arc<dyn LaunchCheck>>,
+    /// Transports to boxes for `connect`.
+    pub remote: Arc<dyn RemoteConnector>,
+    /// The `/etc/hosts` fallback; `None` leaves the hosts file alone.
+    pub hosts: Option<Arc<crate::hosts::HostsFile>>,
+    /// The machine-wide start gate; `None` spawns every service at once.
+    pub start_gate: Option<Arc<dyn devlanes_core::gate::StartGate>>,
+    /// System pressure, for the upfront memory warning.
+    pub pressure: Option<Arc<dyn devlanes_core::gate::PressureSource>>,
+    /// Checks the OS resolver file for the `resolver` hostname strategy.
+    pub resolver_files: Option<Arc<dyn ResolverFiles>>,
+}
+
+/// Reports whether the OS forwards the devlanes TLD to the embedded DNS server.
+/// OS-specific file locations live in the implementation, not the engine.
+pub trait ResolverFiles: Send + Sync {
+    /// `{path, installed, matches}` for the file that routes `tld` to `server`.
+    /// Called on a blocking thread.
+    fn status(&self, tld: &str, server: std::net::SocketAddr) -> Value;
+}
+
+/// What ssh (or another transport) asks the user while connecting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePrompt {
+    pub host: String,
+    pub prompt: String,
+    /// `secret`, `confirm` or `notify`, as the CLI renders them.
+    pub kind: &'static str,
+}
+
+/// Relays connection prompts to the CLI attached to `connect`.
+#[async_trait]
+pub trait RemotePrompter: Send + Sync {
+    /// The answer, or `None` when nobody is attached or the user cancelled.
+    async fn ask(&self, prompt: RemotePrompt) -> Option<String>;
+}
+
+/// Builds transports to boxes; the composition root wires SSH, tests an in-memory pipe.
+pub trait RemoteConnector: Send + Sync {
+    /// A transport to `host`; prompts during authentication go to `prompts`.
+    fn transport(
+        &self,
+        host: &str,
+        prompts: Arc<dyn RemotePrompter>,
+    ) -> Result<Arc<dyn devlanes_transport::Transport>, devlanes_proto::RpcError>;
+
+    /// Transport name recorded in `remote_hosts`.
+    fn kind(&self) -> &'static str {
+        "ssh"
+    }
+
+    /// Loopback addresses that mirrored ports bind; each port is bound on all of them.
+    fn mirror_addresses(&self) -> Vec<std::net::IpAddr> {
+        vec![
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            std::net::Ipv6Addr::LOCALHOST.into(),
+        ]
+    }
+
+    /// Reconnect delays.
+    fn backoff(&self) -> devlanes_transport::Backoff {
+        devlanes_transport::Backoff::default()
+    }
+
+    /// This machine's user home: synced folders land below it.
+    fn home(&self) -> Option<PathBuf>;
+}
+
+/// Connector used when no transport is registered: `connect` is unsupported.
+pub struct NoRemote;
+
+impl RemoteConnector for NoRemote {
+    /// Refuses with `not_supported_yet`.
+    fn transport(
+        &self,
+        _: &str,
+        _: Arc<dyn RemotePrompter>,
+    ) -> Result<Arc<dyn devlanes_transport::Transport>, devlanes_proto::RpcError> {
+        Err(devlanes_proto::RpcError::new(
+            "not_supported_yet",
+            serde_json::json!({"feature": "remote transport"}),
+            1,
+        ))
+    }
+
+    /// No home: syncs are skipped.
+    fn home(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 impl Integrations {
@@ -484,6 +629,11 @@ impl Integrations {
             ca_status: Value::Null,
             presets: Vec::new(),
             launch_checks: Vec::new(),
+            remote: Arc::new(NoRemote),
+            hosts: None,
+            start_gate: None,
+            pressure: None,
+            resolver_files: None,
         }
     }
 }

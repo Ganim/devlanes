@@ -329,7 +329,7 @@ async fn help_lists_clean_and_the_daemon_tab() -> TestResult {
 // ---- full loop -------------------------------------------------------------------
 
 /// Runs `drive` against `api` while `keys` are pressed with a pause between them.
-async fn run_keys(
+pub async fn run_keys(
     api: Arc<FakeApi>,
     keys: Vec<Msg>,
 ) -> Result<Terminal<TestBackend>, Box<dyn std::error::Error>> {

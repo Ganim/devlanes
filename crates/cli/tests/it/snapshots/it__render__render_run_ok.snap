@@ -1,0 +1,10 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+exited acme@2:migrate exit=0
+--- plain (exit 0)
+exited acme@2:migrate exit=0
+--- agent (exit 0)
+exited acme@2:migrate exit=0

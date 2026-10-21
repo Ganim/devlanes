@@ -17,8 +17,8 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 use crate::api::UnitMetrics;
 use crate::app::{
     App, AttachState, Connection, CopyState, Dialog, ErrorEntry, Focus, LogView, MIN_HEIGHT,
-    MIN_WIDTH, PaneMode, PanelLine, Row, Tab, Target, areas, error_panel_area, started_by_agent,
-    unit_ref,
+    MIN_WIDTH, PaneMode, PanelLine, ProfileChoice, ProfilesState, Row, Tab, Target, areas,
+    error_panel_area, started_by_agent, unit_ref,
 };
 use crate::doctor;
 use crate::text::{self, clean, clip};
@@ -301,12 +301,19 @@ fn lane_spans(app: &App, lane: &LaneSummary) -> Vec<Span<'static>> {
 
 /// `    ● api  ready  ! start failed  agent`
 fn unit_spans(unit: &UnitSummary, error: Option<&ErrorEntry>) -> Vec<Span<'static>> {
-    let (glyph, color) = unit_glyph(&unit.state);
+    let (glyph, state_color) = unit_glyph(&unit.state);
+    let own = unit.color.as_deref().and_then(palette_color);
+    // A failed unit's marker stays red whatever its color, so failures stand out.
+    let marker = match own {
+        Some(color) if unit.state != "failed" => color,
+        _ => state_color,
+    };
+    let name = own.map_or_else(Style::new, |color| Style::new().fg(color));
     let mut spans = vec![
         Span::raw("    "),
-        Span::styled(format!("{glyph} "), Style::new().fg(color)),
-        Span::raw(clean(&unit.name)),
-        Span::styled(format!("  {}", unit_state(unit)), Style::new().fg(color)),
+        Span::styled(format!("{glyph} "), Style::new().fg(marker)),
+        Span::styled(clean(&unit.name), name),
+        Span::styled(format!("  {}", unit_state(unit)), Style::new().fg(state_color)),
     ];
     if let Some(entry) = error {
         spans.push(failure_badge(entry));
@@ -347,9 +354,34 @@ fn unit_glyph(state: &str) -> (&'static str, Color) {
     match state {
         "ready" | "running" => ("●", READY),
         "starting" | "stopping" => ("◐", MUTED),
+        "queued" => ("◌", MUTED),
         "failed" => ("✕", FAILED),
         _ => ("○", MUTED),
     }
+}
+
+/// A unit color from the daemon's palette (`devlanes_core::color::PALETTE`) as
+/// the terminal's own ANSI color, so it follows the user's theme. Unknown
+/// names fall back to the default style.
+pub fn palette_color(name: &str) -> Option<Color> {
+    Some(match name {
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        // ANSI 7 and 8: ratatui calls them Gray and DarkGray.
+        "white" => Color::Gray,
+        "gray" => Color::DarkGray,
+        "bright-red" => Color::LightRed,
+        "bright-green" => Color::LightGreen,
+        "bright-yellow" => Color::LightYellow,
+        "bright-blue" => Color::LightBlue,
+        "bright-magenta" => Color::LightMagenta,
+        "bright-cyan" => Color::LightCyan,
+        _ => return None,
+    })
 }
 
 /// The terminal pane, or details when there is no live terminal to show.
@@ -1089,7 +1121,7 @@ const HELP: &[(&str, &str)] = &[
     ("shift+tab", "switch between list and terminal"),
     ("s / x / r", "start / stop / restart unit or lane"),
     ("t", "run a task"),
-    ("p", "start the lane with a profile"),
+    ("p", "start the lane with chosen profiles"),
     ("z", "zoom the terminal"),
     ("pgup/pgdn, wheel", "scroll; older lines load from logs"),
     ("c", "copy mode (y copies with OSC 52)"),
@@ -1102,6 +1134,50 @@ const HELP: &[(&str, &str)] = &[
     ("s", "daemon tab: start a stopped daemon"),
     ("q", "quit; everything keeps running"),
 ];
+
+/// `> [x] web  default  no infra  api, +frontend`: the checkbox and name,
+/// then the markers, then the include selectors dimmed.
+fn profile_row(item: &ProfileChoice, selected: bool, width: usize) -> Line<'static> {
+    let check = if item.checked { "[x]" } else { "[ ]" };
+    let cursor = if selected { "> " } else { "  " };
+    let profile = &item.profile;
+    if selected {
+        // One style for the whole row keeps the highlight readable.
+        let mut text = format!("{cursor}{check} {}", clean(&profile.name));
+        if profile.is_default {
+            text.push_str("  default");
+        }
+        if profile.skips_infra {
+            text.push_str("  no infra");
+        }
+        if !profile.include.is_empty() {
+            text.push_str(&format!("  {}", clean(&profile.include.join(", "))));
+        }
+        let clipped = clip(&text, width);
+        let pad = width.saturating_sub(text::width(&clipped));
+        return Line::from(Span::styled(
+            format!("{clipped}{}", " ".repeat(pad)),
+            Style::new().fg(ON_PAINT).bg(PAINT),
+        ));
+    }
+    let mut spans = vec![
+        Span::raw(format!("{cursor}{check} ")),
+        Span::styled(clean(&profile.name), Style::new().add_modifier(Modifier::BOLD)),
+    ];
+    if profile.is_default {
+        spans.push(Span::styled("  default", Style::new().fg(MUTED)));
+    }
+    if profile.skips_infra {
+        spans.push(Span::styled("  no infra", Style::new().fg(PAINT)));
+    }
+    if !profile.include.is_empty() {
+        spans.push(Span::styled(
+            format!("  {}", clean(&profile.include.join(", "))),
+            Style::new().fg(MUTED).add_modifier(Modifier::DIM),
+        ));
+    }
+    fit(spans, width)
+}
 
 /// The end of typed input that fits in `width` cells: the end is what the
 /// user is typing, so it stays visible.
@@ -1223,19 +1299,37 @@ fn render_dialog(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
             lines.extend(wrapped("enter choose · esc cancel", muted));
             (" run task ", lines)
         }
-        Dialog::Profile { lane, input } => {
-            let mut lines = wrapped(&format!("start {lane} with profile:"), Style::new());
-            let shown = tail_fit(&clean(input), max.saturating_sub(1));
-            lines.push(Line::from(vec![
-                Span::styled(shown, Style::new().fg(PAINT)),
-                Span::raw("▏"),
-            ]));
-            lines.push(Line::from(""));
-            lines.extend(wrapped(
-                "enter start · empty for default · esc cancel",
-                muted,
-            ));
-            (" profile ", lines)
+        Dialog::Profiles { lane, state } => {
+            let mut lines = wrapped(&format!("start {lane} with:"), Style::new());
+            match state {
+                ProfilesState::Loading => lines.extend(wrapped("loading profiles", muted)),
+                ProfilesState::Unsupported => {
+                    lines.extend(wrapped("profiles need a newer daemon", muted));
+                    lines.push(Line::from(""));
+                    lines.extend(wrapped("esc closes", muted));
+                }
+                ProfilesState::Ready { items, .. } if items.is_empty() => {
+                    lines.extend(wrapped("this lane's config defines no profiles", muted));
+                    lines.push(Line::from(""));
+                    lines.extend(wrapped("esc closes", muted));
+                }
+                ProfilesState::Ready { items, index } => {
+                    let width = max.min(72);
+                    lines.extend(
+                        items
+                            .iter()
+                            .enumerate()
+                            .map(|(i, item)| profile_row(item, i == *index, width)),
+                    );
+                    lines.push(Line::from(""));
+                    lines.extend(wrapped(
+                        "space toggles · enter starts · esc cancels",
+                        muted,
+                    ));
+                    lines.extend(wrapped("nothing checked starts the default profile", muted));
+                }
+            }
+            (" profiles ", lines)
         }
         Dialog::Help => {
             let mut lines: Vec<Line> = HELP

@@ -7,6 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-hosts-helper`
+# takes devlanes-hosts from the same release archive as devlanes.
+[package.metadata.binstall]
+pkg-url = "https://github.com/devlanes-run/devlanes/releases/download/v{ version }/devlanes-{ version }-{ target }.tar.gz"
+bin-dir = "devlanes-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+disabled-strategies = ["quick-install"]
+
 # Runs as root through a NOPASSWD sudo rule, so it stays std-only: every line that
 # runs privileged is in this crate. See README.md.
 [lib]

@@ -1,0 +1,60 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+daemon
+  ✓ devlanes 0.1.0, pid 4242, socket /home/u/.devlanes/run/daemon.sock
+  ✓ state schema 5 at /home/u/.devlanes/state.db
+  ✓ 2 projects loaded, 1 event subscribers
+sandbox
+  ✓ not sandboxed
+docker
+  ! Docker is not reachable
+    fix: start Docker; only projects with infra need it
+proxy
+  ✓ http on port 80
+  ! https off: no CA
+    fix: devlanes certs trust
+tls
+  ✓ CA at /home/u/.devlanes/ca/ca.pem
+hosts
+  ✗ /etc/hosts fallback auto: the hosts helper is not installed
+    fix: devlanes certs trust --hosts
+output
+  ✓ mode human (DEVLANES_OUTPUT)
+--- plain (exit 0)
+daemon
+  ok devlanes 0.1.0, pid 4242, socket /home/u/.devlanes/run/daemon.sock
+  ok state schema 5 at /home/u/.devlanes/state.db
+  ok 2 projects loaded, 1 event subscribers
+sandbox
+  ok not sandboxed
+docker
+  warn Docker is not reachable
+    fix: start Docker; only projects with infra need it
+proxy
+  ok http on port 80
+  warn https off: no CA
+    fix: devlanes certs trust
+tls
+  ok CA at /home/u/.devlanes/ca/ca.pem
+hosts
+  fail /etc/hosts fallback auto: the hosts helper is not installed
+    fix: devlanes certs trust --hosts
+output
+  ok mode plain (DEVLANES_OUTPUT)
+--- agent (exit 0)
+fail hosts: /etc/hosts fallback auto: the hosts helper is not installed
+  fix: devlanes certs trust --hosts
+warn docker: Docker is not reachable
+  fix: start Docker; only projects with infra need it
+warn proxy: https off: no CA
+  fix: devlanes certs trust
+ok daemon: devlanes 0.1.0, pid 4242, socket /home/u/.devlanes/run/daemon.sock
+ok daemon: state schema 5 at /home/u/.devlanes/state.db
+ok sandbox: not sandboxed
+ok proxy: http on port 80
+ok tls: CA at /home/u/.devlanes/ca/ca.pem
+ok daemon: 2 projects loaded, 1 event subscribers
+ok output: mode agent (DEVLANES_OUTPUT)

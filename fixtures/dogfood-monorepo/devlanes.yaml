@@ -58,7 +58,7 @@ infra:
   # HTTPS hostnames the proxy routes to a container's published port.
   hosts:
     object-store: ["s3.${{ lane.domain }}"]
-  # Containers whose ports are not mirrored to machines connected with devlanes connect.
+  # Containers whose ports are not mirrored to machines connected with devlanes remote connect.
   hidden: [postgres, redis, rabbitmq]
   # Commands run once per lane after its containers are healthy.
   setup:

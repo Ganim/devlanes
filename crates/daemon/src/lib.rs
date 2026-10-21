@@ -7,15 +7,21 @@
 mod attach;
 pub mod bus;
 mod control;
+mod dns;
 mod engine;
+pub mod hosts;
 pub mod integrations;
 mod lifecycle;
+mod maintenance;
 mod model;
+mod pacing;
+mod platforms;
 pub mod process;
 mod query;
 pub mod ready;
 mod reconcile;
 mod registry;
+mod remote;
 mod resolve;
 mod routes;
 mod sampler;
@@ -217,9 +223,24 @@ impl Server {
             tokio::select! {
                 () = self.shutdown.cancelled() => break,
                 accepted = self.listener.accept() => {
-                    let (stream, _) = accepted?;
-                    if stream.peer_cred()?.uid() != rustix::process::getuid().as_raw() {
-                        continue;
+                    // One client's failure must never end the daemon: a peer that closes
+                    // before its credentials are read (macOS: ENOTCONN) used to exit here.
+                    let stream = match accepted {
+                        Ok((stream, _)) => stream,
+                        Err(error) => {
+                            tracing::warn!(%error, "accept failed");
+                            // Out of descriptors: give closing units a moment instead of spinning.
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            continue;
+                        }
+                    };
+                    match stream.peer_cred() {
+                        Ok(cred) if cred.uid() == rustix::process::getuid().as_raw() => {}
+                        Ok(_) => continue,
+                        Err(error) => {
+                            tracing::debug!(%error, "client left before its credentials were read");
+                            continue;
+                        }
                     }
                     let handler = handler.clone();
                     let shutdown = self.shutdown.clone();

@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use tokio_util::sync::CancellationToken;
 
@@ -97,9 +97,33 @@ pub(crate) struct MuxClient {
     open: mpsc::Sender<OpenReply>,
     shutdown: CancellationToken,
     done: CancellationToken,
+    failure: watch::Receiver<Option<String>>,
 }
 
 impl MuxClient {
+    /// Why the connection failed, once the driver saw an I/O or protocol error.
+    pub(crate) fn failure(&self) -> Option<String> {
+        self.failure.borrow().clone()
+    }
+
+    /// Waits up to `limit` for the driver to report why the connection ended.
+    ///
+    /// Streams can see EOF before the driver records the pipe's error (such as
+    /// the remote tunnel's stderr), so callers that just lost a stream wait here.
+    pub(crate) async fn failure_within(&self, limit: Duration) -> Option<String> {
+        let mut failure = self.failure.clone();
+        let wait = async {
+            tokio::select! {
+                reason = failure.wait_for(Option::is_some) => reason.ok().and_then(|r| r.clone()),
+                () = self.done.cancelled() => None,
+            }
+        };
+        match tokio::time::timeout(limit, wait).await {
+            Ok(Some(reason)) => Some(reason),
+            _ => self.failure(),
+        }
+    }
+
     /// Opens a new outbound stream.
     pub(crate) async fn open(&self) -> Result<MuxStream, MuxError> {
         let (reply, response) = oneshot::channel();
@@ -151,6 +175,7 @@ pub(crate) fn client(io: BoxDuplex) -> MuxClient {
     let (open, open_rx) = mpsc::channel(32);
     let shutdown = CancellationToken::new();
     let done = CancellationToken::new();
+    let (failure_tx, failure) = watch::channel(None);
     let connection = yamux::Connection::new(io.compat(), config(), yamux::Mode::Client);
     tokio::spawn(drive(
         connection,
@@ -158,11 +183,13 @@ pub(crate) fn client(io: BoxDuplex) -> MuxClient {
         None,
         shutdown.clone(),
         done.clone(),
+        failure_tx,
     ));
     MuxClient {
         open,
         shutdown,
         done,
+        failure,
     }
 }
 
@@ -177,6 +204,7 @@ pub(crate) fn server(io: BoxDuplex) -> MuxServer {
         Some(inbound_tx),
         shutdown.clone(),
         CancellationToken::new(),
+        watch::channel(None).0,
     ));
     MuxServer { inbound, shutdown }
 }
@@ -191,6 +219,7 @@ async fn drive<T>(
     inbound_tx: Option<mpsc::UnboundedSender<yamux::Stream>>,
     shutdown: CancellationToken,
     done: CancellationToken,
+    failure: watch::Sender<Option<String>>,
 ) where
     T: futures_util::AsyncRead + futures_util::AsyncWrite + Unpin,
 {
@@ -249,6 +278,13 @@ async fn drive<T>(
     };
     if let Err(error) = result {
         tracing::debug!("mux ended: {error}");
+        // The pipe's own error carries the box's report (an SSH tunnel's stderr), so
+        // it is kept verbatim instead of yamux's "i/o error" wrapper.
+        let reason = match error {
+            MuxError::Connection(yamux::ConnectionError::Io(io)) => io.to_string(),
+            other => other.to_string(),
+        };
+        failure.send_replace(Some(reason));
     }
     // Fail queued opens promptly instead of leaving callers waiting.
     if let Some(reply) = pending.take() {

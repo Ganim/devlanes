@@ -28,7 +28,7 @@ async fn sync_extension(worktree: &Path, to: &Path) -> Result<SyncHandle, SyncEr
 
 - `Syncer`: `start` finishes the first copy before it returns when the source exists, then watches in a background task. `sync_once` runs a single pass.
 - `SyncHandle`: `status`, `subscribe` and `stop`. Dropping it stops the sync.
-- `SyncStatus`: state, last sync time, file and byte counts, and recent errors, for `devlanes sync status`.
+- `SyncStatus`: state, last sync time, file and byte counts, and recent errors, for `devlanes remote sync`.
 - `SyncTarget`: `manifest`, `write_file` and `remove`. The remote mux target will implement it.
 - `LocalTarget`: writes a temp file and renames it into place. It never writes or deletes through a symlinked directory.
 - `IgnoreRules`: a pattern without `/` matches at any depth, and a pattern with `/` is anchored at the source root.
@@ -39,7 +39,7 @@ async fn sync_extension(worktree: &Path, to: &Path) -> Result<SyncHandle, SyncEr
 services:
   extension:
     run_script: apps/extension/package.json#dev
-    # Folders copied to a stable path, locally or on a machine connected with devlanes connect.
+    # Folders copied to a stable path, locally or on a machine connected with devlanes remote connect.
     sync:
       - from: apps/extension/.output/chrome-mv3
         # Destination; defaults to ~/devlanes/sync/<project>/<lane>/<folder>.

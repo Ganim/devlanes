@@ -1,0 +1,19 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 1)
+failed acme@2:admin exit=1
+  exited with code 1
+  | Error: Cannot find module './env'
+  more: devlanes logs acme@2:admin --tail 200
+--- plain (exit 1)
+failed acme@2:admin exit=1
+  exited with code 1
+  | Error: Cannot find module './env'
+  more: devlanes logs acme@2:admin --tail 200
+--- agent (exit 1)
+failed acme@2:admin exit=1
+  exited with code 1
+  | Error: Cannot find module './env'
+  more: devlanes logs acme@2:admin --tail 200

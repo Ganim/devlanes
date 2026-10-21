@@ -1,0 +1,37 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 1)
+acme
+  LANE  BRANCH        STATE   SERVICES  CPU   MEM        URL
+  2     feat/billing  failed  1/4       4.5%  143.1 MiB  https://acme-2.localhost
+
+  UNIT    STATE        PORT   CPU   MEM        URL
+  admin   failed (1)   –      –     –
+  api     ready        20101  4.5%  143.1 MiB  https://api.acme-2.localhost
+  worker  idle         –      –     –
+  search  queued 6/40  –      –     –
+  admin: exited with code 1
+  search: queued: 6 of 40 starting, CPU 93%
+--- plain (exit 1)
+acme
+  LANE  BRANCH        STATE   SERVICES  CPU   MEM        URL
+  2     feat/billing  failed  1/4       4.5%  143.1 MiB  https://acme-2.localhost
+
+  UNIT    STATE        PORT   CPU   MEM        URL
+  admin   failed (1)   –      –     –
+  api     ready        20101  4.5%  143.1 MiB  https://api.acme-2.localhost
+  worker  idle         –      –     –
+  search  queued 6/40  –      –     –
+  admin: exited with code 1
+  search: queued: 6 of 40 starting, CPU 93%
+--- agent (exit 1)
+failed acme@2 feat/billing 1/4 failed=admin
+failed acme@2:admin exit=1
+  exited with code 1
+  more: devlanes logs acme@2:admin --tail 200
+ready acme@2:api https://api.acme-2.localhost http=20101
+idle acme@2:worker
+queued acme@2:search 6/40
+  queued: 6 of 40 starting, CPU 93%

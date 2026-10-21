@@ -140,8 +140,11 @@ pub async fn run_with<D: WithDriver + ?Sized>(
     let mut failures = Vec::new();
     match start {
         Ok(start) if start.ready && start.failures.is_empty() => {
-            // A terminal start result closes any still-open CI phase before test output begins.
-            if let Ok(rendered) = reporter.result(&Report::new(Method::Start, &json!({}))) {
+            // A terminal start result closes any still-open CI phase before test output
+            // begins. JSON has no phases, and the empty object would be a stray NDJSON line.
+            if runtime.mode != crate::OutputMode::Json
+                && let Ok(rendered) = reporter.result(&Report::new(Method::Start, &json!({})))
+            {
                 emit(rendered);
             }
             match driver.env(&ownership.lane).await {

@@ -28,7 +28,7 @@ use crate::{
     engine::{Inner, with_ownership},
     integrations::{InfraPortNeed, ManagedUnit, PlannedUnit},
     model::{EnvMap, Kind, LaneRt, ProjectRt, UnitRec, core_actor, is_mine, unit_summary},
-    ready::{Readiness, run_check},
+    ready::Readiness,
     registry::{internal, store_error},
     units::{UnitHost, UnitInfo, UnitState, now_ms},
 };
@@ -167,7 +167,7 @@ async fn write_files(
 }
 
 /// Maps a resolved readiness spec to the checker's form.
-fn readiness(spec: &ReadySpec) -> Readiness {
+pub(crate) fn readiness(spec: &ReadySpec) -> Readiness {
     match spec {
         ReadySpec::Started => Readiness::Started,
         ReadySpec::Tcp { port } => Readiness::Tcp { port: *port },
@@ -258,6 +258,8 @@ pub(crate) struct StartCx {
     pub skipped_tasks: Vec<String>,
     pub infra_needs: Vec<InfraPortNeed>,
     pub timed_out: bool,
+    /// Bypass the start gate (`Selection.all_at_once`).
+    pub all_at_once: bool,
 }
 
 /// One ordered step of the lane pipeline (plan 5.5).
@@ -305,7 +307,7 @@ fn reason(code: &str, data: Value) -> RpcError {
 
 /// Infra failures as RPC errors.
 fn infra_error(error: crate::integrations::InfraError) -> RpcError {
-    RpcError::new(error.code, json!({"message": error.message}), 1)
+    RpcError::from(error)
 }
 
 #[async_trait]
@@ -672,7 +674,7 @@ impl LanePhase for ServicesPhase {
         if cx.services.is_empty() {
             return PhaseResult::Skipped(reason("no_services", json!({})));
         }
-        // A locked vault fails the start as a whole: `devlanes unlock` fixes it.
+        // A locked vault fails the start as a whole: `devlanes secrets unlock` fixes it.
         for name in &cx.services {
             if let Some(error) = resolved.errors.get(&format!("services.{name}")) {
                 let error = crate::resolve::resolve_error(error);
@@ -682,7 +684,9 @@ impl LanePhase for ServicesPhase {
             }
         }
         let mut to_spawn: Vec<&ResolvedService> = Vec::new();
-        for name in &cx.services {
+        // A copy, because the paced spawn below needs `cx` mutably.
+        let selected = cx.services.clone();
+        for name in &selected {
             if let Some(error) = resolved.errors.get(&format!("services.{name}")) {
                 cx.failures.push(UnitFailureData {
                     lane: cx.reference.clone(),
@@ -741,42 +745,8 @@ impl LanePhase for ServicesPhase {
                 }
             }
         }
-        let spawns = to_spawn.iter().map(|service| {
-            let engine = engine.clone();
-            let project = cx.project.clone();
-            let lane = cx.lane.clone();
-            let request = SpawnRequest::service(service, &cx.actor);
-            let ready = service.ready.clone();
-            let unit = service.unit.clone();
-            async move {
-                let result = engine.spawn_unit(&project, &lane, request).await;
-                if let Ok((host, managed)) = &result {
-                    let host = host.clone();
-                    let managed = managed.clone();
-                    tokio::spawn(async move {
-                        run_check(
-                            &host,
-                            readiness(&ready.check),
-                            ready.timeout,
-                            || async move { managed.listening_ports().await },
-                        )
-                        .await;
-                    });
-                }
-                (unit, result.map(|(host, _)| host))
-            }
-        });
-        for (unit, result) in join_all(spawns).await {
-            match result {
-                Ok(_) => cx.started.push(unit),
-                Err(error) => cx.failures.push(UnitFailureData {
-                    lane: cx.reference.clone(),
-                    unit,
-                    reason: Some(error),
-                    ..UnitFailureData::default()
-                }),
-            }
-        }
+        // Each spawn waits for a start slot; see `pacing`.
+        engine.spawn_services(cx, &to_spawn, &resolved).await;
         PhaseResult::Done
     }
 }
@@ -797,6 +767,8 @@ pub(crate) struct StartOptions {
     pub timeout: Duration,
     pub session: Option<Session>,
     pub setup_only: bool,
+    /// Bypass the start gate for this request.
+    pub all_at_once: bool,
 }
 
 type Spawned = (UnitHost, Arc<dyn ManagedUnit>);
@@ -866,6 +838,7 @@ impl Inner {
             actor: request.actor.clone(),
             started_at_ms: now_ms(),
             log_dir: log_dir.clone(),
+            retention: crate::units::LogRetention::from_config(&self.opts.user.logs.retention),
         };
         let unit: Arc<dyn Unit> = managed.clone();
         let host = match UnitHost::start(info, unit, identity) {
@@ -959,7 +932,76 @@ impl Inner {
                 let _ = engine.store.finish_unit_run(id, outcome).await;
             }
             engine.emit_unit(&project, &lane, &name, &host);
+            if let Some(id) = run_id {
+                // The log closes right after the exit; its segments are final then.
+                for segment in host.run_segments(Duration::from_secs(5)).await {
+                    let _ = engine
+                        .store
+                        .record_log_segment(devlanes_state::LogSegmentInput {
+                            unit_run_id: id,
+                            first_seq: segment.first_seq,
+                            last_seq: segment.last_seq,
+                            min_ts_ms: segment.min_timestamp_ms,
+                            max_ts_ms: segment.max_timestamp_ms,
+                            path: segment.path,
+                            compressed: segment.compressed,
+                            bytes: segment.bytes,
+                        })
+                        .await;
+                }
+            }
         });
+    }
+
+    /// Records why the selected units that did not start stayed idle (`phase_failed`)
+    /// and emits `unit.changed` for each, so clients see it on the unit itself.
+    fn mark_unstarted(
+        &self,
+        project: &ProjectRt,
+        lane: &LaneRt,
+        cx: &StartCx,
+        phase: &str,
+        error: &RpcError,
+    ) {
+        let reason = RpcError::new(
+            "phase_failed",
+            json!({
+                "lane": cx.reference,
+                "phase": phase,
+                "error": {"code": error.code, "data": error.data},
+            }),
+            1,
+        );
+        let summaries = {
+            let mut st = lane.st();
+            let units: Vec<String> = st
+                .view
+                .as_ref()
+                .map(|view| {
+                    view.services
+                        .iter()
+                        .filter(|service| cx.services.contains(&service.name))
+                        .map(|service| service.unit.clone())
+                        .filter(|unit| {
+                            !cx.started.contains(unit) && !cx.already_running.contains(unit)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for unit in &units {
+                st.phase_reasons.insert(unit.clone(), reason.clone());
+            }
+            let summary = crate::model::lane_summary(&project.name(), &st);
+            summary
+                .units
+                .into_iter()
+                .filter(|unit| units.contains(&unit.name))
+                .collect::<Vec<_>>()
+        };
+        for summary in summaries {
+            self.bus
+                .emit(events::UNIT_CHANGED, json!({"unit": summary}));
+        }
     }
 
     /// Emits `unit.changed` and `lane.changed` for one unit.
@@ -975,7 +1017,11 @@ impl Inner {
             st.units
                 .get(name)
                 .filter(|rec| rec.host.same_run(host))
-                .map(|rec| unit_summary(&st.reference(&project.name()), name, rec))
+                .map(|rec| {
+                    let mut summary = unit_summary(&st.reference(&project.name()), name, rec);
+                    crate::model::apply_phase_reason(&st, &mut summary);
+                    summary
+                })
         };
         if let Some(summary) = summary {
             self.bus
@@ -1331,11 +1377,17 @@ impl Inner {
             skipped_tasks: Vec::new(),
             infra_needs: Vec::new(),
             timed_out: false,
+            all_at_once: options.all_at_once,
         };
         let mut hard_error = None;
+        let mut failed_phase: Option<(&'static str, RpcError)> = None;
         for phase in start_pipeline() {
             if phase.visible() {
                 self.phase_event(&reference, phase.name(), "started", None);
+            }
+            // Reaching services is what makes earlier phase failures stale.
+            if phase.name() == "services" && !cx.setup_only {
+                lane.st().phase_reasons.clear();
             }
             let result = phase.run(self, &mut cx).await;
             let (state, why) = match &result {
@@ -1348,12 +1400,21 @@ impl Inner {
             }
             match result {
                 PhaseResult::Done | PhaseResult::Skipped(_) => {}
-                PhaseResult::Halt(_) => break,
+                PhaseResult::Halt(why) => {
+                    failed_phase = Some((phase.name(), why));
+                    break;
+                }
                 PhaseResult::Error(error) => {
+                    failed_phase = Some((phase.name(), error.clone()));
                     hard_error = Some(error);
                     break;
                 }
             }
+        }
+        if let Some((phase, error)) = &failed_phase
+            && !cx.setup_only
+        {
+            self.mark_unstarted(project, lane, &cx, phase, error);
         }
         let record = lane.st().record.clone();
         if let Some(record) = record {
@@ -1483,6 +1544,9 @@ impl Inner {
         selectors: Option<Vec<String>>,
         mine: Option<&Actor>,
     ) -> Result<Vec<UnitSummary>, RpcError> {
+        // Before the lock: a start holding it may be waiting on these queued units.
+        let queued_reference = lane.st().reference(&project.name());
+        self.cancel_queued(lane, &queued_reference, selectors.as_deref(), mine);
         let _op = lane.op.lock().await;
         let reference = lane.st().reference(&project.name());
         let whole = selectors.as_ref().is_none_or(Vec::is_empty) && mine.is_none();
@@ -1694,6 +1758,7 @@ impl Inner {
             skipped_tasks: Vec::new(),
             infra_needs: Vec::new(),
             timed_out: false,
+            all_at_once: options.all_at_once,
         };
         let result = ServicesPhase.run(self, &mut cx).await;
         // Replicas not named by the selectors stay as they are.
@@ -1827,6 +1892,7 @@ impl Inner {
                 timeout: self.opts.start_timeout,
                 session: None,
                 setup_only,
+                all_at_once: false,
             },
         )
         .await
@@ -1835,6 +1901,7 @@ impl Inner {
 
     /// Daemon shutdown: stops every live unit with its policy; returns the count.
     pub(crate) async fn stop_everything(self: &Arc<Self>) -> usize {
+        self.pacing.cancel_all();
         let mut stops = Vec::new();
         for (_, lane) in self.all_lanes() {
             let st = lane.st();

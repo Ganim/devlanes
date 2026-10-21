@@ -1,0 +1,10 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+unlocked 2 secrets for acme@2 (fnox profile dev)
+--- plain (exit 0)
+unlocked 2 secrets for acme@2 (fnox profile dev)
+--- agent (exit 0)
+unlocked 2 secrets for acme@2 (fnox profile dev)

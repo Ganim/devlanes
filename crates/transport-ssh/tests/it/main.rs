@@ -94,12 +94,13 @@ async fn ssh_tunnel_session() -> TestResult {
             }
             return Err("devlanes is not installed on the box".into());
         }
-        // A working tunnel waits silently for the client's hello; an unimplemented one
-        // exits at once, and the stream surfaces its stderr as the read error.
+        // A working tunnel waits for the client's hello or starts the mux (yamux opens
+        // with an RTT ping); an unimplemented one exits at once, and the stream
+        // surfaces its stderr as the read error.
         let mut raw = transport.connect().await?;
         let mut byte = [0u8; 1];
         match tokio::time::timeout(Duration::from_secs(3), raw.read(&mut byte)).await {
-            Err(_) => {}
+            Err(_) | Ok(Ok(1..)) => {}
             Ok(Err(error)) => {
                 let message = error.to_string();
                 let lower = message.to_lowercase();
@@ -111,11 +112,16 @@ async fn ssh_tunnel_session() -> TestResult {
                 }
                 return Err(error.into());
             }
-            Ok(Ok(n)) => return Err(format!("tunnel produced {n} bytes before the hello").into()),
+            Ok(Ok(_)) => return Err("tunnel closed its output without an error".into()),
         }
         drop(raw);
         let session = Session::connect(&transport, SessionOptions::new("ssh-test")).await?;
         assert!(!session.server().is_empty());
+        // A forwarded request reaches the box's own daemon (spawned by the tunnel).
+        let forward = serde_json::json!({"method": "status", "params": {"all": true}});
+        let reply = session.request(forward).await?;
+        assert_eq!(reply["type"], "response", "{reply}");
+        assert_eq!(reply["outcome"]["status"], "ok", "{reply}");
         session.close();
         transport.close().await;
         Ok(())

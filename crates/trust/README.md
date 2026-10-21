@@ -1,6 +1,6 @@
 # devlanes-trust
 
-The `TrustStore` trait and shared types for installing the devlanes CA into OS and browser trust stores. `devlanes-trust-macos` and `devlanes-trust-linux` implement it, and the CLI calls it for `devlanes trust` and `devlanes untrust`. The NSS store used by Firefox and Chromium on both platforms is also here.
+The `TrustStore` trait and shared types for installing the devlanes CA into OS and browser trust stores. `devlanes-trust-macos` and `devlanes-trust-linux` implement it, and the CLI calls it for `devlanes certs trust` and `devlanes certs untrust`. The NSS store used by Firefox and Chromium on both platforms is also here.
 
 ## Usage
 
@@ -30,11 +30,11 @@ async fn trust(store: &dyn TrustStore, ca_pem: &str) -> Result<TrustStatus, Trus
 ```yaml
 # ~/.devlanes/config.yaml
 tls:
-  # Stores that devlanes trust installs the CA into and devlanes untrust removes it from.
+  # Stores that devlanes certs trust installs the CA into and devlanes certs untrust removes it from.
   trust: [system, firefox, chrome]
 ```
 
-Without `tls.trust`, `devlanes trust` uses only the `system` store.
+Without `tls.trust`, `devlanes certs trust` uses only the `system` store.
 
 ## Behaviour
 

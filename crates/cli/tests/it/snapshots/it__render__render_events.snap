@@ -1,0 +1,19 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+lane.phase acme@2 infra done
+unit.changed acme@2:api ready
+task acme@2 migrate failed exit=1
+remote.state host=box state=connected
+--- plain (exit 0)
+lane.phase acme@2 infra done
+unit.changed acme@2:api ready
+task acme@2 migrate failed exit=1
+remote.state host=box state=connected
+--- agent (exit 0)
+lane.phase acme@2 infra done
+unit.changed acme@2:api ready
+task acme@2 migrate failed exit=1
+remote.state host=box state=connected

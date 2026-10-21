@@ -2,7 +2,9 @@
 //!
 //! Fake units understand a tiny script language in the unit's command
 //! (`;`-separated): `echo <text>`, `printenv <KEY>`, `serve` (binds `$PORT` and stays
-//! up), `sleep` (stays up), `exit <code>`, `fail` (prints `boom`, exits 1).
+//! up), `tcp-echo` (echoes every connection on `$PORT`), `http <body>` (answers
+//! every request on `$PORT` with `<body>`), `sleep` (stays up), `exit <code>`,
+//! `fail` (prints `boom`, exits 1).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -169,6 +171,41 @@ impl FakeUnit {
                     drop(listener);
                     return;
                 }
+                "tcp-echo" | "http" => {
+                    let Some(port) = env.get("PORT").and_then(|p| p.parse::<u16>().ok()) else {
+                        self.print("no PORT");
+                        continue;
+                    };
+                    let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await
+                    else {
+                        self.fail_bind(port);
+                        return;
+                    };
+                    self.print(&format!("listening on {port}"));
+                    let body = rest.to_owned();
+                    let http = word == "http";
+                    let accept = async {
+                        loop {
+                            let Ok((stream, _)) = listener.accept().await else {
+                                continue;
+                            };
+                            let body = body.clone();
+                            tokio::spawn(async move {
+                                if http {
+                                    answer_http(stream, &body).await;
+                                } else {
+                                    let (mut read, mut write) = stream.into_split();
+                                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                                }
+                            });
+                        }
+                    };
+                    tokio::select! {
+                        _ = stopped.wait_for(|s| *s) => {}
+                        () = accept => {}
+                    }
+                    return;
+                }
                 other => self.print(&format!("unknown {other}")),
             }
         }
@@ -177,6 +214,36 @@ impl FakeUnit {
             signal: None,
         });
     }
+}
+
+impl FakeUnit {
+    /// Exits like a server whose port is taken.
+    fn fail_bind(&self, port: u16) {
+        self.print(&format!("port {port} in use"));
+        self.end(ExitOutcome {
+            code: Some(98),
+            signal: None,
+        });
+    }
+}
+
+/// Answers one HTTP/1.1 request with `body` and closes.
+async fn answer_http(mut stream: tokio::net::TcpStream, body: &str) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+        match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => request.extend_from_slice(&buffer[..n]),
+        }
+    }
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
 }
 
 #[async_trait]
@@ -276,6 +343,8 @@ pub struct FakeInfra {
     pub calls: Journal,
     /// `StartedAt` reported for every container.
     pub started_at: Arc<Mutex<Option<String>>>,
+    /// When set, `up` fails with this error.
+    pub fail_up: Arc<Mutex<Option<InfraError>>>,
 }
 
 impl FakeInfra {
@@ -304,6 +373,9 @@ impl InfraProvider for FakeInfra {
     }
     async fn up(&self, spec: &InfraSpec) -> Result<InfraUp, InfraError> {
         self.record(format!("up {}", spec.lane));
+        if let Some(error) = self.fail_up.lock().ok().and_then(|e| e.clone()) {
+            return Err(error);
+        }
         Ok(InfraUp {
             namespace: Self::namespace(spec),
             setup_env: BTreeMap::from([("COMPOSE_PROJECT_NAME".into(), "fake".into())]),

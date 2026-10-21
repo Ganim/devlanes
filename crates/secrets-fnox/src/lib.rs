@@ -3,7 +3,7 @@
 //!
 //! fnox runs non-interactively because the daemon has no terminal. When a
 //! provider needs a sign-in or unlock, the error document says so and the
-//! result is [`SecretsError::Locked`]; `devlanes unlock` then runs fnox in the
+//! result is [`SecretsError::Locked`]; `devlanes secrets unlock` then runs fnox in the
 //! client's terminal. Values stay in memory: nothing here logs, prints or
 //! persists them, and error messages carry fnox's message only.
 

@@ -3,8 +3,14 @@
 //! what it started.
 
 mod engine;
+mod failures;
 mod fakes;
+mod hosts;
+mod pacing;
 mod pty;
+mod remote;
+mod resolver;
+mod server;
 
 use std::{
     collections::BTreeMap,
@@ -115,6 +121,9 @@ pub struct Setup {
     pub watch: bool,
     pub infra: bool,
     pub processes: Option<FakeProcesses>,
+    pub gate: Option<Arc<dyn devlanes_core::gate::StartGate>>,
+    /// User config; the DNS server (when configured) then binds an ephemeral port.
+    pub user: Option<devlanes_config::UserConfig>,
 }
 
 /// Opens an engine over `home` (reusing its state.db when present).
@@ -124,6 +133,7 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
     let processes = setup.processes.unwrap_or_default();
     let mut integ = Integrations::with_runner(Arc::new(runner.clone()));
     integ.processes = Arc::new(processes.clone());
+    integ.start_gate = setup.gate.clone();
     if setup.infra {
         integ.infra = Arc::new(infra.clone());
     }
@@ -132,6 +142,10 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
     let mut options = EngineOptions::new(home, home.join("d.sock"));
     options.watch = setup.watch;
     options.start_timeout = Duration::from_secs(10);
+    if let Some(user) = setup.user {
+        options.user = user;
+        options.dns_listen = "127.0.0.1:0".parse().expect("address");
+    }
     let engine = Engine::new(options, store, integ, CancellationToken::new());
     engine.reconcile().await.expect("reconcile");
     Harness {

@@ -12,8 +12,24 @@ use crate::{
 };
 
 impl Inner {
-    /// Builds the complete route list; the first lane claiming a host keeps it.
+    /// Builds the complete route list; local lanes come first, then hostnames
+    /// mirrored from connected boxes, and the first claim of a host keeps it.
     pub(crate) fn route_entries(&self) -> Vec<RouteEntry> {
+        let mut routes = self.local_route_entries();
+        let mut seen: BTreeSet<(String, bool)> = routes
+            .iter()
+            .map(|route| (route.host.clone(), route.fallback))
+            .collect();
+        for route in self.remote.routes() {
+            if seen.insert((route.host.clone(), route.fallback)) {
+                routes.push(route);
+            }
+        }
+        routes
+    }
+
+    /// Routes of this machine's own lanes.
+    pub(crate) fn local_route_entries(&self) -> Vec<RouteEntry> {
         let mut seen = BTreeSet::new();
         let mut routes = Vec::new();
         for (project, lane) in self.all_lanes() {
@@ -73,9 +89,11 @@ impl Inner {
         routes
     }
 
-    /// Hands the current snapshot to the proxy.
+    /// Hands the current snapshot to the proxy and the `/etc/hosts` fallback.
     pub(crate) fn publish_routes(&self) {
-        self.integ.routes.publish(self.route_entries());
+        let routes = self.route_entries();
+        self.sync_hosts(&routes);
+        self.integ.routes.publish(routes);
     }
 
     /// `hosts`: every route with its lane, unit, port and state.
@@ -89,6 +107,7 @@ impl Inner {
                     RouteStatus::Idle => "idle",
                     RouteStatus::Starting => "starting",
                     RouteStatus::Failed { .. } => "failed",
+                    RouteStatus::Reconnecting => "reconnecting",
                 };
                 json!({
                     "host": route.host,
@@ -97,6 +116,7 @@ impl Inner {
                     "unit": route.unit,
                     "port": route.port,
                     "fallback": route.fallback,
+                    "host_header_upstream": route.host_header_upstream,
                     "state": state,
                 })
             })

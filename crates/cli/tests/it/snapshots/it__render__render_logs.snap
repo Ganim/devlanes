@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+api#1 listening on :20101
+api#2 GET / 200
+--- plain (exit 0)
+api#1 listening on :20101
+api#2 GET / 200
+--- agent (exit 0)
+api#1 listening on :20101
+api#2 GET / 200

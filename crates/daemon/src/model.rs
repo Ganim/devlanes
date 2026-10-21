@@ -148,6 +148,9 @@ pub(crate) struct LaneSt {
     pub peaks: BTreeMap<String, (Option<u64>, Option<f64>)>,
     /// Set by the moves check: the index this lane takes at its next start.
     pub moves_to: Option<u32>,
+    /// Why a selected unit did not start: a lane phase before services failed.
+    /// Shown as the unit's `reason` until a start reaches the services phase.
+    pub phase_reasons: BTreeMap<String, RpcError>,
 }
 
 impl LaneSt {
@@ -181,6 +184,7 @@ impl LaneSt {
             skipped_tasks: Vec::new(),
             peaks: BTreeMap::new(),
             moves_to: None,
+            phase_reasons: BTreeMap::new(),
         }
     }
 
@@ -337,6 +341,18 @@ pub(crate) fn is_mine(owner: &Actor, caller: &Actor) -> bool {
     }
 }
 
+/// Gives a unit that is not running the reason its last start stopped short, so
+/// clients can say why it stayed idle without looking at the lane.
+pub(crate) fn apply_phase_reason(lane: &LaneSt, summary: &mut UnitSummary) {
+    let running = lane
+        .units
+        .get(&summary.name)
+        .is_some_and(|unit| unit.host.is_alive());
+    if !running && let Some(reason) = lane.phase_reasons.get(&summary.name) {
+        summary.reason = Some(reason.clone());
+    }
+}
+
 /// Builds the summary of one live or finished unit.
 pub(crate) fn unit_summary(lane: &str, name: &str, unit: &UnitRec) -> UnitSummary {
     let state = unit.host.state();
@@ -372,6 +388,8 @@ pub(crate) fn unit_summary(lane: &str, name: &str, unit: &UnitRec) -> UnitSummar
         started_at_ms: Some(info.started_at_ms),
         cpu_percent: None,
         memory_bytes: None,
+        // The engine fills the resolved color later; config overrides are not reachable here.
+        color: None,
     }
 }
 
@@ -413,6 +431,9 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
             units.push(unit_summary(&reference, name, unit));
         }
     }
+    for summary in &mut units {
+        apply_phase_reason(lane, summary);
+    }
     let missing =
         (!lane.present).then(|| RpcError::new("worktree_missing", json!({"path": lane.path}), 1));
     let reason = missing
@@ -445,7 +466,52 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
         }),
         reason,
         needs_env: lane.needs_env(),
+        containers: container_summaries(lane),
     }
+}
+
+/// Containers from the lane's infra namespace (`{name: {port, ports}}`), set while
+/// its infra is up, with `infra.hidden` applied.
+fn container_summaries(lane: &LaneSt) -> Vec<devlanes_proto::ContainerSummary> {
+    let Some(Value::Object(namespace)) = &lane.infra_ns else {
+        return Vec::new();
+    };
+    let hidden: &[String] = lane
+        .config
+        .loaded()
+        .and_then(|config| config.infra.hidden.as_deref())
+        .unwrap_or_default();
+    namespace
+        .iter()
+        .map(|(name, entry)| {
+            let mut ports: BTreeMap<String, u16> = entry
+                .get("ports")
+                .and_then(Value::as_object)
+                .map(|ports| {
+                    ports
+                        .iter()
+                        .filter_map(|(key, port)| {
+                            let port = u16::try_from(port.as_u64()?).ok()?;
+                            Some((key.clone(), port))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if ports.is_empty()
+                && let Some(port) = entry
+                    .get("port")
+                    .and_then(Value::as_u64)
+                    .and_then(|port| u16::try_from(port).ok())
+            {
+                ports.insert("default".into(), port);
+            }
+            devlanes_proto::ContainerSummary {
+                name: name.clone(),
+                ports,
+                hidden: hidden.contains(name),
+            }
+        })
+        .collect()
 }
 
 /// Shapes a config failure for clients, keeping its source location.

@@ -1,11 +1,14 @@
-//! Actions that must run in the user's terminal, never in the daemon: CA trust (it prompts
-//! for a password) and `unlock` (fnox asks for the vault there).
+//! Actions that must run in the user's terminal, never in the daemon: CA trust, the
+//! hosts helper and the OS resolver file (they prompt for a password) and
+//! `secrets unlock` (fnox asks for the vault there).
 
-use std::{collections::BTreeSet, str::FromStr, sync::Arc};
+use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc};
 
 use devlanes_cli::{Action, Rendered, Runtime};
 use devlanes_client::{Client, Paths};
 use devlanes_proto::{Context, Method, RpcError};
+use devlanes_resolver_dns::ResolverFile;
+use devlanes_resolver_hosts::CommandSpec;
 use devlanes_trust::{CaCertificate, TrustStatus, TrustStore, TrustTarget};
 use serde_json::json;
 
@@ -17,13 +20,35 @@ const CA_NAME: &str = "devlanes development CA";
 /// Routes the terminal-bound actions.
 pub async fn run(runtime: &Runtime, action: Action) -> Result<u8, RpcError> {
     match action {
-        Action::Trust { hosts: true } => Err(RpcError::new(
-            "not_supported_yet",
-            json!({"feature": "hosts helper", "reason": "awaiting design approval (plan step 9.5)"}),
-            2,
-        )),
-        Action::Trust { hosts: false } => trust(runtime, true).await,
-        Action::Untrust => trust(runtime, false).await,
+        Action::Trust { hosts, resolver } => {
+            let mut code = trust(runtime, true).await?;
+            if hosts {
+                code = code.max(crate::hosts::install(runtime).await?);
+            }
+            if resolver {
+                code = code.max(resolver_install(runtime, true).await?);
+            }
+            Ok(code)
+        }
+        // Mirrors `certs trust --hosts`: the helper and resolver file go first, so a CA
+        // removal failure (keychain prompt cancelled) still leaves them uninstalled.
+        Action::Untrust {
+            hosts,
+            resolver,
+            keep_ca,
+        } => {
+            let mut code = 0;
+            if hosts {
+                code = crate::hosts::uninstall(runtime).await?;
+            }
+            if resolver {
+                code = code.max(resolver_install(runtime, false).await?);
+            }
+            if keep_ca {
+                return Ok(code);
+            }
+            Ok(code.max(trust(runtime, false).await?))
+        }
         Action::Unlock(context) => unlock(context).await,
         action @ (Action::Tunnel | Action::Askpass(_)) => crate::remote::run(action).await,
         _ => Err(RpcError::new(
@@ -141,6 +166,118 @@ async fn trust(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
     Ok(u8::from(failed))
 }
 
+/// The OS resolver file that sends `tld` lookups to the daemon's DNS server at
+/// `server`. Blocking: on Linux it asks `systemctl` for the systemd version.
+pub fn resolver_file(tld: &str, server: SocketAddr) -> Result<ResolverFile, String> {
+    let zone = devlanes_resolver_dns::Zone::new(tld).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        Ok(devlanes_resolver_dns::macos_resolver(&zone, server))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let output = std::process::Command::new("systemctl")
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| format!("the resolver strategy needs systemd-resolved: {error}"))?;
+        let version = systemd_version(&String::from_utf8_lossy(&output.stdout))
+            .ok_or("cannot read the systemd version from `systemctl --version`")?;
+        devlanes_resolver_dns::systemd_resolver(&zone, server, version)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// The version from `systemctl --version`'s first line, `systemd 255 (255.4-1)`.
+#[cfg(any(not(target_os = "macos"), test))]
+fn systemd_version(output: &str) -> Option<u32> {
+    let mut words = output.lines().next()?.split_whitespace();
+    (words.next()? == "systemd").then_some(())?;
+    words.next()?.parse().ok()
+}
+
+/// `certs trust --resolver` writes the OS resolver file for `hostnames.tld` with
+/// sudo; `certs untrust --resolver` removes it. Either way the OS is told to reload.
+async fn resolver_install(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
+    let paths = Paths::discover()
+        .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
+    let config = devlanes_config::load_user(paths.home.join("config.yaml")).unwrap_or_default();
+    let hostnames = config.hostnames;
+    let tld = (hostnames.resolver == devlanes_config::Resolver::Resolver)
+        .then_some(hostnames.tld)
+        .flatten()
+        .filter(|tld| !tld.is_empty())
+        .ok_or_else(|| {
+            RpcError::new(
+                "resolver_not_configured",
+                json!({"message": "set hostnames.resolver: resolver and hostnames.tld in the user config first"}),
+                2,
+            )
+        })?;
+    // The daemon listens on the default address; there is no setting for it.
+    let server = devlanes_resolver_dns::default_listen();
+    let lookup = tld.clone();
+    let file = tokio::task::spawn_blocking(move || resolver_file(&lookup, server))
+        .await
+        .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?
+        .map_err(|message| RpcError::new("resolver_unsupported", json!({"message": message}), 2))?;
+    let command = if install {
+        "devlanes certs trust --resolver"
+    } else {
+        "devlanes certs untrust --resolver"
+    };
+    let executor = crate::hosts::privileged(runtime, command).await?;
+    let path = file.path.display().to_string();
+    if runtime.can_prompt() {
+        emit(&Rendered {
+            stderr: format!("updating {path}; sudo may ask for your password\n"),
+            ..Rendered::default()
+        });
+    }
+    let sudo = || CommandSpec::new("sudo");
+    let mut steps = Vec::new();
+    if install {
+        if let Some(parent) = file.path.parent() {
+            steps.push(
+                sudo()
+                    .args(["mkdir", "-p"])
+                    .arg(parent.display().to_string()),
+            );
+        }
+        steps.push(
+            sudo()
+                .args(["tee", path.as_str()])
+                .stdin(file.contents.into_bytes()),
+        );
+        steps.push(sudo().args(["chmod", "644", path.as_str()]));
+    } else {
+        steps.push(sudo().args(["rm", "-f", path.as_str()]));
+    }
+    steps.extend(file.activate.map(|activate| sudo().args(activate)));
+    for step in steps {
+        let failure = match executor.run(&step).await {
+            Ok(output) if output.success() => continue,
+            Ok(output) => output.stderr.trim().to_owned(),
+            Err(error) => error.to_string(),
+        };
+        return Err(RpcError::new(
+            "resolver_install_failed",
+            json!({"message": format!("`{step}` failed: {failure}"), "command": step.to_string(), "stderr": failure}),
+            1,
+        ));
+    }
+    let stdout = if install {
+        format!("wrote {path}: *.{tld} resolves through the devlanes DNS server at {server}\n")
+    } else {
+        format!("removed {path}\n")
+    };
+    emit(&Rendered {
+        stdout,
+        ..Rendered::default()
+    });
+    Ok(0)
+}
+
 /// Runs fnox in this terminal so it can prompt, then hands the values to the daemon,
 /// which keeps them in memory only.
 async fn unlock(context: Context) -> Result<u8, RpcError> {
@@ -181,4 +318,30 @@ async fn unlock(context: Context) -> Result<u8, RpcError> {
         ..Rendered::default()
     });
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    /// The systemd version picks the resolved file form.
+    fn systemd_version_from_systemctl() {
+        assert_eq!(
+            systemd_version("systemd 255 (255.4-1ubuntu8)\n+PAM +AUDIT"),
+            Some(255)
+        );
+        assert_eq!(systemd_version("systemd 258\n"), Some(258));
+        assert_eq!(systemd_version("elogind 252\n"), None);
+        assert_eq!(systemd_version(""), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    /// macOS gets `/etc/resolver/<tld>` pointing at the daemon's server.
+    fn macos_resolver_file() {
+        let file = resolver_file("test", devlanes_resolver_dns::default_listen()).expect("file");
+        assert_eq!(file.path, std::path::Path::new("/etc/resolver/test"));
+        assert!(file.contents.contains("port 15353"));
+    }
 }

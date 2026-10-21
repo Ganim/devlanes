@@ -17,8 +17,9 @@ use devlanes_daemon::{
     Engine, EngineOptions, Handler,
     integrations::{
         InfraError, InfraEvent, InfraPortNeed, InfraProvider, InfraSpec, InfraUp, Integrations,
-        LaunchCheck, ManagedUnit, PlannedUnit, PortInspector, PortScope, PresetEntry, RouteEntry,
-        RouteSink, RouteStatus, SysProcesses, UnitRunner, unavailable,
+        LaunchCheck, ManagedUnit, PlannedUnit, PortInspector, PortScope, PresetEntry,
+        RemoteConnector, RemotePrompt, RemotePrompter, RouteEntry, RouteSink, RouteStatus,
+        SysProcesses, UnitRunner, unavailable,
     },
 };
 use devlanes_proto::RpcError;
@@ -73,8 +74,16 @@ pub async fn engine(
         Err(error) => tracing::warn!(%error, "cannot raise the open-file limit"),
     }
     let user = load_user_config(&paths.home).await;
+    let (hosts_policy, hosts_tld) = devlanes_daemon::hosts::user_policy(&user);
+    // The probe can wait on upstream DNS, so it runs while the store, CA and proxy start.
+    let hosts_probe = (hosts_policy.user_mode() != devlanes_resolver_hosts::HostsFileMode::Never)
+        .then(|| {
+            tokio::spawn(devlanes_resolver_hosts::probe_localhost(
+                HOSTS_PROBE_TIMEOUT,
+            ))
+        });
     let store = devlanes_state::Store::open(&paths.db).await?;
-    let (ca_env, ca_status, ca) = certificate_authority(&paths.home).await;
+    let (ca_env, ca_status, ca) = certificate_authority(&paths.home, user.tls.ca).await;
     let routes = Arc::new(proxy(&user, ca, shutdown.clone()).await);
     let infra = Arc::new(ContainerInfra::new().await);
     let mut integ = Integrations::with_runner(Arc::new(PtyUnits(
@@ -92,12 +101,70 @@ pub async fn engine(
     integ.ca_status = ca_status;
     integ.presets = presets();
     integ.launch_checks = vec![Arc::new(DistinctTauriIdentifiers)];
+    integ.remote = Arc::new(SshConnector {
+        home: paths.home.clone(),
+        exe: std::env::current_exe().ok(),
+    });
+    integ.hosts = hosts_file(hosts_policy, hosts_tld, hosts_probe)
+        .await
+        .map(Arc::new);
+    integ.pressure = pressure_source();
+    integ.start_gate = Some(start_gate(&user.startup, integ.pressure.clone()));
+    integ.resolver_files = Some(Arc::new(OsResolverFiles));
     let mut options = EngineOptions::new(&paths.home, &paths.socket);
     options.db_path = paths.db.clone();
     options.logs = paths.logs.clone();
     options.user = user;
     let engine: Arc<dyn Handler> = Arc::new(Engine::new(options, store, integ, shutdown));
     Ok(engine)
+}
+
+/// Bound on the startup `*.localhost` probe; past it the resolver counts as failing.
+const HOSTS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The `/etc/hosts` fallback over `sudo -n` and the installed helper. Only names
+/// under `.localhost` are written when the configured TLD is one the helper refuses.
+async fn hosts_file(
+    policy: devlanes_resolver_hosts::HostsFilePolicy,
+    tld: Option<String>,
+    probe: Option<tokio::task::JoinHandle<devlanes_resolver_hosts::LocalhostResolution>>,
+) -> Option<devlanes_daemon::hosts::HostsFile> {
+    use devlanes_resolver_hosts::{
+        Executor, FileKind, FsProbe, HostsClient, INSTALL_PATH, LocalhostResolution,
+        SystemExecutor, SystemFs,
+    };
+    let resolution = match probe {
+        // A panicked probe proves nothing about the resolver; treat it like a failure.
+        Some(probe) => Some(probe.await.unwrap_or(LocalhostResolution::Fails)),
+        None => None,
+    };
+    tracing::info!(mode = %policy.user_mode(), ?resolution, "hosts file policy");
+    let executor: Arc<dyn Executor> = Arc::new(SystemExecutor);
+    let fs: Arc<dyn FsProbe> = Arc::new(SystemFs);
+    let (client, tld_error) = match HostsClient::new(executor.clone(), fs.clone(), tld.as_deref()) {
+        Ok(client) => (client, None),
+        Err(error) => match HostsClient::new(executor, fs, None) {
+            Ok(client) => (client, Some(error)),
+            Err(error) => {
+                tracing::warn!(%error, "hosts file fallback unavailable");
+                return None;
+            }
+        },
+    };
+    let installed = matches!(
+        SystemFs.lstat(Path::new(INSTALL_PATH)),
+        Ok(Some(info)) if info.kind == FileKind::File
+    );
+    Some(devlanes_daemon::hosts::HostsFile::spawn(
+        client,
+        devlanes_daemon::hosts::HostsOptions {
+            policy,
+            resolution,
+            installed,
+            tld_error,
+            sync: devlanes_resolver_hosts::SyncConfig::default(),
+        },
+    ))
 }
 
 /// `~/.devlanes/config.yaml`, or defaults when absent or invalid (logged).
@@ -124,6 +191,9 @@ fn contributors() -> Vec<Arc<dyn Contributor>> {
         Arc::new(devlanes_platform_node::NodeContributor),
         Arc::new(devlanes_platform_node::CloudflareContributor),
         Arc::new(devlanes_platform_python::PythonContributor),
+        Arc::new(devlanes_platform_bun::BunContributor),
+        Arc::new(devlanes_platform_deno::DenoContributor),
+        Arc::new(devlanes_platform_rust::RustContributor),
         Arc::new(devlanes_preset_vite::VitePreset),
         Arc::new(devlanes_preset_next::NextPreset),
         Arc::new(devlanes_preset_wrangler::WranglerPreset),
@@ -137,15 +207,17 @@ fn script_runners() -> Vec<Arc<dyn ScriptRunner>> {
         Arc::new(devlanes_run_script_npm::NpmScripts),
         Arc::new(devlanes_run_script_make::MakeTargets),
         Arc::new(devlanes_run_script_just::JustRecipes),
+        Arc::new(devlanes_run_script_deno::DenoTasks),
+        Arc::new(devlanes_run_script_cargo::CargoBins),
+        Arc::new(devlanes_run_script_python::PythonScripts),
     ]
 }
 
-/// Preset option schemas and parsers for `schema` and `config check`.
+/// Preset option parsers for `config check`.
 fn presets() -> Vec<PresetEntry> {
     vec![
         PresetEntry {
             name: devlanes_preset_vite::NAME,
-            schema: devlanes_preset_vite::options_schema(),
             parse: Arc::new(|value| {
                 devlanes_preset_vite::parse_options(value)
                     .map(drop)
@@ -154,7 +226,6 @@ fn presets() -> Vec<PresetEntry> {
         },
         PresetEntry {
             name: devlanes_preset_next::NAME,
-            schema: devlanes_preset_next::options_schema(),
             parse: Arc::new(|value| {
                 devlanes_preset_next::parse_options(value)
                     .map(drop)
@@ -163,7 +234,6 @@ fn presets() -> Vec<PresetEntry> {
         },
         PresetEntry {
             name: devlanes_preset_wrangler::NAME,
-            schema: devlanes_preset_wrangler::options_schema(),
             parse: Arc::new(|value| {
                 devlanes_preset_wrangler::parse_options(value)
                     .map(drop)
@@ -172,7 +242,6 @@ fn presets() -> Vec<PresetEntry> {
         },
         PresetEntry {
             name: devlanes_preset_tauri::NAME,
-            schema: devlanes_preset_tauri::options_schema(),
             parse: Arc::new(|value| {
                 devlanes_preset_tauri::parse_options(value)
                     .map(drop)
@@ -180,6 +249,51 @@ fn presets() -> Vec<PresetEntry> {
             }),
         },
     ]
+}
+
+/// System CPU and memory pressure for the start gate and the memory warning.
+fn pressure_source() -> Option<Arc<dyn devlanes_core::gate::PressureSource>> {
+    #[cfg(target_os = "macos")]
+    let source: Option<Arc<dyn devlanes_core::gate::PressureSource>> =
+        Some(Arc::new(devlanes_metrics_macos::MacosPressure::new()));
+    #[cfg(target_os = "linux")]
+    let source: Option<Arc<dyn devlanes_core::gate::PressureSource>> =
+        Some(Arc::new(devlanes_metrics_linux::LinuxPressure::new()));
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let source = None;
+    source
+}
+
+/// The machine-wide start gate for `startup.mode`. The default mode is
+/// `devlanes_config::DEFAULT_STARTUP_MODE`.
+fn start_gate(
+    startup: &devlanes_config::StartupConfig,
+    pressure: Option<Arc<dyn devlanes_core::gate::PressureSource>>,
+) -> Arc<dyn devlanes_core::gate::StartGate> {
+    use devlanes_start_gate::{AdaptiveConfig, AdaptiveGate, AllAtOnce, FixedWindow, GateOptions};
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let (initial, max) = startup.windows(cores);
+    let options = GateOptions {
+        slot_timeout: startup.slot_timeout.0,
+        settle_cpu: startup.settle_cpu.0,
+        ..GateOptions::default()
+    };
+    let clock = Arc::new(devlanes_core::clock::TokioClock::new());
+    tracing::info!(mode = ?startup.mode, initial, max, "start gate");
+    match (startup.mode, pressure) {
+        (devlanes_config::StartupMode::All, _) => Arc::new(AllAtOnce::new(options, clock)),
+        (devlanes_config::StartupMode::Adaptive, Some(pressure)) => Arc::new(AdaptiveGate::new(
+            AdaptiveConfig::new(initial, max, startup.target_cpu.0),
+            options,
+            clock,
+            pressure,
+        )),
+        (devlanes_config::StartupMode::Fixed, Some(pressure)) => {
+            Arc::new(FixedWindow::with_pressure(max, options, clock, pressure))
+        }
+        // Without pressure readings an adaptive window could never grow.
+        (_, None) => Arc::new(FixedWindow::new(max, options, clock)),
+    }
 }
 
 /// Process collectors for this OS plus Docker container stats.
@@ -199,18 +313,111 @@ fn metrics_sources() -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
     sources
 }
 
-/// Loads or creates the CA under `$DEVLANES_HOME/ca` and writes the combined bundle.
-/// Returns the trust env for contributors, `doctor` facts and the CA itself.
-async fn certificate_authority(
-    home: &Path,
-) -> (
+/// Checks the file `devlanes certs trust --resolver` writes.
+struct OsResolverFiles;
+
+impl devlanes_daemon::integrations::ResolverFiles for OsResolverFiles {
+    /// `{path, installed, matches}`; `matches` is false when the file routes the TLD
+    /// elsewhere (another port, a stale install), `{error}` when the OS has no form.
+    fn status(&self, tld: &str, server: std::net::SocketAddr) -> Value {
+        match crate::local::resolver_file(tld, server) {
+            Ok(file) => {
+                let current = std::fs::read_to_string(&file.path).ok();
+                json!({
+                    "path": file.path,
+                    "installed": current.is_some(),
+                    "matches": current.as_deref() == Some(file.contents.as_str()),
+                })
+            }
+            Err(error) => json!({"error": error}),
+        }
+    }
+}
+
+/// Trust env for contributors, `doctor` facts and the CA itself.
+type LoadedCa = (
     BTreeMap<String, String>,
     Value,
     Option<Arc<devlanes_pki::CertificateAuthority>>,
-) {
+);
+
+/// Loads the CA selected by `tls.ca`: devlanes' own under `$DEVLANES_HOME/ca`
+/// (created on first use), or mkcert's from `mkcert -CAROOT`. The combined bundle
+/// is written under `$DEVLANES_HOME/ca` either way, so contributors and the proxy
+/// use the same root.
+async fn certificate_authority(home: &Path, kind: devlanes_config::CaKind) -> LoadedCa {
+    certificate_authority_with(home, kind, Path::new("mkcert")).await
+}
+
+/// [`certificate_authority`] with an explicit `mkcert` program (tests).
+async fn certificate_authority_with(
+    home: &Path,
+    kind: devlanes_config::CaKind,
+    mkcert: &Path,
+) -> LoadedCa {
+    let failed = |kind: &str, code: &str, message: String| -> LoadedCa {
+        tracing::warn!(code, %message, "CA unavailable; HTTPS is off");
+        (
+            BTreeMap::new(),
+            json!({"present": false, "kind": kind, "error": code, "message": message}),
+            None,
+        )
+    };
+    let caroot = match kind {
+        devlanes_config::CaKind::Devlanes => None,
+        devlanes_config::CaKind::Mkcert => {
+            let output = tokio::process::Command::new(mkcert)
+                .arg("-CAROOT")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await;
+            match output {
+                Ok(output) if output.status.success() => Some(PathBuf::from(
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                )),
+                Ok(output) => {
+                    return failed(
+                        "mkcert",
+                        "mkcert_failed",
+                        String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return failed(
+                        "mkcert",
+                        "mkcert_missing",
+                        "tls.ca is mkcert but `mkcert` is not on PATH; install mkcert or set tls.ca: devlanes".into(),
+                    );
+                }
+                Err(error) => return failed("mkcert", "mkcert_failed", error.to_string()),
+            }
+        }
+    };
     let directory = home.join("ca");
+    let kind_word = if caroot.is_some() {
+        "mkcert"
+    } else {
+        "devlanes"
+    };
+    let root = caroot.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let ca = devlanes_pki::CertificateAuthority::load_or_create(&directory)?;
+        let (ca, cert) = match &root {
+            Some(root) => (
+                devlanes_pki::CertificateAuthority::from_mkcert(root)?,
+                root.join("rootCA.pem"),
+            ),
+            None => (
+                devlanes_pki::CertificateAuthority::load_or_create(&directory)?,
+                directory.join("ca.pem"),
+            ),
+        };
+        if !directory.exists() {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&directory)?;
+        }
         let system = [
             "/etc/ssl/cert.pem",
             "/etc/ssl/certs/ca-certificates.crt",
@@ -223,7 +430,7 @@ async fn certificate_authority(
         let temp = directory.join(".bundle.pem.tmp");
         std::fs::write(&temp, ca.combined_bundle(&system))?;
         std::fs::rename(&temp, &bundle)?;
-        Ok::<_, devlanes_pki::Error>((ca, directory.join("ca.pem"), bundle))
+        Ok::<_, devlanes_pki::Error>((ca, cert, bundle))
     })
     .await;
     match result {
@@ -232,22 +439,17 @@ async fn certificate_authority(
                 (CA_CERT_ENV.to_owned(), cert.display().to_string()),
                 (CA_BUNDLE_ENV.to_owned(), bundle.display().to_string()),
             ]);
-            let status = json!({"present": true, "path": cert, "trusted": "unknown"});
+            let status = json!({
+                "present": true,
+                "kind": kind_word,
+                "path": cert,
+                "caroot": caroot,
+                "trusted": "unknown",
+            });
             (env, status, Some(Arc::new(ca)))
         }
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "CA unavailable; HTTPS is off");
-            (
-                BTreeMap::new(),
-                json!({"present": false, "error": error.to_string()}),
-                None,
-            )
-        }
-        Err(error) => (
-            BTreeMap::new(),
-            json!({"present": false, "error": error.to_string()}),
-            None,
-        ),
+        Ok(Err(error)) => failed(kind_word, "ca_invalid", error.to_string()),
+        Err(error) => failed(kind_word, "ca_invalid", error.to_string()),
     }
 }
 
@@ -363,6 +565,7 @@ impl RouteSink for ProxyRoutes {
                     RouteStatus::Failed { log_tail } => {
                         devlanes_proxy::RouteState::Failed { log_tail }
                     }
+                    RouteStatus::Reconnecting => devlanes_proxy::RouteState::Reconnecting,
                 };
                 route.start_hint = entry.start_hint;
                 route.certificate_names = entry.certificate_names;
@@ -378,6 +581,62 @@ impl RouteSink for ProxyRoutes {
     /// Listener facts.
     fn status(&self) -> Value {
         self.status.clone()
+    }
+}
+
+/// `connect` over system OpenSSH, with ssh's prompts relayed to the attached CLI.
+struct SshConnector {
+    /// `$DEVLANES_HOME`; control sockets live in its `run/ssh`.
+    home: PathBuf,
+    /// This binary, which ssh runs as `askpass`; without it ssh runs in batch mode.
+    exe: Option<PathBuf>,
+}
+
+impl RemoteConnector for SshConnector {
+    /// One SSH transport (and ControlMaster) per box.
+    fn transport(
+        &self,
+        host: &str,
+        prompts: Arc<dyn RemotePrompter>,
+    ) -> Result<Arc<dyn devlanes_transport::Transport>, RpcError> {
+        let mut options = devlanes_transport_ssh::SshOptions::new(&self.home);
+        options.askpass = self
+            .exe
+            .clone()
+            .map(|exe| devlanes_transport_ssh::AskpassConfig {
+                exe,
+                relay: Arc::new(PromptBridge(prompts)),
+            });
+        Ok(Arc::new(devlanes_transport_ssh::SshTransport::new(
+            host, options,
+        )))
+    }
+
+    /// The daemon's `$HOME`, the user's home.
+    fn home(&self) -> Option<PathBuf> {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+/// Adapts the daemon's prompt relay to the SSH transport's.
+struct PromptBridge(Arc<dyn RemotePrompter>);
+
+#[async_trait]
+impl devlanes_transport_ssh::PromptRelay for PromptBridge {
+    /// Forwards with the CLI's prompt kind words.
+    async fn prompt(&self, prompt: devlanes_transport_ssh::AskpassPrompt) -> Option<String> {
+        let kind = match prompt.kind {
+            devlanes_transport_ssh::PromptKind::Secret => "secret",
+            devlanes_transport_ssh::PromptKind::Confirm => "confirm",
+            devlanes_transport_ssh::PromptKind::Notify => "notify",
+        };
+        self.0
+            .ask(RemotePrompt {
+                host: prompt.destination,
+                prompt: prompt.prompt,
+                kind,
+            })
+            .await
     }
 }
 
@@ -517,20 +776,66 @@ fn compose_error(error: devlanes_infra_compose::Error) -> InfraError {
         devlanes_infra_compose::Error::ContainerNameConflict(_) => {
             InfraError::new("container_name_conflict", error.to_string())
         }
+        devlanes_infra_compose::Error::Command {
+            command,
+            status,
+            stderr,
+        } => InfraError::new("compose_failed", error.to_string()).with_command(
+            command.clone(),
+            Some(status.clone()),
+            Some(stderr),
+        ),
+        devlanes_infra_compose::Error::Timeout { command, timeout } => {
+            InfraError::new("compose_failed", error.to_string()).with_command(
+                command.clone(),
+                Some(format!("timed out after {}s", timeout.as_secs())),
+                None,
+            )
+        }
+        devlanes_infra_compose::Error::Json { command, source } => {
+            InfraError::new("compose_failed", error.to_string()).with_command(
+                command.clone(),
+                Some(format!("unexpected output: {source}")),
+                None,
+            )
+        }
         _ => InfraError::new("compose_failed", error.to_string()),
     }
 }
 
-/// Docker API failures; connection problems mean Docker is unavailable.
-fn docker_error(error: devlanes_infra_docker::Error) -> InfraError {
-    let text = error.to_string();
-    if matches!(error, devlanes_infra_docker::Error::Io(_))
-        || text.contains("connect")
-        || text.contains("No such file")
-    {
-        return InfraError::new("docker_unavailable", text);
+/// Docker API failures for `operation` (such as `ensure container acme-db`);
+/// connection problems mean Docker is unavailable.
+fn docker_error(operation: &str) -> impl FnOnce(devlanes_infra_docker::Error) -> InfraError {
+    let command = format!("docker API: {operation}");
+    move |error| {
+        let text = error.to_string();
+        if matches!(error, devlanes_infra_docker::Error::Io(_))
+            || text.contains("connect")
+            || text.contains("No such file")
+        {
+            return InfraError::new("docker_unavailable", text);
+        }
+        let (status, stderr) = match &error {
+            devlanes_infra_docker::Error::Docker(
+                bollard::errors::Error::DockerResponseServerError {
+                    status_code,
+                    message,
+                },
+            ) => (Some(format!("HTTP {status_code}")), Some(message.clone())),
+            devlanes_infra_docker::Error::Unhealthy { health, .. } => {
+                (Some(format!("{health:?}")), None)
+            }
+            devlanes_infra_docker::Error::HealthTimeout { timeout, last, .. } => (
+                Some(format!(
+                    "not healthy after {}s ({last:?})",
+                    timeout.as_secs()
+                )),
+                None,
+            ),
+            _ => (None, None),
+        };
+        InfraError::new("docker_failed", text).with_command(command, status, stderr.as_deref())
     }
-    InfraError::new("docker_failed", text)
 }
 
 impl ContainerInfra {
@@ -607,7 +912,8 @@ impl ContainerInfra {
             } else {
                 spec.shared_block.unwrap_or(spec.block)
             };
-            let block = devlanes_infra_docker::PortBlock::new(first, size).map_err(docker_error)?;
+            let block = devlanes_infra_docker::PortBlock::new(first, size)
+                .map_err(|error| InfraError::new("docker_failed", error.to_string()))?;
             let mut ports = Vec::new();
             for (name, target) in &container.ports {
                 let key = format!("infra.{}/{name}", container.name);
@@ -829,7 +1135,10 @@ impl InfraProvider for ContainerInfra {
                     docker
                         .ensure(container, devlanes_infra_docker::EnsureOptions::default())
                         .await
-                        .map_err(docker_error)?,
+                        .map_err(docker_error(&format!(
+                            "ensure container {} (image {})",
+                            container.name, container.image
+                        )))?,
                 );
             }
             Self::container_namespace(&mut namespace, &containers);
@@ -886,11 +1195,14 @@ impl InfraProvider for ContainerInfra {
             report.insert("lane".into(), json!(lane));
         }
         if !spec.containers.is_empty() {
-            let managed = self
-                .docker()?
-                .list_managed(&spec.project)
-                .await
-                .map_err(docker_error)?;
+            let managed =
+                self.docker()?
+                    .list_managed(&spec.project)
+                    .await
+                    .map_err(docker_error(&format!(
+                        "list containers of {}",
+                        spec.project
+                    )))?;
             report.insert("containers".into(), json!(managed));
         }
         Ok(Value::Object(report))
@@ -920,7 +1232,10 @@ impl InfraProvider for ContainerInfra {
                     Duration::from_secs(30),
                 )
                 .await
-                .map_err(docker_error)?;
+                .map_err(docker_error(&format!(
+                    "stop shared containers of {}",
+                    spec.project
+                )))?;
             report.insert("containers".into(), json!(stopped));
         }
         Ok(Value::Object(report))
@@ -943,7 +1258,7 @@ impl InfraProvider for ContainerInfra {
             Err(error) => {
                 let error = compose_error(error);
                 if error.code != "docker_unavailable" {
-                    report.insert("compose_error".into(), json!(error.message));
+                    report.insert("compose_error".into(), error.data());
                 }
             }
         }
@@ -1013,7 +1328,10 @@ impl InfraProvider for ContainerInfra {
         let docker = self.docker()?;
         let mut adopted = serde_json::Map::new();
         for project in projects {
-            let managed = docker.list_managed(project).await.map_err(docker_error)?;
+            let managed = docker
+                .list_managed(project)
+                .await
+                .map_err(docker_error(&format!("list containers of {project}")))?;
             if !managed.is_empty() {
                 self.watch_events(project);
             }
@@ -1047,5 +1365,130 @@ impl InfraProvider for ContainerInfra {
     /// Container lifecycle events of watched projects.
     fn events(&self) -> Option<broadcast::Receiver<InfraEvent>> {
         Some(self.events.subscribe())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    /// A failed compose command keeps its command line, status and stderr tail.
+    fn compose_command_failure_is_structured() {
+        let error = compose_error(devlanes_infra_compose::Error::Command {
+            command: "docker compose -p acme up --wait".into(),
+            status: "exit status: 1".into(),
+            stderr: "\x1b[31mpull access denied\x1b[0m".into(),
+        });
+        assert_eq!(error.code, "compose_failed");
+        let data = error.data();
+        assert_eq!(data["command"], "docker compose -p acme up --wait");
+        assert_eq!(data["status"], "exit status: 1");
+        assert_eq!(data["stderr"], "pull access denied");
+        assert!(
+            data["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("pull access denied"))
+        );
+    }
+
+    #[test]
+    /// An engine error names the API call and Docker's HTTP status and message.
+    fn docker_server_failure_is_structured() {
+        let error = docker_error("ensure container db (image postgres:16)")(
+            devlanes_infra_docker::Error::Docker(
+                bollard::errors::Error::DockerResponseServerError {
+                    status_code: 404,
+                    message: "No such image: postgres:16".into(),
+                },
+            ),
+        );
+        assert_eq!(error.code, "docker_failed");
+        let data = error.data();
+        assert_eq!(
+            data["command"],
+            "docker API: ensure container db (image postgres:16)"
+        );
+        assert_eq!(data["status"], "HTTP 404");
+        assert_eq!(data["stderr"], "No such image: postgres:16");
+    }
+
+    /// A fake `mkcert` that prints `caroot` for `-CAROOT`.
+    fn fake_mkcert(dir: &Path, caroot: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let program = dir.join("mkcert");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\necho '{}'\n", caroot.display()),
+        )
+        .expect("script");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        program
+    }
+
+    #[tokio::test]
+    /// With `tls.ca: mkcert` the daemon loads mkcert's root, points the cert env at
+    /// it and still writes the bundle under `$DEVLANES_HOME/ca`.
+    async fn mkcert_ca_comes_from_caroot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let generated = tmp.path().join("generated");
+        devlanes_pki::CertificateAuthority::load_or_create(&generated).expect("ca");
+        let caroot = tmp.path().join("mkcert-root");
+        std::fs::create_dir(&caroot).expect("caroot");
+        // Renames keep the key's private mode, which from_mkcert requires.
+        std::fs::rename(generated.join("ca.pem"), caroot.join("rootCA.pem")).expect("cert");
+        std::fs::rename(generated.join("ca-key.pem"), caroot.join("rootCA-key.pem")).expect("key");
+        let program = fake_mkcert(tmp.path(), &caroot);
+        let home = tmp.path().join("home");
+
+        let (env, status, ca) =
+            certificate_authority_with(&home, devlanes_config::CaKind::Mkcert, &program).await;
+        assert!(ca.is_some(), "{status}");
+        assert_eq!(status["kind"], "mkcert");
+        assert_eq!(
+            env[CA_CERT_ENV],
+            caroot.join("rootCA.pem").display().to_string()
+        );
+        let bundle = home.join("ca/bundle.pem");
+        assert_eq!(env[CA_BUNDLE_ENV], bundle.display().to_string());
+        let root = std::fs::read_to_string(caroot.join("rootCA.pem")).expect("root");
+        let bundled = std::fs::read_to_string(bundle).expect("bundle");
+        assert!(
+            bundled.contains(root.trim()),
+            "bundle carries the mkcert root"
+        );
+        assert!(
+            !home.join("ca/ca.pem").exists(),
+            "no devlanes CA is created"
+        );
+    }
+
+    #[tokio::test]
+    /// A missing `mkcert` leaves HTTPS off with a `doctor` error naming the fix.
+    async fn missing_mkcert_is_reported() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (env, status, ca) = certificate_authority_with(
+            tmp.path(),
+            devlanes_config::CaKind::Mkcert,
+            &tmp.path().join("no-such-mkcert"),
+        )
+        .await;
+        assert!(ca.is_none() && env.is_empty());
+        assert_eq!(status["present"], false);
+        assert_eq!(status["error"], "mkcert_missing");
+        assert!(
+            status["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("tls.ca"))
+        );
+
+        // An empty CAROOT is an invalid CA, not a missing program.
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir(&empty).expect("empty");
+        let program = fake_mkcert(tmp.path(), &empty);
+        let (_, status, ca) =
+            certificate_authority_with(tmp.path(), devlanes_config::CaKind::Mkcert, &program).await;
+        assert!(ca.is_none());
+        assert_eq!(status["error"], "ca_invalid");
     }
 }

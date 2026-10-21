@@ -18,7 +18,7 @@ use crate::Session;
 
 /// Per-subscriber queue length before overflow turns into `resync`.
 pub const SUBSCRIBER_QUEUE: usize = 1024;
-/// Recent events kept for non-following `devlanes events`.
+/// Recent events kept for non-following `devlanes debug events`.
 const RECENT: usize = 200;
 
 /// Sequenced publisher shared by the whole engine.

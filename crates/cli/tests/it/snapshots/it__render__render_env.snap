@@ -1,0 +1,16 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+DATABASE_URL=postgres://localhost:20110/acme
+MULTI=a\nb
+PORT=20101
+--- plain (exit 0)
+DATABASE_URL=postgres://localhost:20110/acme
+MULTI=a\nb
+PORT=20101
+--- agent (exit 0)
+DATABASE_URL=postgres://localhost:20110/acme
+MULTI=a\nb
+PORT=20101

@@ -1,0 +1,10 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+stopping the daemon and 6 processes
+--- plain (exit 0)
+stopping the daemon and 6 processes
+--- agent (exit 0)
+stopping the daemon and 6 processes

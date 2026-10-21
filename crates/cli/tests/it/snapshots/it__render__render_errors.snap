@@ -1,0 +1,27 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 1)
+ready acme@2:api crashes=2
+  | warn: slow query
+failed acme@2:admin exit=1 crashes=1
+  exited with code 1
+  port 20102 is held by PID 911
+  | Error: Cannot find module './env'
+--- plain (exit 1)
+ready acme@2:api crashes=2
+  | warn: slow query
+failed acme@2:admin exit=1 crashes=1
+  exited with code 1
+  port 20102 is held by PID 911
+  | Error: Cannot find module './env'
+--- agent (exit 1)
+failed acme@2:admin exit=1 crashes=1
+  exited with code 1
+  port 20102 is held by PID 911
+  | Error: Cannot find module './env'
+  more: devlanes logs acme@2:admin --tail 200
+ready acme@2:api crashes=2
+  | warn: slow query
+  more: devlanes logs acme@2:api --tail 200

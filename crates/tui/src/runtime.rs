@@ -471,6 +471,12 @@ impl Executor {
                     deliver(&sender, Msg::DaemonStarted(api.start_daemon().await)).await;
                 });
             }
+            Effect::FetchProfiles { lane } => {
+                tokio::spawn(async move {
+                    let result = api.profile_list(lane.clone()).await;
+                    deliver(&sender, Msg::Profiles { lane, result }).await;
+                });
+            }
         }
         true
     }

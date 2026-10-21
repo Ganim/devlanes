@@ -1,6 +1,6 @@
 # devlanes-transport-ssh
 
-The SSH `Transport` for `devlanes connect`. It runs the system `ssh` with a ControlMaster per box and starts `devlanes tunnel --stdio` there, so `~/.ssh/config`, agents, ProxyJump and certificates apply as usual. The binary's composition root registers it; `devlanes-transport` runs the protocol on top.
+The SSH `Transport` for `devlanes remote connect`. It runs the system `ssh` with a ControlMaster per box and starts `devlanes tunnel --stdio` there, so `~/.ssh/config`, agents, ProxyJump and certificates apply as usual. The binary's composition root registers it; `devlanes-transport` runs the protocol on top.
 
 ## Usage
 

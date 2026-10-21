@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+started acme@2:seed (detached)
+  logs: devlanes logs acme@2:seed -f
+--- plain (exit 0)
+started acme@2:seed (detached)
+  logs: devlanes logs acme@2:seed -f
+--- agent (exit 0)
+started acme@2:seed (detached)
+  logs: devlanes logs acme@2:seed -f

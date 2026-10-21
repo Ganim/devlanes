@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+started acme@2:console (interactive)
+  attach: devlanes attach acme@2:console
+--- plain (exit 0)
+started acme@2:console (interactive)
+  attach: devlanes attach acme@2:console
+--- agent (exit 0)
+started acme@2:console (interactive)
+  attach: devlanes attach acme@2:console

@@ -1,0 +1,28 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+infra for acme@2
+  shared:
+    project: acme
+    services:
+      service: postgres
+      state: running
+      health: healthy
+--- plain (exit 0)
+infra for acme@2
+  shared:
+    project: acme
+    services:
+      service: postgres
+      state: running
+      health: healthy
+--- agent (exit 0)
+infra for acme@2
+  shared:
+    project: acme
+    services:
+      service: postgres
+      state: running
+      health: healthy

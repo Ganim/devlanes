@@ -82,7 +82,7 @@ pub struct SyncIssue {
     pub at: SystemTime,
 }
 
-/// Snapshot for `devlanes sync status`.
+/// Snapshot for `devlanes remote sync`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncStatus {
     /// Source directory as configured.

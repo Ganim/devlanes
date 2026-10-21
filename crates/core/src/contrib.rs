@@ -235,7 +235,7 @@ pub struct SecretEnv {
 /// Secrets failures. Messages never include secret values.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SecretsError {
-    /// The vault needs an interactive unlock (`devlanes unlock`).
+    /// The vault needs an interactive unlock (`devlanes secrets unlock`).
     #[error("secrets are locked: {message}")]
     Locked { message: String },
     #[error("secrets provider failed: {0}")]

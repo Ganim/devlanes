@@ -1,4 +1,4 @@
-//! Per-worktree secrets cache in front of the injected provider. `devlanes unlock`
+//! Per-worktree secrets cache in front of the injected provider. `devlanes secrets unlock`
 //! fills it with values the client obtained in its own terminal. Values live in
 //! daemon memory only and are never logged or persisted.
 
@@ -66,7 +66,7 @@ impl SecretsCache {
         }
     }
 
-    /// Stores values handed over by `devlanes unlock` for a worktree and profile.
+    /// Stores values handed over by `devlanes secrets unlock` for a worktree and profile.
     /// `None` also serves every profile of that worktree without its own entry.
     pub fn unlock(
         &self,

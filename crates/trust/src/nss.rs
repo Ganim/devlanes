@@ -264,7 +264,7 @@ impl TrustStore for NssStore {
         for db in &databases {
             match self.database_status(&certutil, db, ca).await? {
                 TrustStatus::Installed => {}
-                // Missing is actionable (`devlanes trust` fixes it), so it wins over Unknown.
+                // Missing is actionable (`devlanes certs trust` fixes it), so it wins over Unknown.
                 TrustStatus::Missing => return Ok(TrustStatus::Missing),
                 unknown @ TrustStatus::Unknown { .. } => combined = unknown,
             }

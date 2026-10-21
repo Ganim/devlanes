@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use devlanes_cli::{
-    AGENT_GUIDE, Action, Cli, Hint, Rendered, Report, Runtime, export_environment, run_with,
-    stop_with_logs, write_completions,
+    AGENT_GUIDE, Action, Cli, Hint, Rendered, Report, ReporterStream, Runtime, export_environment,
+    run_with, stop_with_logs, write_completions,
 };
 use devlanes_client::{Client, Paths};
 use devlanes_ipc::Frame;
@@ -21,11 +21,26 @@ pub async fn dispatch(cli: &Cli, runtime: &Runtime, action: Action) -> u8 {
     match run(cli, runtime, action).await {
         Ok(code) => code,
         Err(error) => {
-            let rendered = runtime.reporter().error(&error, None);
+            let rendered = runtime
+                .reporter()
+                .error(&error, confirmation_hint(&error).as_ref());
             emit(&rendered);
             rendered.exit_code
         }
     }
+}
+
+/// For `confirmation_required`: this very invocation again, with the flag the
+/// refusal names (`devlanes lane clean 1 --yes`).
+fn confirmation_hint(error: &RpcError) -> Option<Hint> {
+    (error.code == "confirmation_required").then(|| {
+        let flag = error
+            .data
+            .get("flag")
+            .and_then(Value::as_str)
+            .unwrap_or("--yes");
+        Hint::rerun_with(std::env::args().skip(1), flag)
+    })
 }
 
 /// Paths are resolved per invocation so `DEVLANES_HOME` isolates tests completely.
@@ -247,17 +262,38 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
         .await
         .map_err(rpc_error)?;
     let reporter = runtime.reporter();
+    // Followed logs and a foreground task's output share one output budget; the
+    // reserve keeps room for the summary printed after the stream.
+    let mut log_stream = streamed_output(&request).map(|more| {
+        ReporterStream::new(reporter.as_ref(), method, more).reserve(RUN_SUMMARY_BYTES)
+    });
     let stream = async {
         loop {
             match client.next_frame().await.map_err(rpc_error)? {
+                Frame::Control(Control::Event(event))
+                    if event.event == devlanes_proto::remote::PROMPT_EVENT =>
+                {
+                    answer_prompt(&mut client, &event).await?;
+                }
                 Frame::Control(Control::Event(event)) => {
-                    if let Ok(rendered) = reporter.event(method, &event) {
+                    let rendered = match log_stream.as_mut() {
+                        Some(stream) => stream.event(&event),
+                        None => reporter.event(method, &event),
+                    };
+                    if let Ok(rendered) = rendered {
                         emit(&rendered);
                     }
                 }
                 Frame::Control(Control::Response(response)) if response.id == id => {
                     return match response.result {
-                        Outcome::Ok { data } => {
+                        Outcome::Ok { mut data } => {
+                            // The budget hid the end of a failed task's output: show its tail.
+                            if let Some(stream) = &log_stream
+                                && data.get("state").and_then(Value::as_str) == Some("failed")
+                                && stream.exhausted()
+                            {
+                                data["log_tail"] = json!(stream.hidden_tail());
+                            }
                             render_result(runtime, method, &data, more_hint(method, &request))
                         }
                         Outcome::Error { error } => {
@@ -290,6 +326,68 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
     }
 }
 
+/// Answers an ssh prompt that `connect` relayed (passphrase, OTP, host key) on the
+/// controlling terminal. Without a terminal the empty answer cancels the prompt.
+async fn answer_prompt(client: &mut Client, event: &devlanes_proto::Event) -> Result<(), RpcError> {
+    let Some(stream_id) = event.data.get("stream_id").and_then(Value::as_u64) else {
+        return Ok(());
+    };
+    let text = |key: &str| {
+        event
+            .data
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let (prompt, kind) = (text("prompt"), text("kind"));
+    let answer = tokio::task::spawn_blocking(move || read_tty(&prompt, &kind))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    client
+        .send_bytes(stream_id, bytes::Bytes::from(answer))
+        .await
+        .map_err(rpc_error)
+}
+
+/// Shows `prompt` on `/dev/tty` and reads one line, without echo for secrets.
+/// Returns the line with its newline, so an empty answer stays distinct from cancel.
+fn read_tty(prompt: &str, kind: &str) -> Option<String> {
+    use std::io::{BufRead, Write};
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    let mut out = &tty;
+    if kind == "notify" {
+        writeln!(out, "{prompt}").ok()?;
+        return Some("\n".into());
+    }
+    write!(out, "{prompt} ").ok()?;
+    out.flush().ok()?;
+    let saved = (kind == "secret")
+        .then(|| rustix::termios::tcgetattr(&tty).ok())
+        .flatten();
+    if let Some(saved) = &saved {
+        let mut quiet = saved.clone();
+        quiet.local_modes.remove(rustix::termios::LocalModes::ECHO);
+        let _ = rustix::termios::tcsetattr(&tty, rustix::termios::OptionalActions::Now, &quiet);
+    }
+    let mut line = String::new();
+    let read = std::io::BufReader::new(&tty).read_line(&mut line);
+    if let Some(saved) = &saved {
+        let _ = rustix::termios::tcsetattr(&tty, rustix::termios::OptionalActions::Now, saved);
+        let _ = writeln!(out);
+    }
+    match read {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(format!("{}\n", line.trim_end_matches(['\r', '\n']))),
+    }
+}
+
 /// Renders the response data with the mode's reporter.
 fn render_result(
     runtime: &Runtime,
@@ -306,6 +404,28 @@ fn render_result(
     })?;
     emit(&rendered);
     Ok(rendered.exit_code)
+}
+
+/// Room left after a budgeted stream for the result that follows it.
+const RUN_SUMMARY_BYTES: usize = 2048;
+
+/// The continuation hint when `request` streams log lines (`logs -f`, a foreground
+/// `run`); `None` for everything else.
+fn streamed_output(request: &Request) -> Option<Hint> {
+    let params = &request.params;
+    match request.method {
+        Method::Logs if params.get("follow").and_then(Value::as_bool) == Some(true) => {
+            more_hint(Method::Logs, request)
+        }
+        Method::Run if params.get("detach").and_then(Value::as_bool) != Some(true) => {
+            let task = params
+                .get("task")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            Some(Hint::command(["logs", task, "--tail", "500"]))
+        }
+        _ => None,
+    }
 }
 
 /// Truncated logs say how to get the rest.
@@ -328,7 +448,7 @@ fn hint_for(error: &RpcError, request: &Request) -> Option<Hint> {
             .get("project")
             .and_then(Value::as_str)
             .map(|project| Hint::command(["stop", "--project", project])),
-        "secrets_locked" => Some(Hint::command(["unlock"])),
+        "secrets_locked" => Some(Hint::command(["secrets", "unlock"])),
         "unit_failed" | "ready_timeout" => {
             error.data.get("unit").and_then(Value::as_str).map(|unit| {
                 let lane = request.context.lane.clone().unwrap_or_default();
@@ -339,7 +459,7 @@ fn hint_for(error: &RpcError, request: &Request) -> Option<Hint> {
                 }
             })
         }
-        "confirmation_required" => Some(Hint::command(["daemon", "stop", "--yes"])),
+        "confirmation_required" => confirmation_hint(error),
         _ => None,
     }
 }

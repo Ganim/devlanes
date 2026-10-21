@@ -1,0 +1,98 @@
+---
+source: crates/cli/tests/it/help.rs
+expression: long_help(path)
+---
+Run a dev environment per git worktree, side by side.
+
+Every worktree of a project is a lane with its own ports, hostnames such as
+web.acme-2.localhost and environment, so branches run at the same time. A
+per-user daemon owns the processes and containers and keeps them running when
+the terminal closes; this command and the TUI are its clients. Without a
+command, devlanes opens the TUI on a terminal and prints status otherwise.
+
+Usage: devlanes [OPTIONS] [COMMAND]
+
+Commands:
+  start        Bring up a lane: infra, setup, tasks and services, then wait until ready
+  stop         Stop units, or the whole lane when none are named
+  restart      Stop and start units again with a fresh environment
+  status       Show lanes and units with state, ports, URLs, CPU and memory
+  logs         Read unit logs; each line carries a cursor to continue from
+  wait         Wait until a unit or lane is ready or failed
+  with         Start the lane, run a command against it, then stop what was started
+  run          Run a task from devlanes.yaml and exit with its exit code
+  exec         Run an ad-hoc command as a unit of the lane instead of backgrounding it with &
+  attach       Attach this terminal to a unit's terminal; C-a d detaches
+  ui           Open the TUI; closing it never stops anything
+  lane         Create, list, clean and resume worktree lanes
+  debug        Explain failures: why a unit is not up, errors, events and resource use
+  env          Show, export or enter the environment of a lane or unit
+  url          Print, open and list service URLs and routed hostnames
+  infra        Start, stop and inspect the project's containers
+  config       Validate devlanes.yaml
+  certs        Trust the devlanes CA and install the /etc/hosts helper
+  secrets      Hand secrets from fnox to the daemon
+  remote       Connect to boxes over SSH and mirror their lanes here
+  daemon       Run, stop and install the background daemon
+  doctor       Check the daemon, Docker, proxy, CA, hosts file and output mode, each with a fix
+  agent-guide  Print the short guide for AI agents that use devlanes
+  completions  Print shell completions; lane and unit names come from the running daemon
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Global options:
+      --json
+          Print JSON: one document, or NDJSON for streams (same as --output json)
+
+      --output <MODE>
+          Output mode [default: agent when an AI agent runs devlanes, plain in CI or without a terminal, else human]
+
+          Possible values:
+          - human: Colors and symbols, for a terminal
+          - plain: The same information without color, one line per event
+          - agent: Terse lines for AI agents: failures first, with next commands, size-capped
+          - json:  The daemon's data as JSON, or NDJSON for streams
+
+      --project <PROJECT>
+          Use this project instead of the one containing the current directory
+
+      --lane <LANE>
+          Use this lane ([project@]lane) instead of the current worktree's
+
+      --host <HOST>
+          Run the command on a connected box (see devlanes remote connect)
+
+      --yes
+          Confirm actions that would ask first; needed when no terminal can prompt
+
+      --quiet
+          Print nothing on success; errors still go to stderr
+
+      --env <KEY=VALUE>
+          Set a variable for started processes (start, restart, run TASK, exec); repeatable
+
+      --timeout <DURATION>
+          Limit waits and streams, such as 30s, 5m or 1h [default for start and wait: 180s]
+
+      --budget <BYTES>
+          Cap agent-mode output at this many bytes [default: 16384, minimum: 256]
+
+Examples:
+  devlanes start                                bring up this worktree's lane
+  devlanes status                               lanes and units of this project
+  devlanes logs acme@2:api --tail 200           last 200 lines of api in lane 2
+  devlanes with --profile e2e -- pnpm test:e2e  start, run the tests, stop
+  devlanes stop --mine                          stop what this agent session started
+
+References:
+  A lane is [project@]lane: a lane number (2), a branch (feat/checkout), a
+  lane or worktree directory name, or a path. Without project@ the project of
+  the current directory is used.
+  A unit is [lane:]unit, such as api, 2:api or acme@feat/checkout:web.
+  Commands that take several units also accept globs ("api-*") and tags (+web).

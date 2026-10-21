@@ -1,0 +1,10 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+https://web.acme-2.localhost
+--- plain (exit 0)
+https://web.acme-2.localhost
+--- agent (exit 0)
+https://web.acme-2.localhost

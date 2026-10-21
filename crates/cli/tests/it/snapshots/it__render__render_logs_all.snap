@@ -1,0 +1,26 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+== api (1 line) ==
+api#1 listening on :20101
+
+== web (2 lines, truncated) ==
+web#1 compiled
+web#2 compiled
+  more: devlanes logs acme@2:web --tail 500
+--- plain (exit 0)
+== api (1 line) ==
+api#1 listening on :20101
+
+== web (2 lines, truncated) ==
+web#1 compiled
+web#2 compiled
+  more: devlanes logs acme@2:web --tail 500
+--- agent (exit 0)
+api: 1 line
+api#1 listening on :20101
+web: 2 lines, truncated
+web#1 compiled (x2)
+  more: devlanes logs acme@2:web --tail 500

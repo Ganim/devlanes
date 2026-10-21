@@ -28,7 +28,7 @@ class Devlanes < Formula
   end
 
   def install
-    # devlanes looks for devlanes-hosts next to itself when `devlanes trust --hosts`
+    # devlanes looks for devlanes-hosts next to itself when `devlanes certs trust --hosts`
     # copies the helper to /usr/local/libexec, so both go into the same bin.
     bin.install "devlanes", "devlanes-hosts"
   end

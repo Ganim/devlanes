@@ -3,7 +3,7 @@
 //! `SSL_CERT_FILE` points at the combined bundle (system roots plus the devlanes
 //! root): OpenSSL (`openssl`, and `native-tls` on Linux) and `rustls-native-certs`
 //! read that file instead of the system store, so it must contain both.
-//! `native-tls` on macOS uses the keychain, which `devlanes trust` covers.
+//! `native-tls` on macOS uses the keychain, which `devlanes certs trust` covers.
 //! Programs built on `webpki-roots` trust only their compiled-in roots and ignore
 //! every variable. `RUST_LOG` is never set: logging levels belong to the project.
 

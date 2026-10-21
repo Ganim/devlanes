@@ -1,6 +1,6 @@
 # devlanes-trust-macos
 
-macOS implementations of `devlanes-trust`: the login keychain for the `system` and `chrome` targets, and NSS for Firefox profiles. The composition root registers it on macOS, and the CLI uses it for `devlanes trust`.
+macOS implementations of `devlanes-trust`: the login keychain for the `system` and `chrome` targets, and NSS for Firefox profiles. The composition root registers it on macOS, and the CLI uses it for `devlanes certs trust`.
 
 ## Usage
 

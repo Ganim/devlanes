@@ -1,0 +1,94 @@
+---
+source: crates/cli/tests/it/help.rs
+expression: long_help(path)
+---
+Read unit logs; each line carries a cursor to continue from.
+
+Lines of several units are merged by time. Each line starts with a cursor such
+as api#120 that --cursor and --around accept. In agent mode and without a
+terminal the output defaults to the last 100 lines within the output budget.
+
+Usage: devlanes logs [OPTIONS] [UNIT]...
+
+Arguments:
+  [UNIT]...
+          Units to read ([lane:]unit, globs, +tag)
+
+Options:
+      --all
+          Read every unit of the lane, grouped by unit
+
+      --tail <N>
+          Show the last N lines [default: 100 in agent mode or without a terminal]
+
+  -f, --follow
+          Keep streaming new lines; agent mode requires --timeout
+
+      --since <WHEN>
+          Only lines newer than a duration (5m), a time in milliseconds, or start (the lane's last start)
+
+      --grep <REGEX>
+          Only lines matching this regular expression
+
+      --level <LEVEL>
+          Only lines at this level or above: debug, info, warn or error
+
+      --around <CURSOR>
+          Show the lines around this cursor, such as api#120
+
+  -C, --context <N>
+          Lines before and after --around
+          
+          [default: 3]
+
+      --cursor <CURSOR>
+          Continue after this cursor, as printed by an earlier logs call
+
+      --mine
+          Only units this agent session started
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Global options:
+      --json
+          Print JSON: one document, or NDJSON for streams (same as --output json)
+
+      --output <MODE>
+          Output mode [default: agent when an AI agent runs devlanes, plain in CI or without a terminal, else human]
+
+          Possible values:
+          - human: Colors and symbols, for a terminal
+          - plain: The same information without color, one line per event
+          - agent: Terse lines for AI agents: failures first, with next commands, size-capped
+          - json:  The daemon's data as JSON, or NDJSON for streams
+
+      --project <PROJECT>
+          Use this project instead of the one containing the current directory
+
+      --lane <LANE>
+          Use this lane ([project@]lane) instead of the current worktree's
+
+      --host <HOST>
+          Run the command on a connected box (see devlanes remote connect)
+
+      --yes
+          Confirm actions that would ask first; needed when no terminal can prompt
+
+      --quiet
+          Print nothing on success; errors still go to stderr
+
+      --env <KEY=VALUE>
+          Set a variable for started processes (start, restart, run TASK, exec); repeatable
+
+      --timeout <DURATION>
+          Limit waits and streams, such as 30s, 5m or 1h [default for start and wait: 180s]
+
+      --budget <BYTES>
+          Cap agent-mode output at this many bytes [default: 16384, minimum: 256]
+
+Examples:
+  devlanes logs api --tail 200
+  devlanes logs acme@2:api --since 5m --grep 'timeout|refused'
+  devlanes logs api -f --timeout 30s
+  devlanes logs --all --since start

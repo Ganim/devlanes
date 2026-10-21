@@ -324,6 +324,14 @@ impl Proxy {
                     log_tail,
                 ));
             }
+            RouteState::Reconnecting => {
+                return Ok(page(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Reconnecting",
+                    "The connection to the box running this service dropped; devlanes is reconnecting. Reload in a moment.",
+                    "",
+                ));
+            }
             RouteState::Ready => {}
         }
         let stream = match dial(route.target(), self.config.connect_timeout).await {

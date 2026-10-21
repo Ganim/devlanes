@@ -1,11 +1,15 @@
 //! Atomic allocation persistence. SQL protects ranges even across store instances.
 
 use crate::{Allocation, AllocationRequest, BlockOwner, BlockRecord, Error, Store, queries::now};
+use crate::{
+    models::{BlockRow, OffsetRow, checked},
+    schema::{lanes, port_blocks, port_offsets, projects},
+};
 use devlanes_core::{
     LaneId, ProjectId,
     ports::{self, AllocationError, PortBlock, PortName},
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use diesel::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 type Offsets = (BTreeMap<PortName, u16>, BTreeSet<u16>);
@@ -26,38 +30,82 @@ impl Store {
             return Err(Error::Invalid("port unit/name must not be empty".into()));
         }
         self.call(move |connection| {
-            // IMMEDIATE also serializes allocations from independently opened handles.
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let project = owner_project(&transaction, request.owner)?;
-            let records = blocks(&transaction)?;
-            let old = records.iter().find(|record| record.owner == request.owner).map(|record| record.block);
-            let (existing, mut reserved) = offsets(&transaction, project)?;
-            reserved.extend(&request.reserved);
-            let allocation = plan(&request, &records, project, old, &existing, reserved)?;
-            if old != Some(allocation.block) {
-                delete_block(&transaction, request.owner)?;
-                let lane = match request.owner { BlockOwner::Lane(id) => Some(id.0), BlockOwner::Project(_) => None };
-                transaction.execute("INSERT INTO port_blocks(project_id, lane_id, start, size) VALUES (?1, ?2, ?3, ?4)", params![project.0, lane, allocation.block.start, allocation.block.size])?;
-            }
-            let timestamp = now()?;
-            for (name, offset) in &allocation.offsets {
-                transaction.execute(
-                    "INSERT INTO port_offsets(project_id, unit, port_name, offset, reserved_by_expression, last_used) VALUES (?1,?2,?3,?4,0,?5) ON CONFLICT(project_id, unit, port_name) DO NOTHING",
-                    params![project.0, name.unit, name.name, offset, timestamp],
-                )?;
-                if request.names.contains(name) {
-                    transaction.execute("UPDATE port_offsets SET last_used=?1 WHERE project_id=?2 AND unit=?3 AND port_name=?4", params![timestamp, project.0, name.unit, name.name])?;
+            connection.immediate_transaction(|connection| {
+                let project = owner_project(connection, request.owner)?;
+                let records = blocks(connection)?;
+                let old = records
+                    .iter()
+                    .find(|record| record.owner == request.owner)
+                    .map(|record| record.block);
+                let (existing, mut reserved) = offsets(connection, project)?;
+                reserved.extend(&request.reserved);
+                let allocation = plan(&request, &records, project, old, &existing, reserved)?;
+                if old != Some(allocation.block) {
+                    delete_block(connection, request.owner)?;
+                    let lane = match request.owner {
+                        BlockOwner::Lane(id) => Some(id.0),
+                        BlockOwner::Project(_) => None,
+                    };
+                    diesel::insert_into(port_blocks::table)
+                        .values(BlockRow {
+                            project_id: project.0,
+                            lane_id: lane,
+                            start: i32::from(allocation.block.start),
+                            size: i32::from(allocation.block.size),
+                        })
+                        .execute(connection)?;
                 }
-            }
-            for offset in &allocation.reserved {
-                transaction.execute(
-                    "INSERT INTO port_offsets(project_id, unit, port_name, offset, reserved_by_expression, last_used) VALUES (?1,'',?2,?3,1,?4) ON CONFLICT(project_id, unit, port_name) DO UPDATE SET last_used=excluded.last_used",
-                    params![project.0, offset.to_string(), offset, timestamp],
-                )?;
-            }
-            transaction.commit()?;
-            Ok(allocation)
-        }).await
+                let timestamp = now()?;
+                for (name, offset) in &allocation.offsets {
+                    let row = OffsetRow {
+                        project_id: project.0,
+                        unit: name.unit.clone(),
+                        port_name: name.name.clone(),
+                        offset: i32::from(*offset),
+                        reserved_by_expression: 0,
+                        last_used: timestamp,
+                    };
+                    diesel::insert_into(port_offsets::table)
+                        .values(&row)
+                        .on_conflict((
+                            port_offsets::project_id,
+                            port_offsets::unit,
+                            port_offsets::port_name,
+                        ))
+                        .do_nothing()
+                        .execute(connection)?;
+                    if request.names.contains(name) {
+                        diesel::update(
+                            port_offsets::table.find((project.0, &name.unit, &name.name)),
+                        )
+                        .set(port_offsets::last_used.eq(timestamp))
+                        .execute(connection)?;
+                    }
+                }
+                for offset in &allocation.reserved {
+                    let row = OffsetRow {
+                        project_id: project.0,
+                        unit: String::new(),
+                        port_name: offset.to_string(),
+                        offset: i32::from(*offset),
+                        reserved_by_expression: 1,
+                        last_used: timestamp,
+                    };
+                    diesel::insert_into(port_offsets::table)
+                        .values(&row)
+                        .on_conflict((
+                            port_offsets::project_id,
+                            port_offsets::unit,
+                            port_offsets::port_name,
+                        ))
+                        .do_update()
+                        .set(port_offsets::last_used.eq(timestamp))
+                        .execute(connection)?;
+                }
+                Ok(allocation)
+            })
+        })
+        .await
     }
 
     /// Returns a persisted block and all project offsets without modifying them.
@@ -80,7 +128,7 @@ impl Store {
 
     /// Lists every block, including project-owned shared infrastructure ranges.
     pub async fn port_blocks(&self) -> Result<Vec<BlockRecord>, Error> {
-        self.call(|connection| blocks(connection)).await
+        self.call(blocks).await
     }
 
     /// Releases only the owner's range. Caller must first stop all resources using it.
@@ -98,18 +146,28 @@ impl Store {
         live_reserved: BTreeSet<u16>,
     ) -> Result<usize, Error> {
         self.call(move |connection| {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let (existing, reserved) = offsets(&transaction, project)?;
-            let mut removed = 0;
-            for name in existing.keys().filter(|name| !live_names.contains(*name)) {
-                removed += transaction.execute("DELETE FROM port_offsets WHERE project_id=?1 AND unit=?2 AND port_name=?3", params![project.0, name.unit, name.name])?;
-            }
-            for offset in reserved.difference(&live_reserved) {
-                removed += transaction.execute("DELETE FROM port_offsets WHERE project_id=?1 AND reserved_by_expression=1 AND offset=?2", params![project.0, offset])?;
-            }
-            transaction.commit()?;
-            Ok(removed)
-        }).await
+            connection.immediate_transaction(|connection| {
+                let (existing, reserved) = offsets(connection, project)?;
+                let mut removed = 0;
+                for name in existing.keys().filter(|name| !live_names.contains(*name)) {
+                    removed += diesel::delete(
+                        port_offsets::table.find((project.0, &name.unit, &name.name)),
+                    )
+                    .execute(connection)?;
+                }
+                for offset in reserved.difference(&live_reserved) {
+                    removed += diesel::delete(
+                        port_offsets::table
+                            .filter(port_offsets::project_id.eq(project.0))
+                            .filter(port_offsets::reserved_by_expression.eq(1))
+                            .filter(port_offsets::offset.eq(i32::from(*offset))),
+                    )
+                    .execute(connection)?;
+                }
+                Ok(removed)
+            })
+        })
+        .await
     }
 }
 
@@ -217,62 +275,67 @@ fn plan(
 }
 
 /// Resolves ownership through foreign-key records and rejects cleaned lanes.
-fn owner_project(connection: &Connection, owner: BlockOwner) -> Result<ProjectId, Error> {
+fn owner_project(connection: &mut SqliteConnection, owner: BlockOwner) -> Result<ProjectId, Error> {
     match owner {
-        BlockOwner::Project(id) => connection
-            .query_row("SELECT id FROM projects WHERE id=?1", [id.0], |row| {
-                Ok(ProjectId(row.get(0)?))
-            })
+        BlockOwner::Project(id) => projects::table
+            .find(id.0)
+            .select(projects::id)
+            .first::<i64>(connection)
             .optional()?
+            .map(ProjectId)
             .ok_or(Error::NotFound("project")),
-        BlockOwner::Lane(id) => connection
-            .query_row(
-                "SELECT project_id FROM lanes WHERE id=?1 AND cleaned_at IS NULL",
-                [id.0],
-                |row| Ok(ProjectId(row.get(0)?)),
-            )
+        BlockOwner::Lane(id) => lanes::table
+            .find(id.0)
+            .filter(lanes::cleaned_at.is_null())
+            .select(lanes::project_id)
+            .first::<i64>(connection)
             .optional()?
+            .map(ProjectId)
             .ok_or(Error::NotFound("active lane")),
     }
 }
 
 /// Loads occupancy inside the allocation transaction, including other projects.
-fn blocks(connection: &Connection) -> Result<Vec<BlockRecord>, Error> {
-    Ok(connection
-        .prepare("SELECT project_id, lane_id, start, size FROM port_blocks ORDER BY start")?
-        .query_map([], |row| {
-            let project_id = ProjectId(row.get(0)?);
-            let lane: Option<i64> = row.get(1)?;
+fn blocks(connection: &mut SqliteConnection) -> Result<Vec<BlockRecord>, Error> {
+    port_blocks::table
+        .order(port_blocks::start)
+        .select(BlockRow::as_select())
+        .load::<BlockRow>(connection)?
+        .into_iter()
+        .map(|row| {
+            let project_id = ProjectId(row.project_id);
             Ok(BlockRecord {
                 project_id,
-                owner: lane.map_or(BlockOwner::Project(project_id), |lane| {
+                owner: row.lane_id.map_or(BlockOwner::Project(project_id), |lane| {
                     BlockOwner::Lane(LaneId(lane))
                 }),
                 block: PortBlock {
-                    start: row.get(2)?,
-                    size: row.get(3)?,
+                    start: checked(i64::from(row.start))?,
+                    size: checked(i64::from(row.size))?,
                 },
             })
-        })?
-        .collect::<Result<_, _>>()?)
+        })
+        .collect()
 }
 
 /// Separates expression reservations from named offsets without synthetic core keys.
-fn offsets(connection: &Connection, project: ProjectId) -> Result<Offsets, Error> {
+fn offsets(connection: &mut SqliteConnection, project: ProjectId) -> Result<Offsets, Error> {
     let mut named = BTreeMap::new();
     let mut reserved = BTreeSet::new();
-    let mut statement = connection.prepare("SELECT unit, port_name, offset, reserved_by_expression FROM port_offsets WHERE project_id=?1")?;
-    let mut rows = statement.query([project.0])?;
-    while let Some(row) = rows.next()? {
-        if row.get::<_, bool>(3)? {
-            reserved.insert(row.get(2)?);
+    for row in port_offsets::table
+        .filter(port_offsets::project_id.eq(project.0))
+        .select(OffsetRow::as_select())
+        .load::<OffsetRow>(connection)?
+    {
+        if row.reserved_by_expression != 0 {
+            reserved.insert(checked(i64::from(row.offset))?);
         } else {
             named.insert(
                 PortName {
-                    unit: row.get(0)?,
-                    name: row.get(1)?,
+                    unit: row.unit,
+                    name: row.port_name,
                 },
-                row.get(2)?,
+                checked(i64::from(row.offset))?,
             );
         }
     }
@@ -280,16 +343,19 @@ fn offsets(connection: &Connection, project: ProjectId) -> Result<Offsets, Error
 }
 
 /// Removes exactly one ownership scope; a missing range is already released.
-fn delete_block(connection: &Connection, owner: BlockOwner) -> Result<(), Error> {
+fn delete_block(connection: &mut SqliteConnection, owner: BlockOwner) -> Result<(), Error> {
     match owner {
         BlockOwner::Lane(id) => {
-            connection.execute("DELETE FROM port_blocks WHERE lane_id=?1", [id.0])?;
+            diesel::delete(port_blocks::table.filter(port_blocks::lane_id.eq(id.0)))
+                .execute(connection)?;
         }
         BlockOwner::Project(id) => {
-            connection.execute(
-                "DELETE FROM port_blocks WHERE project_id=?1 AND lane_id IS NULL",
-                [id.0],
-            )?;
+            diesel::delete(
+                port_blocks::table
+                    .filter(port_blocks::project_id.eq(id.0))
+                    .filter(port_blocks::lane_id.is_null()),
+            )
+            .execute(connection)?;
         }
     }
     Ok(())

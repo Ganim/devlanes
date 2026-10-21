@@ -1,0 +1,18 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+HOST                             TARGET      PORT   STATE
+api.acme-2.localhost         ->  acme@2:api  20101  ready
+acme-2.localhost (fallback)  ->  acme@2:web  20100  idle
+proxy: http :80, https :8443 (port 443 needs root)
+--- plain (exit 0)
+HOST                             TARGET      PORT   STATE
+api.acme-2.localhost         ->  acme@2:api  20101  ready
+acme-2.localhost (fallback)  ->  acme@2:web  20100  idle
+proxy: http :80, https :8443 (port 443 needs root)
+--- agent (exit 0)
+ready api.acme-2.localhost -> acme@2:api port=20101
+idle acme-2.localhost -> acme@2:web port=20100 fallback
+proxy: http :80, https :8443 (port 443 needs root)

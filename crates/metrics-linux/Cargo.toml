@@ -9,16 +9,13 @@ publish.workspace = true
 
 # Parsers build everywhere so their fixture tests run on macOS CI too.
 [dependencies]
+devlanes-core = { path = "../core" }
 devlanes-metrics = { path = "../metrics" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 async-trait.workspace = true
-devlanes-core = { path = "../core" }
 rustix = { version = "1", features = ["param"] }
 tokio.workspace = true
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-devlanes-core = { path = "../core" }
 
 [lints]
 workspace = true

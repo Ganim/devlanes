@@ -1,0 +1,26 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+acme@0  cpu –  mem –
+  UNIT  CPU  MEM
+  api   –    –
+
+acme@2  cpu 13%  mem 350.0 MiB
+  UNIT  CPU   MEM
+  api   12%   300.0 MiB
+  web   0.4%  50.0 MiB
+--- plain (exit 0)
+acme@0  cpu –  mem –
+  UNIT  CPU  MEM
+  api   –    –
+
+acme@2  cpu 13%  mem 350.0 MiB
+  UNIT  CPU   MEM
+  api   12%   300.0 MiB
+  web   0.4%  50.0 MiB
+--- agent (exit 0)
+acme@0:api cpu=– mem=–
+acme@2:api cpu=12% mem=300.0 MiB
+acme@2:web cpu=0.4% mem=50.0 MiB

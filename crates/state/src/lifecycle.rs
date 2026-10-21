@@ -1,24 +1,22 @@
-//! Lifecycle records added after the registry: setup completion, task history, log
-//! segments, metric rollups, run summaries and remote hosts. None of them store an
-//! environment, a command line or a secret.
+//! Setup completion and historical data. Environment values never enter this API.
 
-use crate::{Error, Store, queries::now};
-use devlanes_core::{Actor, ActorKind, LaneId, ProjectId, UnitRunId};
-use rusqlite::{Row, params};
-use serde::{Deserialize, Serialize};
-use std::{
-    ffi::OsString,
-    os::unix::ffi::{OsStrExt, OsStringExt},
-    path::PathBuf,
+use crate::{
+    Error, Store,
+    models::*,
+    queries::{now, require_changed},
+    schema::*,
 };
+use devlanes_core::{Actor, LaneId, ProjectId, UnitRunId};
+use diesel::{dsl::exists, prelude::*};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Persistent task-run identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TaskRunId(pub i64);
 
-/// One `infra.setup` entry that succeeded for a lane. `container_started_at` is the
-/// backing container's `StartedAt` when the entry names a container.
+/// Completed setup entry and the backing container's start timestamp, if applicable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupRecord {
     pub lane_id: LaneId,
@@ -27,7 +25,7 @@ pub struct SetupRecord {
     pub container_started_at: Option<String>,
 }
 
-/// Start of a task run. `trigger` is a hook name (`lane.create`) or `manual`.
+/// Task invocation with a hook name or `manual` trigger and client attribution.
 #[derive(Debug, Clone)]
 pub struct TaskRunInput {
     pub lane_id: LaneId,
@@ -36,7 +34,7 @@ pub struct TaskRunInput {
     pub actor: Actor,
 }
 
-/// Task history row; `exit_code` is `None` for killed or still-running tasks.
+/// Task history. An absent end time marks an unfinished task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRun {
     pub id: TaskRunId,
@@ -49,7 +47,7 @@ pub struct TaskRun {
     pub actor: Actor,
 }
 
-/// A rotated log segment of one unit run; bodies stay in files.
+/// Rotated log metadata; log bodies remain in files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogSegmentInput {
     pub unit_run_id: UnitRunId,
@@ -62,7 +60,7 @@ pub struct LogSegmentInput {
     pub bytes: u64,
 }
 
-/// One closed minute of one metrics series (`devlanes_metrics::Subject::key`).
+/// One closed minute of a metrics series.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RollupRow {
     pub series: String,
@@ -77,7 +75,7 @@ pub struct RollupRow {
     pub rss_max: u64,
 }
 
-/// Resource profile of a finished unit run, for baselines.
+/// Resource profile of a finished run, used for baselines.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunSummaryRow {
     pub unit_run_id: UnitRunId,
@@ -94,7 +92,7 @@ pub struct RunSummaryRow {
     pub rss_peak: u64,
 }
 
-/// A box this machine connected to (`devlanes connect`).
+/// A box this machine connected to (`devlanes remote connect`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteHost {
     pub name: String,
@@ -104,7 +102,7 @@ pub struct RemoteHost {
     pub last_connected: Option<i64>,
 }
 
-/// Rows removed by a retention pass.
+/// Compatibility result for the original cutoff-based history API.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pruned {
     pub unit_runs: usize,
@@ -113,55 +111,56 @@ pub struct Pruned {
 }
 
 impl Store {
-    /// Remembers where `devlanes.yaml` lives relative to the worktree root, so a
-    /// restarted daemon can reload a monorepo project without a client cwd.
+    /// Records the configuration directory relative to the worktree root.
     pub async fn set_project_config_dir(
         &self,
         project: ProjectId,
         config_dir: PathBuf,
     ) -> Result<(), Error> {
-        self.call(move |connection| {
-            crate::queries::require_changed(
-                connection.execute(
-                    "UPDATE projects SET config_dir=?1 WHERE id=?2",
-                    params![config_dir.as_os_str().as_bytes(), project.0],
-                )?,
+        self.call(move |c| {
+            require_changed(
+                diesel::update(projects::table.find(project.0))
+                    .set(projects::config_dir.eq(path_bytes(&config_dir)))
+                    .execute(c)?,
                 "project",
             )
         })
         .await
     }
-
-    /// Returns the recorded config directory of every project that has one.
+    /// Lists project configuration locations without decoding YAML.
     pub async fn project_config_dirs(&self) -> Result<Vec<(ProjectId, PathBuf)>, Error> {
-        self.call(|connection| {
-            Ok(connection
-                .prepare(
-                    "SELECT id, config_dir FROM projects WHERE config_dir IS NOT NULL ORDER BY id",
-                )?
-                .query_map([], |row| {
-                    Ok((
-                        ProjectId(row.get(0)?),
-                        PathBuf::from(OsString::from_vec(row.get(1)?)),
-                    ))
-                })?
-                .collect::<Result<_, _>>()?)
+        self.call(|c| {
+            Ok(projects::table
+                .filter(projects::config_dir.is_not_null())
+                .order(projects::id)
+                .select((projects::id, projects::config_dir))
+                .load::<(i64, Option<Vec<u8>>)>(c)?
+                .into_iter()
+                .filter_map(|(id, path)| path.map(|path| (ProjectId(id), path_from_bytes(path))))
+                .collect())
         })
         .await
     }
-
-    /// Returns every completed setup entry of a lane, in entry order.
+    /// Lists completed setup entries in declaration-independent name order.
     pub async fn setup_records(&self, lane: LaneId) -> Result<Vec<SetupRecord>, Error> {
-        self.call(move |connection| {
-            Ok(connection
-                .prepare("SELECT lane_id, entry, done_at, container_started_at FROM lane_setup WHERE lane_id=?1 ORDER BY entry")?
-                .query_map([lane.0], setup_row)?
-                .collect::<Result<_, _>>()?)
+        self.call(move |c| {
+            Ok(lane_setup::table
+                .filter(lane_setup::lane_id.eq(lane.0))
+                .order(lane_setup::entry)
+                .select(SetupRow::as_select())
+                .load::<SetupRow>(c)?
+                .into_iter()
+                .map(|row| SetupRecord {
+                    lane_id: LaneId(row.lane_id),
+                    entry: row.entry,
+                    done_at: row.done_at,
+                    container_started_at: row.container_started_at,
+                })
+                .collect())
         })
         .await
     }
-
-    /// Marks a setup entry done, replacing an earlier record and its container timestamp.
+    /// Marks an entry done, replacing an earlier container timestamp, including NULL.
     pub async fn record_setup(
         &self,
         lane: LaneId,
@@ -171,374 +170,392 @@ impl Store {
         if entry.is_empty() {
             return Err(Error::Invalid("empty setup entry".into()));
         }
-        self.call(move |connection| {
-            connection.execute(
-                "INSERT INTO lane_setup(lane_id, entry, done_at, container_started_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(lane_id, entry) DO UPDATE SET done_at=excluded.done_at, container_started_at=excluded.container_started_at",
-                params![lane.0, entry, now()?, container_started_at],
-            )?;
+        self.call(move |c| {
+            let row = SetupRow {
+                lane_id: lane.0,
+                entry,
+                done_at: now()?,
+                container_started_at,
+            };
+            diesel::insert_into(lane_setup::table)
+                .values(&row)
+                .on_conflict((lane_setup::lane_id, lane_setup::entry))
+                .do_update()
+                .set(&row)
+                .execute(c)?;
             Ok(())
         })
         .await
     }
-
-    /// Forgets one entry (`Some`) or every entry (`None`) of a lane; teardown calls this.
+    /// Clears one setup entry or all entries after teardown.
     pub async fn clear_setup(&self, lane: LaneId, entry: Option<String>) -> Result<usize, Error> {
-        self.call(move |connection| {
-            Ok(connection.execute(
-                "DELETE FROM lane_setup WHERE lane_id=?1 AND (?2 IS NULL OR entry=?2)",
-                params![lane.0, entry],
-            )?)
+        self.call(move |c| {
+            let query = diesel::delete(lane_setup::table.filter(lane_setup::lane_id.eq(lane.0)));
+            Ok(match entry {
+                Some(entry) => query.filter(lane_setup::entry.eq(entry)).execute(c)?,
+                None => query.execute(c)?,
+            })
         })
         .await
     }
-
-    /// Records the start of a task run with the client-supplied actor.
+    /// Records a task invocation with the supplied client actor.
     pub async fn start_task_run(&self, input: TaskRunInput) -> Result<TaskRun, Error> {
         if input.task.is_empty() || input.trigger.is_empty() {
             return Err(Error::Invalid("task and trigger must be nonempty".into()));
         }
-        self.call(move |connection| {
-            connection.query_row(
-                "INSERT INTO task_runs(lane_id, task, trigger, started_at, actor_kind, actor_agent_id, actor_session_id) VALUES (?1,?2,?3,?4,?5,?6,?7)
-                 RETURNING id, lane_id, task, trigger, started_at, ended_at, exit_code, actor_kind, actor_agent_id, actor_session_id",
-                params![input.lane_id.0, input.task, input.trigger, now()?, actor_kind(input.actor.kind), input.actor.agent_id, input.actor.session_id],
-                task_row,
-            ).map_err(Error::from)
+        self.call(move |c| {
+            let row = NewTask {
+                lane_id: input.lane_id.0,
+                task: input.task,
+                trigger: input.trigger,
+                started_at: now()?,
+                actor_kind: actor_kind(input.actor.kind),
+                actor_agent_id: input.actor.agent_id,
+                actor_session_id: input.actor.session_id,
+            };
+            diesel::insert_into(task_runs::table)
+                .values(&row)
+                .returning(TaskRow::as_returning())
+                .get_result::<TaskRow>(c)?
+                .try_into()
         })
         .await
     }
-
-    /// Completes a task run once; a second call keeps the first result.
+    /// Completes a task once and retains its successful-once marker across retention.
     pub async fn finish_task_run(
         &self,
         id: TaskRunId,
         exit_code: Option<i32>,
     ) -> Result<(), Error> {
-        self.call(move |connection| {
-            connection.execute(
-                "UPDATE task_runs SET ended_at=?1, exit_code=?2 WHERE id=?3 AND ended_at IS NULL",
-                params![now()?, exit_code, id.0],
-            )?;
-            Ok(())
+        self.call(move |c| {
+            c.immediate_transaction(|c| {
+                let ended = now()?;
+                let row = diesel::update(
+                    task_runs::table
+                        .find(id.0)
+                        .filter(task_runs::ended_at.is_null()),
+                )
+                .set((
+                    task_runs::ended_at.eq(ended),
+                    task_runs::exit_code.eq(exit_code),
+                ))
+                .returning((task_runs::lane_id, task_runs::task))
+                .get_result::<(i64, String)>(c)
+                .optional()?;
+                if let Some((lane, task)) = row.filter(|_| exit_code == Some(0)) {
+                    diesel::insert_into(task_completions::table)
+                        .values((
+                            task_completions::lane_id.eq(lane),
+                            task_completions::task.eq(task),
+                            task_completions::succeeded_at.eq(ended),
+                        ))
+                        .on_conflict((task_completions::lane_id, task_completions::task))
+                        .do_update()
+                        .set(task_completions::succeeded_at.eq(ended))
+                        .execute(c)?;
+                }
+                Ok(())
+            })
         })
         .await
     }
-
-    /// True once the task exited 0 in this lane; `lane.create` hooks stop running then.
+    /// Reports successful-once state independently of retained task history.
     pub async fn task_succeeded(&self, lane: LaneId, task: String) -> Result<bool, Error> {
-        self.call(move |connection| {
-            Ok(connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM task_runs WHERE lane_id=?1 AND task=?2 AND exit_code=0)",
-                params![lane.0, task],
-                |row| row.get(0),
-            )?)
+        self.call(move |c| {
+            Ok(
+                diesel::select(exists(task_completions::table.find((lane.0, task))))
+                    .get_result(c)?,
+            )
         })
         .await
     }
-
-    /// Returns a lane's task history, newest first.
+    /// Returns bounded task history, newest first.
     pub async fn task_runs(&self, lane: LaneId, limit: u32) -> Result<Vec<TaskRun>, Error> {
-        self.call(move |connection| {
-            Ok(connection
-                .prepare("SELECT id, lane_id, task, trigger, started_at, ended_at, exit_code, actor_kind, actor_agent_id, actor_session_id FROM task_runs WHERE lane_id=?1 ORDER BY id DESC LIMIT ?2")?
-                .query_map(params![lane.0, limit], task_row)?
-                .collect::<Result<_, _>>()?)
+        self.call(move |c| {
+            task_runs::table
+                .filter(task_runs::lane_id.eq(lane.0))
+                .order(task_runs::id.desc())
+                .limit(i64::from(limit))
+                .select(TaskRow::as_select())
+                .load::<TaskRow>(c)?
+                .into_iter()
+                .map(TaskRun::try_from)
+                .collect()
         })
         .await
     }
-
-    /// Drops a cleaned lane's setup and task records so a re-created lane starts fresh.
-    /// Unit run history stays until retention removes it.
+    /// Resets setup and task completion state after lane cleanup.
     pub async fn forget_lane_lifecycle(&self, lane: LaneId) -> Result<(), Error> {
-        self.call(move |connection| {
-            let transaction = connection.transaction()?;
-            transaction.execute("DELETE FROM lane_setup WHERE lane_id=?1", [lane.0])?;
-            transaction.execute("DELETE FROM task_runs WHERE lane_id=?1", [lane.0])?;
-            transaction.commit()?;
-            Ok(())
+        self.call(move |c| {
+            c.immediate_transaction(|c| {
+                diesel::delete(lane_setup::table.filter(lane_setup::lane_id.eq(lane.0)))
+                    .execute(c)?;
+                diesel::delete(
+                    task_completions::table.filter(task_completions::lane_id.eq(lane.0)),
+                )
+                .execute(c)?;
+                diesel::delete(task_runs::table.filter(task_runs::lane_id.eq(lane.0)))
+                    .execute(c)?;
+                Ok(())
+            })
         })
         .await
     }
-
-    /// Records or updates a rotated segment's index metadata.
+    /// Upserts a rotated log segment's metadata by run and path.
     pub async fn record_log_segment(&self, input: LogSegmentInput) -> Result<(), Error> {
-        self.call(move |connection| {
-            connection.execute(
-                "INSERT INTO log_segments(unit_run_id, first_seq, last_seq, min_ts, max_ts, path, compressed, bytes) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-                 ON CONFLICT(unit_run_id, path) DO UPDATE SET first_seq=excluded.first_seq, last_seq=excluded.last_seq, min_ts=excluded.min_ts, max_ts=excluded.max_ts, compressed=excluded.compressed, bytes=excluded.bytes",
-                params![input.unit_run_id.0, sql_u64(input.first_seq), sql_u64(input.last_seq), sql_u64(input.min_ts_ms), sql_u64(input.max_ts_ms), input.path.as_os_str().as_bytes(), input.compressed, sql_u64(input.bytes)],
-            )?;
+        self.call(move |c| {
+            let row = SegmentRow {
+                unit_run_id: input.unit_run_id.0,
+                first_seq: sql_u64(input.first_seq),
+                last_seq: sql_u64(input.last_seq),
+                min_ts: sql_u64(input.min_ts_ms),
+                max_ts: sql_u64(input.max_ts_ms),
+                path: path_bytes(&input.path),
+                compressed: i32::from(input.compressed),
+                bytes: sql_u64(input.bytes),
+            };
+            diesel::insert_into(log_segments::table)
+                .values(&row)
+                .on_conflict((log_segments::unit_run_id, log_segments::path))
+                .do_update()
+                .set(&row)
+                .execute(c)?;
             Ok(())
         })
         .await
     }
-
-    /// Lists a run's segments in sequence order.
+    /// Lists a run's segment metadata in sequence order.
     pub async fn log_segments(&self, run: UnitRunId) -> Result<Vec<LogSegmentInput>, Error> {
-        self.call(move |connection| {
-            Ok(connection
-                .prepare("SELECT unit_run_id, first_seq, last_seq, min_ts, max_ts, path, compressed, bytes FROM log_segments WHERE unit_run_id=?1 ORDER BY first_seq")?
-                .query_map([run.0], |row| {
-                    Ok(LogSegmentInput {
-                        unit_run_id: UnitRunId(row.get(0)?),
-                        first_seq: from_sql_u64(row.get(1)?),
-                        last_seq: from_sql_u64(row.get(2)?),
-                        min_ts_ms: from_sql_u64(row.get(3)?),
-                        max_ts_ms: from_sql_u64(row.get(4)?),
-                        path: OsString::from_vec(row.get(5)?).into(),
-                        compressed: row.get(6)?,
-                        bytes: from_sql_u64(row.get(7)?),
-                    })
-                })?
-                .collect::<Result<_, _>>()?)
+        self.call(move |c| {
+            Ok(log_segments::table
+                .filter(log_segments::unit_run_id.eq(run.0))
+                .order(log_segments::first_seq)
+                .select(SegmentRow::as_select())
+                .load::<SegmentRow>(c)?
+                .into_iter()
+                .map(|row| LogSegmentInput {
+                    unit_run_id: UnitRunId(row.unit_run_id),
+                    first_seq: from_sql_u64(row.first_seq),
+                    last_seq: from_sql_u64(row.last_seq),
+                    min_ts_ms: from_sql_u64(row.min_ts),
+                    max_ts_ms: from_sql_u64(row.max_ts),
+                    path: path_from_bytes(row.path),
+                    compressed: row.compressed != 0,
+                    bytes: from_sql_u64(row.bytes),
+                })
+                .collect())
         })
         .await
     }
-
-    /// Stores closed minutes; a repeated minute replaces the earlier row.
+    /// Stores closed metric minutes, replacing repeated series/minute pairs.
     pub async fn insert_rollups(&self, rows: Vec<RollupRow>) -> Result<(), Error> {
         if rows.is_empty() {
             return Ok(());
         }
-        self.call(move |connection| {
-            let transaction = connection.transaction()?;
-            {
-                let mut statement = transaction.prepare(
-                    "INSERT OR REPLACE INTO metric_rollups(series, minute, samples, cpu_min, cpu_avg, cpu_max, mem_min, mem_avg, mem_max, rss_max) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                )?;
-                for row in &rows {
-                    statement.execute(params![
-                        row.series,
-                        sql_u64(row.minute_ms),
-                        row.samples,
-                        row.cpu_min,
-                        row.cpu_avg,
-                        row.cpu_max,
-                        sql_u64(row.mem_min),
-                        sql_u64(row.mem_avg),
-                        sql_u64(row.mem_max),
-                        sql_u64(row.rss_max)
-                    ])?;
+        self.call(move |c| {
+            c.immediate_transaction(|c| {
+                for row in rows {
+                    let row = MetricRow {
+                        series: row.series,
+                        minute: sql_u64(row.minute_ms),
+                        samples: i64::from(row.samples),
+                        cpu_min: row.cpu_min,
+                        cpu_avg: row.cpu_avg,
+                        cpu_max: row.cpu_max,
+                        mem_min: sql_u64(row.mem_min),
+                        mem_avg: sql_u64(row.mem_avg),
+                        mem_max: sql_u64(row.mem_max),
+                        rss_max: sql_u64(row.rss_max),
+                    };
+                    diesel::insert_into(metric_rollups::table)
+                        .values(&row)
+                        .on_conflict((metric_rollups::series, metric_rollups::minute))
+                        .do_update()
+                        .set(&row)
+                        .execute(c)?;
                 }
-            }
-            transaction.commit()?;
-            Ok(())
+                Ok(())
+            })
         })
         .await
     }
-
-    /// Returns one series' minutes at or after `since_ms`, oldest first.
+    /// Lists series minutes at or after the cutoff, oldest first.
     pub async fn rollups(&self, series: String, since_ms: u64) -> Result<Vec<RollupRow>, Error> {
-        self.call(move |connection| {
-            Ok(connection
-                .prepare("SELECT series, minute, samples, cpu_min, cpu_avg, cpu_max, mem_min, mem_avg, mem_max, rss_max FROM metric_rollups WHERE series=?1 AND minute>=?2 ORDER BY minute")?
-                .query_map(params![series, sql_u64(since_ms)], |row| {
+        self.call(move |c| {
+            metric_rollups::table
+                .filter(metric_rollups::series.eq(series))
+                .filter(metric_rollups::minute.ge(sql_u64(since_ms)))
+                .order(metric_rollups::minute)
+                .select(MetricRow::as_select())
+                .load::<MetricRow>(c)?
+                .into_iter()
+                .map(|row| {
                     Ok(RollupRow {
-                        series: row.get(0)?,
-                        minute_ms: from_sql_u64(row.get(1)?),
-                        samples: row.get(2)?,
-                        cpu_min: row.get(3)?,
-                        cpu_avg: row.get(4)?,
-                        cpu_max: row.get(5)?,
-                        mem_min: from_sql_u64(row.get(6)?),
-                        mem_avg: from_sql_u64(row.get(7)?),
-                        mem_max: from_sql_u64(row.get(8)?),
-                        rss_max: from_sql_u64(row.get(9)?),
+                        series: row.series,
+                        minute_ms: from_sql_u64(row.minute),
+                        samples: checked(row.samples)?,
+                        cpu_min: row.cpu_min,
+                        cpu_avg: row.cpu_avg,
+                        cpu_max: row.cpu_max,
+                        mem_min: from_sql_u64(row.mem_min),
+                        mem_avg: from_sql_u64(row.mem_avg),
+                        mem_max: from_sql_u64(row.mem_max),
+                        rss_max: from_sql_u64(row.rss_max),
                     })
-                })?
-                .collect::<Result<_, _>>()?)
+                })
+                .collect()
         })
         .await
     }
-
-    /// Stores the final profile of a unit run.
+    /// Upserts a unit run's final resource profile.
     pub async fn record_run_summary(&self, row: RunSummaryRow) -> Result<(), Error> {
-        self.call(move |connection| {
-            connection.execute(
-                "INSERT OR REPLACE INTO run_summaries(unit_run_id, series, started_at, ended_at, samples, mem_p50, mem_p95, mem_peak, cpu_p50, cpu_p95, cpu_peak, rss_peak) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                params![row.unit_run_id.0, row.series, sql_u64(row.started_ms), sql_u64(row.ended_ms), sql_u64(row.samples), sql_u64(row.mem_p50), sql_u64(row.mem_p95), sql_u64(row.mem_peak), row.cpu_p50, row.cpu_p95, row.cpu_peak, sql_u64(row.rss_peak)],
-            )?;
+        self.call(move |c| {
+            let row = SummaryRow {
+                unit_run_id: row.unit_run_id.0,
+                series: row.series,
+                started_at: sql_u64(row.started_ms),
+                ended_at: sql_u64(row.ended_ms),
+                samples: sql_u64(row.samples),
+                mem_p50: sql_u64(row.mem_p50),
+                mem_p95: sql_u64(row.mem_p95),
+                mem_peak: sql_u64(row.mem_peak),
+                cpu_p50: row.cpu_p50,
+                cpu_p95: row.cpu_p95,
+                cpu_peak: row.cpu_peak,
+                rss_peak: sql_u64(row.rss_peak),
+            };
+            diesel::insert_into(run_summaries::table)
+                .values(&row)
+                .on_conflict(run_summaries::unit_run_id)
+                .do_update()
+                .set(&row)
+                .execute(c)?;
             Ok(())
         })
         .await
     }
-
-    /// Recent run profiles of a series, newest first, for baselines.
+    /// Returns recent profiles, newest first, for baseline calculation.
     pub async fn run_summaries(
         &self,
         series: String,
         limit: u32,
     ) -> Result<Vec<RunSummaryRow>, Error> {
-        self.call(move |connection| {
-            Ok(connection
-                .prepare("SELECT unit_run_id, series, started_at, ended_at, samples, mem_p50, mem_p95, mem_peak, cpu_p50, cpu_p95, cpu_peak, rss_peak FROM run_summaries WHERE series=?1 ORDER BY ended_at DESC LIMIT ?2")?
-                .query_map(params![series, limit], |row| {
-                    Ok(RunSummaryRow {
-                        unit_run_id: UnitRunId(row.get(0)?),
-                        series: row.get(1)?,
-                        started_ms: from_sql_u64(row.get(2)?),
-                        ended_ms: from_sql_u64(row.get(3)?),
-                        samples: from_sql_u64(row.get(4)?),
-                        mem_p50: from_sql_u64(row.get(5)?),
-                        mem_p95: from_sql_u64(row.get(6)?),
-                        mem_peak: from_sql_u64(row.get(7)?),
-                        cpu_p50: row.get(8)?,
-                        cpu_p95: row.get(9)?,
-                        cpu_peak: row.get(10)?,
-                        rss_peak: from_sql_u64(row.get(11)?),
-                    })
-                })?
-                .collect::<Result<_, _>>()?)
+        self.call(move |c| {
+            Ok(run_summaries::table
+                .filter(run_summaries::series.eq(series))
+                .order(run_summaries::ended_at.desc())
+                .limit(i64::from(limit))
+                .select(SummaryRow::as_select())
+                .load::<SummaryRow>(c)?
+                .into_iter()
+                .map(|row| RunSummaryRow {
+                    unit_run_id: UnitRunId(row.unit_run_id),
+                    series: row.series,
+                    started_ms: from_sql_u64(row.started_at),
+                    ended_ms: from_sql_u64(row.ended_at),
+                    samples: from_sql_u64(row.samples),
+                    mem_p50: from_sql_u64(row.mem_p50),
+                    mem_p95: from_sql_u64(row.mem_p95),
+                    mem_peak: from_sql_u64(row.mem_peak),
+                    cpu_p50: row.cpu_p50,
+                    cpu_p95: row.cpu_p95,
+                    cpu_peak: row.cpu_peak,
+                    rss_peak: from_sql_u64(row.rss_peak),
+                })
+                .collect())
         })
         .await
     }
-
-    /// Inserts or refreshes a remote host after a successful connect.
+    /// Updates the last successful connection metadata for a remote host.
     pub async fn upsert_remote_host(&self, host: RemoteHost) -> Result<(), Error> {
         if host.name.is_empty() {
             return Err(Error::Invalid("empty remote host name".into()));
         }
-        self.call(move |connection| {
-            connection.execute(
-                "INSERT INTO remote_hosts(name, transport, address, daemon_version, last_connected) VALUES (?1,?2,?3,?4,?5)
-                 ON CONFLICT(name) DO UPDATE SET transport=excluded.transport, address=excluded.address, daemon_version=excluded.daemon_version, last_connected=excluded.last_connected",
-                params![host.name, host.transport, host.address, host.daemon_version, host.last_connected],
-            )?;
+        self.call(move |c| {
+            let row = RemoteRow {
+                name: host.name,
+                transport: host.transport,
+                address: host.address,
+                daemon_version: host.daemon_version,
+                last_connected: host.last_connected,
+            };
+            diesel::insert_into(remote_hosts::table)
+                .values(&row)
+                .on_conflict(remote_hosts::name)
+                .do_update()
+                .set(&row)
+                .execute(c)?;
             Ok(())
         })
         .await
     }
-
-    /// Lists remote hosts by name.
+    /// Lists registered remote hosts by name.
     pub async fn remote_hosts(&self) -> Result<Vec<RemoteHost>, Error> {
-        self.call(|connection| {
-            Ok(connection
-                .prepare("SELECT name, transport, address, daemon_version, last_connected FROM remote_hosts ORDER BY name")?
-                .query_map([], |row| {
-                    Ok(RemoteHost {
-                        name: row.get(0)?,
-                        transport: row.get(1)?,
-                        address: row.get(2)?,
-                        daemon_version: row.get(3)?,
-                        last_connected: row.get(4)?,
-                    })
-                })?
-                .collect::<Result<_, _>>()?)
+        self.call(|c| {
+            Ok(remote_hosts::table
+                .order(remote_hosts::name)
+                .select(RemoteRow::as_select())
+                .load::<RemoteRow>(c)?
+                .into_iter()
+                .map(|row| RemoteHost {
+                    name: row.name,
+                    transport: row.transport,
+                    address: row.address,
+                    daemon_version: row.daemon_version,
+                    last_connected: row.last_connected,
+                })
+                .collect())
         })
         .await
     }
-
-    /// Applies history retention: finished unit and task runs ended before
-    /// `runs_before_ms`, rollups older than `rollups_before_ms`. Unfinished runs stay,
-    /// because reconciliation still needs their identities.
+    /// Compatibility cutoff-based retention. New callers should use `prune`.
     pub async fn prune_history(
         &self,
         runs_before_ms: i64,
         rollups_before_ms: i64,
     ) -> Result<Pruned, Error> {
-        self.call(move |connection| {
-            let transaction = connection.transaction()?;
-            let unit_runs = transaction.execute(
-                "DELETE FROM unit_runs WHERE ended_at IS NOT NULL AND ended_at < ?1",
-                [runs_before_ms],
-            )?;
-            let task_runs = transaction.execute(
-                "DELETE FROM task_runs WHERE ended_at IS NOT NULL AND ended_at < ?1",
-                [runs_before_ms],
-            )?;
-            let rollups = transaction.execute(
-                "DELETE FROM metric_rollups WHERE minute < ?1",
-                [rollups_before_ms],
-            )?;
-            transaction.commit()?;
-            Ok(Pruned {
-                unit_runs,
-                task_runs,
-                rollups,
+        self.call(move |c| {
+            c.immediate_transaction(|c| {
+                let unit_runs =
+                    diesel::delete(unit_runs::table.filter(unit_runs::ended_at.lt(runs_before_ms)))
+                        .execute(c)?;
+                let task_runs =
+                    diesel::delete(task_runs::table.filter(task_runs::ended_at.lt(runs_before_ms)))
+                        .execute(c)?;
+                let rollups = diesel::delete(
+                    metric_rollups::table.filter(metric_rollups::minute.lt(rollups_before_ms)),
+                )
+                .execute(c)?;
+                Ok(Pruned {
+                    unit_runs,
+                    task_runs,
+                    rollups,
+                })
             })
         })
         .await
     }
-
-    /// Deletes every row (`devlanes daemon reset-state`). The caller stops all
-    /// resources first; lane numbers and ports are reassigned afterwards.
+    /// Deletes all application records after resources have been stopped.
+    /// Migration history and monotonic IDs are retained.
     pub async fn reset(&self) -> Result<(), Error> {
-        self.call(|connection| {
-            let transaction = connection.transaction()?;
-            // Children first keeps this independent of cascade configuration.
-            for table in [
-                "log_segments",
-                "run_summaries",
-                "metric_rollups",
-                "remote_hosts",
-                "lane_setup",
-                "task_runs",
-                "unit_runs",
-                "port_offsets",
-                "port_blocks",
-                "lanes",
-                "worktrees",
-                "projects",
-            ] {
-                transaction.execute(&format!("DELETE FROM {table}"), [])?;
-            }
-            // AUTOINCREMENT tables guarantee that sqlite_sequence exists.
-            transaction.execute("DELETE FROM sqlite_sequence", [])?;
-            transaction.commit()?;
-            Ok(())
+        self.call(|c| {
+            c.immediate_transaction(|c| {
+                diesel::delete(log_segments::table).execute(c)?;
+                diesel::delete(run_summaries::table).execute(c)?;
+                diesel::delete(metric_rollups::table).execute(c)?;
+                diesel::delete(remote_hosts::table).execute(c)?;
+                diesel::delete(lane_setup::table).execute(c)?;
+                diesel::delete(task_completions::table).execute(c)?;
+                diesel::delete(task_runs::table).execute(c)?;
+                diesel::delete(unit_runs::table).execute(c)?;
+                diesel::delete(port_offsets::table).execute(c)?;
+                diesel::delete(port_blocks::table).execute(c)?;
+                diesel::delete(lanes::table).execute(c)?;
+                diesel::delete(worktrees::table).execute(c)?;
+                diesel::delete(projects::table).execute(c)?;
+                Ok(())
+            })
         })
         .await
     }
-}
-
-/// Stable database word for an actor kind.
-fn actor_kind(kind: ActorKind) -> &'static str {
-    match kind {
-        ActorKind::Human => "human",
-        ActorKind::Agent => "agent",
-    }
-}
-
-/// Decodes a setup projection.
-fn setup_row(row: &Row<'_>) -> rusqlite::Result<SetupRecord> {
-    Ok(SetupRecord {
-        lane_id: LaneId(row.get(0)?),
-        entry: row.get(1)?,
-        done_at: row.get(2)?,
-        container_started_at: row.get(3)?,
-    })
-}
-
-/// Decodes a task-run projection; unknown actor words are treated as corruption.
-fn task_row(row: &Row<'_>) -> rusqlite::Result<TaskRun> {
-    let kind = match row.get::<_, String>(7)?.as_str() {
-        "human" => ActorKind::Human,
-        "agent" => ActorKind::Agent,
-        _ => return Err(rusqlite::Error::InvalidQuery),
-    };
-    Ok(TaskRun {
-        id: TaskRunId(row.get(0)?),
-        lane_id: LaneId(row.get(1)?),
-        task: row.get(2)?,
-        trigger: row.get(3)?,
-        started_at: row.get(4)?,
-        ended_at: row.get(5)?,
-        exit_code: row.get(6)?,
-        actor: Actor {
-            kind,
-            agent_id: row.get(8)?,
-            session_id: row.get(9)?,
-        },
-    })
-}
-
-/// SQLite integers are signed; saturating keeps huge counters representable.
-fn sql_u64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-/// Negative values only appear after corruption; they read back as zero.
-fn from_sql_u64(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or(0)
 }

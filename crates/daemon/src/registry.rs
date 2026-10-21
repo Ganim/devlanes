@@ -787,7 +787,7 @@ impl Inner {
         lane: &Arc<LaneRt>,
     ) {
         let (lane_dir, primary_dir) = self.config_dirs(project, lane);
-        let config = load_config(lane_dir, primary_dir).await;
+        let config = self.with_resolver_domain(load_config(lane_dir, primary_dir).await);
         let mut st = lane.st();
         let before = match &st.config {
             ConfigState::Loaded(config) => serde_json::to_value(config.as_ref()).ok(),
@@ -937,7 +937,8 @@ impl Inner {
 
     /// Emits `lane.changed` with a fresh summary and republishes routes.
     pub(crate) fn emit_lane(&self, project: &ProjectRt, lane: &LaneRt) {
-        let summary = lane_summary(&project.name(), &lane.st());
+        let mut summary = lane_summary(&project.name(), &lane.st());
+        self.fill_queued(&mut summary);
         self.bus
             .emit(events::LANE_CHANGED, json!({"lane": summary}));
         self.publish_routes();

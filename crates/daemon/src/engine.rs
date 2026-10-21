@@ -45,6 +45,9 @@ pub struct EngineOptions {
     pub watch: bool,
     /// Default wait for `start` when the selection has no timeout.
     pub start_timeout: Duration,
+    /// Where the embedded DNS server listens under the `resolver` hostname
+    /// strategy; port 0 picks an ephemeral port (tests).
+    pub dns_listen: std::net::SocketAddr,
 }
 
 impl EngineOptions {
@@ -59,6 +62,7 @@ impl EngineOptions {
             user: UserConfig::default(),
             watch: true,
             start_timeout: Duration::from_secs(180),
+            dns_listen: devlanes_resolver_dns::default_listen(),
         }
     }
 }
@@ -77,6 +81,10 @@ pub(crate) struct Inner {
     pub attach: Mutex<crate::attach::AttachTable>,
     pub metrics: Mutex<crate::sampler::MetricsState>,
     pub next_stream: AtomicU64,
+    pub remote: crate::remote::Remotes,
+    pub pacing: crate::pacing::Pacing,
+    /// Embedded DNS server state for `doctor` (`null` without the resolver strategy).
+    pub dns: Mutex<Value>,
 }
 
 /// Cheap handle implementing [`Handler`].
@@ -109,6 +117,9 @@ impl Engine {
                 attach: Mutex::new(crate::attach::AttachTable::default()),
                 metrics: Mutex::new(crate::sampler::MetricsState::default()),
                 next_stream: AtomicU64::new(1),
+                remote: crate::remote::Remotes::default(),
+                pacing: crate::pacing::Pacing::default(),
+                dns: Mutex::new(Value::Null),
             }),
         }
     }
@@ -145,11 +156,15 @@ impl Handler for Engine {
 
     /// Routes bytes to the unit only for a stream this session opened.
     async fn input(&self, stream_id: u64, data: Bytes, session: Session) -> Result<(), RpcError> {
+        if self.inner.remote_input(stream_id, &data, &session).await {
+            return Ok(());
+        }
         self.inner.input(stream_id, data, &session).await
     }
 
     /// Stops every unit with its stop policy; containers keep running.
     async fn shutdown(&self) -> Result<(), RpcError> {
+        self.inner.remote_shutdown().await;
         let stopped = self.inner.stop_everything().await;
         tracing::info!(stopped, "daemon shutdown stopped units");
         Ok(())
@@ -246,6 +261,10 @@ impl Inner {
         request: Request,
         session: Session,
     ) -> Result<Value, RpcError> {
+        // `--host <box>`: the box's daemon answers, whatever the method.
+        if crate::remote::forwards(&request) {
+            return self.forward(request, &session).await;
+        }
         let Request {
             method,
             params,
@@ -262,12 +281,11 @@ impl Inner {
             Method::DaemonResetState => self.reset_state(&context).await,
             Method::Doctor => self.doctor().await,
             Method::ConfigCheck => self.config_check(&context).await,
-            Method::Schema => Ok(self.schema()),
             Method::Start => self.start_method(params, &context, &session).await,
             Method::Stop => self.stop_method(params, &context).await,
             Method::Restart => self.restart_method(params, &context, &session).await,
             Method::Resume => self.resume_method(params, &context, &session).await,
-            Method::Status => self.status_method(params, &context, &session).await,
+            Method::Status => self.remote_status(params, &context, &session).await,
             Method::LaneList => self.lane_list(&context).await,
             Method::LaneNew => self.lane_new(params, &context, &session).await,
             Method::LaneClean => self.lane_clean_method(params, &context).await,
@@ -283,7 +301,7 @@ impl Inner {
                 json!({"message": "input travels as binary frames on an attach stream"}),
                 2,
             )),
-            Method::Resize => self.resize_method(params, &session).await,
+            Method::Resize => self.remote_resize(params, &session).await,
             Method::InfraUp => self.infra_up_method(&context).await,
             Method::InfraDown => self.infra_down_method(&context).await,
             Method::InfraStatus => self.infra_status_method(&context).await,
@@ -293,14 +311,13 @@ impl Inner {
             Method::Why => self.why_method(params, &context).await,
             Method::Url => self.url_method(params, &context).await,
             Method::Metrics => self.metrics_method(params, &context).await,
-            Method::Subscribe => self.subscribe_method(params, &session).await,
-            Method::SyncStatus => Ok(json!({"items": [], "truncated": false, "next_cursor": null})),
-            Method::Connect | Method::Disconnect | Method::HostList => Err(RpcError::new(
-                "not_supported_yet",
-                json!({"milestone": "M14"}),
-                1,
-            )),
+            Method::Subscribe => self.remote_subscribe(params, &session).await,
+            Method::SyncStatus => self.sync_status_method().await,
+            Method::Connect => self.connect_method(params, &session).await,
+            Method::Disconnect => self.disconnect_method(params).await,
+            Method::HostList => self.host_list().await,
             Method::Unlock => self.unlock_method(params, &context).await,
+            Method::HostsRetry => self.hosts_retry().await,
         }
     }
 

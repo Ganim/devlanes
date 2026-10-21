@@ -1,0 +1,14 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+acme@2
+  UNIT  PEAK CPU  PEAK MEM
+  api   126%      1.0 GiB
+--- plain (exit 0)
+acme@2
+  UNIT  PEAK CPU  PEAK MEM
+  api   126%      1.0 GiB
+--- agent (exit 0)
+acme@2:api peak_cpu=126% peak_mem=1.0 GiB

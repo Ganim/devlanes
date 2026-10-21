@@ -36,13 +36,13 @@ Output prints lanes as `acme@2 (feat/billing)`. Paste references back unchanged.
 | Recent logs | `devlanes logs api --tail 100` |
 | Search logs | `devlanes logs api --grep 'ECONNREFUSED' --since 10m` |
 | Lines around a log cursor | `devlanes logs api --around CURSOR -C 20` |
-| Crashes, exit codes, port conflicts | `devlanes errors --since 15m` |
-| Reason a unit is not running | `devlanes why worker` |
+| Crashes, exit codes, port conflicts | `devlanes debug errors --since 15m` |
+| Reason a unit is not running | `devlanes debug why worker` |
 | Restart after a code change | `devlanes restart api` |
 | Run a configured task | `devlanes run --list`, then `devlanes run migrate` |
 | Ad-hoc long-running command | `devlanes exec --name storybook -- pnpm storybook` |
-| URL of a service | `devlanes url web` |
-| Environment of a unit | `devlanes env api`, or `eval "$(devlanes env api --export)"` |
+| URL of a service | `devlanes url print web` |
+| Environment of a unit | `devlanes env show api`, or `eval "$(devlanes env export api)"` |
 | Tests against the stack | `devlanes with -- pnpm test:e2e` |
 | Stop what you started | `devlanes stop --mine` |
 | Setup problems | `devlanes doctor` |
@@ -80,7 +80,7 @@ unassigned acme spike/xyz reason="pool full"
 
 The first word of a status line is the state: `ready`, `failed`, `stopped`, `starting`, `idle`, `running`. Failures come first, each with its last log lines and the command that shows more. URLs are printed in full.
 
-With `--json`, a command prints one JSON document; lists have the shape `{items, truncated, next_cursor}`. Streams (`start --json`, `logs -f --json`, `events`) print NDJSON.
+With `--json`, a command prints one JSON document; lists have the shape `{items, truncated, next_cursor}`. Streams (`start --json`, `logs -f --json`, `debug events -f`) print NDJSON.
 
 Exit codes: 0 success, 1 failure, 2 usage error or missing `--yes`, 3 unknown or ambiguous reference, 4 daemon unreachable, 124 timeout.
 
@@ -88,7 +88,7 @@ Exit codes: 0 success, 1 failure, 2 usage error or missing `--yes`, 3 unknown or
 
 ```sh
 devlanes start
-devlanes errors                      # only if something failed
+devlanes debug errors                # only if something failed
 devlanes logs api --tail 200
 # fix the code, then
 devlanes restart api

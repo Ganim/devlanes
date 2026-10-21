@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+cleaned acme@2: stopped 2 units, ran drop-db, teardown vhost
+  failed vhost exit=3
+--- plain (exit 0)
+cleaned acme@2: stopped 2 units, ran drop-db, teardown vhost
+  failed vhost exit=3
+--- agent (exit 0)
+cleaned acme@2: stopped 2 units, ran drop-db, teardown vhost
+  failed vhost exit=3

@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+running devlanes 0.1.0 pid 4242, up 2h 3m, 6 managed processes
+socket: /home/u/.devlanes/run/daemon.sock
+--- plain (exit 0)
+running devlanes 0.1.0 pid 4242, up 2h 3m, 6 managed processes
+socket: /home/u/.devlanes/run/daemon.sock
+--- agent (exit 0)
+running devlanes 0.1.0 pid 4242, up 2h 3m, 6 managed processes
+socket: /home/u/.devlanes/run/daemon.sock

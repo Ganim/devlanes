@@ -1,4 +1,4 @@
-//! `devlanes trust --hosts` and `devlanes untrust --hosts`: the exact commands that
+//! `devlanes certs trust --hosts` and `devlanes certs untrust --hosts`: the exact commands that
 //! install and remove the helper and its sudo rule.
 //!
 //! Plans are plain data so tests can compare argv; [`install`] and [`uninstall`] run
@@ -235,7 +235,7 @@ pub fn validate_user(user: &str) -> Result<(), InstallError> {
 pub fn sudoers_contents(user: &str) -> Result<String, InstallError> {
     validate_user(user)?;
     Ok(format!(
-        "# Installed by `devlanes trust --hosts`; remove with `devlanes untrust --hosts`.\n\
+        "# Installed by `devlanes certs trust --hosts`; remove with `devlanes certs untrust --hosts`.\n\
          # Lets {user} run the devlanes /etc/hosts helper as root without a password.\n\
          # The helper only edits the block between `# devlanes begin` and `# devlanes end`.\n\
          Defaults!{INSTALL_PATH} !requiretty\n\
@@ -258,7 +258,7 @@ pub struct InstallInputs {
     pub create_install_dir: bool,
 }
 
-/// The commands `devlanes trust --hosts` runs, in order.
+/// The commands `devlanes certs trust --hosts` runs, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallPlan {
     /// Privileged steps.
@@ -346,7 +346,7 @@ pub fn install_plan(inputs: &InstallInputs) -> Result<InstallPlan, InstallError>
     })
 }
 
-/// The commands `devlanes untrust --hosts` runs. Clearing the block needs the helper,
+/// The commands `devlanes certs untrust --hosts` runs. Clearing the block needs the helper,
 /// so it is skipped when the helper is gone; removals always run.
 pub fn uninstall_plan(helper_installed: bool) -> Vec<Step> {
     let mut steps = Vec::new();
@@ -659,7 +659,7 @@ mod tests {
     fn sudoers_snapshot() {
         assert_eq!(
             sudoers_contents("alice").expect("rule"),
-            "# Installed by `devlanes trust --hosts`; remove with `devlanes untrust --hosts`.\n\
+            "# Installed by `devlanes certs trust --hosts`; remove with `devlanes certs untrust --hosts`.\n\
              # Lets alice run the devlanes /etc/hosts helper as root without a password.\n\
              # The helper only edits the block between `# devlanes begin` and `# devlanes end`.\n\
              Defaults!/usr/local/libexec/devlanes-hosts !requiretty\n\

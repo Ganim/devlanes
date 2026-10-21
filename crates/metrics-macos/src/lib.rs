@@ -4,7 +4,11 @@
 //! Activity Monitor shows; RSS collapses once idle pages are compressed. On other
 //! platforms this crate is empty.
 //!
-//! Unsafe code is confined to the FFI module; every block states its invariants.
+//! `MacosPressure` is the start gate's `PressureSource`: system CPU from
+//! `host_statistics`, memory pressure from `kern.memorystatus_vm_pressure_level`.
+//!
+//! Unsafe code is confined to the FFI and pressure modules; every block states
+//! its invariants.
 
 #![cfg_attr(target_os = "macos", allow(unsafe_code))]
 #![deny(clippy::undocumented_unsafe_blocks)]
@@ -13,6 +17,10 @@
 mod collector;
 #[cfg(target_os = "macos")]
 mod ffi;
+#[cfg(target_os = "macos")]
+mod pressure;
 
 #[cfg(target_os = "macos")]
 pub use collector::{MacosSource, process_identity};
+#[cfg(target_os = "macos")]
+pub use pressure::MacosPressure;

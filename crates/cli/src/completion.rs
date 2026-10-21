@@ -43,26 +43,29 @@ pub fn write_completions(
     completer.write_registration("COMPLETE", "devlanes", "devlanes", "devlanes", writer)
 }
 
+/// Which daemon names complete an argument, by its id.
+fn kind_of(id: &str) -> Option<CompletionKind> {
+    Some(match id {
+        "unit" | "units" | "target" => CompletionKind::Unit,
+        "lane" | "status_lane" | "clean_lane" => CompletionKind::Lane,
+        "task" => CompletionKind::Task,
+        "project" => CompletionKind::Project,
+        "host" | "connect_host" | "disconnect_host" => CompletionKind::Host,
+        _ => return None,
+    })
+}
+
 /// Global selectors and nested command operands share the same no-spawn contract.
-fn add_candidates(mut command: clap::Command, source: &Arc<dyn CompletionSource>) -> clap::Command {
-    let args: Vec<_> = command
-        .get_arguments()
-        .filter_map(|arg| {
-            let name = arg.get_id().as_str();
-            let kind = match name {
-                "unit" | "units" | "target" => CompletionKind::Unit,
-                "lane" => CompletionKind::Lane,
-                "task" => CompletionKind::Task,
-                "project" => CompletionKind::Project,
-                "host" => CompletionKind::Host,
-                _ => return None,
+fn add_candidates(command: clap::Command, source: &Arc<dyn CompletionSource>) -> clap::Command {
+    // `mut_args` edits in place. `mut_arg` removes and re-appends, which moves a
+    // positional behind the next one (`with UNIT... -- COMMAND...`) and makes clap
+    // reject two variadic positionals.
+    command
+        .mut_args(|arg| {
+            let Some(kind) = kind_of(arg.get_id().as_str()) else {
+                return arg;
             };
-            Some((name.to_owned(), kind))
-        })
-        .collect();
-    for (name, kind) in args {
-        let source = source.clone();
-        command = command.mut_arg(name, |arg| {
+            let source = source.clone();
             arg.add(ArgValueCompleter::new(move |current: &OsStr| {
                 let Some(prefix) = current.to_str() else {
                     return Vec::new();
@@ -74,7 +77,6 @@ fn add_candidates(mut command: clap::Command, source: &Arc<dyn CompletionSource>
                     .map(CompletionCandidate::new)
                     .collect::<Vec<_>>()
             }))
-        });
-    }
-    command.mut_subcommands(|subcommand| add_candidates(subcommand, source))
+        })
+        .mut_subcommands(|subcommand| add_candidates(subcommand, source))
 }

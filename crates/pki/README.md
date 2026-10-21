@@ -35,7 +35,7 @@ tls:
   ca: mkcert
 ```
 
-With `mkcert`, `devlanes trust` installs mkcert's root through `CertificateAuthority::from_mkcert`. The daemon still loads or creates its own CA under `~/.devlanes/ca` for the proxy, so the setting does not change which root signs leaf certificates yet.
+With `mkcert`, `devlanes certs trust` installs mkcert's root through `CertificateAuthority::from_mkcert`. The daemon still loads or creates its own CA under `~/.devlanes/ca` for the proxy, so the setting does not change which root signs leaf certificates yet.
 
 ## Behaviour
 

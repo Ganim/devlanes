@@ -10,6 +10,7 @@ use devlanes_proto::{
 };
 use devlanes_tui::{
     ApiError, AttachEvent, AttachInput, AttachSession, DaemonApi, EventStream, UnitMetrics,
+    api::{ProfileInfo, ProfileList},
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -26,6 +27,8 @@ pub struct FakeApi {
     pub clean_error: Option<RpcError>,
     /// The daemon log the TUI tails.
     pub log_path: Option<PathBuf>,
+    /// When set, `profile.list` fails with this daemon error.
+    pub profiles_error: Option<RpcError>,
     pub calls: Mutex<Vec<String>>,
     pub events: Mutex<Option<mpsc::Sender<Result<Event, ApiError>>>>,
     /// Keeps attach output channels open so streams do not end on their own.
@@ -119,7 +122,14 @@ impl DaemonApi for FakeApi {
         lane: String,
         selection: Selection,
     ) -> Result<Value, ApiError> {
-        self.record(format!("{method:?} {lane} {:?}", selection.units));
+        if selection.profiles.is_empty() {
+            self.record(format!("{method:?} {lane} {:?}", selection.units));
+        } else {
+            self.record(format!(
+                "{method:?} {lane} {:?} profiles={:?}",
+                selection.units, selection.profiles
+            ));
+        }
         match &self.control_error {
             Some(error) => Err(ApiError::Rpc(error.clone())),
             None => Ok(json!({})),
@@ -187,9 +197,36 @@ impl DaemonApi for FakeApi {
         Ok(daemon_status())
     }
 
+    async fn profile_list(&self, lane: String) -> Result<ProfileList, ApiError> {
+        self.record(format!("profile.list {lane}"));
+        if let Some(error) = &self.profiles_error {
+            return Err(ApiError::Rpc(error.clone()));
+        }
+        Ok(ProfileList {
+            lane,
+            items: profiles(),
+        })
+    }
+
     fn daemon_log(&self) -> Option<PathBuf> {
         self.log_path.clone()
     }
+}
+
+/// Profiles as `profile.list` describes them: a default, an extra and one without infra.
+pub fn profiles() -> Vec<ProfileInfo> {
+    let profile = |name: &str, include: &[&str], skips_infra, is_default| ProfileInfo {
+        name: name.into(),
+        include: include.iter().map(|s| (*s).to_owned()).collect(),
+        exclude: Vec::new(),
+        skips_infra,
+        is_default,
+    };
+    vec![
+        profile("web", &["web", "api"], false, true),
+        profile("e2e", &["+e2e", "web", "api", "worker"], false, false),
+        profile("frontend", &["web"], true, false),
+    ]
 }
 
 /// `daemon.status` as the daemon sends it.

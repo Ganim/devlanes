@@ -235,12 +235,12 @@ fn phase_groups_and_failed_unit_annotation() {
     assert_eq!(output.matches("::error title=").count(), 1);
     insta::assert_snapshot!(output, @r#"
     ::group::infra
-    lane.phase lane=acme@0 phase=infra state=started
-    lane.phase lane=acme@0 phase=infra state=done
+    ok infra
     ::endgroup::
     ::error title=api exited 1::missing config%0Aat app.ts:1
-    unit.changed unit={"name":"api","lane":"acme@0","state":"failed","exit_code":1,"log_tail":["missing config","at app.ts:1"]}
-    unit: {"name":"api","lane":"acme@0","state":"failed","exit_code":1,"log_tail":["missing config","at app.ts:1"]}
+    failed acme@0:api exit=1
+      | missing config
+      | at app.ts:1
     "#);
 }
 
@@ -519,10 +519,34 @@ async fn with_success_and_command_failure_preserve_exit_codes_and_summary() {
     }
     insta::assert_json_snapshot!(snapshots, @r#"
     {
-      "0": "exit=0\n::group::services\nlane.phase lane=acme@0 phase=services state=started\n::endgroup::\n| Unit | Peak memory | Peak CPU |\n| --- | ---: | ---: |\n| api | 1.0 MiB | 20.0% |\n",
-      "3": "exit=3\n::group::services\nlane.phase lane=acme@0 phase=services state=started\n::endgroup::\n| Unit | Peak memory | Peak CPU |\n| --- | ---: | ---: |\n| api | 1.0 MiB | 20.0% |\n"
+      "0": "exit=0\n::group::services\n::endgroup::\n| Unit | Peak memory | Peak CPU |\n| --- | ---: | ---: |\n| api | 1.0 MiB | 20.0% |\n",
+      "3": "exit=3\n::group::services\n::endgroup::\n| Unit | Peak memory | Peak CPU |\n| --- | ---: | ---: |\n| api | 1.0 MiB | 20.0% |\n"
     }
     "#);
+}
+
+#[tokio::test]
+async fn with_json_prints_no_empty_object() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (plan, mut runtime) = plan(temp.path(), false);
+    runtime.mode = OutputMode::Json;
+    runtime.ci = None;
+    let mut driver = FakeDriver::default();
+    let mut output = String::new();
+    let outcome = run_with(&plan, &runtime, &mut driver, &mut |rendered| {
+        output.push_str(&rendered.stdout)
+    })
+    .await;
+    assert_eq!(outcome.exit_code, 0);
+    let lines: Vec<&str> = output.lines().collect();
+    assert!(!lines.contains(&"{}"), "{output}");
+    for line in &lines {
+        // Every line of the NDJSON stream is a JSON document (the summary table aside).
+        if line.starts_with('{') {
+            serde_json::from_str::<serde_json::Value>(line).expect("ndjson line");
+        }
+    }
+    assert!(lines[0].starts_with("{\"seq\""), "{output}");
 }
 
 #[tokio::test]
@@ -546,7 +570,6 @@ async fn with_start_failure_writes_logs_and_stops_without_running_command() {
     assert_eq!(outcome.log_files.len(), 1);
     insta::assert_snapshot!(output, @r#"
     ::group::services
-    lane.phase lane=acme@0 phase=services state=started
     ::endgroup::
     ::error title=api exited 1::missing config
     failed acme@0:api exit=1

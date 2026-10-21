@@ -1,6 +1,12 @@
 //! Real SQLite round-trips and allocation transaction regressions.
 
 mod lifecycle;
+mod retention;
+#[path = "../../src/schema.rs"]
+mod schema;
+
+use diesel::{connection::SimpleConnection, prelude::*};
+use diesel_migrations::{MigrationHarness, embed_migrations};
 
 use devlanes_core::{
     Actor, ActorKind, ExitOutcome, ProcessIdentity, ProjectId,
@@ -154,14 +160,23 @@ async fn migrations_upgrade_v1_and_refuse_future_without_mutation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v1.db");
     {
-        let connection = rusqlite::Connection::open(&path).expect("db");
-        connection
-            .execute_batch(include_str!("../../migrations/001_registry.sql"))
-            .expect("v1");
-        connection
-            .pragma_update(None, "user_version", 1)
-            .expect("version");
-        connection.execute("INSERT INTO projects(name, identity, root_path, primary_branch) VALUES ('old', x'01', x'2F74657374', 'main')", []).expect("existing data");
+        use diesel::migration::MigrationSource;
+        let mut connection = SqliteConnection::establish(path.to_str().expect("path")).expect("db");
+        const MIGRATIONS: diesel_migrations::EmbeddedMigrations = embed_migrations!("migrations");
+        let migrations = <_ as MigrationSource<diesel::sqlite::Sqlite>>::migrations(&MIGRATIONS)
+            .expect("migrations");
+        connection.applied_migrations().expect("initialize ledger");
+        connection.run_migrations(&migrations[..1]).expect("v1");
+        use schema::projects as p;
+        diesel::insert_into(p::table)
+            .values((
+                p::name.eq("old"),
+                p::identity.eq(vec![1u8]),
+                p::root_path.eq(b"/test".to_vec()),
+                p::primary_branch.eq("main"),
+            ))
+            .execute(&mut connection)
+            .expect("existing data");
     }
     let store = Store::open(&path).await.expect("upgrade");
     assert_eq!(store.projects().await.expect("projects")[0].name, "old");
@@ -172,30 +187,36 @@ async fn migrations_upgrade_v1_and_refuse_future_without_mutation() {
     drop(store);
     let newer = dir.path().join("future.db");
     {
-        let connection = rusqlite::Connection::open(&newer).expect("db");
+        let mut connection =
+            SqliteConnection::establish(newer.to_str().expect("path")).expect("db");
         connection
-            .pragma_update(None, "user_version", 999)
-            .expect("version");
+            .batch_execute("PRAGMA user_version = 999")
+            .expect("legacy version");
     }
     assert!(matches!(
         Store::open(&newer).await,
-        Err(Error::NewerSchema { found: 999, .. })
+        Err(Error::LegacySchema { version: 999 })
     ));
-    let connection = rusqlite::Connection::open(&newer).expect("db");
+    let mut connection = SqliteConnection::establish(newer.to_str().expect("path")).expect("db");
+    #[derive(diesel::QueryableByName)]
+    struct Version {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        user_version: i32,
+    }
     assert_eq!(
-        connection
-            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
-            .expect("version"),
+        diesel::sql_query("PRAGMA user_version")
+            .get_result::<Version>(&mut connection)
+            .expect("version")
+            .user_version,
         999
     );
-    let count: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("tables");
-    assert_eq!(count, 0);
+    assert!(
+        schema::projects::table
+            .count()
+            .get_result::<i64>(&mut connection)
+            .is_err(),
+        "refusal must not create application tables"
+    );
 }
 
 #[tokio::test]
@@ -467,39 +488,229 @@ async fn relational_constraints_and_lossless_paths() {
         .await
         .expect("worktree");
     assert_eq!(worktree.path, non_utf8);
-    let connection = rusqlite::Connection::open(path).expect("database");
+    let mut connection =
+        SqliteConnection::establish(path.to_str().expect("path")).expect("database");
+    #[derive(diesel::QueryableByName)]
+    struct Journal {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        journal_mode: String,
+    }
     assert_eq!(
-        connection
-            .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
-            .expect("journal mode"),
+        diesel::sql_query("PRAGMA journal_mode")
+            .get_result::<Journal>(&mut connection)
+            .expect("journal")
+            .journal_mode,
         "wal"
     );
-    let columns: Vec<String> = connection
-        .prepare("SELECT name FROM pragma_table_info('unit_runs')")
-        .expect("prepare")
-        .query_map([], |row| row.get(0))
-        .expect("query")
-        .collect::<Result<_, _>>()
-        .expect("columns");
+    #[derive(diesel::QueryableByName)]
+    struct Column {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+    }
+    let columns: Vec<_> = diesel::sql_query("PRAGMA table_info('unit_runs')")
+        .load::<Column>(&mut connection)
+        .expect("columns")
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
     assert!(
         columns
             .iter()
             .all(|name| !name.contains("env") && !name.contains("secret"))
     );
+    use schema::port_blocks as p;
     assert!(
-        connection
-            .execute(
-                "INSERT INTO port_blocks(project_id, lane_id, start, size) VALUES (?1,?2,20000,10)",
-                rusqlite::params![a.id.0, lane.id.0]
-            )
+        diesel::insert_into(p::table)
+            .values((
+                p::project_id.eq(a.id.0),
+                p::lane_id.eq(lane.id.0),
+                p::start.eq(20000),
+                p::size.eq(10)
+            ))
+            .execute(&mut connection)
             .is_ok()
     );
     assert!(
-        connection
-            .execute(
-                "INSERT INTO port_blocks(project_id, start, size) VALUES (?1,20005,10)",
-                [b.id.0]
-            )
+        diesel::insert_into(p::table)
+            .values((p::project_id.eq(b.id.0), p::start.eq(20005), p::size.eq(10)))
+            .execute(&mut connection)
             .is_err()
     );
+}
+
+#[tokio::test]
+/// Registry updates retain identity and explicit deletion releases ownership.
+async fn registry_updates_deletes_and_allocation_release() {
+    let store = Store::open(":memory:").await.expect("store");
+    let p = project(&store, "acme").await;
+    let updated = store
+        .upsert_project(ProjectInput {
+            name: "renamed".into(),
+            common_dir: p.common_dir.clone(),
+            root_path: "/test/moved".into(),
+            primary_branch: "trunk".into(),
+        })
+        .await
+        .expect("update");
+    assert_eq!(updated.id, p.id);
+    assert_eq!(updated.name, "renamed");
+    let first = lane(&store, p.id, 0).await;
+    let moved = store
+        .upsert_lane(LaneInput {
+            project_id: p.id,
+            worktree_id: first.worktree_id,
+            index: 3,
+            name: "feature".into(),
+            desired_state: DesiredState::Running,
+            profile: Some("api".into()),
+        })
+        .await
+        .expect("update lane");
+    assert_eq!(moved.id, first.id);
+    assert_eq!(moved.created_at, first.created_at);
+    assert_eq!(store.lanes(Some(p.id)).await.expect("lanes"), [moved]);
+    store
+        .set_lane_desired(first.id, DesiredState::Stopped, None)
+        .await
+        .expect("clear profile");
+    assert_eq!(
+        store
+            .lane(first.id)
+            .await
+            .expect("lane")
+            .expect("exists")
+            .profile,
+        None
+    );
+    for owner in [BlockOwner::Lane(first.id), BlockOwner::Project(p.id)] {
+        store.allocate(request(owner, 1)).await.expect("allocate");
+        store.release_block(owner).await.expect("release");
+        store
+            .release_block(owner)
+            .await
+            .expect("idempotent release");
+        assert!(store.allocation(owner).await.expect("query").is_none());
+    }
+    store.delete_lane(first.id).await.expect("delete");
+    assert!(store.lane(first.id).await.expect("query").is_none());
+    assert!(matches!(
+        store.delete_lane(first.id).await,
+        Err(Error::NotFound("lane"))
+    ));
+    assert!(
+        store
+            .upsert_worktree(WorktreeInput {
+                project_id: ProjectId(-1),
+                identity: "foreign".into(),
+                path: "/test".into(),
+                branch: None,
+                present: true
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .finish_unit_run(
+                devlanes_core::UnitRunId(-1),
+                ExitOutcome {
+                    code: Some(0),
+                    signal: None
+                }
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+/// Diesel upgrades each supported prefix and reverses migrations without losing constraints.
+async fn every_diesel_migration_prefix_upgrades_and_down_scripts_work() {
+    use diesel::migration::MigrationSource;
+    const MIGRATIONS: diesel_migrations::EmbeddedMigrations = embed_migrations!("migrations");
+    let dir = tempfile::tempdir().expect("dir");
+    for prefix in 0..=SCHEMA_VERSION as usize {
+        let path = dir.path().join(format!("prefix-{prefix}.db"));
+        let mut c = SqliteConnection::establish(path.to_str().expect("path")).expect("db");
+        c.batch_execute("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000")
+            .expect("connection settings");
+        c.applied_migrations().expect("ledger");
+        let migrations = <_ as MigrationSource<diesel::sqlite::Sqlite>>::migrations(&MIGRATIONS)
+            .expect("migrations");
+        c.run_migrations(&migrations[..prefix]).expect("prefix");
+        let store = Store::open(&path).await.expect("upgrade");
+        assert_eq!(
+            store.schema_version().await.expect("schema"),
+            SCHEMA_VERSION
+        );
+        project(&store, "acme").await;
+        drop(store);
+        c.revert_all_migrations(MIGRATIONS)
+            .expect("down migrations");
+        assert!(c.applied_migrations().expect("ledger").is_empty());
+        c.run_pending_migrations(MIGRATIONS).expect("redo");
+        assert_eq!(
+            c.applied_migrations().expect("ledger").len(),
+            SCHEMA_VERSION as usize
+        );
+    }
+}
+
+#[tokio::test]
+/// A newer Diesel ledger is rejected instead of silently applying an older schema.
+async fn newer_diesel_schema_is_refused() {
+    diesel::table! { __diesel_schema_migrations (version) { version -> Text, run_on -> Timestamp, } }
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("future.db");
+    let store = Store::open(&path).await.expect("store");
+    drop(store);
+    let mut c = SqliteConnection::establish(path.to_str().expect("path")).expect("connection");
+    c.batch_execute("PRAGMA busy_timeout = 5000")
+        .expect("busy timeout");
+    diesel::insert_into(__diesel_schema_migrations::table)
+        .values(__diesel_schema_migrations::version.eq("00000000000999"))
+        .execute(&mut c)
+        .expect("future migration");
+    assert!(matches!(
+        Store::open(&path).await,
+        Err(Error::NewerSchema {
+            found: 999,
+            supported: SCHEMA_VERSION
+        })
+    ));
+}
+
+#[tokio::test]
+/// Initialization recovers if the first migration committed before its ledger row.
+async fn initial_migration_recovers_after_interrupted_ledger_write() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("interrupted.db");
+    let mut c = SqliteConnection::establish(path.to_str().expect("path")).expect("connection");
+    c.applied_migrations().expect("ledger");
+    c.batch_execute(include_str!(
+        "../../migrations/00000000000001_registry/up.sql"
+    ))
+    .expect("migration without ledger commit");
+    let store = Store::open(&path).await.expect("resume migrations");
+    assert_eq!(
+        store.schema_version().await.expect("version"),
+        SCHEMA_VERSION
+    );
+    assert!(store.projects().await.expect("projects").is_empty());
+}
+
+#[tokio::test]
+/// Database filenames retain Unix bytes and cannot inject SQLite URI options.
+async fn non_utf8_database_paths_support_reopen_and_retention() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join(OsString::from_vec(b"state-\xff?mode=memory.db".to_vec()));
+    let store = Store::open(&path).await.expect("non-UTF-8 database");
+    let p = project(&store, "acme").await;
+    assert!(path.exists());
+    let report = store.prune(devlanes_state::RetentionPolicy::default()).await.expect("retention");
+    assert!(!report.budget_exceeded);
+    drop(store);
+    let store = Store::open(&path).await.expect("reopen");
+    assert_eq!(store.project(p.id).await.expect("project"), Some(p));
 }

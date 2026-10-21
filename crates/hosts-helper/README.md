@@ -80,7 +80,7 @@ and only matter while the devlanes proxy listens there.
 ## Installing
 
 ```sh
-devlanes trust --hosts
+devlanes certs trust --hosts
 ```
 
 This asks for your password once (sudo caches it for the remaining commands)
@@ -123,7 +123,7 @@ refuses to install otherwise.
 The rule, for a user named `alice`:
 
 ```
-# Installed by `devlanes trust --hosts`; remove with `devlanes untrust --hosts`.
+# Installed by `devlanes certs trust --hosts`; remove with `devlanes certs untrust --hosts`.
 # Lets alice run the devlanes /etc/hosts helper as root without a password.
 # The helper only edits the block between `# devlanes begin` and `# devlanes end`.
 Defaults!/usr/local/libexec/devlanes-hosts !requiretty
@@ -244,11 +244,11 @@ directly and never read `/etc/hosts`.
 ## Removing
 
 ```sh
-devlanes untrust --hosts
+devlanes certs untrust --hosts
 ```
 
 This clears the block, removes the rule and the helper, then removes the devlanes
-CA from the trust stores, undoing `devlanes trust --hosts`. Add `--keep-ca` to
+CA from the trust stores, undoing `devlanes certs trust --hosts`. Add `--keep-ca` to
 remove only the helper. If the helper is
 already gone, the block cannot be cleared that way; delete the lines between
 the markers by hand. To remove everything manually:
@@ -287,7 +287,7 @@ refusing to run it.
 
 ### `helper_missing`
 
-`/usr/local/libexec/devlanes-hosts` does not exist. Run `devlanes trust --hosts`.
+`/usr/local/libexec/devlanes-hosts` does not exist. Run `devlanes certs trust --hosts`.
 
 ### `sudo_denied`
 
@@ -296,13 +296,13 @@ sudo asked for a password or refused. Check with
 after an install, `/etc/sudoers` probably does not read `/etc/sudoers.d`; it
 needs `#includedir /etc/sudoers.d` or `@includedir /etc/sudoers.d`. After a
 denial the daemon waits five minutes before trying sudo again, so a missing
-rule does not fill the auth log. Running `devlanes trust --hosts` makes it
+rule does not fill the auth log. Running `devlanes certs trust --hosts` makes it
 retry at once.
 
 ### `helper_outdated`
 
 The installed helper speaks a different protocol version from this devlanes.
-Run `devlanes trust --hosts` again.
+Run `devlanes certs trust --hosts` again.
 
 ### `hosts_file_refused`
 

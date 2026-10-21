@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 2)
+failed acme@2:test exit=2
+  more: devlanes logs acme@2:test --tail 200
+--- plain (exit 2)
+failed acme@2:test exit=2
+  more: devlanes logs acme@2:test --tail 200
+--- agent (exit 2)
+failed acme@2:test exit=2
+  more: devlanes logs acme@2:test --tail 200

@@ -119,6 +119,10 @@ pub enum SessionError {
         /// The box's version label.
         server: String,
     },
+    /// The box side broke the connection; the text is the pipe's own report, such
+    /// as the stderr of a remote `devlanes tunnel --stdio` that exited.
+    #[error("box closed the connection: {0}")]
+    Closed(String),
     /// The session already ended.
     #[error("{0}")]
     Ended(SessionEnd),
@@ -363,9 +367,27 @@ async fn handshake(
         }
         Ok((control, server))
     };
-    timeout(limit, exchange)
-        .await
-        .map_err(|_| SessionError::HandshakeTimeout)?
+    match timeout(limit, exchange).await {
+        Err(_) => Err(SessionError::HandshakeTimeout),
+        Ok(Err(error @ SessionError::IncompatibleProtocol { .. })) => Err(error),
+        // A closed control stream usually means the pipe died; its error says why.
+        Ok(Err(error)) => match mux.failure_within(FAILURE_GRACE).await {
+            Some(reason) => Err(SessionError::Closed(reason)),
+            None => Err(error),
+        },
+        Ok(Ok(established)) => Ok(established),
+    }
+}
+
+/// How long a lost stream waits for the mux driver to report the pipe's error.
+const FAILURE_GRACE: Duration = Duration::from_secs(1);
+
+/// Ends a session that lost its control stream, preferring the pipe's own error.
+async fn lost(mux: &MuxClient) -> SessionEnd {
+    match mux.failure_within(FAILURE_GRACE).await {
+        Some(reason) => SessionEnd::Failed(reason),
+        None => SessionEnd::Disconnected,
+    }
 }
 
 /// Applies registry changes and pings until the session ends.
@@ -386,7 +408,7 @@ async fn run_control(
         let deadline = outstanding.map(|(_, sent)| sent + timing.ping_timeout);
         tokio::select! {
             () = cancel.cancelled() => break SessionEnd::Closed,
-            () = mux.closed() => break SessionEnd::Disconnected,
+            () = mux.closed() => break lost(&mux).await,
             message = wire::recv::<_, BoxControl>(&mut control) => match message {
                 Ok(Some((BoxControl::Snapshot { snapshot }, _))) => registry.replace(snapshot),
                 Ok(Some((BoxControl::Event { event }, _))) => registry.apply(event),
@@ -396,8 +418,11 @@ async fn run_control(
                     }
                 }
                 Ok(Some(_)) => break SessionEnd::Failed("unexpected control message".into()),
-                Ok(None) => break SessionEnd::Disconnected,
-                Err(error) => break SessionEnd::Failed(error.to_string()),
+                Ok(None) => break lost(&mux).await,
+                Err(error) => break match mux.failure_within(FAILURE_GRACE).await {
+                    Some(reason) => SessionEnd::Failed(reason),
+                    None => SessionEnd::Failed(error.to_string()),
+                },
             },
             _ = ticker.tick(), if outstanding.is_none() => {
                 nonce += 1;
@@ -483,6 +508,60 @@ mod tests {
             ));
             let result = server.await?;
             assert!(matches!(result, Err(ServeError::IncompatibleClient { .. })));
+            Ok(())
+        })
+        .await?
+    }
+
+    /// A pipe whose reads fail like an SSH tunnel that exited with an error.
+    struct DeadTunnel;
+
+    impl tokio::io::AsyncRead for DeadTunnel {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "remote `devlanes tunnel --stdio` exited with 2: error: not_supported_yet",
+            )))
+        }
+    }
+
+    impl tokio::io::AsyncWrite for DeadTunnel {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn handshake_surfaces_the_pipe_error() -> Result<(), Box<dyn std::error::Error>> {
+        timeout(Duration::from_secs(5), async {
+            let result = Session::establish(Box::new(DeadTunnel), SessionOptions::new("c")).await;
+            let Err(error) = result else {
+                panic!("handshake over a dead pipe succeeded");
+            };
+            assert!(matches!(error, SessionError::Closed(_)), "{error:?}");
+            assert!(error.to_string().contains("not_supported_yet"), "{error}");
             Ok(())
         })
         .await?

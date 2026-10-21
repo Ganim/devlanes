@@ -184,11 +184,31 @@ pub enum Dialog {
         tasks: Vec<String>,
         index: usize,
     },
-    Profile {
+    /// Profiles to start the lane with; space toggles, enter starts.
+    Profiles {
         lane: String,
-        input: String,
+        state: ProfilesState,
     },
     Help,
+}
+
+/// The profile picker while `profile.list` loads and after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfilesState {
+    Loading,
+    /// The daemon does not know `profile.list`.
+    Unsupported,
+    Ready {
+        items: Vec<ProfileChoice>,
+        index: usize,
+    },
+}
+
+/// One row of the profile picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileChoice {
+    pub profile: crate::api::ProfileInfo,
+    pub checked: bool,
 }
 
 /// What the terminal pane shows for an attached unit.
@@ -303,6 +323,10 @@ pub enum Msg {
     /// The new daemon's status after a restart.
     DaemonRestarted(Result<Value, ApiError>),
     DaemonStarted(Result<Value, ApiError>),
+    Profiles {
+        lane: String,
+        result: Result<crate::api::ProfileList, ApiError>,
+    },
 }
 
 /// Side effects the runtime performs; results come back as [`Msg`].
@@ -367,6 +391,9 @@ pub enum Effect {
     /// Sends `yes`; only produced by a confirmed dialog.
     RestartDaemon,
     StartDaemon,
+    FetchProfiles {
+        lane: String,
+    },
     Quit,
 }
 
@@ -703,6 +730,7 @@ impl App {
                     Err(error) => self.api_error("stop daemon", None, error, &mut effects),
                 }
             }
+            Msg::Profiles { lane, result } => self.profiles_loaded(lane, result, &mut effects),
             Msg::DaemonRestarted(result) | Msg::DaemonStarted(result) => {
                 let verb = if self.daemon.busy == Some("restarting") {
                     "restart"
@@ -959,7 +987,10 @@ impl App {
                     .is_some_and(|a| a.lane == unit.lane && a.unit == unit.name);
                 match lane.units.iter_mut().find(|u| u.name == unit.name) {
                     Some(existing) => *existing = unit,
-                    None => lane.units.push(unit),
+                    None => {
+                        lane.units.push(unit);
+                        sort_units(&mut lane.units);
+                    }
                 }
                 if is_attached {
                     // A restart starts a new PTY; reopen a stream that ended with the old one.
@@ -1483,7 +1514,7 @@ impl App {
             KeyCode::Char('x') => self.control(Method::Stop, effects),
             KeyCode::Char('r') => self.control(Method::Restart, effects),
             KeyCode::Char('t') => self.run_prompt(),
-            KeyCode::Char('p') => self.profile_prompt(),
+            KeyCode::Char('p') => self.profile_prompt(effects),
             KeyCode::Char('z') => {
                 self.zoom = !self.zoom;
                 self.resize_pane(effects);
@@ -1529,9 +1560,7 @@ impl App {
 
     /// Paste goes to a text prompt or, in terminal focus, to the unit.
     fn paste(&mut self, text: &str, effects: &mut Vec<Effect>) {
-        if let Some(Dialog::Profile { input, .. } | Dialog::TypeConfirm { input, .. }) =
-            self.dialog.as_mut()
-        {
+        if let Some(Dialog::TypeConfirm { input, .. }) = self.dialog.as_mut() {
             input.push_str(text.trim());
             return;
         }
@@ -1657,38 +1686,114 @@ impl App {
                 }
                 _ => self.dialog = Some(Dialog::Tasks { lane, tasks, index }),
             },
-            Dialog::Profile { lane, mut input } => match key.code {
-                KeyCode::Esc => {}
-                KeyCode::Enter => {
-                    let profile = input.trim().to_owned();
-                    let label = if profile.is_empty() {
-                        format!("start {lane} with the default profile")
-                    } else {
-                        format!("start {lane} with profile {profile}")
-                    };
-                    let selection = Selection {
-                        profile: (!profile.is_empty()).then_some(profile),
+            Dialog::Profiles { lane, state } => self.profiles_key(key, lane, state, effects),
+        }
+    }
+
+    /// Keys in the profile picker.
+    fn profiles_key(
+        &mut self,
+        key: KeyEvent,
+        lane: String,
+        state: ProfilesState,
+        effects: &mut Vec<Effect>,
+    ) {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            return;
+        }
+        let ProfilesState::Ready { mut items, mut index } = state else {
+            // Nothing to pick while loading or on an older daemon.
+            self.dialog = Some(Dialog::Profiles { lane, state });
+            return;
+        };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                index = (index + 1).min(items.len().saturating_sub(1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => index = index.saturating_sub(1),
+            KeyCode::Char(' ') => {
+                if let Some(item) = items.get_mut(index) {
+                    item.checked = !item.checked;
+                }
+            }
+            KeyCode::Enter => {
+                // List order, so later profiles' env wins the way the config reads.
+                let profiles: Vec<String> = items
+                    .iter()
+                    .filter(|item| item.checked)
+                    .map(|item| item.profile.name.clone())
+                    .collect();
+                let label = if profiles.is_empty() {
+                    format!("start {lane} with the default profile")
+                } else {
+                    format!("start {lane} with {}", profiles.join(", "))
+                };
+                self.pending.insert(lane.clone());
+                effects.push(Effect::Control {
+                    method: Method::Start,
+                    target: Target::Lane(lane.clone()),
+                    lane,
+                    selection: Selection {
+                        profiles,
                         ..Selection::default()
-                    };
-                    self.pending.insert(lane.clone());
-                    effects.push(Effect::Control {
-                        method: Method::Start,
-                        target: Target::Lane(lane.clone()),
+                    },
+                    label,
+                });
+                return;
+            }
+            _ => {}
+        }
+        self.dialog = Some(Dialog::Profiles {
+            lane,
+            state: ProfilesState::Ready { items, index },
+        });
+    }
+
+    /// Fills the picker with the lane's profiles, checking the ones it runs now.
+    fn profiles_loaded(
+        &mut self,
+        lane: String,
+        result: Result<crate::api::ProfileList, ApiError>,
+        effects: &mut Vec<Effect>,
+    ) {
+        let open = matches!(&self.dialog, Some(Dialog::Profiles { lane: open, .. }) if *open == lane);
+        let current = self
+            .lanes
+            .iter()
+            .find(|l| l.reference == lane)
+            .map(lane_profiles)
+            .unwrap_or_default();
+        match result {
+            Ok(list) if open => {
+                let items: Vec<ProfileChoice> = list
+                    .items
+                    .into_iter()
+                    .map(|profile| ProfileChoice {
+                        checked: current.contains(&profile.name),
+                        profile,
+                    })
+                    .collect();
+                self.dialog = Some(Dialog::Profiles {
+                    lane,
+                    state: ProfilesState::Ready { items, index: 0 },
+                });
+            }
+            // The picker was closed while loading; nothing to show.
+            Ok(_) => {}
+            Err(error) if crate::api::is_unsupported(&error) => {
+                if open {
+                    self.dialog = Some(Dialog::Profiles {
                         lane,
-                        selection,
-                        label,
+                        state: ProfilesState::Unsupported,
                     });
                 }
-                KeyCode::Backspace => {
-                    input.pop();
-                    self.dialog = Some(Dialog::Profile { lane, input });
+            }
+            Err(error) => {
+                if open {
+                    self.dialog = None;
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    input.push(c);
-                    self.dialog = Some(Dialog::Profile { lane, input });
-                }
-                _ => self.dialog = Some(Dialog::Profile { lane, input }),
-            },
+                self.api_error(&format!("profiles of {lane}"), None, error, effects);
+            }
         }
     }
 
@@ -1855,13 +1960,15 @@ impl App {
         }
     }
 
-    /// Opens the profile prompt prefilled with the lane's current profile.
-    fn profile_prompt(&mut self) {
+    /// Opens the profile picker and asks the daemon for the lane's profiles.
+    fn profile_prompt(&mut self, effects: &mut Vec<Effect>) {
         if let Some(lane) = self.selected_lane() {
-            self.dialog = Some(Dialog::Profile {
-                lane: lane.reference.clone(),
-                input: lane.profile.clone().unwrap_or_default(),
+            let lane = lane.reference.clone();
+            self.dialog = Some(Dialog::Profiles {
+                lane: lane.clone(),
+                state: ProfilesState::Loading,
             });
+            effects.push(Effect::FetchProfiles { lane });
         }
     }
 
@@ -2195,9 +2302,22 @@ pub fn unit_ref(lane: &str, unit: &str) -> String {
     format!("{lane}:{unit}")
 }
 
-/// States with a live process behind them.
+/// States with a live process behind them, or one about to start.
 pub fn is_active(state: &str) -> bool {
-    matches!(state, "starting" | "ready" | "running" | "stopping")
+    matches!(
+        state,
+        "queued" | "starting" | "ready" | "running" | "stopping"
+    )
+}
+
+/// Display order: services and tasks together by name, ad-hoc exec units
+/// after them. Only the TUI's copy is sorted; the daemon starts units in
+/// declaration order.
+pub fn sort_units(units: &mut [UnitSummary]) {
+    units.sort_by(|a, b| {
+        let key = |unit: &UnitSummary| (unit.kind == "exec", unit.name.to_lowercase());
+        key(a).cmp(&key(b)).then_with(|| a.name.cmp(&b.name))
+    });
 }
 
 /// Plain verb for notices.
@@ -2243,8 +2363,12 @@ fn log_query(lane: &str, unit: &str, cursor: Option<String>) -> LogQuery {
     }
 }
 
-/// Projects by name, lanes by index, unassigned lanes last.
+/// Projects by name, lanes by index, unassigned lanes last; units sorted
+/// inside each lane.
 fn sort_lanes(lanes: &mut [LaneSummary]) {
+    for lane in lanes.iter_mut() {
+        sort_units(&mut lane.units);
+    }
     lanes.sort_by(|a, b| {
         (
             a.project.as_str(),
@@ -2264,4 +2388,10 @@ fn sort_lanes(lanes: &mut [LaneSummary]) {
 /// True for units started by an agent; the list shows a badge for them.
 pub fn started_by_agent(unit: &UnitSummary) -> bool {
     unit.actor.kind == ActorKind::Agent
+}
+
+/// The profiles a lane runs now. `LaneSummary` carries a single `profile`
+/// today; a `profiles` list is coming to proto and belongs here when it lands.
+pub fn lane_profiles(lane: &LaneSummary) -> Vec<String> {
+    lane.profile.iter().cloned().collect()
 }

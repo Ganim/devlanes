@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+created acme@6 (feat/checkout) at /work/acme-lanes/feat-checkout
+next: devlanes start --lane acme@6
+--- plain (exit 0)
+created acme@6 (feat/checkout) at /work/acme-lanes/feat-checkout
+next: devlanes start --lane acme@6
+--- agent (exit 0)
+created acme@6 (feat/checkout) at /work/acme-lanes/feat-checkout
+next: devlanes start --lane acme@6

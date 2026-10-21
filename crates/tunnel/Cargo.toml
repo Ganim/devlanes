@@ -1,0 +1,27 @@
+[package]
+name = "devlanes-tunnel"
+description = "Box side of devlanes remote connect: serves the remote mux from the box's daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+devlanes-client = { path = "../client" }
+devlanes-ipc = { path = "../ipc" }
+devlanes-proto = { path = "../proto" }
+devlanes-sync = { path = "../sync" }
+devlanes-transport = { path = "../transport" }
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

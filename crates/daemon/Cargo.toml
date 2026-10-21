@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-daemon"
+description = "Per-user devlanes daemon: lanes, processes, infra and state behind a local socket API"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,13 +19,17 @@ devlanes-config = { path = "../config" }
 devlanes-git = { path = "../git" }
 devlanes-metrics = { path = "../metrics" }
 devlanes-resolve = { path = "../resolve" }
+devlanes-resolver-dns = { path = "../resolver-dns" }
+devlanes-resolver-hosts = { path = "../resolver-hosts" }
 devlanes-state = { path = "../state" }
 devlanes-sys = { path = "../sys" }
+devlanes-sync = { path = "../sync" }
+devlanes-transport = { path = "../transport" }
 async-trait.workspace = true
+base64.workspace = true
 futures-util.workspace = true
 globset = "0.4"
 indexmap = "2"
-schemars = "1"
 serde.workspace = true
 regex = "1"
 strip-ansi-escapes = "0.2"
@@ -39,5 +44,11 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+devlanes-client = { path = "../client" }
+devlanes-proxy = { path = "../proxy" }
+devlanes-resolver-hosts = { path = "../resolver-hosts", features = ["fake"] }
 devlanes-runner-pty = { path = "../runner-pty" }
+devlanes-start-gate = { path = "../start-gate" }
+devlanes-tunnel = { path = "../tunnel" }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

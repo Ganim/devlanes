@@ -9,8 +9,10 @@ publish.workspace = true
 
 [dependencies]
 devlanes-core = { path = "../core" }
-rusqlite = { version = "0.40", features = ["bundled"] }
-rusqlite_migration = "2.6"
+diesel = { version = "2.3", default-features = false, features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
+diesel_migrations = { version = "2.3", features = ["sqlite"] }
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
+percent-encoding = "2"
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

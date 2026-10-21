@@ -156,6 +156,7 @@ impl Inner {
         let mut items = Vec::new();
         for (project, lane) in lanes {
             let mut summary = lane_summary(&project.name(), &lane.st());
+            self.fill_queued(&mut summary);
             if let Some(caller) = mine {
                 summary
                     .units
@@ -238,7 +239,9 @@ impl Inner {
                     .join(project.name())
                     .join(index.to_string())
                     .join(unit.replace('/', "_"));
-                query_log_dir(dir, unit.to_owned(), query).await
+                let retention =
+                    crate::units::LogRetention::from_config(&self.opts.user.logs.retention);
+                query_log_dir(dir, unit.to_owned(), query, retention).await
             }
         }
     }
@@ -682,6 +685,16 @@ impl Inner {
         {
             push(&mut reasons, "waiting_after_services", json!({}));
         }
+        if let Some((code, data)) = self.hosts_reason(&reference, &name) {
+            push(&mut reasons, code, data);
+        }
+        let state = match self.queued_reason(&reference, &name) {
+            Some(data) => {
+                push(&mut reasons, "queued", data);
+                "queued"
+            }
+            None => state,
+        };
         Ok(json!({"lane": reference, "unit": name, "state": state, "reasons": reasons}))
     }
 
@@ -841,6 +854,8 @@ impl Inner {
             "ca": self.integ.ca_status,
             "projects": self.all_projects().len(),
             "subscribers": self.bus.subscribers(),
+            "hosts": self.hosts_status(),
+            "dns": self.dns_doctor().await,
         }))
     }
 }

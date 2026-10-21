@@ -106,6 +106,7 @@ impl Inner {
                     timeout: self.timeout(selection.timeout_ms),
                     session: None,
                     setup_only: false,
+                    all_at_once: selection.all_at_once,
                 },
             )
             .await?;
@@ -165,6 +166,7 @@ impl Inner {
                     timeout: self.timeout(selection.timeout_ms),
                     session: None,
                     setup_only: false,
+                    all_at_once: selection.all_at_once,
                 },
             )
             .await?;
@@ -209,6 +211,7 @@ impl Inner {
                         timeout: self.timeout(args.timeout_ms),
                         session: None,
                         setup_only: false,
+                        all_at_once: false,
                     },
                 )
                 .await;
@@ -298,6 +301,7 @@ impl Inner {
                         timeout: self.opts.start_timeout,
                         session: None,
                         setup_only: false,
+                        all_at_once: false,
                     },
                 )
                 .await?;
@@ -728,7 +732,7 @@ impl Inner {
             .infra
             .port_needs(&spec)
             .await
-            .map_err(|error| RpcError::new(error.code, json!({"message": error.message}), 1))?;
+            .map_err(RpcError::from)?;
         self.allocate_lane(&project, &lane, &needs).await?;
         let spec = self.infra_spec(&project, &lane, &needs).await?;
         Ok(((project, lane), spec))
@@ -741,12 +745,7 @@ impl Inner {
     ) -> Result<Value, RpcError> {
         let ((project, lane), spec) = self.infra_for(context).await?;
         let _op = lane.op.lock().await;
-        let up = self
-            .integ
-            .infra
-            .up(&spec)
-            .await
-            .map_err(|error| RpcError::new(error.code, json!({"message": error.message}), 1))?;
+        let up = self.integ.infra.up(&spec).await.map_err(RpcError::from)?;
         {
             let mut st = lane.st();
             st.infra_ns = Some(up.namespace.clone());
@@ -776,11 +775,7 @@ impl Inner {
                 json!({"lanes_running": running, "flag": "--yes"}),
             ));
         }
-        self.integ
-            .infra
-            .down(&spec)
-            .await
-            .map_err(|error| RpcError::new(error.code, json!({"message": error.message}), 1))
+        self.integ.infra.down(&spec).await.map_err(RpcError::from)
     }
 
     /// `infra.status` for the request's lane.
@@ -794,7 +789,7 @@ impl Inner {
             .infra
             .status(&spec)
             .await
-            .map_err(|error| RpcError::new(error.code, json!({"message": error.message}), 1))?;
+            .map_err(RpcError::from)?;
         Ok(json!({"lane": lane.st().reference(&project.name()), "infra": status}))
     }
 
@@ -808,8 +803,9 @@ impl Inner {
             .map_err(|error| internal("io", error))?
             .ok_or_else(|| RpcError::new("not_found", json!({"reference": context.cwd}), 3))?;
         let presets = self.integ.presets.clone();
+        let known = crate::platforms::known(&self.integ.contributors);
         let path = file.clone();
-        let report = tokio::task::spawn_blocking(move || {
+        let (report, unknown) = tokio::task::spawn_blocking(move || {
             let config = devlanes_config::load_project_with::<BuiltinExtensions>(&path)?;
             let validator = |name: &str, options: Option<&Value>| -> Result<(), String> {
                 match presets.iter().find(|preset| preset.name == name) {
@@ -818,25 +814,20 @@ impl Inner {
                     None => Err(format!("unknown preset `{name}`")),
                 }
             };
-            devlanes_config::validate_with_presets(&config, &validator)
+            let report = devlanes_config::validate_with_presets(&config, &validator)?;
+            Ok::<_, devlanes_config::ConfigError>((
+                report,
+                crate::platforms::unknown(&config, &known),
+            ))
         })
         .await
         .map_err(|error| internal("config_check", error))?
         .map_err(|error| crate::model::config_error(&error))?;
-        Ok(json!({"project": report.project, "path": file, "warnings": report.warnings}))
-    }
-
-    /// `schema`: project schema with registered preset options, and the user schema.
-    pub(crate) fn schema(&self) -> Value {
-        let presets: Vec<(&str, schemars::Schema)> = self
-            .integ
-            .presets
-            .iter()
-            .map(|preset| (preset.name, preset.schema.clone()))
-            .collect();
-        json!({
-            "project": devlanes_config::project_schema_with_presets(&presets),
-            "user": devlanes_config::user_schema(),
-        })
+        let mut warnings =
+            serde_json::to_value(&report.warnings).map_err(|e| internal("encode", e))?;
+        if let Some(list) = warnings.as_array_mut() {
+            list.extend(unknown);
+        }
+        Ok(json!({"project": report.project, "path": file, "warnings": warnings}))
     }
 }

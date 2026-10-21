@@ -4,12 +4,118 @@
 //! a Linux 7.0 container (a `redis-server` PID 1 and a `cat` reading itself).
 //! `stat_odd_comm.txt` is the `cat` line with comm and state edited to cover a
 //! name containing `) (` and a zombie.
+//!
+//! `proc_stat_before.txt`/`proc_stat_after.txt` (one second apart) and
+//! `meminfo.txt` were captured in the same kind of container. That kernel has no
+//! PSI, so `psi_memory.txt` and `psi_cpu.txt` are written in the kernel's
+//! documented PSI format with values chosen to cross the warn threshold.
 
+use devlanes_core::gate::MemoryPressure;
 use devlanes_metrics::Error;
-use devlanes_metrics_linux::procfs::{
-    ProcStat, cpu_percent, lifetime_cpu_percent, parse_smaps_rollup_pss, parse_stat, parse_statm,
-    parse_uptime,
+use devlanes_metrics_linux::{
+    pressure::{
+        CpuTimes, MEMORY_CRITICAL_FULL_AVG10, Psi, parse_meminfo_available, parse_proc_stat_cpu,
+        parse_psi,
+    },
+    procfs::{
+        ProcStat, cpu_percent, lifetime_cpu_percent, parse_smaps_rollup_pss, parse_stat,
+        parse_statm, parse_uptime,
+    },
 };
+
+#[test]
+fn proc_stat_fixtures_give_system_cpu() {
+    let before =
+        parse_proc_stat_cpu(include_str!("../../fixtures/proc_stat_before.txt")).expect("before");
+    let after =
+        parse_proc_stat_cpu(include_str!("../../fixtures/proc_stat_after.txt")).expect("after");
+    assert_eq!(
+        before,
+        CpuTimes {
+            total: 713_122 + 428_485 + 55_168_776 + 3_111 + 158_069,
+            idle: 55_168_776 + 3_111,
+        }
+    );
+    // 15 busy ticks out of 1205: user 7, system 6, softirq 2; idle 1189, iowait 1.
+    let busy = after.busy_percent_since(&before).expect("time passed");
+    assert!((busy - 15.0 / 1205.0 * 100.0).abs() < 1e-9, "{busy}");
+    assert_eq!(
+        before.busy_percent_since(&after),
+        None,
+        "counters went back"
+    );
+    assert_eq!(before.busy_percent_since(&before), None, "no time passed");
+    for text in [
+        "",
+        "cpu0 1 2 3 4 5 6 7 8\n",
+        "cpu 1 2 3\n",
+        "cpu 1 x 3 4 5 6 7 8\n",
+    ] {
+        assert!(
+            matches!(parse_proc_stat_cpu(text), Err(Error::Malformed { .. })),
+            "accepted {text:?}"
+        );
+    }
+}
+
+#[test]
+fn psi_fixtures_grade_memory_pressure() {
+    let memory = parse_psi(include_str!("../../fixtures/psi_memory.txt")).expect("memory psi");
+    assert_eq!(
+        memory,
+        Psi {
+            some_avg10: 14.25,
+            full_avg10: Some(3.40),
+        }
+    );
+    assert_eq!(memory.memory_level(), MemoryPressure::Warn);
+    let cpu = parse_psi(include_str!("../../fixtures/psi_cpu.txt")).expect("cpu psi");
+    assert_eq!(cpu.some_avg10, 22.81);
+    let calm = parse_psi("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n").expect("calm");
+    assert_eq!(calm.full_avg10, None);
+    assert_eq!(calm.memory_level(), MemoryPressure::Normal);
+    let stalled = Psi {
+        some_avg10: 60.0,
+        full_avg10: Some(MEMORY_CRITICAL_FULL_AVG10),
+    };
+    assert_eq!(stalled.memory_level(), MemoryPressure::Critical);
+    for text in [
+        "",
+        "full avg10=1.00 avg60=0 avg300=0 total=0\n",
+        "some avg10=x avg60=0 avg300=0 total=0\n",
+        "some avg10=-1 avg60=0 avg300=0 total=0\n",
+    ] {
+        assert!(parse_psi(text).is_err(), "accepted {text:?}");
+    }
+}
+
+#[test]
+fn meminfo_fixture_gives_available_bytes() {
+    assert_eq!(
+        parse_meminfo_available(include_str!("../../fixtures/meminfo.txt")).expect("meminfo"),
+        9_230_008 * 1024
+    );
+    assert!(parse_meminfo_available("MemFree: 1 kB\n").is_err());
+    assert!(parse_meminfo_available("MemAvailable: 1 pages\n").is_err());
+}
+
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs Linux")]
+fn live_pressure_reads_proc() {
+    #[cfg(target_os = "linux")]
+    {
+        let source = devlanes_metrics_linux::LinuxPressure::new();
+        let first = source.sample_blocking().expect("first reading");
+        assert_eq!(first.cpu_percent, None);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let second = source.sample_blocking().expect("second reading");
+        assert!(
+            second
+                .cpu_percent
+                .is_some_and(|cpu| (0.0..=100.0).contains(&cpu))
+        );
+    }
+}
 
 #[test]
 fn stat_fixture_parses_tree_and_cpu_fields() {

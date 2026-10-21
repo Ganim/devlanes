@@ -1,7 +1,10 @@
 //! Pure domain contracts shared by daemon integrations and clients.
 
+pub mod clock;
+pub mod color;
 pub mod contrib;
 pub mod env;
+pub mod gate;
 pub mod ports;
 pub mod refs;
 pub mod runtime;

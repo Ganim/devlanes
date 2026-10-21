@@ -1,0 +1,10 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+ready acme@2:api
+--- plain (exit 0)
+ready acme@2:api
+--- agent (exit 0)
+ready acme@2:api

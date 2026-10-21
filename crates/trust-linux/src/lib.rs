@@ -32,7 +32,7 @@ pub const CERTUTIL_HINT: &str = "install NSS tools: `sudo apt install libnss3-to
 const CA_TOOLS_HINT: &str = "install the `ca-certificates` package";
 
 /// Shown when sudo is missing.
-const SUDO_HINT: &str = "run `devlanes trust` as root or install sudo";
+const SUDO_HINT: &str = "run `devlanes certs trust` as root or install sudo";
 
 /// Non-root `PATH`s on Debian lack the sbin directories the refresh tools live in.
 const SBIN_DIRS: [&str; 4] = ["/usr/sbin", "/sbin", "/usr/bin", "/bin"];
@@ -316,7 +316,7 @@ impl SystemStore {
         if !output.success() && needs_password(&output.stderr) {
             return Err(TrustError::InteractionRequired {
                 command: command.to_string(),
-                detail: "sudo needs a password; rerun `devlanes trust` in a terminal or \
+                detail: "sudo needs a password; rerun `devlanes certs trust` in a terminal or \
                          allow passwordless sudo"
                     .into(),
             });

@@ -1,11 +1,20 @@
 [package]
 name = "devlanes"
+description = "Run a dev environment per git worktree, side by side: CLI, TUI and daemon in one binary"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+
+# `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes` downloads the
+# release archive built by .github/workflows/release.yml instead of compiling.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/devlanes-{ version }-{ target }.tar.gz"
+bin-dir = "devlanes-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+disabled-strategies = ["quick-install"]
 
 [lints]
 workspace = true
@@ -16,6 +25,16 @@ devlanes-trust-macos = { path = "../../crates/trust-macos" }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 devlanes-trust-linux = { path = "../../crates/trust-linux" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[build-dependencies]
+devlanes-config = { path = "../../crates/config" }
+devlanes-preset-vite = { path = "../../crates/preset-vite" }
+devlanes-preset-next = { path = "../../crates/preset-next" }
+devlanes-preset-wrangler = { path = "../../crates/preset-wrangler" }
+devlanes-preset-tauri = { path = "../../crates/preset-tauri" }
 
 [dependencies]
 devlanes-cli = { path = "../../crates/cli" }
@@ -39,23 +58,37 @@ devlanes-env-direnv = { path = "../../crates/env-direnv" }
 devlanes-env-mise = { path = "../../crates/env-mise" }
 devlanes-infra-compose = { path = "../../crates/infra-compose" }
 devlanes-infra-docker = { path = "../../crates/infra-docker" }
+# Same version as devlanes-infra-docker; named only to read Docker's HTTP error status.
+bollard = "0.21"
 devlanes-metrics = { path = "../../crates/metrics" }
 devlanes-metrics-docker = { path = "../../crates/metrics-docker" }
 devlanes-metrics-linux = { path = "../../crates/metrics-linux" }
 devlanes-metrics-macos = { path = "../../crates/metrics-macos" }
 devlanes-platform-node = { path = "../../crates/platform-node" }
 devlanes-platform-python = { path = "../../crates/platform-python" }
+devlanes-run-script-cargo = { path = "../../crates/run-script-cargo" }
+devlanes-run-script-deno = { path = "../../crates/run-script-deno" }
+devlanes-run-script-python = { path = "../../crates/run-script-python" }
+devlanes-platform-bun = { path = "../../crates/platform-bun" }
+devlanes-platform-deno = { path = "../../crates/platform-deno" }
+devlanes-platform-rust = { path = "../../crates/platform-rust" }
 devlanes-preset-next = { path = "../../crates/preset-next" }
 devlanes-preset-tauri = { path = "../../crates/preset-tauri" }
 devlanes-preset-vite = { path = "../../crates/preset-vite" }
 devlanes-preset-wrangler = { path = "../../crates/preset-wrangler" }
 devlanes-proxy = { path = "../../crates/proxy" }
+devlanes-resolver-dns = { path = "../../crates/resolver-dns" }
+devlanes-resolver-hosts = { path = "../../crates/resolver-hosts" }
 devlanes-run-script-just = { path = "../../crates/run-script-just" }
 devlanes-run-script-make = { path = "../../crates/run-script-make" }
 devlanes-run-script-npm = { path = "../../crates/run-script-npm" }
 devlanes-runner-pty = { path = "../../crates/runner-pty" }
+devlanes-start-gate = { path = "../../crates/start-gate" }
 devlanes-state = { path = "../../crates/state" }
 devlanes-sys = { path = "../../crates/sys" }
+devlanes-transport = { path = "../../crates/transport" }
+devlanes-transport-ssh = { path = "../../crates/transport-ssh" }
+devlanes-tunnel = { path = "../../crates/tunnel" }
 futures-util.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true

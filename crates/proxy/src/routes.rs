@@ -43,6 +43,8 @@ pub enum RouteState {
     Failed {
         log_tail: String,
     },
+    /// The route belongs to a remote box whose connection is down and retrying.
+    Reconnecting,
 }
 
 /// A hostname mapping independent of daemon/configuration types.

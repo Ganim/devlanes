@@ -91,6 +91,14 @@ struct Timing {
     sweep_timeout: Duration,
 }
 
+impl Timing {
+    /// Upper bound for a stop beyond its policy timeout: the sweep, both output
+    /// drains and slack for scans on a loaded machine.
+    fn stop_margin(&self) -> Duration {
+        self.sweep_timeout + self.drain_timeout * 2 + Duration::from_secs(5)
+    }
+}
+
 /// A validated stop request sent to the supervisor.
 #[derive(Debug, Clone, Copy)]
 struct StopRequest {
@@ -495,6 +503,49 @@ impl PtyUnit {
         let _ = self.inner.stops.send(StopRequest {
             signal,
             timeout: policy.timeout,
+        });
+        let bound = policy
+            .timeout
+            .saturating_add(self.inner.timing.stop_margin());
+        match time::timeout(bound, self.wait_report()).await {
+            Ok(report) => report,
+            Err(_) => self.settle_overdue_stop(signal).await,
+        }
+    }
+
+    /// Runs when a stop outlived the supervisor's own worst case. A leader that is
+    /// gone gets a status-less report so waiters are released; the supervisor's real
+    /// report still replaces it if it arrives later. A live leader is an error.
+    async fn settle_overdue_stop(&self, signal: Signal) -> Result<ExitReport, Error> {
+        let identity = self.inner.identity;
+        if blocking(move || devlanes_sys::matches(&identity)).await?? {
+            return Err(Error::Integration(format!(
+                "unit {} still running after stop",
+                identity.pid
+            )));
+        }
+        tracing::warn!(
+            pid = identity.pid,
+            "unit exit not reported after stop; leader is gone"
+        );
+        let report = ExitReport {
+            outcome: ExitOutcome {
+                code: None,
+                signal: None,
+            },
+            stop: Some(StopOutcome {
+                signal: signal.as_raw(),
+                escalated: true,
+            }),
+            swept: Vec::new(),
+            escaped: Vec::new(),
+        };
+        self.inner.exit.send_if_modified(|exit| {
+            if exit.is_some() {
+                return false;
+            }
+            *exit = Some(report);
+            true
         });
         self.wait_report().await
     }

@@ -87,8 +87,6 @@ pub enum Method {
     Doctor,
     #[serde(rename = "config.check")]
     ConfigCheck,
-    #[serde(rename = "schema")]
-    Schema,
     #[serde(rename = "start")]
     Start,
     #[serde(rename = "stop")]
@@ -113,6 +111,9 @@ pub enum Method {
     Run,
     #[serde(rename = "task.list")]
     TaskList,
+    /// Profiles of the lane's project: `{lane, items: [ProfileSummary]}`.
+    #[serde(rename = "profile.list")]
+    ProfileList,
     #[serde(rename = "logs")]
     Logs,
     #[serde(rename = "wait")]
@@ -153,6 +154,10 @@ pub enum Method {
     HostList,
     #[serde(rename = "unlock")]
     Unlock,
+    /// Sent by `devlanes certs trust --hosts` and `certs untrust --hosts` after changing the
+    /// helper: the daemon drops its sudo backoff and reapplies `/etc/hosts` now.
+    #[serde(rename = "hosts.retry")]
+    HostsRetry,
 }
 
 /// Context is deliberately not `Debug` to prevent accidental environment traces.
@@ -245,14 +250,36 @@ impl<T> Page<T> {
 pub struct Selection {
     #[serde(default)]
     pub units: Vec<String>,
+    /// Single profile from clients that predate `profiles`; counts as the first entry.
     #[serde(default)]
     pub profile: Option<String>,
+    /// Profiles to start together, in the order given (later env wins).
+    #[serde(default)]
+    pub profiles: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub mine: bool,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Start every selected service at once, bypassing the start gate for this
+    /// request only (`start --all-at-once`).
+    #[serde(default)]
+    pub all_at_once: bool,
+}
+
+impl Selection {
+    /// Requested profiles: `profile` first, then `profiles`, without repeats and
+    /// blank names. Empty means "the default profile".
+    pub fn profile_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for name in self.profile.iter().chain(&self.profiles) {
+            if !name.trim().is_empty() && !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
+    }
 }
 
 /// Ad-hoc commands are argv to avoid an additional implicit shell interpretation.
@@ -302,7 +329,9 @@ pub struct LogLine {
 }
 
 /// Public service state is separate from an OS-specific process handle.
-/// States: `idle`, `starting`, `ready`, `failed`, `stopping`, `stopped`, `exited`.
+/// States: `idle`, `queued`, `starting`, `ready`, `failed`, `stopping`, `stopped`, `exited`.
+/// `queued` units wait for a start slot; their `reason` has code `queued` with
+/// `{position, queued, in_flight, window, hold, cpu_percent?, memory_pressure?}`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UnitSummary {
     pub name: String,
@@ -323,6 +352,10 @@ pub struct UnitSummary {
     pub hidden: bool,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Palette name from `devlanes_core::color::unit_color`; clients reserve red
+    /// for failures. Absent from older daemons; omitted from JSON when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     #[serde(default)]
     pub started_at_ms: Option<u64>,
     /// Filled by the metrics sampler when it has a recent sample for the unit.
@@ -344,8 +377,12 @@ pub struct LaneSummary {
     pub state: String,
     pub config_changed: bool,
     pub units: Vec<UnitSummary>,
+    /// First entry of `profiles`, for clients that show one profile.
     #[serde(default)]
     pub profile: Option<String>,
+    /// Profiles of the lane's last start, in the order given.
+    #[serde(default)]
+    pub profiles: Vec<String>,
     /// Set when the worktree changed branch and will change lane at its next start.
     #[serde(default)]
     pub moves_to: Option<u32>,
@@ -360,6 +397,23 @@ pub struct LaneSummary {
     /// `start`/`resume` from a shell is required before services can run.
     #[serde(default)]
     pub needs_env: bool,
+    /// Started containers of the lane with their host ports; connected clients mirror
+    /// the ports of the non-hidden ones.
+    #[serde(default)]
+    pub containers: Vec<ContainerSummary>,
+}
+
+/// A container a lane uses (shared or per-lane) and its published host ports.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerSummary {
+    pub name: String,
+    pub ports: BTreeMap<String, u16>,
+    /// Listed in `infra.hidden`: never mirrored to connected clients.
+    #[serde(default)]
+    pub hidden: bool,
+    /// Palette name, as for [`UnitSummary::color`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// Opens a terminal stream. The daemon answers with [`AttachResult`], then sends a
@@ -458,6 +512,121 @@ pub struct UnitPeak {
     pub peak_cpu_percent: Option<f64>,
 }
 
+/// Messages a client daemon exchanges with a box's `devlanes tunnel` over the remote
+/// mux. They travel as opaque JSON values of the transport's RPC and sync streams.
+pub mod remote {
+    use std::path::PathBuf;
+
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+
+    use super::{Context, Event, Method, Outcome};
+
+    /// Event sent to the CLI attached to `connect` when ssh asks for input:
+    /// `{host, prompt, kind: secret|confirm|notify, stream_id}`. The CLI answers with
+    /// one binary frame on `stream_id`; an empty frame cancels.
+    pub const PROMPT_EVENT: &str = "remote.prompt";
+    /// `{host, state, ...}` whenever a connection changes state.
+    pub const STATE_EVENT: &str = "remote.state";
+    /// `{host, code, ...}` for mirroring problems such as a skipped lane or a busy port.
+    pub const WARNING_EVENT: &str = "remote.warning";
+
+    /// One daemon request forwarded to the box (`devlanes --host <h> <cmd>`).
+    ///
+    /// `context` drops the client's cwd, environment and host before it leaves the
+    /// machine: they describe the client, not the box.
+    #[derive(Clone, Serialize, Deserialize)]
+    pub struct Forward {
+        pub method: Method,
+        #[serde(default)]
+        pub params: Value,
+        #[serde(default)]
+        pub context: Context,
+    }
+
+    /// One reply item of a forwarded request, in the order the box daemon sent it.
+    ///
+    /// The reply ends after `response`, except for `attach`, whose terminal bytes keep
+    /// flowing until the box sends an empty `bytes` item.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum Reply {
+        Event {
+            event: Event,
+        },
+        /// Terminal output; `data` is base64 because transport values are JSON.
+        Bytes {
+            stream_id: u64,
+            data: String,
+        },
+        Response {
+            outcome: Outcome,
+        },
+    }
+
+    /// Client input on a forwarded `attach`; ids are the box's stream ids.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum Input {
+        /// Keystrokes; `data` is base64.
+        Bytes { stream_id: u64, data: String },
+        Resize {
+            stream_id: u64,
+            columns: u16,
+            rows: u16,
+        },
+    }
+
+    /// A `services.<name>.sync` entry of a running lane, as listed by `sync.status`.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct SyncEntry {
+        /// Canonical lane reference, `project@index`.
+        pub lane: String,
+        pub project: String,
+        pub unit: String,
+        /// Position within the service's `sync` list.
+        pub index: usize,
+        pub from: PathBuf,
+        pub to: PathBuf,
+        /// `to` relative to the box user's home, so a client can re-root it under its own.
+        #[serde(default)]
+        pub home_relative: Option<PathBuf>,
+        /// Last component of `from`, for the default destination.
+        pub leaf: String,
+        #[serde(default)]
+        pub ignore: Vec<String>,
+    }
+
+    /// Sync subscription request; the box looks the entry up itself and never takes
+    /// paths from the client.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct SyncRequest {
+        pub lane: String,
+        pub unit: String,
+        pub index: usize,
+    }
+
+    /// Manifest messages of a sync stream; file bytes travel as transport chunks.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum SyncManifest {
+        /// Precedes the chunks of one file.
+        File { path: String, mode: u32, size: u64 },
+        /// The initial copy finished; anything else at the destination is stale.
+        Ready { files: Vec<String> },
+    }
+
+    /// A tunnel registered with its box daemon while it serves a client.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct RemoteClient {
+        pub pid: u32,
+        /// `$SSH_CONNECTION` of the tunnel: client address and port, box address and port.
+        #[serde(default)]
+        pub ssh: Option<String>,
+        pub since_ms: u64,
+    }
+}
+
 /// Event names. Payloads are JSON objects documented next to each constant.
 pub mod events {
     /// `{lane: LaneSummary}` whenever lane state, membership or config status changes.
@@ -476,6 +645,10 @@ pub mod events {
     pub const RESULT: &str = "result";
     /// Sent instead of dropped events after a subscriber overflowed; clients must re-query.
     pub const RESYNC: &str = "resync";
+    /// `{lane, code, data}` for advice that never blocks a start. Code
+    /// `memory_baseline`: `{peak_memory_bytes, available_memory_bytes, units}` when
+    /// the units being started usually peak above the memory available now.
+    pub const LANE_WARNING: &str = "lane.warning";
 }
 
 #[cfg(test)]
@@ -498,6 +671,19 @@ mod tests {
         }))?;
         assert_eq!(hello.managed_processes, 0);
         assert!(hello.features.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    /// Old clients send only `profile`; new ones send `profiles`; both merge in order.
+    fn selection_profiles_are_additive() -> Result<(), serde_json::Error> {
+        let old: Selection = serde_json::from_value(serde_json::json!({"profile": "web"}))?;
+        assert_eq!(old.profile_names(), ["web"]);
+        let new: Selection = serde_json::from_value(serde_json::json!({
+            "profile": "web", "profiles": ["api", "web", " ", "e2e"]
+        }))?;
+        assert_eq!(new.profile_names(), ["web", "api", "e2e"]);
+        assert!(Selection::default().profile_names().is_empty());
         Ok(())
     }
 }

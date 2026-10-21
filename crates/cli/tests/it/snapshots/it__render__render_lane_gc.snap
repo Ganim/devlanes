@@ -1,0 +1,10 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+cleaned acme@5; removed 3 unused port offsets
+--- plain (exit 0)
+cleaned acme@5; removed 3 unused port offsets
+--- agent (exit 0)
+cleaned acme@5; removed 3 unused port offsets

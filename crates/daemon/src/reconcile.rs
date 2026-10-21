@@ -54,6 +54,7 @@ impl Inner {
             Ok(adopted) => tracing::info!(%adopted, "re-adopted containers"),
             Err(error) => tracing::debug!(code = %error.code, "container adoption skipped"),
         }
+        self.start_dns().await;
         self.start_background();
         Ok(())
     }
@@ -127,6 +128,7 @@ impl Inner {
         });
         tokio::spawn(self.clone().sampler_loop());
         tokio::spawn(self.clone().retention_loop());
+        tokio::spawn(self.clone().log_maintenance_loop());
         if let Some(mut events) = self.integ.infra.events() {
             let engine = self.clone();
             tokio::spawn(async move {

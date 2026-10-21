@@ -93,9 +93,9 @@ fn entire_command_inventory_builds_actions() {
             ],
             Some(Method::Logs),
         ),
-        (&["errors", "--since", "5m"], Some(Method::Errors)),
+        (&["debug", "errors", "--since", "5m"], Some(Method::Errors)),
         (&["wait", "acme@2", "--timeout", "1m"], Some(Method::Wait)),
-        (&["why", "api"], Some(Method::Why)),
+        (&["debug", "why", "api"], Some(Method::Why)),
         (&["run", "migrate", "--detach", "--yes"], Some(Method::Run)),
         (&["run", "--list"], Some(Method::TaskList)),
         (
@@ -111,13 +111,14 @@ fn entire_command_inventory_builds_actions() {
             Some(Method::Exec),
         ),
         (&["attach", "api"], Some(Method::Attach)),
-        (&["open", "api"], Some(Method::Url)),
-        (&["url", "api"], Some(Method::Url)),
-        (&["env", "--explain", "api"], Some(Method::Env)),
-        (&["env", "api", "--export"], Some(Method::Env)),
-        (&["shell", "api"], Some(Method::Env)),
-        (&["top", "--json"], Some(Method::Metrics)),
-        (&["resume"], Some(Method::Resume)),
+        (&["url", "open", "api"], Some(Method::Url)),
+        (&["url", "print", "api"], Some(Method::Url)),
+        (&["url", "ls"], Some(Method::Hosts)),
+        (&["env", "show", "--explain", "api"], Some(Method::Env)),
+        (&["env", "export", "api"], Some(Method::Env)),
+        (&["env", "shell", "api"], Some(Method::Env)),
+        (&["debug", "top", "--json"], Some(Method::Metrics)),
+        (&["lane", "resume"], Some(Method::Resume)),
         (&["lane", "ls"], Some(Method::LaneList)),
         (
             &["lane", "new", "feat/checkout", "--start"],
@@ -131,24 +132,26 @@ fn entire_command_inventory_builds_actions() {
         (&["infra", "up"], Some(Method::InfraUp)),
         (&["infra", "down"], Some(Method::InfraDown)),
         (&["infra", "status"], Some(Method::InfraStatus)),
-        (&["sync", "status"], Some(Method::SyncStatus)),
+        (&["remote", "sync"], Some(Method::SyncStatus)),
         (&["config", "check"], Some(Method::ConfigCheck)),
-        (&["schema"], Some(Method::Schema)),
         (&["doctor"], Some(Method::Doctor)),
-        (&["hosts"], Some(Method::Hosts)),
         (&["daemon", "status"], Some(Method::DaemonStatus)),
         (&["daemon", "stop"], Some(Method::DaemonShutdown)),
         (
             &["daemon", "reset-state", "--yes"],
             Some(Method::DaemonResetState),
         ),
-        (&["connect", "box", "--background"], Some(Method::Connect)),
-        (&["disconnect", "box"], Some(Method::Disconnect)),
-        (&["host", "ls"], Some(Method::HostList)),
-        (&["events", "-f"], Some(Method::Subscribe)),
-        (&["trust", "--hosts"], None),
-        (&["untrust"], None),
-        (&["unlock"], None),
+        (
+            &["remote", "connect", "box", "--background"],
+            Some(Method::Connect),
+        ),
+        (&["remote", "disconnect", "box"], Some(Method::Disconnect)),
+        (&["remote", "ls"], Some(Method::HostList)),
+        (&["debug", "events", "-f"], Some(Method::Subscribe)),
+        (&["certs", "trust", "--hosts"], None),
+        (&["certs", "untrust"], None),
+        (&["certs", "untrust", "--hosts", "--keep-ca"], None),
+        (&["secrets", "unlock"], None),
         (&["daemon", "restart"], None),
         (&["daemon", "logs", "-f", "--tail", "10"], None),
         (&["daemon", "install"], None),
@@ -168,6 +171,106 @@ fn entire_command_inventory_builds_actions() {
             assert_eq!(request(action).method, *method, "{args:?}");
         }
     }
+}
+
+#[test]
+fn positional_lanes_and_hosts_do_not_collide_with_global_flags() {
+    for (args, lane) in [
+        (vec!["status", "--lane", "acme@2"], "acme@2"),
+        (vec!["status", "acme@3"], "acme@3"),
+        (vec!["--lane", "acme@1", "status", "acme@4"], "acme@4"),
+        (vec!["lane", "clean", "acme@5", "--yes"], "acme@5"),
+    ] {
+        let cli = Cli::try_parse_from(std::iter::once("devlanes").chain(args.clone()))
+            .unwrap_or_else(|error| panic!("{args:?}: {error}"));
+        let request = request(action(&cli, &runtime(&cli, OutputMode::Plain)));
+        assert_eq!(request.context.lane.as_deref(), Some(lane), "{args:?}");
+    }
+    let cli = Cli::try_parse_from(["devlanes", "lane", "clean", "acme@5", "--lane", "acme@6"])
+        .expect("clean with --lane");
+    assert_eq!(
+        request(action(&cli, &runtime(&cli, OutputMode::Plain))).params["lane"],
+        "acme@5"
+    );
+    let cli = Cli::try_parse_from(["devlanes", "remote", "connect", "box", "--host", "other"])
+        .expect("connect with --host");
+    let request = request(action(&cli, &runtime(&cli, OutputMode::Plain)));
+    assert_eq!(request.params["host"], "box");
+    assert_eq!(request.context.host.as_deref(), Some("other"));
+    assert!(Cli::try_parse_from(["devlanes", "remote", "disconnect", "--host", "box"]).is_ok());
+}
+
+#[test]
+fn profile_repeats_into_an_ordered_list() {
+    let cli = Cli::parse_from(["devlanes", "start", "--profile", "web", "--profile", "e2e"]);
+    let params = request(action(&cli, &runtime(&cli, OutputMode::Plain))).params;
+    assert_eq!(params["profiles"], json!(["web", "e2e"]));
+    let cli = Cli::parse_from(["devlanes", "with", "--profile", "e2e", "--", "true"]);
+    match action(&cli, &runtime(&cli, OutputMode::Plain)) {
+        Action::With(plan) => assert_eq!(plan.start.params["profiles"], json!(["e2e"])),
+        _ => panic!("expected with"),
+    }
+}
+
+#[test]
+fn all_at_once_reaches_every_starting_request() {
+    for args in [
+        vec!["start", "--all-at-once"],
+        vec!["restart", "api", "--all-at-once"],
+        vec!["lane", "resume", "--all-at-once"],
+    ] {
+        let cli = Cli::parse_from(std::iter::once("devlanes").chain(args.clone()));
+        let request = request(action(&cli, &runtime(&cli, OutputMode::Plain)));
+        assert_eq!(request.params["all_at_once"], true, "{args:?}");
+    }
+    let cli = Cli::parse_from(["devlanes", "start"]);
+    assert_eq!(
+        request(action(&cli, &runtime(&cli, OutputMode::Plain))).params["all_at_once"],
+        false
+    );
+    let cli = Cli::parse_from(["devlanes", "with", "--all-at-once", "--", "true"]);
+    match action(&cli, &runtime(&cli, OutputMode::Plain)) {
+        Action::With(plan) => assert_eq!(plan.start.params["all_at_once"], true),
+        _ => panic!("expected with"),
+    }
+}
+
+#[test]
+fn trust_and_untrust_carry_the_hosts_flag() {
+    // (is trust, hosts, resolver, keep_ca)
+    for (args, expected) in [
+        (vec!["trust"], (true, false, false, false)),
+        (vec!["trust", "--hosts"], (true, true, false, false)),
+        (vec!["trust", "--resolver"], (true, false, true, false)),
+        (vec!["untrust"], (false, false, false, false)),
+        (vec!["untrust", "--hosts"], (false, true, false, false)),
+        (
+            vec!["untrust", "--hosts", "--keep-ca"],
+            (false, true, false, true),
+        ),
+        (
+            vec!["untrust", "--resolver", "--keep-ca"],
+            (false, false, true, true),
+        ),
+        (
+            vec!["untrust", "--hosts", "--resolver"],
+            (false, true, true, false),
+        ),
+    ] {
+        let cli = Cli::parse_from(["devlanes", "certs"].into_iter().chain(args));
+        let found = match action(&cli, &runtime(&cli, OutputMode::Plain)) {
+            Action::Trust { hosts, resolver } => (true, hosts, resolver, false),
+            Action::Untrust {
+                hosts,
+                resolver,
+                keep_ca,
+            } => (false, hosts, resolver, keep_ca),
+            _ => panic!("expected a trust action"),
+        };
+        assert_eq!(found, expected);
+    }
+    // Keeping the CA only makes sense when something else is being removed.
+    assert!(Cli::try_parse_from(["devlanes", "certs", "untrust", "--keep-ca"]).is_err());
 }
 
 #[test]
@@ -249,9 +352,9 @@ fn environment_is_captured_only_for_relevant_methods() {
         (vec!["restart", "api"], true),
         (vec!["run", "migrate"], true),
         (vec!["exec", "--name", "demo", "--", "echo"], true),
-        (vec!["resume"], true),
+        (vec!["lane", "resume"], true),
         (vec!["run", "--list"], false),
-        (vec!["env"], false),
+        (vec!["env", "show"], false),
         (vec!["status"], false),
         (vec!["lane", "new", "feature", "--start"], false),
     ] {
@@ -378,7 +481,7 @@ fn defaults_follow_guards_and_interrupt_policy() {
             .require_confirmation(true)
             .is_ok()
     );
-    let cli = Cli::parse_from(["devlanes", "open", "api"]);
+    let cli = Cli::parse_from(["devlanes", "url", "open", "api"]);
     assert!(matches!(
         action(&cli, &runtime(&cli, OutputMode::Agent)),
         Action::Rpc(_)
@@ -524,12 +627,12 @@ fn errors_are_stderr_in_every_mode_and_keep_exit_status() {
     ] {
         let result = runtime(&cli, mode)
             .reporter()
-            .error(&error, Some(&Hint::command(["why", "acme@2:api"])));
+            .error(&error, Some(&Hint::command(["debug", "why", "acme@2:api"])));
         assert!(result.stdout.is_empty());
         assert_eq!(result.exit_code, 3);
         assert_eq!(
             result.stderr,
-            "error: port 20000 is in use by PID 42\n  api could not bind\nhint: devlanes why acme@2:api\n"
+            "error: port 20000 is in use by PID 42\n  api could not bind\nhint: devlanes debug why acme@2:api\n"
         );
     }
 }
@@ -582,6 +685,29 @@ fn shell_exports_and_hints_are_injection_safe() {
 }
 
 #[test]
+fn confirmation_hints_repeat_the_refused_command_with_the_flag() {
+    for (args, hint) in [
+        (vec!["lane", "clean", "1"], "devlanes lane clean 1 --yes"),
+        (
+            vec!["daemon", "reset-state"],
+            "devlanes daemon reset-state --yes",
+        ),
+        (vec!["run", "reset-db"], "devlanes run reset-db --yes"),
+        (vec!["lane", "gc", "--yes"], "devlanes lane gc --yes"),
+        (
+            vec!["with", "--", "pnpm", "test", "--yes"],
+            "devlanes with --yes -- pnpm test --yes",
+        ),
+        (
+            vec!["--lane", "acme@feat/x", "infra", "down"],
+            "devlanes --lane acme@feat/x infra down --yes",
+        ),
+    ] {
+        assert_eq!(Hint::rerun_with(&args, "--yes").0, hint, "{args:?}");
+    }
+}
+
+#[test]
 fn quiet_color_and_human_ownership_note() {
     let cli = Cli::parse_from(["devlanes", "stop", "--quiet"]);
     let data =
@@ -595,11 +721,42 @@ fn quiet_color_and_human_ownership_note() {
             .is_empty()
     );
     let cli = Cli::parse_from(["devlanes", "stop"]);
-    let rendered = runtime(&cli, OutputMode::Agent)
+    let agent_caller = Runtime::resolve(
+        &cli,
+        Signals {
+            detected_actor: Some(Actor {
+                kind: ActorKind::Agent,
+                agent_id: Some("codex".into()),
+                session_id: Some("thread".into()),
+            }),
+            ..Signals::default()
+        },
+    )
+    .expect("runtime");
+    assert_eq!(agent_caller.mode, OutputMode::Agent);
+    let rendered = agent_caller
         .reporter()
         .result(&Report::new(Method::Stop, &data))
         .expect("render");
     assert_eq!(rendered.stderr, "note: affected units started by a human\n");
+    // DEVLANES_OUTPUT=agent with DEVLANES_AGENT=0: a human stopping their own units.
+    let rendered = runtime(&cli, OutputMode::Agent)
+        .reporter()
+        .result(&Report::new(Method::Stop, &data))
+        .expect("render");
+    assert!(rendered.stderr.is_empty(), "{}", rendered.stderr);
+    // An agent restarting its own units gets no note either.
+    let mut own = unit("api", "ready");
+    own.actor = agent_caller.actor.clone();
+    let restart = json!({"lane": "acme@2", "ready": true, "units": [own]});
+    assert!(
+        agent_caller
+            .reporter()
+            .result(&Report::new(Method::Restart, &restart))
+            .expect("render")
+            .stderr
+            .is_empty()
+    );
     let signals = Signals {
         stdout_tty: true,
         force_color: true,
@@ -629,23 +786,113 @@ fn follow_budget_is_shared_across_events() {
     );
     let mut combined = String::new();
     for seq in 0..100 {
-        let event = Event {
-            seq,
-            event: "log".into(),
-            data: serde_json::to_value(LogLine {
-                unit: "api".into(),
-                seq,
-                timestamp_ms: 1,
-                text: "long line of process output".into(),
-                level: None,
-            })
-            .expect("line"),
-        };
+        let event = log_event(seq, "long line of process output");
         combined.push_str(&stream.event(&event).expect("stream event").stdout);
     }
     assert!(stream.exhausted());
     assert!(combined.len() <= 256, "{}", combined.len());
     assert_eq!(combined.matches("truncated;").count(), 1);
+}
+
+/// A followed line exactly as the daemon sends it: `{unit, line: LogLine}`.
+fn log_event(seq: u64, text: &str) -> Event {
+    let line = LogLine {
+        unit: "api".into(),
+        seq,
+        timestamp_ms: 1,
+        text: text.into(),
+        level: None,
+    };
+    Event {
+        seq,
+        event: devlanes_proto::events::LOG.into(),
+        data: json!({"unit": "api", "line": line}),
+    }
+}
+
+#[test]
+fn foreground_run_output_streams_within_the_budget_and_keeps_the_hidden_tail() {
+    let cli = Cli::parse_from(["devlanes", "run", "test", "--budget", "512"]);
+    let agent = runtime(&cli, OutputMode::Agent).reporter();
+    // A task's progress events stay silent for agents; its output does not.
+    let progress = Event {
+        seq: 1,
+        event: devlanes_proto::events::TASK.into(),
+        data: json!({"lane": "acme@2", "task": "test", "state": "started"}),
+    };
+    assert!(
+        agent
+            .event(Method::Run, &progress)
+            .expect("event")
+            .stdout
+            .is_empty()
+    );
+    let mut stream = ReporterStream::new(
+        agent.as_ref(),
+        Method::Run,
+        Hint::command(["logs", "test", "--tail", "500"]),
+    )
+    .reserve(128);
+    let mut printed = String::new();
+    for seq in 0..60 {
+        printed.push_str(
+            &stream
+                .event(&log_event(seq, &format!("case {seq} ok")))
+                .expect("event")
+                .stdout,
+        );
+    }
+    assert!(stream.exhausted());
+    assert!(printed.len() <= 512 - 128, "{}", printed.len());
+    assert!(printed.starts_with("api#0 case 0 ok\n"));
+    assert!(printed.contains("truncated; more: devlanes logs test --tail 500"));
+    let tail = stream.hidden_tail();
+    assert_eq!(tail.len(), 20);
+    assert_eq!(tail.last().map(String::as_str), Some("case 59 ok"));
+    // The summary shows the hidden end of a failed task's output.
+    let data = json!({"task": "test", "lane": "acme@2", "unit": "test", "interactive": false,
+        "exit_code": 1, "state": "failed", "log_tail": tail});
+    let summary = agent
+        .result(&Report::new(Method::Run, &data))
+        .expect("summary");
+    assert!(
+        summary
+            .stdout
+            .starts_with("failed acme@2:test exit=1\n  | case 40 ok\n"),
+        "{}",
+        summary.stdout
+    );
+    assert_eq!(summary.exit_code, 1);
+    // Plain mode streams every line.
+    let plain = runtime(&cli, OutputMode::Plain).reporter();
+    assert_eq!(
+        plain
+            .event(Method::Run, &log_event(3, "listening"))
+            .expect("event")
+            .stdout,
+        "api#3 listening\n"
+    );
+}
+
+#[test]
+fn followed_log_events_render_their_line() {
+    let cli = Cli::parse_from(["devlanes", "logs", "api", "-f", "--timeout", "1s"]);
+    for mode in [OutputMode::Human, OutputMode::Plain, OutputMode::Agent] {
+        let reporter = runtime(&cli, mode).reporter();
+        let mut stream = ReporterStream::new(
+            reporter.as_ref(),
+            Method::Logs,
+            Hint::command(["logs", "api"]),
+        );
+        let rendered = stream.event(&log_event(3, "listening")).expect("event");
+        assert_eq!(rendered.stdout, "api#3 listening\n", "{mode:?}");
+    }
+    let json = runtime(&cli, OutputMode::Json)
+        .reporter()
+        .event(Method::Logs, &log_event(3, "listening"))
+        .expect("json");
+    let value: Value = serde_json::from_str(&json.stdout).expect("ndjson");
+    assert_eq!(value["data"]["line"]["text"], "listening");
 }
 
 #[test]
@@ -733,6 +980,38 @@ impl CompletionSource for FakeCompletion {
 }
 
 #[test]
+fn completion_tree_passes_clap_debug_asserts() {
+    Cli::command().debug_assert();
+    completion_command(Arc::new(FakeCompletion(AtomicUsize::new(0)))).debug_assert();
+}
+
+/// Candidates clap_complete's engine offers for `args` (the last one is completed).
+fn complete(args: &[&str]) -> Vec<String> {
+    let mut command = completion_command(Arc::new(FakeCompletion(AtomicUsize::new(0))));
+    let args: Vec<std::ffi::OsString> = std::iter::once("devlanes")
+        .chain(args.iter().copied())
+        .map(Into::into)
+        .collect();
+    clap_complete::engine::complete(&mut command, args.clone(), args.len() - 1, None)
+        .expect("complete")
+        .into_iter()
+        .map(|candidate| candidate.get_value().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn dynamic_completion_offers_commands_and_daemon_units() {
+    let commands = complete(&["st"]);
+    assert!(commands.contains(&"start".to_owned()), "{commands:?}");
+    assert!(commands.contains(&"status".to_owned()), "{commands:?}");
+    assert!(commands.contains(&"stop".to_owned()), "{commands:?}");
+    let units = complete(&["logs", ""]);
+    assert!(units.contains(&"api".to_owned()), "{units:?}");
+    assert!(units.contains(&"web".to_owned()), "{units:?}");
+    assert_eq!(complete(&["debug", "why", "a"]), ["api"]);
+}
+
+#[test]
 fn completion_is_lazy_and_filters_existing_candidates() {
     let source = Arc::new(FakeCompletion(AtomicUsize::new(0)));
     let command = completion_command(source.clone());
@@ -757,3 +1036,5 @@ fn completion_is_lazy_and_filters_existing_candidates() {
     );
 }
 mod ci;
+mod help;
+mod render;

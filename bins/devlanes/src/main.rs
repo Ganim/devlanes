@@ -7,6 +7,7 @@ mod commands;
 mod completion;
 mod daemon;
 mod driver;
+mod hosts;
 mod local;
 mod output;
 mod remote;

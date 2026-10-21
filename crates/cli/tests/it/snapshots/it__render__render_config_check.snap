@@ -1,0 +1,16 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+ok acme (/work/acme/devlanes.yaml)
+warn templates.unused: template is never used
+warn services.api.platform: unknown platform elixir for service api; it starts without platform setup. Known: node, python. Fix the name or drop platform: to detect it
+--- plain (exit 0)
+ok acme (/work/acme/devlanes.yaml)
+warn templates.unused: template is never used
+warn services.api.platform: unknown platform elixir for service api; it starts without platform setup. Known: node, python. Fix the name or drop platform: to detect it
+--- agent (exit 0)
+ok acme (/work/acme/devlanes.yaml)
+warn templates.unused: template is never used
+warn services.api.platform: unknown platform elixir for service api; it starts without platform setup. Known: node, python. Fix the name or drop platform: to detect it

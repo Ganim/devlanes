@@ -30,7 +30,7 @@ Rust units get:
 - `CARGO_TERM_COLOR=always`, unless the shell sets `CARGO_TERM_COLOR` or `NO_COLOR`.
 - `SSL_CERT_FILE`: the combined bundle of system roots plus the devlanes root. OpenSSL (the `openssl` crate, `native-tls` on Linux) and `rustls-native-certs` load this file instead of the system store. A different value from the shell is replaced and reported as a note.
 
-`RUST_LOG` is never set. `native-tls` on macOS reads the keychain, which `devlanes trust` covers. Programs that only use `webpki-roots` ignore every variable and do not trust the devlanes CA.
+`RUST_LOG` is never set. `native-tls` on macOS reads the keychain, which `devlanes certs trust` covers. Programs that only use `webpki-roots` ignore every variable and do not trust the devlanes CA.
 
 ## Behaviour
 

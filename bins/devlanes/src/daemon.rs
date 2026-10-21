@@ -34,6 +34,8 @@ pub fn run() -> ExitCode {
         return ExitCode::from(1);
     }
     let _log_guard = init_logging(&paths);
+    // Panics would otherwise go to the detached stderr and leave no trace.
+    devlanes_daemon::process::install_panic_hook();
     let tokio = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -81,6 +83,9 @@ pub fn run() -> ExitCode {
             }
         }
     });
+    // Dropping the runtime waits for every spawn_blocking task (git, getaddrinfo, file
+    // watchers), which can keep a stopped daemon alive indefinitely; bound the wait.
+    tokio.shutdown_timeout(std::time::Duration::from_secs(5));
     ExitCode::from(code)
 }
 

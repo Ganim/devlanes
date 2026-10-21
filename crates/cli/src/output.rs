@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use devlanes_proto::{ActorKind, Event, LaneSummary, LogLine, Method, RpcError, UnitSummary};
 use serde_json::{Value, json};
 
-use crate::{OutputMode, Runtime, exit};
+use crate::{
+    OutputMode, Runtime, exit,
+    render::{self, cap_line, clean, error_message},
+};
 
 /// A shell-safe command that can be pasted regardless of the caller's lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +31,18 @@ impl Hint {
             "--tail".into(),
             tail.to_string(),
         ])
+    }
+
+    /// The command the user ran (`args` without the program name) with `flag` added,
+    /// for refusals that need confirmation: `devlanes lane clean 1 --yes`. The flag
+    /// goes before a `--`, where it would otherwise reach the wrapped command.
+    pub fn rerun_with(args: impl IntoIterator<Item = impl AsRef<str>>, flag: &str) -> Self {
+        let mut args: Vec<String> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
+        let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+        if !args[..end].iter().any(|a| a == flag) {
+            args.insert(end, flag.to_owned());
+        }
+        Self::command(args)
     }
 }
 
@@ -87,7 +102,12 @@ pub trait Reporter: Send + Sync {
             });
         }
         let agent = self.mode() == OutputMode::Agent;
-        let mut lines = text_result(report.method, report.data, agent, self.runtime().color);
+        let cx = render::Ctx {
+            mode: self.mode(),
+            color: self.runtime().color,
+            runtime: self.runtime(),
+        };
+        let mut lines = render::result(report.method, report.data, &cx);
         if report.data.get("truncated").and_then(Value::as_bool) == Some(true)
             || agent && report.method == Method::Logs && logs_shaped(report.data)
         {
@@ -113,7 +133,8 @@ pub trait Reporter: Send + Sync {
         })
     }
 
-    /// Progress is silent in agent mode; explicit log/event subscriptions still stream.
+    /// Progress is silent in agent mode; explicit log/event subscriptions and the
+    /// output of a foreground `run` still stream.
     fn event(&self, method: Method, event: &Event) -> Result<Rendered, serde_json::Error> {
         if self.mode() == OutputMode::Json {
             return Ok(Rendered {
@@ -129,16 +150,32 @@ pub trait Reporter: Send + Sync {
         if event.event == "result" {
             return self.result(&Report::new(method, &event.data));
         }
+        let task_output = method == Method::Run && event.event == devlanes_proto::events::LOG;
         if self.runtime().quiet
             || self.mode() == OutputMode::Agent
                 && !matches!(method, Method::Logs | Method::Subscribe)
+                && !task_output
         {
             return Ok(Rendered::default());
         }
-        let stdout = if method == Method::Logs {
-            self.result(&Report::new(method, &event.data))?.stdout
+        let stdout = if matches!(method, Method::Logs | Method::Run)
+            && event.event == devlanes_proto::events::LOG
+        {
+            // Followed lines arrive as `{unit, line: LogLine}`; render the line itself.
+            let line = event.data.get("line").unwrap_or(&Value::Null);
+            self.result(&Report::new(Method::Logs, line))?.stdout
         } else {
-            format!("{} {}\n", clean(&event.event), compact_fields(&event.data))
+            let cx = render::Ctx {
+                mode: self.mode(),
+                color: self.runtime().color,
+                runtime: self.runtime(),
+            };
+            let lines = render::event(method, event, &cx);
+            if lines.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", lines.join("\n"))
+            }
         };
         Ok(Rendered {
             stdout,
@@ -180,6 +217,9 @@ pub struct PlainReporter(pub Runtime);
 pub struct AgentReporter(pub Runtime);
 pub struct JsonReporter(pub Runtime);
 
+/// Log lines kept after the budget runs out, for a failure summary.
+const HIDDEN_TAIL: usize = 20;
+
 /// One command-wide budget for follow mode, rather than a fresh budget per event.
 pub struct ReporterStream<'a> {
     reporter: &'a dyn Reporter,
@@ -187,6 +227,8 @@ pub struct ReporterStream<'a> {
     remaining: usize,
     more: Hint,
     exhausted: bool,
+    /// Last log lines the budget hid; a failed `run` shows them in its summary.
+    hidden: std::collections::VecDeque<String>,
 }
 
 impl<'a> ReporterStream<'a> {
@@ -198,12 +240,21 @@ impl<'a> ReporterStream<'a> {
             method,
             more,
             exhausted: false,
+            hidden: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Leaves `bytes` of the budget for a summary printed after the stream.
+    #[must_use]
+    pub fn reserve(mut self, bytes: usize) -> Self {
+        self.remaining = self.remaining.saturating_sub(bytes);
+        self
     }
 
     /// Emits at most one truncation notice; callers can detach once exhausted.
     pub fn event(&mut self, event: &Event) -> Result<Rendered, serde_json::Error> {
         if self.exhausted {
+            self.keep_hidden(event);
             return Ok(Rendered::default());
         }
         let mut rendered = self.reporter.event(self.method, event)?;
@@ -216,6 +267,7 @@ impl<'a> ReporterStream<'a> {
             // Reserve the notice before consuming the final event, including exact-boundary cases.
             rendered.stdout = truncate_output(&rendered.stdout, self.remaining, &notice);
             self.exhausted = true;
+            self.keep_hidden(event);
         }
         self.remaining = self.remaining.saturating_sub(rendered.stdout.len());
         Ok(rendered)
@@ -224,6 +276,24 @@ impl<'a> ReporterStream<'a> {
     /// Allows the transport to stop reading a bounded agent stream without stopping units.
     pub fn exhausted(&self) -> bool {
         self.exhausted
+    }
+
+    /// The last log lines the budget hid, oldest first (at most 20).
+    pub fn hidden_tail(&self) -> Vec<String> {
+        self.hidden.iter().cloned().collect()
+    }
+
+    /// Remembers a log line that was not printed.
+    fn keep_hidden(&mut self, event: &Event) {
+        if event.event != devlanes_proto::events::LOG {
+            return;
+        }
+        if let Some(text) = event.data.pointer("/line/text").and_then(Value::as_str) {
+            if self.hidden.len() == HIDDEN_TAIL {
+                self.hidden.pop_front();
+            }
+            self.hidden.push_back(text.to_owned());
+        }
     }
 }
 
@@ -386,162 +456,6 @@ pub fn shell_quote(value: &str) -> String {
     }
 }
 
-/// Removes terminal escapes and control bytes before rendering untrusted logs.
-fn clean(value: &str) -> String {
-    strip_ansi_escapes::strip_str(value)
-        .chars()
-        .filter(|c| !c.is_control() || *c == '\t')
-        .collect()
-}
-
-/// Caps characters rather than slicing UTF-8 bytes; URLs bypass this log-only helper.
-fn cap_line(value: &str, limit: usize) -> String {
-    if value.chars().count() > limit {
-        format!(
-            "{}...",
-            value
-                .chars()
-                .take(limit.saturating_sub(3))
-                .collect::<String>()
-        )
-    } else {
-        value.into()
-    }
-}
-
-/// Typed payloads receive specialized rendering; unknown additive fields remain inspectable.
-fn text_result(method: Method, data: &Value, agent: bool, color: bool) -> Vec<String> {
-    if method == Method::Url {
-        if let Some(url) = data
-            .as_str()
-            .or_else(|| data.get("url").and_then(Value::as_str))
-        {
-            return vec![clean(url)];
-        }
-        if let Some(urls) = data.get("urls").and_then(Value::as_array) {
-            return urls.iter().filter_map(Value::as_str).map(clean).collect();
-        }
-    }
-    if let Some(items) = data
-        .as_array()
-        .or_else(|| data.get("items").and_then(Value::as_array))
-    {
-        if method == Method::Logs && agent {
-            return agent_logs(items);
-        }
-        let mut items: Vec<_> = items.iter().collect();
-        if agent {
-            items.sort_by_key(|v| v.get("state").and_then(Value::as_str) != Some("failed"));
-        }
-        return items
-            .into_iter()
-            .flat_map(|v| text_result(method, v, agent, color))
-            .collect();
-    }
-    if data.get("reference").is_some()
-        && let Ok(lane) = serde_json::from_value::<LaneSummary>(data.clone())
-    {
-        return lane.text(agent, color);
-    }
-    if data.get("state").is_some()
-        && let Ok(unit) = serde_json::from_value::<UnitSummary>(data.clone())
-    {
-        let mut result = unit.text(agent, color);
-        if unit.state == "failed"
-            && let Some(tail) = data.get("log_tail").and_then(Value::as_array)
-        {
-            let insert = if agent {
-                result.len().saturating_sub(1)
-            } else {
-                result.len()
-            };
-            let lines = tail
-                .iter()
-                .rev()
-                .take(20)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .filter_map(|v| v.as_str().or_else(|| v.get("text").and_then(Value::as_str)))
-                .map(|line| format!("  | {}", cap_line(&clean(line), 300)));
-            result.splice(insert..insert, lines);
-        }
-        return result;
-    }
-    if method == Method::Logs
-        && let Ok(line) = serde_json::from_value::<LogLine>(data.clone())
-    {
-        return line.text(agent, color);
-    }
-    match data {
-        Value::Null => Vec::new(),
-        Value::String(value) => vec![clean(value)],
-        Value::Object(fields) => fields
-            .iter()
-            .filter(|(k, _)| !matches!(k.as_str(), "truncated" | "next_cursor"))
-            .map(|(key, value)| format!("{}: {}", clean(key), display_value(value)))
-            .collect(),
-        _ => vec![display_value(data)],
-    }
-}
-
-/// Collapses adjacent repeats and dependency stack frames while keeping the first cursor.
-fn agent_logs(items: &[Value]) -> Vec<String> {
-    let mut output = Vec::new();
-    let mut previous: Option<(String, String, usize)> = None;
-    let mut folded = 0;
-    for value in items {
-        let Ok(line) = serde_json::from_value::<LogLine>(value.clone()) else {
-            flush_repeat(&mut previous, &mut output);
-            output.push(compact_fields(value));
-            continue;
-        };
-        let text = clean(&line.text);
-        if text.trim_start().starts_with("at ") && text.contains("node_modules") {
-            flush_repeat(&mut previous, &mut output);
-            folded += 1;
-            continue;
-        }
-        if folded > 0 {
-            output.push(format!("  ({folded} node_modules frames folded)"));
-            folded = 0;
-        }
-        let key = format!("{}\0{text}", line.unit);
-        if let Some((old, _, count)) = &mut previous
-            && *old == key
-        {
-            *count += 1;
-            continue;
-        }
-        flush_repeat(&mut previous, &mut output);
-        previous = Some((
-            key,
-            format!(
-                "{}#{} {}",
-                clean(&line.unit),
-                line.seq,
-                cap_line(&text, 300)
-            ),
-            1,
-        ));
-    }
-    flush_repeat(&mut previous, &mut output);
-    if folded > 0 {
-        output.push(format!("  ({folded} node_modules frames folded)"));
-    }
-    output
-}
-
-/// Flushes only after a text change so long repeat runs take constant extra memory.
-fn flush_repeat(previous: &mut Option<(String, String, usize)>, output: &mut Vec<String>) {
-    if let Some((_, mut line, count)) = previous.take() {
-        if count > 1 {
-            line.push_str(&format!(" (x{count})"));
-        }
-        output.push(line);
-    }
-}
-
 /// Uses a complete line budget so URLs and multibyte text are never cut mid-token.
 fn budget_output(text: &str, budget: usize, notice: &str) -> String {
     if text.len() <= budget {
@@ -650,15 +564,20 @@ fn logs_shaped(data: &Value) -> bool {
         })
 }
 
-/// Reports mixed ownership after a mutation without refusing the requested operation.
+/// Tells an agent caller that it stopped or restarted units a human started, without
+/// refusing the operation. The output mode does not matter: a human who forced
+/// `--output agent` stopping their own units gets no note.
 fn ownership_note(report: &Report<'_>, runtime: &Runtime) -> String {
-    if runtime.mode != OutputMode::Agent || !matches!(report.method, Method::Stop | Method::Restart)
+    if runtime.actor.kind != ActorKind::Agent
+        || !matches!(report.method, Method::Stop | Method::Restart)
     {
         return String::new();
     }
+    // `stop` returns a page of units, `restart` a start result with `units`.
     let items = report
         .data
         .get("items")
+        .or_else(|| report.data.get("units"))
         .and_then(Value::as_array)
         .or_else(|| report.data.as_array());
     if items.is_some_and(|items| {
@@ -672,92 +591,4 @@ fn ownership_note(report: &Report<'_>, runtime: &Runtime) -> String {
     } else {
         String::new()
     }
-}
-
-/// Words machine codes locally; the daemon never supplies terminal instructions.
-fn error_message(error: &RpcError) -> (String, Option<Hint>) {
-    let field = |key: &str| {
-        error
-            .data
-            .get(key)
-            .map(display_value)
-            .unwrap_or_else(|| "unknown".into())
-    };
-    match error.code.as_str() {
-        "port_in_use" => (
-            format!("port {} is in use by PID {}", field("port"), field("pid")),
-            None,
-        ),
-        "not_in_profile" => (
-            format!("unit is not selected by profile {}", field("profile")),
-            None,
-        ),
-        "autostart_disabled" => ("unit has autostart disabled".into(), None),
-        "timeout" => (
-            "operation timed out".into(),
-            Some(Hint::command(["status"])),
-        ),
-        "not_found" => (
-            format!("target not found: {}", field("target")),
-            Some(Hint::command(["lane", "ls"])),
-        ),
-        "ambiguous" => (
-            format!(
-                "target is ambiguous: {}; candidates: {}",
-                field("target"),
-                field("candidates")
-            ),
-            None,
-        ),
-        "unsupported" | "unsupported_method" => {
-            (format!("daemon does not support {}", field("method")), None)
-        }
-        "incompatible" | "protocol_mismatch" => (
-            format!(
-                "daemon v{} (build {}) runs {} processes; protocol is incompatible",
-                field("version"),
-                field("build_id"),
-                field("managed_processes")
-            ),
-            Some(Hint::command(["daemon", "restart"])),
-        ),
-        "daemon_unreachable" => (
-            "daemon is unreachable".into(),
-            Some(Hint::command(["daemon", "install"])),
-        ),
-        "confirmation_required" => ("confirmation required; add --yes".into(), None),
-        _ => (
-            format!(
-                "{}{}",
-                clean(&error.code),
-                if error.data.is_null() || error.data == json!({}) {
-                    String::new()
-                } else {
-                    format!(": {}", compact_fields(&error.data))
-                }
-            ),
-            None,
-        ),
-    }
-}
-
-/// Leaves unknown response fields visible instead of silently dropping new API data.
-fn compact_fields(value: &Value) -> String {
-    if let Some(fields) = value.as_object() {
-        fields
-            .iter()
-            .map(|(key, value)| format!("{}={}", clean(key), display_value(value)))
-            .collect::<Vec<_>>()
-            .join(" ")
-    } else {
-        display_value(value)
-    }
-}
-
-/// Sanitizes text modes while JSON mode retains the exact serialized payload.
-fn display_value(value: &Value) -> String {
-    value
-        .as_str()
-        .map(clean)
-        .unwrap_or_else(|| clean(&value.to_string()))
 }

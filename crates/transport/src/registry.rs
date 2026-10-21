@@ -185,6 +185,41 @@ impl Registry {
         }
     }
 
+    /// Events that turn `self` into `next` when applied in order.
+    ///
+    /// Box daemons that only see full snapshots use this to publish incremental
+    /// changes; an empty result means nothing changed.
+    pub fn diff(&self, next: &Registry) -> Vec<RegistryEvent> {
+        let mut events = Vec::new();
+        let removed_lanes: Vec<&LaneKey> = self
+            .lanes
+            .keys()
+            .filter(|key| !next.lanes.contains_key(*key))
+            .collect();
+        for lane in &removed_lanes {
+            events.push(RegistryEvent::LaneRemoved {
+                lane: (*lane).clone(),
+            });
+        }
+        for key in self.units.keys() {
+            // Units of a removed lane already went with `LaneRemoved`.
+            if !next.units.contains_key(key) && !removed_lanes.contains(&&key.lane) {
+                events.push(RegistryEvent::UnitRemoved { unit: key.clone() });
+            }
+        }
+        for (key, lane) in &next.lanes {
+            if self.lanes.get(key) != Some(lane) {
+                events.push(RegistryEvent::LaneUpserted { lane: lane.clone() });
+            }
+        }
+        for (key, unit) in &next.units {
+            if self.units.get(key) != Some(unit) || removed_lanes.contains(&&key.lane) {
+                events.push(RegistryEvent::UnitUpserted { unit: unit.clone() });
+            }
+        }
+        events
+    }
+
     /// Iterates lanes in key order.
     pub fn lanes(&self) -> impl Iterator<Item = &LaneInfo> {
         self.lanes.values()
@@ -467,6 +502,40 @@ mod tests {
         });
         registry.apply(RegistryEvent::LaneRemoved { lane: lane() });
         assert_eq!(registry, Registry::default());
+    }
+
+    #[test]
+    fn diff_replays_into_the_next_state() {
+        let lane_info = LaneInfo {
+            key: lane(),
+            index: 0,
+            domain: None,
+        };
+        let before = Registry::from_snapshot(RegistrySnapshot {
+            lanes: vec![lane_info.clone()],
+            units: vec![unit("web", 20000, false), unit("db", 20001, false)],
+        });
+        let mut moved = unit("web", 20002, false);
+        moved.state = "starting".into();
+        let after = Registry::from_snapshot(RegistrySnapshot {
+            lanes: vec![LaneInfo {
+                domain: Some("app.localhost".into()),
+                ..lane_info
+            }],
+            units: vec![moved, unit("api", 20003, true)],
+        });
+        let events = before.diff(&after);
+        let mut replayed = before.clone();
+        for event in events {
+            replayed.apply(event);
+        }
+        assert_eq!(replayed, after);
+        assert!(after.diff(&after).is_empty());
+        let mut emptied = after.clone();
+        for event in after.diff(&Registry::default()) {
+            emptied.apply(event);
+        }
+        assert_eq!(emptied, Registry::default());
     }
 
     #[tokio::test]

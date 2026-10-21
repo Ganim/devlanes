@@ -205,11 +205,49 @@ pub trait DaemonApi: Send + Sync {
     async fn restart_daemon(&self) -> Result<Value, ApiError>;
     /// Starts the daemon when none is running; returns its status.
     async fn start_daemon(&self) -> Result<Value, ApiError>;
+    /// `profile.list` for a lane: the profiles its config defines.
+    async fn profile_list(&self, lane: String) -> Result<ProfileList, ApiError>;
     /// The daemon's own log file, read directly because the TUI runs on the
     /// same machine. `None` when there is no local file.
     fn daemon_log(&self) -> Option<PathBuf> {
         None
     }
+}
+
+/// One profile from `profile.list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct ProfileInfo {
+    pub name: String,
+    /// Unit selectors the profile starts (names, globs, `+tag`).
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// The profile sets `infra: false`.
+    #[serde(default)]
+    pub skips_infra: bool,
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+/// `profile.list`: `{lane, items: [ProfileInfo]}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct ProfileList {
+    #[serde(default)]
+    pub lane: String,
+    #[serde(default)]
+    pub items: Vec<ProfileInfo>,
+}
+
+/// Codes an older daemon answers for a method it does not know.
+pub fn is_unsupported(error: &ApiError) -> bool {
+    matches!(
+        error,
+        ApiError::Rpc(rpc) if matches!(
+            rpc.code.as_str(),
+            "not_supported" | "not_supported_yet" | "unsupported" | "unsupported_method" | "unknown_method"
+        )
+    )
 }
 
 /// The real implementation over `devlanes-client`.
@@ -554,6 +592,17 @@ impl DaemonApi for ClientApi {
             .await?;
         *self.shared.lock().await = Some(client);
         Ok(status)
+    }
+
+    /// `profile.list` needs `Method::ProfileList` in `devlanes-proto`. Until
+    /// that variant exists this answers like a daemon that lacks the method, so
+    /// the TUI says profiles need a newer daemon instead of failing.
+    async fn profile_list(&self, lane: String) -> Result<ProfileList, ApiError> {
+        Err(ApiError::Rpc(RpcError::new(
+            "unsupported_method",
+            json!({"method": "profile.list", "lane": lane}),
+            1,
+        )))
     }
 
     /// `$DEVLANES_HOME/logs/daemon.log`.

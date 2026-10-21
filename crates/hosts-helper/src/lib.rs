@@ -20,10 +20,10 @@ pub mod write;
 /// The file the helper edits.
 pub const HOSTS_PATH: &str = "/etc/hosts";
 
-/// Where `devlanes trust --hosts` installs the helper.
+/// Where `devlanes certs trust --hosts` installs the helper.
 pub const INSTALL_PATH: &str = "/usr/local/libexec/devlanes-hosts";
 
-/// Where `devlanes trust --hosts` installs the sudo rule.
+/// Where `devlanes certs trust --hosts` installs the sudo rule.
 pub const SUDOERS_PATH: &str = "/etc/sudoers.d/devlanes";
 
 /// Version of the command-line contract between the daemon and the helper.

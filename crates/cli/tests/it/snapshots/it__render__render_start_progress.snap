@@ -1,0 +1,7 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: output
+---
+ok infra
+ok migrate
+failed services: acme@2:admin failed

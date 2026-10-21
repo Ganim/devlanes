@@ -1,0 +1,72 @@
+---
+source: crates/cli/tests/it/help.rs
+expression: long_help(path)
+---
+Bring up a lane: infra, setup, tasks and services, then wait until ready.
+
+Starts the lane of the current worktree, or only the named units. Units that
+already run are left alone, so starting twice is safe. Waits
+until every started unit is ready or one fails; Ctrl-C detaches and leaves
+everything running.
+
+Usage: devlanes start [OPTIONS] [UNIT]...
+
+Arguments:
+  [UNIT]...
+          Units to start ([lane:]unit, globs, +tag) [default: the whole lane]
+
+Options:
+      --profile <PROFILE>
+          Start the units of this profile from devlanes.yaml; repeat to combine profiles (later ones win on env)
+
+      --attach
+          Open the TUI once the lane is up
+
+      --all-at-once
+          Start every selected service immediately, bypassing the machine-wide start gate for this run
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Global options:
+      --json
+          Print JSON: one document, or NDJSON for streams (same as --output json)
+
+      --output <MODE>
+          Output mode [default: agent when an AI agent runs devlanes, plain in CI or without a terminal, else human]
+
+          Possible values:
+          - human: Colors and symbols, for a terminal
+          - plain: The same information without color, one line per event
+          - agent: Terse lines for AI agents: failures first, with next commands, size-capped
+          - json:  The daemon's data as JSON, or NDJSON for streams
+
+      --project <PROJECT>
+          Use this project instead of the one containing the current directory
+
+      --lane <LANE>
+          Use this lane ([project@]lane) instead of the current worktree's
+
+      --host <HOST>
+          Run the command on a connected box (see devlanes remote connect)
+
+      --yes
+          Confirm actions that would ask first; needed when no terminal can prompt
+
+      --quiet
+          Print nothing on success; errors still go to stderr
+
+      --env <KEY=VALUE>
+          Set a variable for started processes (start, restart, run TASK, exec); repeatable
+
+      --timeout <DURATION>
+          Limit waits and streams, such as 30s, 5m or 1h [default for start and wait: 180s]
+
+      --budget <BYTES>
+          Cap agent-mode output at this many bytes [default: 16384, minimum: 256]
+
+Examples:
+  devlanes start                       the whole lane of this worktree
+  devlanes start api web               only these services
+  devlanes start --profile e2e         the units of the e2e profile
+  devlanes start 2:+api --timeout 5m   units tagged api in lane 2

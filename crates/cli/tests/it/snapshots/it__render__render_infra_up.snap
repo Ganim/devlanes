@@ -1,0 +1,19 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+infra up for acme@2
+  SERVICE   PORT   PORTS
+  postgres  20110  5432->20110
+  redis     20111  6379->20111
+--- plain (exit 0)
+infra up for acme@2
+  SERVICE   PORT   PORTS
+  postgres  20110  5432->20110
+  redis     20111  6379->20111
+--- agent (exit 0)
+infra up for acme@2
+  SERVICE   PORT   PORTS
+  postgres  20110  5432->20110
+  redis     20111  6379->20111

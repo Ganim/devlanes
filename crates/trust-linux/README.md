@@ -1,6 +1,6 @@
 # devlanes-trust-linux
 
-Linux implementations of `devlanes-trust`: the distribution CA bundle for `system`, `~/.pki/nssdb` for `chrome`, and Firefox profiles for `firefox`. The composition root registers it on Linux, and the CLI uses it for `devlanes trust`.
+Linux implementations of `devlanes-trust`: the distribution CA bundle for `system`, `~/.pki/nssdb` for `chrome`, and Firefox profiles for `firefox`. The composition root registers it on Linux, and the CLI uses it for `devlanes certs trust`.
 
 ## Usage
 

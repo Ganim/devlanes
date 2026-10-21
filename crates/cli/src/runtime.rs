@@ -10,9 +10,13 @@ pub const DEFAULT_BUDGET: usize = 16 * 1024;
 /// Explicit rendering policy, independent of request semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputMode {
+    /// Colors and symbols, for a terminal
     Human,
+    /// The same information without color, one line per event
     Plain,
+    /// Terse lines for AI agents: failures first, with next commands, size-capped
     Agent,
+    /// The daemon's data as JSON, or NDJSON for streams
     Json,
 }
 

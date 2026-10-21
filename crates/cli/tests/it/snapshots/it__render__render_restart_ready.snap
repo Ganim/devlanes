@@ -1,0 +1,15 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+acme@2 · feat/billing
+✓ services  1 of 1 ready
+  ✓  api  https://api.acme-2.localhost
+--- plain (exit 0)
+acme@2 · feat/billing
+ok services  1 of 1 ready
+  ok  api  https://api.acme-2.localhost
+--- agent (exit 0)
+acme@2 (feat/billing): 1/1 ready
+ready api https://api.acme-2.localhost

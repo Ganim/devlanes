@@ -66,14 +66,14 @@ Publish changes with `registry.publish(event)`. A daemon that only has full snap
 services:
   admin:
     run: ./admin-server
-    # Not mirrored to machines connected with devlanes connect.
+    # Not mirrored to machines connected with devlanes remote connect.
     hidden: true
 infra:
   # Containers whose ports are not mirrored either.
   hidden: [postgres]
 ```
 
-A client running `devlanes connect <box>` binds every other service and container port locally under the same number; the box refuses streams to `admin`'s and `postgres`'s ports.
+A client running `devlanes remote connect <box>` binds every other service and container port locally under the same number; the box refuses streams to `admin`'s and `postgres`'s ports.
 
 ## Behaviour
 
