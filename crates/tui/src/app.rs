@@ -3,13 +3,13 @@
 //! Nothing here performs I/O, so key handling, event application and resync
 //! behavior are tested without a terminal or a daemon.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use devlanes_proto::{
-    ActorKind, AttachResult, Event, LaneSummary, LogLine, LogQuery, Method, Page, RunParams,
-    Selection, UnitSummary, events,
+    ActorKind, AttachResult, Event, LaneSummary, LogLine, LogQuery, Method, Page, RpcError,
+    RunParams, Selection, UnitSummary, events,
 };
 use ratatui::layout::Rect;
 use serde_json::Value;
@@ -17,12 +17,17 @@ use serde_json::Value;
 use crate::api::{ApiError, UnitMetrics};
 use crate::input::{self, InputModes};
 use crate::screen::TerminalScreen;
+use crate::text;
+use crate::words::{self, Worded};
 
 /// Smallest terminal that still fits a list, a pane and the help bar.
 pub const MIN_WIDTH: u16 = 40;
 pub const MIN_HEIGHT: u16 = 8;
-/// Notices stay this many one-second ticks.
+/// Notices stay this many one-second ticks; errors stay longer.
 const NOTICE_TICKS: u8 = 6;
+const ERROR_TICKS: u8 = 12;
+/// Errors kept for the error list (`e`).
+const MAX_ERRORS: usize = 50;
 /// Lines requested per deep-scrollback page.
 const LOG_PAGE: usize = 500;
 const WHEEL_LINES: isize = 3;
@@ -35,11 +40,49 @@ pub enum Focus {
     Terminal,
 }
 
-/// Top-level views.
+/// Top-level views, in tab order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Lanes,
     Monitor,
+    Daemon,
+}
+
+/// Lines of the daemon log kept client-side.
+const MAX_DAEMON_LOG: usize = 2000;
+/// Daemon facts refresh every this many one-second ticks while the tab is visible.
+const DAEMON_REFRESH_TICKS: u8 = 3;
+
+/// The daemon tab: facts, doctor data, the log tail and in-flight actions.
+#[derive(Debug, Default)]
+pub struct DaemonView {
+    /// `daemon.status` (version, pid, uptime, socket, managed processes).
+    pub status: Option<Value>,
+    /// `doctor` facts; the UI words them as checks.
+    pub doctor: Option<Value>,
+    pub log: VecDeque<String>,
+    pub log_offset: u64,
+    /// Why the log cannot be read, shown in place of the tail.
+    pub log_error: Option<String>,
+    /// Log lines scrolled up from the newest; 0 follows the file.
+    pub scroll: usize,
+    /// The restart, stop, start or gc in flight.
+    pub busy: Option<&'static str>,
+    /// Set after this TUI stopped the daemon, until one is reachable again.
+    pub stopped: bool,
+    /// Facts and log failures repeat every refresh; only a change is reported.
+    last_error: Option<String>,
+    ticks: u8,
+}
+
+impl DaemonView {
+    /// Managed processes from the last status, when known.
+    pub fn managed_processes(&self) -> Option<u64> {
+        self.status
+            .as_ref()?
+            .get("managed_processes")
+            .and_then(Value::as_u64)
+    }
 }
 
 /// Daemon connection as seen by the user.
@@ -65,11 +108,75 @@ pub enum Row {
     Unit(usize, usize),
 }
 
+/// The header message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    /// One cleaned line; the header clips it to its width.
+    pub text: String,
+    pub error: bool,
+}
+
+/// The lane or unit an error belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Target {
+    Lane(String),
+    Unit { lane: String, unit: String },
+}
+
+/// One reported failure, kept in the error list and on its target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorEntry {
+    /// The operation, such as `start acme@1:portal`.
+    pub what: String,
+    pub target: Option<Target>,
+    pub worded: Worded,
+    /// The target's daemon state when the error arrived; the row badge stays
+    /// until the target becomes healthy from a different state.
+    pub state: Option<String>,
+}
+
+impl ErrorEntry {
+    /// The operation's verb for row badges (`start failed`).
+    pub fn verb(&self) -> &str {
+        self.what.split(' ').next().unwrap_or("action")
+    }
+}
+
+/// One line of the error list, styled by kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PanelLine {
+    Title(String),
+    Summary(String),
+    Detail(String),
+    Hint(String),
+    Blank,
+}
+
 /// Modal prompts; while one is open it receives every key.
 #[derive(Debug)]
 pub enum Dialog {
+    /// Recent errors with full text; `scroll` is the first visible line.
+    Errors {
+        scroll: usize,
+    },
+    /// `y` confirms; `Enter` too unless `strict` (anything that stops or removes).
     Confirm {
         prompt: String,
+        /// What will happen, one sentence per entry.
+        detail: Vec<String>,
+        /// The verb for the key hint (`y restart`).
+        action: &'static str,
+        strict: bool,
+        effect: Box<Effect>,
+    },
+    /// Destructive actions on data: the user types `expected` and presses Enter.
+    TypeConfirm {
+        prompt: String,
+        detail: Vec<String>,
+        expected: String,
+        input: String,
+        /// Enter was pressed with the wrong text.
+        mismatch: bool,
         effect: Box<Effect>,
     },
     Tasks {
@@ -115,7 +222,7 @@ pub enum AttachState {
     Opening,
     Live,
     Closed,
-    Failed(String),
+    Failed(Worded),
 }
 
 /// The one unit parsed client-side.
@@ -141,7 +248,8 @@ pub enum Msg {
     Status(Result<Vec<LaneSummary>, ApiError>),
     Subscribed(Result<(), ApiError>),
     Event(Event),
-    EventsEnded,
+    /// The subscription ended, with the reason when there is one.
+    EventsEnded(Option<ApiError>),
     Reconnect,
     AttachOpened {
         generation: u64,
@@ -154,8 +262,14 @@ pub enum Msg {
     AttachClosed {
         generation: u64,
     },
+    /// Input, resize or the stream itself failed on an open attach.
+    StreamError {
+        generation: u64,
+        error: ApiError,
+    },
     ActionDone {
         label: String,
+        target: Target,
         result: Result<Value, ApiError>,
     },
     RunDone {
@@ -169,8 +283,26 @@ pub enum Msg {
         result: Result<Page<LogLine>, ApiError>,
     },
     Metrics(Result<Vec<UnitMetrics>, ApiError>),
-    /// A helper (URL opener, terminal launcher) failed.
-    Failed(String),
+    /// A local helper (URL opener, terminal launcher, clipboard, input queue) failed.
+    Failed {
+        what: String,
+        message: String,
+    },
+    CleanDone {
+        lane: String,
+        result: Result<Value, ApiError>,
+    },
+    GcDone(Result<Value, ApiError>),
+    DaemonInfo {
+        status: Result<Value, ApiError>,
+        doctor: Result<Value, ApiError>,
+    },
+    /// New lines of the daemon's log file, or why it cannot be read.
+    DaemonLog(Result<crate::logfile::LogChunk, String>),
+    DaemonStopped(Result<Value, ApiError>),
+    /// The new daemon's status after a restart.
+    DaemonRestarted(Result<Value, ApiError>),
+    DaemonStarted(Result<Value, ApiError>),
 }
 
 /// Side effects the runtime performs; results come back as [`Msg`].
@@ -199,6 +331,7 @@ pub enum Effect {
         lane: String,
         selection: Selection,
         label: String,
+        target: Target,
     },
     Run {
         lane: String,
@@ -219,6 +352,21 @@ pub enum Effect {
         title: String,
     },
     Copy(String),
+    /// Sends `yes`; only produced by a confirmed dialog.
+    CleanLane {
+        lane: String,
+    },
+    /// Sends `yes`; only produced by a confirmed dialog.
+    LaneGc,
+    FetchDaemon,
+    ReadDaemonLog {
+        offset: u64,
+    },
+    /// Sends `yes`; only produced by a confirmed dialog.
+    StopDaemon,
+    /// Sends `yes`; only produced by a confirmed dialog.
+    RestartDaemon,
+    StartDaemon,
     Quit,
 }
 
@@ -281,9 +429,20 @@ pub struct App {
     pub metrics: Vec<UnitMetrics>,
     pub monitor_index: usize,
     pub list_offset: usize,
-    pub notice: Option<String>,
+    pub notice: Option<Notice>,
+    /// Recent errors, newest first.
+    pub errors: VecDeque<ErrorEntry>,
+    pub daemon: DaemonView,
     pub size: (u16, u16),
     expanded: HashMap<String, bool>,
+    /// Lanes with a clean in flight; their rows say so.
+    cleaning: HashSet<String>,
+    /// The last failed action per lane or unit.
+    target_errors: HashMap<Target, ErrorEntry>,
+    /// Lanes with an action in flight; their phase events are not reported twice.
+    pending: HashSet<String>,
+    /// Metrics fail every tick when unsupported; only a change is reported.
+    last_metrics_error: Option<String>,
     notice_ticks: u8,
     generation: u64,
     reconnect_pending: bool,
@@ -306,8 +465,14 @@ impl App {
             monitor_index: 0,
             list_offset: 0,
             notice: None,
+            errors: VecDeque::new(),
+            daemon: DaemonView::default(),
             size: (width, height),
             expanded: HashMap::new(),
+            cleaning: HashSet::new(),
+            target_errors: HashMap::new(),
+            pending: HashSet::new(),
+            last_metrics_error: None,
             notice_ticks: 0,
             generation: 0,
             reconnect_pending: false,
@@ -338,32 +503,49 @@ impl App {
                 sort_lanes(&mut self.lanes);
                 self.after_change(&mut effects);
             }
-            Msg::Status(Err(error)) => self.api_error("status", error, &mut effects),
+            Msg::Status(Err(error)) => self.api_error("status", None, error, &mut effects),
             Msg::Subscribed(Ok(())) => {
                 let reconnected = matches!(self.connection, Connection::Reconnecting { .. });
                 self.connection = Connection::Online;
+                // Someone may have started the daemon this TUI stopped.
+                self.daemon.stopped = false;
                 if reconnected {
                     self.reattach_if_closed(&mut effects);
                 }
             }
             Msg::Subscribed(Err(error)) => {
-                self.lost_connection(&mut effects);
                 if !error.is_disconnect() {
-                    self.set_notice(format!("subscribe: {}", describe(&error)));
+                    self.report("subscribe", None, words::api(&error));
                 }
+                self.lost_connection(Some(&error), &mut effects);
             }
-            Msg::EventsEnded => self.lost_connection(&mut effects),
+            Msg::EventsEnded(reason) => self.lost_connection(reason.as_ref(), &mut effects),
             Msg::Reconnect => {
                 self.reconnect_pending = false;
                 effects.extend([Effect::Subscribe, Effect::Refresh]);
             }
             Msg::Event(event) => self.event(event, &mut effects),
             Msg::AttachOpened { generation, result } => {
+                let Some(attached) = self.attached_mut(generation) else {
+                    return effects;
+                };
+                match result {
+                    Ok(_) => attached.state = AttachState::Live,
+                    Err(error) => {
+                        let worded = words::api(&error);
+                        let what = format!("attach {}", unit_ref(&attached.lane, &attached.unit));
+                        attached.state = AttachState::Failed(worded.clone());
+                        // A unit that is not running simply has no terminal; the pane says so.
+                        if worded.code.as_deref() != Some("not_running") {
+                            self.api_error(&what, None, error, &mut effects);
+                        }
+                    }
+                }
+            }
+            Msg::StreamError { generation, error } => {
                 if let Some(attached) = self.attached_mut(generation) {
-                    attached.state = match result {
-                        Ok(_) => AttachState::Live,
-                        Err(error) => AttachState::Failed(describe(&error)),
-                    };
+                    let what = format!("terminal {}", unit_ref(&attached.lane, &attached.unit));
+                    self.report(&what, None, words::api(&error));
                 }
             }
             Msg::AttachOutput { generation, bytes } => {
@@ -381,34 +563,307 @@ impl App {
                     }
                 }
             }
-            Msg::ActionDone { label, result } => match result {
-                Ok(_) => self.set_notice(format!("{label}: ok")),
-                Err(error) => self.api_error(&label, error, &mut effects),
-            },
+            Msg::ActionDone {
+                label,
+                target,
+                result,
+            } => {
+                self.pending.remove(target_lane(&target));
+                match result {
+                    Ok(_) => {
+                        self.target_errors.remove(&target);
+                        self.set_notice(format!("{label}: ok"));
+                    }
+                    Err(error) => self.api_error(&label, Some(target), error, &mut effects),
+                }
+            }
             Msg::RunDone { lane, task, result } => self.run_done(lane, task, result, &mut effects),
             Msg::Logs {
                 generation,
                 older,
                 result,
-            } => self.logs(generation, older, result),
+            } => self.logs(generation, older, result, &mut effects),
             Msg::Metrics(Ok(metrics)) => {
+                self.last_metrics_error = None;
                 self.metrics = metrics;
                 self.clamp_monitor();
             }
-            // The table falls back to per-unit numbers from status, so this stays quiet.
-            Msg::Metrics(Err(_)) => self.metrics.clear(),
-            Msg::Failed(message) => self.set_notice(message),
+            Msg::Metrics(Err(error)) => {
+                // The table falls back to per-unit numbers from status.
+                self.metrics.clear();
+                if error.is_disconnect() {
+                    self.lost_connection(Some(&error), &mut effects);
+                } else {
+                    let worded = words::api(&error);
+                    let line = worded.one_line();
+                    if self.last_metrics_error.as_ref() != Some(&line) {
+                        self.last_metrics_error = Some(line);
+                        self.report("metrics", None, worded);
+                    }
+                }
+            }
+            Msg::Failed { what, message } => self.report(&what, None, Worded::local(&message)),
+            Msg::CleanDone { lane, result } => {
+                self.cleaning.remove(&lane);
+                self.pending.remove(&lane);
+                let target = Target::Lane(lane.clone());
+                match result {
+                    Ok(value) => {
+                        self.target_errors.remove(&target);
+                        let stopped = value
+                            .get("stopped")
+                            .and_then(Value::as_array)
+                            .map_or(0, Vec::len);
+                        self.set_notice(match stopped {
+                            0 => format!("clean {lane}: done"),
+                            1 => format!("clean {lane}: done, stopped 1 unit"),
+                            n => format!("clean {lane}: done, stopped {n} units"),
+                        });
+                        // The daemon removes and re-lists the lane; fetch the result.
+                        effects.push(Effect::Refresh);
+                    }
+                    Err(error) => {
+                        self.api_error(&format!("clean {lane}"), Some(target), error, &mut effects);
+                    }
+                }
+            }
+            Msg::GcDone(result) => {
+                self.daemon.busy = None;
+                match result {
+                    Ok(value) => {
+                        let cleaned: Vec<String> = value
+                            .get("cleaned")
+                            .and_then(Value::as_array)
+                            .map(|list| {
+                                list.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(text::clean)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        self.set_notice(if cleaned.is_empty() {
+                            "lane gc: nothing to clean".into()
+                        } else {
+                            format!("lane gc: cleaned {}", cleaned.join(", "))
+                        });
+                        effects.push(Effect::Refresh);
+                    }
+                    Err(error) => self.api_error("lane gc", None, error, &mut effects),
+                }
+            }
+            Msg::DaemonInfo { status, doctor } => {
+                let mut failure = None;
+                match status {
+                    Ok(status) => self.daemon.status = Some(status),
+                    Err(error) => failure = Some(("daemon status", error)),
+                }
+                match doctor {
+                    Ok(doctor) => self.daemon.doctor = Some(doctor),
+                    Err(error) => failure = failure.or(Some(("doctor", error))),
+                }
+                match failure {
+                    Some((_, error)) if error.is_disconnect() => {
+                        self.lost_connection(Some(&error), &mut effects);
+                    }
+                    Some((what, error)) => self.report_daemon_once(what, words::api(&error)),
+                    None => self.daemon.last_error = None,
+                }
+            }
+            Msg::DaemonLog(Ok(chunk)) => {
+                self.daemon.log_error = None;
+                let added = chunk.lines.len();
+                if chunk.reset {
+                    self.daemon.log.clear();
+                    self.daemon.scroll = 0;
+                } else if self.daemon.scroll > 0 {
+                    // A paused view keeps showing the same lines while new ones arrive.
+                    self.daemon.scroll += added;
+                }
+                self.daemon
+                    .log
+                    .extend(chunk.lines.iter().map(|line| text::clean(line)));
+                while self.daemon.log.len() > MAX_DAEMON_LOG {
+                    self.daemon.log.pop_front();
+                }
+                self.daemon.scroll = self.daemon.scroll.min(self.daemon.log.len());
+                self.daemon.log_offset = chunk.offset;
+            }
+            Msg::DaemonLog(Err(message)) => {
+                self.daemon.log_error = Some(text::clean(&message));
+                self.report_daemon_once("daemon log", Worded::local(&message));
+            }
+            Msg::DaemonStopped(result) => {
+                self.daemon.busy = None;
+                match result {
+                    Ok(_) => {
+                        self.daemon.stopped = true;
+                        self.daemon.status = None;
+                        self.set_notice("daemon stopped".into());
+                    }
+                    Err(error) => self.api_error("stop daemon", None, error, &mut effects),
+                }
+            }
+            Msg::DaemonRestarted(result) | Msg::DaemonStarted(result) => {
+                let verb = if self.daemon.busy == Some("restarting") {
+                    "restart"
+                } else {
+                    "start"
+                };
+                self.daemon.busy = None;
+                match result {
+                    Ok(status) => {
+                        self.daemon.stopped = false;
+                        self.daemon.status = Some(status);
+                        self.set_notice(format!("daemon {verb}ed"));
+                        // Reconnect now instead of waiting for the next backoff step.
+                        effects.extend([Effect::Subscribe, Effect::Refresh, Effect::FetchDaemon]);
+                    }
+                    Err(error) => {
+                        self.api_error(&format!("{verb} daemon"), None, error, &mut effects);
+                    }
+                }
+            }
         }
         effects
     }
 
+    /// Reports a daemon-tab failure unless it repeats the last one.
+    fn report_daemon_once(&mut self, what: &str, worded: Worded) {
+        let line = format!("{what}: {}", worded.one_line());
+        if self.daemon.last_error.as_ref() != Some(&line) {
+            self.daemon.last_error = Some(line);
+            self.report(what, None, worded);
+        }
+    }
+
+    /// True while a clean of `lane` is in flight.
+    pub fn is_cleaning(&self, lane: &str) -> bool {
+        self.cleaning.contains(lane)
+    }
+
+    // ---- errors -----------------------------------------------------------
+
+    /// The single path for every failure: the error list, the header notice
+    /// and, when it has one, the target's badge and details.
+    pub fn report(&mut self, what: &str, target: Option<Target>, worded: Worded) {
+        let what = text::clean(what);
+        let state = target.as_ref().and_then(|t| self.target_state(t));
+        let entry = ErrorEntry {
+            what: what.clone(),
+            target: target.clone(),
+            worded,
+            state,
+        };
+        self.notice = Some(Notice {
+            text: format!("{what}: {}", entry.worded.one_line()),
+            error: true,
+        });
+        self.notice_ticks = ERROR_TICKS;
+        if let Some(target) = target {
+            self.target_errors.insert(target, entry.clone());
+        }
+        self.errors.push_front(entry);
+        self.errors.truncate(MAX_ERRORS);
+    }
+
+    /// The last failed action on a lane or unit, while it still applies.
+    pub fn target_error(&self, target: &Target) -> Option<&ErrorEntry> {
+        self.target_errors.get(target)
+    }
+
+    /// The daemon state of a target, if it is still listed.
+    fn target_state(&self, target: &Target) -> Option<String> {
+        let lane = self
+            .lanes
+            .iter()
+            .find(|lane| lane.reference == target_lane(target))?;
+        match target {
+            Target::Lane(_) => Some(lane.state.clone()),
+            Target::Unit { unit, .. } => lane
+                .units
+                .iter()
+                .find(|u| u.name == *unit)
+                .map(|u| u.state.clone()),
+        }
+    }
+
+    /// Drops badges for targets that are gone or became healthy since the failure.
+    fn prune_target_errors(&mut self) {
+        let states: HashMap<Target, Option<String>> = self
+            .target_errors
+            .keys()
+            .map(|target| (target.clone(), self.target_state(target)))
+            .collect();
+        self.target_errors.retain(
+            |target, entry| match states.get(target).cloned().flatten() {
+                None => false,
+                Some(state) => {
+                    let changed = entry.state.as_deref() != Some(state.as_str());
+                    !(changed && matches!(state.as_str(), "ready" | "running"))
+                }
+            },
+        );
+    }
+
+    /// Lines of the error list wrapped to `width`, newest error first.
+    pub fn error_panel_lines(&self, width: usize) -> Vec<PanelLine> {
+        let mut lines = Vec::new();
+        for entry in &self.errors {
+            for line in text::wrap(&entry.what, width) {
+                lines.push(PanelLine::Title(line));
+            }
+            for line in text::wrap(&entry.worded.summary, width) {
+                lines.push(PanelLine::Summary(line));
+            }
+            for detail in &entry.worded.detail {
+                for line in text::wrap(detail, width) {
+                    lines.push(PanelLine::Detail(line));
+                }
+            }
+            if let Some(command) = &entry.worded.command {
+                for line in text::wrap(&format!("command: {command}"), width) {
+                    lines.push(PanelLine::Hint(line));
+                }
+            }
+            if let Some(hint) = &entry.worded.hint {
+                for line in text::wrap(&format!("hint: {hint}"), width) {
+                    lines.push(PanelLine::Hint(line));
+                }
+            }
+            lines.push(PanelLine::Blank);
+        }
+        lines.pop();
+        lines
+    }
+
+    /// Scrolls the error list, clamped so the last line stays at the bottom.
+    fn scroll_errors(&mut self, scroll: usize, delta: isize) -> usize {
+        let (width, height) = error_panel_inner(self.size);
+        let total = self.error_panel_lines(width).len();
+        scroll
+            .saturating_add_signed(delta)
+            .min(total.saturating_sub(height))
+    }
+
     // ---- connection -------------------------------------------------------
 
-    /// Marks the daemon unreachable and schedules one retry with backoff.
-    fn lost_connection(&mut self, effects: &mut Vec<Effect>) {
+    /// Marks the daemon unreachable and schedules one retry with backoff. The
+    /// first loss goes to the error list, unless this TUI is stopping or
+    /// restarting the daemon itself; retries only update the header.
+    fn lost_connection(&mut self, reason: Option<&ApiError>, effects: &mut Vec<Effect>) {
+        let expected = self.daemon.stopped || self.daemon.busy.is_some();
         let attempt = match self.connection {
             Connection::Reconnecting { attempt } => attempt.saturating_add(1),
-            _ => 0,
+            _ => {
+                if !expected {
+                    let worded = match reason {
+                        Some(error) => words::api(error),
+                        None => Worded::local("the event stream ended"),
+                    };
+                    self.report("daemon connection", None, worded);
+                }
+                0
+            }
         };
         self.connection = Connection::Reconnecting { attempt };
         if !self.reconnect_pending {
@@ -418,12 +873,22 @@ impl App {
         }
     }
 
-    /// Shows a request failure, or treats it as a lost connection.
-    fn api_error(&mut self, what: &str, error: ApiError, effects: &mut Vec<Effect>) {
+    /// Reports a request failure; a lost connection also starts reconnecting.
+    /// A failed action keeps its target either way, so the row shows what failed.
+    fn api_error(
+        &mut self,
+        what: &str,
+        target: Option<Target>,
+        error: ApiError,
+        effects: &mut Vec<Effect>,
+    ) {
+        if error.is_disconnect() && target.is_none() {
+            self.lost_connection(Some(&error), effects);
+            return;
+        }
+        self.report(what, target, words::api(&error));
         if error.is_disconnect() {
-            self.lost_connection(effects);
-        } else {
-            self.set_notice(format!("{what}: {}", describe(&error)));
+            self.lost_connection(Some(&error), effects);
         }
     }
 
@@ -503,17 +968,34 @@ impl App {
                 self.after_change(effects);
             }
             events::PHASE if event.data.get("state").and_then(Value::as_str) == Some("failed") => {
-                let lane = event
+                let lane = text::clean(
+                    event
+                        .data
+                        .get("lane")
+                        .and_then(Value::as_str)
+                        .unwrap_or("lane"),
+                );
+                // This TUI's own action reports the same failure when it returns.
+                if self.pending.contains(&lane) {
+                    return;
+                }
+                let phase = text::clean(
+                    event
+                        .data
+                        .get("phase")
+                        .and_then(Value::as_str)
+                        .unwrap_or("start"),
+                );
+                let worded = event
                     .data
-                    .get("lane")
-                    .and_then(Value::as_str)
-                    .unwrap_or("lane");
-                let phase = event
-                    .data
-                    .get("phase")
-                    .and_then(Value::as_str)
-                    .unwrap_or("start");
-                self.set_notice(format!("{lane}: {phase} failed"));
+                    .get("reason")
+                    .cloned()
+                    .and_then(|reason| serde_json::from_value::<RpcError>(reason).ok())
+                    .map_or_else(
+                        || Worded::local(&format!("{phase} failed")),
+                        |reason| words::rpc(&reason),
+                    );
+                self.report(&format!("{phase} {lane}"), Some(Target::Lane(lane)), worded);
             }
             _ => {}
         }
@@ -529,6 +1011,7 @@ impl App {
         if !valid {
             self.selected = self.fallback_selection(&rows);
         }
+        self.prune_target_errors();
         self.clamp_monitor();
         self.ensure_visible();
         self.sync_attach(effects);
@@ -767,8 +1250,9 @@ impl App {
             self.dialog_key(key, effects);
             return;
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl && key.code == KeyCode::Char('a') {
+        // Shift+Tab is reserved for focus, so apps in the pane never receive it;
+        // Tab and C-a reach them (shell completion, tmux prefix).
+        if key.code == KeyCode::BackTab {
             self.toggle_focus();
             return;
         }
@@ -782,7 +1266,7 @@ impl App {
                     self.copy_key(key, effects);
                     return;
                 }
-                PaneMode::Logs(_) if key.code == KeyCode::Esc => {
+                PaneMode::Logs(_) if key.code == KeyCode::Esc && self.tab == Tab::Lanes => {
                     attached.mode = PaneMode::Live;
                     attached.screen.scroll_to_bottom();
                     return;
@@ -790,11 +1274,160 @@ impl App {
                 _ => {}
             }
         }
-        if self.tab == Tab::Monitor {
-            self.monitor_key(key, effects);
+        match self.tab {
+            Tab::Monitor => self.monitor_key(key, effects),
+            Tab::Daemon => self.daemon_key(key, effects),
+            Tab::Lanes => self.list_key(key, effects),
+        }
+    }
+
+    /// Switches tabs; the daemon tab loads its facts and log at once.
+    fn set_tab(&mut self, tab: Tab, effects: &mut Vec<Effect>) {
+        if tab == Tab::Daemon && self.tab != Tab::Daemon {
+            self.daemon.ticks = 0;
+            effects.push(Effect::ReadDaemonLog {
+                offset: self.daemon.log_offset,
+            });
+            if !self.daemon.stopped {
+                effects.push(Effect::FetchDaemon);
+            }
+        }
+        self.tab = tab;
+    }
+
+    /// Keys on the daemon tab. Every action that stops something asks first.
+    fn daemon_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let page = usize::from(self.size.1 / 2).max(1);
+        let log_len = self.daemon.log.len();
+        match key.code {
+            KeyCode::Char('q') => effects.push(Effect::Quit),
+            KeyCode::Char('c') if ctrl => effects.push(Effect::Quit),
+            KeyCode::Tab | KeyCode::Char('1') | KeyCode::Esc => self.set_tab(Tab::Lanes, effects),
+            KeyCode::Char('2') => self.set_tab(Tab::Monitor, effects),
+            KeyCode::Char('e') => self.dialog = Some(Dialog::Errors { scroll: 0 }),
+            KeyCode::Char('?') => self.dialog = Some(Dialog::Help),
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.daemon.scroll = (self.daemon.scroll + 1).min(log_len);
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.daemon.scroll = self.daemon.scroll.saturating_sub(1);
+            }
+            KeyCode::PageUp => self.daemon.scroll = (self.daemon.scroll + page).min(log_len),
+            KeyCode::PageDown => self.daemon.scroll = self.daemon.scroll.saturating_sub(page),
+            KeyCode::Home => self.daemon.scroll = log_len,
+            KeyCode::End | KeyCode::Char('G') => self.daemon.scroll = 0,
+            KeyCode::Char('R') => self.daemon_prompt(
+                "restart the daemon?",
+                "restart",
+                "the TUI reconnects when the new daemon is up.",
+                Effect::RestartDaemon,
+            ),
+            KeyCode::Char('S') => self.daemon_prompt(
+                "stop the daemon?",
+                "stop",
+                "press s on this tab to start it again.",
+                Effect::StopDaemon,
+            ),
+            KeyCode::Char('g') => {
+                if self.daemon.busy.is_none() {
+                    self.dialog = Some(Dialog::Confirm {
+                        prompt: "run lane gc?".into(),
+                        detail: vec![
+                            "it cleans every lane whose worktree is gone: stops its units, runs its lane.clean tasks and infra teardown, removes its per-lane containers and volumes, and frees its ports.".into(),
+                            "it also drops port offsets that no config uses.".into(),
+                        ],
+                        action: "run gc",
+                        strict: true,
+                        effect: Box::new(Effect::LaneGc),
+                    });
+                }
+            }
+            KeyCode::Char('s') => {
+                if !self.daemon.stopped && self.connection == Connection::Online {
+                    self.set_notice("the daemon is running".into());
+                } else if self.daemon.busy.is_none() {
+                    self.daemon.busy = Some("starting");
+                    effects.push(Effect::StartDaemon);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The confirm dialog for restarting or stopping the daemon, with the
+    /// number of processes it would stop.
+    fn daemon_prompt(&mut self, prompt: &str, action: &'static str, after: &str, effect: Effect) {
+        if self.daemon.busy.is_some() {
+            self.set_notice(format!(
+                "the daemon is busy {}",
+                self.daemon.busy.unwrap_or("")
+            ));
             return;
         }
-        self.list_key(key, effects);
+        if self.daemon.stopped {
+            self.set_notice("the daemon is stopped; s starts it".into());
+            return;
+        }
+        let processes = match self.daemon.managed_processes() {
+            Some(0) => "no managed processes are running.".to_owned(),
+            Some(1) => {
+                "it stops 1 managed process; start it again afterwards with devlanes lane resume."
+                    .to_owned()
+            }
+            Some(n) => format!(
+                "it stops {n} managed processes; start them again afterwards with devlanes lane resume."
+            ),
+            None => "it stops every process the daemon manages.".to_owned(),
+        };
+        self.dialog = Some(Dialog::Confirm {
+            prompt: prompt.into(),
+            detail: vec![processes, after.into()],
+            action,
+            strict: true,
+            effect: Box::new(effect),
+        });
+    }
+
+    /// Opens the clean dialog for the selected lane, or the lane of the selected unit.
+    fn clean_prompt(&mut self) {
+        let Some(lane) = self.selected_lane() else {
+            return;
+        };
+        let reference = lane.reference.clone();
+        if self.cleaning.contains(&reference) {
+            self.set_notice(format!("{reference} is already being cleaned"));
+            return;
+        }
+        self.dialog = Some(Dialog::TypeConfirm {
+            prompt: format!("clean {reference}?"),
+            detail: vec![
+                "it stops the lane's units, runs its lane.clean tasks and infra teardown, removes its per-lane containers and volumes, and frees its ports and setup records.".into(),
+                "worktree files are not touched.".into(),
+            ],
+            expected: reference.clone(),
+            input: String::new(),
+            mismatch: false,
+            effect: Box::new(Effect::CleanLane { lane: reference }),
+        });
+    }
+
+    /// Records an action the user just confirmed, so its progress shows.
+    fn begin(&mut self, effect: &Effect) {
+        match effect {
+            Effect::Run { lane, .. } => {
+                self.pending.insert(lane.clone());
+            }
+            Effect::CleanLane { lane } => {
+                self.pending.insert(lane.clone());
+                self.cleaning.insert(lane.clone());
+                self.set_notice(format!("cleaning {lane}"));
+            }
+            Effect::LaneGc => self.daemon.busy = Some("collecting lanes"),
+            Effect::RestartDaemon => self.daemon.busy = Some("restarting"),
+            Effect::StopDaemon => self.daemon.busy = Some("stopping"),
+            _ => {}
+        }
     }
 
     /// Toggles list and terminal focus; the terminal needs an attached unit.
@@ -840,8 +1473,12 @@ impl App {
                     self.toggle_lane(effects);
                 }
             }
-            KeyCode::Tab | KeyCode::Char('2') => self.tab = Tab::Monitor,
-            KeyCode::Char('1') => self.tab = Tab::Lanes,
+            KeyCode::Tab | KeyCode::Char('2') => self.set_tab(Tab::Monitor, effects),
+            KeyCode::Char('3') => self.set_tab(Tab::Daemon, effects),
+            KeyCode::Char('e') => self.dialog = Some(Dialog::Errors { scroll: 0 }),
+            KeyCode::Char('1') => self.set_tab(Tab::Lanes, effects),
+            // Shift+C: Option chords become characters in many macOS terminals.
+            KeyCode::Char('C') => self.clean_prompt(),
             KeyCode::Char('s') => self.control(Method::Start, effects),
             KeyCode::Char('x') => self.control(Method::Stop, effects),
             KeyCode::Char('r') => self.control(Method::Restart, effects),
@@ -890,9 +1527,11 @@ impl App {
         }
     }
 
-    /// Paste goes to the profile prompt or, in terminal focus, to the unit.
+    /// Paste goes to a text prompt or, in terminal focus, to the unit.
     fn paste(&mut self, text: &str, effects: &mut Vec<Effect>) {
-        if let Some(Dialog::Profile { input, .. }) = self.dialog.as_mut() {
+        if let Some(Dialog::Profile { input, .. } | Dialog::TypeConfirm { input, .. }) =
+            self.dialog.as_mut()
+        {
             input.push_str(text.trim());
             return;
         }
@@ -916,10 +1555,86 @@ impl App {
         };
         match dialog {
             Dialog::Help => {}
-            Dialog::Confirm { prompt, effect } => match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => effects.push(*effect),
+            Dialog::Errors { scroll } => {
+                let page = isize::try_from(error_panel_inner(self.size).1)
+                    .unwrap_or(1)
+                    .max(1);
+                let delta = match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('e') => return,
+                    KeyCode::Char('j') | KeyCode::Down => 1,
+                    KeyCode::Char('k') | KeyCode::Up => -1,
+                    KeyCode::PageDown | KeyCode::Char(' ') => page,
+                    KeyCode::PageUp => -page,
+                    KeyCode::Char('g') | KeyCode::Home => isize::MIN / 2,
+                    KeyCode::Char('G') | KeyCode::End => isize::MAX / 2,
+                    _ => 0,
+                };
+                let scroll = self.scroll_errors(scroll, delta);
+                self.dialog = Some(Dialog::Errors { scroll });
+            }
+            Dialog::Confirm {
+                prompt,
+                detail,
+                action,
+                strict,
+                effect,
+            } => match key.code {
+                // A stray Enter must not stop or remove anything.
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.begin(&effect);
+                    effects.push(*effect);
+                }
+                KeyCode::Enter if !strict => {
+                    self.begin(&effect);
+                    effects.push(*effect);
+                }
                 KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {}
-                _ => self.dialog = Some(Dialog::Confirm { prompt, effect }),
+                _ => {
+                    self.dialog = Some(Dialog::Confirm {
+                        prompt,
+                        detail,
+                        action,
+                        strict,
+                        effect,
+                    });
+                }
+            },
+            Dialog::TypeConfirm {
+                prompt,
+                detail,
+                expected,
+                mut input,
+                mut mismatch,
+                effect,
+            } => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter if input.trim() == expected => {
+                    self.begin(&effect);
+                    effects.push(*effect);
+                }
+                code => {
+                    // The warning is for the text that was submitted; editing clears it.
+                    match code {
+                        KeyCode::Enter => mismatch = true,
+                        KeyCode::Backspace => {
+                            input.pop();
+                            mismatch = false;
+                        }
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            input.push(c);
+                            mismatch = false;
+                        }
+                        _ => {}
+                    }
+                    self.dialog = Some(Dialog::TypeConfirm {
+                        prompt,
+                        detail,
+                        expected,
+                        input,
+                        mismatch,
+                        effect,
+                    });
+                }
             },
             Dialog::Tasks {
                 lane,
@@ -955,8 +1670,10 @@ impl App {
                         profile: (!profile.is_empty()).then_some(profile),
                         ..Selection::default()
                     };
+                    self.pending.insert(lane.clone());
                     effects.push(Effect::Control {
                         method: Method::Start,
+                        target: Target::Lane(lane.clone()),
                         lane,
                         selection,
                         label,
@@ -981,7 +1698,9 @@ impl App {
         match key.code {
             KeyCode::Char('q') => effects.push(Effect::Quit),
             KeyCode::Char('c') if ctrl => effects.push(Effect::Quit),
-            KeyCode::Tab | KeyCode::Char('1') | KeyCode::Esc => self.tab = Tab::Lanes,
+            KeyCode::Tab | KeyCode::Char('3') => self.set_tab(Tab::Daemon, effects),
+            KeyCode::Char('1') | KeyCode::Esc => self.set_tab(Tab::Lanes, effects),
+            KeyCode::Char('e') => self.dialog = Some(Dialog::Errors { scroll: 0 }),
             KeyCode::Char('j') | KeyCode::Down => {
                 self.monitor_index = self.monitor_index.saturating_add(1);
                 self.clamp_monitor();
@@ -1003,6 +1722,13 @@ impl App {
         };
         let reference = lane.reference.clone();
         let verb = method_verb(method);
+        let error_target = match self.selected_unit() {
+            Some(unit) => Target::Unit {
+                lane: reference.clone(),
+                unit: unit.name.clone(),
+            },
+            None => Target::Lane(reference.clone()),
+        };
         let (units, target) = match self.selected_unit() {
             Some(unit) => {
                 let unit = unit_ref(&reference, &unit.name);
@@ -1024,6 +1750,7 @@ impl App {
             }
             None => (Vec::new(), reference.clone()),
         };
+        self.pending.insert(reference.clone());
         effects.push(Effect::Control {
             method,
             lane: reference,
@@ -1032,6 +1759,7 @@ impl App {
                 ..Selection::default()
             },
             label: format!("{verb} {target}"),
+            target: error_target,
         });
     }
 
@@ -1069,6 +1797,9 @@ impl App {
     fn confirm_run(&mut self, lane: String, task: String) {
         self.dialog = Some(Dialog::Confirm {
             prompt: format!("run {task} in {lane}?"),
+            detail: Vec::new(),
+            action: "run",
+            strict: false,
             effect: Box::new(Effect::Run {
                 lane,
                 params: RunParams {
@@ -1090,8 +1821,14 @@ impl App {
         result: Result<Value, ApiError>,
         effects: &mut Vec<Effect>,
     ) {
+        self.pending.remove(&lane);
+        let target = Target::Unit {
+            lane: lane.clone(),
+            unit: task.clone(),
+        };
         match result {
             Ok(value) => {
+                self.target_errors.remove(&target);
                 self.set_notice(format!("run {task}: started"));
                 self.expanded.insert(lane.clone(), true);
                 self.selected = Some(Selected::Unit { lane, unit: task });
@@ -1101,7 +1838,20 @@ impl App {
                     self.focus = Focus::Terminal;
                 }
             }
-            Err(error) => self.api_error(&format!("run {task}"), error, effects),
+            Err(error) => {
+                // A task that is not listed as a unit attaches its error to the lane.
+                let target = if self.target_state(&target).is_some() {
+                    target
+                } else {
+                    Target::Lane(lane.clone())
+                };
+                self.api_error(
+                    &format!("run {task} in {lane}"),
+                    Some(target),
+                    error,
+                    effects,
+                );
+            }
         }
     }
 
@@ -1201,10 +1951,18 @@ impl App {
     }
 
     /// Stores a page of log lines; older pages go above the loaded ones.
-    fn logs(&mut self, generation: u64, older: bool, result: Result<Page<LogLine>, ApiError>) {
+    fn logs(
+        &mut self,
+        generation: u64,
+        older: bool,
+        result: Result<Page<LogLine>, ApiError>,
+        effects: &mut Vec<Effect>,
+    ) {
+        // A page for a unit that is no longer shown has no place to go.
         let Some(attached) = self.attached_mut(generation) else {
             return;
         };
+        let what = format!("logs {}", unit_ref(&attached.lane, &attached.unit));
         let PaneMode::Logs(view) = &mut attached.mode else {
             return;
         };
@@ -1224,10 +1982,7 @@ impl App {
                     view.lines = page.items;
                 }
             }
-            Err(error) => {
-                let notice = format!("logs: {}", describe(&error));
-                self.set_notice(notice);
-            }
+            Err(error) => self.api_error(&what, None, error, effects),
         }
     }
 
@@ -1362,7 +2117,8 @@ impl App {
 
     // ---- misc -------------------------------------------------------------
 
-    /// Ages the notice and polls metrics while the monitor is visible.
+    /// Ages the notice, polls metrics on the monitor and follows the daemon
+    /// tab's facts and log while it is visible.
     fn tick(&mut self, effects: &mut Vec<Effect>) {
         if self.notice_ticks > 0 {
             self.notice_ticks -= 1;
@@ -1373,11 +2129,27 @@ impl App {
         if self.tab == Tab::Monitor && self.connection == Connection::Online {
             effects.push(Effect::FetchMetrics);
         }
+        if self.tab == Tab::Daemon {
+            // The log is a local file, readable even while the daemon is down.
+            effects.push(Effect::ReadDaemonLog {
+                offset: self.daemon.log_offset,
+            });
+            self.daemon.ticks += 1;
+            if self.daemon.ticks >= DAEMON_REFRESH_TICKS {
+                self.daemon.ticks = 0;
+                if self.connection == Connection::Online && self.daemon.busy.is_none() {
+                    effects.push(Effect::FetchDaemon);
+                }
+            }
+        }
     }
 
-    /// Shows a short status message in the header.
+    /// Shows a short status message in the header; errors go through [`App::report`].
     pub fn set_notice(&mut self, notice: String) {
-        self.notice = Some(notice);
+        self.notice = Some(Notice {
+            text: text::clean(&notice),
+            error: false,
+        });
         self.notice_ticks = NOTICE_TICKS;
     }
 
@@ -1438,20 +2210,27 @@ fn method_verb(method: Method) -> &'static str {
     }
 }
 
-/// Short lowercase error text: the code plus a message field when present.
-pub fn describe(error: &ApiError) -> String {
-    match error {
-        ApiError::Rpc(rpc) => {
-            let detail = rpc
-                .data
-                .get("message")
-                .and_then(Value::as_str)
-                .map(|message| format!(" ({message})"))
-                .unwrap_or_default();
-            format!("{}{detail}", rpc.code.replace('_', " "))
-        }
-        other => other.to_string(),
+/// The lane reference of a target.
+pub fn target_lane(target: &Target) -> &str {
+    match target {
+        Target::Lane(lane) | Target::Unit { lane, .. } => lane,
     }
+}
+
+/// The error list's box: the whole body between header and help bar, so long
+/// lines get every column and nothing peeks through at the edges.
+pub fn error_panel_area(size: (u16, u16)) -> Rect {
+    let (width, height) = size;
+    Rect::new(0, 1.min(height), width, height.saturating_sub(2))
+}
+
+/// The error list's text `(columns, rows)` inside its border.
+pub fn error_panel_inner(size: (u16, u16)) -> (usize, usize) {
+    let area = error_panel_area(size);
+    (
+        usize::from(area.width.saturating_sub(2)).max(1),
+        usize::from(area.height.saturating_sub(2)).max(1),
+    )
 }
 
 /// Newest lines of one unit, older than `cursor` when given.

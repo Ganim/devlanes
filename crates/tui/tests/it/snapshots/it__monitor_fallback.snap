@@ -2,7 +2,7 @@
 source: crates/tui/tests/it/main.rs
 expression: draw(&app)?.backend()
 ---
-" devlanes  lanes  monitor                                                       "
+" devlanes  lanes  monitor  daemon                                               "
 "┌ resources ───────────────────────────────────────────────────────────────────┐"
 "│lane             unit           cpu    mem      cpu history                   │"
 "│acme@0           api            12%    256M                                   │"
@@ -13,4 +13,4 @@ expression: draw(&app)?.backend()
 "│                                                                              │"
 "│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
-" j/k move  tab lanes  q quit                                                    "
+" j/k move  tab daemon  q quit                                                   "

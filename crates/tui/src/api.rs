@@ -102,19 +102,20 @@ impl UnitMetrics {
     }
 }
 
-/// Live subscription events; ends when the subscription connection closes.
+/// Live subscription events. An `Err` item says why the subscription ended;
+/// a closed channel without one means the connection closed cleanly.
 pub struct EventStream {
-    events: mpsc::Receiver<Event>,
+    events: mpsc::Receiver<Result<Event, ApiError>>,
 }
 
 impl EventStream {
     /// Wraps a channel; fakes push events into the sending half.
-    pub fn new(events: mpsc::Receiver<Event>) -> Self {
+    pub fn new(events: mpsc::Receiver<Result<Event, ApiError>>) -> Self {
         Self { events }
     }
 
     /// Waits for the next event; `None` means the subscription is gone.
-    pub async fn next(&mut self) -> Option<Event> {
+    pub async fn next(&mut self) -> Option<Result<Event, ApiError>> {
         self.events.recv().await
     }
 }
@@ -126,10 +127,18 @@ pub enum AttachInput {
     Resize { columns: u16, rows: u16 },
 }
 
+/// What an attached stream delivers: terminal output, or a failure of input,
+/// resize or the stream itself. The channel closes when the stream ends.
+#[derive(Debug, Clone)]
+pub enum AttachEvent {
+    Output(Bytes),
+    Error(ApiError),
+}
+
 /// An open terminal stream. Dropping it detaches; the unit keeps running.
 pub struct AttachSession {
     pub result: AttachResult,
-    output: mpsc::Receiver<Bytes>,
+    output: mpsc::Receiver<AttachEvent>,
     input: mpsc::Sender<AttachInput>,
 }
 
@@ -137,7 +146,7 @@ impl AttachSession {
     /// Builds a session from channels; the real client and fakes both use this.
     pub fn new(
         result: AttachResult,
-        output: mpsc::Receiver<Bytes>,
+        output: mpsc::Receiver<AttachEvent>,
         input: mpsc::Sender<AttachInput>,
     ) -> Self {
         Self {
@@ -152,7 +161,7 @@ impl AttachSession {
         self,
     ) -> (
         AttachResult,
-        mpsc::Receiver<Bytes>,
+        mpsc::Receiver<AttachEvent>,
         mpsc::Sender<AttachInput>,
     ) {
         (self.result, self.output, self.input)
@@ -181,6 +190,26 @@ pub trait DaemonApi: Send + Sync {
     async fn logs(&self, lane: String, query: LogQuery) -> Result<Page<LogLine>, ApiError>;
     /// Resource samples; an empty list when the daemon has none.
     async fn metrics(&self) -> Result<Vec<UnitMetrics>, ApiError>;
+    /// `daemon.status`: version, pid, uptime, socket, managed processes.
+    async fn daemon_status(&self) -> Result<Value, ApiError>;
+    /// `doctor`: the daemon's raw facts; the TUI words them as checks.
+    async fn doctor(&self) -> Result<Value, ApiError>;
+    /// `lane.clean` for one lane. Sends `yes`, so call it only after the user confirmed.
+    async fn clean_lane(&self, lane: String) -> Result<Value, ApiError>;
+    /// `lane.gc`. Sends `yes`, so call it only after the user confirmed.
+    async fn lane_gc(&self) -> Result<Value, ApiError>;
+    /// Stops the daemon and everything it manages. Sends `yes`; confirm first.
+    async fn stop_daemon(&self) -> Result<Value, ApiError>;
+    /// Stops the daemon, waits for it to exit and starts a new one; returns
+    /// the new daemon's status. Sends `yes`; confirm first.
+    async fn restart_daemon(&self) -> Result<Value, ApiError>;
+    /// Starts the daemon when none is running; returns its status.
+    async fn start_daemon(&self) -> Result<Value, ApiError>;
+    /// The daemon's own log file, read directly because the TUI runs on the
+    /// same machine. `None` when there is no local file.
+    fn daemon_log(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// The real implementation over `devlanes-client`.
@@ -301,20 +330,27 @@ impl DaemonApi for ClientApi {
             .await?;
         let (sender, receiver) = mpsc::channel(EVENT_QUEUE);
         tokio::spawn(async move {
-            loop {
+            let ending = loop {
                 match client.next_frame().await {
                     Ok(Frame::Control(Control::Event(event))) => {
-                        if sender.send(event).await.is_err() {
-                            break;
+                        if sender.send(Ok(event)).await.is_err() {
+                            // The TUI dropped the stream; nobody is listening.
+                            return;
                         }
                     }
-                    // A terminal response ends the subscription, whether ok or error.
+                    // A terminal response ends the subscription; an error says why.
                     Ok(Frame::Control(Control::Response(response))) if response.id == id => {
-                        break;
+                        match response.result {
+                            Outcome::Ok { .. } => return,
+                            Outcome::Error { error } => break ApiError::Rpc(error),
+                        }
                     }
                     Ok(_) => {}
-                    Err(_) => break,
+                    Err(error) => break ApiError::from(error),
                 }
+            };
+            if sender.send(Err(ending)).await.is_err() {
+                // The TUI dropped the stream first; there is nobody left to tell.
             }
         });
         Ok(EventStream::new(receiver))
@@ -339,17 +375,19 @@ impl DaemonApi for ClientApi {
                 Input(Option<AttachInput>),
                 Frame(devlanes_client::Result<Frame>),
             }
-            loop {
+            // The reason the stream ended, shown by the UI.
+            let ending: ApiError = loop {
                 // Both receives are cancel-safe, so losing the race drops nothing.
                 let step = tokio::select! {
                     input = input_rx.recv() => Step::Input(input),
                     frame = client.next_frame() => Step::Frame(frame),
                 };
                 match step {
-                    Step::Input(None) => break,
+                    // The TUI detached; dropping the connection is the detach.
+                    Step::Input(None) => return,
                     Step::Input(Some(AttachInput::Bytes(data))) => {
-                        if client.send_bytes(stream_id, data).await.is_err() {
-                            break;
+                        if let Err(error) = client.send_bytes(stream_id, data).await {
+                            break ApiError::from(error);
                         }
                     }
                     Step::Input(Some(AttachInput::Resize { columns, rows })) => {
@@ -358,34 +396,44 @@ impl DaemonApi for ClientApi {
                             columns,
                             rows,
                         };
-                        let Ok(params) = serde_json::to_value(params) else {
-                            continue;
+                        let params = match serde_json::to_value(params) {
+                            Ok(params) => params,
+                            Err(error) => break ApiError::Decode(error.to_string()),
                         };
-                        // Observers may be refused; the stream stays usable either way.
                         match client
                             .request(Method::Resize, params, context.clone())
                             .await
                         {
-                            Ok(_) | Err(devlanes_client::Error::Rpc(_)) => {}
-                            Err(_) => break,
+                            Ok(_) => {}
+                            // A refused resize leaves the stream usable; report and go on.
+                            Err(devlanes_client::Error::Rpc(error)) => {
+                                let event = AttachEvent::Error(ApiError::Rpc(error));
+                                if output_tx.send(event).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(error) => break ApiError::from(error),
                         }
                     }
                     Step::Frame(Ok(Frame::Bytes {
                         stream_id: id,
                         data,
                     })) if id == stream_id => {
-                        if output_tx.send(data).await.is_err() {
-                            break;
+                        if output_tx.send(AttachEvent::Output(data)).await.is_err() {
+                            return;
                         }
                     }
-                    Step::Frame(Ok(Frame::Control(Control::Response(response))))
-                        if matches!(response.result, Outcome::Error { .. }) =>
-                    {
-                        break;
+                    Step::Frame(Ok(Frame::Control(Control::Response(response)))) => {
+                        if let Outcome::Error { error } = response.result {
+                            break ApiError::Rpc(error);
+                        }
                     }
                     Step::Frame(Ok(_)) => {}
-                    Step::Frame(Err(_)) => break,
+                    Step::Frame(Err(error)) => break ApiError::from(error),
                 }
+            };
+            if output_tx.send(AttachEvent::Error(ending)).await.is_err() {
+                // The TUI already detached; there is nobody left to tell.
             }
         });
         Ok(AttachSession::new(result, output_rx, input_tx))
@@ -436,6 +484,81 @@ impl DaemonApi for ClientApi {
             .shared_request(Method::Metrics, json!({}), self.context(None, false))
             .await?;
         Ok(UnitMetrics::parse_list(&value))
+    }
+
+    /// Calls `daemon.status` on the shared connection.
+    async fn daemon_status(&self) -> Result<Value, ApiError> {
+        self.shared_request(Method::DaemonStatus, json!({}), self.context(None, false))
+            .await
+    }
+
+    /// Calls `doctor` on the shared connection.
+    async fn doctor(&self) -> Result<Value, ApiError> {
+        self.shared_request(Method::Doctor, json!({}), self.context(None, false))
+            .await
+    }
+
+    /// Calls `lane.clean` on its own connection; cleaning waits for teardown.
+    async fn clean_lane(&self, lane: String) -> Result<Value, ApiError> {
+        let mut context = self.context(Some(lane.clone()), false);
+        context.yes = true;
+        self.oneshot(Method::LaneClean, json!({"lane": lane}), context)
+            .await
+    }
+
+    /// Calls `lane.gc` on its own connection.
+    async fn lane_gc(&self) -> Result<Value, ApiError> {
+        let mut context = self.context(None, false);
+        context.yes = true;
+        self.oneshot(Method::LaneGc, json!({}), context).await
+    }
+
+    /// Calls `daemon.shutdown`; the shared connection dies with the daemon.
+    async fn stop_daemon(&self) -> Result<Value, ApiError> {
+        let mut context = self.context(None, false);
+        context.yes = true;
+        let result = self
+            .oneshot(Method::DaemonShutdown, json!({}), context)
+            .await;
+        *self.shared.lock().await = None;
+        result
+    }
+
+    /// Shutdown, then a new daemon from this binary, as `devlanes daemon restart` does.
+    async fn restart_daemon(&self) -> Result<Value, ApiError> {
+        self.stop_daemon().await?;
+        // The old daemon releases its socket only after stopping everything.
+        let mut released = false;
+        for _ in 0..200 {
+            if Client::connect(&self.paths).await.is_err() {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if !released {
+            return Err(ApiError::Rpc(RpcError::new(
+                "timeout",
+                json!({"message": "the old daemon did not exit within 10 seconds"}),
+                1,
+            )));
+        }
+        self.start_daemon().await
+    }
+
+    /// Spawns the daemon if needed and keeps the connection as the shared one.
+    async fn start_daemon(&self) -> Result<Value, ApiError> {
+        let mut client = Client::connect_or_spawn(&self.paths).await?;
+        let status = client
+            .request(Method::DaemonStatus, json!({}), self.context(None, false))
+            .await?;
+        *self.shared.lock().await = Some(client);
+        Ok(status)
+    }
+
+    /// `$DEVLANES_HOME/logs/daemon.log`.
+    fn daemon_log(&self) -> Option<PathBuf> {
+        Some(self.paths.logs.join("daemon.log"))
     }
 }
 

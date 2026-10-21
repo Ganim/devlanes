@@ -36,10 +36,20 @@ async fn main() -> Result<(), devlanes_tui::Error> {
 | `pgup`/`pgdn`, wheel | scroll; older lines load from the daemon's logs |
 | `c` | copy mode; `y` copies through OSC 52 |
 | `o` / `O` | open the unit's URL / open the unit in a new terminal |
+| `C` | clean the selected lane; you type its name to confirm |
 | `e` | recent errors with their full text |
-| `tab` | lanes or monitor (from the list) |
+| `tab`, `1`-`3` | lanes, monitor or daemon (from the list) |
 | `?` | all keys |
 | `q` | quit |
+
+The daemon tab shows the daemon's status, each doctor check with its fix, and a live tail of `~/.devlanes/logs/daemon.log` (`j`/`k` scroll, `G` follows again).
+
+| key (daemon tab) | does |
+|---|---|
+| `R` | restart the daemon; asks first and says how many processes it stops |
+| `S` | stop the daemon; asks first |
+| `s` | start the daemon after it was stopped |
+| `g` | lane gc; asks first |
 
 In terminal focus every key except `shift+tab` goes to the unit, encoded for its current vt100 modes. Tab and `C-a` reach the unit, so shell completion and a tmux prefix work; shift+tab is reserved for focus and apps in the pane don't receive it.
 

@@ -2,7 +2,7 @@
 source: crates/tui/tests/it/main.rs
 expression: draw(&app)?.backend()
 ---
-" devlanes  lanes  monitor                                                                           "
+" devlanes  lanes  monitor  daemon                                                                   "
 "┌ lanes ───────────────────────────────┐┌ acme@2 ──────────────────────────────────────────────────┐"
 "│acme                                  ││state     idle                                            │"
 "│▾ ● @0 main                           ││branch    fix/cache                                       │"
@@ -10,8 +10,8 @@ expression: draw(&app)?.backend()
 "│    ◐ web  starting                   ││moves to  lane 3 at next start                            │"
 "│    ✕ worker  failed 1  agent         ││config    changed; restart to apply                       │"
 "│    ○ migrate  exited 0  task         ││                                                          │"
-"│▸ ○ @1 feat/login  idle               ││s start · x stop · r restart · t task · p profile · O term│"
-"│  ○ @2 fix/cache  moves to lane 3  con││                                                          │"
+"│▸ ○ @1 feat/login  idle               ││s start · x stop · r restart · t task · p profile · O     │"
+"│  ○ @2 fix/cache  moves to lane 3  co…││terminal                                                  │"
 "│  ○ -- spike  unassigned              ││                                                          │"
 "│shop                                  ││                                                          │"
 "│▾ ● @0 main                           ││                                                          │"
@@ -21,4 +21,4 @@ expression: draw(&app)?.backend()
 "│                                      ││                                                          │"
 "│                                      ││                                                          │"
 "└──────────────────────────────────────┘└──────────────────────────────────────────────────────────┘"
-" j/k move  s start  x stop  r restart  t task  C-a terminal  z zoom  o url  O open  c copy          "
+" j/k move  s start  x stop  r restart  t task  shift+tab terminal  z zoom  o url  O open  c copy    "

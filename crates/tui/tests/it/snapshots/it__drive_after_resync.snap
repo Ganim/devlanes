@@ -2,7 +2,7 @@
 source: crates/tui/tests/it/main.rs
 expression: terminal.backend()
 ---
-" devlanes  lanes  monitor                                                                           "
+" devlanes  lanes  monitor  daemon                                                                   "
 "┌ lanes ───────────────────────────────┐┌ acme@0:api · ready ──────────────────────────────────────┐"
 "│acme                                  ││                                                          │"
 "│▾ ● @0 main                           ││                                                          │"
@@ -11,7 +11,7 @@ expression: terminal.backend()
 "│    ✕ worker  failed 1  agent         ││                                                          │"
 "│    ○ migrate  exited 0  task         ││                                                          │"
 "│▸ ○ @1 feat/login  idle               ││                                                          │"
-"│  ○ @2 fix/cache  moves to lane 3  con││                                                          │"
+"│  ○ @2 fix/cache  moves to lane 3  co…││                                                          │"
 "│  ○ -- spike  unassigned              ││                                                          │"
 "│shop                                  ││                                                          │"
 "│▾ ● @0 main                           ││                                                          │"
@@ -25,4 +25,4 @@ expression: terminal.backend()
 "│                                      ││                                                          │"
 "│                                      ││                                                          │"
 "└──────────────────────────────────────┘└──────────────────────────────────────────────────────────┘"
-" j/k move  s start  x stop  r restart  t task  C-a terminal  z zoom  o url  O open  c copy          "
+" j/k move  s start  x stop  r restart  t task  shift+tab terminal  z zoom  o url  O open  c copy    "

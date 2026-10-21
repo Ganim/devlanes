@@ -1,5 +1,7 @@
 //! TUI tests against a fake daemon: rendering snapshots, key handling and resync.
 
+mod daemon;
+mod errors;
 mod fake;
 
 use std::{sync::Arc, time::Duration};
@@ -8,7 +10,7 @@ use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
 use devlanes_proto::{Method, events};
 use devlanes_tui::{
     DaemonApi, Options, UnitMetrics,
-    app::{App, Connection, Dialog, Effect, Focus, Msg, Tab},
+    app::{App, Connection, Dialog, Effect, Focus, Msg, Tab, Target},
     drive, ui,
 };
 use fake::{FakeApi, mixed_lanes};
@@ -41,6 +43,11 @@ fn key(code: KeyCode) -> Msg {
 /// Ctrl+`c`.
 fn ctrl(c: char) -> Msg {
     Msg::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+}
+
+/// Shift+Tab, the focus key; crossterm reports it as `BackTab`.
+fn shift_tab() -> Msg {
+    Msg::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
 }
 
 /// Presses `j` until the selected unit is `name`; returns the last attach generation.
@@ -185,7 +192,7 @@ async fn snapshot_run_confirm_and_reconnecting() -> TestResult {
     let (mut app, _) = loaded(&api, 80, 16).await;
     select_unit(&mut app, "migrate").ok_or("migrate not reachable")?;
     app.update(key(KeyCode::Char('t')));
-    app.update(Msg::EventsEnded);
+    app.update(Msg::EventsEnded(None));
     insta::assert_snapshot!("confirm_reconnecting", draw(&app)?.backend());
     Ok(())
 }
@@ -193,21 +200,74 @@ async fn snapshot_run_confirm_and_reconnecting() -> TestResult {
 // ---- keys ----------------------------------------------------------------------
 
 #[tokio::test]
-async fn ctrl_a_toggles_focus_only_with_a_unit() -> TestResult {
+async fn shift_tab_toggles_focus_only_with_a_unit() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 100, 24).await;
-    app.update(ctrl('a'));
+    app.update(shift_tab());
     assert_eq!(app.focus, Focus::List, "a lane row has no terminal");
     assert!(app.notice.is_some());
     let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
     feed(&mut app, generation, b"$ ");
-    app.update(ctrl('a'));
+    assert!(app.update(shift_tab()).is_empty());
     assert_eq!(app.focus, Focus::Terminal);
     // In terminal focus, list keys go to the unit instead.
     let effects = app.update(key(KeyCode::Char('q')));
     assert!(matches!(effects.as_slice(), [Effect::Input(bytes)] if bytes == b"q"));
-    app.update(ctrl('a'));
+    // Shift+Tab is consumed: it switches focus and sends nothing to the unit.
+    assert!(app.update(shift_tab()).is_empty());
     assert_eq!(app.focus, Focus::List);
+    Ok(())
+}
+
+#[tokio::test]
+async fn help_says_shift_tab_is_reserved() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 30).await;
+    app.update(key(KeyCode::Char('?')));
+    let terminal = draw(&app)?;
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("switch between list and terminal"), "{text}");
+    assert!(
+        text.contains("shift+tab is reserved for focus; apps in the pane don't receive it"),
+        "{text}"
+    );
+    assert!(!text.contains("C-a"), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn tab_and_ctrl_a_reach_the_unit_in_terminal_focus() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
+    feed(&mut app, generation, b"$ ");
+    // In the list, Tab cycles lanes, monitor, daemon.
+    app.update(key(KeyCode::Tab));
+    assert_eq!(app.tab, Tab::Monitor);
+    let effects = app.update(key(KeyCode::Tab));
+    assert_eq!(app.tab, Tab::Daemon);
+    assert!(effects.iter().any(|e| matches!(e, Effect::FetchDaemon)));
+    app.update(key(KeyCode::Tab));
+    assert_eq!(app.tab, Tab::Lanes);
+    app.update(ctrl('a'));
+    assert_eq!(app.focus, Focus::List, "C-a no longer switches focus");
+    app.update(shift_tab());
+    let effects = app.update(key(KeyCode::Tab));
+    assert!(matches!(effects.as_slice(), [Effect::Input(b)] if b == b"\t"));
+    assert_eq!(
+        app.tab,
+        Tab::Lanes,
+        "Tab completes in the shell, the tab stays"
+    );
+    let effects = app.update(ctrl('a'));
+    assert!(matches!(effects.as_slice(), [Effect::Input(b)] if b == &[1]));
+    assert_eq!(app.focus, Focus::Terminal);
     Ok(())
 }
 
@@ -254,6 +314,7 @@ async fn start_stop_restart_dispatch_lane_and_unit_refs() -> TestResult {
             lane,
             selection,
             label,
+            target,
         },
     ] = effects.as_slice()
     else {
@@ -262,6 +323,13 @@ async fn start_stop_restart_dispatch_lane_and_unit_refs() -> TestResult {
     assert_eq!((*method, lane.as_str()), (Method::Stop, "acme@0"));
     assert_eq!(selection.units, ["acme@0:worker"]);
     assert_eq!(label, "stop acme@0:worker");
+    assert_eq!(
+        *target,
+        Target::Unit {
+            lane: "acme@0".into(),
+            unit: "worker".into()
+        }
+    );
     Ok(())
 }
 
@@ -287,7 +355,7 @@ async fn arrows_follow_application_cursor_mode() -> TestResult {
     let (mut app, _) = loaded(&api, 100, 24).await;
     let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
     feed(&mut app, generation, b"");
-    app.update(ctrl('a'));
+    app.update(shift_tab());
     let effects = app.update(key(KeyCode::Up));
     assert!(matches!(effects.as_slice(), [Effect::Input(b)] if b == b"\x1b[A"));
     // The program switches to application cursor mode (as vim and less do).
@@ -315,7 +383,7 @@ async fn paste_respects_bracketed_mode_and_focus() -> TestResult {
         app.update(Msg::Paste("ls\n".into())).is_empty(),
         "list focus ignores paste"
     );
-    app.update(ctrl('a'));
+    app.update(shift_tab());
     let effects = app.update(Msg::Paste("ls\n".into()));
     assert!(matches!(effects.as_slice(), [Effect::Input(b)] if b == b"\x1b[200~ls\r\x1b[201~"));
     Ok(())
@@ -467,7 +535,7 @@ async fn disconnect_backs_off_and_resubscribes() -> TestResult {
     let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
     feed(&mut app, generation, b"");
     app.update(Msg::AttachClosed { generation });
-    let effects = app.update(Msg::EventsEnded);
+    let effects = app.update(Msg::EventsEnded(None));
     assert!(matches!(
         effects.as_slice(),
         [Effect::ScheduleReconnect { after_ms: 250 }]

@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/it/daemon.rs
+expression: screen(&render(&app)?)
+---
+" devlanes  lanes  monitor  daemon                                               "
+"┌ lanes ───────────────────────┐┌ acme@0:api · ready ──────────────────────────┐"
+"│acme                          ││                                              │"
+"│▾ ● @0 main                   ││                                              │"
+"│    ● api  ready              ││                                              │"
+"│    ◐ web  starting           ││                                              │"
+"│    ✕┌ confirm ─────────────────────────────────────────────────────────┐     │"
+"│    ○│clean acme@0?                                                     │     │"
+"│▸ ○ @│it stops the lane's units, runs its lane.clean tasks and infra    │     │"
+"│  ○ @│teardown, removes its per-lane containers and volumes, and frees  │     │"
+"│  ○ -│its ports and setup records.                                      │     │"
+"│shop │worktree files are not touched.                                   │     │"
+"│▾ ● @│                                                                  │     │"
+"│    ●│type acme@0 and press enter                                       │     │"
+"│    ○│> acme@0▏                                                         │     │"
+"│     │                                                                  │     │"
+"│     │esc cancels                                                       │     │"
+"│     └──────────────────────────────────────────────────────────────────┘     │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"└──────────────────────────────┘└──────────────────────────────────────────────┘"
+" j/k move  s start  x stop  r restart  t task  shift+tab terminal  z zoom       "

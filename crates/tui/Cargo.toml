@@ -19,13 +19,16 @@ futures-util.workspace = true
 ratatui = "0.30"
 serde.workspace = true
 serde_json.workspace = true
+strip-ansi-escapes = "0.2"
 thiserror.workspace = true
 tokio.workspace = true
 tui-term = { version = "0.3", default-features = false }
+unicode-width = "0.2"
 vt100 = "0.18"
 
 [dev-dependencies]
 insta = "1"
+tempfile.workspace = true
 
 [lints]
 workspace = true

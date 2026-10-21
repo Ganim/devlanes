@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/it/daemon.rs
+expression: screen(&render(&app)?)
+---
+" devlanes  lanes  monitor  daemon                                               "
+"┌ daemon ──────────────────────────────────────────────────────────────────────┐"
+"│version   0.1.0 · pid 4242 · up 2h 5m                                         │"
+"│socket    /home/acme/.devlanes/run/daemon.sock                                │"
+"│processes 3 managed · 4 event subscribers · 2 projects                        │"
+"│                                                                              │"
+"│fail tls     no CA: no CA has been created yet                                │"
+"│             fix: devlanes certs trust                                        │"
+"│warn p┌ confirm ───────────────────────────────────────────────────────┐      │"
+"│      │restart the daemon?                                             │      │"
+"│      │it stops 3 managed processes; start them again afterwards with  │      │"
+"│ok   s│devlanes lane resume.                                           │      │"
+"│ok   d│the TUI reconnects when the new daemon is up.                   │      │"
+"│ok   d│                                                                │      │"
+"│… more│y restart · n or esc cancels                                    │      │"
+"└──────└────────────────────────────────────────────────────────────────┘──────┘"
+"┌ daemon.log following ────────────────────────────────────────────────────────┐"
+"│port 443 needs root "                                                         │"
+"│2026-10-21T09:13:44.502Z  INFO devlanes_daemon::lifecycle: lane started       │"
+"│lane=acme@0 units=3                                                           │"
+"│2026-10-21T09:14:02.990Z ERROR devlanes_daemon::lifecycle: compose failed     │"
+"│lane=acme@1                                                                   │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
+" j/k scroll log  R restart  S stop  g lane gc  tab lanes  q quit                "

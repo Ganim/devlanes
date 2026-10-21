@@ -1,4 +1,8 @@
 //! The event loop and the executor that turns effects into daemon calls.
+//!
+//! Every failure becomes a [`Msg`] for the app, which reports it through one
+//! path. A failed channel send only happens after the loop quit, when nobody
+//! is left to show the result.
 
 use std::{
     io::{self, Write},
@@ -31,7 +35,7 @@ use tokio::{
 
 use crate::{
     Error, Options,
-    api::{AttachInput, DaemonApi},
+    api::{AttachEvent, AttachInput, DaemonApi},
     app::{App, Effect, Msg},
     input, ui,
 };
@@ -77,15 +81,19 @@ fn restore() {
     if !ACTIVE.swap(false, Ordering::SeqCst) {
         return;
     }
-    // Errors are ignored: this runs during unwinding and must not panic again.
-    let _ = execute!(
+    // This can run while unwinding, so failures are printed rather than raised;
+    // by now the alternate screen is gone and stderr is readable.
+    let screen = execute!(
         io::stdout(),
         DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen,
         crossterm::cursor::Show
     );
-    let _ = disable_raw_mode();
+    let raw = disable_raw_mode();
+    if let Err(error) = screen.and(raw) {
+        eprintln!("devlanes: could not restore the terminal ({error}); run `reset`");
+    }
 }
 
 /// Chains a hook that restores the terminal before the panic message prints.
@@ -121,6 +129,9 @@ where
     let mut executor = Executor::new(api, sender, options, clipboard);
     for effect in app.start() {
         executor.execute(effect);
+    }
+    if !executor.flush(&mut app) {
+        return Ok(());
     }
     let mut tick = interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -177,6 +188,16 @@ fn terminal_msg(event: TermEvent) -> Option<Msg> {
     }
 }
 
+/// Sends a result to the loop; false once the loop has quit.
+async fn deliver(sender: &mpsc::Sender<Msg>, msg: Msg) -> bool {
+    sender.send(msg).await.is_ok()
+}
+
+/// [`deliver`] from a blocking thread (URL opener, terminal launcher).
+fn deliver_blocking(sender: &mpsc::Sender<Msg>, msg: Msg) -> bool {
+    sender.blocking_send(msg).is_ok()
+}
+
 /// Owns background tasks and the attached stream's input queue.
 struct Executor {
     api: Arc<dyn DaemonApi>,
@@ -186,6 +207,12 @@ struct Executor {
     subscription: Option<JoinHandle<()>>,
     attach: Option<(JoinHandle<()>, mpsc::Sender<AttachInput>)>,
     metrics: Option<JoinHandle<()>>,
+    /// The daemon tab's facts request and log read, one of each at a time.
+    daemon: Option<JoinHandle<()>>,
+    log: Option<JoinHandle<()>>,
+    /// Failures found while running an effect, applied before the next message
+    /// so they cannot be lost to a full channel.
+    local: Vec<Msg>,
 }
 
 impl Executor {
@@ -204,14 +231,44 @@ impl Executor {
             subscription: None,
             attach: None,
             metrics: None,
+            daemon: None,
+            log: None,
+            local: Vec::new(),
         }
     }
 
-    /// Updates the app and runs its effects; false when the user quit.
+    /// Updates the app, runs its effects and any local failures they caused;
+    /// false when the user quit.
     fn apply(&mut self, app: &mut App, msg: Msg) -> bool {
-        app.update(msg)
+        let running = app
+            .update(msg)
             .into_iter()
-            .all(|effect| self.execute(effect))
+            .all(|effect| self.execute(effect));
+        running && self.flush(app)
+    }
+
+    /// Applies queued local failures; they may queue more, so this loops.
+    fn flush(&mut self, app: &mut App) -> bool {
+        while !self.local.is_empty() {
+            for msg in std::mem::take(&mut self.local) {
+                let running = app
+                    .update(msg)
+                    .into_iter()
+                    .all(|effect| self.execute(effect));
+                if !running {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Queues a local failure for the app.
+    fn fail(&mut self, what: &str, message: String) {
+        self.local.push(Msg::Failed {
+            what: what.into(),
+            message,
+        });
     }
 
     /// Runs one effect, returning false for [`Effect::Quit`].
@@ -225,7 +282,7 @@ impl Executor {
             }
             Effect::Refresh => {
                 tokio::spawn(async move {
-                    let _ = sender.send(Msg::Status(api.status().await)).await;
+                    deliver(&sender, Msg::Status(api.status().await)).await;
                 });
             }
             Effect::Subscribe => {
@@ -237,25 +294,31 @@ impl Executor {
                     let mut stream = match api.subscribe().await {
                         Ok(stream) => stream,
                         Err(error) => {
-                            let _ = sender.send(Msg::Subscribed(Err(error))).await;
+                            deliver(&sender, Msg::Subscribed(Err(error))).await;
                             return;
                         }
                     };
-                    if sender.send(Msg::Subscribed(Ok(()))).await.is_err() {
+                    if !deliver(&sender, Msg::Subscribed(Ok(()))).await {
                         return;
                     }
-                    while let Some(event) = stream.next().await {
-                        if sender.send(Msg::Event(event)).await.is_err() {
-                            return;
+                    let reason = loop {
+                        match stream.next().await {
+                            Some(Ok(event)) => {
+                                if !deliver(&sender, Msg::Event(event)).await {
+                                    return;
+                                }
+                            }
+                            Some(Err(error)) => break Some(error),
+                            None => break None,
                         }
-                    }
-                    let _ = sender.send(Msg::EventsEnded).await;
+                    };
+                    deliver(&sender, Msg::EventsEnded(reason)).await;
                 }));
             }
             Effect::ScheduleReconnect { after_ms } => {
                 tokio::spawn(async move {
                     sleep(Duration::from_millis(after_ms)).await;
-                    let _ = sender.send(Msg::Reconnect).await;
+                    deliver(&sender, Msg::Reconnect).await;
                 });
             }
             Effect::Attach {
@@ -287,17 +350,23 @@ impl Executor {
                 lane,
                 selection,
                 label,
+                target,
             } => {
                 tokio::spawn(async move {
                     let result = api.control(method, lane, selection).await;
-                    let _ = sender.send(Msg::ActionDone { label, result }).await;
+                    let msg = Msg::ActionDone {
+                        label,
+                        target,
+                        result,
+                    };
+                    deliver(&sender, msg).await;
                 });
             }
             Effect::Run { lane, params } => {
                 tokio::spawn(async move {
                     let task = params.task.clone();
                     let result = api.run_task(lane.clone(), params).await;
-                    let _ = sender.send(Msg::RunDone { lane, task, result }).await;
+                    deliver(&sender, Msg::RunDone { lane, task, result }).await;
                 });
             }
             Effect::FetchLogs {
@@ -308,13 +377,12 @@ impl Executor {
             } => {
                 tokio::spawn(async move {
                     let result = api.logs(lane, query).await;
-                    let _ = sender
-                        .send(Msg::Logs {
-                            generation,
-                            older,
-                            result,
-                        })
-                        .await;
+                    let msg = Msg::Logs {
+                        generation,
+                        older,
+                        result,
+                    };
+                    deliver(&sender, msg).await;
                 });
             }
             Effect::FetchMetrics => {
@@ -327,13 +395,17 @@ impl Executor {
                     return true;
                 }
                 self.metrics = Some(tokio::spawn(async move {
-                    let _ = sender.send(Msg::Metrics(api.metrics().await)).await;
+                    deliver(&sender, Msg::Metrics(api.metrics().await)).await;
                 }));
             }
             Effect::OpenUrl(url) => {
                 tokio::task::spawn_blocking(move || {
                     if let Err(error) = open_url(&url) {
-                        let _ = sender.blocking_send(Msg::Failed(format!("open {url}: {error}")));
+                        let msg = Msg::Failed {
+                            what: format!("open {url}"),
+                            message: error.to_string(),
+                        };
+                        deliver_blocking(&sender, msg);
                     }
                 });
             }
@@ -344,8 +416,60 @@ impl Executor {
                     .write_all(input::osc52(&text).as_bytes())
                     .and_then(|()| self.clipboard.flush());
                 if let Err(error) = written {
-                    let _ = sender.try_send(Msg::Failed(format!("copy: {error}")));
+                    self.fail("copy", error.to_string());
                 }
+            }
+            Effect::CleanLane { lane } => {
+                tokio::spawn(async move {
+                    let result = api.clean_lane(lane.clone()).await;
+                    deliver(&sender, Msg::CleanDone { lane, result }).await;
+                });
+            }
+            Effect::LaneGc => {
+                tokio::spawn(async move {
+                    deliver(&sender, Msg::GcDone(api.lane_gc().await)).await;
+                });
+            }
+            Effect::FetchDaemon => {
+                // A slow daemon must not pile up one request per refresh.
+                if self.daemon.as_ref().is_some_and(|task| !task.is_finished()) {
+                    return true;
+                }
+                self.daemon = Some(tokio::spawn(async move {
+                    let (status, doctor) = tokio::join!(api.daemon_status(), api.doctor());
+                    deliver(&sender, Msg::DaemonInfo { status, doctor }).await;
+                }));
+            }
+            Effect::ReadDaemonLog { offset } => {
+                if self.log.as_ref().is_some_and(|task| !task.is_finished()) {
+                    return true;
+                }
+                let Some(path) = api.daemon_log() else {
+                    self.local.push(Msg::DaemonLog(Err(
+                        "this daemon has no local log file".into()
+                    )));
+                    return true;
+                };
+                self.log = Some(tokio::task::spawn_blocking(move || {
+                    let result = crate::logfile::read(&path, offset)
+                        .map_err(|error| format!("{}: {error}", path.display()));
+                    deliver_blocking(&sender, Msg::DaemonLog(result));
+                }));
+            }
+            Effect::StopDaemon => {
+                tokio::spawn(async move {
+                    deliver(&sender, Msg::DaemonStopped(api.stop_daemon().await)).await;
+                });
+            }
+            Effect::RestartDaemon => {
+                tokio::spawn(async move {
+                    deliver(&sender, Msg::DaemonRestarted(api.restart_daemon().await)).await;
+                });
+            }
+            Effect::StartDaemon => {
+                tokio::spawn(async move {
+                    deliver(&sender, Msg::DaemonStarted(api.start_daemon().await)).await;
+                });
             }
         }
         true
@@ -358,14 +482,19 @@ impl Executor {
         }
     }
 
-    /// Queues input for the attached stream; input is dropped when nothing is attached.
+    /// Queues input for the attached stream; a full queue drops the input and says so.
     fn send_attach(&mut self, input: AttachInput) {
-        if let Some((_, sender)) = &self.attach
-            && sender.try_send(input).is_err()
-        {
-            let _ = self
-                .sender
-                .try_send(Msg::Failed("input dropped: unit is not reading".into()));
+        let Some((_, sender)) = &self.attach else {
+            self.fail("input", "no terminal is attached".into());
+            return;
+        };
+        match sender.try_send(input) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.fail("input", "dropped: the unit is not reading its input".into());
+            }
+            // The stream ended; its own message explains why.
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
         }
     }
 
@@ -375,7 +504,8 @@ impl Executor {
         let launcher = match &self.launcher {
             Ok(launcher) => Arc::clone(launcher),
             Err(message) => {
-                let _ = sender.try_send(Msg::Failed(message.clone()));
+                let message = message.clone();
+                self.fail("open terminal", message);
                 return;
             }
         };
@@ -395,7 +525,11 @@ impl Executor {
                 title: Some(title),
             };
             if let Err(error) = launcher.launch(&request) {
-                let _ = sender.blocking_send(Msg::Failed(format!("open terminal: {error}")));
+                let msg = Msg::Failed {
+                    what: "open terminal".into(),
+                    message: error.to_string(),
+                };
+                deliver_blocking(&sender, msg);
             }
         });
     }
@@ -409,13 +543,17 @@ impl Drop for Executor {
         if let Some(task) = self.subscription.take() {
             task.abort();
         }
+        if let Some(task) = self.daemon.take() {
+            task.abort();
+        }
         if let Some(task) = self.metrics.take() {
             task.abort();
         }
     }
 }
 
-/// Opens the attach stream, then forwards output to the app and input to the daemon.
+/// Opens the attach stream, then forwards output and errors to the app and
+/// input to the daemon.
 async fn pump_attach(
     api: Arc<dyn DaemonApi>,
     sender: mpsc::Sender<Msg>,
@@ -427,48 +565,47 @@ async fn pump_attach(
     let session = match api.attach(lane, params).await {
         Ok(session) => session,
         Err(error) => {
-            let _ = sender
-                .send(Msg::AttachOpened {
-                    generation,
-                    result: Err(error),
-                })
-                .await;
+            let msg = Msg::AttachOpened {
+                generation,
+                result: Err(error),
+            };
+            deliver(&sender, msg).await;
             return;
         }
     };
     let (result, mut output, remote) = session.split();
-    if sender
-        .send(Msg::AttachOpened {
-            generation,
-            result: Ok(result),
-        })
-        .await
-        .is_err()
-    {
+    let opened = Msg::AttachOpened {
+        generation,
+        result: Ok(result),
+    };
+    if !deliver(&sender, opened).await {
         return;
     }
     loop {
         tokio::select! {
-            data = output.recv() => match data {
-                Some(bytes) => {
-                    let msg = Msg::AttachOutput { generation, bytes: bytes.to_vec() };
-                    if sender.send(msg).await.is_err() {
-                        return;
-                    }
+            event = output.recv() => {
+                let msg = match event {
+                    Some(AttachEvent::Output(bytes)) => Msg::AttachOutput { generation, bytes: bytes.to_vec() },
+                    Some(AttachEvent::Error(error)) => Msg::StreamError { generation, error },
+                    None => break,
+                };
+                if !deliver(&sender, msg).await {
+                    return;
                 }
-                None => break,
             },
             request = input.recv() => match request {
                 Some(request) => {
+                    // A closed remote means the stream ended; keep reading output,
+                    // which delivers the reason and then closes.
                     if remote.send(request).await.is_err() {
-                        break;
+                        continue;
                     }
                 }
                 None => return,
             },
         }
     }
-    let _ = sender.send(Msg::AttachClosed { generation }).await;
+    deliver(&sender, Msg::AttachClosed { generation }).await;
 }
 
 /// Hands a URL to the desktop's opener.

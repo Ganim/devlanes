@@ -1,19 +1,24 @@
 //! The devlanes terminal UI: a daemon client like the CLI, with a lane tree,
-//! a live terminal pane for one unit and a resource monitor.
+//! a live terminal pane for one unit, a resource monitor and a daemon tab.
 //!
 //! Quitting only closes connections. Units keep running in the daemon.
 
 pub mod api;
 pub mod app;
+pub mod doctor;
 pub mod input;
+pub mod logfile;
 mod runtime;
 pub mod screen;
+pub mod text;
 pub mod ui;
+pub mod words;
 
 use std::{io::IsTerminal, sync::Arc};
 
 pub use api::{
-    ApiError, AttachInput, AttachSession, ClientApi, DaemonApi, EventStream, UnitMetrics,
+    ApiError, AttachEvent, AttachInput, AttachSession, ClientApi, DaemonApi, EventStream,
+    UnitMetrics,
 };
 pub use devlanes_client::Paths;
 pub use devlanes_term::TerminalLauncher;

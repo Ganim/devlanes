@@ -2,7 +2,7 @@
 source: crates/tui/tests/it/main.rs
 expression: draw(&app)?.backend()
 ---
-" devlanes  lanes  monitor                                                       "
+" devlanes  lanes  monitor  daemon                                               "
 "┌ lanes ───────────────────────┐┌ devlanes ────────────────────────────────────┐"
 "│no lanes                      ││no lane selected                              │"
 "│run devlanes start in a       ││                                              │"
@@ -13,4 +13,4 @@ expression: draw(&app)?.backend()
 "│                              ││                                              │"
 "│                              ││                                              │"
 "└──────────────────────────────┘└──────────────────────────────────────────────┘"
-" j/k move  s start  x stop  r restart  t task  C-a terminal  z zoom  o url      "
+" j/k move  s start  x stop  r restart  t task  shift+tab terminal  z zoom       "
