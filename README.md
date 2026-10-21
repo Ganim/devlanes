@@ -19,6 +19,23 @@ cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes d
 
 `install.sh` verifies the archive against the release's `SHA256SUMS`, installs to `~/.local/bin` (`DEVLANES_INSTALL_DIR` changes it) and takes `DEVLANES_VERSION=X.Y.Z` to pin a release. [packaging](packaging/README.md) describes the release pipeline.
 
+### Shorter name
+
+devlanes ships no `dl` command. To type `dl`, add an alias to your shell config, after the line that loads devlanes completions, so the alias completes like `devlanes`:
+
+```sh
+# zsh, ~/.zshrc
+alias dl=devlanes
+compdef dl=devlanes
+
+# bash, ~/.bashrc
+alias dl=devlanes
+complete -o nospace -o bashdefault -F _clap_complete_devlanes dl
+
+# fish, ~/.config/fish/config.fish (fish aliases inherit the command's completions)
+alias dl devlanes
+```
+
 ## Usage
 
 ```sh
