@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-transport-ssh"
+description = "SSH transport for devlanes connect over system OpenSSH with ControlMaster and askpass"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

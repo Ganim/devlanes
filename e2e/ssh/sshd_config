@@ -1,5 +1,5 @@
 # Key-only login for the test user. Forwarding stays off because devlanes only
-# needs a session channel (design-draft section 5).
+# needs a session channel: the mux runs over `devlanes tunnel --stdio`.
 AllowUsers devlanes
 PermitRootLogin no
 PubkeyAuthentication yes

@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-term-iterm2"
+description = "iTerm2 terminal launcher for devlanes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-preset-tauri"
+description = "devlanes preset for side-by-side Tauri dev apps per lane and replica"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

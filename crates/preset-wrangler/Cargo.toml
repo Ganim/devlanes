@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-preset-wrangler"
+description = "devlanes preset for wrangler dev: per-lane ports, vars and dev registry"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-trust-macos"
+description = "macOS keychain and Firefox NSS trust stores for the devlanes CA."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

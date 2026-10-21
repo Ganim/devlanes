@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-cli"
+description = "Command parsing, request building, and output rendering for devlanes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-runner-pty"
+description = "PTY and pipe runner for daemon-owned units, reaped by PID"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

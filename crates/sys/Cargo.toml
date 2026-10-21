@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-sys"
+description = "Process-table queries, PID-safe signalling and descendant tracking for macOS and Linux"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-logs"
+description = "Per-unit log framing, segmented storage, and bounded queries for the devlanes daemon."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

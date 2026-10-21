@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-transport"
+description = "Transport-independent mux protocol between a devlanes client daemon and a box"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

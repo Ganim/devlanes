@@ -2,8 +2,9 @@
 
 `devlanes-hosts` is a small program that runs as root and keeps one block of
 lines in `/etc/hosts` in sync with the hostnames devlanes routes. It exists for
-programs that cannot resolve `*.localhost` names on their own. On machines and
-projects that don't need it, devlanes never calls it.
+programs that cannot resolve `*.localhost` names on their own. The daemon only
+calls it when a project needs names written, or when the helper is installed and
+a block from an earlier run has to be replaced or removed.
 
 ## Background
 
@@ -345,3 +346,7 @@ DEVLANES_HOSTS_HELPER=$PWD/target/release/devlanes-hosts \
 
 Bump `PROTOCOL` in `src/lib.rs` whenever arguments, input or output change in a
 way an older daemon or helper would misread.
+
+## License
+
+Apache-2.0

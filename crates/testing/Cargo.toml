@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-testing"
+description = "Isolated test homes, Git repositories and a native HTTP/process fixture server for devlanes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

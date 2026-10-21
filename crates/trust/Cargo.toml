@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-trust"
+description = "Trust-store trait and shared NSS support for installing the devlanes CA."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

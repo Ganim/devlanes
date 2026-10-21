@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-term"
+description = "TerminalLauncher trait for opening devlanes units in a terminal application"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

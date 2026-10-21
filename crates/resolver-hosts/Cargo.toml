@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-resolver-hosts"
+description = "When and which hostnames devlanes writes to /etc/hosts, the sudo client for the helper, and its installer."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

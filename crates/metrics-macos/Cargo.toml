@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-metrics-macos"
+description = "macOS libproc process collector for devlanes-metrics"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

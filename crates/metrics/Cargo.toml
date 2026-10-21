@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-metrics"
+description = "Resource samples, roll-ups, history, run summaries and baselines for devlanes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-core"
+description = "Shared domain types, allocation logic, and integration traits for devlanes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-env-mise"
+description = "mise environment contributor for devlanes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

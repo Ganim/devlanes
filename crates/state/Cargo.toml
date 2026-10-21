@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-state"
+description = "Daemon-owned SQLite persistence and allocation storage for devlanes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

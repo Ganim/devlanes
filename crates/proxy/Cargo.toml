@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-proxy"
+description = "Streaming HTTP and TLS reverse proxy for devlanes service routes."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

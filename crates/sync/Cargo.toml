@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-sync"
+description = "Watcher-driven one-way folder sync for devlanes services."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

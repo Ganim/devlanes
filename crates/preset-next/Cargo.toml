@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-preset-next"
+description = "devlanes preset that binds next dev to the lane's port"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

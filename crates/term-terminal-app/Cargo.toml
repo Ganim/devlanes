@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-term-terminal-app"
+description = "macOS Terminal.app launcher for devlanes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

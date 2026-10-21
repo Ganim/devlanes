@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-metrics-docker"
+description = "Docker Engine container collector for devlanes-metrics"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

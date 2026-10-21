@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-resolver-dns"
+description = "Embedded loopback DNS server and OS resolver files for a custom devlanes TLD."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

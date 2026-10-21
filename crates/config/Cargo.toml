@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-config"
+description = "Typed YAML configuration, expression evaluation, and JSON Schema generation for devlanes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

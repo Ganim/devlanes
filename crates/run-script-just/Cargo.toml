@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-run-script-just"
+description = "Runs justfile recipes for devlanes run_script"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

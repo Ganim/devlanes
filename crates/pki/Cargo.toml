@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-pki"
+description = "Per-user certificate authorities and route-authorized TLS certificates for devlanes."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

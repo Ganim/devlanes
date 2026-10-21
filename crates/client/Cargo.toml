@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-client"
+description = "Unix-socket daemon client for devlanes CLI, completions, and TUI"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

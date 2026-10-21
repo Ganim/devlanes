@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-infra-compose"
+description = "Shared and per-lane Docker Compose projects for devlanes infra"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

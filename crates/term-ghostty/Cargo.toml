@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-term-ghostty"
+description = "Ghostty terminal launcher for devlanes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

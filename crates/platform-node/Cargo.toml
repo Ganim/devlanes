@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-platform-node"
+description = "Node.js and Wrangler launch contributors for devlanes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
