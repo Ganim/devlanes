@@ -1,0 +1,258 @@
+---
+source: crates/resolve/tests/it/main.rs
+expression: lane_view(&lane)
+---
+{
+  "lane": {
+    "index": 1,
+    "name": "lane1",
+    "label": "feature-login"
+  },
+  "domain": "myapp-1.localhost",
+  "port": 21000,
+  "vars": {},
+  "profile": null,
+  "infra_enabled": true,
+  "routes": [
+    "api.myapp-1.localhost -> api:21000",
+    "myapp-1.localhost -> web:21001"
+  ],
+  "origins": [
+    "https://api.myapp-1.localhost",
+    "http://localhost:21000",
+    "http://127.0.0.1:21000",
+    "https://myapp-1.localhost",
+    "http://localhost:21001",
+    "http://127.0.0.1:21001"
+  ],
+  "lane_env": {
+    "DEVLANES": "1",
+    "DEVLANES_CA_CERT": "/home/dev/.devlanes/ca/ca.pem",
+    "DEVLANES_LANE": "1",
+    "DEVLANES_LANE_NAME": "lane1",
+    "DEVLANES_PROJECT": "myapp",
+    "DEVLANES_PUBLIC_URL_API": "https://api.myapp-1.localhost",
+    "DEVLANES_PUBLIC_URL_WEB": "https://myapp-1.localhost"
+  },
+  "errors": {},
+  "warnings": [],
+  "services": {
+    "api": {
+      "replica": "1/1",
+      "port": 21000,
+      "ports": {},
+      "url": "http://127.0.0.1:21000",
+      "public_url": "https://api.myapp-1.localhost",
+      "hosts": [
+        "api.myapp-1.localhost"
+      ],
+      "ready": "Tcp { port: 21000 } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "pnpm",
+        "args": [
+          "run",
+          "dev"
+        ],
+        "cwd": "/work/myapp-lanes/lane-1/api",
+        "platform": "node",
+        "script": {
+          "source": "/work/myapp-lanes/lane-1/api/package.json",
+          "name": "dev",
+          "runner": "fake",
+          "cwd": "/work/myapp-lanes/lane-1/api"
+        },
+        "contributors": [
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "DATABASE_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/myapp_lane1",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_CA_CERT": "Devlanes: /home/dev/.devlanes/ca/ca.pem",
+          "DEVLANES_LANE": "Devlanes: 1",
+          "DEVLANES_LANE_NAME": "Devlanes: lane1",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: myapp",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://api.myapp-1.localhost",
+          "DEVLANES_SERVICE": "Devlanes: api",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Client: /usr/bin:/bin",
+          "PORT": "Devlanes: 21000"
+        }
+      }
+    },
+    "web": {
+      "replica": "1/1",
+      "port": 21001,
+      "ports": {},
+      "url": "http://127.0.0.1:21001",
+      "public_url": "https://myapp-1.localhost",
+      "hosts": [
+        "myapp-1.localhost"
+      ],
+      "ready": "Tcp { port: 21001 } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "pnpm",
+        "args": [
+          "run",
+          "dev"
+        ],
+        "cwd": "/work/myapp-lanes/lane-1/web",
+        "platform": "node",
+        "script": {
+          "source": "/work/myapp-lanes/lane-1/web/package.json",
+          "name": "dev",
+          "runner": "fake",
+          "cwd": "/work/myapp-lanes/lane-1/web"
+        },
+        "contributors": [
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "DATABASE_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/myapp_lane1",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_CA_CERT": "Devlanes: /home/dev/.devlanes/ca/ca.pem",
+          "DEVLANES_LANE": "Devlanes: 1",
+          "DEVLANES_LANE_NAME": "Devlanes: lane1",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: myapp",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://myapp-1.localhost",
+          "DEVLANES_SERVICE": "Devlanes: web",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Client: /usr/bin:/bin",
+          "PORT": "Devlanes: 21001",
+          "VITE_API_URL": "Service: https://api.myapp-1.localhost"
+        }
+      }
+    }
+  },
+  "tasks": {
+    "migrate": {
+      "when": "Start",
+      "after_services": false,
+      "profiles": null,
+      "active": true,
+      "steps": [],
+      "confirm": null,
+      "interactive": false,
+      "timeout": null,
+      "pty": false,
+      "launch": {
+        "program": "pnpm",
+        "args": [
+          "run",
+          "migrate"
+        ],
+        "cwd": "/work/myapp-lanes/lane-1/api",
+        "platform": "node",
+        "script": {
+          "source": "/work/myapp-lanes/lane-1/api/package.json",
+          "name": "migrate",
+          "runner": "fake",
+          "cwd": "/work/myapp-lanes/lane-1/api"
+        },
+        "contributors": [
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "DATABASE_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/myapp_lane1",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_CA_CERT": "Devlanes: /home/dev/.devlanes/ca/ca.pem",
+          "DEVLANES_LANE": "Devlanes: 1",
+          "DEVLANES_LANE_NAME": "Devlanes: lane1",
+          "DEVLANES_PROJECT": "Devlanes: myapp",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Client: /usr/bin:/bin"
+        }
+      }
+    }
+  },
+  "setup": {
+    "database": {
+      "container": null,
+      "ignore_errors": false,
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "docker compose exec -T postgres createdb -U postgres myapp_lane1"
+        ],
+        "cwd": "/work/myapp-lanes/lane-1",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "DATABASE_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/myapp_lane1",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_CA_CERT": "Devlanes: /home/dev/.devlanes/ca/ca.pem",
+          "DEVLANES_LANE": "Devlanes: 1",
+          "DEVLANES_LANE_NAME": "Devlanes: lane1",
+          "DEVLANES_PROJECT": "Devlanes: myapp",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Client: /usr/bin:/bin"
+        }
+      }
+    }
+  },
+  "teardown": {
+    "database": {
+      "container": null,
+      "ignore_errors": false,
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "docker compose exec -T postgres dropdb -U postgres --if-exists myapp_lane1"
+        ],
+        "cwd": "/work/myapp-lanes/lane-1",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "DATABASE_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/myapp_lane1",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_CA_CERT": "Devlanes: /home/dev/.devlanes/ca/ca.pem",
+          "DEVLANES_LANE": "Devlanes: 1",
+          "DEVLANES_LANE_NAME": "Devlanes: lane1",
+          "DEVLANES_PROJECT": "Devlanes: myapp",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Client: /usr/bin:/bin"
+        }
+      }
+    }
+  }
+}

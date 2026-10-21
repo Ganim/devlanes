@@ -1,0 +1,26 @@
+[package]
+name = "devlanes-resolve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+devlanes-config = { path = "../config" }
+devlanes-core = { path = "../core" }
+globset = "0.4"
+indexmap = "2"
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+async-trait.workspace = true
+insta = { version = "1", features = ["json"] }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,1970 @@
+---
+source: crates/resolve/tests/it/main.rs
+expression: lane_view(&lane)
+---
+{
+  "lane": {
+    "index": 2,
+    "name": "lane2",
+    "label": "feature-billing"
+  },
+  "domain": "acme-2.localhost",
+  "port": 21000,
+  "vars": {
+    "domain": "acme-2.localhost",
+    "db_name": "acme_lane2",
+    "redis_db": 2,
+    "vhost": "acme_lane2",
+    "bucket": "media-lane2"
+  },
+  "profile": "default",
+  "infra_enabled": true,
+  "routes": [
+    "catalog.acme-2.localhost -> catalog:21004",
+    "crm.acme-2.localhost -> crm-api:21006",
+    "admin-api.acme-2.localhost -> admin-api:21000",
+    "payments-api.acme-2.localhost -> payments-api:21005",
+    "sms-stub.acme-2.localhost -> sms-stub:3998",
+    "app.acme-2.localhost -> user-web:21019",
+    "docs.acme-2.localhost -> docs:21010",
+    "api.acme-2.localhost -> api-gateway:21002",
+    "*.acme-2.localhost -> api-gateway:21002 (fallback)",
+    "inspect-gateway.acme-2.localhost -> api-gateway:21003",
+    "funnels.acme-2.localhost -> api-gateway:21002 (upstream host)",
+    "pages.acme-2.localhost -> pages-worker:21014",
+    "*.pages-2.localhost -> pages-worker:21014",
+    "ai.acme-2.localhost -> ai-gateway:21001",
+    "sim.acme-2.localhost -> ios-sim:21012"
+  ],
+  "origins": [
+    "https://catalog.acme-2.localhost",
+    "http://localhost:21004",
+    "http://127.0.0.1:21004",
+    "https://crm.acme-2.localhost",
+    "http://localhost:21006",
+    "http://127.0.0.1:21006",
+    "https://admin-api.acme-2.localhost",
+    "http://localhost:21000",
+    "http://127.0.0.1:21000",
+    "https://payments-api.acme-2.localhost",
+    "http://localhost:21005",
+    "http://127.0.0.1:21005",
+    "https://sms-stub.acme-2.localhost",
+    "http://localhost:3998",
+    "http://127.0.0.1:3998",
+    "https://app.acme-2.localhost",
+    "http://localhost:21019",
+    "http://127.0.0.1:21019",
+    "https://docs.acme-2.localhost",
+    "http://localhost:21010",
+    "http://127.0.0.1:21010",
+    "https://api.acme-2.localhost",
+    "https://inspect-gateway.acme-2.localhost",
+    "https://funnels.acme-2.localhost",
+    "http://localhost:21002",
+    "http://127.0.0.1:21002",
+    "https://pages.acme-2.localhost",
+    "http://localhost:21014",
+    "http://127.0.0.1:21014",
+    "http://localhost:21013",
+    "http://127.0.0.1:21013",
+    "http://localhost:21016",
+    "http://127.0.0.1:21016",
+    "https://ai.acme-2.localhost",
+    "http://localhost:21001",
+    "http://127.0.0.1:21001",
+    "http://localhost:21018",
+    "http://127.0.0.1:21018",
+    "http://localhost:21011",
+    "http://127.0.0.1:21011",
+    "https://sim.acme-2.localhost",
+    "http://localhost:21012",
+    "http://127.0.0.1:21012",
+    "http://localhost:21007",
+    "http://127.0.0.1:21007",
+    "http://localhost:21009",
+    "http://127.0.0.1:21009",
+    "http://localhost:21008",
+    "http://127.0.0.1:21008"
+  ],
+  "lane_env": {
+    "DEVLANES": "1",
+    "DEVLANES_LANE": "2",
+    "DEVLANES_LANE_NAME": "lane2",
+    "DEVLANES_PROJECT": "acme",
+    "DEVLANES_PUBLIC_URL_ADMIN_API": "https://admin-api.acme-2.localhost",
+    "DEVLANES_PUBLIC_URL_AI_GATEWAY": "https://ai.acme-2.localhost",
+    "DEVLANES_PUBLIC_URL_API_GATEWAY": "https://api.acme-2.localhost",
+    "DEVLANES_PUBLIC_URL_CATALOG": "https://catalog.acme-2.localhost",
+    "DEVLANES_PUBLIC_URL_CRM_API": "https://crm.acme-2.localhost",
+    "DEVLANES_PUBLIC_URL_DESKTOP": "http://127.0.0.1:21007",
+    "DEVLANES_PUBLIC_URL_DESKTOP_WEB": "http://127.0.0.1:21008",
+    "DEVLANES_PUBLIC_URL_DOCS": "https://docs.acme-2.localhost",
+    "DEVLANES_PUBLIC_URL_EXTENSION": "http://127.0.0.1:21011",
+    "DEVLANES_PUBLIC_URL_IOS_SIM": "https://sim.acme-2.localhost",
+    "DEVLANES_PUBLIC_URL_PAGES_SERVER": "http://127.0.0.1:21013",
+    "DEVLANES_PUBLIC_URL_PAGES_WORKER": "https://pages.acme-2.localhost",
+    "DEVLANES_PUBLIC_URL_PAYMENTS_API": "https://payments-api.acme-2.localhost",
+    "DEVLANES_PUBLIC_URL_QUEUE_WORKER": "http://127.0.0.1:21016",
+    "DEVLANES_PUBLIC_URL_REALTIME": "http://127.0.0.1:21018",
+    "DEVLANES_PUBLIC_URL_SMS_STUB": "https://sms-stub.acme-2.localhost",
+    "DEVLANES_PUBLIC_URL_USER_WEB": "https://app.acme-2.localhost"
+  },
+  "errors": {},
+  "warnings": [],
+  "services": {
+    "catalog": {
+      "replica": "1/1",
+      "port": 21004,
+      "ports": {},
+      "url": "http://127.0.0.1:21004",
+      "public_url": "https://catalog.acme-2.localhost",
+      "hosts": [
+        "catalog.acme-2.localhost"
+      ],
+      "ready": "Http { port: 21004, path: \"/-/health\", status: None } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [
+        "api",
+        "essential"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --silent -F @acme/catalog dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://catalog.acme-2.localhost",
+          "DEVLANES_SERVICE": "Devlanes: catalog",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21004",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "crm-api": {
+      "replica": "1/1",
+      "port": 21006,
+      "ports": {},
+      "url": "http://127.0.0.1:21006",
+      "public_url": "https://crm.acme-2.localhost",
+      "hosts": [
+        "crm.acme-2.localhost"
+      ],
+      "ready": "Http { port: 21006, path: \"/-/health\", status: None } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [
+        "api",
+        "essential"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --silent -F @acme/crm dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_CRM_PORT": "Service: 21006",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://crm.acme-2.localhost",
+          "DEVLANES_SERVICE": "Devlanes: crm-api",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21006",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "admin-api": {
+      "replica": "1/1",
+      "port": 21000,
+      "ports": {},
+      "url": "http://127.0.0.1:21000",
+      "public_url": "https://admin-api.acme-2.localhost",
+      "hosts": [
+        "admin-api.acme-2.localhost"
+      ],
+      "ready": "Http { port: 21000, path: \"/-/health\", status: None } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [
+        "api",
+        "essential"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "pnpm",
+        "args": [
+          "run",
+          "dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2/apps/admin-api",
+        "platform": "node",
+        "script": {
+          "source": "/work/acme-lanes/lane-2/apps/admin-api/package.json",
+          "name": "dev",
+          "runner": "fake",
+          "cwd": "/work/acme-lanes/lane-2/apps/admin-api"
+        },
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ADMIN_TOKEN": "Secrets: adm",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://admin-api.acme-2.localhost",
+          "DEVLANES_SERVICE": "Devlanes: admin-api",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21000",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "payments-api": {
+      "replica": "1/1",
+      "port": 21005,
+      "ports": {},
+      "url": "http://127.0.0.1:21005",
+      "public_url": "https://payments-api.acme-2.localhost",
+      "hosts": [
+        "payments-api.acme-2.localhost"
+      ],
+      "ready": "Http { port: 21005, path: \"/-/health\", status: None } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [
+        "api"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --silent -F @acme/payments-api dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://payments-api.acme-2.localhost",
+          "DEVLANES_SERVICE": "Devlanes: payments-api",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Service: 21005",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "sms-stub": {
+      "replica": "1/1",
+      "port": 3998,
+      "ports": {},
+      "url": "http://127.0.0.1:3998",
+      "public_url": "https://sms-stub.acme-2.localhost",
+      "hosts": [
+        "sms-stub.acme-2.localhost"
+      ],
+      "ready": "Tcp { port: 3998 } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": false,
+      "hidden": true,
+      "tags": [],
+      "literal_port": true,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "node infra/stubs/sms.mjs"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://sms-stub.acme-2.localhost",
+          "DEVLANES_SERVICE": "Devlanes: sms-stub",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Service: 3998",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "user-web": {
+      "replica": "1/1",
+      "port": 21019,
+      "ports": {},
+      "url": "http://127.0.0.1:21019",
+      "public_url": "https://app.acme-2.localhost",
+      "hosts": [
+        "app.acme-2.localhost"
+      ],
+      "ready": "Tcp { port: 21019 } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [
+        "web",
+        "essential"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --silent -F @acme/user-web dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://app.acme-2.localhost",
+          "DEVLANES_SERVICE": "Devlanes: user-web",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21019",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "docs": {
+      "replica": "1/1",
+      "port": 21010,
+      "ports": {},
+      "url": "http://127.0.0.1:21010",
+      "public_url": "https://docs.acme-2.localhost",
+      "hosts": [
+        "docs.acme-2.localhost"
+      ],
+      "ready": "Tcp { port: 21010 } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [
+        "web"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --silent -F @acme/docs dev --port 21010 --host 127.0.0.1"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://docs.acme-2.localhost",
+          "DEVLANES_SERVICE": "Devlanes: docs",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21010",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "api-gateway": {
+      "replica": "1/1",
+      "port": 21002,
+      "ports": {
+        "inspector": 21003
+      },
+      "url": "http://127.0.0.1:21002",
+      "public_url": "https://api.acme-2.localhost",
+      "hosts": [
+        "api.acme-2.localhost",
+        "*.acme-2.localhost",
+        "inspect-gateway.acme-2.localhost",
+        "funnels.acme-2.localhost"
+      ],
+      "ready": "Tcp { port: 21002 } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [
+        "worker"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --silent -F @acme/api-gateway dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://api.acme-2.localhost",
+          "DEVLANES_SERVICE": "Devlanes: api-gateway",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21002",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "pages-worker": {
+      "replica": "1/1",
+      "port": 21014,
+      "ports": {
+        "inspector": 21015
+      },
+      "url": "http://127.0.0.1:21014",
+      "public_url": "https://pages.acme-2.localhost",
+      "hosts": [
+        "pages.acme-2.localhost",
+        "*.pages-2.localhost"
+      ],
+      "ready": "Tcp { port: 21014 } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [
+        "worker"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --silent -F @acme/pages-worker dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_PAGES_SERVER_URL": "Service: http://127.0.0.1:21013",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://pages.acme-2.localhost",
+          "DEVLANES_SERVICE": "Devlanes: pages-worker",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21014",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "pages-server": {
+      "replica": "1/1",
+      "port": 21013,
+      "ports": {},
+      "url": "http://127.0.0.1:21013",
+      "public_url": null,
+      "hosts": [],
+      "ready": "Started within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --silent -F @acme/pages-server dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_SERVICE": "Devlanes: pages-server",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21013",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "queue-worker": {
+      "replica": "1/1",
+      "port": 21016,
+      "ports": {},
+      "url": "http://127.0.0.1:21016",
+      "public_url": null,
+      "hosts": [],
+      "ready": "Log { pattern: \"Connected to Redis\" } within 60s",
+      "stop": "signal 2 after 15s",
+      "pty": false,
+      "autostart": true,
+      "hidden": false,
+      "tags": [
+        "worker",
+        "essential"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --silent -F @acme/queue-worker dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_SERVICE": "Devlanes: queue-worker",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21016",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "ai-gateway": {
+      "replica": "1/1",
+      "port": 21001,
+      "ports": {},
+      "url": "http://127.0.0.1:21001",
+      "public_url": "https://ai.acme-2.localhost",
+      "hosts": [
+        "ai.acme-2.localhost"
+      ],
+      "ready": "Http { port: 21001, path: \"/healthz\", status: Some(200) } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "uv run uvicorn app:main --port 21001 --reload"
+        ],
+        "cwd": "/work/acme-lanes/lane-2/services/ai-gateway",
+        "platform": "python",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://ai.acme-2.localhost",
+          "DEVLANES_SERVICE": "Devlanes: ai-gateway",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21001",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "realtime": {
+      "replica": "1/1",
+      "port": 21018,
+      "ports": {
+        "debug": 21017
+      },
+      "url": "http://127.0.0.1:21018",
+      "public_url": null,
+      "hosts": [],
+      "ready": "Tcp { port: 21018 } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --silent -F @acme/realtime dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEBUG_PORT": "Service: 21017",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_SERVICE": "Devlanes: realtime",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21018",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "extension": {
+      "replica": "1/1",
+      "port": 21011,
+      "ports": {},
+      "url": "http://127.0.0.1:21011",
+      "public_url": null,
+      "hosts": [],
+      "ready": "Started within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [
+        "extension"
+      ],
+      "literal_port": false,
+      "sync": [
+        "SyncSpec { from: \"/work/acme-lanes/lane-2/apps/extension/.output/chrome-mv3\", to: \"/home/dev/devlanes/sync/acme/lane2/chrome-mv3\", ignore: [\"*.map\"] }"
+      ],
+      "launch": {
+        "program": "pnpm",
+        "args": [
+          "run",
+          "dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2/apps/extension",
+        "platform": "node",
+        "script": {
+          "source": "/work/acme-lanes/lane-2/apps/extension/package.json",
+          "name": "dev",
+          "runner": "fake",
+          "cwd": "/work/acme-lanes/lane-2/apps/extension"
+        },
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_SERVICE": "Devlanes: extension",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21011",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "ios-sim": {
+      "replica": "1/1",
+      "port": 21012,
+      "ports": {},
+      "url": "http://127.0.0.1:21012",
+      "public_url": "https://sim.acme-2.localhost",
+      "hosts": [
+        "sim.acme-2.localhost"
+      ],
+      "ready": "Tcp { port: 21012 } within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": false,
+      "hidden": false,
+      "tags": [
+        "mobile"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "npx serve-sim --port 21012"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_PUBLIC_URL": "Devlanes: https://sim.acme-2.localhost",
+          "DEVLANES_SERVICE": "Devlanes: ios-sim",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21012",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "desktop.1": {
+      "replica": "1/2",
+      "port": 21007,
+      "ports": {},
+      "url": "http://127.0.0.1:21007",
+      "public_url": null,
+      "hosts": [],
+      "ready": "Started within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": false,
+      "hidden": false,
+      "tags": [
+        "desktop"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --filter @acme/desktop dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_SERVICE": "Devlanes: desktop",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21007",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "desktop.2": {
+      "replica": "2/2",
+      "port": 21009,
+      "ports": {},
+      "url": "http://127.0.0.1:21009",
+      "public_url": null,
+      "hosts": [],
+      "ready": "Started within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": false,
+      "hidden": false,
+      "tags": [
+        "desktop"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --filter @acme/desktop dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_SERVICE": "Devlanes: desktop",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21009",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "desktop-web": {
+      "replica": "1/1",
+      "port": 21008,
+      "ports": {},
+      "url": "http://127.0.0.1:21008",
+      "public_url": null,
+      "hosts": [],
+      "ready": "Started within 60s",
+      "stop": "signal 15 after 10s",
+      "pty": true,
+      "autostart": true,
+      "hidden": false,
+      "tags": [
+        "desktop"
+      ],
+      "literal_port": false,
+      "sync": [],
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm --filter @acme/desktop-web dev"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_ORIGINS": "Devlanes: <lane origins>",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DEVLANES_SERVICE": "Devlanes: desktop-web",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "HOST": "Devlanes: 127.0.0.1",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "PORT": "Devlanes: 21008",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    }
+  },
+  "tasks": {
+    "build-deps": {
+      "when": "Create",
+      "after_services": false,
+      "profiles": null,
+      "active": true,
+      "steps": [],
+      "confirm": null,
+      "interactive": false,
+      "timeout": null,
+      "pty": false,
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm build-deps"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "migrate": {
+      "when": "Start",
+      "after_services": false,
+      "profiles": [
+        "default",
+        "backend"
+      ],
+      "active": true,
+      "steps": [],
+      "confirm": null,
+      "interactive": false,
+      "timeout": null,
+      "pty": false,
+      "launch": {
+        "program": "pnpm",
+        "args": [
+          "run",
+          "db-deploy"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": "node",
+        "script": {
+          "source": "/work/acme-lanes/lane-2/package.json",
+          "name": "db-deploy",
+          "runner": "fake",
+          "cwd": "/work/acme-lanes/lane-2"
+        },
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "seed": {
+      "when": "Create",
+      "after_services": true,
+      "profiles": null,
+      "active": true,
+      "steps": [],
+      "confirm": null,
+      "interactive": false,
+      "timeout": "600s",
+      "pty": false,
+      "launch": {
+        "program": "pnpm",
+        "args": [
+          "run",
+          "start"
+        ],
+        "cwd": "/work/acme-lanes/lane-2/packages/seed",
+        "platform": "node",
+        "script": {
+          "source": "/work/acme-lanes/lane-2/packages/seed/package.json",
+          "name": "start",
+          "runner": "fake",
+          "cwd": "/work/acme-lanes/lane-2/packages/seed"
+        },
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "build": {
+      "when": "Start",
+      "after_services": false,
+      "profiles": [
+        "e2e"
+      ],
+      "active": false,
+      "steps": [],
+      "confirm": null,
+      "interactive": false,
+      "timeout": null,
+      "pty": false,
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm build"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "reset-db": {
+      "when": null,
+      "after_services": false,
+      "profiles": null,
+      "active": true,
+      "steps": [
+        "infra.teardown.database",
+        "infra.setup.database",
+        "migrate",
+        "seed"
+      ],
+      "confirm": "Drops acme_lane2 and re-seeds it",
+      "interactive": false,
+      "timeout": null,
+      "pty": false,
+      "launch": null
+    },
+    "typegen": {
+      "when": null,
+      "after_services": false,
+      "profiles": null,
+      "active": true,
+      "steps": [],
+      "confirm": null,
+      "interactive": false,
+      "timeout": null,
+      "pty": false,
+      "launch": {
+        "program": "pnpm",
+        "args": [
+          "run",
+          "generate"
+        ],
+        "cwd": "/work/acme-lanes/lane-2/packages/api-types",
+        "platform": "node",
+        "script": {
+          "source": "/work/acme-lanes/lane-2/packages/api-types/package.json",
+          "name": "generate",
+          "runner": "fake",
+          "cwd": "/work/acme-lanes/lane-2/packages/api-types"
+        },
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "certs": {
+      "when": null,
+      "after_services": false,
+      "profiles": null,
+      "active": true,
+      "steps": [],
+      "confirm": null,
+      "interactive": false,
+      "timeout": null,
+      "pty": false,
+      "launch": {
+        "program": "make",
+        "args": [
+          "certs"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": {
+          "source": "/work/acme-lanes/lane-2/Makefile",
+          "name": "certs",
+          "runner": "fake",
+          "cwd": "/work/acme-lanes/lane-2"
+        },
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "fixtures": {
+      "when": null,
+      "after_services": false,
+      "profiles": null,
+      "active": true,
+      "steps": [],
+      "confirm": null,
+      "interactive": false,
+      "timeout": null,
+      "pty": false,
+      "launch": {
+        "program": "just",
+        "args": [
+          "fixtures"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": {
+          "source": "/work/acme-lanes/lane-2/justfile",
+          "name": "fixtures",
+          "runner": "fake",
+          "cwd": "/work/acme-lanes/lane-2"
+        },
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "prisma-login": {
+      "when": null,
+      "after_services": false,
+      "profiles": null,
+      "active": true,
+      "steps": [],
+      "confirm": null,
+      "interactive": true,
+      "timeout": null,
+      "pty": true,
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "pnpm prisma login"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    }
+  },
+  "setup": {
+    "database": {
+      "container": null,
+      "ignore_errors": false,
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "psql \"postgres://postgres:postgres@127.0.0.1:15432/postgres\" -c \"CREATE DATABASE acme_lane2\""
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "vhost": {
+      "container": "rabbitmq",
+      "ignore_errors": true,
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "docker compose exec -T rabbitmq rabbitmqctl add_vhost acme_lane2"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "bucket": {
+      "container": null,
+      "ignore_errors": false,
+      "launch": {
+        "program": "aws",
+        "args": [
+          "--endpoint-url",
+          "http://127.0.0.1:19090",
+          "s3",
+          "mb",
+          "s3://media-lane2"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "webhook-certs": {
+      "container": null,
+      "ignore_errors": false,
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "set -euo pipefail\nmkdir -p .devlanes/certs\n./scripts/gen-webhook-certs.sh .devlanes/certs\n"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    }
+  },
+  "teardown": {
+    "database": {
+      "container": null,
+      "ignore_errors": false,
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "psql \"postgres://postgres:postgres@127.0.0.1:15432/postgres\" -c \"DROP DATABASE IF EXISTS acme_lane2 WITH (FORCE)\""
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "vhost": {
+      "container": null,
+      "ignore_errors": false,
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "docker compose exec -T rabbitmq rabbitmqctl delete_vhost acme_lane2"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "redis": {
+      "container": null,
+      "ignore_errors": false,
+      "launch": {
+        "program": "/bin/sh",
+        "args": [
+          "-c",
+          "redis-cli -p 16379 -n 2 FLUSHDB"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    },
+    "bucket": {
+      "container": null,
+      "ignore_errors": true,
+      "launch": {
+        "program": "aws",
+        "args": [
+          "--endpoint-url",
+          "http://127.0.0.1:19090",
+          "s3",
+          "rb",
+          "s3://media-lane2",
+          "--force"
+        ],
+        "cwd": "/work/acme-lanes/lane-2",
+        "platform": null,
+        "script": null,
+        "contributors": [
+          "fake-mise",
+          "fake-node"
+        ],
+        "notes": [],
+        "files": [],
+        "env": {
+          "ACME_AMQP_VHOST": "Global: acme_lane2",
+          "ACME_CRM_BASE_URL": "Global: https://crm.acme-2.localhost",
+          "ACME_DB_URL": "Global: postgres://postgres:postgres@127.0.0.1:15432/acme_lane2",
+          "ACME_DOMAIN": "Global: acme-2.localhost",
+          "ACME_MEDIA_BUCKET": "Global: media-lane2",
+          "ACME_REDIS_URL": "Global: redis://127.0.0.1:16379/2",
+          "ACME_STRIPE_KEY": "Secrets: sk_dev",
+          "CERBOS_URL": "Global: http://127.0.0.1:21050",
+          "DEVLANES": "Devlanes: 1",
+          "DEVLANES_LANE": "Devlanes: 2",
+          "DEVLANES_LANE_NAME": "Devlanes: lane2",
+          "DEVLANES_PROJECT": "Devlanes: acme",
+          "DOTENV_ROOT": "Global: /work/acme",
+          "FORCE_COLOR": "Contributor: 1",
+          "HOME": "Client: /home/dev",
+          "PATH": "Contributor: /mise/bin:/usr/bin:/bin",
+          "REFEREE_URL": "Global: https://referee.staging.example.invalid",
+          "SENTRY_DSN": "Global: "
+        }
+      }
+    }
+  }
+}
