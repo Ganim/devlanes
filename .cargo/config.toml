@@ -1,0 +1,3 @@
+[build]
+# Every rustc and clippy warning fails the build, locally and in CI.
+warnings = "deny"

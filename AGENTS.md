@@ -31,7 +31,7 @@ cargo test --workspace --doc --all-features
 cargo build --workspace --all-targets --all-features
 ```
 
-During parallel work, format and test only owned crates. Every process test needs a timeout and test-owned cleanup. Docker, SSH, trust-store and real framework tests use `#[ignore = "needs ..."]`; run them explicitly with their prerequisites. Prefix Docker-only external tests with `docker_` for the manual CI job. Consolidated end-to-end tests are deferred until final integration.
+`.cargo/config.toml` sets `build.warnings = "deny"`, so any rustc or clippy warning fails the build; fix warnings instead of allowing them. During parallel work, format and test only owned crates. Every process test needs a timeout and test-owned cleanup. Docker, SSH, trust-store and real framework tests use `#[ignore = "needs ..."]`; run them explicitly with their prerequisites. Prefix Docker-only external tests with `docker_` for the manual CI job. Consolidated end-to-end tests are deferred until final integration.
 
 ## Public content
 
