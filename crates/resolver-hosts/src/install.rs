@@ -1402,16 +1402,19 @@ mod tests {
         let private_dir = ran[1]
             .strip_suffix("/devlanes-hosts version")
             .expect("private copy");
+        let group = Platform::current().expect("platform").root_group();
         assert_eq!(
             ran[2..],
             [
                 "sudo /usr/bin/test -e /etc/sudoers.d/devlanes",
-                "sudo /usr/bin/install -d -o root -g wheel -m 0755 -- /usr/local/libexec",
                 &format!(
-                    "sudo /usr/bin/install -o root -g wheel -m 0755 -- {private_dir}/devlanes-hosts /usr/local/libexec/.devlanes-hosts.new"
+                    "sudo /usr/bin/install -d -o root -g {group} -m 0755 -- /usr/local/libexec"
                 ),
                 &format!(
-                    "sudo /usr/bin/install -o root -g wheel -m 0440 -- {private_dir}/sudoers /etc/sudoers.d/.devlanes.new"
+                    "sudo /usr/bin/install -o root -g {group} -m 0755 -- {private_dir}/devlanes-hosts /usr/local/libexec/.devlanes-hosts.new"
+                ),
+                &format!(
+                    "sudo /usr/bin/install -o root -g {group} -m 0440 -- {private_dir}/sudoers /etc/sudoers.d/.devlanes.new"
                 ),
                 "sudo /usr/sbin/visudo -c -f /etc/sudoers.d/.devlanes.new",
                 "sudo /bin/cat -- /etc/sudoers.d/.devlanes.new",

@@ -15,6 +15,15 @@ fn session_members_and_descendants_are_sampled() {
     macos::session_members_and_descendants_are_sampled();
 }
 
+/// Entry point re-executed by `session_members_and_descendants_are_sampled`.
+/// Ignored in normal runs and inert without the marker variable.
+#[test]
+#[ignore = "helper process entry point, started by session_members_and_descendants_are_sampled"]
+fn helper_session_leader() {
+    #[cfg(target_os = "macos")]
+    macos::helper_session_leader();
+}
+
 #[test]
 #[cfg_attr(not(target_os = "macos"), ignore = "needs macOS")]
 fn reused_pid_is_rejected_by_start_time() {
@@ -32,18 +41,24 @@ fn busy_process_cpu_uses_converted_ticks() {
 #[cfg(target_os = "macos")]
 mod macos {
     use std::{
+        io::{BufRead, BufReader},
         process::{Child, Command, Stdio},
         sync::mpsc,
         thread,
         time::Duration,
     };
 
-    use devlanes_core::{LaneId, ProjectId};
+    use devlanes_core::{LaneId, ProcessIdentity, ProjectId};
     use devlanes_metrics::{MetricsSource, Sample, SampleRequest, Subject, UnitKey, UnitTarget};
     use devlanes_metrics_macos::{MacosSource, process_identity};
+    use devlanes_sys::Signal;
 
     /// Upper bound for helper commands so a wedged `ps` cannot hang the suite.
     const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+    /// Marks the self-reexec helper process; see [`helper_session_leader`].
+    const HELPER_ENV: &str = "DEVLANES_METRICS_MACOS_HELPER";
+    /// Marker the helper prints before its child's PID.
+    const CHILD_PREFIX: &str = "SESSION child=";
 
     /// Kills and reaps a test-owned child when the test ends, even on panic.
     struct Owned(Child);
@@ -140,17 +155,84 @@ mod macos {
         ));
     }
 
+    /// Leads a new session with a `sleep` child, prints the child's PID and waits for it.
+    pub fn helper_session_leader() {
+        if std::env::var_os(HELPER_ENV).is_none() {
+            return;
+        }
+        rustix::process::setsid().expect("setsid");
+        let mut child = spawn("/bin/sleep", &["30"]);
+        println!("{CHILD_PREFIX}{}", child.0.id());
+        let _ = child.0.wait();
+    }
+
+    /// The re-executed [`helper_session_leader`] and its child. Dropping it kills
+    /// the child by identity, then the leader.
+    struct Session {
+        leader: Owned,
+        child: ProcessIdentity,
+    }
+
+    impl Session {
+        /// Starts the helper and waits until it reports its child.
+        fn start() -> Self {
+            let mut command = Command::new(std::env::current_exe().expect("test binary"));
+            command
+                .args([
+                    "--exact",
+                    "helper_session_leader",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads",
+                    "1",
+                ])
+                .env(HELPER_ENV, "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            let mut leader = Owned(command.spawn().expect("spawn helper"));
+            let stdout = leader.0.stdout.take().expect("helper stdout");
+            let (send, receive) = mpsc::channel();
+            thread::spawn(move || {
+                let pid = BufReader::new(stdout)
+                    .lines()
+                    .map_while(Result::ok)
+                    // libtest's `test ... ` status shares the line with the marker.
+                    .find_map(|line| line.split_once(CHILD_PREFIX)?.1.trim().parse::<u32>().ok());
+                let _ = send.send(pid);
+            });
+            let pid = receive
+                .recv_timeout(COMMAND_TIMEOUT)
+                .expect("helper reported in time")
+                .expect("helper reported its child");
+            let child = devlanes_sys::identity(pid)
+                .expect("child identity")
+                .expect("child alive");
+            Self { leader, child }
+        }
+    }
+
+    impl Drop for Session {
+        /// Kills the child, which would outlive the leader; `leader` drops next.
+        fn drop(&mut self) {
+            let _ = devlanes_sys::signal_verified(&self.child, Signal::KILL);
+        }
+    }
+
     pub fn session_members_and_descendants_are_sampled() {
-        let own = process_identity(std::process::id()).expect("own identity");
-        assert!(own.sid > 1, "test runs in a user session");
-        let child = spawn("/bin/sleep", &["30"]);
+        // On GitHub's macOS runners the suite itself runs in session 0 or 1, which the
+        // collector never sweeps, so the test samples a session it created.
+        let session = Session::start();
+        let leader = process_identity(session.leader.0.id()).expect("leader identity");
+        assert_eq!(leader.sid, leader.pid, "helper leads its session");
+        let child = session.child.pid;
         let source = MacosSource::new().expect("source");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
         let request = SampleRequest {
-            units: vec![target("self", vec![own.sid], Vec::new())],
+            units: vec![target("session", vec![leader.sid], Vec::new())],
             containers: Vec::new(),
         };
         let samples = runtime
@@ -159,23 +241,18 @@ mod macos {
             })
             .expect("sample in time")
             .expect("sample");
+        assert!(sample_for(&samples, leader.pid).is_some(), "session leader");
+        assert!(sample_for(&samples, child).is_some(), "child via session");
         assert!(
-            sample_for(&samples, std::process::id()).is_some(),
-            "own process"
-        );
-        assert!(
-            sample_for(&samples, child.0.id()).is_some(),
-            "child via session"
+            sample_for(&samples, std::process::id()).is_none(),
+            "test process is outside the session"
         );
 
-        // Tracking only this process still finds its child through the parent link.
+        // Tracking only the leader still finds its child through the parent link.
         let samples = source
-            .sample_blocking(&[target("tree", Vec::new(), vec![own])])
+            .sample_blocking(&[target("tree", Vec::new(), vec![leader])])
             .expect("sample");
-        assert!(
-            sample_for(&samples, child.0.id()).is_some(),
-            "child via ppid"
-        );
+        assert!(sample_for(&samples, child).is_some(), "child via ppid");
         assert_eq!(source.name(), "macos");
     }
 

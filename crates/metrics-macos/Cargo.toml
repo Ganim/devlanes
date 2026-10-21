@@ -17,5 +17,9 @@ devlanes-sys = { path = "../sys" }
 libc = "0.2"
 tokio.workspace = true
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# The session test's helper process calls `setsid` itself.
+rustix = { version = "1", features = ["process"] }
+
 [lints]
 workspace = true

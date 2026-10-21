@@ -1225,6 +1225,7 @@ dependencies = [
  "devlanes-metrics",
  "devlanes-sys",
  "libc",
+ "rustix",
  "tokio",
 ]
 
