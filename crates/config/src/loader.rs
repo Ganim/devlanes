@@ -223,7 +223,7 @@ impl<E: Extensions> PartialProject<E> {
                     .map_err(|e| {
                         ConfigError::plain(format!("templates.{name}.extends: {}", e.message))
                     })?
-                    .finish(),
+                    .finish(&format!("templates.{name}"))?,
             );
         }
         let mut services = IndexMap::new();
@@ -234,7 +234,7 @@ impl<E: Extensions> PartialProject<E> {
                     .map_err(|e| {
                         ConfigError::plain(format!("services.{name}.extends: {}", e.message))
                     })?
-                    .finish(),
+                    .finish(&format!("services.{name}"))?,
             );
         }
         Ok(ProjectConfig {

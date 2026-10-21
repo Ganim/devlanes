@@ -178,7 +178,7 @@ fn validate_inner<E: Extensions>(
             if template.preset.as_ref() != Some(key) {
                 return Err(fail(
                     &format!("templates.{name}.{key}"),
-                    format!("unknown key `{key}`; options require preset: {key}"),
+                    crate::service::unknown_service_key::<E>(key, template.preset.as_deref()),
                 ));
             }
         }
@@ -210,7 +210,7 @@ fn validate_inner<E: Extensions>(
             if service.preset.as_ref() != Some(option) {
                 return Err(fail(
                     &format!("{path}.{option}"),
-                    format!("options require preset: {option}"),
+                    crate::service::unknown_service_key::<E>(option, service.preset.as_deref()),
                 ));
             }
         }

@@ -12,36 +12,6 @@ use serde::{
 use serde_saphyr::Spanned;
 use std::{fmt, marker::PhantomData};
 
-/// `deserialize_any` prevents YAML null from being coerced to an empty mapping.
-struct PresetMapping(serde_json::Map<String, serde_json::Value>);
-
-impl<'de> Deserialize<'de> for PresetMapping {
-    /// Reject every non-mapping YAML node at its original parser location.
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct MappingVisitor;
-        impl<'de> Visitor<'de> for MappingVisitor {
-            type Value = PresetMapping;
-            /// Explain the required node shape in source-labelled YAML errors.
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a preset options mapping")
-            }
-            /// Preserve arbitrary integration fields until the registered parser runs.
-            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
-                let mut values = serde_json::Map::new();
-                while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
-                    if values.insert(key.clone(), value).is_some() {
-                        return Err(serde::de::Error::custom(format!(
-                            "duplicate preset option `{key}`"
-                        )));
-                    }
-                }
-                Ok(PresetMapping(values))
-            }
-        }
-        deserializer.deserialize_any(MappingVisitor)
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 /// Signal and grace period used when stopping a process tree.
@@ -77,19 +47,21 @@ macro_rules! service_fields {
         pub(crate) struct PartialService<E: Extensions> {
             $(pub $field: Option<Spanned<$ty>>,)*
             pub env: Option<Spanned<Env>>,
-            pub preset_options: IndexMap<String, Spanned<E::Options>>,
+            // An option key cannot be classified until the preset has been inherited.
+            pub preset_candidates: IndexMap<String, Spanned<serde_json::Value>>,
+            extensions: PhantomData<E>,
         }
 
         impl<E: Extensions> Default for PartialService<E> {
             /// Keep every field absent until base and local sources have been merged.
             fn default() -> Self {
-                Self { $($field: None,)* env: None, preset_options: IndexMap::new() }
+                Self { $($field: None,)* env: None, preset_candidates: IndexMap::new(), extensions: PhantomData }
             }
         }
 
         impl<E: Extensions> Default for ServiceConfig<E> {
             /// Construct an empty template; runnable services require a command.
-            fn default() -> Self { PartialService::<E>::default().finish() }
+            fn default() -> Self { Self { $($field: None,)* env: Env::new(), preset_options: IndexMap::new() } }
         }
 
         impl<E: Extensions> PartialService<E> {
@@ -107,16 +79,29 @@ macro_rules! service_fields {
                     if let Some(base) = &mut self.env { base.value.extend(overlay.value); }
                     else { self.env = Some(overlay); }
                 }
-                self.preset_options.extend(overlay.preset_options);
+                self.preset_candidates.extend(overlay.preset_candidates);
             }
 
-            /// Drop span metadata only after all merge decisions have been made.
-            pub(crate) fn finish(self) -> ServiceConfig<E> {
-                ServiceConfig {
+            /// Classify unknown keys against the effective preset only after merging and inheritance.
+            pub(crate) fn finish(self, path: &str) -> Result<ServiceConfig<E>, crate::ConfigError> {
+                let mut preset_options = IndexMap::new();
+                let preset = self.preset.as_ref().map(|value| value.value.as_str());
+                for (key, value) in self.preset_candidates {
+                    let fail = |message| crate::ConfigError::plain(format!("{path}.{key}: {message}"));
+                    if preset != Some(key.as_str()) {
+                        return Err(fail(unknown_service_key::<E>(&key, preset)));
+                    }
+                    if !value.value.is_object() {
+                        return Err(fail(format!("preset options `{key}` must be a mapping")));
+                    }
+                    let parsed = E::parse_preset_options(&key, value.value).map_err(fail)?;
+                    preset_options.insert(key, parsed);
+                }
+                Ok(ServiceConfig {
                     $($field: self.$field.map(|v| v.value),)*
                     env: self.env.map(|v| v.value).unwrap_or_default(),
-                    preset_options: self.preset_options.into_iter().map(|(k,v)| (k,v.value)).collect(),
-                }
+                    preset_options,
+                })
             }
         }
 
@@ -138,26 +123,8 @@ macro_rules! service_fields {
                                 $(stringify!($field) => result.$field = map.next_value()?,)*
                                 "env" => result.env = Some(map.next_value()?),
                                 "gui" => return Err(serde::de::Error::custom("`gui` is not supported yet")),
-                                key if E::preset_names().contains(&key) || E::accepts_unregistered_presets() => {
-                                    let value: Spanned<PresetMapping> = map.next_value()?;
-                                    let parsed = E::parse_preset_options(key, serde_json::Value::Object(value.value.0)).map_err(|mut message| {
-                                        let known = [$(stringify!($field),)* "env"];
-                                        if let Some(suggestion) = known.iter().max_by(|a,b| strsim::jaro_winkler(key,a).total_cmp(&strsim::jaro_winkler(key,b)))
-                                            && strsim::jaro_winkler(key,suggestion) > 0.75 {
-                                            message.push_str(&format!("; did you mean `{suggestion}`?"));
-                                        }
-                                        serde::de::Error::custom(message)
-                                    })?;
-                                    result.preset_options.insert(key.into(), Spanned::new(parsed, value.referenced, value.defined));
-                                }
                                 key => {
-                                    let known = [$(stringify!($field),)* "env"];
-                                    let suggestion = known.iter().max_by(|a,b| strsim::jaro_winkler(key,a).total_cmp(&strsim::jaro_winkler(key,b)));
-                                    let message = match suggestion.filter(|s| strsim::jaro_winkler(key,s) > 0.75) {
-                                        Some(s) => format!("unknown key `{key}`; did you mean `{s}`?"),
-                                        None => format!("unknown key `{key}`"),
-                                    };
-                                    return Err(serde::de::Error::custom(message));
+                                    result.preset_candidates.insert(key.into(), map.next_value()?);
                                 }
                             }
                         }
@@ -171,7 +138,26 @@ macro_rules! service_fields {
         impl<'de, E: Extensions> Deserialize<'de> for ServiceConfig<E> {
             /// Deserialize a standalone service, retaining strict unknown-key checks.
             fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                PartialService::<E>::deserialize(d).map(PartialService::finish)
+                PartialService::<E>::deserialize(d)?.finish("service").map_err(serde::de::Error::custom)
+            }
+        }
+
+        /// Suggest service fields or the selected integration without interpreting unrelated keys as options.
+        pub(crate) fn unknown_service_key<E: Extensions>(key: &str, preset: Option<&str>) -> String {
+            let fields = [$(stringify!($field),)* "env"];
+            let suggestion = fields.into_iter().chain(preset).chain(E::preset_names().iter().copied())
+                .filter(|candidate| *candidate != key)
+                .max_by(|a,b| strsim::jaro_winkler(key,a).total_cmp(&strsim::jaro_winkler(key,b)))
+                .filter(|candidate| strsim::jaro_winkler(key,candidate) > 0.75);
+            if let Some(suggestion) = suggestion {
+                return format!("unknown key `{key}`; did you mean `{suggestion}`?");
+            }
+            if preset.is_none() && (E::accepts_unregistered_presets() || E::preset_names().contains(&key)) {
+                return format!("unknown key `{key}`; set `preset: {key}` to use these options");
+            }
+            match preset {
+                Some(preset) => format!("unknown key `{key}`; options must use the selected preset key `{preset}`"),
+                None => format!("unknown key `{key}`"),
             }
         }
 
