@@ -1,0 +1,14 @@
+# Requires a base that defines admin-web. The reference base does not.
+lanes:
+  max: 3
+global_env:
+  LOG_LEVEL: debug
+services:
+  admin-web:
+    autostart: false
+  scratch-api:
+    extends: fastify-api
+    run: node scratch/server.mjs
+    hosts: ["scratch.${{ lane.domain }}"]
+profiles:
+  default: [+essential, admin-web]

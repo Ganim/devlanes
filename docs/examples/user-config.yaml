@@ -1,0 +1,22 @@
+# Per-user settings, normally at ~/.devlanes/config.yaml.
+# This source example includes unsupported trust targets; see README.md.
+hostnames:
+  resolver: localhost
+  hosts_file: auto
+  # Custom TLD alternative: resolver: resolver, tld: test.
+  # Public DNS resolution is outside v1.
+ports:
+  range: 20000-32767
+tls:
+  ca: devlanes
+  # ios-simulator and android-emulator are rejected in v1.
+  trust: [system, firefox, ios-simulator, android-emulator]
+proxy:
+  https_port: 443
+  http_port: 80
+  lan: false
+logs:
+  retention: { days: 7, max_size: 5GiB }
+metrics:
+  retention: 30d
+terminal: ghostty

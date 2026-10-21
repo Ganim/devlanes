@@ -1,0 +1,258 @@
+# Reference forms for a fictional application. Companion programs are not included.
+# Expressions use ${{ ... }}; single-expression values retain their type.
+# Use svc.crm_api or svc['crm-api'] for names containing dashes.
+project: acme
+templates:
+  fastify-api:
+    platform: node
+    tags: [api]
+    ready: { http: { path: /-/health } }
+  wrangler-worker:
+    platform: node
+    preset: wrangler
+    tags: [worker]
+lanes:
+  primary: main
+  new_worktrees: register
+  removed_worktrees: stop
+  worktree_dir: ../${{ project.name }}-lanes
+  # block_size: 80
+  # max: 6
+  hosts_file: always
+  vars:
+    domain: ${{ 'acme' if lane.index == 0 else 'acme-' ~ lane.index }}.localhost
+    db_name: acme_${{ lane.name }}
+    redis_db: ${{ lane.index }}
+    vhost: acme_${{ lane.name }}
+    bucket: media-${{ lane.name }}
+    # port: ${{ 40000 + lane.index * 100 }}
+  # Alternative to vars; entry N is lane N:
+  # matrix:
+  #   - { port: 10000, domain: acme.localhost, db_name: acme, redis_db: 0, vhost: acme, bucket: media }
+  #   - { port: 11000, domain: test1.localhost, db_name: test1, redis_db: 1, vhost: test1, bucket: media-test1 }
+infra:
+  compose: docker-compose.yml
+  # compose: [docker-compose.yml, docker-compose.dev.yml]
+  project_name: monorepo
+  exclude: [caddy]
+  per_lane: [mailpit]
+  env:
+    ACME_DB_PORT: 15432
+  hosts:
+    s3mock: ["s3.${{ lane.domain }}"]
+  hidden: [postgres]
+  containers:
+    cerbos:
+      image: ghcr.io/cerbos/cerbos:0.40.0
+      command: [server, --config=/policies/config.yaml]
+      volumes: ["./infra/cerbos:/policies:ro"]
+      ports: { http: 3592, grpc: 3593 }
+      per_lane: true
+  setup:
+    database: psql "postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/postgres" -c "CREATE DATABASE ${{ lane.db_name }}"
+    vhost:
+      run: docker compose exec -T rabbitmq rabbitmqctl add_vhost ${{ lane.vhost }}
+      container: rabbitmq
+      ignore_errors: true
+    bucket:
+      run: [aws, --endpoint-url, "http://127.0.0.1:${{ infra.s3mock.port }}", s3, mb, "s3://${{ lane.bucket }}"]
+    webhook-certs: |
+      set -euo pipefail
+      mkdir -p .devlanes/certs
+      ./scripts/gen-webhook-certs.sh .devlanes/certs
+  teardown:
+    database: psql "postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/postgres" -c "DROP DATABASE IF EXISTS ${{ lane.db_name }} WITH (FORCE)"
+    vhost: docker compose exec -T rabbitmq rabbitmqctl delete_vhost ${{ lane.vhost }}
+    redis: redis-cli -p ${{ infra.redis.port }} -n ${{ lane.redis_db }} FLUSHDB
+    bucket:
+      run: [aws, --endpoint-url, "http://127.0.0.1:${{ infra.s3mock.port }}", s3, rb, "s3://${{ lane.bucket }}", --force]
+      ignore_errors: true
+fnox:
+  profile: dev
+global_env:
+  ACME_DOMAIN: ${{ lane.domain }}
+  DOTENV_ROOT: ${{ project.primary_path }}
+  ACME_DB_URL: postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/${{ lane.db_name }}
+  ACME_REDIS_URL: redis://127.0.0.1:${{ infra.redis.port }}/${{ lane.redis_db }}
+  ACME_AMQP_VHOST: ${{ lane.vhost }}
+  ACME_MEDIA_BUCKET: ${{ lane.bucket }}
+  ACME_CRM_BASE_URL: ${{ svc.crm_api.public_url }}
+  CERBOS_URL: http://127.0.0.1:${{ infra.cerbos.ports.http }}
+  REFEREE_URL: ${{ projects.workflows.svc.referee.public_url | default('https://referee.staging.example.invalid') }}
+  SENTRY_DSN: ${{ env.SENTRY_DSN | default('') }}
+tasks:
+  build-deps:
+    run: pnpm build-deps
+    when: lane.create
+  migrate:
+    run_script: package.json#db-deploy
+    when: lane.start
+    profiles: [default, backend]
+  seed:
+    run_script: packages/seed/package.json#start
+    when: lane.create
+    after: services
+    timeout: 10m
+  build:
+    run: pnpm build
+    when: lane.start
+    profiles: [e2e]
+  reset-db:
+    steps: [infra.teardown.database, infra.setup.database, migrate, seed]
+    confirm: Drops ${{ lane.db_name }} and re-seeds it
+  typegen:
+    run_script: packages/api-types/package.json#generate
+    # Alternative: run: [pnpm, -F, "@acme/api-types", generate]
+  certs:
+    run_script: Makefile#certs
+  fixtures:
+    run_script:
+      source: justfile
+      name: fixtures
+  prisma-login:
+    run: pnpm prisma login
+    interactive: true
+services:
+  catalog:
+    extends: fastify-api
+    run: pnpm --silent -F @acme/catalog dev
+    hosts: ["catalog.${{ lane.domain }}"]
+    tags: [api, essential]
+  crm-api:
+    extends: fastify-api
+    run: pnpm --silent -F @acme/crm dev
+    env:
+      ACME_CRM_PORT: ${{ self.port }}
+    hosts: ["crm.${{ lane.domain }}"]
+    tags: [api, essential]
+  admin-api:
+    extends: fastify-api
+    run_script: apps/admin-api/package.json#dev
+    fnox: { profile: admin-api }
+    hosts: ["admin-api.${{ lane.domain }}"]
+    tags: [api, essential]
+  payments-api:
+    extends: fastify-api
+    run: pnpm --silent -F @acme/payments-api dev
+    env: { PORT: "${{ lane.port + 5 }}" }
+    hosts: ["payments-api.${{ lane.domain }}"]
+    tags: [api]
+  sms-stub:
+    run: node infra/stubs/sms.mjs
+    env: { PORT: 3998 }
+    hosts: ["sms-stub.${{ lane.domain }}"]
+    hidden: true
+    autostart: false
+  user-web:
+    platform: node
+    preset: vite
+    run: pnpm --silent -F @acme/user-web dev
+    hosts: ["app.${{ lane.domain }}"]
+    tags: [web, essential]
+  docs:
+    platform: node
+    run: >-
+      pnpm --silent -F @acme/docs dev
+      --port ${{ self.port }}
+      --host 127.0.0.1
+    hosts: ["docs.${{ lane.domain }}"]
+    tags: [web]
+  api-gateway:
+    extends: wrangler-worker
+    run: pnpm --silent -F @acme/api-gateway dev
+    wrangler:
+      vars:
+        PUBLIC_BASE_URL: ${{ self.public_url }}
+      args: [--env-file, .dev.vars.example]
+    hosts:
+      - api.${{ lane.domain }}
+      - host: "*.${{ lane.domain }}"
+        fallback: true
+      - host: inspect-gateway.${{ lane.domain }}
+        port: inspector
+      - host: funnels.${{ lane.domain }}
+        host_header: upstream
+  pages-worker:
+    extends: wrangler-worker
+    run: pnpm --silent -F @acme/pages-worker dev
+    env:
+      ACME_PAGES_SERVER_URL: ${{ svc.pages_server.url }}
+    hosts: ["pages.${{ lane.domain }}", "*.pages-${{ lane.index }}.localhost"]
+  pages-server:
+    platform: node
+    run: pnpm --silent -F @acme/pages-server dev
+  queue-worker:
+    platform: node
+    run: pnpm --silent -F @acme/queue-worker dev
+    ready: { log: Connected to Redis }
+    pty: false
+    stop: { signal: SIGINT, timeout: 15s }
+    tags: [worker, essential]
+  ai-gateway:
+    platform: python
+    run: uv run uvicorn app:main --port ${{ self.port }} --reload
+    cwd: services/ai-gateway
+    hosts: ["ai.${{ lane.domain }}"]
+    ready: { http: { path: /healthz, status: 200, timeout: 60s } }
+    # ready: { tcp: true }
+    # ready: { tcp: inspector }
+    # ready: { log: "Application startup complete" }
+    # ready: { cmd: "curl -fsS http://127.0.0.1:${{ self.port }}/healthz" }
+    # ready: started
+  realtime:
+    platform: node
+    run: pnpm --silent -F @acme/realtime dev
+    env:
+      DEBUG_PORT: ${{ self.ports.debug }}
+    ready: { tcp: true }
+  extension:
+    platform: node
+    run_script: apps/extension/package.json#dev
+    sync:
+      - from: apps/extension/.output/chrome-mv3
+        ignore: ["*.map"]
+    tags: [extension]
+  # HTTP viewers are ordinary services; built-in window streaming is outside v1.
+  ios-sim:
+    run: npx serve-sim --port ${{ self.port }}
+    hosts: ["sim.${{ lane.domain }}"]
+    autostart: false
+    tags: [mobile]
+  desktop:
+    platform: node
+    preset: tauri
+    tauri:
+      identifier: io.example.app.dev${{ '' if lane.index == 0 else '.lane' ~ lane.index }}.client${{ replica.index }}
+      dev_url: ${{ svc.desktop_web.url }}
+    run: pnpm --filter @acme/desktop dev
+    replicas: 2
+    autostart: false
+    tags: [desktop]
+  desktop-web:
+    platform: node
+    preset: vite
+    run: pnpm --filter @acme/desktop-web dev
+    tags: [desktop]
+profiles:
+  default: [+essential]
+  backend: [+api, +worker]
+  web: [+web, crm-api]
+  crm: ["crm-*", catalog]
+  everything:
+    include: ["*"]
+    exclude: [+desktop, sms-stub]
+  staging-web:
+    include: [+web]
+    infra: false
+    env:
+      ACME_USE_STAGE_APIS: "1"
+  e2e:                                  # production-like run: devlanes with --profile e2e -- pnpm test:e2e
+    include: [+api, +web]
+    run_scripts: { dev: start }         # services using run_script ...#dev run ...#start instead
+    env:
+      NODE_ENV: production
+  attach:
+    include: [+desktop]
+    infra: false
+    env:
+      ACME_CRM_BASE_URL: ${{ lanes.main.svc.crm_api.public_url }}

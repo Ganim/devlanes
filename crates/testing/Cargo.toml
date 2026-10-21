@@ -1,0 +1,29 @@
+[package]
+name = "devlanes-testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+clap.workspace = true
+futures-util.workspace = true
+humantime = "2"
+rustix = { version = "1", features = ["process"] }
+serde_json.workspace = true
+socket2 = "0.6"
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+
+[[bin]]
+name = "fixture-server"
+path = "src/bin/fixture-server.rs"

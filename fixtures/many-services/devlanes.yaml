@@ -1,0 +1,46 @@
+project: fixture-many
+templates:
+  native:
+    run: [fixture-server]
+    ready: { tcp: true }
+services:
+  service-01: { extends: native }
+  service-02: { extends: native }
+  service-03: { extends: native }
+  service-04: { extends: native }
+  service-05: { extends: native }
+  service-06: { extends: native }
+  service-07: { extends: native }
+  service-08: { extends: native }
+  service-09: { extends: native }
+  service-10: { extends: native }
+  service-11: { extends: native }
+  service-12: { extends: native }
+  service-13: { extends: native }
+  service-14: { extends: native }
+  service-15: { extends: native }
+  service-16: { extends: native }
+  service-17: { extends: native }
+  service-18: { extends: native }
+  service-19: { extends: native }
+  service-20: { extends: native }
+  service-21: { extends: native }
+  service-22: { extends: native }
+  service-23: { extends: native }
+  service-24: { extends: native }
+  service-25: { extends: native }
+  service-26: { extends: native }
+  service-27: { extends: native }
+  service-28: { extends: native }
+  service-29: { extends: native }
+  service-30: { extends: native }
+  service-31: { extends: native }
+  service-32: { extends: native }
+  service-33: { extends: native }
+  service-34: { extends: native }
+  service-35: { extends: native }
+  service-36: { extends: native }
+  service-37: { extends: native }
+  service-38: { extends: native }
+  service-39: { extends: native }
+  service-40: { extends: native }

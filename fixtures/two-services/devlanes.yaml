@@ -1,0 +1,11 @@
+project: fixture-two
+services:
+  api:
+    run: [fixture-server, --log-line, api-ready]
+    hosts: ["api.${{ lane.domain }}"]
+    ready: { http: { path: /healthz } }
+  web:
+    run: [fixture-server, --log-line, web-ready]
+    hosts: ["${{ lane.domain }}"]
+    env: { API_URL: "${{ svc.api.url }}" }
+    ready: { http: { path: /healthz } }
