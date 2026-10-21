@@ -72,5 +72,8 @@ cp "$here/devlanes/README.md" "$out/devlanes/README.md"
 cp "$here/devlanes/bin/devlanes.js" "$out/devlanes/bin/devlanes.js"
 chmod 755 "$out/devlanes/bin/devlanes.js"
 cp "$root/LICENSE" "$out/devlanes/LICENSE"
+# The committed schemas, so editors can point yaml-language-server at node_modules.
+cp "$root/crates/config/schema.json" "$out/devlanes/schema.json"
+cp "$root/crates/config/user-schema.json" "$out/devlanes/user-schema.json"
 
 ls -1 "$out"

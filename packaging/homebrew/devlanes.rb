@@ -3,7 +3,6 @@
 class Devlanes < Formula
   desc "Development environments in Git worktree lanes"
   homepage "https://devlanes.run"
-  version "@VERSION@"
   license "Apache-2.0"
 
   on_macos do

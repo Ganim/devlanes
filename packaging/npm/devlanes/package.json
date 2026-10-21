@@ -13,8 +13,15 @@
     "devlanes": "bin/devlanes.js"
   },
   "files": [
-    "bin"
+    "bin",
+    "schema.json",
+    "user-schema.json"
   ],
+  "exports": {
+    "./package.json": "./package.json",
+    "./schema.json": "./schema.json",
+    "./user-schema.json": "./user-schema.json"
+  },
   "engines": {
     "node": ">=18"
   },

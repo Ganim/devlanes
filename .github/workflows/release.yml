@@ -1,9 +1,15 @@
 name: Release
+# A `v*` tag builds the archives and uploads them to a draft release. The release
+# is published only after every asset is attached, so the Homebrew formula, npm
+# packages, cargo binstall and install.sh never see a half-filled release.
 on:
   push:
     tags: ["v*"]
 permissions:
   contents: read
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 jobs:
   build:
     strategy:
@@ -22,7 +28,6 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             native: true
-            schema: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
             native: true
@@ -54,9 +59,6 @@ jobs:
           "target/$TARGET/release/devlanes-hosts" version | grep -F "build=release"
       - name: Package
         run: sh packaging/scripts/package.sh "$VERSION" "$TARGET" dist
-      - name: Export JSON Schemas
-        if: matrix.schema
-        run: sh packaging/scripts/export-schema.sh dist "target/$TARGET/release/devlanes"
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
@@ -69,6 +71,11 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -76,29 +83,179 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - name: Checksums and release manifest
+      - name: Version
+        id: version
         run: |
-          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-          sh packaging/scripts/manifest.sh "${GITHUB_REF_NAME#v}" dist \
+          version=${GITHUB_REF_NAME#v}
+          case $version in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "PRERELEASE=$prerelease" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+      - name: Checksums, release manifest and schemas
+        run: |
+          sh packaging/scripts/manifest.sh "$VERSION" dist \
             "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
           jq -e '.artifacts | length == 4' dist/release-manifest.json
-      - name: Homebrew formula and npm packages
+          cp crates/config/schema.json crates/config/user-schema.json dist/
+      - name: Homebrew formula
         run: |
-          mkdir -p packages
-          sh packaging/homebrew/render.sh "$VERSION" dist/SHA256SUMS > packages/devlanes.rb
-          sh packaging/npm/build.sh "$VERSION" dist packages/npm
-      # Publishing to the tap and npm needs credentials and stays manual (packaging/README.md).
+          mkdir -p formula
+          sh packaging/homebrew/render.sh "$VERSION" dist/SHA256SUMS > formula/devlanes.rb
       - uses: actions/upload-artifact@v4
         with:
-          name: packages
-          path: packages/
+          name: formula
+          path: formula/
           if-no-files-found: error
-      - name: Create draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Upload to a draft release
         run: |
-          set --
-          case $VERSION in *-*) set -- --prerelease ;; esac
-          gh release create "$GITHUB_REF_NAME" --draft --verify-tag "$@" \
-            --title "devlanes $VERSION" --generate-notes \
-            dist/*.tar.gz dist/SHA256SUMS dist/release-manifest.json dist/v1.json dist/user-v1.json
+          set -- dist/*.tar.gz dist/SHA256SUMS dist/release-manifest.json dist/schema.json dist/user-schema.json
+          if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then
+            # A rerun may refill a draft, but published assets are never replaced.
+            if [ "$draft" != true ]; then
+              echo "::error::release $GITHUB_REF_NAME is already published"
+              exit 1
+            fi
+            gh release upload "$GITHUB_REF_NAME" --clobber "$@"
+          else
+            prerelease=
+            if [ "$PRERELEASE" = true ]; then prerelease=--prerelease; fi
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag ${prerelease:+"$prerelease"} \
+              --title "devlanes $VERSION" --generate-notes "$@"
+          fi
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Publish the release
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+
+  homebrew-verify:
+    needs: [release, publish]
+    if: needs.release.outputs.prerelease == 'false'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: formula
+          path: formula
+      - name: Install and test the formula from the published release
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew tap devlanes-run/tap
+          # Homebrew 6 loads non-official taps only after explicit trust.
+          if brew help trust >/dev/null 2>&1; then
+            brew trust --formula devlanes-run/tap/devlanes
+          fi
+          cp formula/devlanes.rb "$(brew --repository devlanes-run/tap)/Formula/devlanes.rb"
+          brew audit --formula devlanes-run/tap/devlanes
+          brew install devlanes-run/tap/devlanes
+          brew test devlanes-run/tap/devlanes
+
+  homebrew-publish:
+    needs: [release, homebrew-verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: formula
+          path: formula
+      - name: Push the formula to devlanes-run/homebrew-tap
+        uses: actions/github-script@v7
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        with:
+          github-token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const owner = 'devlanes-run';
+            const repo = 'homebrew-tap';
+            const path = 'Formula/devlanes.rb';
+            const version = process.env.VERSION;
+            if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`not a stable version: ${version}`);
+            const content = fs.readFileSync('formula/devlanes.rb');
+
+            let current;
+            try {
+              current = (await github.rest.repos.getContent({ owner, repo, path, ref: 'main' })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            if (current) {
+              const old = Buffer.from(current.content, 'base64');
+              if (old.equals(content)) return;
+              // A rerun of an older tag must not replace the formula of a newer release.
+              const oldVersion = old.toString('utf8').match(/releases\/download\/v(\d+\.\d+\.\d+)\//)?.[1];
+              if (oldVersion) {
+                const before = oldVersion.split('.').map(Number);
+                const after = version.split('.').map(Number);
+                const first = before.findIndex((part, index) => part !== after[index]);
+                if (first !== -1 && before[first] > after[first]) {
+                  core.notice(`Kept the newer tap version ${oldVersion}`);
+                  return;
+                }
+              }
+            }
+
+            await github.rest.repos.createOrUpdateFileContents({
+              owner, repo, path, branch: 'main',
+              message: `devlanes ${version}`,
+              content: content.toString('base64'),
+              ...(current ? { sha: current.sha } : {}),
+            });
+            core.notice(`Published devlanes ${version} to ${owner}/${repo}`);
+
+  npm:
+    needs: [release, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Trusted publishing: npm exchanges the job's OIDC token for a publish token, so
+    # no npm secret exists. Each package's trusted publisher names this file.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.release.outputs.version }}
+      PRERELEASE: ${{ needs.release.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      # The archives keep the executable bits that an uploaded package directory would lose.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - name: npm with trusted publishing support
+        run: |
+          npm install -g npm@11
+          # Trusted publishing needs npm 11.5.1 or later.
+          printf '11.5.1\n%s\n' "$(npm --version)" | sort -V -C
+      - name: Build the packages
+        run: sh packaging/npm/build.sh "$VERSION" dist npm
+      - name: Publish, platform packages first
+        run: |
+          tag=latest
+          if [ "$PRERELEASE" = true ]; then tag=next; fi
+          for dir in npm/devlanes-*/ npm/devlanes/; do
+            name=$(jq -r .name "$dir/package.json")
+            # Reruns skip versions already on the registry. A plain registry read, because
+            # npm commands other than publish would send setup-node's placeholder token.
+            if curl -fs -o /dev/null "https://registry.npmjs.org/$name/$VERSION"; then
+              echo "$name@$VERSION is already published"
+              continue
+            fi
+            npm publish "$dir" --provenance --access public --tag "$tag"
+          done
