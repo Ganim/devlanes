@@ -451,13 +451,17 @@ async fn setsid_grandchild_killed_via_descendants() -> Result<(), Error> {
     .await
 }
 
-/// After a natural leader exit, processes still holding the output are swept.
+/// After a natural leader exit, a session member that outlives it is swept, even
+/// when no periodic snapshot ever saw it before it was reparented to init.
 #[tokio::test]
 async fn leftovers_swept_after_leader_exit() -> Result<(), Error> {
     bounded(async {
-        // Pipes, so no terminal hangup kills the background job first.
-        let unit = runner()
-            .spawn_unit(shell("sleep 30 & echo child=$!", false))
+        // Pipes, so no terminal hangup kills the background job first. The long
+        // interval leaves only the immediate first tick, which runs before the
+        // delayed fork, so adoption must come from the scan done while reaping.
+        let unit = PtyRunner::default()
+            .with_track_interval(Duration::from_secs(60))
+            .spawn_unit(shell("sleep 0.2; sleep 30 & echo child=$!", false))
             .await?;
         let mut cleanup = Cleanup::default();
         cleanup.unit(&unit);
@@ -468,7 +472,7 @@ async fn leftovers_swept_after_leader_exit() -> Result<(), Error> {
         assert_eq!(report.outcome.code, Some(0));
         assert!(report.stop.is_none());
         assert!(report.swept.iter().any(|p| p.pid == child), "{report:?}");
-        assert!(report.escaped.is_empty());
+        assert!(report.escaped.is_empty(), "{report:?}");
         assert!(!alive(child));
         Ok(())
     })

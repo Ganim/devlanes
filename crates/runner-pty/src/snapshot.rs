@@ -67,6 +67,10 @@ pub(crate) fn processes(max_age: Duration) -> Result<Arc<Vec<ProcessInfo>>, devl
             let number = state.started;
             drop(state);
             let guard = ScanGuard;
+            #[cfg(test)]
+            std::thread::sleep(Duration::from_millis(
+                SCAN_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed),
+            ));
             let result = devlanes_sys::processes().map(Arc::new);
             std::mem::forget(guard);
             state = lock();
@@ -85,6 +89,10 @@ pub(crate) fn processes(max_age: Duration) -> Result<Arc<Vec<ProcessInfo>>, devl
         state = DONE.wait(state).unwrap_or_else(PoisonError::into_inner);
     }
 }
+
+/// Extra scan duration, so tests can make calls overlap deterministically.
+#[cfg(test)]
+static SCAN_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Number of scans started so far, for tests that count scans.
 #[cfg(test)]
@@ -107,17 +115,39 @@ impl Drop for ScanGuard {
 mod tests {
     use super::*;
 
-    /// Concurrent fresh requests share scans instead of running one each.
+    /// Concurrent fresh requests share scans instead of running one each. Scans are
+    /// slowed so the callers overlap; callers sharing a scan get the same `Arc`, so
+    /// the count ignores scans other tests in this binary start meanwhile.
     #[test]
     fn concurrent_fresh_requests_coalesce() {
-        let before = lock().started;
+        use std::sync::{Barrier, atomic::Ordering};
+        SCAN_DELAY_MS.store(100, Ordering::Relaxed);
+        let barrier = Arc::new(Barrier::new(16));
         let threads: Vec<_> = (0..16)
-            .map(|_| std::thread::spawn(|| processes(Duration::ZERO).map(|s| s.len())))
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    processes(Duration::ZERO)
+                })
+            })
             .collect();
-        for thread in threads {
-            assert!(thread.join().expect("no panic").expect("scan") > 0);
-        }
-        let scans = lock().started - before;
-        assert!((1..16).contains(&scans), "{scans} scans for 16 callers");
+        let snapshots: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("no panic").expect("scan"))
+            .collect();
+        SCAN_DELAY_MS.store(0, Ordering::Relaxed);
+        let mut distinct: Vec<*const Vec<ProcessInfo>> =
+            snapshots.iter().map(Arc::as_ptr).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        // At most a scan already running when they arrived plus one shared scan;
+        // one more covers a caller delayed past the barrier by the scheduler.
+        assert!(
+            distinct.len() <= 3,
+            "{} scans for 16 callers",
+            distinct.len()
+        );
+        assert!(snapshots.iter().all(|s| !s.is_empty()));
     }
 }
