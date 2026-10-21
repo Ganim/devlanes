@@ -1,0 +1,12 @@
+# Key-only login for the test user. Forwarding stays off because devlanes only
+# needs a session channel (design-draft section 5).
+AllowUsers devlanes
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
