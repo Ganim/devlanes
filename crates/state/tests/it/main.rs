@@ -700,15 +700,24 @@ async fn initial_migration_recovers_after_interrupted_ledger_write() {
 }
 
 #[tokio::test]
-/// Database filenames retain Unix bytes and cannot inject SQLite URI options.
-async fn non_utf8_database_paths_support_reopen_and_retention() {
-    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+/// Filenames cannot inject URI options; Linux additionally exercises non-UTF-8 bytes.
+async fn database_paths_preserve_bytes_and_uri_punctuation() {
+    use std::ffi::OsString;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::ffi::OsStringExt;
     let dir = tempfile::tempdir().expect("dir");
-    let path = dir.path().join(OsString::from_vec(b"state-\xff?mode=memory.db".to_vec()));
-    let store = Store::open(&path).await.expect("non-UTF-8 database");
+    #[cfg(target_os = "linux")]
+    let name = OsString::from_vec(b"state-\xff?mode=memory.db".to_vec());
+    #[cfg(not(target_os = "linux"))]
+    let name = OsString::from("state-é?mode=memory.db");
+    let path = dir.path().join(name);
+    let store = Store::open(&path).await.expect("literal database filename");
     let p = project(&store, "acme").await;
     assert!(path.exists());
-    let report = store.prune(devlanes_state::RetentionPolicy::default()).await.expect("retention");
+    let report = store
+        .prune(devlanes_state::RetentionPolicy::default())
+        .await
+        .expect("retention");
     assert!(!report.budget_exceeded);
     drop(store);
     let store = Store::open(&path).await.expect("reopen");

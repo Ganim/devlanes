@@ -17,7 +17,10 @@ pub use retention::*;
 
 use diesel::{connection::SimpleConnection, prelude::*};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
-use std::{path::{Path, PathBuf}, os::unix::ffi::OsStrExt};
+use std::{
+    os::unix::ffi::OsStrExt,
+    path::{Path, PathBuf},
+};
 use tokio::sync::{mpsc, oneshot};
 
 /// Highest supported forward-only migration. Newer databases require an upgrade.
@@ -96,7 +99,10 @@ impl Store {
                 }
             })?;
         let database_path = result.await.map_err(|_| Error::Closed)??;
-        Ok(Self { sender, database_path })
+        Ok(Self {
+            sender,
+            database_path,
+        })
     }
 
     /// Queues typed work without exposing a connection or blocking executor threads.
@@ -127,13 +133,20 @@ fn open_connection(path: &Path) -> Result<(SqliteConnection, PathBuf), Error> {
     let (path, url) = if path == Path::new(":memory:") {
         (path.to_path_buf(), ":memory:".to_owned())
     } else {
-        let path = std::path::absolute(path).map_err(|error| Error::Filesystem(error.to_string()))?;
+        let path =
+            std::path::absolute(path).map_err(|error| Error::Filesystem(error.to_string()))?;
         let bytes = path.as_os_str().as_bytes();
-        if bytes.contains(&0) { return Err(Error::Invalid("database path contains NUL".into())); }
-        let url = format!("file:{}", percent_encoding::percent_encode(bytes, percent_encoding::NON_ALPHANUMERIC));
+        if bytes.contains(&0) {
+            return Err(Error::Invalid("database path contains NUL".into()));
+        }
+        let url = format!(
+            "file:{}",
+            percent_encoding::percent_encode(bytes, percent_encoding::NON_ALPHANUMERIC)
+        );
         (path, url)
     };
-    let mut connection = SqliteConnection::establish(&url).map_err(|error| Error::Connection(error.to_string()))?;
+    let mut connection =
+        SqliteConnection::establish(&url).map_err(|error| Error::Connection(error.to_string()))?;
     configure(&mut connection)?;
     Ok((connection, path))
 }

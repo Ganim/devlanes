@@ -30,7 +30,7 @@ Only the daemon opens the database. Client environments and secret-provider valu
 
 Opening runs pending embedded Diesel migrations and configures WAL, foreign keys, and a five-second busy timeout. Old rusqlite development databases using `user_version` are refused with `STATE_LEGACY_SCHEMA`: run `devlanes daemon reset-state`. Newer Diesel schemas require an upgrade.
 
-The daemon schedules retention calls and supplies configuration values. Defaults are 30 days for finished runs and metrics, 7 days for log segment rows, 90 days since a remote host's last connection, and a 512 MiB database budget. These defaults are exported as `DEFAULT_*` constants. Log files have separate retention; this store removes their metadata only.
+Call retention periodically from the daemon with configuration-derived limits. Defaults are 30 days for finished runs and metrics, 7 days for log segment rows, 90 days since a remote host's last connection, and a 512 MiB database budget. These defaults are exported as `DEFAULT_*` constants. Log files have separate retention; this store removes their metadata only.
 
 Under size pressure, pruning removes oldest metric rollups before other history. Registry rows, unfinished runs, and successful-once task markers remain. Closed segment rows can expire while their process keeps running. Incremental vacuum returns freed pages to disk; `PruneReport` includes sidecar bytes and reports an unmet budget or a checkpoint blocked by readers.
 
