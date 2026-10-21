@@ -18,7 +18,7 @@ use crate::api::UnitMetrics;
 use crate::app::{
     App, AttachState, Connection, CopyState, Dialog, ErrorEntry, Focus, LogView, MIN_HEIGHT,
     MIN_WIDTH, PaneMode, PanelLine, ProfileChoice, ProfilesState, Row, Tab, Target, areas,
-    error_panel_area, started_by_agent, unit_ref,
+    error_panel_area, lane_profiles, started_by_agent, unit_ref,
 };
 use crate::doctor;
 use crate::text::{self, clean, clip};
@@ -313,7 +313,10 @@ fn unit_spans(unit: &UnitSummary, error: Option<&ErrorEntry>) -> Vec<Span<'stati
         Span::raw("    "),
         Span::styled(format!("{glyph} "), Style::new().fg(marker)),
         Span::styled(clean(&unit.name), name),
-        Span::styled(format!("  {}", unit_state(unit)), Style::new().fg(state_color)),
+        Span::styled(
+            format!("  {}", unit_state(unit)),
+            Style::new().fg(state_color),
+        ),
     ];
     if let Some(entry) = error {
         spans.push(failure_badge(entry));
@@ -646,8 +649,14 @@ fn lane_details(app: &App, width: usize) -> Vec<Line<'static>> {
         width,
         plain,
     ));
-    if let Some(profile) = &lane.profile {
-        lines.extend(field("profile", profile, width, plain));
+    let profiles = lane_profiles(lane);
+    if !profiles.is_empty() {
+        let label = if profiles.len() == 1 {
+            "profile"
+        } else {
+            "profiles"
+        };
+        lines.extend(field(label, &profiles.join(", "), width, plain));
     }
     if let Some(domain) = &lane.domain {
         lines.extend(field("domain", domain, width, plain));
@@ -1162,7 +1171,10 @@ fn profile_row(item: &ProfileChoice, selected: bool, width: usize) -> Line<'stat
     }
     let mut spans = vec![
         Span::raw(format!("{cursor}{check} ")),
-        Span::styled(clean(&profile.name), Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            clean(&profile.name),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
     ];
     if profile.is_default {
         spans.push(Span::styled("  default", Style::new().fg(MUTED)));
@@ -1322,10 +1334,7 @@ fn render_dialog(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
                             .map(|(i, item)| profile_row(item, i == *index, width)),
                     );
                     lines.push(Line::from(""));
-                    lines.extend(wrapped(
-                        "space toggles · enter starts · esc cancels",
-                        muted,
-                    ));
+                    lines.extend(wrapped("space toggles · enter starts · esc cancels", muted));
                     lines.extend(wrapped("nothing checked starts the default profile", muted));
                 }
             }

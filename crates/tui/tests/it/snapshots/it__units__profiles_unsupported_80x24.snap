@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/it/units.rs
+expression: text
+---
+" devlanes  lanes  monitor  daemon                                               "
+"┌ lanes ───────────────────────┐┌ acme@0 ──────────────────────────────────────┐"
+"│acme                          ││state     running                             │"
+"│▾ ● @0 main                   ││branch    main                                │"
+"│    ● api  ready              ││path      /work/acme/main                     │"
+"│    ○ migrate  exited 0  task ││profile   web                                 │"
+"│    ◐ web  starting           ││                                              │"
+"│    ✕ worker  failed 1  agent ││s start · x stop · r restart · t task · p     │"
+"│▸ ○ @1 feat/login  idle       ││profile · O terminal                          │"
+"│  ○ @2 fix/cache  moves┌ profiles ────────────────────┐                       │"
+"│  ○ -- spike  unassigne│start acme@0 with:            │                       │"
+"│shop                   │profiles need a newer daemon  │                       │"
+"│▾ ● @0 main            │                              │                       │"
+"│    ○ admin  stopped   │esc closes                    │                       │"
+"│    ● storefront  ready└──────────────────────────────┘                       │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"└──────────────────────────────┘└──────────────────────────────────────────────┘"
+" j/k move  s start  x stop  r restart  t task  shift+tab terminal  z zoom       "

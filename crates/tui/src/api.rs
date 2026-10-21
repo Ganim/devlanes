@@ -594,15 +594,16 @@ impl DaemonApi for ClientApi {
         Ok(status)
     }
 
-    /// `profile.list` needs `Method::ProfileList` in `devlanes-proto`. Until
-    /// that variant exists this answers like a daemon that lacks the method, so
-    /// the TUI says profiles need a newer daemon instead of failing.
+    /// Calls `profile.list` on the shared connection; the lane travels in the context.
     async fn profile_list(&self, lane: String) -> Result<ProfileList, ApiError> {
-        Err(ApiError::Rpc(RpcError::new(
-            "unsupported_method",
-            json!({"method": "profile.list", "lane": lane}),
-            1,
-        )))
+        let value = self
+            .shared_request(
+                Method::ProfileList,
+                json!({}),
+                self.context(Some(lane), false),
+            )
+            .await?;
+        from_value(value)
     }
 
     /// `$DEVLANES_HOME/logs/daemon.log`.

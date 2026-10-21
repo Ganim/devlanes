@@ -1701,7 +1701,11 @@ impl App {
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
             return;
         }
-        let ProfilesState::Ready { mut items, mut index } = state else {
+        let ProfilesState::Ready {
+            mut items,
+            mut index,
+        } = state
+        else {
             // Nothing to pick while loading or on an older daemon.
             self.dialog = Some(Dialog::Profiles { lane, state });
             return;
@@ -1756,7 +1760,8 @@ impl App {
         result: Result<crate::api::ProfileList, ApiError>,
         effects: &mut Vec<Effect>,
     ) {
-        let open = matches!(&self.dialog, Some(Dialog::Profiles { lane: open, .. }) if *open == lane);
+        let open =
+            matches!(&self.dialog, Some(Dialog::Profiles { lane: open, .. }) if *open == lane);
         let current = self
             .lanes
             .iter()
@@ -2390,8 +2395,11 @@ pub fn started_by_agent(unit: &UnitSummary) -> bool {
     unit.actor.kind == ActorKind::Agent
 }
 
-/// The profiles a lane runs now. `LaneSummary` carries a single `profile`
-/// today; a `profiles` list is coming to proto and belongs here when it lands.
+/// The profiles of the lane's last start. Older daemons send only `profile`.
 pub fn lane_profiles(lane: &LaneSummary) -> Vec<String> {
-    lane.profile.iter().cloned().collect()
+    if lane.profiles.is_empty() {
+        lane.profile.iter().cloned().collect()
+    } else {
+        lane.profiles.clone()
+    }
 }

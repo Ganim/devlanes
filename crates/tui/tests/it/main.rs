@@ -3,6 +3,7 @@
 mod daemon;
 mod errors;
 mod fake;
+mod units;
 
 use std::{sync::Arc, time::Duration};
 

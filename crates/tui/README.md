@@ -31,7 +31,7 @@ async fn main() -> Result<(), devlanes_tui::Error> {
 | `shift+tab` | switch between the list and the unit's terminal |
 | `s` / `x` / `r` | start / stop / restart the selected unit or lane |
 | `t` | run a task (asks first) |
-| `p` | start the lane with a profile |
+| `p` | pick profiles (space toggles, enter starts the lane with the checked ones) |
 | `z` | zoom the terminal |
 | `pgup`/`pgdn`, wheel | scroll; older lines load from the daemon's logs |
 | `c` | copy mode; `y` copies through OSC 52 |
