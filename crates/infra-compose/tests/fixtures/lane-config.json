@@ -1,0 +1,136 @@
+{
+  "name": "acme-lane2",
+  "networks": {
+    "default": {
+      "name": "acme-lane2_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "caddy": {
+      "command": null,
+      "depends_on": {
+        "redis": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "image": "caddy:2-alpine",
+      "networks": {
+        "default": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 80,
+          "published": "80",
+          "protocol": "tcp"
+        },
+        {
+          "mode": "ingress",
+          "target": 443,
+          "published": "443",
+          "protocol": "tcp"
+        }
+      ]
+    },
+    "mailpit": {
+      "command": null,
+      "depends_on": {
+        "redis": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "image": "redis:7-alpine",
+      "labels": {
+        "dev.devlanes.kind": "compose",
+        "dev.devlanes.lane": "2",
+        "dev.devlanes.project": "acme",
+        "dev.devlanes.scope": "lane",
+        "dev.devlanes.service": "mailpit"
+      },
+      "networks": {
+        "default": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 8025,
+          "published": "21000",
+          "protocol": "tcp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 1025,
+          "published": "21001",
+          "protocol": "tcp"
+        }
+      ]
+    },
+    "postgres": {
+      "command": null,
+      "container_name": "acme-postgres",
+      "entrypoint": null,
+      "environment": {
+        "POSTGRES_PASSWORD": "postgres"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "pg_isready",
+          "-h",
+          "127.0.0.1",
+          "-U",
+          "postgres"
+        ],
+        "interval": "2s"
+      },
+      "image": "postgres:17-alpine",
+      "networks": {
+        "default": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 5432,
+          "published": "15432",
+          "protocol": "tcp"
+        }
+      ],
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "pgdata",
+          "target": "/var/lib/postgresql/data",
+          "volume": {}
+        }
+      ]
+    },
+    "redis": {
+      "command": null,
+      "entrypoint": null,
+      "image": "redis:7-alpine",
+      "networks": {
+        "default": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 6379,
+          "protocol": "tcp"
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "pgdata": {
+      "name": "acme-lane2_pgdata"
+    }
+  }
+}

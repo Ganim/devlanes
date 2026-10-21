@@ -1,0 +1,41 @@
+# Source of the captured fixtures (Compose 5.1.2). Regenerate with ACME_DB_PORT=15432 in .env:
+#   docker compose config --format json > config.json
+#   docker compose -p acme-lane2 -f docker-compose.yml -f <rendered lane 2 override> config --format json > lane-config.json
+#   docker compose up -d --wait redis postgres && docker compose ps --all --format json > ps.ndjson
+# ps.ndjson has its paths replaced with /work/acme.
+name: acme
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: acme-postgres
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "${ACME_DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 2s
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1::6379"
+  mailpit:
+    image: redis:7-alpine
+    container_name: acme-mailpit
+    ports:
+      - "8025:8025"
+      - "1025:1025/tcp"
+    depends_on:
+      - redis
+  caddy:
+    image: caddy:2-alpine
+    ports: ["80:80", "443:443"]
+    depends_on: [redis]
+  search:
+    image: redis:7-alpine
+    profiles: [search]
+    ports: ["9200-9201:9200-9201"]
+volumes:
+  pgdata: {}
