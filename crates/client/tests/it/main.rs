@@ -1,23 +1,29 @@
-//! Client behaviour against mock daemons on Unix sockets. Unix only until the
-//! Windows named-pipe endpoint exists.
-#![cfg(unix)]
+//! Client behaviour against mock daemons on the local endpoint: Unix sockets, or
+//! named pipes on Windows.
 
-use std::{os::unix::fs::PermissionsExt, time::Duration};
+use std::time::Duration;
 
 use bytes::Bytes;
 use devlanes_client::{Client, Context, Error, Frame, Hello, Method, Paths};
-use devlanes_ipc::Connection;
+use devlanes_ipc::{Connection, local::LocalListener};
 use devlanes_proto::{Control, Event, Outcome, Response, RpcError};
 use serde_json::json;
-use tokio::{net::UnixListener, time::timeout};
+use tokio::time::timeout;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 /// Keeps mock sockets inside test cleanup even when the host exports XDG_RUNTIME_DIR.
+#[cfg(unix)]
 fn mock_paths(home: &std::path::Path) -> devlanes_client::Result<Paths> {
     let mut paths = Paths::new(home)?;
     paths.socket = paths.run.join("daemon.sock");
     Ok(paths)
+}
+
+/// The pipe name already follows the temporary home, so tests never collide.
+#[cfg(windows)]
+fn mock_paths(home: &std::path::Path) -> devlanes_client::Result<Paths> {
+    Paths::new(home)
 }
 
 /// A real socket exercises peer credentials, framing, request context, and queued output together.
@@ -27,9 +33,9 @@ async fn request_preserves_events_bytes_and_rpc_errors() -> TestResult {
         let temp = tempfile::tempdir()?;
         let paths = mock_paths(&temp.path().join("home"))?;
         paths.prepare()?;
-        let listener = UnixListener::bind(&paths.socket)?;
+        let mut listener = LocalListener::bind(&paths.socket).await?;
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             let mut connection = Connection::new(stream);
             assert!(matches!(
                 connection.recv().await?,
@@ -115,9 +121,9 @@ async fn incompatible_daemon_is_never_sent_shutdown() -> TestResult {
         let temp = tempfile::tempdir()?;
         let paths = mock_paths(&temp.path().join("home"))?;
         paths.prepare()?;
-        let listener = UnixListener::bind(&paths.socket)?;
+        let mut listener = LocalListener::bind(&paths.socket).await?;
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             let mut connection = Connection::new(stream);
             connection.recv().await?;
             let mut hello = Hello::current(42);
@@ -153,9 +159,9 @@ async fn connect_any_keeps_an_incompatible_daemon_for_shutdown() -> TestResult {
         let temp = tempfile::tempdir()?;
         let paths = mock_paths(&temp.path().join("home"))?;
         paths.prepare()?;
-        let listener = UnixListener::bind(&paths.socket)?;
+        let mut listener = LocalListener::bind(&paths.socket).await?;
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             let mut connection = Connection::new(stream);
             connection.recv().await?;
             let mut hello = Hello::current(5);
@@ -221,6 +227,7 @@ async fn no_spawn_connect_has_no_filesystem_side_effects() -> TestResult {
 }
 
 /// Long homes have stable distinct socket names, and discovery itself writes nothing.
+#[cfg(unix)]
 #[test]
 fn long_paths_remain_isolated_and_read_only() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -236,8 +243,10 @@ fn long_paths_remain_isolated_and_read_only() -> TestResult {
 
 /// A symlinked home cannot silently become trusted daemon state; an own home
 /// others can read passes, for the daemon to tighten.
+#[cfg(unix)]
 #[test]
 fn prepare_rejects_symlinked_homes() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("shared");
     std::fs::create_dir(&home)?;
@@ -259,9 +268,9 @@ async fn streaming_attach_is_bidirectional() -> TestResult {
         let temp = tempfile::tempdir()?;
         let paths = mock_paths(&temp.path().join("home"))?;
         paths.prepare()?;
-        let listener = UnixListener::bind(&paths.socket)?;
+        let mut listener = LocalListener::bind(&paths.socket).await?;
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             let mut connection = Connection::new(stream);
             connection.recv().await?;
             connection.send(Frame::Control(Control::Hello(Hello::current(1)))).await?;
@@ -287,9 +296,42 @@ async fn streaming_attach_is_bidirectional() -> TestResult {
     }).await?
 }
 
+/// A junctioned home cannot silently become trusted daemon state; an own home
+/// other accounts can read passes, for the daemon to tighten.
+#[cfg(windows)]
+#[test]
+fn prepare_rejects_junctioned_homes() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("shared");
+    std::fs::create_dir(&home)?;
+    // Everyone, read access.
+    let granted = std::process::Command::new("icacls")
+        .arg(&home)
+        .args(["/grant", "*S-1-1-0:(OI)(CI)R"])
+        .stdout(std::process::Stdio::null())
+        .status()?;
+    assert!(granted.success());
+    Paths::new(&home)?.prepare()?;
+    let link = temp.path().join("link");
+    let linked = std::process::Command::new("cmd")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&link)
+        .arg(temp.path())
+        .stdout(std::process::Stdio::null())
+        .status()?;
+    assert!(linked.success());
+    assert!(matches!(
+        Paths::new(&link)?.prepare(),
+        Err(Error::UnsafeDirectory(_))
+    ));
+    Ok(())
+}
+
 /// The pointer is atomically published inside the home and fallback directories stay private.
+#[cfg(unix)]
 #[test]
 fn prepare_writes_fallback_pointer() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
     let mut paths = Paths::new(temp.path().join("home"))?;
     paths.socket = temp.path().join("private").join("daemon.sock");

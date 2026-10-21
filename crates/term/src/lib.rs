@@ -90,49 +90,30 @@ pub fn on_path(program: &str) -> bool {
     })
 }
 
-/// True when `program`, as given or with a `PATHEXT` extension, is a file in a
-/// `PATH` directory. Extensions compare case-insensitively.
+/// True when `Command::new(program)` would find `program` in a `PATH` directory:
+/// the name as given when it has an extension, otherwise with `.exe` appended.
+/// `PATHEXT` is ignored because std only ever appends `.exe`, so a `.cmd` or
+/// `.bat` launcher counts only when `program` names that extension.
 #[cfg(windows)]
 pub fn on_path(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
-    let pathext = std::env::var("PATHEXT").unwrap_or_default();
-    let extensions = windows_path::extensions(&pathext);
-    std::env::split_paths(&path).any(|dir| windows_path::in_dir(&dir, program, &extensions))
+    std::env::split_paths(&path).any(|dir| windows_path::in_dir(&dir, program))
 }
 
 #[cfg(windows)]
 mod windows_path {
     use std::path::Path;
 
-    /// Used when `PATHEXT` is unset or empty, matching `cmd.exe`'s minimal list.
-    const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
-
-    /// The lowercase extensions in a `PATHEXT` value, each with its leading dot.
-    pub(crate) fn extensions(pathext: &str) -> Vec<String> {
-        let pathext = if pathext.trim().is_empty() {
-            DEFAULT_PATHEXT
+    /// Whether `dir` holds the file `Command::new(program)` looks for there.
+    /// Like std, any dot counts as an extension.
+    pub(crate) fn in_dir(dir: &Path, program: &str) -> bool {
+        if program.contains('.') {
+            present(&dir.join(program))
         } else {
-            pathext
-        };
-        pathext
-            .split(';')
-            .map(str::trim)
-            .filter(|ext| ext.len() > 1 && ext.starts_with('.'))
-            .map(str::to_ascii_lowercase)
-            .collect()
-    }
-
-    /// Whether `dir` holds `program` with one of `extensions`, either already in
-    /// the name or appended to it.
-    pub(crate) fn in_dir(dir: &Path, program: &str, extensions: &[String]) -> bool {
-        let lower = program.to_ascii_lowercase();
-        let has_extension = extensions.iter().any(|ext| lower.ends_with(ext.as_str()));
-        (has_extension && present(&dir.join(program)))
-            || extensions
-                .iter()
-                .any(|ext| present(&dir.join(format!("{program}{ext}"))))
+            present(&dir.join(format!("{program}.exe")))
+        }
     }
 
     /// Whether `candidate` is a file. App Execution Aliases such as `wt.exe` in
@@ -309,10 +290,10 @@ mod tests {
         assert_eq!(applescript_string(r#"a "b" \c"#), r#""a \"b\" \\c""#);
     }
 
-    /// `cmd` resolves through `PATHEXT` from the real `PATH`; unknown names do not.
+    /// `cmd` resolves to `cmd.exe` from the real `PATH`; unknown names do not.
     #[cfg(windows)]
     #[test]
-    fn on_path_finds_cmd_through_pathext() {
+    fn on_path_finds_cmd_exe() {
         assert!(on_path("cmd"));
         assert!(on_path("CMD.EXE"));
         assert!(!on_path("devlanes-no-such-program"));
@@ -327,22 +308,22 @@ mod tests {
         assert!(on_path("wt"));
     }
 
-    /// Names match with or without an extension, case-insensitively; files
-    /// without a listed extension and directories do not count.
+    /// Bare names match only `<name>.exe`, as `Command::new` resolves them;
+    /// names with an extension match as given. Directories do not count.
     #[cfg(windows)]
     #[test]
-    fn windows_lookup_uses_listed_extensions_only() -> std::io::Result<()> {
+    fn windows_lookup_matches_command_new() -> std::io::Result<()> {
         let dir = tempfile::tempdir()?;
-        std::fs::write(dir.path().join("tool.CMD"), "")?;
+        std::fs::write(dir.path().join("tool.EXE"), "")?;
+        std::fs::write(dir.path().join("shim.cmd"), "")?;
         std::fs::write(dir.path().join("plain"), "")?;
         std::fs::create_dir(dir.path().join("folder.exe"))?;
-        let extensions = windows_path::extensions(".exe; .Cmd;;bad");
-        assert_eq!(extensions, [".exe", ".cmd"]);
-        assert!(windows_path::in_dir(dir.path(), "tool", &extensions));
-        assert!(windows_path::in_dir(dir.path(), "TOOL.cmd", &extensions));
-        assert!(!windows_path::in_dir(dir.path(), "plain", &extensions));
-        assert!(!windows_path::in_dir(dir.path(), "folder", &extensions));
-        assert_eq!(windows_path::extensions("").len(), 4);
+        assert!(windows_path::in_dir(dir.path(), "tool"));
+        assert!(windows_path::in_dir(dir.path(), "TOOL.exe"));
+        assert!(windows_path::in_dir(dir.path(), "SHIM.cmd"));
+        assert!(!windows_path::in_dir(dir.path(), "shim"));
+        assert!(!windows_path::in_dir(dir.path(), "plain"));
+        assert!(!windows_path::in_dir(dir.path(), "folder"));
         Ok(())
     }
 

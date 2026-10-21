@@ -15,11 +15,12 @@ pub fn detach() -> std::io::Result<()> {
     }
 }
 
-/// Nothing to do: on Windows the spawning client starts the daemon without a console
-/// (`DETACHED_PROCESS`), which is what keeps terminal events away from it.
+/// The spawning client already started the daemon without a console
+/// (`DETACHED_PROCESS`), which keeps terminal events away. What is left is the
+/// inherited "ignore Ctrl-C" flag, which would stop Ctrl-C from reaching any unit.
 #[cfg(windows)]
 pub fn detach() -> std::io::Result<()> {
-    Ok(())
+    devlanes_sys::windows::process::accept_ctrl_c()
 }
 
 /// Routes panics through `tracing`, so a crash leaves its message, location and
@@ -109,9 +110,8 @@ fn release_stdout() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Keeps the pipe for now: the client stops reading at the newline, so it is not
-/// blocked. Swapping the standard handle for `NUL` needs a Win32 call from `sys`.
+/// Swaps the standard output handle for `NUL` and closes the client's pipe.
 #[cfg(windows)]
 fn release_stdout() -> std::io::Result<()> {
-    Ok(())
+    devlanes_sys::windows::process::release_stdout()
 }

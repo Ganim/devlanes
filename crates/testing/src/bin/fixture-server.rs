@@ -165,7 +165,7 @@ mod platform {
 }
 
 /// Windows stand-ins until the fixture gets console-event and job flags.
-#[cfg(not(unix))]
+#[cfg(windows)]
 mod platform {
     use super::Args;
 

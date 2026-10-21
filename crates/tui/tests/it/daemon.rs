@@ -71,7 +71,7 @@ async fn daemon_app(width: u16, height: u16) -> Result<App, Box<dyn std::error::
         lines: log_lines(),
         position: LogPosition {
             offset: 900,
-            file: (1, 2),
+            file: Default::default(),
         },
         reset: true,
     })));
@@ -111,7 +111,7 @@ async fn daemon_log_pauses_when_scrolled_and_follows_again() -> TestResult {
         lines: vec!["new line".into()],
         position: LogPosition {
             offset: 950,
-            file: (1, 2),
+            file: Default::default(),
         },
         reset: false,
     })));

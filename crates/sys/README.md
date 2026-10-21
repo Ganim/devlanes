@@ -33,7 +33,8 @@ All functions block. Call them from `spawn_blocking` in async code.
 - `listening_tcp`: TCP listeners of a set of PIDs, for diagnostics only.
 - `open_file`, `holders`: find processes that still hold a PTY slave or pipe open.
 - `raise_nofile_limit`, `child_nofile_limit`: raise the daemon's open-file limit and keep the original for children. Both report no limit on Windows.
-- `file_identity`, `path_identity`: device and inode on Unix, volume serial and file index on Windows, for noticing that a path now names a different file.
+- `file_identity`, `path_identity`: device and inode on Unix, volume serial and 128-bit file id on Windows, for noticing that a path now names a different file.
+- `windows` (Windows only): safe wrappers for the endpoint, daemon and runner crates. `token` (user SIDs, elevation), `security` (user-only security descriptors, private-directory checks and tightening), `pipe` (user-only pipe instances, checks of the account on the other end), `process` (spawn flags, waiting on a PID, the job this process runs in, Ctrl-C delivery, the stdout swap and stdio inheritance for the daemon).
 - `macos` (macOS only): safe rusage, mach time, host CPU and sysctl readings for `devlanes-metrics-macos`.
 
 ## Behaviour

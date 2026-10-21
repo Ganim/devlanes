@@ -209,7 +209,14 @@ async fn hosts_file(
     if let Some(probe) = probe {
         probe.abort();
     }
-    tracing::info!(mode = %policy.user_mode(), "hosts file fallback is not supported on Windows yet");
+    let mode = policy.user_mode();
+    // Only `always` is an explicit request; `auto` is the default and would warn on
+    // every start, and `never` opted out.
+    if mode == devlanes_resolver_hosts::HostsFileMode::Always {
+        tracing::warn!(%mode, "hosts file fallback is not supported on Windows yet");
+    } else {
+        tracing::debug!(%mode, "hosts file fallback is not supported on Windows yet");
+    }
     None
 }
 

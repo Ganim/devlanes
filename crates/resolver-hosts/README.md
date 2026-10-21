@@ -81,12 +81,12 @@ With both, the project's routed names are written on every route change, even wh
 - `install` refuses debug builds of the helper, and refuses directories on the install path that are not root-owned or that others can write.
 - `install` works from a private copy of the helper and compares the root-owned staged helper and rule with what it checked before activating either; a failure during activation restores the previous helper and rule.
 
+The helper's README covers what gets installed, the sudo rule and the security
+model: [`crates/hosts-helper/README.md`](../hosts-helper/README.md).
+
 ## Windows
 
 The crate builds on Windows, but there is no helper there yet. `SystemFs::lstat` fails with `Unsupported`, so a `HostsClient` built on it returns `HostsError::Unsupported` (`hosts_unsupported`) from every call without running a command. `install` and `uninstall` return `InstallError::Unsupported`. The policy, the probe, `HostsSync` and the fakes behave as on Unix.
-
-The helper's README covers what gets installed, the sudo rule and the security
-model: [`crates/hosts-helper/README.md`](../hosts-helper/README.md).
 
 ## License
 

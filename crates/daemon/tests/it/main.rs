@@ -70,8 +70,15 @@ pub fn temp() -> Temp {
     Temp { _dir: dir, path }
 }
 
-/// Runs git with test-local identity and no global config.
+/// Runs git with test-local identity, no global config and no hooks.
 pub fn git(dir: &Path, args: &[&str]) -> String {
+    // An empty hooks directory works on every OS, unlike `/dev/null`.
+    let hooks = tempfile::Builder::new()
+        .prefix("dle-hooks-")
+        .tempdir()
+        .expect("hooks dir");
+    let mut hooks_path = std::ffi::OsString::from("core.hooksPath=");
+    hooks_path.push(hooks.path());
     let output = Command::new("git")
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -83,9 +90,9 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
             "user.email=test@example.invalid",
             "-c",
             "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/dev/null",
         ])
+        .arg("-c")
+        .arg(hooks_path)
         .args(args)
         .output()
         .expect("git runs");

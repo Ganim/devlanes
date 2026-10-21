@@ -1,7 +1,7 @@
 # devlanes-client
 
-The Unix-socket client shared by the devlanes CLI, shell completions, and TUI.
-It uses `devlanes-ipc` and `devlanes-proto` to connect to the daemon and exchange requests and streaming frames.
+The daemon client shared by the devlanes CLI, shell completions, and TUI.
+It uses `devlanes-ipc` (a Unix socket, or a named pipe on Windows) and `devlanes-proto` to connect to the daemon and exchange requests and streaming frames.
 
 ## Usage
 
@@ -47,6 +47,12 @@ macOS ignores XDG. On either platform, an overlong home socket path falls back t
 `$TMPDIR/devlanes-<uid>/daemon-<home hash>.sock`, or `/tmp` if that path is still too long.
 `Paths::prepare()` creates private directories and writes `run/daemon.socket` for
 relocated sockets. The lock remains at `run/daemon.lock` under the home.
+
+## Windows
+
+The home defaults to `%USERPROFILE%\.devlanes` (`user_home()` ignores `HOME`, which Git Bash sets to a POSIX path). The socket is a named pipe, `\\.\pipe\devlanes-<home hash>`, hashed from the canonical home so every spelling of it reaches the same daemon; `run/daemon.socket` always names it. New directories get a DACL for the user, SYSTEM and Administrators.
+
+The daemon is spawned without a console (`DETACHED_PROCESS`) and, when the terminal's job allows it, outside that job, so closing the terminal does not stop it. It inherits none of the CLI's standard handles, so `$(devlanes status)` returns at once. Its environment adds the Windows variables programs need (`SystemRoot`, `PATHEXT`, the profile and program directories), with names compared without case.
 
 ## License
 

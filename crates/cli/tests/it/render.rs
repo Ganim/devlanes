@@ -631,6 +631,39 @@ fn doctor_without_a_daemon() {
     );
 }
 
+/// Windows terminal facts: an elevated shell fails doctor, a job that kills on
+/// close without breakaway is a warning, and an ordinary shell adds nothing. An
+/// open home is a warning the daemon fixes.
+#[test]
+fn doctor_terminal_and_acl_checks() {
+    let base = json!({
+        "running": false, "version": "0.3.0", "home": r"C:\Users\u\.devlanes",
+        "socket": r"\\.\pipe\devlanes-0", "db_path": r"C:\Users\u\.devlanes\state.db",
+        "home_check": {"path": r"C:\Users\u\.devlanes", "exists": true, "problem": "acl"},
+        "sandbox": {"codex_sandbox": false, "app_sandbox": false},
+    });
+    let with = |terminal: Value| {
+        let mut data = base.clone();
+        data["terminal"] = terminal;
+        render_text(Method::Doctor, &data)
+    };
+    let plain = with(json!({"elevated": false, "job": null}));
+    assert!(!plain.contains("terminal"), "{plain}");
+    assert!(plain.contains("lets other accounts in"), "{plain}");
+    let elevated = with(json!({"elevated": true, "job": null}));
+    assert!(elevated.contains("--- plain (exit 1)"), "{elevated}");
+    assert!(elevated.contains("runs as administrator"), "{elevated}");
+    let killing =
+        with(json!({"elevated": false, "job": {"kill_on_close": true, "breakaway_ok": false}}));
+    assert!(
+        killing.contains("stops every process it started"),
+        "{killing}"
+    );
+    let escapable =
+        with(json!({"elevated": false, "job": {"kill_on_close": true, "breakaway_ok": true}}));
+    assert!(!escapable.contains("stops every process"), "{escapable}");
+}
+
 #[test]
 fn doctor_says_how_to_recreate_an_unconstrained_ca() {
     let data = json!({

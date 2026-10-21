@@ -797,6 +797,7 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
         )
         .fix("devlanes daemon install, so the daemon starts outside the sandbox")
     });
+    checks.extend(terminal_checks(&data["terminal"]));
     // Docker is the daemon's to ask; without one there is nothing to say.
     if data.get("infra").is_some() {
         checks.extend(docker_checks(data));
@@ -866,6 +867,13 @@ fn home_checks(home: &Value) -> Vec<Check> {
             ),
         )
         .fix(format!("chmod 700 {}", crate::shell_quote(&path))),
+        Some("acl") => Check::new(
+            "home",
+            Outcome::Skip,
+            format!(
+                "{path} lets other accounts in; the daemon limits it to you, SYSTEM and Administrators when it starts"
+            ),
+        ),
         Some(problem) => Check::new(
             "home",
             Outcome::Fail,
@@ -882,6 +890,36 @@ fn home_checks(home: &Value) -> Vec<Check> {
         .fix("point DEVLANES_HOME at a directory you own, or fix that path by hand"),
     };
     vec![check]
+}
+
+/// The shell running `doctor` (`terminal: {elevated, job}`, reported on Windows):
+/// an elevated shell cannot start the daemon, and a job that kills its processes
+/// on close, with no way out, stops a daemon started from it.
+fn terminal_checks(terminal: &Value) -> Vec<Check> {
+    let mut checks = Vec::new();
+    if terminal.get("elevated").and_then(Value::as_bool) == Some(true) {
+        checks.push(
+            Check::new(
+                "terminal",
+                Outcome::Fail,
+                "this terminal runs as administrator; the daemon refuses to run elevated",
+            )
+            .fix("run devlanes from a terminal that is not running as administrator"),
+        );
+    }
+    let job = &terminal["job"];
+    let flag = |key: &str| job.get(key).and_then(Value::as_bool) == Some(true);
+    if flag("kill_on_close") && !flag("breakaway_ok") {
+        checks.push(
+            Check::new(
+                "terminal",
+                Outcome::Skip,
+                "this terminal stops every process it started when it closes, including a daemon started from it",
+            )
+            .fix("start the daemon from another terminal, such as Windows Terminal or PowerShell"),
+        );
+    }
+    checks
 }
 
 /// Docker and Compose from the daemon's `infra` facts.

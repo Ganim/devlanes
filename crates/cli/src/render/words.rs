@@ -937,7 +937,8 @@ pub(crate) fn has_wording(code: &str) -> bool {
 }
 
 /// `unsafe_home` (`{path, problem, owner?, mode?, fix?}`): the daemon refuses a
-/// state directory others could write; `mode` problems get `chmod 700`.
+/// state directory others could write; `mode` problems get `chmod 700`, `acl`
+/// problems (Windows) come with their own `fix`.
 fn unsafe_home(data: &Value) -> (String, Option<Hint>) {
     let path = field(data, "path");
     let why = match text(data, "problem").as_str() {
@@ -945,6 +946,7 @@ fn unsafe_home(data: &Value) -> (String, Option<Hint>) {
             Some(mode) => format!("mode {} lets other users in", display_value(mode)),
             None => "other users can access it".into(),
         },
+        "acl" => "its access list lets other accounts in".into(),
         "owner" => match data.get("owner").filter(|owner| !owner.is_null()) {
             Some(owner) => format!("it is owned by {}, not you", display_value(owner)),
             None => "another user owns it".into(),

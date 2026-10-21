@@ -5,8 +5,21 @@ use std::io;
 use std::path::Path;
 
 /// Names one file on one machine: device and inode on Unix, volume serial number
-/// and file index on Windows. Compare values for equality only.
-pub type FileIdentity = (u64, u64);
+/// and 128-bit file id on Windows (ReFS, used by Dev Drives, has ids that 64 bits
+/// cannot hold). Opaque: compare values for equality only. The default value names
+/// no file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct FileIdentity {
+    volume: u64,
+    file: u128,
+}
+
+impl FileIdentity {
+    /// Built by the platform modules from what the OS reports.
+    pub(crate) fn new(volume: u64, file: u128) -> Self {
+        Self { volume, file }
+    }
+}
 
 /// Identity of an open file. Log followers compare it across reads to detect rotation.
 pub fn file_identity(file: &File) -> io::Result<FileIdentity> {
@@ -28,14 +41,22 @@ mod imp {
 
     use super::FileIdentity;
 
+    /// Device and inode of an open file.
     pub(super) fn file(file: &File) -> io::Result<FileIdentity> {
         let metadata = file.metadata()?;
-        Ok((metadata.dev(), metadata.ino()))
+        Ok(FileIdentity::new(
+            metadata.dev(),
+            u128::from(metadata.ino()),
+        ))
     }
 
+    /// Device and inode of `path` itself (`lstat`).
     pub(super) fn path(path: &Path) -> io::Result<FileIdentity> {
         let metadata = fs::symlink_metadata(path)?;
-        Ok((metadata.dev(), metadata.ino()))
+        Ok(FileIdentity::new(
+            metadata.dev(),
+            u128::from(metadata.ino()),
+        ))
     }
 }
 
@@ -52,10 +73,12 @@ mod imp {
 
     use super::FileIdentity;
 
+    /// Volume serial and file id of an open file.
     pub(super) fn file(file: &File) -> io::Result<FileIdentity> {
         crate::os::file_identity(file)
     }
 
+    /// Volume serial and file id of `path` itself, not what a link points to.
     pub(super) fn path(path: &Path) -> io::Result<FileIdentity> {
         // Access 0 only queries attributes, so files locked by other processes still
         // open. Backup semantics is what allows opening a directory, and the reparse

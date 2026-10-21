@@ -106,11 +106,33 @@ fn socket_path(home: &Path, run: &Path, _runtime: Option<&Path>, temporary: &Pat
 }
 
 /// A named pipe per home, so isolated homes (tests, `DEVLANES_HOME`) never share a
-/// daemon. Pipe names live in a machine-wide namespace; the pipe's security
-/// descriptor, not its name, keeps other users out.
+/// daemon. Every spelling of one home must give the same name, or a second client
+/// would spawn a daemon that loses the lock and then waits on a pipe nobody serves.
+///
+/// Pipe names are machine-wide and public, so another account could create this
+/// one first; the daemon then fails to bind (it asks for the first instance) and
+/// clients refuse a pipe served by another account.
 #[cfg(windows)]
 fn socket_path(home: &Path, _run: &Path, _runtime: Option<&Path>, _temporary: &Path) -> PathBuf {
-    PathBuf::from(format!(r"\\.\pipe\devlanes-{:016x}", home_hash(home)))
+    PathBuf::from(format!(
+        r"\\.\pipe\devlanes-{:016x}",
+        home_hash(&pipe_key(home))
+    ))
+}
+
+/// The home in one spelling: canonical when it exists, else absolute, without the
+/// verbatim prefix, with `\` separators and no trailing separator.
+#[cfg(windows)]
+fn pipe_key(home: &Path) -> PathBuf {
+    let resolved = fs::canonicalize(home)
+        .or_else(|_| std::path::absolute(home))
+        .unwrap_or_else(|_| home.to_owned());
+    let text = resolved.to_string_lossy().replace('/', r"\");
+    let text = match text.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned(),
+    };
+    PathBuf::from(text.trim_end_matches('\\'))
 }
 
 /// Publishes a relocated socket's path in `run/daemon.socket` so tools can find it.
@@ -208,25 +230,20 @@ fn private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Creates missing directories and refuses symlinks, junctions and files.
-/// Ownership and ACL checks are not implemented on Windows yet.
+/// Creates a missing state directory with a DACL for this user, SYSTEM and
+/// Administrators, and refuses a symlink or junction, a non-directory or another
+/// account's directory. An own directory that others can read passes: the daemon
+/// tightens it when it starts and logs that once.
 #[cfg(windows)]
 fn private_directory(path: &Path) -> Result<()> {
-    use std::os::windows::fs::MetadataExt;
-    // FILE_ATTRIBUTE_REPARSE_POINT: symlinks and junctions both carry it.
-    const REPARSE_POINT: u32 = 0x400;
-    match fs::symlink_metadata(path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(path)?;
-        }
-        Err(error) => return Err(error.into()),
+    use devlanes_sys::windows::security::{DirProblem, ensure_private_dir};
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || metadata.file_attributes() & REPARSE_POINT != 0 {
-        return Err(Error::UnsafeDirectory(path.to_owned()));
+    match ensure_private_dir(path)? {
+        Ok(()) | Err(DirProblem::Acl) => Ok(()),
+        Err(_) => Err(Error::UnsafeDirectory(path.to_owned())),
     }
-    Ok(())
 }
 
 #[cfg(all(test, windows))]
@@ -249,6 +266,14 @@ mod windows_tests {
         assert_ne!(first.socket, second.socket);
         assert_eq!(first.socket, upper.socket);
         assert_eq!(first.run, Path::new(r"C:\Users\acme\one\run"));
+        for spelling in [
+            r"C:/Users/acme/one",
+            r"C:\Users\acme\one\",
+            r"\\?\C:\Users\acme\one",
+        ] {
+            let other = Paths::with_environment(Path::new(spelling), None, &temporary)?;
+            assert_eq!(other.socket, first.socket, "{spelling}");
+        }
         Ok(())
     }
 

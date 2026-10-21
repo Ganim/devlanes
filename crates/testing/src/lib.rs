@@ -51,7 +51,7 @@ impl TestHome {
     /// There are no mode bits to set; the home inherits the ACL of the temp directory
     /// in the user profile. This blocking filesystem helper should run outside async
     /// executor threads.
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     pub fn new() -> Result<Self, Error> {
         let dir = tempfile::Builder::new().prefix("dl-").tempdir()?;
         std::fs::create_dir(dir.path().join("run"))?;
@@ -83,6 +83,9 @@ pub struct TestRepo {
     /// Empty file used as the global Git config. It lives outside the repository so
     /// it never shows up as an untracked file.
     global_config: tempfile::TempPath,
+    /// Empty directory used as `core.hooksPath`, outside the repository for the
+    /// same reason.
+    hooks: tempfile::TempDir,
 }
 
 impl TestRepo {
@@ -93,6 +96,9 @@ impl TestRepo {
         let repo = Self {
             dir: tempfile::Builder::new().prefix("devlanes-git-").tempdir()?,
             global_config: empty_git_config()?,
+            hooks: tempfile::Builder::new()
+                .prefix("devlanes-hooks-")
+                .tempdir()?,
         };
         repo.git(&["init", "--initial-branch=main"])?;
         repo.git(&["config", "user.name", "Fixture Author"])?;
@@ -115,7 +121,7 @@ impl TestRepo {
 
     /// Runs Git in this repository, returning a typed error on unsuccessful exit.
     ///
-    /// Global configuration and inherited repository selectors are disabled.
+    /// Global configuration, hooks and inherited repository selectors are disabled.
     pub fn git(&self, args: &[&str]) -> Result<Output, Error> {
         let mut command = Command::new("git");
         for (key, _) in std::env::vars_os() {
@@ -123,11 +129,16 @@ impl TestRepo {
                 command.env_remove(key);
             }
         }
+        // `/dev/null` would resolve to `<drive>:\dev\null` on Windows.
+        let mut hooks = std::ffi::OsString::from("core.hooksPath=");
+        hooks.push(self.hooks.path());
         let output = command
             .current_dir(self.path())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", &self.global_config)
-            .args(["-c", "core.hooksPath=/dev/null", "-c", "init.templateDir="])
+            .arg("-c")
+            .arg(hooks)
+            .args(["-c", "init.templateDir="])
             .args(args)
             .output()?;
         if !output.status.success() {

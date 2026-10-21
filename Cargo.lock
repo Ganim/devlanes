@@ -980,6 +980,7 @@ dependencies = [
  "bytes",
  "devlanes-ipc",
  "devlanes-proto",
+ "devlanes-sys",
  "rustix",
  "serde",
  "serde_json",
@@ -1155,6 +1156,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "devlanes-proto",
+ "devlanes-sys",
  "futures-util",
  "rustix",
  "serde_json",
@@ -1616,6 +1618,7 @@ dependencies = [
  "rustix",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "windows-sys 0.61.2",
 ]
 

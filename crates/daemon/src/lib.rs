@@ -65,6 +65,12 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("a daemon already owns the lock")]
     AlreadyRunning,
+    /// Windows only: every unit would inherit administrator rights, and the
+    /// unelevated CLI could not inspect the daemon's process.
+    #[error(
+        "the daemon refuses to run elevated; run devlanes from a terminal that is not running as administrator"
+    )]
+    Elevated,
     #[error("unsafe daemon directory: {0}")]
     UnsafeDirectory(PathBuf),
     #[error("startup worker failed: {0}")]
@@ -194,6 +200,7 @@ pub struct Server {
 impl Server {
     /// Acquires the lock before inspecting a stale socket, preventing spawn races.
     pub async fn bind(options: Options) -> Result<Self, Error> {
+        refuse_elevation()?;
         let prepared = options.clone();
         let lock = tokio::task::spawn_blocking(move || prepare(&prepared)).await??;
         let listener = match LocalListener::bind(&options.socket).await {
@@ -315,14 +322,27 @@ fn startup_reason(error: &RpcError) -> String {
     format!("{}: {message}", error.code.to_uppercase())
 }
 
+/// Unix does not refuse root, matching how the daemon always behaved there.
+#[cfg(unix)]
+fn refuse_elevation() -> Result<(), Error> {
+    Ok(())
+}
+
+/// Refuses an elevated token before anything is created under the home.
+#[cfg(windows)]
+fn refuse_elevation() -> Result<(), Error> {
+    if devlanes_sys::windows::token::elevated()? {
+        return Err(Error::Elevated);
+    }
+    Ok(())
+}
+
 /// Uses no-follow opens inside owner-only directories to protect the singleton lock.
 fn prepare(options: &Options) -> Result<File, Error> {
-    let parent = options
-        .socket
-        .parent()
-        .ok_or_else(|| Error::UnsafeDirectory(options.socket.clone()))?;
     let lock = lock_singleton(&options.home)?;
-    secure_directory(parent)?;
+    if let Some(parent) = local::endpoint_dir(&options.socket) {
+        secure_directory(parent)?;
+    }
     Ok(lock)
 }
 
@@ -369,12 +389,13 @@ fn refuse_reparse_point(_lock: &File, _run: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Windows opened a reparse point itself; locking it would not protect the real file.
+/// Windows opened a reparse point itself; locking it would not protect the real
+/// file. The error names the lock file, which clients report as a symlink.
 #[cfg(windows)]
 fn refuse_reparse_point(lock: &File, run: &Path) -> Result<(), Error> {
     use std::os::windows::fs::MetadataExt;
     if lock.metadata()?.file_attributes() & REPARSE_POINT != 0 {
-        return Err(Error::UnsafeDirectory(run.into()));
+        return Err(Error::UnsafeDirectory(run.join("daemon.lock")));
     }
     Ok(())
 }
@@ -410,17 +431,25 @@ fn secure_directory(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Creates missing directories and refuses symlinks, junctions and files. Owner and
-/// ACL checks are not implemented on Windows yet.
+/// Creates `path` private, or gives an existing directory of this user the
+/// private DACL (this user, SYSTEM, Administrators) when others have access. A
+/// symlink or junction, a non-directory or another account's directory is refused:
+/// it may not be ours to change.
 #[cfg(windows)]
 fn secure_directory(path: &Path) -> Result<(), Error> {
-    use std::os::windows::fs::MetadataExt;
-    std::fs::create_dir_all(path)?;
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || metadata.file_attributes() & REPARSE_POINT != 0 {
-        return Err(Error::UnsafeDirectory(path.into()));
+    use devlanes_sys::windows::security::{DirProblem, ensure_private_dir, tighten_private_dir};
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-    Ok(())
+    match ensure_private_dir(path)? {
+        Ok(()) => Ok(()),
+        Err(DirProblem::Acl) => {
+            tighten_private_dir(path)?;
+            tracing::warn!(path = %path.display(), "tightened a devlanes directory to this user, SYSTEM and Administrators");
+            Ok(())
+        }
+        Err(_) => Err(Error::UnsafeDirectory(path.into())),
+    }
 }
 
 /// A request's tap and the task forwarding its records to the client.
@@ -660,16 +689,9 @@ async fn serve_client(
 mod tests {
     use super::*;
 
-    // Tests that bind a real endpoint run on Unix until the Windows pipe exists.
-    #[cfg(unix)]
     #[tokio::test]
     async fn lock_prevents_a_second_bind() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let home = temp.path().join("home");
-        let options = Options {
-            socket: home.join("run/daemon.sock"),
-            home,
-        };
+        let (_temp, options) = short_options();
         let _first = Server::bind(options.clone()).await?;
         assert!(matches!(
             Server::bind(options).await,
@@ -715,15 +737,61 @@ mod tests {
         Ok(())
     }
 
+    /// Runs `icacls` with `args` on `path`, for setting up access lists in tests.
+    #[cfg(windows)]
+    fn icacls(path: &Path, args: &[&str]) {
+        let status = std::process::Command::new("icacls")
+            .arg(path)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("icacls runs");
+        assert!(status.success(), "icacls {args:?}");
+    }
+
+    /// An own home that other accounts can read is given the private access list.
+    #[cfg(windows)]
+    #[test]
+    fn tightens_an_open_home() -> Result<(), Box<dyn std::error::Error>> {
+        use devlanes_sys::windows::security::check_private_dir;
+        let dir = tempfile::tempdir()?;
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home)?;
+        // Everyone, read access.
+        icacls(&home, &["/grant", "*S-1-1-0:(OI)(CI)R"]);
+        assert!(check_private_dir(&home)?.is_err());
+        secure_directory(&home)?;
+        assert_eq!(check_private_dir(&home)?, Ok(()));
+        Ok(())
+    }
+
+    /// A junction is refused; creating one needs no privilege.
+    #[cfg(windows)]
+    #[test]
+    fn refuses_a_junctioned_home() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let link = dir.path().join("alias");
+        let status = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(dir.path())
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        assert!(status.success());
+        assert!(matches!(
+            secure_directory(&link),
+            Err(Error::UnsafeDirectory(_))
+        ));
+        Ok(())
+    }
+
     /// Answers every request with `reply`; reconciliation fails when `broken`.
-    #[cfg(unix)]
     struct Fixed {
         reply: Value,
         broken: bool,
         shut_down: std::sync::atomic::AtomicBool,
     }
 
-    #[cfg(unix)]
     #[async_trait]
     impl Handler for Fixed {
         fn managed_processes(&self) -> usize {
@@ -767,8 +835,20 @@ mod tests {
         (dir, options)
     }
 
+    /// Options with a per-test pipe name under a temporary home.
+    #[cfg(windows)]
+    fn short_options() -> (tempfile::TempDir, Options) {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let options = Options {
+            socket: format!(r"\\.\pipe\devlanes-test-{}-{id}", std::process::id()).into(),
+            home: dir.path().join("h"),
+        };
+        (dir, options)
+    }
+
     /// Sends request `id` and waits for its outcome.
-    #[cfg(unix)]
     async fn ask(connection: &mut Connection<LocalStream>, id: u64, method: Method) -> Outcome {
         connection
             .send(Frame::Control(Control::Request(Request {
@@ -789,7 +869,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     /// A response larger than a frame becomes an error reply on a connection
     /// that keeps working.
@@ -826,7 +905,6 @@ mod tests {
         .expect("timeout");
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     /// A failed reconcile still shuts the handler down (records exits, closes
     /// the store), removes the socket and reports `CODE: message`.

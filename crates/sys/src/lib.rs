@@ -42,10 +42,13 @@ mod os;
 #[path = "macos.rs"]
 mod os;
 
+/// Safe wrappers over Win32 security, pipe, process and job calls, for the
+/// endpoint, daemon and runner crates, so those need no `unsafe`.
 #[cfg(windows)]
 #[allow(unsafe_code)]
-#[path = "windows/mod.rs"]
-mod os;
+pub mod windows;
+#[cfg(windows)]
+use windows as os;
 
 /// Safe wrappers over macOS libproc, mach and sysctl calls for the metrics and
 /// pressure collectors, so those crates need no `unsafe`.

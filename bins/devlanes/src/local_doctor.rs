@@ -47,28 +47,44 @@ pub async fn facts(paths: &Paths) -> Value {
     })
 }
 
-/// `{path, exists, problem?}` for the devlanes home. Reports symlinks and
-/// junctions and non-directories; owner and ACL findings come with the Windows
-/// private-directory checks.
+/// Adds `terminal: {elevated, job}` about the shell running this command: an
+/// elevated shell cannot start the daemon, and a job that kills its processes when
+/// the terminal closes takes a daemon started inside it along.
+#[cfg(windows)]
+pub fn annotate_terminal(data: &mut Value) {
+    use devlanes_sys::windows::{process::job_of_self, token::elevated};
+    let job = job_of_self()
+        .ok()
+        .flatten()
+        .map(|job| json!({"kill_on_close": job.kill_on_close, "breakaway_ok": job.breakaway_ok}));
+    data["terminal"] = json!({"elevated": elevated().ok(), "job": job});
+}
+
+/// Nothing to add on Unix: the daemon leaves the terminal's session itself.
+#[cfg(unix)]
+pub fn annotate_terminal(_data: &mut Value) {}
+
+/// `{path, exists, problem?}` for the devlanes home: the client refuses a symlink
+/// or junction and another account's home, and the daemon tightens an own home
+/// that other accounts can open (`problem: "acl"`, the Windows counterpart of
+/// `mode`).
 #[cfg(windows)]
 fn home_check(home: &Path) -> Value {
-    use std::os::windows::fs::MetadataExt;
-    // FILE_ATTRIBUTE_REPARSE_POINT: symlinks and junctions both carry it.
-    const REPARSE_POINT: u32 = 0x400;
-    match std::fs::symlink_metadata(home) {
+    use devlanes_sys::windows::security::{DirProblem, check_private_dir};
+    match check_private_dir(home) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             json!({"path": home, "exists": false})
         }
         Err(error) => {
             json!({"path": home, "exists": true, "problem": "unreadable", "message": error.to_string()})
         }
-        Ok(meta) => {
-            let problem = if meta.file_attributes() & REPARSE_POINT != 0 {
-                Some("symlink")
-            } else if !meta.is_dir() {
-                Some("not_a_directory")
-            } else {
-                None
+        Ok(verdict) => {
+            let problem = match verdict {
+                Ok(()) => None,
+                Err(DirProblem::ReparsePoint) => Some("symlink"),
+                Err(DirProblem::NotADirectory) => Some("not_a_directory"),
+                Err(DirProblem::Owner) => Some("owner"),
+                Err(DirProblem::Acl) => Some("acl"),
             };
             json!({"path": home, "exists": true, "problem": problem})
         }

@@ -323,9 +323,9 @@ fn command_exit(status: std::process::ExitStatus) -> CommandExit {
     }
 }
 
-/// `STATUS_CONTROL_C_EXIT` (`0xC000013A`) as an exit code: the process ended on Ctrl-C.
+/// `STATUS_CONTROL_C_EXIT` as an exit code: the process ended on Ctrl-C.
 #[cfg(windows)]
-const STATUS_CONTROL_C_EXIT: i32 = -1_073_741_510;
+const STATUS_CONTROL_C_EXIT: i32 = 0xC000_013A_u32.cast_signed();
 
 /// The `with` command's exit code. A Ctrl-C exit reads like SIGINT on Unix, so
 /// `with` reports and exits the same way on both.
@@ -421,27 +421,47 @@ pub fn unsafe_directory(path: &Path) -> RpcError {
 }
 
 /// `unsafe_home` (exit 4): a state directory devlanes refuses, `{message, path,
-/// problem}`. `problem` is `symlink` (also junctions), `not_a_directory`,
-/// `unreadable`, or `acl` for anything else. No `fix` yet: the owner and ACL
-/// details come with the Windows private-directory checks.
+/// problem, fix?}`. `problem` is `symlink` (also junctions), `owner` (another
+/// account's, for example Administrators after an elevated run),
+/// `not_a_directory`, `unreadable`, or `acl` when other accounts have access and
+/// tightening it failed. Only `acl` has a `fix`, an `icacls` command keeping this
+/// user, SYSTEM and Administrators; the others need a person to decide.
 #[cfg(windows)]
 pub fn unsafe_directory(path: &Path) -> RpcError {
-    use std::os::windows::fs::MetadataExt;
-    // FILE_ATTRIBUTE_REPARSE_POINT: symlinks and junctions both carry it.
-    const REPARSE_POINT: u32 = 0x400;
-    let metadata = std::fs::symlink_metadata(path).ok();
-    let problem = match &metadata {
-        None => "unreadable",
-        Some(meta) if meta.file_attributes() & REPARSE_POINT != 0 => "symlink",
-        Some(meta) if !meta.is_dir() => "not_a_directory",
-        Some(_) => "acl",
+    use devlanes_sys::windows::security::{DirProblem, check_private_dir};
+    let problem = match check_private_dir(path) {
+        Err(_) => "unreadable",
+        Ok(Err(DirProblem::ReparsePoint)) => "symlink",
+        Ok(Err(DirProblem::NotADirectory)) => "not_a_directory",
+        Ok(Err(DirProblem::Owner)) => "owner",
+        // A directory that checks out now was refused for its access list.
+        Ok(Err(DirProblem::Acl) | Ok(())) => "acl",
     };
-    let data = json!({
+    let mut data = json!({
         "message": format!("unsafe devlanes home: {}", path.display()),
         "path": path,
         "problem": problem,
     });
+    if problem == "acl"
+        && let Some(fix) = acl_fix(path)
+    {
+        data["fix"] = json!(fix);
+    }
     RpcError::new("unsafe_home", data, 4)
+}
+
+/// `icacls` arguments that leave `path` to this user, SYSTEM and Administrators.
+/// SIDs instead of names, which Windows translates per display language. The
+/// quotes work in both cmd and PowerShell.
+#[cfg(windows)]
+fn acl_fix(path: &Path) -> Option<String> {
+    let user = devlanes_sys::windows::token::current_user()
+        .and_then(|sid| sid.to_sddl())
+        .ok()?;
+    Some(format!(
+        r#"icacls "{}" /inheritance:r /grant:r "*{user}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F""#,
+        path.display()
+    ))
 }
 
 #[async_trait]
@@ -1000,21 +1020,28 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    /// Without owner and ACL checks the problem is named, never with a mode or fix.
+    /// Each refusal is named; only an access list problem comes with an icacls fix.
     fn unsafe_directory_names_the_problem() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let problem = |path: &Path| {
+        let error = |path: &Path| {
             let error = rpc_error(ClientError::UnsafeDirectory(path.to_owned()));
             assert_eq!(error.code, "unsafe_home");
             assert_eq!(error.exit_code, 4);
-            assert!(error.data.get("mode").is_none() && error.data.get("fix").is_none());
-            error.data["problem"].clone()
+            assert!(error.data.get("mode").is_none());
+            error.data
         };
         let file = tmp.path().join("file");
         std::fs::write(&file, b"").expect("file");
-        assert_eq!(problem(&file), "not_a_directory");
-        assert_eq!(problem(&tmp.path().join("missing")), "unreadable");
-        assert_eq!(problem(tmp.path()), "acl");
+        assert_eq!(error(&file)["problem"], "not_a_directory");
+        assert!(error(&file).get("fix").is_none());
+        assert_eq!(error(&tmp.path().join("missing"))["problem"], "unreadable");
+        let open = error(tmp.path());
+        assert_eq!(open["problem"], "acl");
+        let fix = open["fix"].as_str().expect("fix");
+        assert!(
+            fix.starts_with("icacls \"") && fix.contains("/inheritance:r"),
+            "{fix}"
+        );
     }
 
     #[cfg(windows)]

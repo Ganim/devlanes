@@ -1,8 +1,8 @@
 //! The daemon's local endpoint, reachable only by the user that runs it.
 //!
-//! On Unix it is a domain socket checked with `SO_PEERCRED`. On Windows it will be a
-//! named pipe; that transport is not implemented yet, so binding and connecting
-//! return [`io::ErrorKind::Unsupported`].
+//! On Unix it is a domain socket checked with `SO_PEERCRED`. On Windows it is a
+//! named pipe whose instances only the current user can open, with both ends
+//! confirming the other's account.
 //!
 //! Peer checks happen at two points because the platforms differ in when the
 //! peer's identity is available. Unix knows it as soon as a connection exists. A
@@ -62,6 +62,13 @@ impl LocalListener {
 /// which callers read as "no daemon".
 pub async fn connect(path: &Path) -> io::Result<LocalStream> {
     imp::connect(path).await.map(LocalStream)
+}
+
+/// The directory holding the endpoint, which must be private to the user: the
+/// socket's parent on Unix. `None` on Windows, where a pipe lives outside the
+/// filesystem and its own security descriptor protects it.
+pub fn endpoint_dir(path: &Path) -> Option<&Path> {
+    imp::endpoint_dir(path)
 }
 
 /// Removes what the endpoint leaves behind once its listener is dropped: the socket
@@ -133,6 +140,76 @@ impl AsyncWrite for LocalStream {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
+
+    /// A fresh endpoint path: a socket in a temp dir, or a pipe named after it.
+    fn endpoint(dir: &Path) -> PathBuf {
+        #[cfg(unix)]
+        let path = dir.join("e.sock");
+        #[cfg(windows)]
+        let path = PathBuf::from(format!(
+            r"\\.\pipe\devlanes-ipc-test-{}-{}",
+            std::process::id(),
+            dir.file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default()
+        ));
+        path
+    }
+
+    /// Fifty clients connecting at once all get through, each to its own stream,
+    /// and a second listener on the same endpoint is refused while one runs.
+    #[tokio::test]
+    async fn many_clients_connect_and_the_endpoint_is_exclusive() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = endpoint(dir.path());
+        let mut listener = LocalListener::bind(&path).await.map_err(io::Error::other)?;
+        assert!(matches!(
+            LocalListener::bind(&path).await,
+            Err(BindError::AlreadyListening(_))
+        ));
+        let server = tokio::spawn(async move {
+            for _ in 0..50 {
+                let mut stream = listener.accept().await?;
+                assert!(stream.peer_is_current_user()?);
+                tokio::spawn(async move {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).await?;
+                    stream.confirm_peer_after_read()?;
+                    stream.write_all(&byte).await
+                });
+            }
+            Ok::<_, io::Error>(listener)
+        });
+        let clients = (0..50u8).map(|n| {
+            let path = path.clone();
+            tokio::spawn(async move {
+                let mut stream = tokio::time::timeout(Duration::from_secs(10), connect(&path))
+                    .await
+                    .map_err(io::Error::other)??;
+                assert!(stream.peer_is_current_user()?);
+                stream.write_all(&[n]).await?;
+                let mut echo = [0];
+                stream.read_exact(&mut echo).await?;
+                assert_eq!(echo, [n]);
+                Ok::<_, io::Error>(())
+            })
+        });
+        for client in clients.collect::<Vec<_>>() {
+            client.await.map_err(io::Error::other)??;
+        }
+        let listener = server.await.map_err(io::Error::other)??;
+        listener.close();
+        remove(&path).await
+    }
+}
+
 #[cfg(unix)]
 mod imp {
     use std::io;
@@ -174,6 +251,11 @@ mod imp {
 
     pub(super) async fn connect(path: &Path) -> io::Result<Stream> {
         UnixStream::connect(path).await.map(Stream)
+    }
+
+    /// The socket's directory.
+    pub(super) fn endpoint_dir(path: &Path) -> Option<&Path> {
+        path.parent()
     }
 
     pub(super) async fn remove(path: &Path) -> io::Result<()> {
@@ -244,89 +326,5 @@ mod imp {
 }
 
 #[cfg(windows)]
-mod imp {
-    use std::io;
-    use std::path::Path;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-
-    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-
-    use super::{BindError, ProbeError};
-
-    /// Uninhabited until the named-pipe transport lands, so no stream ever exists.
-    pub(super) enum Stream {}
-
-    pub(super) enum Listener {}
-
-    fn unsupported() -> io::Error {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the daemon's named-pipe endpoint is not implemented yet",
-        )
-    }
-
-    pub(super) async fn bind(_path: &Path) -> Result<Listener, BindError> {
-        Err(unsupported().into())
-    }
-
-    impl Listener {
-        pub(super) async fn accept(&mut self) -> io::Result<Stream> {
-            match *self {}
-        }
-
-        pub(super) fn close(self) {
-            match self {}
-        }
-    }
-
-    pub(super) async fn connect(_path: &Path) -> io::Result<Stream> {
-        Err(unsupported())
-    }
-
-    pub(super) async fn remove(_path: &Path) -> io::Result<()> {
-        Ok(())
-    }
-
-    pub(super) fn probe(_path: &Path) -> Result<(), ProbeError> {
-        Err(ProbeError::Endpoint(unsupported()))
-    }
-
-    impl Stream {
-        pub(super) fn peer_is_current_user(&self) -> io::Result<bool> {
-            match *self {}
-        }
-
-        pub(super) fn confirm_peer_after_read(&self) -> io::Result<bool> {
-            match *self {}
-        }
-    }
-
-    impl AsyncRead for Stream {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            _buf: &mut ReadBuf<'_>,
-        ) -> Poll<io::Result<()>> {
-            match *self.get_mut() {}
-        }
-    }
-
-    impl AsyncWrite for Stream {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            _buf: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            match *self.get_mut() {}
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            match *self.get_mut() {}
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            match *self.get_mut() {}
-        }
-    }
-}
+#[path = "local_windows.rs"]
+mod imp;

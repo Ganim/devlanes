@@ -7,8 +7,8 @@
 //!
 //! Requires a tokio runtime with IO, time and signal drivers enabled.
 //!
-//! Unix only: on other platforms this crate is empty, and Windows units run through
-//! a separate runner. See [`PtyRunner`] for an example.
+//! Unix only: on other platforms this crate is empty, and Windows units will run
+//! through a separate runner. See [`PtyRunner`] for an example.
 
 // Sessions, PTYs and signals have no Windows equivalent here, so the whole crate is
 // compiled out there. rustdoc still collects crate-level doc tests from a crate that

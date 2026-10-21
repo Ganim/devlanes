@@ -229,7 +229,7 @@ impl Client {
         command
             .env_clear()
             .envs(daemon_env(std::env::vars_os(), remove_env));
-        let mut child = command
+        command
             .args(["daemon", "run"])
             .env("DEVLANES_HOME", &paths.home)
             .env("DEVLANES_READY_FD", "1")
@@ -237,8 +237,8 @@ impl Client {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(false)
-            .spawn()?;
+            .kill_on_drop(false);
+        let mut child = spawn_daemon(&mut command)?;
         let stdout = child
             .stdout
             .take()
@@ -479,6 +479,38 @@ pub mod diagnostics {
     }
 }
 
+/// Starts the daemon; on Unix it leaves the terminal's session itself (`setsid`).
+#[cfg(unix)]
+fn spawn_daemon(command: &mut Command) -> std::io::Result<tokio::process::Child> {
+    command.spawn()
+}
+
+/// Starts the daemon without a console, so the terminal's Ctrl-C and close events
+/// never reach it, and outside the terminal's job object, which some terminals kill
+/// when they close. A job that forbids breaking away refuses the second flag with
+/// access denied; the daemon then starts inside it, and `doctor` reports whether
+/// that job kills on close.
+///
+/// The daemon also must not inherit this process's standard handles: a shell
+/// reading devlanes' output (`$(devlanes status)`) would wait for the daemon to
+/// exit.
+#[cfg(windows)]
+fn spawn_daemon(command: &mut Command) -> std::io::Result<tokio::process::Child> {
+    use devlanes_sys::windows::process::{
+        CREATE_BREAKAWAY_FROM_JOB, DETACHED_PROCESS, without_inherited_std_handles,
+    };
+    without_inherited_std_handles(|| {
+        command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
+        match command.spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                command.creation_flags(DETACHED_PROCESS);
+                command.spawn()
+            }
+            result => result,
+        }
+    })
+}
+
 /// Detects explicit sandbox markers before any auto-spawn filesystem or process operations.
 pub fn sandbox_reason() -> Option<&'static str> {
     ["CODEX_SANDBOX", "APP_SANDBOX_CONTAINER_ID"]
@@ -522,6 +554,63 @@ const DAEMON_ENV: &[&str] = &[
 /// CLI's settings and devlanes' own.
 const DAEMON_ENV_PREFIXES: &[&str] = &["LC_", "XDG_", "DOCKER_", "DEVLANES_"];
 
+/// Nothing extra on Unix.
+#[cfg(unix)]
+const PLATFORM_ENV: &[&str] = &[];
+
+/// What Windows programs expect: Winsock fails to start without `SystemRoot`
+/// (WSA error 10106), and helpers such as git and docker read the profile and
+/// program directories.
+#[cfg(windows)]
+const PLATFORM_ENV: &[&str] = &[
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "PATHEXT",
+    "USERPROFILE",
+    "USERNAME",
+    "USERDOMAIN",
+    "COMPUTERNAME",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramData",
+    "ALLUSERSPROFILE",
+    "PUBLIC",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "CommonProgramFiles",
+    "CommonProgramFiles(x86)",
+    "CommonProgramW6432",
+    "TEMP",
+    "TMP",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "OS",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+    "PSModulePath",
+];
+
+/// Names compare exactly on Unix.
+#[cfg(unix)]
+fn same_name(name: &str, listed: &str) -> bool {
+    name == listed
+}
+
+/// Windows names compare without case: the environment usually spells `Path`.
+#[cfg(windows)]
+fn same_name(name: &str, listed: &str) -> bool {
+    name.eq_ignore_ascii_case(listed)
+}
+
+/// Prefix match with the platform's name comparison.
+fn has_prefix(name: &str, prefix: &str) -> bool {
+    name.get(..prefix.len())
+        .is_some_and(|start| same_name(start, prefix))
+}
+
 /// The allowlisted part of `vars` for an auto-spawned daemon, minus `remove`.
 /// Anything else a shell carries (tokens, project variables) stays out of a
 /// process that serves every later shell.
@@ -533,11 +622,14 @@ fn daemon_env(
         let Some(name) = name.to_str() else {
             return false;
         };
-        !remove.contains(&name)
-            && (DAEMON_ENV.contains(&name)
+        !remove.iter().any(|removed| same_name(name, removed))
+            && (DAEMON_ENV
+                .iter()
+                .chain(PLATFORM_ENV)
+                .any(|listed| same_name(name, listed))
                 || DAEMON_ENV_PREFIXES
                     .iter()
-                    .any(|prefix| name.starts_with(prefix)))
+                    .any(|prefix| has_prefix(name, prefix)))
     })
     .collect()
 }
@@ -602,5 +694,25 @@ mod tests {
                 "CI"
             ]
         );
+    }
+
+    /// Windows keeps the system variables programs need and matches names without
+    /// case, as Windows does.
+    #[cfg(windows)]
+    #[test]
+    fn daemon_env_keeps_windows_variables() {
+        let vars = [
+            ("Path", r"C:\Windows"),
+            ("SystemRoot", r"C:\Windows"),
+            ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            ("devlanes_home", r"C:\dl"),
+            ("GITHUB_TOKEN", "secret"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        let kept: Vec<String> = daemon_env(vars.into_iter(), &["systemroot"])
+            .into_iter()
+            .filter_map(|(name, _)| name.into_string().ok())
+            .collect();
+        assert_eq!(kept, ["Path", "ProgramFiles(x86)", "devlanes_home"]);
     }
 }

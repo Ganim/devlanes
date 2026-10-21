@@ -20,10 +20,16 @@ struct Server {
 }
 
 impl Server {
-    /// Waits for an explicit listening announcement instead of racing a free-port probe.
+    /// Starts a fixture that exits after 10 s, see [`Server::start_with_deadline`].
     async fn start(args: &[&str]) -> Result<Self> {
+        Self::start_with_deadline("10s", args).await
+    }
+
+    /// Waits for an explicit listening announcement instead of racing a free-port probe.
+    /// `exit_after` bounds the fixture and every descendant it spawns.
+    async fn start_with_deadline(exit_after: &str, args: &[&str]) -> Result<Self> {
         let mut child = Command::new(env!("CARGO_BIN_EXE_fixture-server"))
-            .args(["--exit-after", "10s"])
+            .args(["--exit-after", exit_after])
             .args(args)
             .env("PORT", "0")
             .env("FIXTURE_MARKER", "test-value")
@@ -247,13 +253,13 @@ async fn escaped_grandchild() -> Result {
 /// Descendants announce their PID and exit with the inherited deadline.
 #[tokio::test]
 async fn spawned_grandchild_announces_itself() -> Result {
-    let mut server = Server::start(&["--spawn-grandchild"]).await?;
+    let mut server = Server::start_with_deadline("1s", &["--spawn-grandchild"]).await?;
     let mut announced = server
         .startup
         .iter()
         .any(|line| line.starts_with("grandchild pid="));
-    // Every holder of stdout exits at the deadline (10 s), which ends the stream.
-    timeout(Duration::from_secs(12), async {
+    // Every holder of stdout exits at the 1 s deadline, which ends the stream.
+    timeout(Duration::from_secs(5), async {
         while let Some(line) = server.lines.next_line().await? {
             announced |= line.starts_with("grandchild pid=");
         }
@@ -266,7 +272,7 @@ async fn spawned_grandchild_announces_itself() -> Result {
 }
 
 /// Without Unix sessions, `--setsid-grandchild` fails before anything is spawned.
-#[cfg(not(unix))]
+#[cfg(windows)]
 #[tokio::test]
 async fn setsid_grandchild_is_refused() -> Result {
     let output = timeout(

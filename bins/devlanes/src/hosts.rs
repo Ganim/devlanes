@@ -139,7 +139,7 @@ pub(crate) fn privileged_supported(feature: &str) -> Result<(), RpcError> {
     Err(RpcError::new(
         "not_supported_yet",
         json!({"feature": feature}),
-        2,
+        1,
     ))
 }
 

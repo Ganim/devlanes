@@ -21,3 +21,9 @@ tokio-util.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+devlanes-sys = { path = "../sys" }
+
+[dev-dependencies]
+tempfile.workspace = true

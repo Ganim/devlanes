@@ -394,14 +394,20 @@ async fn daemon_gone(paths: &Paths, pid: Option<i32>) -> bool {
     }
 }
 
-/// Whether the old daemon's pipe stopped answering. The pipe can close shortly
-/// before the process releases its lock; waiting on the process itself needs a
-/// process handle, which comes with the Windows process support in `sys`.
+/// Whether the old daemon `pid` has exited; without a pid, whether its pipe
+/// stopped answering. The pipe closes shortly before the process releases its
+/// lock, so the process is what a restart waits for.
 #[cfg(windows)]
-async fn daemon_gone(paths: &Paths, _pid: Option<i32>) -> bool {
-    Client::connect_any(paths)
-        .await
-        .is_err_and(|error| error.is_not_running())
+async fn daemon_gone(paths: &Paths, pid: Option<i32>) -> bool {
+    match pid.and_then(|pid| u32::try_from(pid).ok()) {
+        // A zero timeout only polls, so this does not block the executor.
+        Some(pid) => {
+            devlanes_sys::windows::process::wait_exit(pid, Duration::ZERO).unwrap_or(false)
+        }
+        None => Client::connect_any(paths)
+            .await
+            .is_err_and(|error| error.is_not_running()),
+    }
 }
 
 /// One-shot request returning the data, for actions that post-process it locally.
@@ -467,6 +473,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
             Err(error) if error.is_not_running() => {
                 let mut data = crate::local_doctor::facts(&paths).await;
                 crate::notices::annotate_doctor(None, &mut data).await;
+                crate::local_doctor::annotate_terminal(&mut data);
                 return render_result(runtime, Method::Doctor, &data, None);
             }
             Err(error) => return Err(rpc_error(error)),
@@ -530,6 +537,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                         Outcome::Ok { mut data } => {
                             if method == Method::Doctor {
                                 crate::notices::annotate_doctor(Some(&mut client), &mut data).await;
+                                crate::local_doctor::annotate_terminal(&mut data);
                                 // Trust stores belong to this user and machine, so the
                                 // CLI checks them, not the daemon.
                                 if data.get("ca").is_some_and(Value::is_object) {
@@ -859,8 +867,11 @@ fn read_tty(prompt: &str, kind: &str) -> Option<String> {
 
 /// Reading a prompt answer from the console is not supported on Windows yet, so
 /// every prompt is cancelled (`None`), as when no terminal is available on Unix.
+/// The prompt is still shown with a note, so a cancelled answer is not a mystery.
 #[cfg(windows)]
-fn read_tty(_prompt: &str, _kind: &str) -> Option<String> {
+fn read_tty(prompt: &str, _kind: &str) -> Option<String> {
+    eprintln!("{prompt}");
+    eprintln!("devlanes cannot read answers from the console on Windows yet; answering no");
     None
 }
 
