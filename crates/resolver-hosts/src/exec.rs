@@ -198,6 +198,9 @@ pub struct FileInfo {
 pub trait FsProbe: Send + Sync {
     /// `lstat(path)`; `Ok(None)` when it does not exist.
     fn lstat(&self, path: &Path) -> io::Result<Option<FileInfo>>;
+
+    /// Full contents of `path`, for comparing an installed copy with what was checked.
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
 }
 
 /// Real `lstat`. Single stat calls are cheap enough to run inline, as the trust
@@ -229,6 +232,12 @@ impl FsProbe for SystemFs {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// `std::fs::read`. Only the installer calls it, once, on a binary of under a
+    /// megabyte, from the CLI's terminal session.
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        std::fs::read(path)
     }
 }
 

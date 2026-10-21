@@ -57,10 +57,11 @@ impl Executor for FakeExecutor {
     }
 }
 
-/// Paths with fixed `lstat` answers; everything else is missing.
+/// Paths with fixed `lstat` answers and contents; everything else is missing.
 #[derive(Debug, Default)]
 pub struct FakeFs {
     entries: Mutex<BTreeMap<PathBuf, Result<FileInfo, io::ErrorKind>>>,
+    contents: Mutex<BTreeMap<PathBuf, Vec<u8>>>,
 }
 
 impl FakeFs {
@@ -87,6 +88,19 @@ impl FakeFs {
     /// Removes `path`.
     pub fn remove(&self, path: impl AsRef<Path>) {
         self.lock().remove(path.as_ref());
+        self.contents().remove(path.as_ref());
+    }
+
+    /// Makes `path` a root-owned `0755` file holding `bytes`.
+    pub fn write(&self, path: impl AsRef<Path>, bytes: impl Into<Vec<u8>>) {
+        self.set(path.as_ref(), FileKind::File, 0, 0o755);
+        self.contents()
+            .insert(path.as_ref().to_owned(), bytes.into());
+    }
+
+    /// Locks the contents table.
+    fn contents(&self) -> MutexGuard<'_, BTreeMap<PathBuf, Vec<u8>>> {
+        self.contents.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Locks the table.
@@ -103,5 +117,13 @@ impl FsProbe for FakeFs {
             Some(Ok(info)) => Ok(Some(*info)),
             Some(Err(kind)) => Err(io::Error::from(*kind)),
         }
+    }
+
+    /// Contents set with [`FakeFs::write`]; `NotFound` otherwise.
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.contents()
+            .get(path)
+            .cloned()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
     }
 }

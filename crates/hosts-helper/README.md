@@ -83,30 +83,52 @@ and only matter while the devlanes proxy listens there.
 devlanes certs trust --hosts
 ```
 
-This asks for your password once (sudo caches it for the remaining commands)
+This installs the devlanes CA in the trust stores, as `devlanes certs trust`
+does, and then the helper and its sudo rule.
+
+The helper comes from the `devlanes-hosts` binary next to the `devlanes`
+binary, or from the path in `DEVLANES_HOSTS_HELPER`. The installer reads it
+once into memory and writes that copy to a private temp directory (`0700`),
+together with the rule. It runs `<copy> version` and refuses anything that
+reports `build=debug` or another protocol. From then on only the private copy
+is used, so rebuilding or replacing the original file mid-install has no effect.
+
+It then asks for your password once (sudo caches it for the remaining commands)
 and runs the commands below, shown for macOS. Linux uses group `root` instead
 of `wheel`.
 
 ```sh
-sudo /usr/bin/install -d -o root -g wheel -m 0755 /usr/local/libexec    # only if missing
-sudo /usr/bin/install -o root -g wheel -m 0755 <source> /usr/local/libexec/.devlanes-hosts.new
-sudo /bin/mv -f /usr/local/libexec/.devlanes-hosts.new /usr/local/libexec/devlanes-hosts
-sudo /usr/bin/install -o root -g wheel -m 0440 <staged rule> /etc/sudoers.d/.devlanes.new
+sudo /usr/bin/test -e /etc/sudoers.d/devlanes    # is there a rule to back up?
+sudo /usr/bin/install -d -o root -g wheel -m 0755 -- /usr/local/libexec    # only if missing
+sudo /usr/bin/install -o root -g wheel -m 0755 -- <copy> /usr/local/libexec/.devlanes-hosts.new
+sudo /usr/bin/install -o root -g wheel -m 0440 -- <rule> /etc/sudoers.d/.devlanes.new
 sudo /usr/sbin/visudo -c -f /etc/sudoers.d/.devlanes.new
-sudo /bin/mv -f /etc/sudoers.d/.devlanes.new /etc/sudoers.d/devlanes
+sudo /bin/cat -- /etc/sudoers.d/.devlanes.new    # compared with the intended rule
+sudo /bin/cp -p -- /etc/sudoers.d/devlanes /etc/sudoers.d/.devlanes.old    # only on reinstall
+sudo /bin/cp -p -- /usr/local/libexec/devlanes-hosts /usr/local/libexec/.devlanes-hosts.old    # only on reinstall
+sudo /bin/mv -f -- /etc/sudoers.d/.devlanes.new /etc/sudoers.d/devlanes
 sudo /usr/sbin/visudo -c
+sudo /bin/mv -f -- /usr/local/libexec/.devlanes-hosts.new /usr/local/libexec/devlanes-hosts
+sudo /bin/rm -f -- /usr/local/libexec/.devlanes-hosts.old /etc/sudoers.d/.devlanes.old
 sudo -n -k /usr/local/libexec/devlanes-hosts version    # proves the rule works without a password
 ```
 
-`<source>` is the `devlanes-hosts` binary next to the `devlanes` binary, or the
-path in `DEVLANES_HOSTS_HELPER`. It must be a release build: the installer runs
-`<source> version` first and refuses anything that reports `build=debug`.
+Both files are first copied to root-owned dot-names. sudo ignores files in
+`sudoers.d` whose names contain a dot, so a staged rule is never read. Before
+anything is moved into place, the installer compares the staged helper byte for
+byte with the copy it checked, and the staged rule with the rule it meant to
+write; `visudo` only checks syntax, so this comparison is what catches a file
+swapped or edited after it was checked. On a mismatch, or if the syntax check
+fails, the staged files are removed and the installed helper and rule are left
+as they were.
 
-Each file is copied under a dot-name and then renamed into place. sudo ignores
-files in `sudoers.d` whose names contain a dot, so a half-copied rule is never
-read, and `visudo` checks the root-owned copy, so the bytes it approved are the
-bytes that get renamed. If a check fails, the staged file is removed and nothing
-else changes.
+The rule moves into place before the helper, so the helper is only replaced
+after the full `visudo -c` passes. If that check or a later move fails, or the
+installed helper does not have the expected owner and mode, the previous rule
+and helper are restored from the `.old` copies (on a first install, the new
+files are removed). If everything is in place but `sudo -n` still asks for a
+password, the installer reports it and leaves the new files installed; see
+`sudo_denied` below.
 
 Before running anything, the installer checks that `/`, `/usr`, `/usr/local`,
 `/usr/local/libexec` (those that exist) and `/etc/sudoers.d` are real
@@ -248,10 +270,10 @@ devlanes certs untrust --hosts
 ```
 
 This clears the block, removes the rule and the helper, then removes the devlanes
-CA from the trust stores, undoing `devlanes certs trust --hosts`. Add `--keep-ca` to
-remove only the helper. If the helper is
-already gone, the block cannot be cleared that way; delete the lines between
-the markers by hand. To remove everything manually:
+CA from the trust stores, undoing `devlanes certs trust --hosts`. Use
+`devlanes certs untrust --hosts --keep-ca` to remove only the helper and keep the
+CA trusted. If the helper is already gone, the block cannot be cleared that way;
+delete the lines between the markers by hand. To remove everything manually:
 
 ```sh
 sudo /usr/local/libexec/devlanes-hosts clear
