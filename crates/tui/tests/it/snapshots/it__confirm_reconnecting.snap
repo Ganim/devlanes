@@ -1,0 +1,20 @@
+---
+source: crates/tui/tests/it/main.rs
+expression: draw(&app)?.backend()
+---
+" devlanes  lanes  monitor                      daemon unreachable, reconnecting "
+"┌ lanes ───────────────────────┐┌ acme@0:migrate · exited 0 ───────────────────┐"
+"│acme                          ││                                              │"
+"│▾ ● @0 main                   ││                                              │"
+"│    ● api  ready              ││                                              │"
+"│    ◐ web  starting       ┌ confirm ───────────────┐                          │"
+"│    ✕ worker  failed 1  ag│run migrate in acme@0?  │                          │"
+"│    ○ migrate  exited 0  t│                        │                          │"
+"│▸ ○ @1 feat/login  idle   │y run · n cancel        │                          │"
+"│  ○ @2 fix/cache  moves to└────────────────────────┘                          │"
+"│  ○ -- spike  unassigned      ││                                              │"
+"│shop                          ││                                              │"
+"│▾ ● @0 main                   ││                                              │"
+"│    ● storefront  ready       ││                                              │"
+"└──────────────────────────────┘└──────────────────────────────────────────────┘"
+" j/k move  s start  x stop  r restart  t task  C-a terminal  z zoom  o url      "

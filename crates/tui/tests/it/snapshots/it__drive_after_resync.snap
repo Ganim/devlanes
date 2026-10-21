@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/it/main.rs
+expression: terminal.backend()
+---
+" devlanes  lanes  monitor                                                                           "
+"┌ lanes ───────────────────────────────┐┌ acme@0:api · ready ──────────────────────────────────────┐"
+"│acme                                  ││                                                          │"
+"│▾ ● @0 main                           ││                                                          │"
+"│    ● api  ready                      ││                                                          │"
+"│    ◐ web  starting                   ││                                                          │"
+"│    ✕ worker  failed 1  agent         ││                                                          │"
+"│    ○ migrate  exited 0  task         ││                                                          │"
+"│▸ ○ @1 feat/login  idle               ││                                                          │"
+"│  ○ @2 fix/cache  moves to lane 3  con││                                                          │"
+"│  ○ -- spike  unassigned              ││                                                          │"
+"│shop                                  ││                                                          │"
+"│▾ ● @0 main                           ││                                                          │"
+"│    ● storefront  ready               ││                                                          │"
+"│    ○ admin  stopped                  ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"└──────────────────────────────────────┘└──────────────────────────────────────────────────────────┘"
+" j/k move  s start  x stop  r restart  t task  C-a terminal  z zoom  o url  O open  c copy          "

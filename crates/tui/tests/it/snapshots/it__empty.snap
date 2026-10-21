@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/it/main.rs
+expression: draw(&app)?.backend()
+---
+" devlanes  lanes  monitor                                                       "
+"┌ lanes ───────────────────────┐┌ devlanes ────────────────────────────────────┐"
+"│no lanes                      ││no lane selected                              │"
+"│run devlanes start in a       ││                                              │"
+"│project                       ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"└──────────────────────────────┘└──────────────────────────────────────────────┘"
+" j/k move  s start  x stop  r restart  t task  C-a terminal  z zoom  o url      "

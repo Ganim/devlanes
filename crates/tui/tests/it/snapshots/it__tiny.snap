@@ -1,0 +1,10 @@
+---
+source: crates/tui/tests/it/main.rs
+expression: draw(&app)?.backend()
+---
+"                              "
+"                              "
+"      terminal too small      "
+"     need 40x8, have 30x6     "
+"                              "
+"                              "

@@ -1,0 +1,24 @@
+---
+source: crates/tui/tests/it/main.rs
+expression: draw(&app)?.backend()
+---
+" devlanes  lanes  monitor                                                                           "
+"┌ lanes ───────────────────────────────┐┌ acme@2 ──────────────────────────────────────────────────┐"
+"│acme                                  ││state     idle                                            │"
+"│▾ ● @0 main                           ││branch    fix/cache                                       │"
+"│    ● api  ready                      ││path      /work/acme/fix/cache                            │"
+"│    ◐ web  starting                   ││moves to  lane 3 at next start                            │"
+"│    ✕ worker  failed 1  agent         ││config    changed; restart to apply                       │"
+"│    ○ migrate  exited 0  task         ││                                                          │"
+"│▸ ○ @1 feat/login  idle               ││s start · x stop · r restart · t task · p profile · O term│"
+"│  ○ @2 fix/cache  moves to lane 3  con││                                                          │"
+"│  ○ -- spike  unassigned              ││                                                          │"
+"│shop                                  ││                                                          │"
+"│▾ ● @0 main                           ││                                                          │"
+"│    ● storefront  ready               ││                                                          │"
+"│    ○ admin  stopped                  ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"└──────────────────────────────────────┘└──────────────────────────────────────────────────────────┘"
+" j/k move  s start  x stop  r restart  t task  C-a terminal  z zoom  o url  O open  c copy          "
