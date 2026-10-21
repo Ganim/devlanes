@@ -11,13 +11,13 @@ cargo binstall --git https://github.com/devlanes-run/devlanes devlanes
 curl -fsSL https://raw.githubusercontent.com/devlanes-run/devlanes/main/install.sh | sh
 ```
 
-Each of these installs `devlanes` and `devlanes-hosts` from a GitHub release for macOS or Linux (glibc), arm64 or x86_64; cargo binstall needs a second run with `devlanes-hosts-helper` for the helper. No release has been tagged yet, so until the first one only the source build works:
+These install release builds for macOS or Linux (glibc), arm64 or x86_64. Homebrew, npm and `install.sh` install both `devlanes` and the `devlanes-hosts` helper; cargo binstall installs `devlanes`, and `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-hosts-helper` adds the helper. No release has been tagged yet, so until the first one only the source build works:
 
 ```sh
 cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes devlanes-hosts-helper
 ```
 
-`install.sh` verifies the archive against the release's `SHA256SUMS`, installs to `~/.local/bin` (`DEVLANES_INSTALL_DIR` changes it) and takes `DEVLANES_VERSION=X.Y.Z` to pin a release. [packaging](packaging/README.md) describes the release pipeline.
+`install.sh` verifies the archive against the release's `SHA256SUMS`, installs to `~/.local/bin` (`DEVLANES_INSTALL_DIR` changes it; `DEVLANES_INSTALL_SUDO=1` allows sudo for a directory you can't write) and takes `DEVLANES_VERSION=X.Y.Z` to pin a release. [packaging](packaging/README.md) describes the release pipeline.
 
 ### Shorter name
 
@@ -45,19 +45,19 @@ devlanes logs api -f
 devlanes                    # the TUI
 ```
 
-The commands are listed in [bins/devlanes](bins/devlanes/README.md). See [design](docs/design.md), [development conventions](AGENTS.md), [fixtures](fixtures/README.md), [the agent plugin](agent-plugin/README.md) and [M0 commands](docs/milestones/M0.md). mprocs and dekit informed terminal interaction; pitchfork, process-compose, devenv, Coasts, portless, kache, overmind and Conductor informed process and worktree workflows.
+`devlanes --help` lists the commands, and `devlanes <command> --help` describes each one. See [design](docs/design.md), [development conventions](AGENTS.md), [fixtures](fixtures/README.md), [the agent plugin](agent-plugin/README.md) and [M0 commands](docs/milestones/M0.md). mprocs and dekit informed terminal interaction; pitchfork, process-compose, devenv, Coasts, portless, kache, overmind and Conductor informed process and worktree workflows.
 
 ## Config example
 
 ```yaml
 # Project name shared by every worktree of this repository.
-project: myapp
+project: acme
 # Long-running processes, started together after infra and setup.
 services:
   api:
     # Runs a script from package.json with the project's package manager.
     run_script: api/package.json#dev
-    # HTTPS hostnames routed by the proxy; lane.domain is myapp.localhost or myapp-<N>.localhost.
+    # HTTPS hostnames routed by the proxy; lane.domain is acme.localhost or acme-<N>.localhost.
     hosts: ["api.${{ lane.domain }}"]
   web:
     # Adds Vite's port and host flags to the command.
@@ -68,7 +68,7 @@ services:
     hosts: ["${{ lane.domain }}"]
 ```
 
-In the worktree of lane 2 this serves `https://api.myapp-2.localhost` and `https://myapp-2.localhost`, each on its own allocated port. The excerpt comes from [minimal.yaml](docs/examples/minimal.yaml), which also has shared Postgres and a database per lane; [devlanes.yaml](docs/examples/devlanes.yaml) shows every form.
+In the worktree of lane 2 this serves `https://api.acme-2.localhost` and `https://acme-2.localhost`, each on its own allocated port. The excerpt comes from [minimal.yaml](docs/examples/minimal.yaml), which also has shared Postgres and a database per lane; [devlanes.yaml](docs/examples/devlanes.yaml) shows every form.
 
 ## License
 

@@ -5,6 +5,11 @@ class Devlanes < Formula
   homepage "https://devlanes.run"
   license "Apache-2.0"
 
+  livecheck do
+    url :stable
+    strategy :github_latest
+  end
+
   on_macos do
     on_arm do
       url "https://github.com/devlanes-run/devlanes/releases/download/v@VERSION@/devlanes-@VERSION@-aarch64-apple-darwin.tar.gz"

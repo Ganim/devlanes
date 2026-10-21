@@ -10,6 +10,6 @@ Startup orders infrastructure, per-lane setup, lifecycle tasks, concurrent servi
 
 YAML configuration merges local maps by key and replaces lists/scalars before template expansion. `${{ ... }}` expressions use strict undefined-variable handling. Client environments and secret-provider values stay in daemon memory; `.env` files supply expression values, not implicit process environment injection.
 
-The planned HTTPS proxy uses a per-user CA and certificates for registered hosts. SSH transport mirrors registered, non-hidden TCP ports. HTTP-based GUI viewers can be ordinary services; built-in window streaming, relay transport, public DNS resolution and iOS/Android certificate trust are outside v1.
+The daemon's HTTPS proxy signs certificates for registered hosts with a per-user CA, devlanes' own or mkcert's (`tls.ca`). SSH transport mirrors registered, non-hidden TCP ports. HTTP-based GUI viewers can be ordinary services; built-in window streaming, relay transport, public DNS resolution and iOS/Android certificate trust are outside v1.
 
-These are architecture contracts. See the README for implementation status and [example notes](examples/README.md) for source inconsistencies.
+[examples](examples/README.md) has commented configuration files for these contracts.

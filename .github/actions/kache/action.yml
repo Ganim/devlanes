@@ -1,0 +1,62 @@
+name: kache
+description: Install the pinned kache release that .cargo/config.toml uses as rustc wrapper, and restore its local store.
+inputs:
+  store:
+    description: Name of the persisted local store. Empty skips persistence.
+    required: false
+    default: ""
+  save:
+    description: Save the store when the job ends. "false" only restores it.
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Install kache
+      shell: bash
+      env:
+        KACHE_VERSION: 1.2.2
+      run: |
+        set -euo pipefail
+        case "$(uname -s)-$(uname -m)" in
+          Linux-x86_64) target=x86_64-unknown-linux-musl sha=f2f6555dee50945c2a90a7fb793c2084a00cc6459d08ac2306d38d905064321b ;;
+          Linux-aarch64) target=aarch64-unknown-linux-musl sha=38856cee613f6ee0ec579099fc9205b840a0b45bb763f4b8fa782d25d93c18ef ;;
+          Darwin-arm64) target=aarch64-apple-darwin sha=10d09e146852a8df8796cf642ca58872107a7f391b7647ec8cc253cf289af0a9 ;;
+          Darwin-x86_64) target=x86_64-apple-darwin sha=9a1c3ecc89cf36b23512a93868226140d46f1f70cf6cb648bfe08eeafb25a368 ;;
+          *) echo "::error::no pinned kache release for $(uname -s)-$(uname -m)"; exit 1 ;;
+        esac
+        dir=$RUNNER_TEMP/kache-bin
+        mkdir -p "$dir"
+        curl -fsSL --retry 3 -o "$dir/kache.tar.gz" \
+          "https://github.com/kunobi-ninja/kache/releases/download/v$KACHE_VERSION/kache-$target.tar.gz"
+        if command -v sha256sum >/dev/null; then
+          actual=$(sha256sum < "$dir/kache.tar.gz")
+        else
+          actual=$(shasum -a 256 < "$dir/kache.tar.gz")
+        fi
+        if [ "${actual%% *}" != "$sha" ]; then
+          echo "::error::kache-$target.tar.gz does not match the pinned SHA-256"
+          exit 1
+        fi
+        tar -xzf "$dir/kache.tar.gz" -C "$dir" kache
+        rm "$dir/kache.tar.gz"
+        "$dir/kache" --version
+        echo "$dir" >> "$GITHUB_PATH"
+        # On the workspace's filesystem, so restores link into target/ instead of copying.
+        echo "KACHE_CACHE_DIR=$RUNNER_TEMP/kache" >> "$GITHUB_ENV"
+        # Keeps each saved store small against the repository's Actions cache quota.
+        echo "KACHE_MAX_SIZE=2GiB" >> "$GITHUB_ENV"
+    # The key changes with the toolchain or the lockfile; restore-keys start a new
+    # key from the previous store, so only changed dependencies compile again.
+    - if: inputs.store != '' && inputs.save == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/kache
+        key: kache-${{ inputs.store }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+        restore-keys: kache-${{ inputs.store }}-${{ runner.os }}-${{ runner.arch }}-
+    - if: inputs.store != '' && inputs.save != 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/kache
+        key: kache-${{ inputs.store }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+        restore-keys: kache-${{ inputs.store }}-${{ runner.os }}-${{ runner.arch }}-

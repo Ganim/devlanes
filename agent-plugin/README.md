@@ -6,10 +6,10 @@ Instructions that teach coding agents to run dev services through the devlanes C
 |---|---|
 | `skills/devlanes/SKILL.md` | The skill. Claude Code, the skills CLI and Codex all use this file. |
 | `.claude-plugin/plugin.json` | Claude Code plugin manifest. |
-| `hooks/hooks.json`, `scripts/block-background.sh` | Optional Claude Code `PreToolUse` hook that rejects backgrounded dev servers. |
+| `hooks/hooks.json`, `scripts/block-background.sh` | Optional Claude Code `PreToolUse` hook that rejects backgrounded dev servers; `scripts/test-block-background.sh` tests it. |
 | `codex/AGENTS.md` | Short form of the skill for an `AGENTS.md` file. |
 
-`devlanes agent-guide` prints the same short form, from `AGENT_GUIDE` in `crates/cli/src/lib.rs`. When the skill changes, update `AGENT_GUIDE` and `codex/AGENTS.md` with it.
+The short form's source is `crates/cli/agent-guide.md`, which `devlanes agent-guide` prints. `codex/AGENTS.md` is a copy of it, and a `devlanes-cli` test fails when the two differ or when a command in it no longer parses. When the skill changes, edit `agent-guide.md` and copy it over.
 
 ## Usage
 
@@ -30,11 +30,11 @@ claude --plugin-dir ./agent-plugin
 
 The plugin adds the `devlanes` skill and the hook. The hook runs before every Bash tool call. It blocks the call (exit 2) when all of these hold:
 
-- the working directory or one of its parents contains `devlanes.yaml`;
-- the command backgrounds a process with a lone `&` (as in `pnpm dev &`, `nohup ... &` or `... &>/dev/null &`), or the call sets `run_in_background`;
-- the command looks long-running: `dev`, `start`, `serve`, `watch`, `preview`, `vite`, `next`, `wrangler`, `uvicorn`, `rails` and similar words.
+- a command is detached: it ends with a lone `&` outside quotes (`pnpm dev &`, `nohup ... &`, `... &>/dev/null &`, `... & disown`), runs under `setsid -f`, `tmux new -d` or `screen -dm`, or the call sets `run_in_background`;
+- that command looks like a dev server: a `dev`, `start`, `serve`, `watch`, `preview` or `up` argument, a `server.js`-style script, or a tool such as `vite`, `next`, `wrangler` or `uvicorn` without `build` or `test`;
+- the directory it runs in, after any `cd DIR &&` before it, or one of that directory's parents contains `devlanes.yaml`.
 
-Commands that call `devlanes` pass. The block message tells Claude to use `devlanes start` or `devlanes exec --name NAME -- COMMAND`. The script uses `jq` when it is installed and falls back to matching the raw JSON input. To turn the hook off, set `DEVLANES_BLOCK_BACKGROUND=0` in Claude Code's environment, for example under `env` in `~/.claude/settings.json`.
+A detached `devlanes` command, such as `devlanes logs api -f &`, passes. The block message tells Claude to use `devlanes start` or `devlanes exec --name NAME -- COMMAND`. The script uses `jq` when it is installed and otherwise reads the `command` and `cwd` values from the JSON input with awk. To turn the hook off, set `DEVLANES_BLOCK_BACKGROUND=0` in Claude Code's environment, for example under `env` in `~/.claude/settings.json`.
 
 ### Skills CLI
 
@@ -44,11 +44,7 @@ npx skills add devlanes-run/devlanes --skill devlanes
 
 Add `-g` to install for every project, and `-a claude-code` or `-a codex` to pick the agent. This installs the skill only, without the hook.
 
-The skill is not in one of the directories the skills CLI scans first (`skills/`, `.claude/skills/` and others at the repository root). The CLI then falls back to a recursive search, which finds `agent-plugin/skills/devlanes`. This was checked with skills 1.7.4 against a copy of this layout. If a later version stops finding it, install from the direct path:
-
-```sh
-npx skills add https://github.com/devlanes-run/devlanes/tree/main/agent-plugin/skills/devlanes
-```
+The skills CLI finds the skill through the repository's `.claude-plugin/marketplace.json`, which lists `agent-plugin` as a plugin.
 
 ### Codex
 

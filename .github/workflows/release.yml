@@ -1,7 +1,8 @@
 name: Release
-# A `v*` tag builds the archives and uploads them to a draft release. The release
-# is published only after every asset is attached, so the Homebrew formula, npm
-# packages, cargo binstall and install.sh never see a half-filled release.
+# A `v*` tag tests the commit, builds the archives and uploads them to a draft
+# release. The release is published only after every asset is attached, so the
+# Homebrew formula, npm packages, cargo binstall and install.sh never see a
+# half-filled release.
 on:
   push:
     tags: ["v*"]
@@ -11,6 +12,34 @@ concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 jobs:
+  # The tests run here, in parallel with the builds, instead of waiting for the CI
+  # workflow's result on the tag commit: that would need polling another workflow and
+  # breaks when CI never ran for the commit.
+  test:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      # Reads the store the CI rust job saved on the default branch; the same tests
+      # with the same features, so most of the workspace restores instead of compiling.
+      - uses: ./.github/actions/kache
+        with:
+          store: rust
+          save: "false"
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: nextest
+      - run: cargo nextest run --workspace --all-features --locked
+      - name: kache stats
+        if: ${{ !cancelled() }}
+        run: kache stats
+
   build:
     strategy:
       fail-fast: true
@@ -35,23 +64,32 @@ jobs:
     timeout-minutes: 60
     env:
       TARGET: ${{ matrix.target }}
+      # kache passes every compile straight to rustc here: shipped binaries are always
+      # compiled from source, and release targets share no cache entries with CI anyway.
+      KACHE_DISABLED: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain
         run: |
-          rustup show active-toolchain
+          rustup toolchain install
           rustup target add "$TARGET"
-      - name: Check the tag against the workspace version
+      # .cargo/config.toml names kache as rustc wrapper, so it must exist even when disabled.
+      - uses: ./.github/actions/kache
+      - name: Check the tag against the workspace and plugin versions
         run: |
           version=${GITHUB_REF_NAME#v}
           crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "devlanes") | .version')
-          if [ "$version" != "$crate" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match devlanes $crate"
+          plugin=$(jq -r .version agent-plugin/.claude-plugin/plugin.json)
+          if [ "$version" != "$crate" ] || [ "$version" != "$plugin" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, devlanes $crate and agent-plugin/.claude-plugin/plugin.json $plugin must match"
             exit 1
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --release --locked --target "$TARGET" -p devlanes -p devlanes-hosts-helper
+      # build.rs regenerates the served schemas; a difference means they were committed stale.
+      - name: Check the committed schemas
+        run: git diff --exit-code crates/config/schema.json crates/config/user-schema.json
       - name: Smoke test
         if: matrix.native
         run: |
@@ -59,26 +97,29 @@ jobs:
           "target/$TARGET/release/devlanes-hosts" version | grep -F "build=release"
       - name: Package
         run: sh packaging/scripts/package.sh "$VERSION" "$TARGET" dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.target }}
           path: dist/
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [test, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: dist-*
           path: dist
@@ -98,11 +139,16 @@ jobs:
             "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
           jq -e '.artifacts | length == 4' dist/release-manifest.json
           cp crates/config/schema.json crates/config/user-schema.json dist/
+      # Verify with: gh attestation verify devlanes-VERSION-TARGET.tar.gz --repo devlanes-run/devlanes
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
       - name: Homebrew formula
         run: |
           mkdir -p formula
           sh packaging/homebrew/render.sh "$VERSION" dist/SHA256SUMS > formula/devlanes.rb
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: formula
           path: formula/
@@ -142,7 +188,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: formula
           path: formula
@@ -165,12 +211,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: formula
           path: formula
       - name: Push the formula to devlanes-run/homebrew-tap
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           VERSION: ${{ needs.release.outputs.version }}
         with:
@@ -227,17 +273,18 @@ jobs:
       VERSION: ${{ needs.release.outputs.version }}
       PRERELEASE: ${{ needs.release.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The archives keep the executable bits that an uploaded package directory would lose.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
       - name: npm with trusted publishing support
         run: |
           npm install -g npm@11
@@ -251,8 +298,7 @@ jobs:
           if [ "$PRERELEASE" = true ]; then tag=next; fi
           for dir in npm/devlanes-*/ npm/devlanes/; do
             name=$(jq -r .name "$dir/package.json")
-            # Reruns skip versions already on the registry. A plain registry read, because
-            # npm commands other than publish would send setup-node's placeholder token.
+            # Reruns skip versions already on the registry; a plain read needs no npm auth.
             if curl -fs -o /dev/null "https://registry.npmjs.org/$name/$VERSION"; then
               echo "$name@$VERSION is already published"
               continue

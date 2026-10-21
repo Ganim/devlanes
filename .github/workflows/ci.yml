@@ -10,6 +10,10 @@ on:
         default: false
 permissions:
   contents: read
+# A newer push to the same branch or pull request replaces the running checks.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   rust:
     strategy:
@@ -19,17 +23,44 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain
-        run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
+        run: rustup toolchain install
+      - uses: ./.github/actions/kache
+        with:
+          store: rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # kache's store holds the compiled dependencies; this caches only the registry.
+          cache-targets: "false"
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: nextest
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       # The default nextest profile leaves out devlanes-e2e; the e2e jobs run it.
-      - run: cargo nextest run --workspace --all-features
-      - run: cargo test --workspace --doc --all-features
-      - run: cargo build --workspace --all-targets --all-features
+      - run: cargo nextest run --workspace --all-features --locked
+      - run: cargo test --workspace --doc --all-features --locked
+      - run: cargo build --workspace --all-targets --all-features --locked
+      - name: kache stats
+        if: ${{ !cancelled() }}
+        run: kache stats
+  packaging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: shellcheck
+      - name: Install actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12 "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - run: actionlint
+      - run: shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh agent-plugin/scripts/*.sh e2e/ssh/run.sh
+      - run: sh packaging/scripts/check.sh
+      - run: sh agent-plugin/scripts/test-block-background.sh
   e2e:
     strategy:
       fail-fast: false
@@ -38,54 +69,104 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain
-        run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
+        run: rustup toolchain install
+      - uses: ./.github/actions/kache
+        with:
+          store: e2e
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-targets: "false"
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: nextest
       # Built once here; each nextest test process would otherwise run cargo build itself.
-      - run: cargo build -p devlanes -p devlanes-testing
-      - run: cargo nextest run --profile e2e
+      - run: cargo build -p devlanes -p devlanes-testing --locked
+      - run: cargo nextest run --profile e2e --locked
         env:
           DEVLANES_E2E_BIN_DIR: ${{ github.workspace }}/target/debug
+      - name: kache stats
+        if: ${{ !cancelled() }}
+        run: kache stats
   docker-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain
-        run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
+        run: rustup toolchain install
+      # Same build as the Linux e2e job, so it only reads that job's store.
+      - uses: ./.github/actions/kache
+        with:
+          store: e2e
+          save: "false"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-targets: "false"
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: nextest
       - run: docker info
       - run: docker compose version
-      - run: cargo build -p devlanes -p devlanes-testing
-      - run: cargo nextest run --profile e2e --run-ignored only -E 'test(/^docker_/)'
+      - run: cargo build -p devlanes -p devlanes-testing --locked
+      - run: cargo nextest run --profile e2e --locked --run-ignored only -E 'test(/^docker_/)'
         env:
           DEVLANES_E2E_BIN_DIR: ${{ github.workspace }}/target/debug
+      - name: kache stats
+        if: ${{ !cancelled() }}
+        run: kache stats
   external:
     if: github.event_name == 'workflow_dispatch' && inputs.external
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain
-        run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
+        run: rustup toolchain install
+      # Same features as the Linux rust job, so it only reads that job's store.
+      - uses: ./.github/actions/kache
+        with:
+          store: rust
+          save: "false"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-targets: "false"
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: nextest
       - run: docker info
       - run: docker compose version
       # External tests use a docker_ name prefix so this job never invokes trust/SSH tests.
-      - run: cargo nextest run --workspace --all-features --run-ignored only -E 'test(/^docker_/)' --no-tests=pass
+      - run: cargo nextest run --workspace --all-features --locked --run-ignored only -E 'test(/^docker_/)' --no-tests=pass
+      - name: kache stats
+        if: ${{ !cancelled() }}
+        run: kache stats
   ssh:
     # `needs ssh` tests against a throwaway sshd container; the script builds the box's
     # Linux devlanes in rust:1.99.1-bookworm and always removes the container.
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain
-        run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
+        run: rustup toolchain install
+      - uses: ./.github/actions/kache
+        with:
+          store: ssh
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-targets: "false"
+      # The box binary's target dir and registry, built inside the container.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ssh-box
+          key: ssh-box-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ssh-box-
       - run: docker info
       - run: bash e2e/ssh/run.sh
+        env:
+          DEVLANES_TEST_SSH_CACHE: ${{ runner.temp }}/ssh-box
+      - name: kache stats
+        if: ${{ !cancelled() }}
+        run: kache stats

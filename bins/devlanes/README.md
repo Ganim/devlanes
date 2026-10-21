@@ -39,7 +39,7 @@ Project settings live in each repository's `devlanes.yaml`; `docs/examples/user-
 
 ## Behaviour
 
-Any command auto-spawns the daemon (`devlanes daemon run`, a hidden subcommand) when none is running. Inside an agent sandbox the CLI refuses to auto-spawn; start the daemon from a normal shell or install it once with `devlanes daemon install`. `devlanes daemon stop` and `devlanes daemon restart` are the only commands that stop all managed processes, and they ask first.
+Any command auto-spawns the daemon (`devlanes daemon run`, a hidden subcommand) when none is running. Inside an agent sandbox the CLI refuses to auto-spawn; start the daemon from a normal shell or install it once with `devlanes daemon install`. `devlanes daemon stop`, `devlanes daemon restart` and `devlanes daemon reset-state` are the only commands that stop all managed processes, and they ask first; `reset-state` also empties `state.db`.
 
 Everything lives under `~/.devlanes`, or `DEVLANES_HOME` when set: `state.db`, `config.yaml`, `logs/` (including `daemon.log`), `ca/` and `run/daemon.sock`. When the socket path is too long for macOS, it moves to a short temporary directory.
 

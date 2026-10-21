@@ -9,24 +9,32 @@ use devlanes_core::{LaneId, ProjectId};
 use devlanes_metrics::{MetricsSource, SampleRequest, UnitKey, UnitTarget};
 use devlanes_metrics_linux::{LinuxSource, process_identity};
 
-let source = LinuxSource::new();
-let leader = process_identity(std::process::id()).expect("process is running");
-let request = SampleRequest {
-    units: vec![UnitTarget {
-        unit: UnitKey { project: ProjectId(1), lane: LaneId(1), unit: "web".into() },
-        sessions: vec![leader.sid],
-        processes: vec![leader],
-    }],
-    containers: Vec::new(),
-};
-let samples = source.sample(&request).await?;
+async fn sample_self() -> Result<(), Box<dyn std::error::Error>> {
+    let source = LinuxSource::new();
+    let leader = process_identity(std::process::id()).expect("process is running");
+    let request = SampleRequest {
+        units: vec![UnitTarget {
+            unit: UnitKey { project: ProjectId(1), lane: LaneId(1), unit: "web".into() },
+            sessions: vec![leader.sid],
+            processes: vec![leader],
+        }],
+        containers: Vec::new(),
+    };
+    let samples = source.sample(&request).await?;
+    println!("{} samples", samples.len());
+    Ok(())
+}
 ```
 
 Parsers work on text from anywhere:
 
 ```rust
-let stat = devlanes_metrics_linux::procfs::parse_stat(&std::fs::read_to_string("/proc/self/stat")?)?;
-let psi = devlanes_metrics_linux::pressure::parse_psi(&std::fs::read_to_string("/proc/pressure/memory")?)?;
+fn parse() -> Result<(), Box<dyn std::error::Error>> {
+    let stat = devlanes_metrics_linux::procfs::parse_stat(&std::fs::read_to_string("/proc/self/stat")?)?;
+    let psi = devlanes_metrics_linux::pressure::parse_psi(&std::fs::read_to_string("/proc/pressure/memory")?)?;
+    println!("{stat:?} {psi:?}");
+    Ok(())
+}
 ```
 
 `LinuxPressure` is the start gate's `PressureSource`:
@@ -34,8 +42,12 @@ let psi = devlanes_metrics_linux::pressure::parse_psi(&std::fs::read_to_string("
 ```rust
 use devlanes_core::gate::PressureSource;
 
-let pressure = devlanes_metrics_linux::LinuxPressure::new();
-let sample = pressure.sample().await?; // cpu_percent is None on the first call
+async fn pressure() -> Result<(), Box<dyn std::error::Error>> {
+    let pressure = devlanes_metrics_linux::LinuxPressure::new();
+    let sample = pressure.sample().await?; // cpu_percent is None on the first call
+    println!("{:?}", sample.cpu_percent);
+    Ok(())
+}
 ```
 
 ## Behaviour

@@ -1,6 +1,6 @@
 # devlanes-tunnel
 
-The box side of `devlanes remote connect`. The client's SSH transport runs `devlanes tunnel --stdio` on the box, and this crate answers the mux streams on that pipe from the box's own daemon, which it reaches over the daemon's Unix socket like any other client.
+The box side of `devlanes remote connect`. The client's SSH transport runs `devlanes tunnel --stdio` on the box, and this crate answers the mux streams on that pipe from the box's own daemon, which it reaches over the daemon's Unix socket like any other client. Remote is mirroring only: the client gets the registry, data streams and syncs, and never runs commands on the box.
 
 ## Usage
 
@@ -9,18 +9,24 @@ use devlanes_client::Paths;
 
 // `devlanes tunnel --stdio`: starts the box daemon if needed, then serves one
 // client over stdin and stdout until it leaves.
-devlanes_tunnel::run_stdio(Paths::discover()?).await?;
+async fn tunnel() -> Result<(), Box<dyn std::error::Error>> {
+    devlanes_tunnel::run_stdio(Paths::discover()?).await?;
+    Ok(())
+}
 ```
 
 To serve over another pipe, such as the in-memory transport in tests:
 
 ```rust
+use devlanes_client::Paths;
 use devlanes_proto::remote::RemoteClient;
-use devlanes_transport::{ServeOptions, serve};
+use devlanes_transport::{Duplex, ServeError, ServeOptions, serve};
 
-let client = RemoteClient { pid: std::process::id(), ssh: None, since_ms: 0 };
-let services = devlanes_tunnel::services(paths, client);
-serve(stream, services, ServeOptions::new(devlanes_tunnel::server_label())).await?;
+async fn serve_pipe(paths: Paths, stream: impl Duplex + 'static) -> Result<(), ServeError> {
+    let client = RemoteClient { pid: std::process::id(), ssh: None, since_ms: 0 };
+    let services = devlanes_tunnel::services(paths, client);
+    serve(stream, services, ServeOptions::new(devlanes_tunnel::server_label())).await
+}
 ```
 
 ## API
@@ -50,11 +56,11 @@ The tunnel offers the `extension` sync to the client that ran `devlanes remote c
 
 ## Behaviour
 
-- The registry comes from the daemon's `status --all` and `hosts`, refreshed on daemon events. Hidden services and containers are listed but never mirrored.
-- Data streams only dial loopback ports that a non-hidden unit in the registry advertises.
-- Each forwarded request gets its own daemon connection. Attach bytes travel base64-encoded, because transport RPC values are JSON.
-- Syncs stream the entries the daemon lists in `sync.status`; the client names an entry, never a path.
-- Forwarded `unlock`, `connect`, `disconnect` and `host ls` return `not_supported_yet`.
+- The registry comes from the daemon's `status --all` and `hosts`, refreshed on daemon events. It carries ports, hostnames and states, never environments or secrets. Hidden services and containers are listed but never mirrored.
+- Data streams only dial loopback ports of running units that are not hidden.
+- Every daemon request a client sends is refused with `not_supported`.
+- Syncs stream the entries the daemon lists in `sync.status`; the client names an entry and sends what it already holds, never a path. Files over 256 MiB are skipped, and one client follows at most 16 syncs.
+- A daemon the tunnel starts does not inherit the SSH session's variables (`SSH_AUTH_SOCK` and friends). On Linux the handshake label says `(linger off)` when the box would stop it at logout.
 - stdout carries only mux frames. Errors go to stderr, which ssh returns to the client as the connection error.
 
 ## License

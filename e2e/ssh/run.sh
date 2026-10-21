@@ -5,6 +5,8 @@
 #
 # DEVLANES_TEST_SSH_BIN: prebuilt Linux devlanes for the box. Unset builds one in
 #   rust:1.99.1-bookworm; `skip` starts the box without devlanes (tunnel test skips).
+# DEVLANES_TEST_SSH_CACHE: host directory for that build's target dir and cargo registry,
+#   so CI can cache it; unset uses named Docker volumes.
 # CARGO_TARGET_DIR is passed through to the host test build.
 set -euo pipefail
 
@@ -24,11 +26,18 @@ bin=${DEVLANES_TEST_SSH_BIN:-}
 if [ -z "$bin" ]; then
   # Host builds are Mach-O on macOS, so the box binary is built for Linux in a container.
   # Named volumes keep the registry and target dir warm between local runs.
+  target=devlanes-e2e-ssh-target registry=devlanes-e2e-ssh-registry
+  if [ -n "${DEVLANES_TEST_SSH_CACHE:-}" ]; then
+    mkdir -p "$DEVLANES_TEST_SSH_CACHE/target" "$DEVLANES_TEST_SSH_CACHE/registry"
+    cache=$(cd "$DEVLANES_TEST_SSH_CACHE" && pwd)
+    target=$cache/target registry=$cache/registry
+  fi
+  # The image has no kache, so an empty RUSTC_WRAPPER overrides the repository's wrapper.
   docker run --rm \
     -v "$repo":/src -w /src \
-    -v devlanes-e2e-ssh-target:/target -v devlanes-e2e-ssh-registry:/usr/local/cargo/registry \
+    -v "$target":/target -v "$registry":/usr/local/cargo/registry \
     -v "$work":/out \
-    -e CARGO_TARGET_DIR=/target -e RUSTUP_TOOLCHAIN=1.99.1 \
+    -e CARGO_TARGET_DIR=/target -e RUSTUP_TOOLCHAIN=1.99.1 -e RUSTC_WRAPPER= \
     rust:1.99.1-bookworm \
     sh -c 'cargo build -p devlanes && cp /target/debug/devlanes /out/devlanes'
   bin=$work/devlanes

@@ -1,3 +1,5 @@
 [build]
 # Every rustc and clippy warning fails the build, locally and in CI.
 warnings = "deny"
+# Every compile goes through the kache build cache; see CONTRIBUTING.md.
+rustc-wrapper = "kache"

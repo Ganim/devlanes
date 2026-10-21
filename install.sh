@@ -6,11 +6,14 @@
 #
 # DEVLANES_VERSION=0.1.0 pins a release (default: the latest one).
 # DEVLANES_INSTALL_DIR sets the target directory (default: ~/.local/bin).
+# DEVLANES_INSTALL_SUDO=1 allows sudo when that directory is not writable.
 # DEVLANES_INSTALL_BASE_URL replaces the release URL; it exists only so the
 # script can be tested against a local directory of fake releases.
 set -eu
 
 base=${DEVLANES_INSTALL_BASE_URL:-https://github.com/devlanes-run/devlanes/releases}
+proto='=https'
+if [ -n "${DEVLANES_INSTALL_BASE_URL:-}" ]; then proto='=https,file'; fi
 version=${DEVLANES_VERSION:-}
 version=${version#v}
 dir=${DEVLANES_INSTALL_DIR:-$HOME/.local/bin}
@@ -21,7 +24,7 @@ fail() {
 }
 
 if [ "$#" -gt 0 ]; then
-	printf 'usage: [DEVLANES_VERSION=X.Y.Z] [DEVLANES_INSTALL_DIR=DIR] sh install.sh\n' >&2
+	printf 'usage: [DEVLANES_VERSION=X.Y.Z] [DEVLANES_INSTALL_DIR=DIR] [DEVLANES_INSTALL_SUDO=1] sh install.sh\n' >&2
 	exit 2
 fi
 
@@ -55,14 +58,22 @@ if [ "$os" = Linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then
 fi
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+cleanup() { rm -rf "$tmp"; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+download() {
+	curl -fsSL --proto "$proto" --proto-redir "$proto" --tlsv1.2 "$1" -o "$2"
+}
 
 if [ -n "$version" ]; then
 	sums_url=$base/download/v$version/SHA256SUMS
 else
 	sums_url=$base/latest/download/SHA256SUMS
 fi
-curl -fsSL "$sums_url" -o "$tmp/SHA256SUMS" || fail "cannot download $sums_url"
+download "$sums_url" "$tmp/SHA256SUMS" || fail "cannot download $sums_url"
 
 # The latest release is found through its SHA256SUMS, which names the archive and
 # so the version; the archive then comes from that version's own release.
@@ -83,7 +94,7 @@ printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
 printf '%s\n' "$expected" | grep -Eq '^[0-9a-f]{64}$' || fail "malformed checksum for $archive"
 
 url=$base/download/v$version/$archive
-curl -fsSL "$url" -o "$tmp/$archive" || fail "cannot download $url"
+download "$url" "$tmp/$archive" || fail "cannot download $url"
 actual=$(sha256 "$tmp/$archive")
 [ "$actual" = "$expected" ] || fail "checksum mismatch for $archive: expected $expected, got $actual"
 
@@ -100,6 +111,9 @@ case "$dir" in
 esac
 sudo=
 if ! mkdir -p "$dir" 2>/dev/null || [ ! -w "$dir" ]; then
+	if [ "${DEVLANES_INSTALL_SUDO:-}" != 1 ]; then
+		fail "$dir is not writable; set DEVLANES_INSTALL_DIR to a writable directory, or DEVLANES_INSTALL_SUDO=1 to install there with sudo"
+	fi
 	command -v sudo >/dev/null 2>&1 || fail "$dir is not writable and sudo is not available"
 	printf 'devlanes install: %s is not writable; using sudo to install there\n' "$dir"
 	sudo=sudo

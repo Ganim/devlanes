@@ -77,7 +77,7 @@ model below).
 Entries stay in `/etc/hosts` after the daemon stops. They point at loopback
 and only matter while the devlanes proxy listens there.
 
-## Installing
+## Usage
 
 ```sh
 devlanes certs trust --hosts

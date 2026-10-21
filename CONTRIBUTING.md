@@ -6,9 +6,12 @@ devlanes is a Cargo workspace: one binary (`bins/devlanes`) built from small cra
 
 - Rust comes from `rust-toolchain.toml`; rustup installs the pinned version on the first `cargo` call.
 - Install nextest: `cargo install cargo-nextest --locked`.
-- macOS (Apple Silicon) and Linux are supported. Windows isn't.
+- Install kache, the build cache every compile goes through (`.cargo/config.toml` sets it as rustc wrapper): `cargo install kache --locked`, then `kache init` once.
+- macOS (Apple Silicon and Intel) and Linux with glibc (x86_64 and arm64) are supported. Windows isn't.
 
 Optional tools, needed only by the ignored tests that mention them: Docker (OrbStack or Docker Desktop on macOS), `node` with npm/pnpm/yarn/bun, `just`, `deno`, `uv`, `poetry`, `mise`, `direnv`, `fnox` 1.39+, `certutil` (NSS), `dig`, `tmux`.
+
+kache keeps its cache on each machine, and CI saves it with the Actions cache. A shared S3 cache isn't set up yet. When it is, its `[cache.remote]` table goes in `~/.config/kache/config.toml` on each machine, and `.github/actions/kache/action.yml` writes the same table in CI before the first build, with the credentials from repository secrets.
 
 ## Checks
 
@@ -19,9 +22,19 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run --workspace --all-features
 cargo test --workspace --doc --all-features
+cargo build --workspace --all-targets --all-features
 ```
 
 While working on one crate, test just that crate: `cargo nextest run -p devlanes-config`.
+
+Changes to shell scripts or workflows also have a check, which CI runs in its `packaging` job:
+
+```sh
+shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh agent-plugin/scripts/*.sh e2e/ssh/run.sh
+actionlint
+sh packaging/scripts/check.sh                       # release scripts and install.sh against fake binaries
+sh agent-plugin/scripts/test-block-background.sh    # the Claude Code hook
+```
 
 ## Running the CLI from a checkout
 
@@ -73,19 +86,19 @@ dl stop && dl daemon stop --yes
 The daemon's proxy listens on 443 and 80, and falls back to 8443 and 8080 when it can't bind them. macOS lets unprivileged processes bind both; on Linux, run `sudo setcap cap_net_bind_service=+ep target/debug/devlanes` or use the fallback ports.
 
 ```sh
-dl hosts                                    # routes, and the ports the proxy bound
+dl url ls                                   # routed hostnames with their lane, unit and port
 curl --cacert "$DEVLANES_HOME/ca/ca.pem" https://api.fixture-two.localhost/healthz
-dl trust                                    # installs the dev CA (asks for your password)
-dl untrust
+dl certs trust                              # installs the dev CA (asks for your password)
+dl certs untrust
 ```
 
 The `/etc/hosts` helper needs a release build, because its installer refuses debug builds:
 
 ```sh
 cargo build --release -p devlanes-hosts-helper
-DEVLANES_HOSTS_HELPER="$PWD/target/release/devlanes-hosts" dl trust --hosts   # CA + helper
-dl untrust --hosts             # removes both
-dl untrust --hosts --keep-ca   # removes only the helper
+DEVLANES_HOSTS_HELPER="$PWD/target/release/devlanes-hosts" dl certs trust --hosts   # CA + helper
+dl certs untrust --hosts             # removes both
+dl certs untrust --hosts --keep-ca   # removes only the helper
 ```
 
 `crates/hosts-helper/README.md` explains what that installs and why.
@@ -102,7 +115,7 @@ They create containers labelled `dev.devlanes.*` and remove them afterwards. To 
 
 ## Remote and SSH
 
-Most remote behaviour is tested without SSH. `crates/daemon/tests/it/remote.rs` runs a box daemon and a client daemon in one process over an in-memory transport, covering mirrored ports, proxy routes, `--host` forwarding, attach, sync and reconnect:
+Remote is mirroring only: a client never runs commands on a box. Most of it is tested without SSH. `crates/daemon/tests/it/remote.rs` runs a box daemon and a client daemon in one process over an in-memory transport, covering mirrored ports, proxy routes, refused daemon requests, sync, reconnect and failure:
 
 ```sh
 cargo nextest run -p devlanes-daemon -E 'test(/remote/)'
@@ -115,12 +128,13 @@ e2e/ssh/run.sh                              # builds a Linux devlanes for the bo
 DEVLANES_TEST_SSH_BIN=skip e2e/ssh/run.sh   # no box binary; only the connection test runs
 ```
 
-To use `dl connect` by hand you need a box with `devlanes` on its PATH and an entry for it in `~/.ssh/config`. A Linux VM or a spare machine works best: a box on the same machine as the client is confusing, because mirroring binds the box's port numbers locally and they collide with the box's own listeners.
+To use `dl remote connect` by hand you need a box with `devlanes` on its PATH (or pass `--install`) and an entry for it in `~/.ssh/config`. A Linux VM or a spare machine works best: a box on the same machine as the client is confusing, because mirroring binds the box's port numbers locally and they collide with the box's own listeners.
 
 ```sh
-dl connect mybox          # streams connection status; Ctrl-C detaches, the connection stays up
-dl --host mybox status
-dl disconnect mybox
+dl remote connect mybox      # streams connection status; Ctrl-C detaches, the connection stays up
+dl remote ls                 # mirrored ports, routes, syncs and warnings
+ssh mybox devlanes status    # lanes are managed on the box itself
+dl remote disconnect mybox
 ```
 
 ## End-to-end tests

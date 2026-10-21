@@ -30,7 +30,20 @@ done
 cp "$root/LICENSE" "$stage/$name/LICENSE"
 chmod 644 "$stage/$name/LICENSE"
 
+# Same inputs give the same archive: fixed owners, order and mtimes
+# (SOURCE_DATE_EPOCH, else the last commit's time) and a gzip header without a timestamp.
+epoch=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct 2>/dev/null || echo 0)}
+if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+	set -- --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$epoch"
+else
+	# bsdtar (macOS) has no --sort or --mtime; one directory with fixed names keeps
+	# the order stable, and touch fixes the times.
+	stamp=$(date -u -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null || date -u -d "@$epoch" +%Y%m%d%H%M.%S)
+	find "$stage/$name" -exec touch -h -t "$stamp" {} +
+	set -- --uid 0 --gid 0 --uname root --gname root
+fi
 # macOS tar would otherwise store extended attributes (com.apple.provenance) as
 # pax headers that GNU tar warns about, and AppleDouble ._ files.
-COPYFILE_DISABLE=1 tar --no-xattrs -C "$stage" -czf "$out/$name.tar.gz" "$name"
+COPYFILE_DISABLE=1 tar --no-xattrs "$@" -C "$stage" -cf "$stage/$name.tar" "$name"
+gzip -n -9 -c "$stage/$name.tar" >"$out/$name.tar.gz"
 echo "$out/$name.tar.gz"

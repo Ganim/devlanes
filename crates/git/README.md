@@ -31,6 +31,19 @@ async fn lanes(cwd: &Path) -> Result<(), Error> {
 - `add`: `git worktree add` for a new or existing branch, after `git check-ref-format` accepts its name.
 - `watch`: a channel that receives the full worktree list again after each change.
 
+## Config example
+
+```yaml
+# devlanes.yaml
+lanes:
+  # Branch that gets lane 0.
+  primary: main
+  # Where devlanes lane new creates worktrees, relative to the project; this is the default.
+  worktree_dir: ../${{ project.name }}-lanes
+```
+
+`devlanes lane new feat/login` runs `add` for `../acme-lanes/feat-login`.
+
 ## Behaviour
 
 A worktree's `identity` is its administration name under the common Git directory, so `git worktree move` keeps the same lane. The common directory separates independent clones that share a project name. Without an explicit primary branch, `discover` takes origin's default branch, then `main`, then `master`.

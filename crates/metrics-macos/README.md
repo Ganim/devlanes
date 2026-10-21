@@ -9,17 +9,21 @@ use devlanes_core::{LaneId, ProjectId};
 use devlanes_metrics::{MetricsSource, SampleRequest, UnitKey, UnitTarget};
 use devlanes_metrics_macos::{MacosSource, process_identity};
 
-let source = MacosSource::new()?;
-let leader = process_identity(std::process::id()).expect("process is running");
-let request = SampleRequest {
-    units: vec![UnitTarget {
-        unit: UnitKey { project: ProjectId(1), lane: LaneId(1), unit: "web".into() },
-        sessions: vec![leader.sid],
-        processes: vec![leader],
-    }],
-    containers: Vec::new(),
-};
-let samples = source.sample(&request).await?; // one Subject::Process sample per member
+async fn sample_self() -> Result<(), Box<dyn std::error::Error>> {
+    let source = MacosSource::new()?;
+    let leader = process_identity(std::process::id()).expect("process is running");
+    let request = SampleRequest {
+        units: vec![UnitTarget {
+            unit: UnitKey { project: ProjectId(1), lane: LaneId(1), unit: "web".into() },
+            sessions: vec![leader.sid],
+            processes: vec![leader],
+        }],
+        containers: Vec::new(),
+    };
+    let samples = source.sample(&request).await?; // one Subject::Process sample per member
+    println!("{} samples", samples.len());
+    Ok(())
+}
 ```
 
 `MacosSource::sample_blocking` does the same on the calling thread.
@@ -30,9 +34,13 @@ let samples = source.sample(&request).await?; // one Subject::Process sample per
 use devlanes_core::gate::PressureSource;
 use devlanes_metrics_macos::MacosPressure;
 
-let pressure = MacosPressure::new();
-let sample = pressure.sample().await?; // cpu_percent is None on the first call
-let available = pressure.available_memory().await?;
+async fn pressure() -> Result<(), Box<dyn std::error::Error>> {
+    let pressure = MacosPressure::new();
+    let sample = pressure.sample().await?; // cpu_percent is None on the first call
+    let available = pressure.available_memory().await?;
+    println!("{:?} {available:?}", sample.cpu_percent);
+    Ok(())
+}
 ```
 
 ## Pressure

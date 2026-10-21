@@ -9,17 +9,21 @@ use devlanes_core::{LaneId, ProjectId};
 use devlanes_metrics::{ContainerTarget, MetricsSource, SampleRequest};
 use devlanes_metrics_docker::DockerSource;
 
-let source = DockerSource::connect()?; // DOCKER_HOST or the default socket
-let request = SampleRequest {
-    units: Vec::new(),
-    containers: vec![ContainerTarget {
-        project: ProjectId(1),
-        lane: Some(LaneId(2)),
-        id: "acme-lane2-postgres-1".into(),
-    }],
-};
-let samples = source.sample(&request).await?;
-let vm = source.vm_info().await?; // CPUs and memory of the engine host
+async fn sample_postgres() -> Result<(), Box<dyn std::error::Error>> {
+    let source = DockerSource::connect()?; // DOCKER_HOST or the default socket
+    let request = SampleRequest {
+        units: Vec::new(),
+        containers: vec![ContainerTarget {
+            project: ProjectId(1),
+            lane: Some(LaneId(2)),
+            id: "acme-lane2-postgres-1".into(),
+        }],
+    };
+    let samples = source.sample(&request).await?;
+    let vm = source.vm_info().await?; // CPUs and memory of the engine host
+    println!("{} samples, {vm:?}", samples.len());
+    Ok(())
+}
 ```
 
 ## API
