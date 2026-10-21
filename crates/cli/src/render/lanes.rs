@@ -555,10 +555,22 @@ fn lane_notes(lane: &LaneSummary) -> Vec<String> {
     if lane.state == "no-config" && lane.reason.is_none() {
         notes.push("no devlanes.yaml".into());
     }
-    for warning in &lane.warnings {
-        notes.push(words::lane_warning(&warning.code, &warning.data));
-    }
     notes
+}
+
+/// The lane's warnings (`ports_pending`, `host_conflict`), one marked line each,
+/// below the lane rather than in its note: they carry commands and semicolons.
+fn lane_warning_lines(lane: &LaneSummary, cx: &Ctx<'_>) -> Vec<String> {
+    lane.warnings
+        .iter()
+        .map(|warning| {
+            cx.warning(&format!(
+                "{}: {}",
+                clean(&lane.reference),
+                words::lane_warning(&warning.code, &warning.data)
+            ))
+        })
+        .collect()
 }
 
 /// The scheme any listed unit URL uses; the proxy serves every lane the same way.
@@ -623,6 +635,7 @@ pub(super) fn status(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
     if cx.agent() {
         for lane in &lanes {
             lines.push(agent_lane(lane));
+            lines.extend(lane_warning_lines(lane, cx));
             if single {
                 let mut units: Vec<&UnitSummary> = lane.units.iter().collect();
                 units.sort_by_key(|unit| unit.state != "failed");
@@ -694,6 +707,7 @@ pub(super) fn status(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         notes.push(lane_notes(lane));
     }
     flush(&mut lines, &mut rows, &mut notes);
+    lines.extend(lanes.iter().flat_map(|lane| lane_warning_lines(lane, cx)));
     if let [lane] = lanes.as_slice()
         && !lane.units.is_empty()
     {
@@ -842,6 +856,7 @@ pub(super) fn lane_new(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
     for note in lane_notes(&lane) {
         lines.push(format!("  {note}"));
     }
+    lines.extend(lane_warning_lines(&lane, cx));
     match data.get("start") {
         Some(start) => lines.extend(start_like(start, cx)),
         None => lines.push(format!(
@@ -911,14 +926,12 @@ pub(super) fn lane_gc(data: &Value) -> Vec<String> {
         format!("cleaned {}", cleaned.join(", "))
     };
     let mut lines = vec![format!("{lanes}; removed {offsets} unused port offsets")];
-    let kept: Vec<String> = list(data, "kept_running")
-        .iter()
-        .map(display_value)
-        .collect();
-    if !kept.is_empty() {
+    // Lanes whose worktree is gone but whose units still run: gc never stops anything.
+    for lane in list(data, "kept_running").iter().map(display_value) {
         lines.push(format!(
-            "kept {} (worktree missing, but units still run; stop them first)",
-            kept.join(", ")
+            "kept {lane}: its worktree is gone but units still run; stop them with {}, then run {} again",
+            Hint::command(["stop", "--lane", lane.as_str()]).0,
+            Hint::command(["lane", "gc"]).0
         ));
     }
     lines
@@ -1150,26 +1163,21 @@ pub(super) fn hosts(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             lines.push(format!("proxy: {}", parts.join(", ")));
         }
     }
-    lines.extend(route_warnings(data));
+    lines.extend(route_warnings(data).iter().map(|line| cx.warning(line)));
     lines
 }
 
 /// `host_conflict` and `host_rejected` warnings, then the entries the proxy
-/// dropped, one line each (`hosts` and `doctor`).
+/// dropped, one line each without a marker (`hosts` and `doctor` add their own).
 pub(super) fn route_warnings(data: &Value) -> Vec<String> {
     let mut lines: Vec<String> = list(data, "warnings")
         .iter()
         .chain(list(data, "route_warnings").iter())
-        .map(|warning| {
-            format!(
-                "warning: {}",
-                words::lane_warning(&text(warning, "code"), &warning["data"])
-            )
-        })
+        .map(|warning| words::lane_warning(&text(warning, "code"), &warning["data"]))
         .collect();
     for rejected in list(&data["proxy"], "rejected") {
         lines.push(format!(
-            "warning: proxy dropped {} ({}:{}): {}",
+            "proxy dropped {} ({}:{}): {}",
             text(rejected, "host"),
             text(rejected, "lane"),
             text(rejected, "unit"),

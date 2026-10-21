@@ -789,6 +789,14 @@ fn hint_for(error: &RpcError, request: &Request) -> Option<Hint> {
             })
         }
         "confirmation_required" => confirmation_hint(error),
+        // The same logs, fewer lines: one unit when several were asked for.
+        "response_too_large" if request.method == Method::Logs => request
+            .params
+            .get("units")
+            .and_then(Value::as_array)
+            .and_then(|units| units.first())
+            .and_then(Value::as_str)
+            .map(|unit| scoped_logs(request, &[unit, "--tail", "200"])),
         _ => None,
     }
 }
@@ -935,6 +943,12 @@ mod tests {
                 .map(|hint| hint.0)
                 .as_deref(),
             Some("devlanes logs api --tail 500 --lane feat/x --project acme")
+        );
+        // An oversized logs answer points at a shorter read of the first unit.
+        let too_large = RpcError::new("response_too_large", json!({}), 1);
+        assert_eq!(
+            hint_for(&too_large, &request).map(|hint| hint.0).as_deref(),
+            Some("devlanes logs api --tail 200 --lane feat/x --project acme")
         );
         // A foreground run learns its unit (or that it has none) from its result.
         let run = Request {

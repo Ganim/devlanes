@@ -1,0 +1,23 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+acme
+  LANE  BRANCH        STATE    SERVICES  CPU   MEM        URL
+  0     main          running  1/1       4.5%  143.1 MiB  https://acme.localhost
+  2     feat/billing  running  1/1       4.5%  143.1 MiB  https://acme-2.localhost
+! acme@2: config changed ports; they apply at the next full start: devlanes stop --lane acme@2, then devlanes start --lane acme@2
+! acme@2: api.acme.localhost is routed by acme@0 and acme@2; acme@0 keeps it, so give one of them another hostname
+--- plain (exit 0)
+acme
+  LANE  BRANCH        STATE    SERVICES  CPU   MEM        URL
+  0     main          running  1/1       4.5%  143.1 MiB  https://acme.localhost
+  2     feat/billing  running  1/1       4.5%  143.1 MiB  https://acme-2.localhost
+warn acme@2: config changed ports; they apply at the next full start: devlanes stop --lane acme@2, then devlanes start --lane acme@2
+warn acme@2: api.acme.localhost is routed by acme@0 and acme@2; acme@0 keeps it, so give one of them another hostname
+--- agent (exit 0)
+running acme@0 main 1/1
+running acme@2 feat/billing 1/1
+warn acme@2: config changed ports; they apply at the next full start: devlanes stop --lane acme@2, then devlanes start --lane acme@2
+warn acme@2: api.acme.localhost is routed by acme@0 and acme@2; acme@0 keeps it, so give one of them another hostname

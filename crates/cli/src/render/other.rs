@@ -852,7 +852,6 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
     }
     // Hostnames two lanes claim, invalid ones, and entries the proxy dropped.
     for line in super::lanes::route_warnings(data) {
-        let line = line.strip_prefix("warning: ").unwrap_or(&line).to_owned();
         checks.push(Check::new("proxy", Outcome::Skip, line));
     }
     let hosts = &data["hosts"];
@@ -1142,8 +1141,10 @@ pub(super) fn config_check(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
                     known.join(", ")
                 )
             }
-            // `{path, code, host, suggestion, message}`, worded like start's warning.
-            "host_outside_ca" => words::lane_warning("host_outside_ca", warning),
+            // `{path, code, ...data}`, worded like the same warning in start and status.
+            code @ ("host_outside_ca" | "ports_pending" | "host_conflict" | "host_rejected") => {
+                words::lane_warning(code, warning)
+            }
             _ => text(warning, "message"),
         };
         lines.push(format!(

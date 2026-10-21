@@ -1,0 +1,21 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+HOST                    TARGET      PORT   STATE
+api.acme.localhost  ->  acme@0:api  20001  ready
+proxy: http :80
+! api.acme.localhost is routed by acme@0 and acme@2; acme@0 keeps it, so give one of them another hostname
+! hostname web_app.localhost is invalid (acme@2:web): `web_app.localhost` contains `_`, which DNS names cannot; the route is left out
+--- plain (exit 0)
+HOST                    TARGET      PORT   STATE
+api.acme.localhost  ->  acme@0:api  20001  ready
+proxy: http :80
+warn api.acme.localhost is routed by acme@0 and acme@2; acme@0 keeps it, so give one of them another hostname
+warn hostname web_app.localhost is invalid (acme@2:web): `web_app.localhost` contains `_`, which DNS names cannot; the route is left out
+--- agent (exit 0)
+ready api.acme.localhost -> acme@0:api port=20001
+proxy: http :80
+warn api.acme.localhost is routed by acme@0 and acme@2; acme@0 keeps it, so give one of them another hostname
+warn hostname web_app.localhost is invalid (acme@2:web): `web_app.localhost` contains `_`, which DNS names cannot; the route is left out

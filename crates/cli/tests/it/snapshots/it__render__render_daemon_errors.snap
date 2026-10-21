@@ -28,5 +28,17 @@ error: the running daemon is devlanes 0.2.0 (protocol 7, this CLI speaks 8) and 
 hint: devlanes daemon restart
 error: the running daemon is devlanes 0.2.0 (protocol 7, this CLI speaks 8) and cannot serve this CLI
 hint: devlanes daemon restart
+error: the start of acme@2 was cancelled by a stop, clean or reset of the lane
+hint: devlanes status acme@2
+error: acme@2 still runs api, worker; stop the lane, then retry
+hint: devlanes stop --lane acme@2
+error: the daemon is shutting down; retry once it has stopped, or start a new one now
+hint: devlanes daemon restart
+error: api is a configured service of acme@2; give exec another --name, or run the configured service
+hint: devlanes start acme@2:api
+error: seed is a configured task of acme@2; give exec another --name, or run the configured task
+hint: devlanes run seed --lane acme@2
+error: the answer is larger than the 16 MiB message limit; ask for less: a smaller --tail or --budget, or one unit at a time
+error: the connection to the daemon closed before the answer arrived
 error: the installed /etc/hosts helper is version 0.1.0, devlanes is 0.2.0
 hint: devlanes certs trust --hosts

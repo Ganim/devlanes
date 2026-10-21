@@ -80,7 +80,7 @@ unassigned acme spike/xyz reason="pool full"
 
 The first word of a status line is the state: `ready`, `starting`, `queued` (waiting for a start slot), `running`, `failed`, `stopping`, `stopped`, `exited` (a task or exec that ended), `idle` or `orphaned`. `orphaned` means a previous daemon left the process running and nothing supervises it: run `devlanes stop UNIT --lane LANE`, then start it again. Failures come first, each with its last log lines and the command that shows more. URLs are printed in full.
 
-If a command fails because the running daemon cannot serve this CLI (`protocol_mismatch` in JSON), the daemon is another devlanes version. Ask the user before running `devlanes daemon restart`: it stops every service the daemon runs.
+An error ends with a `hint:` line naming the command that fixes it. Ask the user before running a hint that stops services this session did not start. Examples are `devlanes stop --lane LANE` when `lane clean` refuses a lane that still runs, and `devlanes daemon restart` when the running daemon is another devlanes version (`protocol_mismatch` in JSON), which stops every service the daemon runs.
 
 With `--json`, a command prints one JSON document; lists have the shape `{items, truncated, next_cursor}`. Streams (`start --json`, `logs -f --json`, `debug events -f`) print NDJSON.
 

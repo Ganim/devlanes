@@ -7,13 +7,19 @@ ok acme (/work/acme/devlanes.yaml)
 warn templates.unused: template is never used
 warn services.api.platform: unknown platform elixir for service api; it starts without platform setup. Known: node, python. Fix the name or drop platform: to detect it
 warn services.api.hosts: api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
+warn lanes: config changed ports; they apply at the next full start: devlanes stop --lane acme@0, then devlanes start --lane acme@0
+warn services.web.hosts: web.acme.localhost is routed by shop@0 and acme@0; shop@0 keeps it, so give one of them another hostname
 --- plain (exit 0)
 ok acme (/work/acme/devlanes.yaml)
 warn templates.unused: template is never used
 warn services.api.platform: unknown platform elixir for service api; it starts without platform setup. Known: node, python. Fix the name or drop platform: to detect it
 warn services.api.hosts: api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
+warn lanes: config changed ports; they apply at the next full start: devlanes stop --lane acme@0, then devlanes start --lane acme@0
+warn services.web.hosts: web.acme.localhost is routed by shop@0 and acme@0; shop@0 keeps it, so give one of them another hostname
 --- agent (exit 0)
 ok acme (/work/acme/devlanes.yaml)
 warn templates.unused: template is never used
 warn services.api.platform: unknown platform elixir for service api; it starts without platform setup. Known: node, python. Fix the name or drop platform: to detect it
 warn services.api.hosts: api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
+warn lanes: config changed ports; they apply at the next full start: devlanes stop --lane acme@0, then devlanes start --lane acme@0
+warn services.web.hosts: web.acme.localhost is routed by shop@0 and acme@0; shop@0 keeps it, so give one of them another hostname

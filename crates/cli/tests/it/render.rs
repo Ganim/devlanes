@@ -180,6 +180,23 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
             ]),
         ),
         ("status_one_lane", Method::Status, page(vec![status_lane])),
+        ("status_lane_warnings", Method::Status, {
+            let mut warned = lane(
+                Some(2),
+                "feat/billing",
+                "running",
+                vec![unit("api", "ready")],
+            );
+            warned["warnings"] = json!([
+                {"code": "ports_pending", "data": {"lane": "acme@2", "message": "the edited config needs a different port block"}},
+                {"code": "host_conflict", "data": {"host": "api.acme.localhost", "lane": "acme@0", "other": "acme@2",
+                 "message": "api.acme.localhost is routed by acme@0 and acme@2; acme@0 keeps it because it has running units"}},
+            ]);
+            page(vec![
+                lane(Some(0), "main", "running", vec![unit("api", "ready")]),
+                warned,
+            ])
+        }),
         (
             "lane_new",
             Method::LaneNew,
@@ -199,6 +216,11 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
             "lane_gc",
             Method::LaneGc,
             json!({"cleaned": ["acme@5"], "offsets_removed": 3}),
+        ),
+        (
+            "lane_gc_kept",
+            Method::LaneGc,
+            json!({"cleaned": [], "kept_running": ["acme@3", "acme@4"], "offsets_removed": 0}),
         ),
         ("exec", Method::Exec, {
             let mut exec = unit("probe", "ready");
@@ -291,6 +313,23 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
                 ],
                 "proxy": {"http": {"bound": true, "port": 80, "fallback_reason": null},
                           "https": {"bound": true, "port": 8443, "fallback_reason": "port 443 needs root"}},
+                "truncated": false, "next_cursor": null,
+            }),
+        ),
+        (
+            "hosts_warnings",
+            Method::Hosts,
+            json!({
+                "items": [
+                    {"host": "api.acme.localhost", "project": "acme", "lane": "acme@0", "unit": "api", "port": 20001, "fallback": false, "state": "ready"},
+                ],
+                "proxy": {"http": {"bound": true, "port": 80, "fallback_reason": null}},
+                "warnings": [
+                    {"code": "host_conflict", "data": {"host": "api.acme.localhost", "lane": "acme@0", "other": "acme@2",
+                     "message": "api.acme.localhost is routed by acme@0 and acme@2; acme@0 keeps it because it comes first by project and lane index"}},
+                    {"code": "host_rejected", "data": {"lane": "acme@2", "unit": "web", "host": "web_app.localhost",
+                     "message": "`web_app.localhost` contains `_`, which DNS names cannot; the route is left out"}},
+                ],
                 "truncated": false, "next_cursor": null,
             }),
         ),
@@ -426,6 +465,8 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
                        "name_constrained": false,
                        "hint": "the devlanes CA has no name constraints (it predates them), so a leaked key could sign certificates for any site",
                        "fix": "devlanes certs untrust && rm -r /home/u/.devlanes/ca && devlanes certs trust && devlanes daemon restart"},
+                "route_warnings": [{"code": "host_rejected", "data": {"lane": "acme@2", "unit": "web", "host": "web_app.localhost",
+                                    "message": "`web_app.localhost` contains `_`, which DNS names cannot; the route is left out"}}],
                 "ca_warnings": [{"code": "host_outside_ca", "data": {
                     "lane": "acme@2", "unit": "api", "host": "api.example.com",
                     "permitted": ["localhost", "test"], "suggestion": "api.acme-2.localhost",
@@ -454,6 +495,10 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
                 {"code": "host_outside_ca", "path": "services.api.hosts",
                  "message": "api.example.com is outside the names the devlanes CA can certify",
                  "host": "api.example.com", "suggestion": "api.acme.test"},
+                {"code": "ports_pending", "path": "lanes", "lane": "acme@0",
+                 "message": "the edited config needs a different port block"},
+                {"code": "host_conflict", "path": "services.web.hosts", "host": "web.acme.localhost",
+                 "lane": "shop@0", "other": "acme@0", "message": "web.acme.localhost is routed by shop@0 and acme@0"},
             ]}),
         ),
         (
@@ -920,6 +965,33 @@ fn daemon_errors_are_worded_with_hints() {
             json!({"protocol": 7, "client_protocol": 8, "version": "0.2.0", "build_id": "a1b2c3", "managed_processes": 0}),
             4,
         ),
+        RpcError::new("start_cancelled", json!({"lane": "acme@2"}), 1),
+        RpcError::new(
+            "lane_running",
+            json!({"lane": "acme@2", "units": ["api", "worker"]}),
+            1,
+        ),
+        RpcError::new(
+            "daemon_stopping",
+            json!({"message": "the daemon is shutting down; retry once it is gone"}),
+            4,
+        ),
+        RpcError::new(
+            "name_taken",
+            json!({"name": "api", "kind": "service", "lane": "acme@2"}),
+            2,
+        ),
+        RpcError::new(
+            "name_taken",
+            json!({"name": "seed", "kind": "task", "lane": "acme@2"}),
+            2,
+        ),
+        RpcError::new(
+            "response_too_large",
+            json!({"limit_bytes": 16_777_216, "message": "a message exceeded the 16 MiB frame limit"}),
+            1,
+        ),
+        RpcError::new("client_disconnected", Value::Null, 4),
         RpcError::new(
             "helper_version_mismatch",
             json!({"message": "The installed hosts helper is version 0.1.0 and devlanes is 0.2.0. Run `devlanes certs trust --hosts` to reinstall it.",

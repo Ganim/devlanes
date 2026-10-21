@@ -1,0 +1,16 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+no lanes to clean; removed 0 unused port offsets
+kept acme@3: its worktree is gone but units still run; stop them with devlanes stop --lane acme@3, then run devlanes lane gc again
+kept acme@4: its worktree is gone but units still run; stop them with devlanes stop --lane acme@4, then run devlanes lane gc again
+--- plain (exit 0)
+no lanes to clean; removed 0 unused port offsets
+kept acme@3: its worktree is gone but units still run; stop them with devlanes stop --lane acme@3, then run devlanes lane gc again
+kept acme@4: its worktree is gone but units still run; stop them with devlanes stop --lane acme@4, then run devlanes lane gc again
+--- agent (exit 0)
+no lanes to clean; removed 0 unused port offsets
+kept acme@3: its worktree is gone but units still run; stop them with devlanes stop --lane acme@3, then run devlanes lane gc again
+kept acme@4: its worktree is gone but units still run; stop them with devlanes stop --lane acme@4, then run devlanes lane gc again

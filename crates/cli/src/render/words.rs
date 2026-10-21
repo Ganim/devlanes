@@ -277,6 +277,63 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             format!("daemon does not support {}", field(data, "method")),
             None,
         ),
+        "start_cancelled" => (
+            format!(
+                "the start of {} was cancelled by a stop, clean or reset of the lane",
+                field(data, "lane")
+            ),
+            data.get("lane")
+                .and_then(Value::as_str)
+                .map(|lane| Hint::command(["status", lane])),
+        ),
+        // `{lane, units}` from `lane clean`; a start phase skipped for this reason
+        // carries no data.
+        "lane_running" => {
+            let units: Vec<String> = list(data, "units").iter().map(display_value).collect();
+            match data.get("lane").and_then(Value::as_str) {
+                Some(lane) if !units.is_empty() => (
+                    format!(
+                        "{} still runs {}; stop the lane, then retry",
+                        super::clean(lane),
+                        units.join(", ")
+                    ),
+                    Some(Hint::command(["stop", "--lane", lane])),
+                ),
+                _ => ("the lane is already running".into(), None),
+            }
+        }
+        "daemon_stopping" => (
+            "the daemon is shutting down; retry once it has stopped, or start a new one now".into(),
+            Some(Hint::command(["daemon", "restart"])),
+        ),
+        "name_taken" => {
+            let (name, lane) = (text(data, "name"), text(data, "lane"));
+            let kind = match text(data, "kind").as_str() {
+                "task" => "task",
+                _ => "service",
+            };
+            (
+                format!(
+                    "{name} is a configured {kind} of {lane}; give exec another --name, or run the configured {kind}"
+                ),
+                Some(if kind == "task" {
+                    Hint::command(["run", name.as_str(), "--lane", lane.as_str()])
+                } else {
+                    Hint::command(["start", &format!("{lane}:{name}")])
+                }),
+            )
+        }
+        "response_too_large" => (
+            format!(
+                "the answer is larger than the {} MiB message limit; ask for less: a smaller --tail or --budget, or one unit at a time",
+                int(data, "limit_bytes").map_or(16, |bytes| bytes / (1024 * 1024))
+            ),
+            None,
+        ),
+        "client_disconnected" => (
+            "the connection to the daemon closed before the answer arrived".into(),
+            None,
+        ),
         "unknown_method" => (
             "the running daemon is older and does not know this command".into(),
             Some(Hint::command(["daemon", "restart"])),
@@ -424,6 +481,40 @@ pub(crate) fn lane_warning(code: &str, data: &Value) -> String {
             );
             if let Some(suggestion) = data.get("suggestion").and_then(Value::as_str) {
                 line.push_str(&format!("; try {}", super::clean(suggestion)));
+            }
+            line
+        }
+        // The new block is allocated only when nothing in the lane runs.
+        "ports_pending" => {
+            let lane = text(data, "lane");
+            if lane.is_empty() {
+                "config changed ports; they apply at the next full start of the lane".into()
+            } else {
+                format!(
+                    "config changed ports; they apply at the next full start: {}, then {}",
+                    Hint::command(["stop", "--lane", lane.as_str()]).0,
+                    Hint::command(["start", "--lane", lane.as_str()]).0
+                )
+            }
+        }
+        // `lane` keeps the hostname, `other` loses it.
+        "host_conflict" => format!(
+            "{} is routed by {} and {}; {} keeps it, so give one of them another hostname",
+            field(data, "host"),
+            field(data, "lane"),
+            field(data, "other"),
+            field(data, "lane")
+        ),
+        // The daemon's message says what is wrong with the name.
+        "host_rejected" => {
+            let mut line = format!("hostname {} is invalid", field(data, "host"));
+            let (lane, unit) = (text(data, "lane"), text(data, "unit"));
+            if !lane.is_empty() && !unit.is_empty() {
+                line.push_str(&format!(" ({lane}:{unit})"));
+            }
+            match data.get("message").and_then(Value::as_str) {
+                Some(message) => line.push_str(&format!(": {}", super::clean(message))),
+                None => line.push_str("; the route is left out"),
             }
             line
         }
