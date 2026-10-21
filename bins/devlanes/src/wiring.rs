@@ -1536,7 +1536,10 @@ mod tests {
         let message = error.to_string();
         let first = message.lines().next().unwrap_or_default();
         assert!(first.starts_with("STATE_LEGACY_SCHEMA:"), "{message}");
-        assert!(first.contains("devlanes daemon reset-state --yes"), "{message}");
+        assert!(
+            first.contains("devlanes daemon reset-state --yes"),
+            "{message}"
+        );
         assert!(first.len() < 127, "fits the readiness line");
         assert!(message.contains(&db.display().to_string()));
     }

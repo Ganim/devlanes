@@ -194,7 +194,12 @@ async fn units_and_containers_have_colors() {
         assert_eq!(color(&live, "web").as_deref(), Some("green"));
         assert_eq!(
             color(&live, "migrate").as_deref(),
-            Some(devlanes_core::color::unit_color(&[], "migrate", None, &none))
+            Some(devlanes_core::color::unit_color(
+                &[],
+                "migrate",
+                None,
+                &none
+            ))
         );
         assert_eq!(color(&live, "db-shell").as_deref(), Some("yellow"));
         let db = live
@@ -203,7 +208,9 @@ async fn units_and_containers_have_colors() {
             .find(|c| c.name == "db")
             .expect("db container");
         assert_eq!(db.color.as_deref(), Some("yellow"));
-        h.call(Method::Stop, json!({}), cx(&main)).await.expect("stop");
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
         h.close().await;
     })
     .await

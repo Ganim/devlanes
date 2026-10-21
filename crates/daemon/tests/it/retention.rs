@@ -31,7 +31,9 @@ async fn state_retention_follows_history_retention() {
         h.call(Method::Start, json!({}), cx(&main))
             .await
             .expect("start");
-        h.call(Method::Stop, json!({}), cx(&main)).await.expect("stop");
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
         let store = devlanes_state::Store::open(home.join("state.db"))
             .await
             .expect("store");
@@ -53,7 +55,11 @@ async fn state_retention_follows_history_retention() {
                 .as_millis(),
         )
         .expect("ms");
-        let early = h.engine.prune_state_at(now + 3_600_000).await.expect("prune");
+        let early = h
+            .engine
+            .prune_state_at(now + 3_600_000)
+            .await
+            .expect("prune");
         assert_eq!(early.unit_runs, 0, "younger than a day");
         let late = h
             .engine
@@ -69,7 +75,10 @@ async fn state_retention_follows_history_retention() {
             .expect("doctor");
         let state = &doctor["state"];
         assert_eq!(state["budget_bytes"], 64 << 20);
-        assert!(state["size_bytes"].as_u64().is_some_and(|b| b > 0), "{state}");
+        assert!(
+            state["size_bytes"].as_u64().is_some_and(|b| b > 0),
+            "{state}"
+        );
         assert_eq!(state["last_prune"]["at_ms"], now + 2 * 86_400_000);
         assert_eq!(state["last_prune"]["unit_runs"], finished);
         assert_eq!(state["last_prune"]["budget_exceeded"], false);

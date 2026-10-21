@@ -1360,9 +1360,8 @@ impl Inner {
         } else {
             options.profiles.clone()
         };
-        let selection =
-            devlanes_resolve::select_profiles(&config, &requested, &options.selectors)
-                .map_err(|error| fail(crate::resolve::resolve_error(&error)))?;
+        let selection = devlanes_resolve::select_profiles(&config, &requested, &options.selectors)
+            .map_err(|error| fail(crate::resolve::resolve_error(&error)))?;
         // Kept only once valid, so a typo does not stick to the lane.
         lane.st().profiles = selection.profiles.clone();
         let infra_enabled = !matches!(

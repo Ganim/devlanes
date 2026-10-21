@@ -579,7 +579,12 @@ mod tests {
         let names = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         assert_eq!(encode_profiles(&[]), None);
         assert_eq!(encode_profiles(&names(&["dev"])).as_deref(), Some("dev"));
-        for list in [vec![], names(&["dev"]), names(&["a", "b,c"]), names(&["[x"])] {
+        for list in [
+            vec![],
+            names(&["dev"]),
+            names(&["a", "b,c"]),
+            names(&["[x"]),
+        ] {
             assert_eq!(decode_profiles(encode_profiles(&list).as_deref()), list);
         }
         assert_eq!(decode_profiles(Some("[broken")), names(&["[broken"]));

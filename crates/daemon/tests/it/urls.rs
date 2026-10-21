@@ -82,7 +82,9 @@ async fn public_urls_use_the_bound_https_port() {
         };
         assert_eq!(url_of("web.demo.localhost"), Some(json!(public)));
         assert_eq!(url_of("*.pages.demo.localhost"), Some(Value::Null));
-        h.call(Method::Stop, json!({}), cx(&main)).await.expect("stop");
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
         h.close().await;
 
         let standard = harness(
