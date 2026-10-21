@@ -1,0 +1,25 @@
+[package]
+name = "devlanes-hosts-helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Runs as root through a NOPASSWD sudo rule, so it stays std-only: every line that
+# runs privileged is in this crate. See README.md.
+[lib]
+name = "devlanes_hosts_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "devlanes-hosts"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

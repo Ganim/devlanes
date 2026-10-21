@@ -1,0 +1,28 @@
+[package]
+name = "devlanes-resolver-hosts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Exposes `fake::FakeExecutor` and `fake::FakeFs` for argv tests in other crates.
+fake = []
+
+# Commands are only built here and run through an injected executor, so argv tests
+# compile on every platform.
+[dependencies]
+async-trait.workspace = true
+devlanes-hosts-helper = { path = "../hosts-helper" }
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
