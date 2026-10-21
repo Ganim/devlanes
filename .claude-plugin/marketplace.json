@@ -1,0 +1,12 @@
+{
+  "name": "devlanes",
+  "description": "devlanes agent plugin",
+  "owner": { "name": "devlanes", "url": "https://devlanes.run" },
+  "plugins": [
+    {
+      "name": "devlanes",
+      "source": "./agent-plugin",
+      "description": "Run dev services through the devlanes CLI"
+    }
+  ]
+}

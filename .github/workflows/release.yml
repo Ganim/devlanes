@@ -1,0 +1,104 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            native: true
+          # Cross-compiled on the arm64 runner, so it is built but not executed.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            native: false
+          # 22.04 runners keep the glibc requirement at 2.35, so the binaries also
+          # run on Debian 12 and Ubuntu 22.04 hosts that SSH bootstrap installs onto.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            native: true
+            schema: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            native: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: |
+          rustup show active-toolchain
+          rustup target add "$TARGET"
+      - name: Check the tag against the workspace version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "devlanes") | .version')
+          if [ "$version" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match devlanes $crate"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET" -p devlanes -p devlanes-hosts-helper
+      - name: Smoke test
+        if: matrix.native
+        run: |
+          "target/$TARGET/release/devlanes" --version | grep -Fx "devlanes $VERSION"
+          "target/$TARGET/release/devlanes-hosts" version | grep -F "build=release"
+      - name: Package
+        run: sh packaging/scripts/package.sh "$VERSION" "$TARGET" dist
+      - name: Export JSON Schemas
+        if: matrix.schema
+        run: sh packaging/scripts/export-schema.sh dist "target/$TARGET/release/devlanes"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums and release manifest
+        run: |
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          sh packaging/scripts/manifest.sh "${GITHUB_REF_NAME#v}" dist \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          jq -e '.artifacts | length == 4' dist/release-manifest.json
+      - name: Homebrew formula and npm packages
+        run: |
+          mkdir -p packages
+          sh packaging/homebrew/render.sh "$VERSION" dist/SHA256SUMS > packages/devlanes.rb
+          sh packaging/npm/build.sh "$VERSION" dist packages/npm
+      # Publishing to the tap and npm needs credentials and stays manual (packaging/README.md).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: packages/
+          if-no-files-found: error
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set --
+          case $VERSION in *-*) set -- --prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag "$@" \
+            --title "devlanes $VERSION" --generate-notes \
+            dist/*.tar.gz dist/SHA256SUMS dist/release-manifest.json dist/v1.json dist/user-v1.json

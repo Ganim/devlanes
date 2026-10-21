@@ -1,0 +1,27 @@
+{
+  "name": "devlanes",
+  "version": "0.0.0",
+  "description": "Development environments in Git worktree lanes",
+  "license": "Apache-2.0",
+  "homepage": "https://devlanes.run",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/devlanes-run/devlanes.git",
+    "directory": "packaging/npm/devlanes"
+  },
+  "bin": {
+    "devlanes": "bin/devlanes.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@devlanes/darwin-arm64": "0.0.0",
+    "@devlanes/darwin-x64": "0.0.0",
+    "@devlanes/linux-arm64": "0.0.0",
+    "@devlanes/linux-x64": "0.0.0"
+  }
+}

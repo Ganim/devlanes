@@ -1,0 +1,18 @@
+{
+  "description": "Blocks Bash commands that start dev servers in the background inside a devlanes project and points to devlanes exec",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/block-background.sh"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "devlanes",
+  "displayName": "devlanes",
+  "version": "0.1.0",
+  "description": "Teaches Claude to run dev services through the devlanes CLI and blocks backgrounded dev servers",
+  "author": {
+    "name": "devlanes",
+    "url": "https://devlanes.run"
+  },
+  "homepage": "https://devlanes.run",
+  "repository": "https://github.com/devlanes-run/devlanes",
+  "license": "Apache-2.0",
+  "keywords": ["dev-server", "worktree", "processes", "logs"]
+}
