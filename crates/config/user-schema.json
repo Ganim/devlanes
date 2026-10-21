@@ -3,20 +3,51 @@
   "$defs": {
     "ByteSize": {
       "description": "A byte count with decimal or binary size units.",
-      "type": "string"
-    },
-    "CaKind": {
-      "enum": [
-        "devlanes",
-        "mkcert"
+      "examples": [
+        "5GiB"
       ],
       "type": "string"
     },
+    "CaKind": {
+      "description": "Certificate authority used to issue certificates for local project hostnames.",
+      "examples": [
+        "devlanes",
+        "mkcert"
+      ],
+      "oneOf": [
+        {
+          "const": "devlanes",
+          "description": "Use the CA managed in the devlanes home directory.",
+          "examples": [
+            "devlanes"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "mkcert",
+          "description": "Reuse the CA in mkcert's CAROOT directory.",
+          "examples": [
+            "mkcert"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "CloudflareDns": {
       "additionalProperties": false,
+      "description": "Cloudflare DNS credentials for the reserved public resolver.",
+      "examples": [
+        {
+          "token": "${{ env.CF_API_TOKEN }}"
+        }
+      ],
       "properties": {
         "token": {
-          "$ref": "#/$defs/Templated_string"
+          "$ref": "#/$defs/Templated_string",
+          "description": "API token with permission to edit the domain's DNS records; prefer an environment expression.",
+          "examples": [
+            "${{ env.CF_API_TOKEN }}"
+          ]
         }
       },
       "required": [
@@ -26,13 +57,31 @@
     },
     "ConfigDuration": {
       "description": "A duration written with `ms`, `s`, `m`, `h`, or `d` units.",
+      "examples": [
+        "15s",
+        "10m"
+      ],
       "type": "string"
     },
     "DnsProvider": {
       "additionalProperties": false,
+      "description": "Reserved DNS-01 provider configuration; not supported yet.",
+      "examples": [
+        {
+          "cloudflare": {
+            "token": "${{ env.CF_API_TOKEN }}"
+          }
+        }
+      ],
       "properties": {
         "cloudflare": {
-          "$ref": "#/$defs/CloudflareDns"
+          "$ref": "#/$defs/CloudflareDns",
+          "description": "Cloudflare DNS API credentials supplied by an environment expression.",
+          "examples": [
+            {
+              "token": "${{ env.CF_API_TOKEN }}"
+            }
+          ]
         }
       },
       "required": [
@@ -42,10 +91,24 @@
     },
     "HostnamesConfig": {
       "additionalProperties": false,
+      "description": "Hostname resolution and optional system hosts-file entries.",
+      "examples": [
+        {
+          "hosts_file": "auto",
+          "resolver": "localhost"
+        },
+        {
+          "resolver": "resolver",
+          "tld": "test"
+        }
+      ],
       "properties": {
         "base_domain": {
           "default": null,
           "description": "Reserved public-resolver base domain; not supported yet.",
+          "examples": [
+            "dev.example.invalid"
+          ],
           "type": [
             "string",
             "null"
@@ -54,35 +117,70 @@
         "dns_provider": {
           "anyOf": [
             {
-              "$ref": "#/$defs/DnsProvider"
+              "$ref": "#/$defs/DnsProvider",
+              "description": "Reserved DNS-01 provider configuration; not supported yet.",
+              "examples": [
+                {
+                  "cloudflare": {
+                    "token": "${{ env.CF_API_TOKEN }}"
+                  }
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Reserved DNS-01 provider settings; not supported yet."
+          "description": "Reserved DNS-01 provider settings; not supported yet.",
+          "examples": [
+            {
+              "cloudflare": {
+                "token": "${{ env.CF_API_TOKEN }}"
+              }
+            }
+          ]
         },
         "hosts_file": {
           "anyOf": [
             {
-              "$ref": "#/$defs/HostsFile"
+              "$ref": "#/$defs/HostsFile",
+              "description": "Whether project hostnames are also written to the system hosts file.",
+              "examples": [
+                "auto",
+                "never",
+                "always"
+              ]
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Whether exact hostnames should also be written to the system hosts file."
+          "description": "Whether exact hostnames should also be written to the system hosts file.",
+          "examples": [
+            "auto",
+            "never",
+            "always"
+          ]
         },
         "resolver": {
           "$ref": "#/$defs/Resolver",
           "default": "localhost",
-          "description": "localhost or resolver in v1; public parses but is not supported yet."
+          "description": "localhost or resolver in v1; public parses but is not supported yet.",
+          "examples": [
+            "localhost",
+            "hosts_file",
+            "resolver",
+            "public"
+          ]
         },
         "tld": {
           "default": null,
           "description": "Custom top-level domain for the embedded DNS strategy.",
+          "examples": [
+            "test"
+          ],
           "type": [
             "string",
             "null"
@@ -92,61 +190,142 @@
       "type": "object"
     },
     "HostsFile": {
-      "enum": [
+      "description": "Whether project hostnames are also written to the system hosts file.",
+      "examples": [
         "auto",
         "never",
         "always"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Write entries when the system cannot resolve the configured hostnames.",
+          "examples": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Do not write hosts entries.",
+          "examples": [
+            "never"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "always",
+          "description": "Always write exact hostnames, including for runtimes without localhost subdomain support.",
+          "examples": [
+            "always"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "LogRetention": {
       "additionalProperties": false,
+      "description": "Disk retention bounded by both age and total log size.",
+      "examples": [
+        {
+          "days": 7,
+          "max_size": "5GiB"
+        }
+      ],
       "properties": {
         "days": {
           "default": 7,
+          "description": "Number of days to retain logs; defaults to 7.",
+          "examples": [
+            7
+          ],
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         },
         "max_size": {
           "$ref": "#/$defs/ByteSize",
-          "default": "5368709120B"
+          "default": "5368709120B",
+          "description": "Maximum total size of retained logs; defaults to 5GiB.",
+          "examples": [
+            "5GiB"
+          ]
         }
       },
       "type": "object"
     },
     "LogsConfig": {
       "additionalProperties": false,
+      "description": "Retention settings for stored service and task output.",
+      "examples": [
+        {
+          "retention": {
+            "days": 7,
+            "max_size": "5GiB"
+          }
+        }
+      ],
       "properties": {
         "retention": {
           "$ref": "#/$defs/LogRetention",
           "default": {
             "days": 7,
             "max_size": "5368709120B"
-          }
+          },
+          "description": "Age and total-size bounds for stored log output.",
+          "examples": [
+            {
+              "days": 7,
+              "max_size": "5GiB"
+            }
+          ]
         }
       },
       "type": "object"
     },
     "MetricsConfig": {
       "additionalProperties": false,
+      "description": "Retention for monitor history used by graphs and service baselines.",
+      "examples": [
+        {
+          "retention": "30d"
+        }
+      ],
       "properties": {
         "retention": {
           "$ref": "#/$defs/ConfigDuration",
-          "default": "2592000000ms"
+          "default": "2592000000ms",
+          "description": "Maximum age of persisted monitor samples; defaults to 30d.",
+          "examples": [
+            "30d"
+          ]
         }
       },
       "type": "object"
     },
     "Percent": {
       "description": "A percentage with a `%` suffix, such as `75%` or `12.5%`.",
+      "examples": [
+        "75%",
+        "12.5%"
+      ],
       "type": "string"
     },
     "PortsConfig": {
       "additionalProperties": false,
+      "description": "Machine-wide port pool shared by all projects and lanes.",
+      "examples": [
+        {
+          "range": "20000-32767"
+        }
+      ],
       "properties": {
         "range": {
           "default": "20000-32767",
+          "description": "Inclusive port range, written start-end; defaults to 20000-32767.",
+          "examples": [
+            "20000-32767"
+          ],
           "type": "string"
         }
       },
@@ -154,9 +333,22 @@
     },
     "ProxyConfig": {
       "additionalProperties": false,
+      "description": "Ports and network access policy for the local HTTP/HTTPS proxy.",
+      "examples": [
+        {
+          "http_port": 80,
+          "https_port": 443,
+          "lan": false
+        }
+      ],
       "properties": {
         "http_port": {
           "default": 80,
+          "description": "HTTP listening port; defaults to 80 and redirects to HTTPS when TLS is enabled.",
+          "examples": [
+            80,
+            8080
+          ],
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0,
@@ -164,6 +356,11 @@
         },
         "https_port": {
           "default": 443,
+          "description": "HTTPS listening port; defaults to 443.",
+          "examples": [
+            443,
+            8443
+          ],
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0,
@@ -171,27 +368,83 @@
         },
         "lan": {
           "default": false,
+          "description": "Accept connections from other machines; defaults to loopback-only access.",
+          "examples": [
+            false,
+            true
+          ],
           "type": "boolean"
         }
       },
       "type": "object"
     },
     "Resolver": {
-      "enum": [
+      "description": "Strategy for resolving local project hostnames; defaults to localhost.",
+      "examples": [
         "localhost",
         "hosts_file",
         "resolver",
         "public"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "localhost",
+          "description": "Use names under .localhost, resolved by browsers without a custom DNS service.",
+          "examples": [
+            "localhost"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "hosts_file",
+          "description": "Resolve exact project names through system hosts-file entries.",
+          "examples": [
+            "hosts_file"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "resolver",
+          "description": "Use the daemon's DNS resolver for the configured custom top-level domain.",
+          "examples": [
+            "resolver"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "public",
+          "description": "Reserved public DNS and DNS-01 strategy; not supported yet.",
+          "examples": [
+            "public"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "StartupConfig": {
       "additionalProperties": false,
       "description": "Startup pacing. Machine settings, so they live in user config only.",
+      "examples": [
+        {
+          "max": 4,
+          "mode": "fixed"
+        },
+        {
+          "initial": 2,
+          "max": 8,
+          "mode": "adaptive",
+          "settle_cpu": "10%",
+          "slot_timeout": "20s",
+          "target_cpu": "75%"
+        }
+      ],
       "properties": {
         "initial": {
           "default": null,
           "description": "Adaptive starting window; default CPU cores / 4, at least 2, at most `max`.",
+          "examples": [
+            2
+          ],
           "format": "uint32",
           "minimum": 1,
           "type": [
@@ -202,6 +455,9 @@
         "max": {
           "default": null,
           "description": "Largest window (the fixed window in `fixed` mode); default CPU cores.",
+          "examples": [
+            8
+          ],
           "format": "uint32",
           "minimum": 1,
           "type": [
@@ -212,42 +468,73 @@
         "mode": {
           "$ref": "#/$defs/StartupMode",
           "default": "fixed",
-          "description": "`adaptive`, `fixed` or `all`; default `fixed`."
+          "description": "`adaptive`, `fixed` or `all`; default `fixed`.",
+          "examples": [
+            "adaptive",
+            "fixed",
+            "all"
+          ]
         },
         "settle_cpu": {
           "$ref": "#/$defs/Percent",
           "default": "10%",
-          "description": "A `ready: started` service has finished starting once its process tree\nstays below this share of one core for 2 s; default 10%."
+          "description": "A `ready: started` service has finished starting once its process tree\nstays below this share of one core for 2 s; default 10%.",
+          "examples": [
+            "10%",
+            "12.5%"
+          ]
         },
         "slot_timeout": {
           "$ref": "#/$defs/ConfigDuration",
           "default": "20000ms",
-          "description": "A start slot is given back after this even if the service is not ready,\nso services waiting on each other cannot block the queue; default 20s."
+          "description": "A start slot is given back after this even if the service is not ready,\nso services waiting on each other cannot block the queue; default 20s.",
+          "examples": [
+            "15s",
+            "10m"
+          ]
         },
         "target_cpu": {
           "$ref": "#/$defs/Percent",
           "default": "75%",
-          "description": "Adaptive mode grows the window while system CPU stays below this; default 75%."
+          "description": "Adaptive mode grows the window while system CPU stays below this; default 75%.",
+          "examples": [
+            "75%",
+            "80%"
+          ]
         }
       },
       "type": "object"
     },
     "StartupMode": {
       "description": "How the start gate sizes its window.",
+      "examples": [
+        "adaptive",
+        "fixed",
+        "all"
+      ],
       "oneOf": [
         {
           "const": "adaptive",
           "description": "Grow the window while CPU and memory allow, shrink it under pressure.",
+          "examples": [
+            "adaptive"
+          ],
           "type": "string"
         },
         {
           "const": "fixed",
           "description": "Always `max` starts at a time.",
+          "examples": [
+            "fixed"
+          ],
           "type": "string"
         },
         {
           "const": "all",
           "description": "No pacing: every service starts at once.",
+          "examples": [
+            "all"
+          ],
           "type": "string"
         }
       ]
@@ -255,35 +542,118 @@
     "Templated_string": {
       "anyOf": [
         {
+          "description": "Literal value used without expression evaluation.",
           "type": "string"
         },
         {
+          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "examples": [
+            "${{ lane.value }}"
+          ],
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` template, checked against `T` after evaluation."
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "examples": [
+        "${{ lane.value }}"
+      ]
     },
     "Terminal": {
-      "enum": [
+      "description": "Terminal application used by open-in-terminal actions.",
+      "examples": [
         "iterm2",
         "ghostty",
         "wezterm",
         "kitty",
         "terminal"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "iterm2",
+          "description": "Open a session in iTerm2 on macOS.",
+          "examples": [
+            "iterm2"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "ghostty",
+          "description": "Open a session in Ghostty.",
+          "examples": [
+            "ghostty"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "wezterm",
+          "description": "Open a session in WezTerm.",
+          "examples": [
+            "wezterm"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "kitty",
+          "description": "Open a session in kitty.",
+          "examples": [
+            "kitty"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "terminal",
+          "description": "Open a session in macOS Terminal.app.",
+          "examples": [
+            "terminal"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "TlsConfig": {
       "additionalProperties": false,
+      "description": "Certificate authority selection and requested certificate trust targets.",
+      "examples": [
+        {
+          "ca": "devlanes",
+          "trust": [
+            "system",
+            "firefox"
+          ]
+        }
+      ],
       "properties": {
         "ca": {
           "$ref": "#/$defs/CaKind",
-          "default": "devlanes"
+          "default": "devlanes",
+          "description": "Use devlanes' own CA by default, or reuse mkcert's CA.",
+          "examples": [
+            "devlanes",
+            "mkcert"
+          ]
         },
         "trust": {
           "default": [],
+          "description": "Trust stores that should accept the local CA; mobile targets are reserved and unsupported.",
+          "examples": [
+            [
+              "system",
+              "firefox"
+            ],
+            [
+              "chrome"
+            ]
+          ],
           "items": {
-            "$ref": "#/$defs/TrustTarget"
+            "$ref": "#/$defs/TrustTarget",
+            "description": "Store in which the local CA should be trusted; mobile stores are not supported yet.",
+            "examples": [
+              "system",
+              "firefox",
+              "chrome",
+              "ios-simulator",
+              "android-emulator"
+            ]
           },
           "type": "array"
         }
@@ -291,20 +661,73 @@
       "type": "object"
     },
     "TrustTarget": {
-      "enum": [
+      "description": "Store in which the local CA should be trusted; mobile stores are not supported yet.",
+      "examples": [
         "system",
         "firefox",
         "chrome",
         "ios-simulator",
         "android-emulator"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "system",
+          "description": "Trust the local CA in the operating system's certificate store.",
+          "examples": [
+            "system"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "firefox",
+          "description": "Trust the local CA in Firefox's certificate database.",
+          "examples": [
+            "firefox"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "chrome",
+          "description": "Trust the local CA in Chrome's certificate database where required.",
+          "examples": [
+            "chrome"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "ios-simulator",
+          "description": "Reserved iOS simulator trust target; not supported yet.",
+          "examples": [
+            "ios-simulator"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "android-emulator",
+          "description": "Reserved Android emulator trust target; not supported yet.",
+          "examples": [
+            "android-emulator"
+          ],
+          "type": "string"
+        }
+      ]
     }
   },
   "$id": "https://devlanes.run/schema/user-v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Per-user machine settings, separate from project configuration.",
+  "examples": [
+    {
+      "hostnames": {
+        "resolver": "localhost"
+      },
+      "ports": {
+        "range": "20000-32767"
+      },
+      "terminal": "ghostty"
+    }
+  ],
   "properties": {
     "hostnames": {
       "$ref": "#/$defs/HostnamesConfig",
@@ -315,7 +738,17 @@
         "resolver": "localhost",
         "tld": null
       },
-      "description": "Hostname resolution strategy and optional hosts-file policy."
+      "description": "Hostname resolution strategy and optional hosts-file policy.",
+      "examples": [
+        {
+          "hosts_file": "auto",
+          "resolver": "localhost"
+        },
+        {
+          "resolver": "resolver",
+          "tld": "test"
+        }
+      ]
     },
     "logs": {
       "$ref": "#/$defs/LogsConfig",
@@ -325,21 +758,39 @@
           "max_size": "5368709120B"
         }
       },
-      "description": "Disk retention for service output."
+      "description": "Disk retention for service output.",
+      "examples": [
+        {
+          "retention": {
+            "days": 7,
+            "max_size": "5GiB"
+          }
+        }
+      ]
     },
     "metrics": {
       "$ref": "#/$defs/MetricsConfig",
       "default": {
         "retention": "2592000000ms"
       },
-      "description": "Retention for monitor aggregates."
+      "description": "Retention for monitor aggregates.",
+      "examples": [
+        {
+          "retention": "30d"
+        }
+      ]
     },
     "ports": {
       "$ref": "#/$defs/PortsConfig",
       "default": {
         "range": "20000-32767"
       },
-      "description": "Machine-wide pool shared by all project lane blocks."
+      "description": "Machine-wide pool shared by all project lane blocks.",
+      "examples": [
+        {
+          "range": "20000-32767"
+        }
+      ]
     },
     "proxy": {
       "$ref": "#/$defs/ProxyConfig",
@@ -348,7 +799,14 @@
         "https_port": 443,
         "lan": false
       },
-      "description": "HTTP/HTTPS listening ports and LAN access policy."
+      "description": "HTTP/HTTPS listening ports and LAN access policy.",
+      "examples": [
+        {
+          "http_port": 80,
+          "https_port": 443,
+          "lan": false
+        }
+      ]
     },
     "startup": {
       "$ref": "#/$defs/StartupConfig",
@@ -360,19 +818,48 @@
         "slot_timeout": "20000ms",
         "target_cpu": "75%"
       },
-      "description": "How many services start at once, across all lanes and projects."
+      "description": "How many services start at once, across all lanes and projects.",
+      "examples": [
+        {
+          "max": 4,
+          "mode": "fixed"
+        },
+        {
+          "initial": 2,
+          "max": 8,
+          "mode": "adaptive",
+          "settle_cpu": "10%",
+          "slot_timeout": "20s",
+          "target_cpu": "75%"
+        }
+      ]
     },
     "terminal": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Terminal"
+          "$ref": "#/$defs/Terminal",
+          "description": "Terminal application used by open-in-terminal actions.",
+          "examples": [
+            "iterm2",
+            "ghostty",
+            "wezterm",
+            "kitty",
+            "terminal"
+          ]
         },
         {
           "type": "null"
         }
       ],
       "default": null,
-      "description": "Terminal application used by open-in-terminal actions."
+      "description": "Terminal application used by open-in-terminal actions.",
+      "examples": [
+        "iterm2",
+        "ghostty",
+        "wezterm",
+        "kitty",
+        "terminal"
+      ]
     },
     "tls": {
       "$ref": "#/$defs/TlsConfig",
@@ -380,9 +867,18 @@
         "ca": "devlanes",
         "trust": []
       },
-      "description": "Certificate authority and explicitly requested trust targets."
+      "description": "Certificate authority and explicitly requested trust targets.",
+      "examples": [
+        {
+          "ca": "devlanes",
+          "trust": [
+            "system",
+            "firefox"
+          ]
+        }
+      ]
     }
   },
-  "title": "UserConfig",
+  "title": "devlanes user config",
   "type": "object"
 }

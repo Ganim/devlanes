@@ -17,6 +17,7 @@ mod extensions;
 mod loader;
 mod model;
 mod scalar;
+mod schema_docs;
 mod service;
 mod tags;
 mod user;
@@ -50,6 +51,7 @@ pub fn schema_with<E: Extensions>() -> schemars::Schema {
     schema.insert("$id".into(), "https://devlanes.run/schema/v1.json".into());
     // The same modeline supports partial local overrides; loading still requires a base project.
     schema.remove("required");
+    schema_docs::prepare(&mut schema, "devlanes");
     schema
 }
 
@@ -86,7 +88,7 @@ pub fn project_schema_with_presets(presets: &[(&str, schemars::Schema)]) -> serd
             defs.insert(key, options);
             properties.insert(
                 (*name).to_owned(),
-                serde_json::json!({"allOf":[{"type":"object"},{"$ref":reference}]}),
+                serde_json::json!({"type":"object","$ref":reference}),
             );
         }
         for (name, definition) in defs {
@@ -101,11 +103,13 @@ pub fn project_schema_with_presets(presets: &[(&str, schemars::Schema)]) -> serd
                         preset["enum"] = serde_json::json!(
                             presets.iter().map(|(name, _)| *name).collect::<Vec<_>>()
                         );
+                        preset["examples"] = preset["enum"].clone();
                     }
                 }
             }
         }
     }
+    schema_docs::prepare_value(&mut schema, "devlanes");
     schema
 }
 
@@ -138,6 +142,7 @@ pub fn user_schema() -> serde_json::Value {
         "$id".into(),
         "https://devlanes.run/schema/user-v1.json".into(),
     );
+    schema_docs::prepare(&mut schema, "devlanes user config");
     schema.to_value()
 }
 

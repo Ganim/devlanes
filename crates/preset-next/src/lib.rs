@@ -22,9 +22,11 @@ pub const HOST: &str = "127.0.0.1";
 /// Options under the service's `next:` key.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend("examples" = [{"args":["--turbo"]}]))]
 pub struct NextOptions {
     /// Extra arguments appended after the preset's flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("examples" = [["--turbo"]]))]
     pub args: Option<Vec<String>>,
 }
 

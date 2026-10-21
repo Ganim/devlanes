@@ -37,6 +37,7 @@ const RESERVED_FLAGS: &[&str] = &["--port", "--inspector-port", "--inspectorPort
 /// Options under the service's `wrangler:` key.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend("examples" = [{"vars":{"PUBLIC_BASE_URL":"${{ self.public_url }}"},"args":["--env-file",".dev.vars"],"isolate_registry":true}]))]
 pub struct WranglerOptions {
     /// Worker variables, passed as `--var KEY:VALUE`. Numbers and booleans are
     /// accepted because config scalars evaluate to them; wrangler sees strings.
@@ -45,14 +46,16 @@ pub struct WranglerOptions {
         skip_serializing_if = "BTreeMap::is_empty",
         deserialize_with = "scalar_map"
     )]
-    #[schemars(schema_with = "scalar_map_schema")]
+    #[schemars(schema_with = "scalar_map_schema", extend("examples" = [{"PUBLIC_BASE_URL":"${{ self.public_url }}"}]))]
     pub vars: BTreeMap<String, String>,
     /// Extra arguments appended after the preset's flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("examples" = [["--env-file",".dev.vars"]]))]
     pub args: Option<Vec<String>>,
     /// Give each lane its own dev registry through `WRANGLER_REGISTRY_PATH`.
     /// Default: true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("examples" = [true,false]))]
     pub isolate_registry: Option<bool>,
 }
 

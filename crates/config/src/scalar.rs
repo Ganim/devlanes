@@ -5,10 +5,19 @@ use std::{fmt, str::FromStr, time::Duration};
 /// A scalar suitable for environment variables and free-form lane variables.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
+#[schemars(extend("examples" = ["acme",20000,true]))]
 pub enum Scalar {
+    /// Text used verbatim in the environment or lane variables.
+    #[schemars(extend("examples" = ["acme"]))]
     String(String),
+    /// Boolean value, rendered as true or false in process environments.
+    #[schemars(extend("examples" = [true,false]))]
     Bool(bool),
+    /// Whole number, such as a port or lane index.
+    #[schemars(extend("examples" = [20000]))]
     Integer(i64),
+    /// Decimal number, rendered as text in process environments.
+    #[schemars(extend("examples" = [1.5]))]
     Float(f64),
 }
 
@@ -24,12 +33,16 @@ impl fmt::Display for Scalar {
     }
 }
 
-/// A literal value or a `${{ ... }}` template, checked against `T` after evaluation.
+/// A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(rename = "Templated_{T}")]
+#[schemars(extend("examples" = ["${{ lane.value }}"]))]
 pub enum Templated<T> {
+    /// Literal value used without expression evaluation.
     Literal(T),
+    /// Expression or interpolated string resolved from the lane's runtime context.
+    #[schemars(extend("examples" = ["${{ lane.value }}"]))]
     Expression(String),
 }
 
@@ -66,6 +79,7 @@ impl<T: Clone + serde::de::DeserializeOwned> Templated<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(into = "String")]
 #[schemars(with = "String")]
+#[schemars(extend("examples" = ["15s","10m"]))]
 pub struct ConfigDuration(pub Duration);
 
 impl FromStr for ConfigDuration {
@@ -115,6 +129,7 @@ impl<'de> Deserialize<'de> for ConfigDuration {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, JsonSchema)]
 #[serde(into = "String")]
 #[schemars(with = "String")]
+#[schemars(extend("examples" = ["75%","12.5%"]))]
 pub struct Percent(pub f64);
 
 impl FromStr for Percent {
@@ -154,6 +169,7 @@ impl<'de> Deserialize<'de> for Percent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(into = "String")]
 #[schemars(with = "String")]
+#[schemars(extend("examples" = ["5GiB"]))]
 pub struct ByteSize(pub u64);
 
 impl FromStr for ByteSize {

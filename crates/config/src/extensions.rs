@@ -80,7 +80,11 @@ impl Extensions for BuiltinExtensions {
         {
             for (name, definition) in defs {
                 if name.starts_with("ServiceConfig") {
-                    definition["additionalProperties"] = serde_json::json!({"type":"object"});
+                    definition["additionalProperties"] = serde_json::json!({
+                        "type":"object",
+                        "description":"Options for the preset selected by this service; validated by the registered integration.",
+                        "examples":[{"args":["--open"]}]
+                    });
                 }
             }
         }

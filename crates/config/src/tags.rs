@@ -5,10 +5,12 @@ use std::{fmt, str::FromStr};
 /// Optional display overrides for a tag; services may also use undeclared tags.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend("examples" = [{"color":"cyan","description":"HTTP APIs"}]))]
 pub struct TagConfig {
     /// Terminal palette color; inferred by the resolver when omitted.
     pub color: Option<TagColor>,
     /// Human-readable description available to the TUI.
+    #[schemars(extend("examples" = ["HTTP APIs","Background workers"]))]
     pub description: Option<String>,
 }
 
@@ -16,7 +18,12 @@ macro_rules! palette {
     ($($variant:ident => $name:literal),* $(,)?) => {
         /// Fixed terminal palette for tag color overrides.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
-        pub enum TagColor { $(#[serde(rename = $name)] $variant,)* }
+        #[schemars(extend("examples" = [$($name,)*]))]
+        pub enum TagColor {
+            $(#[doc = concat!("Use the terminal's ", $name, " palette color.")]
+            #[schemars(extend("examples" = [$name]))]
+            #[serde(rename = $name)] $variant,)*
+        }
 
         impl TagColor {
             /// Return the canonical configuration spelling.

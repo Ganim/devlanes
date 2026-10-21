@@ -44,8 +44,14 @@ impl<'de> Deserialize<'de> for PresetMapping {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Signal and grace period used when stopping a process tree.
+#[schemars(extend("examples" = [{"signal":"SIGINT","timeout":"15s"}]))]
 pub struct StopConfig {
+    /// Initial stop signal; defaults to SIGTERM, followed by SIGKILL if the grace period expires.
+    #[schemars(extend("examples" = ["SIGTERM","SIGINT"]))]
     pub signal: Option<String>,
+    /// Grace period before SIGKILL; defaults to 10s.
+    #[schemars(extend("examples" = ["15s","10m"]))]
     pub timeout: Option<Templated<ConfigDuration>>,
 }
 
@@ -54,12 +60,15 @@ macro_rules! service_fields {
         /// Service settings after typed local and template merging.
         #[derive(Debug, Clone, JsonSchema)]
         #[schemars(bound = "E: Extensions", deny_unknown_fields)]
+        #[schemars(extend("examples" = [{"run_script":"apps/api/package.json#dev","hosts":["api.${{ lane.domain }}"],"tags":["api"]}]))]
         pub struct ServiceConfig<E: Extensions = BuiltinExtensions> {
             $($(#[$meta])* pub $field: Option<$ty>,)*
             /// Service-specific environment overrides, above global_env.
             #[schemars(default)]
+            #[schemars(extend("examples" = [{"API_URL":"${{ svc.api.url }}"}]))]
             pub env: Env,
             #[schemars(skip)]
+            /// Options under the selected preset's name, validated by that integration.
             pub preset_options: IndexMap<String, E::Options>,
         }
 
@@ -181,36 +190,47 @@ macro_rules! service_fields {
 
 service_fields! {
     /// Template name; resolved after devlanes.local.yaml is merged.
+    #[schemars(extend("examples" = ["fastify-api"]))]
     extends: String,
     /// Shell command or argv; exactly one of run and run_script is required after inheritance.
     run: Run,
     /// Script file and name, in shorthand or object form.
     run_script: RunScript,
     /// Working directory relative to the lane worktree.
+    #[schemars(extend("examples" = ["apps/api"]))]
     cwd: Templated<String>,
     /// Platform: node, bun, deno, python or rust; detected from project files when omitted.
+    #[schemars(extend("examples" = ["node","bun","deno","python","rust"]))]
     platform: String,
     /// Registered framework preset; options use a sibling key with this name.
+    #[schemars(extend("examples" = ["vite","next","wrangler","tauri"]))]
     preset: String,
     /// HTTP hosts, wildcard hosts, and routes to named ports.
+    #[schemars(extend("examples" = [["api.${{ lane.domain }}"],[{"host":"inspect.${{ lane.domain }}","port":"inspector"}]]))]
     hosts: Vec<HostConfig>,
     /// Tags used by +tag profile selectors.
+    #[schemars(extend("examples" = [["api","essential"],["worker"],["web"]]))]
     tags: Vec<String>,
     /// Readiness policy; defaults to TCP with hosts, otherwise started.
     ready: ReadyConfig,
     /// Use a pseudoterminal; defaults to true.
+    #[schemars(extend("examples" = [true,false]))]
     pty: Templated<bool>,
     /// Stop signal and grace period before killing the process tree.
     stop: StopConfig,
     /// Prevent remote port mirroring; defaults to false.
+    #[schemars(extend("examples" = [false,true]))]
     hidden: Templated<bool>,
     /// Start by default unless explicitly selected; defaults to true.
+    #[schemars(extend("examples" = [true,false]))]
     autostart: Templated<bool>,
     /// Override the project fnox profile for this service.
     fnox: FnoxConfig,
     /// Folders copied to stable local or remote-client paths.
+    #[schemars(extend("examples" = [[{"from":"apps/extension/.output/chrome-mv3","ignore":["*.map"]}]]))]
     sync: Vec<SyncConfig>,
     /// Number of instances; replica.index starts at one. Defaults to one.
+    #[schemars(extend("examples" = [1,2]))]
     replicas: Templated<u16>,
 }
 

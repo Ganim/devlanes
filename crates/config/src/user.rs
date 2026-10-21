@@ -6,6 +6,7 @@ use std::{num::NonZeroU32, path::Path};
 /// Per-user machine settings, separate from project configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+#[schemars(extend("examples" = [{"hostnames":{"resolver":"localhost"},"ports":{"range":"20000-32767"},"terminal":"ghostty"}]))]
 pub struct UserConfig {
     /// Hostname resolution strategy and optional hosts-file policy.
     pub hostnames: HostnamesConfig,
@@ -33,12 +34,16 @@ pub const DEFAULT_STARTUP_MODE: StartupMode = StartupMode::Fixed;
 /// How the start gate sizes its window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[schemars(extend("examples" = ["adaptive","fixed","all"]))]
 pub enum StartupMode {
     /// Grow the window while CPU and memory allow, shrink it under pressure.
+    #[schemars(extend("examples" = ["adaptive"]))]
     Adaptive,
     /// Always `max` starts at a time.
+    #[schemars(extend("examples" = ["fixed"]))]
     Fixed,
     /// No pacing: every service starts at once.
+    #[schemars(extend("examples" = ["all"]))]
     All,
 }
 
@@ -52,17 +57,22 @@ impl Default for StartupMode {
 /// Startup pacing. Machine settings, so they live in user config only.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+#[schemars(extend("examples" = [{"mode":"fixed","max":4},{"mode":"adaptive","initial":2,"max":8,"target_cpu":"75%","settle_cpu":"10%","slot_timeout":"20s"}]))]
 pub struct StartupConfig {
     /// `adaptive`, `fixed` or `all`; default `fixed`.
     pub mode: StartupMode,
     /// Adaptive starting window; default CPU cores / 4, at least 2, at most `max`.
+    #[schemars(extend("examples" = [2]))]
     pub initial: Option<NonZeroU32>,
     /// Largest window (the fixed window in `fixed` mode); default CPU cores.
+    #[schemars(extend("examples" = [8]))]
     pub max: Option<NonZeroU32>,
     /// Adaptive mode grows the window while system CPU stays below this; default 75%.
+    #[schemars(extend("examples" = ["75%", "80%" ]))]
     pub target_cpu: Percent,
     /// A `ready: started` service has finished starting once its process tree
     /// stays below this share of one core for 2 s; default 10%.
+    #[schemars(extend("examples" = ["10%","12.5%" ]))]
     pub settle_cpu: Percent,
     /// A start slot is given back after this even if the service is not ready,
     /// so services waiting on each other cannot block the queue; default 20s.
@@ -120,14 +130,18 @@ impl StartupConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+/// Hostname resolution and optional system hosts-file entries.
+#[schemars(extend("examples" = [{"resolver":"localhost","hosts_file":"auto"},{"resolver":"resolver","tld":"test"}]))]
 pub struct HostnamesConfig {
     /// localhost or resolver in v1; public parses but is not supported yet.
     pub resolver: Resolver,
     /// Whether exact hostnames should also be written to the system hosts file.
     pub hosts_file: Option<HostsFile>,
     /// Custom top-level domain for the embedded DNS strategy.
+    #[schemars(extend("examples" = ["test"]))]
     pub tld: Option<String>,
     /// Reserved public-resolver base domain; not supported yet.
+    #[schemars(extend("examples" = ["dev.example.invalid"]))]
     pub base_domain: Option<String>,
     /// Reserved DNS-01 provider settings; not supported yet.
     pub dns_provider: Option<DnsProvider>,
@@ -135,29 +149,50 @@ pub struct HostnamesConfig {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+/// Strategy for resolving local project hostnames; defaults to localhost.
+#[schemars(extend("examples" = ["localhost","hosts_file","resolver","public"]))]
 pub enum Resolver {
+    /// Use names under .localhost, resolved by browsers without a custom DNS service.
     #[default]
+    #[schemars(extend("examples" = ["localhost"]))]
     Localhost,
+    /// Resolve exact project names through system hosts-file entries.
+    #[schemars(extend("examples" = ["hosts_file"]))]
     HostsFile,
+    /// Use the daemon's DNS resolver for the configured custom top-level domain.
+    #[schemars(extend("examples" = ["resolver"]))]
     Resolver,
+    /// Reserved public DNS and DNS-01 strategy; not supported yet.
+    #[schemars(extend("examples" = ["public"]))]
     Public,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Reserved DNS-01 provider configuration; not supported yet.
+#[schemars(extend("examples" = [{"cloudflare":{"token":"${{ env.CF_API_TOKEN }}"}}]))]
 pub struct DnsProvider {
+    /// Cloudflare DNS API credentials supplied by an environment expression.
     pub cloudflare: CloudflareDns,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Cloudflare DNS credentials for the reserved public resolver.
+#[schemars(extend("examples" = [{"token":"${{ env.CF_API_TOKEN }}"}]))]
 pub struct CloudflareDns {
+    /// API token with permission to edit the domain's DNS records; prefer an environment expression.
+    #[schemars(extend("examples" = ["${{ env.CF_API_TOKEN }}"]))]
     pub token: Templated<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+/// Machine-wide port pool shared by all projects and lanes.
+#[schemars(extend("examples" = [{"range":"20000-32767"}]))]
 pub struct PortsConfig {
+    /// Inclusive port range, written start-end; defaults to 20000-32767.
+    #[schemars(extend("examples" = ["20000-32767"]))]
     pub range: String,
 }
 
@@ -187,34 +222,65 @@ impl PortsConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+/// Certificate authority selection and requested certificate trust targets.
+#[schemars(extend("examples" = [{"ca":"devlanes","trust":["system","firefox"]}]))]
 pub struct TlsConfig {
+    /// Use devlanes' own CA by default, or reuse mkcert's CA.
     pub ca: CaKind,
+    /// Trust stores that should accept the local CA; mobile targets are reserved and unsupported.
+    #[schemars(extend("examples" = [["system","firefox"],["chrome"]]))]
     pub trust: Vec<TrustTarget>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+/// Certificate authority used to issue certificates for local project hostnames.
+#[schemars(extend("examples" = ["devlanes","mkcert"]))]
 pub enum CaKind {
+    /// Use the CA managed in the devlanes home directory.
     #[default]
+    #[schemars(extend("examples" = ["devlanes"]))]
     Devlanes,
+    /// Reuse the CA in mkcert's CAROOT directory.
+    #[schemars(extend("examples" = ["mkcert"]))]
     Mkcert,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
+/// Store in which the local CA should be trusted; mobile stores are not supported yet.
+#[schemars(extend("examples" = ["system","firefox","chrome","ios-simulator","android-emulator"]))]
 pub enum TrustTarget {
+    /// Trust the local CA in the operating system's certificate store.
+    #[schemars(extend("examples" = ["system"]))]
     System,
+    /// Trust the local CA in Firefox's certificate database.
+    #[schemars(extend("examples" = ["firefox"]))]
     Firefox,
+    /// Trust the local CA in Chrome's certificate database where required.
+    #[schemars(extend("examples" = ["chrome"]))]
     Chrome,
+    /// Reserved iOS simulator trust target; not supported yet.
+    #[schemars(extend("examples" = ["ios-simulator"]))]
     IosSimulator,
+    /// Reserved Android emulator trust target; not supported yet.
+    #[schemars(extend("examples" = ["android-emulator"]))]
     AndroidEmulator,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+/// Ports and network access policy for the local HTTP/HTTPS proxy.
+#[schemars(extend("examples" = [{"https_port":443,"http_port":80,"lan":false}]))]
 pub struct ProxyConfig {
+    /// HTTPS listening port; defaults to 443.
+    #[schemars(extend("examples" = [443,8443]))]
     pub https_port: u16,
+    /// HTTP listening port; defaults to 80 and redirects to HTTPS when TLS is enabled.
+    #[schemars(extend("examples" = [80,8080]))]
     pub http_port: u16,
+    /// Accept connections from other machines; defaults to loopback-only access.
+    #[schemars(extend("examples" = [false,true]))]
     pub lan: bool,
 }
 
@@ -231,14 +297,22 @@ impl Default for ProxyConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+/// Retention settings for stored service and task output.
+#[schemars(extend("examples" = [{"retention":{"days":7,"max_size":"5GiB"}}]))]
 pub struct LogsConfig {
+    /// Age and total-size bounds for stored log output.
     pub retention: LogRetention,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+/// Disk retention bounded by both age and total log size.
+#[schemars(extend("examples" = [{"days":7,"max_size":"5GiB"}]))]
 pub struct LogRetention {
+    /// Number of days to retain logs; defaults to 7.
+    #[schemars(extend("examples" = [7]))]
     pub days: u32,
+    /// Maximum total size of retained logs; defaults to 5GiB.
     pub max_size: ByteSize,
 }
 
@@ -254,7 +328,11 @@ impl Default for LogRetention {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+/// Retention for monitor history used by graphs and service baselines.
+#[schemars(extend("examples" = [{"retention":"30d"}]))]
 pub struct MetricsConfig {
+    /// Maximum age of persisted monitor samples; defaults to 30d.
+    #[schemars(extend("examples" = ["30d"]))]
     pub retention: ConfigDuration,
 }
 
@@ -269,11 +347,23 @@ impl Default for MetricsConfig {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+/// Terminal application used by open-in-terminal actions.
+#[schemars(extend("examples" = ["iterm2","ghostty","wezterm","kitty","terminal"]))]
 pub enum Terminal {
+    /// Open a session in iTerm2 on macOS.
+    #[schemars(extend("examples" = ["iterm2"]))]
     Iterm2,
+    /// Open a session in Ghostty.
+    #[schemars(extend("examples" = ["ghostty"]))]
     Ghostty,
+    /// Open a session in WezTerm.
+    #[schemars(extend("examples" = ["wezterm"]))]
     Wezterm,
+    /// Open a session in kitty.
+    #[schemars(extend("examples" = ["kitty"]))]
     Kitty,
+    /// Open a session in macOS Terminal.app.
+    #[schemars(extend("examples" = ["terminal"]))]
     Terminal,
 }
 

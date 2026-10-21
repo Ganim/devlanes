@@ -4,80 +4,208 @@
     "ComposeFiles": {
       "anyOf": [
         {
+          "description": "One Compose file relative to the project.",
+          "examples": [
+            "docker-compose.yml"
+          ],
           "type": "string"
         },
         {
+          "description": "Ordered Compose files, merged in the same order as repeated -f arguments.",
+          "examples": [
+            [
+              "docker-compose.yml",
+              "docker-compose.dev.yml"
+            ]
+          ],
           "items": {
+            "description": "Ordered Compose files, merged in the same order as repeated -f arguments.",
+            "examples": [
+              "docker-compose.yml",
+              "docker-compose.dev.yml"
+            ],
             "type": "string"
           },
           "type": "array"
         }
+      ],
+      "description": "Compose files used to resolve and start infrastructure.",
+      "examples": [
+        "docker-compose.yml",
+        [
+          "docker-compose.yml",
+          "docker-compose.dev.yml"
+        ]
       ]
     },
     "ConfigDuration": {
       "description": "A duration written with `ms`, `s`, `m`, `h`, or `d` units.",
+      "examples": [
+        "15s",
+        "10m"
+      ],
       "type": "string"
     },
     "ContainerConfig": {
       "additionalProperties": false,
+      "description": "Plain Docker container managed alongside Compose services.",
+      "examples": [
+        {
+          "image": "ghcr.io/cerbos/cerbos:0.40.0",
+          "per_lane": true,
+          "ports": {
+            "grpc": 3593,
+            "http": 3592
+          }
+        }
+      ],
       "properties": {
         "command": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Run"
+              "$ref": "#/$defs/Run",
+              "description": "Shell text runs in a shell; argv is passed directly to the executable.",
+              "examples": [
+                "pnpm dev",
+                [
+                  "node",
+                  "server.mjs",
+                  "--port",
+                  "${{ self.port }}"
+                ]
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Command replacing the image's default command.",
+          "examples": [
+            [
+              "server",
+              "--config=/policies/config.yaml"
+            ]
           ]
         },
         "env": {
           "additionalProperties": {
-            "$ref": "#/$defs/Templated_Scalar"
+            "$ref": "#/$defs/Templated_Scalar",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "examples": [
+              "${{ lane.value }}"
+            ]
           },
           "default": {},
+          "description": "Environment variables passed to this container.",
+          "examples": [
+            {
+              "LOG_LEVEL": "debug"
+            }
+          ],
           "type": "object"
         },
         "image": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string"
+              "$ref": "#/$defs/Templated_string",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Docker image to run; required after local overrides are merged.",
+          "examples": [
+            "ghcr.io/cerbos/cerbos:0.40.0"
           ]
         },
         "per_lane": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean"
+              "$ref": "#/$defs/Templated_boolean",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Create one container per lane; defaults to a shared project container.",
+          "examples": [
+            true,
+            false
           ]
         },
         "ports": {
           "additionalProperties": {
-            "$ref": "#/$defs/Templated_uint16"
+            "$ref": "#/$defs/Templated_uint16",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "examples": [
+              "${{ lane.value }}"
+            ]
           },
           "default": {},
+          "description": "Named container ports; host ports are allocated by devlanes.",
+          "examples": [
+            {
+              "grpc": 3593,
+              "http": 3592
+            }
+          ],
           "type": "object"
         },
         "ready": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadyConfig"
+              "$ref": "#/$defs/ReadyConfig",
+              "description": "Readiness policy; defaults to TCP for services with hosts and started for other services.",
+              "examples": [
+                "started",
+                {
+                  "http": {
+                    "path": "/healthz"
+                  }
+                },
+                {
+                  "tcp": true
+                }
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Readiness check for the container.",
+          "examples": [
+            "started",
+            {
+              "http": {
+                "path": "/healthz"
+              }
+            },
+            {
+              "tcp": true
+            }
           ]
         },
         "volumes": {
+          "description": "Docker source:destination[:mode] mounts; relative sources use the owning worktree.",
+          "examples": [
+            [
+              "./infra/cerbos:/policies:ro"
+            ]
+          ],
           "items": {
-            "$ref": "#/$defs/Templated_string"
+            "$ref": "#/$defs/Templated_string",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "examples": [
+              "${{ lane.value }}"
+            ]
           },
           "type": [
             "array",
@@ -89,15 +217,30 @@
     },
     "FnoxConfig": {
       "additionalProperties": false,
+      "description": "Secrets profile selection for the project or a single unit.",
+      "examples": [
+        {
+          "profile": "dev"
+        }
+      ],
       "properties": {
         "profile": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string"
+              "$ref": "#/$defs/Templated_string",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Secrets profile passed to fnox; uses fnox's default profile when omitted.",
+          "examples": [
+            "dev",
+            "admin-api"
           ]
         }
       },
@@ -106,47 +249,123 @@
     "HostConfig": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Templated_string"
+          "$ref": "#/$defs/Templated_string",
+          "description": "Hostname routed to the service's primary port.",
+          "examples": [
+            "api.${{ lane.domain }}"
+          ]
         },
         {
-          "$ref": "#/$defs/HostRoute"
+          "$ref": "#/$defs/HostRoute",
+          "description": "Hostname with optional named port, fallback, and Host-header policy.",
+          "examples": [
+            {
+              "fallback": true,
+              "host": "*.${{ lane.domain }}"
+            }
+          ]
+        }
+      ],
+      "description": "Hostname routed by the HTTP proxy, optionally with route settings.",
+      "examples": [
+        "api.${{ lane.domain }}",
+        {
+          "fallback": true,
+          "host": "*.${{ lane.domain }}"
         }
       ]
     },
     "HostHeader": {
-      "enum": [
+      "description": "Host header sent to the upstream HTTP server.",
+      "examples": [
         "preserve",
         "upstream"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "preserve",
+          "description": "Keep the Host header supplied by the client.",
+          "examples": [
+            "preserve"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "upstream",
+          "description": "Send the upstream address and port as the Host header.",
+          "examples": [
+            "upstream"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "HostRoute": {
       "additionalProperties": false,
+      "description": "HTTP proxy route to a service or container port.",
+      "examples": [
+        {
+          "host": "inspect.${{ lane.domain }}",
+          "port": "inspector"
+        },
+        {
+          "fallback": true,
+          "host": "*.${{ lane.domain }}"
+        }
+      ],
       "properties": {
         "fallback": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean"
+              "$ref": "#/$defs/Templated_boolean",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Use this route only when no other hostname matches; defaults to false.",
+          "examples": [
+            true,
+            false
           ]
         },
         "host": {
-          "$ref": "#/$defs/Templated_string"
+          "$ref": "#/$defs/Templated_string",
+          "description": "Exact hostname or wildcard pattern, evaluated for the current lane.",
+          "examples": [
+            "api.${{ lane.domain }}",
+            "*.${{ lane.domain }}"
+          ]
         },
         "host_header": {
           "anyOf": [
             {
-              "$ref": "#/$defs/HostHeader"
+              "$ref": "#/$defs/HostHeader",
+              "description": "Host header sent to the upstream HTTP server.",
+              "examples": [
+                "preserve",
+                "upstream"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Preserve the browser's Host header by default, or rewrite it for the upstream.",
+          "examples": [
+            "preserve",
+            "upstream"
           ]
         },
         "port": {
+          "description": "Named port to route to; uses the unit's primary port when omitted.",
+          "examples": [
+            "inspector"
+          ],
           "type": [
             "string",
             "null"
@@ -159,44 +378,104 @@
       "type": "object"
     },
     "HostsFile": {
-      "enum": [
+      "description": "Whether project hostnames are also written to the system hosts file.",
+      "examples": [
         "auto",
         "never",
         "always"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Write entries when the system cannot resolve the configured hostnames.",
+          "examples": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Do not write hosts entries.",
+          "examples": [
+            "never"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "always",
+          "description": "Always write exact hostnames, including for runtimes without localhost subdomain support.",
+          "examples": [
+            "always"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "HttpReady": {
       "additionalProperties": false,
+      "description": "HTTP readiness probe against the unit's local server.",
+      "examples": [
+        {
+          "path": "/healthz",
+          "status": 200,
+          "timeout": "60s"
+        }
+      ],
       "properties": {
         "path": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string"
+              "$ref": "#/$defs/Templated_string",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Request path, such as /healthz.",
+          "examples": [
+            "/healthz",
+            "/-/health"
           ]
         },
         "status": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_uint16"
+              "$ref": "#/$defs/Templated_uint16",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "HTTP response status required for readiness, between 100 and 599.",
+          "examples": [
+            200
           ]
         },
         "timeout": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_ConfigDuration"
+              "$ref": "#/$defs/Templated_ConfigDuration",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Maximum time to wait for the HTTP probe to succeed.",
+          "examples": [
+            "15s",
+            "10m"
           ]
         }
       },
@@ -205,17 +484,53 @@
     "InfraCommand": {
       "anyOf": [
         {
-          "$ref": "#/$defs/InfraCommandOptions"
+          "$ref": "#/$defs/InfraCommandOptions",
+          "description": "Command or script with lifecycle and failure-handling settings.",
+          "examples": [
+            {
+              "ignore_errors": true,
+              "run": "docker compose exec -T rabbitmq rabbitmqctl add_vhost ${{ lane.vhost }}"
+            }
+          ]
         },
         {
-          "$ref": "#/$defs/Run"
+          "$ref": "#/$defs/Run",
+          "description": "Shell command or argv without extra options.",
+          "examples": [
+            "docker compose exec -T postgres createdb acme_${{ lane.name }}"
+          ]
+        }
+      ],
+      "description": "Named infrastructure command in shorthand or object form.",
+      "examples": [
+        "docker compose exec -T postgres createdb acme_${{ lane.name }}",
+        {
+          "ignore_errors": true,
+          "run": [
+            "aws",
+            "s3",
+            "mb",
+            "s3://${{ lane.bucket }}"
+          ]
         }
       ]
     },
     "InfraCommandOptions": {
       "additionalProperties": false,
+      "description": "Setup or teardown command with optional container restart tracking.",
+      "examples": [
+        {
+          "container": "rabbitmq",
+          "ignore_errors": true,
+          "run": "docker compose exec -T rabbitmq rabbitmqctl add_vhost ${{ lane.vhost }}"
+        }
+      ],
       "properties": {
         "container": {
+          "description": "Container whose restart invalidates this setup entry's completion record, so it runs again.",
+          "examples": [
+            "rabbitmq"
+          ],
           "type": [
             "string",
             "null"
@@ -224,58 +539,130 @@
         "cwd": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string"
+              "$ref": "#/$defs/Templated_string",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Working directory relative to the lane's worktree.",
+          "examples": [
+            "infra"
           ]
         },
         "env": {
           "additionalProperties": {
-            "$ref": "#/$defs/Templated_Scalar"
+            "$ref": "#/$defs/Templated_Scalar",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "examples": [
+              "${{ lane.value }}"
+            ]
           },
           "default": {},
+          "description": "Environment overrides for this command.",
+          "examples": [
+            {
+              "AWS_DEFAULT_REGION": "us-east-1"
+            }
+          ],
           "type": "object"
         },
         "ignore_errors": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean"
+              "$ref": "#/$defs/Templated_boolean",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Continue when the command fails; defaults to false.",
+          "examples": [
+            true,
+            false
           ]
         },
         "run": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Run"
+              "$ref": "#/$defs/Run",
+              "description": "Shell text runs in a shell; argv is passed directly to the executable.",
+              "examples": [
+                "pnpm dev",
+                [
+                  "node",
+                  "server.mjs",
+                  "--port",
+                  "${{ self.port }}"
+                ]
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Shell text or argv; mutually exclusive with run_script.",
+          "examples": [
+            "pnpm dev",
+            [
+              "node",
+              "server.mjs",
+              "--port",
+              "${{ self.port }}"
+            ]
           ]
         },
         "run_script": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RunScript"
+              "$ref": "#/$defs/RunScript",
+              "description": "Script selected from a package manifest, Makefile, or justfile.",
+              "examples": [
+                "apps/api/package.json#dev",
+                {
+                  "name": "fixtures",
+                  "source": "justfile"
+                }
+              ]
             },
             {
               "type": "null"
+            }
+          ],
+          "description": "Script source and name; mutually exclusive with run.",
+          "examples": [
+            "apps/api/package.json#dev",
+            {
+              "name": "fixtures",
+              "source": "justfile"
             }
           ]
         },
         "timeout": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_ConfigDuration"
+              "$ref": "#/$defs/Templated_ConfigDuration",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Maximum run duration for this command.",
+          "examples": [
+            "15s",
+            "10m"
           ]
         }
       },
@@ -283,37 +670,101 @@
     },
     "InfraConfig": {
       "additionalProperties": false,
+      "description": "Containers and per-lane setup/teardown commands started before application services.",
+      "examples": [
+        {
+          "compose": "docker-compose.yml",
+          "hidden": [
+            "postgres"
+          ]
+        }
+      ],
       "properties": {
         "compose": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ComposeFiles"
+              "$ref": "#/$defs/ComposeFiles",
+              "description": "Compose files used to resolve and start infrastructure.",
+              "examples": [
+                "docker-compose.yml",
+                [
+                  "docker-compose.yml",
+                  "docker-compose.dev.yml"
+                ]
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Compose file or ordered list of Compose files."
+          "description": "Compose file or ordered list of Compose files.",
+          "examples": [
+            "docker-compose.yml",
+            [
+              "docker-compose.yml",
+              "docker-compose.dev.yml"
+            ]
+          ]
         },
         "containers": {
           "additionalProperties": {
-            "$ref": "#/$defs/ContainerConfig"
+            "$ref": "#/$defs/ContainerConfig",
+            "description": "Plain Docker container managed alongside Compose services.",
+            "examples": [
+              {
+                "image": "ghcr.io/cerbos/cerbos:0.40.0",
+                "per_lane": true,
+                "ports": {
+                  "grpc": 3593,
+                  "http": 3592
+                }
+              }
+            ]
           },
           "default": {},
           "description": "Plain Docker containers managed alongside Compose services.",
+          "examples": [
+            {
+              "cerbos": {
+                "image": "ghcr.io/cerbos/cerbos:0.40.0",
+                "per_lane": true,
+                "ports": {
+                  "http": 3592
+                }
+              }
+            }
+          ],
           "type": "object"
         },
         "env": {
           "additionalProperties": {
-            "$ref": "#/$defs/Templated_Scalar"
+            "$ref": "#/$defs/Templated_Scalar",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "examples": [
+              "${{ lane.value }}"
+            ]
           },
           "default": {},
           "description": "Variables for Compose interpolation, separate from process global_env.",
+          "examples": [
+            {
+              "ACME_DB_PORT": 15432
+            }
+          ],
           "type": "object"
         },
         "exclude": {
           "description": "Compose services never started by devlanes.",
+          "examples": [
+            [
+              "caddy"
+            ]
+          ],
           "items": {
+            "description": "Compose services never started by devlanes.",
+            "examples": [
+              "caddy"
+            ],
             "type": "string"
           },
           "type": [
@@ -323,7 +774,16 @@
         },
         "hidden": {
           "description": "Containers whose ports must not be mirrored to remote clients.",
+          "examples": [
+            [
+              "postgres"
+            ]
+          ],
           "items": {
+            "description": "Containers whose ports must not be mirrored to remote clients.",
+            "examples": [
+              "postgres"
+            ],
             "type": "string"
           },
           "type": [
@@ -333,18 +793,48 @@
         },
         "hosts": {
           "additionalProperties": {
+            "description": "Container name to HTTP proxy route declarations.",
+            "examples": [
+              [
+                "s3.${{ lane.domain }}"
+              ]
+            ],
             "items": {
-              "$ref": "#/$defs/HostConfig"
+              "$ref": "#/$defs/HostConfig",
+              "description": "Hostname routed by the HTTP proxy, optionally with route settings.",
+              "examples": [
+                "api.${{ lane.domain }}",
+                {
+                  "fallback": true,
+                  "host": "*.${{ lane.domain }}"
+                }
+              ]
             },
             "type": "array"
           },
           "default": {},
           "description": "Container name to HTTP proxy route declarations.",
+          "examples": [
+            {
+              "s3mock": [
+                "s3.${{ lane.domain }}"
+              ]
+            }
+          ],
           "type": "object"
         },
         "per_lane": {
           "description": "Compose services instantiated separately in each lane.",
+          "examples": [
+            [
+              "mailpit"
+            ]
+          ],
           "items": {
+            "description": "Compose services instantiated separately in each lane.",
+            "examples": [
+              "mailpit"
+            ],
             "type": "string"
           },
           "type": [
@@ -354,7 +844,16 @@
         },
         "profiles": {
           "description": "Compose profiles enabled when resolving and starting infrastructure.",
+          "examples": [
+            [
+              "development"
+            ]
+          ],
           "items": {
+            "description": "Compose profiles enabled when resolving and starting infrastructure.",
+            "examples": [
+              "development"
+            ],
             "type": "string"
           },
           "type": [
@@ -365,28 +864,71 @@
         "project_name": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string"
+              "$ref": "#/$defs/Templated_string",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Shared Compose project name; defaults to Compose's own name."
+          "description": "Shared Compose project name; defaults to Compose's own name.",
+          "examples": [
+            "acme"
+          ]
         },
         "setup": {
           "additionalProperties": {
-            "$ref": "#/$defs/InfraCommand"
+            "$ref": "#/$defs/InfraCommand",
+            "description": "Named infrastructure command in shorthand or object form.",
+            "examples": [
+              "docker compose exec -T postgres createdb acme_${{ lane.name }}",
+              {
+                "ignore_errors": true,
+                "run": [
+                  "aws",
+                  "s3",
+                  "mb",
+                  "s3://${{ lane.bucket }}"
+                ]
+              }
+            ]
           },
           "default": {},
           "description": "Named commands run once per lane after containers become healthy.",
+          "examples": [
+            {
+              "database": "docker compose exec -T postgres createdb acme_${{ lane.name }}"
+            }
+          ],
           "type": "object"
         },
         "teardown": {
           "additionalProperties": {
-            "$ref": "#/$defs/InfraCommand"
+            "$ref": "#/$defs/InfraCommand",
+            "description": "Named infrastructure command in shorthand or object form.",
+            "examples": [
+              "docker compose exec -T postgres createdb acme_${{ lane.name }}",
+              {
+                "ignore_errors": true,
+                "run": [
+                  "aws",
+                  "s3",
+                  "mb",
+                  "s3://${{ lane.bucket }}"
+                ]
+              }
+            ]
           },
           "default": {},
           "description": "Named cleanup commands run when a lane is explicitly cleaned.",
+          "examples": [
+            {
+              "database": "docker compose exec -T postgres dropdb --if-exists acme_${{ lane.name }}"
+            }
+          ],
           "type": "object"
         }
       },
@@ -395,10 +937,26 @@
     "InjectedPresetOptions0": {
       "additionalProperties": false,
       "description": "Options under the service's `vite:` key.",
+      "examples": [
+        {
+          "args": [
+            "--open"
+          ]
+        }
+      ],
       "properties": {
         "args": {
           "description": "Extra arguments appended after the preset's flags.",
+          "examples": [
+            [
+              "--open"
+            ]
+          ],
           "items": {
+            "description": "Extra arguments appended after the preset's flags.",
+            "examples": [
+              "--open"
+            ],
             "type": "string"
           },
           "type": [
@@ -407,16 +965,31 @@
           ]
         }
       },
-      "title": "ViteOptions",
       "type": "object"
     },
     "InjectedPresetOptions1": {
       "additionalProperties": false,
       "description": "Options under the service's `next:` key.",
+      "examples": [
+        {
+          "args": [
+            "--turbo"
+          ]
+        }
+      ],
       "properties": {
         "args": {
           "description": "Extra arguments appended after the preset's flags.",
+          "examples": [
+            [
+              "--turbo"
+            ]
+          ],
           "items": {
+            "description": "Extra arguments appended after the preset's flags.",
+            "examples": [
+              "--turbo"
+            ],
             "type": "string"
           },
           "type": [
@@ -425,16 +998,38 @@
           ]
         }
       },
-      "title": "NextOptions",
       "type": "object"
     },
     "InjectedPresetOptions2": {
       "additionalProperties": false,
       "description": "Options under the service's `wrangler:` key.",
+      "examples": [
+        {
+          "args": [
+            "--env-file",
+            ".dev.vars"
+          ],
+          "isolate_registry": true,
+          "vars": {
+            "PUBLIC_BASE_URL": "${{ self.public_url }}"
+          }
+        }
+      ],
       "properties": {
         "args": {
           "description": "Extra arguments appended after the preset's flags.",
+          "examples": [
+            [
+              "--env-file",
+              ".dev.vars"
+            ]
+          ],
           "items": {
+            "description": "Extra arguments appended after the preset's flags.",
+            "examples": [
+              "--env-file",
+              ".dev.vars"
+            ],
             "type": "string"
           },
           "type": [
@@ -444,6 +1039,10 @@
         },
         "isolate_registry": {
           "description": "Give each lane its own dev registry through `WRANGLER_REGISTRY_PATH`.\nDefault: true.",
+          "examples": [
+            true,
+            false
+          ],
           "type": [
             "boolean",
             "null"
@@ -451,6 +1050,10 @@
         },
         "vars": {
           "additionalProperties": {
+            "description": "Worker variables, passed as `--var KEY:VALUE`. Numbers and booleans are\naccepted because config scalars evaluate to them; wrangler sees strings.",
+            "examples": [
+              "${{ self.public_url }}"
+            ],
             "type": [
               "string",
               "number",
@@ -458,18 +1061,33 @@
             ]
           },
           "description": "Worker variables, passed as `--var KEY:VALUE`. Numbers and booleans are\naccepted because config scalars evaluate to them; wrangler sees strings.",
+          "examples": [
+            {
+              "PUBLIC_BASE_URL": "${{ self.public_url }}"
+            }
+          ],
           "type": "object"
         }
       },
-      "title": "WranglerOptions",
       "type": "object"
     },
     "InjectedPresetOptions3": {
       "additionalProperties": false,
       "description": "Options under the service's `tauri:` key, after expression evaluation.",
+      "examples": [
+        {
+          "before_dev_command": "",
+          "dev_url": "${{ svc.desktop_web.url }}",
+          "identifier": "io.acme.app.lane${{ lane.index }}.client${{ replica.index }}"
+        }
+      ],
       "properties": {
         "before_dev_command": {
           "description": "`build.beforeDevCommand` override. Set it to an empty string when the\nfrontend runs as its own devlanes service; otherwise every replica\nstarts its own frontend on the port from `tauri.conf.json`.",
+          "examples": [
+            "",
+            "pnpm dev"
+          ],
           "type": [
             "string",
             "null"
@@ -477,6 +1095,9 @@
         },
         "dev_url": {
           "description": "`build.devUrl`, usually another service's `url`.",
+          "examples": [
+            "${{ svc.desktop_web.url }}"
+          ],
           "type": [
             "string",
             "null"
@@ -484,6 +1105,9 @@
         },
         "identifier": {
           "description": "Bundle identifier for this lane and replica. Required; it must differ per\nlane and replica, for example\n`com.acme.app.dev${{ '' if lane.index == 0 else '.lane' ~ lane.index }}.client${{ replica.index }}`.",
+          "examples": [
+            "io.acme.app.lane${{ lane.index }}.client${{ replica.index }}"
+          ],
           "type": [
             "string",
             "null"
@@ -491,46 +1115,103 @@
         },
         "product_name": {
           "description": "`productName` override, shown in the dock and window menus.",
+          "examples": [
+            "Acme Dev"
+          ],
           "type": [
             "string",
             "null"
           ]
         }
       },
-      "title": "TauriOptions",
       "type": "object"
     },
     "LanesConfig": {
       "additionalProperties": false,
+      "description": "Worktree registration policy and values computed for each lane.",
+      "examples": [
+        {
+          "hosts_file": "always",
+          "primary": "main",
+          "vars": {
+            "db_name": "acme_${{ lane.name }}"
+          }
+        }
+      ],
       "properties": {
         "block_size": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_uint16"
+              "$ref": "#/$defs/Templated_uint16",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Fixed port-block capacity; otherwise allocated with fifty percent headroom."
+          "description": "Fixed port-block capacity; otherwise allocated with fifty percent headroom.",
+          "examples": [
+            80
+          ]
         },
         "hosts_file": {
           "anyOf": [
             {
-              "$ref": "#/$defs/HostsFile"
+              "$ref": "#/$defs/HostsFile",
+              "description": "Whether project hostnames are also written to the system hosts file.",
+              "examples": [
+                "auto",
+                "never",
+                "always"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Project-specific host-file hint, overriding the user's policy."
+          "description": "Project-specific host-file hint, overriding the user's policy.",
+          "examples": [
+            "auto",
+            "never",
+            "always"
+          ]
         },
         "matrix": {
           "description": "Explicit lane values; entry N describes lane N. Mutually exclusive with vars.",
+          "examples": [
+            [
+              {
+                "domain": "acme.localhost",
+                "port": 20000
+              },
+              {
+                "domain": "acme-1.localhost",
+                "port": 20100
+              }
+            ]
+          ],
           "items": {
             "additionalProperties": {
-              "$ref": "#/$defs/Templated_Scalar"
+              "$ref": "#/$defs/Templated_Scalar",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
+            "description": "Explicit lane values; entry N describes lane N. Mutually exclusive with vars.",
+            "examples": [
+              {
+                "domain": "acme.localhost",
+                "port": 20000
+              },
+              {
+                "domain": "acme-1.localhost",
+                "port": 20100
+              }
+            ],
             "type": "object"
           },
           "type": [
@@ -541,27 +1222,48 @@
         "max": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_uint32"
+              "$ref": "#/$defs/Templated_uint32",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Maximum assigned lanes; existing lanes are retained if this is lowered."
+          "description": "Maximum assigned lanes; existing lanes are retained if this is lowered.",
+          "examples": [
+            6
+          ]
         },
         "new_worktrees": {
           "anyOf": [
             {
-              "$ref": "#/$defs/NewWorktrees"
+              "$ref": "#/$defs/NewWorktrees",
+              "description": "Action when a new worktree appears; defaults to register.",
+              "examples": [
+                "register",
+                "setup",
+                "start"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Action for newly discovered worktrees; defaults to register."
+          "description": "Action for newly discovered worktrees; defaults to register.",
+          "examples": [
+            "register",
+            "setup",
+            "start"
+          ]
         },
         "primary": {
           "description": "Branch assigned lane zero; defaults to the remote default branch, main, or master.",
+          "examples": [
+            "main"
+          ],
           "type": [
             "string",
             "null"
@@ -570,71 +1272,191 @@
         "removed_worktrees": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RemovedWorktrees"
+              "$ref": "#/$defs/RemovedWorktrees",
+              "description": "Action when a worktree disappears; defaults to stop and retain its data.",
+              "examples": [
+                "stop",
+                "clean"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Stop processes or also clean lane data when a worktree disappears."
+          "description": "Stop processes or also clean lane data when a worktree disappears.",
+          "examples": [
+            "stop",
+            "clean"
+          ]
         },
         "vars": {
           "additionalProperties": {
-            "$ref": "#/$defs/Templated_Scalar"
+            "$ref": "#/$defs/Templated_Scalar",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "examples": [
+              "${{ lane.value }}"
+            ]
           },
           "default": {},
           "description": "Scalar lane values available through the lane expression namespace.",
+          "examples": [
+            {
+              "db_name": "acme_${{ lane.name }}"
+            }
+          ],
           "type": "object"
         },
         "worktree_dir": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string"
+              "$ref": "#/$defs/Templated_string",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Directory for newly created worktrees, relative to the project."
+          "description": "Directory for newly created worktrees, relative to the project.",
+          "examples": [
+            "../${{ project.name }}-lanes"
+          ]
         }
       },
       "type": "object"
     },
     "NewWorktrees": {
-      "enum": [
+      "description": "Action when a new worktree appears; defaults to register.",
+      "examples": [
         "register",
         "setup",
         "start"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "register",
+          "description": "Reserve a lane without running setup or services.",
+          "examples": [
+            "register"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "setup",
+          "description": "Run infrastructure setup and lane.create tasks, leaving services stopped.",
+          "examples": [
+            "setup"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "start",
+          "description": "Start the worktree with the default profile.",
+          "examples": [
+            "start"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "ProfileConfig": {
       "anyOf": [
         {
+          "description": "Service names, globs, or +tag selectors.",
+          "examples": [
+            [
+              "+api",
+              "+web"
+            ]
+          ],
           "items": {
+            "description": "Service names, globs, or +tag selectors.",
+            "examples": [
+              "+api",
+              "+web"
+            ],
             "type": "string"
           },
           "type": "array"
         },
         {
-          "$ref": "#/$defs/ProfileOptions"
+          "$ref": "#/$defs/ProfileOptions",
+          "description": "Selection and overrides expressed as a mapping.",
+          "examples": [
+            {
+              "include": [
+                "+web"
+              ],
+              "infra": false
+            }
+          ]
+        }
+      ],
+      "description": "Named service selection with optional environment, infrastructure, and script overrides.",
+      "examples": [
+        [
+          "+api",
+          "+web"
+        ],
+        {
+          "include": [
+            "+web"
+          ],
+          "infra": false
         }
       ]
     },
     "ProfileOptions": {
       "additionalProperties": false,
+      "description": "Service selectors and overrides applied when this profile is active.",
+      "examples": [
+        {
+          "env": {
+            "NODE_ENV": "production"
+          },
+          "include": [
+            "+api",
+            "+web"
+          ],
+          "run_scripts": {
+            "dev": "start"
+          }
+        }
+      ],
       "properties": {
         "env": {
           "additionalProperties": {
-            "$ref": "#/$defs/Templated_Scalar"
+            "$ref": "#/$defs/Templated_Scalar",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "examples": [
+              "${{ lane.value }}"
+            ]
           },
           "default": {},
           "description": "Profile environment overrides, applied above service environment values.",
+          "examples": [
+            {
+              "NODE_ENV": "production"
+            }
+          ],
           "type": "object"
         },
         "exclude": {
           "description": "Selectors removed from the included service set.",
+          "examples": [
+            [
+              "+desktop",
+              "sms-stub"
+            ]
+          ],
           "items": {
+            "description": "Selectors removed from the included service set.",
+            "examples": [
+              "+desktop",
+              "sms-stub"
+            ],
             "type": "string"
           },
           "type": [
@@ -644,7 +1466,22 @@
         },
         "include": {
           "description": "Service names, globs, and +tag selectors included by this profile.",
+          "examples": [
+            [
+              "+api",
+              "+web"
+            ],
+            [
+              "*"
+            ]
+          ],
           "items": {
+            "description": "Service names, globs, and +tag selectors included by this profile.",
+            "examples": [
+              "+api",
+              "+web",
+              "*"
+            ],
             "type": "string"
           },
           "type": [
@@ -655,22 +1492,39 @@
         "infra": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean"
+              "$ref": "#/$defs/Templated_boolean",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Set false to skip containers and infra setup."
+          "description": "Set false to skip containers and infra setup.",
+          "examples": [
+            false,
+            true
+          ]
         },
         "run_scripts": {
           "additionalProperties": {
+            "description": "Remap service script names once, such as dev to start; source files stay unchanged.",
+            "examples": [
+              "start"
+            ],
             "minLength": 1,
             "pattern": "\\S",
             "type": "string"
           },
           "default": {},
           "description": "Remap service script names once, such as dev to start; source files stay unchanged.",
+          "examples": [
+            {
+              "dev": "start"
+            }
+          ],
           "propertyNames": {
             "minLength": 1,
             "pattern": "\\S",
@@ -684,55 +1538,128 @@
     "ReadyCheck": {
       "additionalProperties": false,
       "description": "Exactly one readiness mechanism is accepted by semantic validation.",
+      "examples": [
+        {
+          "http": {
+            "path": "/healthz"
+          }
+        },
+        {
+          "tcp": true
+        },
+        {
+          "log": "Connected to Redis"
+        },
+        {
+          "cmd": "curl -fsS ${{ self.url }}/healthz"
+        }
+      ],
       "properties": {
         "cmd": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Run"
+              "$ref": "#/$defs/Run",
+              "description": "Shell text runs in a shell; argv is passed directly to the executable.",
+              "examples": [
+                "pnpm dev",
+                [
+                  "node",
+                  "server.mjs",
+                  "--port",
+                  "${{ self.port }}"
+                ]
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Retry this command until it exits successfully.",
+          "examples": [
+            "curl -fsS ${{ self.url }}/healthz"
           ]
         },
         "http": {
           "anyOf": [
             {
-              "$ref": "#/$defs/HttpReady"
+              "$ref": "#/$defs/HttpReady",
+              "description": "HTTP readiness probe against the unit's local server.",
+              "examples": [
+                {
+                  "path": "/healthz",
+                  "status": 200,
+                  "timeout": "60s"
+                }
+              ]
             },
             {
               "type": "null"
+            }
+          ],
+          "description": "Wait for an HTTP response matching the requested path and status.",
+          "examples": [
+            {
+              "path": "/healthz",
+              "status": 200,
+              "timeout": "60s"
             }
           ]
         },
         "log": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string"
+              "$ref": "#/$defs/Templated_string",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Regular expression matched against output with terminal escape codes removed.",
+          "examples": [
+            "Connected to Redis"
           ]
         },
         "tcp": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TcpReady"
+              "$ref": "#/$defs/TcpReady",
+              "description": "TCP port to probe for readiness.",
+              "examples": [
+                true,
+                "inspector"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Wait for the primary port with true, or a named port such as inspector.",
+          "examples": [
+            true,
+            "inspector"
           ]
         },
         "timeout": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_ConfigDuration"
+              "$ref": "#/$defs/Templated_ConfigDuration",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Maximum time to wait for the readiness check.",
+          "examples": [
+            "15s",
+            "10m"
           ]
         }
       },
@@ -741,70 +1668,198 @@
     "ReadyConfig": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Started"
+          "$ref": "#/$defs/Started",
+          "description": "Treat a running process as ready without a probe.",
+          "examples": [
+            "started"
+          ]
         },
         {
-          "$ref": "#/$defs/ReadyCheck"
+          "$ref": "#/$defs/ReadyCheck",
+          "description": "Wait for a TCP, HTTP, log, or command check to succeed.",
+          "examples": [
+            {
+              "http": {
+                "path": "/healthz"
+              }
+            },
+            {
+              "tcp": true
+            }
+          ]
+        }
+      ],
+      "description": "Readiness policy; defaults to TCP for services with hosts and started for other services.",
+      "examples": [
+        "started",
+        {
+          "http": {
+            "path": "/healthz"
+          }
+        },
+        {
+          "tcp": true
         }
       ]
     },
     "RemovedWorktrees": {
-      "enum": [
+      "description": "Action when a worktree disappears; defaults to stop and retain its data.",
+      "examples": [
         "stop",
         "clean"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "stop",
+          "description": "Stop the lane's processes but keep its data.",
+          "examples": [
+            "stop"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "clean",
+          "description": "Stop processes, run teardown, and free the lane.",
+          "examples": [
+            "clean"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "Run": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Templated_string"
+          "$ref": "#/$defs/Templated_string",
+          "description": "Shell command text; supports pipelines and multiline scripts.",
+          "examples": [
+            "pnpm dev"
+          ]
         },
         {
+          "description": "Executable and arguments passed directly without shell expansion.",
+          "examples": [
+            [
+              "node",
+              "server.mjs"
+            ]
+          ],
           "items": {
-            "$ref": "#/$defs/Templated_string"
+            "$ref": "#/$defs/Templated_string",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "examples": [
+              "${{ lane.value }}"
+            ]
           },
           "type": "array"
         }
       ],
-      "description": "Shell text runs in a shell; argv is passed directly to the executable."
+      "description": "Shell text runs in a shell; argv is passed directly to the executable.",
+      "examples": [
+        "pnpm dev",
+        [
+          "node",
+          "server.mjs",
+          "--port",
+          "${{ self.port }}"
+        ]
+      ]
     },
     "RunScript": {
       "anyOf": [
         {
+          "description": "Source file followed by # and the script name.",
+          "examples": [
+            "apps/api/package.json#dev"
+          ],
           "type": "string"
         },
         {
-          "$ref": "#/$defs/ScriptSource"
+          "$ref": "#/$defs/ScriptSource",
+          "description": "Source file and script name written as separate fields.",
+          "examples": [
+            {
+              "name": "fixtures",
+              "source": "justfile"
+            }
+          ]
+        }
+      ],
+      "description": "Script selected from a package manifest, Makefile, or justfile.",
+      "examples": [
+        "apps/api/package.json#dev",
+        {
+          "name": "fixtures",
+          "source": "justfile"
         }
       ]
     },
     "Scalar": {
       "anyOf": [
         {
+          "description": "Text used verbatim in the environment or lane variables.",
+          "examples": [
+            "acme"
+          ],
           "type": "string"
         },
         {
+          "description": "Boolean value, rendered as true or false in process environments.",
+          "examples": [
+            true,
+            false
+          ],
           "type": "boolean"
         },
         {
+          "description": "Whole number, such as a port or lane index.",
+          "examples": [
+            20000
+          ],
           "format": "int64",
           "type": "integer"
         },
         {
+          "description": "Decimal number, rendered as text in process environments.",
+          "examples": [
+            1.5
+          ],
           "format": "double",
           "type": "number"
         }
       ],
-      "description": "A scalar suitable for environment variables and free-form lane variables."
+      "description": "A scalar suitable for environment variables and free-form lane variables.",
+      "examples": [
+        "acme",
+        20000,
+        true
+      ]
     },
     "ScriptSource": {
       "additionalProperties": false,
+      "description": "A source file and the script or target to run from it.",
+      "examples": [
+        {
+          "name": "fixtures",
+          "source": "justfile"
+        }
+      ],
       "properties": {
         "name": {
+          "description": "Script, target, or recipe name within the source file.",
+          "examples": [
+            "dev",
+            "fixtures"
+          ],
           "type": "string"
         },
         "source": {
+          "description": "Script source relative to the worktree, such as package.json, Makefile, or justfile.",
+          "examples": [
+            "apps/api/package.json",
+            "Makefile",
+            "justfile"
+          ],
           "type": "string"
         }
       },
@@ -817,39 +1872,77 @@
     "ServiceConfig": {
       "additionalProperties": false,
       "description": "Service settings after typed local and template merging.",
+      "examples": [
+        {
+          "hosts": [
+            "api.${{ lane.domain }}"
+          ],
+          "run_script": "apps/api/package.json#dev",
+          "tags": [
+            "api"
+          ]
+        }
+      ],
       "properties": {
         "autostart": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean"
+              "$ref": "#/$defs/Templated_boolean",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Start by default unless explicitly selected; defaults to true."
+          "description": "Start by default unless explicitly selected; defaults to true.",
+          "examples": [
+            true,
+            false
+          ]
         },
         "cwd": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string"
+              "$ref": "#/$defs/Templated_string",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Working directory relative to the lane worktree."
+          "description": "Working directory relative to the lane worktree.",
+          "examples": [
+            "apps/api"
+          ]
         },
         "env": {
           "additionalProperties": {
-            "$ref": "#/$defs/Templated_Scalar"
+            "$ref": "#/$defs/Templated_Scalar",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "examples": [
+              "${{ lane.value }}"
+            ]
           },
           "default": {},
           "description": "Service-specific environment overrides, above global_env.",
+          "examples": [
+            {
+              "API_URL": "${{ svc.api.url }}"
+            }
+          ],
           "type": "object"
         },
         "extends": {
           "description": "Template name; resolved after devlanes.local.yaml is merged.",
+          "examples": [
+            "fastify-api"
+          ],
           "type": [
             "string",
             "null"
@@ -858,29 +1951,67 @@
         "fnox": {
           "anyOf": [
             {
-              "$ref": "#/$defs/FnoxConfig"
+              "$ref": "#/$defs/FnoxConfig",
+              "description": "Secrets profile selection for the project or a single unit.",
+              "examples": [
+                {
+                  "profile": "dev"
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Override the project fnox profile for this service."
+          "description": "Override the project fnox profile for this service.",
+          "examples": [
+            {
+              "profile": "dev"
+            }
+          ]
         },
         "hidden": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean"
+              "$ref": "#/$defs/Templated_boolean",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Prevent remote port mirroring; defaults to false."
+          "description": "Prevent remote port mirroring; defaults to false.",
+          "examples": [
+            false,
+            true
+          ]
         },
         "hosts": {
           "description": "HTTP hosts, wildcard hosts, and routes to named ports.",
+          "examples": [
+            [
+              "api.${{ lane.domain }}"
+            ],
+            [
+              {
+                "host": "inspect.${{ lane.domain }}",
+                "port": "inspector"
+              }
+            ]
+          ],
           "items": {
-            "$ref": "#/$defs/HostConfig"
+            "$ref": "#/$defs/HostConfig",
+            "description": "Hostname routed by the HTTP proxy, optionally with route settings.",
+            "examples": [
+              "api.${{ lane.domain }}",
+              {
+                "fallback": true,
+                "host": "*.${{ lane.domain }}"
+              }
+            ]
           },
           "type": [
             "array",
@@ -888,17 +2019,26 @@
           ]
         },
         "next": {
-          "allOf": [
+          "$ref": "#/$defs/InjectedPresetOptions1",
+          "description": "Options under the service's `next:` key.",
+          "examples": [
             {
-              "type": "object"
-            },
-            {
-              "$ref": "#/$defs/InjectedPresetOptions1"
+              "args": [
+                "--turbo"
+              ]
             }
-          ]
+          ],
+          "type": "object"
         },
         "platform": {
           "description": "Platform: node, bun, deno, python or rust; detected from project files when omitted.",
+          "examples": [
+            "node",
+            "bun",
+            "deno",
+            "python",
+            "rust"
+          ],
           "type": [
             "string",
             "null"
@@ -912,6 +2052,12 @@
             "wrangler",
             "tauri"
           ],
+          "examples": [
+            "vite",
+            "next",
+            "wrangler",
+            "tauri"
+          ],
           "type": [
             "string",
             "null"
@@ -920,73 +2066,178 @@
         "pty": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean"
+              "$ref": "#/$defs/Templated_boolean",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Use a pseudoterminal; defaults to true."
+          "description": "Use a pseudoterminal; defaults to true.",
+          "examples": [
+            true,
+            false
+          ]
         },
         "ready": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadyConfig"
+              "$ref": "#/$defs/ReadyConfig",
+              "description": "Readiness policy; defaults to TCP for services with hosts and started for other services.",
+              "examples": [
+                "started",
+                {
+                  "http": {
+                    "path": "/healthz"
+                  }
+                },
+                {
+                  "tcp": true
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Readiness policy; defaults to TCP with hosts, otherwise started."
+          "description": "Readiness policy; defaults to TCP with hosts, otherwise started.",
+          "examples": [
+            "started",
+            {
+              "http": {
+                "path": "/healthz"
+              }
+            },
+            {
+              "tcp": true
+            }
+          ]
         },
         "replicas": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_uint16"
+              "$ref": "#/$defs/Templated_uint16",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Number of instances; replica.index starts at one. Defaults to one."
+          "description": "Number of instances; replica.index starts at one. Defaults to one.",
+          "examples": [
+            1,
+            2
+          ]
         },
         "run": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Run"
+              "$ref": "#/$defs/Run",
+              "description": "Shell text runs in a shell; argv is passed directly to the executable.",
+              "examples": [
+                "pnpm dev",
+                [
+                  "node",
+                  "server.mjs",
+                  "--port",
+                  "${{ self.port }}"
+                ]
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Shell command or argv; exactly one of run and run_script is required after inheritance."
+          "description": "Shell command or argv; exactly one of run and run_script is required after inheritance.",
+          "examples": [
+            "pnpm dev",
+            [
+              "node",
+              "server.mjs",
+              "--port",
+              "${{ self.port }}"
+            ]
+          ]
         },
         "run_script": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RunScript"
+              "$ref": "#/$defs/RunScript",
+              "description": "Script selected from a package manifest, Makefile, or justfile.",
+              "examples": [
+                "apps/api/package.json#dev",
+                {
+                  "name": "fixtures",
+                  "source": "justfile"
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Script file and name, in shorthand or object form."
+          "description": "Script file and name, in shorthand or object form.",
+          "examples": [
+            "apps/api/package.json#dev",
+            {
+              "name": "fixtures",
+              "source": "justfile"
+            }
+          ]
         },
         "stop": {
           "anyOf": [
             {
-              "$ref": "#/$defs/StopConfig"
+              "$ref": "#/$defs/StopConfig",
+              "description": "Signal and grace period used when stopping a process tree.",
+              "examples": [
+                {
+                  "signal": "SIGINT",
+                  "timeout": "15s"
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Stop signal and grace period before killing the process tree."
+          "description": "Stop signal and grace period before killing the process tree.",
+          "examples": [
+            {
+              "signal": "SIGINT",
+              "timeout": "15s"
+            }
+          ]
         },
         "sync": {
           "description": "Folders copied to stable local or remote-client paths.",
+          "examples": [
+            [
+              {
+                "from": "apps/extension/.output/chrome-mv3",
+                "ignore": [
+                  "*.map"
+                ]
+              }
+            ]
+          ],
           "items": {
-            "$ref": "#/$defs/SyncConfig"
+            "$ref": "#/$defs/SyncConfig",
+            "description": "Directory copied to a stable local or remote-client path.",
+            "examples": [
+              {
+                "from": "apps/extension/.output/chrome-mv3",
+                "ignore": [
+                  "*.map"
+                ]
+              }
+            ]
           },
           "type": [
             "array",
@@ -995,7 +2246,26 @@
         },
         "tags": {
           "description": "Tags used by +tag profile selectors.",
+          "examples": [
+            [
+              "api",
+              "essential"
+            ],
+            [
+              "worker"
+            ],
+            [
+              "web"
+            ]
+          ],
           "items": {
+            "description": "Tags used by +tag profile selectors.",
+            "examples": [
+              "api",
+              "essential",
+              "worker",
+              "web"
+            ],
             "type": "string"
           },
           "type": [
@@ -1004,48 +2274,81 @@
           ]
         },
         "tauri": {
-          "allOf": [
+          "$ref": "#/$defs/InjectedPresetOptions3",
+          "description": "Options under the service's `tauri:` key, after expression evaluation.",
+          "examples": [
             {
-              "type": "object"
-            },
-            {
-              "$ref": "#/$defs/InjectedPresetOptions3"
+              "before_dev_command": "",
+              "dev_url": "${{ svc.desktop_web.url }}",
+              "identifier": "io.acme.app.lane${{ lane.index }}.client${{ replica.index }}"
             }
-          ]
+          ],
+          "type": "object"
         },
         "vite": {
-          "allOf": [
+          "$ref": "#/$defs/InjectedPresetOptions0",
+          "description": "Options under the service's `vite:` key.",
+          "examples": [
             {
-              "type": "object"
-            },
-            {
-              "$ref": "#/$defs/InjectedPresetOptions0"
+              "args": [
+                "--open"
+              ]
             }
-          ]
+          ],
+          "type": "object"
         },
         "wrangler": {
-          "allOf": [
+          "$ref": "#/$defs/InjectedPresetOptions2",
+          "description": "Options under the service's `wrangler:` key.",
+          "examples": [
             {
-              "type": "object"
-            },
-            {
-              "$ref": "#/$defs/InjectedPresetOptions2"
+              "args": [
+                "--env-file",
+                ".dev.vars"
+              ],
+              "isolate_registry": true,
+              "vars": {
+                "PUBLIC_BASE_URL": "${{ self.public_url }}"
+              }
             }
-          ]
+          ],
+          "type": "object"
         }
       },
       "type": "object"
     },
     "Started": {
-      "enum": [
+      "description": "Readiness without an application-level probe.",
+      "examples": [
         "started"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "started",
+          "description": "The process has started; no TCP, HTTP, log, or command probe is needed.",
+          "examples": [
+            "started"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "StopConfig": {
       "additionalProperties": false,
+      "description": "Signal and grace period used when stopping a process tree.",
+      "examples": [
+        {
+          "signal": "SIGINT",
+          "timeout": "15s"
+        }
+      ],
       "properties": {
         "signal": {
+          "description": "Initial stop signal; defaults to SIGTERM, followed by SIGKILL if the grace period expires.",
+          "examples": [
+            "SIGTERM",
+            "SIGINT"
+          ],
           "type": [
             "string",
             "null"
@@ -1054,11 +2357,20 @@
         "timeout": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_ConfigDuration"
+              "$ref": "#/$defs/Templated_ConfigDuration",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Grace period before SIGKILL; defaults to 10s.",
+          "examples": [
+            "15s",
+            "10m"
           ]
         }
       },
@@ -1066,13 +2378,36 @@
     },
     "SyncConfig": {
       "additionalProperties": false,
+      "description": "Directory copied to a stable local or remote-client path.",
+      "examples": [
+        {
+          "from": "apps/extension/.output/chrome-mv3",
+          "ignore": [
+            "*.map"
+          ]
+        }
+      ],
       "properties": {
         "from": {
-          "$ref": "#/$defs/Templated_string"
+          "$ref": "#/$defs/Templated_string",
+          "description": "Directory to copy, relative to the lane's worktree.",
+          "examples": [
+            "apps/extension/.output/chrome-mv3"
+          ]
         },
         "ignore": {
           "default": [],
+          "description": "Glob patterns excluded from the copy and subsequent updates.",
+          "examples": [
+            [
+              "*.map"
+            ]
+          ],
           "items": {
+            "description": "Glob patterns excluded from the copy and subsequent updates.",
+            "examples": [
+              "*.map"
+            ],
             "type": "string"
           },
           "type": "array"
@@ -1080,11 +2415,19 @@
         "to": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string"
+              "$ref": "#/$defs/Templated_string",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
+          ],
+          "description": "Destination on the client; defaults to a stable project/lane path under ~/devlanes/sync.",
+          "examples": [
+            "~/devlanes/sync/acme/${{ lane.name }}/chrome-mv3"
           ]
         }
       },
@@ -1095,7 +2438,7 @@
     },
     "TagColor": {
       "description": "Fixed terminal palette for tag color overrides.",
-      "enum": [
+      "examples": [
         "red",
         "green",
         "yellow",
@@ -1111,25 +2454,181 @@
         "bright-magenta",
         "bright-cyan"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "red",
+          "description": "Use the terminal's red palette color.",
+          "examples": [
+            "red"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "green",
+          "description": "Use the terminal's green palette color.",
+          "examples": [
+            "green"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "yellow",
+          "description": "Use the terminal's yellow palette color.",
+          "examples": [
+            "yellow"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "blue",
+          "description": "Use the terminal's blue palette color.",
+          "examples": [
+            "blue"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "magenta",
+          "description": "Use the terminal's magenta palette color.",
+          "examples": [
+            "magenta"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "cyan",
+          "description": "Use the terminal's cyan palette color.",
+          "examples": [
+            "cyan"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "white",
+          "description": "Use the terminal's white palette color.",
+          "examples": [
+            "white"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "gray",
+          "description": "Use the terminal's gray palette color.",
+          "examples": [
+            "gray"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "bright-red",
+          "description": "Use the terminal's bright-red palette color.",
+          "examples": [
+            "bright-red"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "bright-green",
+          "description": "Use the terminal's bright-green palette color.",
+          "examples": [
+            "bright-green"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "bright-yellow",
+          "description": "Use the terminal's bright-yellow palette color.",
+          "examples": [
+            "bright-yellow"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "bright-blue",
+          "description": "Use the terminal's bright-blue palette color.",
+          "examples": [
+            "bright-blue"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "bright-magenta",
+          "description": "Use the terminal's bright-magenta palette color.",
+          "examples": [
+            "bright-magenta"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "bright-cyan",
+          "description": "Use the terminal's bright-cyan palette color.",
+          "examples": [
+            "bright-cyan"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "TagConfig": {
       "additionalProperties": false,
       "description": "Optional display overrides for a tag; services may also use undeclared tags.",
+      "examples": [
+        {
+          "color": "cyan",
+          "description": "HTTP APIs"
+        }
+      ],
       "properties": {
         "color": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TagColor"
+              "$ref": "#/$defs/TagColor",
+              "description": "Fixed terminal palette for tag color overrides.",
+              "examples": [
+                "red",
+                "green",
+                "yellow",
+                "blue",
+                "magenta",
+                "cyan",
+                "white",
+                "gray",
+                "bright-red",
+                "bright-green",
+                "bright-yellow",
+                "bright-blue",
+                "bright-magenta",
+                "bright-cyan"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Terminal palette color; inferred by the resolver when omitted."
+          "description": "Terminal palette color; inferred by the resolver when omitted.",
+          "examples": [
+            "red",
+            "green",
+            "yellow",
+            "blue",
+            "magenta",
+            "cyan",
+            "white",
+            "gray",
+            "bright-red",
+            "bright-green",
+            "bright-yellow",
+            "bright-blue",
+            "bright-magenta",
+            "bright-cyan"
+          ]
         },
         "description": {
           "description": "Human-readable description available to the TUI.",
+          "examples": [
+            "HTTP APIs",
+            "Background workers"
+          ],
           "type": [
             "string",
             "null"
@@ -1139,80 +2638,157 @@
       "type": "object"
     },
     "TaskAfter": {
-      "enum": [
+      "description": "Move a create/start task to a later startup phase.",
+      "examples": [
         "services"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "services",
+          "description": "Run after selected services are ready; skip if any selected service failed.",
+          "examples": [
+            "services"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "TaskConfig": {
       "additionalProperties": false,
+      "description": "One-shot command, script, or named steps, run on demand or from a lifecycle hook.",
+      "examples": [
+        {
+          "run_script": "apps/api/package.json#migrate",
+          "when": "lane.start"
+        }
+      ],
       "properties": {
         "after": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TaskAfter"
+              "$ref": "#/$defs/TaskAfter",
+              "description": "Move a create/start task to a later startup phase.",
+              "examples": [
+                "services"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Delay a create/start hook until all selected services are ready."
+          "description": "Delay a create/start hook until all selected services are ready.",
+          "examples": [
+            "services"
+          ]
         },
         "confirm": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string"
+              "$ref": "#/$defs/Templated_string",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Confirmation text; noninteractive clients must explicitly approve."
+          "description": "Confirmation text; noninteractive clients must explicitly approve.",
+          "examples": [
+            "Reset ${{ lane.db_name }} and re-seed it?"
+          ]
         },
         "cwd": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_string"
+              "$ref": "#/$defs/Templated_string",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Working directory relative to the lane's worktree."
+          "description": "Working directory relative to the lane's worktree.",
+          "examples": [
+            "apps/api"
+          ]
         },
         "env": {
           "additionalProperties": {
-            "$ref": "#/$defs/Templated_Scalar"
+            "$ref": "#/$defs/Templated_Scalar",
+            "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+            "examples": [
+              "${{ lane.value }}"
+            ]
           },
           "default": {},
           "description": "Task-specific environment overrides.",
+          "examples": [
+            {
+              "API_URL": "${{ svc.api.url }}"
+            }
+          ],
           "type": "object"
         },
         "fnox": {
           "anyOf": [
             {
-              "$ref": "#/$defs/FnoxConfig"
+              "$ref": "#/$defs/FnoxConfig",
+              "description": "Secrets profile selection for the project or a single unit.",
+              "examples": [
+                {
+                  "profile": "dev"
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Task-specific fnox profile."
+          "description": "Task-specific fnox profile.",
+          "examples": [
+            {
+              "profile": "dev"
+            }
+          ]
         },
         "interactive": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean"
+              "$ref": "#/$defs/Templated_boolean",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Require an attached terminal; incompatible with lifecycle hooks."
+          "description": "Require an attached terminal; incompatible with lifecycle hooks.",
+          "examples": [
+            true,
+            false
+          ]
         },
         "profiles": {
           "description": "Profiles for which this lifecycle hook runs automatically.",
+          "examples": [
+            [
+              "default",
+              "backend"
+            ]
+          ],
           "items": {
+            "description": "Profiles for which this lifecycle hook runs automatically.",
+            "examples": [
+              "default",
+              "backend"
+            ],
             "type": "string"
           },
           "type": [
@@ -1223,39 +2799,96 @@
         "pty": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_boolean"
+              "$ref": "#/$defs/Templated_boolean",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Allocate a pseudoterminal instead of pipes."
+          "description": "Allocate a pseudoterminal instead of pipes.",
+          "examples": [
+            true,
+            false
+          ]
         },
         "run": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Run"
+              "$ref": "#/$defs/Run",
+              "description": "Shell text runs in a shell; argv is passed directly to the executable.",
+              "examples": [
+                "pnpm dev",
+                [
+                  "node",
+                  "server.mjs",
+                  "--port",
+                  "${{ self.port }}"
+                ]
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Shell text or an argument vector. Mutually exclusive with run_script and steps."
+          "description": "Shell text or an argument vector. Mutually exclusive with run_script and steps.",
+          "examples": [
+            "pnpm dev",
+            [
+              "node",
+              "server.mjs",
+              "--port",
+              "${{ self.port }}"
+            ]
+          ]
         },
         "run_script": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RunScript"
+              "$ref": "#/$defs/RunScript",
+              "description": "Script selected from a package manifest, Makefile, or justfile.",
+              "examples": [
+                "apps/api/package.json#dev",
+                {
+                  "name": "fixtures",
+                  "source": "justfile"
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Script source and name, such as package.json#migrate or Makefile#build."
+          "description": "Script source and name, such as package.json#migrate or Makefile#build.",
+          "examples": [
+            "apps/api/package.json#dev",
+            {
+              "name": "fixtures",
+              "source": "justfile"
+            }
+          ]
         },
         "steps": {
           "description": "Sequential task names or infra.setup/infra.teardown entries, always run explicitly.",
+          "examples": [
+            [
+              "infra.teardown.database",
+              "infra.setup.database",
+              "migrate",
+              "seed"
+            ]
+          ],
           "items": {
+            "description": "Sequential task names or infra.setup/infra.teardown entries, always run explicitly.",
+            "examples": [
+              "infra.teardown.database",
+              "infra.setup.database",
+              "migrate",
+              "seed"
+            ],
             "type": "string"
           },
           "type": [
@@ -1266,141 +2899,296 @@
         "timeout": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Templated_ConfigDuration"
+              "$ref": "#/$defs/Templated_ConfigDuration",
+              "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+              "examples": [
+                "${{ lane.value }}"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Maximum run duration, for example 10m."
+          "description": "Maximum run duration, for example 10m.",
+          "examples": [
+            "15s",
+            "10m"
+          ]
         },
         "when": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TaskWhen"
+              "$ref": "#/$defs/TaskWhen",
+              "description": "Lifecycle event that runs a task automatically.",
+              "examples": [
+                "lane.create",
+                "lane.start",
+                "lane.stop",
+                "lane.clean"
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "description": "Lifecycle hook; omitted tasks run only on demand."
+          "description": "Lifecycle hook; omitted tasks run only on demand.",
+          "examples": [
+            "lane.create",
+            "lane.start",
+            "lane.stop",
+            "lane.clean"
+          ]
         }
       },
       "type": "object"
     },
     "TaskWhen": {
-      "enum": [
+      "description": "Lifecycle event that runs a task automatically.",
+      "examples": [
         "lane.create",
         "lane.start",
         "lane.stop",
         "lane.clean"
       ],
-      "type": "string"
+      "oneOf": [
+        {
+          "const": "lane.create",
+          "description": "Run until the task succeeds once for this lane.",
+          "examples": [
+            "lane.create"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "lane.start",
+          "description": "Run each time the lane starts.",
+          "examples": [
+            "lane.start"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "lane.stop",
+          "description": "Run when the lane stops, but not on daemon shutdown.",
+          "examples": [
+            "lane.stop"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "lane.clean",
+          "description": "Run during lane cleanup before infrastructure teardown.",
+          "examples": [
+            "lane.clean"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "TcpReady": {
       "anyOf": [
         {
+          "description": "Set true to probe the unit's primary port; false is invalid.",
+          "examples": [
+            true
+          ],
           "type": "boolean"
         },
         {
+          "description": "Probe a named extra port instead of the primary port.",
+          "examples": [
+            "inspector"
+          ],
           "type": "string"
         }
+      ],
+      "description": "TCP port to probe for readiness.",
+      "examples": [
+        true,
+        "inspector"
       ]
     },
     "Templated_ConfigDuration": {
       "anyOf": [
         {
-          "$ref": "#/$defs/ConfigDuration"
+          "$ref": "#/$defs/ConfigDuration",
+          "description": "Literal value used without expression evaluation.",
+          "examples": [
+            "15s",
+            "10m"
+          ]
         },
         {
+          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "examples": [
+            "${{ lane.value }}"
+          ],
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` template, checked against `T` after evaluation."
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "examples": [
+        "${{ lane.value }}"
+      ]
     },
     "Templated_Scalar": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Scalar"
+          "$ref": "#/$defs/Scalar",
+          "description": "Literal value used without expression evaluation.",
+          "examples": [
+            "acme",
+            20000,
+            true
+          ]
         },
         {
+          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "examples": [
+            "${{ lane.value }}"
+          ],
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` template, checked against `T` after evaluation."
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "examples": [
+        "${{ lane.value }}"
+      ]
     },
     "Templated_boolean": {
       "anyOf": [
         {
+          "description": "Literal value used without expression evaluation.",
           "type": "boolean"
         },
         {
+          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "examples": [
+            "${{ lane.value }}"
+          ],
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` template, checked against `T` after evaluation."
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "examples": [
+        "${{ lane.value }}"
+      ]
     },
     "Templated_string": {
       "anyOf": [
         {
+          "description": "Literal value used without expression evaluation.",
           "type": "string"
         },
         {
+          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "examples": [
+            "${{ lane.value }}"
+          ],
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` template, checked against `T` after evaluation."
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "examples": [
+        "${{ lane.value }}"
+      ]
     },
     "Templated_uint16": {
       "anyOf": [
         {
+          "description": "Literal value used without expression evaluation.",
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0,
           "type": "integer"
         },
         {
+          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "examples": [
+            "${{ lane.value }}"
+          ],
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` template, checked against `T` after evaluation."
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "examples": [
+        "${{ lane.value }}"
+      ]
     },
     "Templated_uint32": {
       "anyOf": [
         {
+          "description": "Literal value used without expression evaluation.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         },
         {
+          "description": "Expression or interpolated string resolved from the lane's runtime context.",
+          "examples": [
+            "${{ lane.value }}"
+          ],
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` template, checked against `T` after evaluation."
+      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+      "examples": [
+        "${{ lane.value }}"
+      ]
     }
   },
   "$id": "https://devlanes.run/schema/v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Fully merged project configuration. Map order is declaration order.",
+  "examples": [
+    {
+      "project": "acme",
+      "services": {
+        "api": {
+          "run_script": "apps/api/package.json#dev"
+        }
+      }
+    }
+  ],
   "properties": {
     "fnox": {
       "anyOf": [
         {
-          "$ref": "#/$defs/FnoxConfig"
+          "$ref": "#/$defs/FnoxConfig",
+          "description": "Secrets profile selection for the project or a single unit.",
+          "examples": [
+            {
+              "profile": "dev"
+            }
+          ]
         },
         {
           "type": "null"
         }
       ],
-      "description": "Project-wide fnox profile for secrets resolved by the runtime."
+      "description": "Project-wide fnox profile for secrets resolved by the runtime.",
+      "examples": [
+        {
+          "profile": "dev"
+        }
+      ]
     },
     "global_env": {
       "additionalProperties": {
-        "$ref": "#/$defs/Templated_Scalar"
+        "$ref": "#/$defs/Templated_Scalar",
+        "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.",
+        "examples": [
+          "${{ lane.value }}"
+        ]
       },
       "default": {},
       "description": "Environment overrides for tasks and services, after derived DEVLANES values.",
+      "examples": [
+        {
+          "API_URL": "${{ svc.api.url }}"
+        }
+      ],
       "type": "object"
     },
     "infra": {
@@ -1418,7 +3206,15 @@
         "setup": {},
         "teardown": {}
       },
-      "description": "Shared and per-lane containers, setup commands, and teardown commands."
+      "description": "Shared and per-lane containers, setup commands, and teardown commands.",
+      "examples": [
+        {
+          "compose": "docker-compose.yml",
+          "hidden": [
+            "postgres"
+          ]
+        }
+      ]
     },
     "lanes": {
       "$ref": "#/$defs/LanesConfig",
@@ -1433,53 +3229,173 @@
         "vars": {},
         "worktree_dir": null
       },
-      "description": "Worktree registration, per-lane variables, and port-block policy."
+      "description": "Worktree registration, per-lane variables, and port-block policy.",
+      "examples": [
+        {
+          "hosts_file": "always",
+          "primary": "main",
+          "vars": {
+            "db_name": "acme_${{ lane.name }}"
+          }
+        }
+      ]
     },
     "profiles": {
       "additionalProperties": {
-        "$ref": "#/$defs/ProfileConfig"
+        "$ref": "#/$defs/ProfileConfig",
+        "description": "Named service selection with optional environment, infrastructure, and script overrides.",
+        "examples": [
+          [
+            "+api",
+            "+web"
+          ],
+          {
+            "include": [
+              "+web"
+            ],
+            "infra": false
+          }
+        ]
       },
       "default": {},
       "description": "Named service selectors with optional environment and infrastructure overrides.",
+      "examples": [
+        {
+          "default": [
+            "+api",
+            "+web"
+          ],
+          "e2e": {
+            "include": [
+              "*"
+            ],
+            "run_scripts": {
+              "dev": "start"
+            }
+          }
+        }
+      ],
       "type": "object"
     },
     "project": {
       "description": "Project identity shared by every worktree; lowercase letters, digits, dots, underscores, and dashes.",
+      "examples": [
+        "acme"
+      ],
       "type": "string"
     },
     "services": {
       "additionalProperties": {
-        "$ref": "#/$defs/ServiceConfig"
+        "$ref": "#/$defs/ServiceConfig",
+        "description": "Service settings after typed local and template merging.",
+        "examples": [
+          {
+            "hosts": [
+              "api.${{ lane.domain }}"
+            ],
+            "run_script": "apps/api/package.json#dev",
+            "tags": [
+              "api"
+            ]
+          }
+        ]
       },
       "default": {},
       "description": "Long-running processes started together after infrastructure and before-service tasks.",
+      "examples": [
+        {
+          "api": {
+            "hosts": [
+              "api.${{ lane.domain }}"
+            ],
+            "run_script": "apps/api/package.json#dev"
+          }
+        }
+      ],
       "type": "object"
     },
     "tags": {
       "additionalProperties": {
-        "$ref": "#/$defs/TagConfig"
+        "$ref": "#/$defs/TagConfig",
+        "description": "Optional display overrides for a tag; services may also use undeclared tags.",
+        "examples": [
+          {
+            "color": "cyan",
+            "description": "HTTP APIs"
+          }
+        ]
       },
       "default": {},
       "description": "Tag settings. Units are colored by their first tag; colors are inferred from common tag names (api, web, worker, db, ...) when not set here.",
+      "examples": [
+        {
+          "api": {
+            "color": "cyan",
+            "description": "HTTP APIs"
+          }
+        }
+      ],
       "type": "object"
     },
     "tasks": {
       "additionalProperties": {
-        "$ref": "#/$defs/TaskConfig"
+        "$ref": "#/$defs/TaskConfig",
+        "description": "One-shot command, script, or named steps, run on demand or from a lifecycle hook.",
+        "examples": [
+          {
+            "run_script": "apps/api/package.json#migrate",
+            "when": "lane.start"
+          }
+        ]
       },
       "default": {},
       "description": "One-shot commands; lifecycle hooks execute in declaration order.",
+      "examples": [
+        {
+          "migrate": {
+            "run_script": "apps/api/package.json#migrate",
+            "when": "lane.start"
+          }
+        }
+      ],
       "type": "object"
     },
     "templates": {
       "additionalProperties": {
-        "$ref": "#/$defs/ServiceConfig"
+        "$ref": "#/$defs/ServiceConfig",
+        "description": "Service settings after typed local and template merging.",
+        "examples": [
+          {
+            "hosts": [
+              "api.${{ lane.domain }}"
+            ],
+            "run_script": "apps/api/package.json#dev",
+            "tags": [
+              "api"
+            ]
+          }
+        ]
       },
       "default": {},
       "description": "Reusable service settings, inherited with extends after local overrides are merged.",
+      "examples": [
+        {
+          "fastify-api": {
+            "platform": "node",
+            "ready": {
+              "http": {
+                "path": "/-/health"
+              }
+            },
+            "tags": [
+              "api"
+            ]
+          }
+        }
+      ],
       "type": "object"
     }
   },
-  "title": "ProjectConfig",
+  "title": "devlanes",
   "type": "object"
 }

@@ -1,6 +1,7 @@
 mod dogfood;
 
 mod artifacts;
+mod schema_docs;
 mod tags;
 
 use devlanes_config::*;
