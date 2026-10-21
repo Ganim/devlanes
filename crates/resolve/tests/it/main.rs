@@ -1,6 +1,7 @@
 //! Lane resolution tests: env layering, ports, selection, namespaces and
 //! snapshots of the example configs.
 
+mod script_notes;
 mod support;
 
 use std::{

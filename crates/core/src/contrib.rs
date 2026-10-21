@@ -268,13 +268,22 @@ pub struct ScriptRequest<'a> {
 }
 
 /// Rendered script command.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScriptPlan {
     /// Program first.
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     /// Script text when the source defines one, for presets that inspect it.
     pub body: Option<String>,
+    /// Non-fatal findings, such as a package manager picked from a lockfile
+    /// because `packageManager` is missing. Lane resolution copies them into
+    /// the launch notes shown by `env --explain` and `why`.
+    #[serde(default)]
+    pub notes: Vec<String>,
+    /// One line on how the runner was chosen, such as
+    /// `pnpm 10.4.1 (packageManager in package.json)`. Shown with the notes.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// Renders `run_script` references for one kind of source file

@@ -237,6 +237,8 @@ impl ScriptRunner for FakeRunner {
             argv,
             cwd: file.parent().map(Path::to_path_buf).unwrap_or_default(),
             body: Some(format!("echo {}", request.name)),
+            notes: Vec::new(),
+            detail: None,
         })
     }
 }

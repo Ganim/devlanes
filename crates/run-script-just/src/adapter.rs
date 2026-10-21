@@ -49,6 +49,8 @@ impl ScriptRunner for JustRecipes {
             argv: planned.argv,
             cwd: planned.cwd,
             body: None,
+            notes: Vec::new(),
+            detail: None,
         })
     }
 }

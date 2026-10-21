@@ -42,12 +42,12 @@ impl ScriptRunner for NpmScripts {
         .await
         .map_err(|e| Error::Integration(format!("package.json script resolution failed: {e}")))?
         .map_err(into_core)?;
-        // `planned.notes` and `planned.version` are dropped here: `ScriptPlan`
-        // has no field for them yet (needs a core change).
         Ok(ScriptPlan {
+            detail: Some(planned.detail(request.worktree)),
             argv: planned.argv,
             cwd: planned.cwd,
             body: Some(planned.script_body),
+            notes: planned.notes,
         })
     }
 }

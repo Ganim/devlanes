@@ -663,6 +663,11 @@ impl<E: Extensions> Planner<'_, '_, E> {
                             .1
                     }
                 };
+                // The rendered plan's findings (how the runner was chosen, a
+                // missing packageManager field) surface with the unit's notes.
+                let runner = script.as_ref().map_or("run_script", |s| s.runner);
+                notes.extend(plan.detail.map(|detail| format!("{runner}: {detail}")));
+                notes.extend(plan.notes);
                 (plan.argv, plan.cwd)
             }
         };

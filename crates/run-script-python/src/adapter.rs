@@ -44,11 +44,12 @@ impl ScriptRunner for PythonScripts {
             PythonError::Read { .. } => Error::Integration(error.to_string()),
             other => Error::InvalidInput(other.to_string()),
         })?;
-        // `planned.notes` are dropped: `ScriptPlan` has no field for them yet.
         Ok(ScriptPlan {
+            detail: Some(planned.detail()),
             argv: planned.argv,
             cwd: planned.cwd,
             body: None,
+            notes: planned.notes,
         })
     }
 }

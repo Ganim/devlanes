@@ -317,6 +317,10 @@ fn plan_uses_manifest_dir_and_exposes_body() {
     assert_eq!(declared.cwd, temp.path().join("apps/api"));
     assert_eq!(declared.manager, PackageManager::Pnpm);
     assert_eq!(declared.version.as_deref(), Some("10.4.1"));
+    assert_eq!(
+        declared.detail(temp.path()),
+        "pnpm 10.4.1 (packageManager in package.json)"
+    );
     assert!(declared.notes.is_empty(), "{:?}", declared.notes);
     assert_eq!(declared.script_body, "wrangler dev --persist-to .state");
 
@@ -409,6 +413,16 @@ async fn adapter_resolves_through_core_trait() {
     assert_eq!(plan.argv, ["npm", "run", "dev", "--", "--port", "1"]);
     assert_eq!(plan.cwd, temp.path().join("web"));
     assert_eq!(plan.body.as_deref(), Some("vite"));
+    assert_eq!(
+        plan.detail.as_deref(),
+        Some("npm (lockfile package-lock.json)")
+    );
+    assert_eq!(
+        plan.notes,
+        [
+            r#"no packageManager field; detected npm from package-lock.json. Add "packageManager": "npm@<version>" to package.json"#
+        ]
+    );
     let missing = contrib::ScriptRequest {
         name: "start",
         ..request

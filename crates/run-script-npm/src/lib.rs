@@ -61,6 +61,36 @@ pub struct LaunchPlan {
     pub script_body: String,
 }
 
+impl LaunchPlan {
+    /// One line on how the manager was chosen, with paths relative to
+    /// `worktree`, e.g. `pnpm 10.4.1 (packageManager in package.json)`.
+    pub fn detail(&self, worktree: &Path) -> String {
+        let shown = |path: &Path| {
+            path.strip_prefix(worktree)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        };
+        let manager = match (&self.version, self.manager) {
+            (Some(version), manager) => format!("{} {version}", manager.field_name()),
+            (None, PackageManager::YarnClassic) => "yarn 1".to_owned(),
+            (None, PackageManager::YarnBerry) => "yarn 2+".to_owned(),
+            (None, manager) => manager.field_name().to_owned(),
+        };
+        let source = match &self.detection {
+            DetectionSource::PackageManagerField(path) => {
+                format!("packageManager in {}", shown(path))
+            }
+            DetectionSource::DevEngines(path) => {
+                format!("devEngines.packageManager in {}", shown(path))
+            }
+            DetectionSource::Lockfile(path) => format!("lockfile {}", shown(path)),
+            DetectionSource::Default => "default".to_owned(),
+        };
+        format!("{manager} ({source})")
+    }
+}
+
 /// A script read from a `package.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageScript {

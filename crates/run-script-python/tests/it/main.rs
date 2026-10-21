@@ -176,6 +176,11 @@ async fn adapter_resolves_through_core_trait() {
     let plan = runner.resolve(&request).await.expect("resolve");
     assert_eq!(plan.argv, ["uv", "run", "serve", "--port", "1"]);
     assert_eq!(plan.cwd, temp.path().join("svc"));
+    assert_eq!(
+        plan.detail.as_deref(),
+        Some("uv (uv.lock), entry point acme:main")
+    );
+    assert!(plan.notes.is_empty(), "{:?}", plan.notes);
     let missing = contrib::ScriptRequest {
         name: "nope",
         ..request

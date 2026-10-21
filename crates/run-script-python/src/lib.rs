@@ -71,6 +71,9 @@ pub struct LaunchPlan {
     /// Directory containing the `pyproject.toml`.
     pub cwd: PathBuf,
     pub runner: PythonRunner,
+    /// What selected the runner: `uv.lock`, `[tool.uv]` or `poetry.lock`,
+    /// with the lockfile path relative to the worktree.
+    pub evidence: String,
     /// Entry point such as `acme.server:main`.
     pub entry_point: Option<String>,
     /// Non-fatal findings, such as both tools being configured.
@@ -235,6 +238,17 @@ pub fn plan(request: &ScriptRequest<'_>) -> Result<LaunchPlan, PythonError> {
         (false, true) => PythonRunner::Poetry,
         (false, false) => return Err(PythonError::NoRunner { file }),
     };
+    let shown = |path: &Path| {
+        path.strip_prefix(&worktree)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    };
+    let evidence = match (runner, &uv_lock) {
+        (PythonRunner::Uv, Some(lock)) => shown(lock),
+        (PythonRunner::Uv, None) => "[tool.uv]".to_owned(),
+        (PythonRunner::Poetry, _) => shown(&cwd.join("poetry.lock")),
+    };
     // uv only installs entry points for packaged projects, so the script
     // would not exist in the environment.
     let in_project_scripts = project_scripts.is_some_and(|s| s.contains_key(request.name));
@@ -250,9 +264,22 @@ pub fn plan(request: &ScriptRequest<'_>) -> Result<LaunchPlan, PythonError> {
         argv: runner.run_argv(request.name, request.extra_args),
         cwd,
         runner,
+        evidence,
         entry_point,
         notes,
     })
+}
+
+impl LaunchPlan {
+    /// One line on the chosen tool and entry point, e.g.
+    /// `uv (uv.lock), entry point acme.server:main`.
+    pub fn detail(&self) -> String {
+        let mut detail = format!("{} ({})", self.runner.program(), self.evidence);
+        if let Some(entry) = self.entry_point.as_deref().filter(|e| !e.is_empty()) {
+            detail.push_str(&format!(", entry point {entry}"));
+        }
+        detail
+    }
 }
 
 /// Reads a poetry script entry: a string, or a table naming the callable.

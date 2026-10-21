@@ -48,6 +48,8 @@ impl ScriptRunner for CargoBins {
             argv: planned.argv,
             cwd: planned.cwd,
             body: None,
+            notes: Vec::new(),
+            detail: None,
         })
     }
 }
