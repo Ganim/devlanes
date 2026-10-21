@@ -67,6 +67,7 @@ pub fn run() -> ExitCode {
             Ok(handler) => handler,
             Err(error) => {
                 tracing::error!(%error, "engine startup failed");
+                let _ = readiness.failed(&error.to_string());
                 return 1;
             }
         };

@@ -7,10 +7,13 @@ mod failures;
 mod fakes;
 mod hosts;
 mod pacing;
+mod profiles;
 mod pty;
 mod remote;
 mod resolver;
+mod retention;
 mod server;
+mod urls;
 
 use std::{
     collections::BTreeMap,
@@ -124,6 +127,8 @@ pub struct Setup {
     pub gate: Option<Arc<dyn devlanes_core::gate::StartGate>>,
     /// User config; the DNS server (when configured) then binds an ephemeral port.
     pub user: Option<devlanes_config::UserConfig>,
+    /// Route sink, e.g. one reporting a bound HTTPS port.
+    pub routes: Option<Arc<dyn devlanes_daemon::integrations::RouteSink>>,
 }
 
 /// Opens an engine over `home` (reusing its state.db when present).
@@ -136,6 +141,9 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
     integ.start_gate = setup.gate.clone();
     if setup.infra {
         integ.infra = Arc::new(infra.clone());
+    }
+    if let Some(routes) = setup.routes {
+        integ.routes = routes;
     }
     std::fs::create_dir_all(home).expect("home");
     let store = Store::open(home.join("state.db")).await.expect("store");

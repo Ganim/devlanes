@@ -82,7 +82,7 @@ pub async fn engine(
                 HOSTS_PROBE_TIMEOUT,
             ))
         });
-    let store = devlanes_state::Store::open(&paths.db).await?;
+    let store = open_store(&paths.db).await?;
     let (ca_env, ca_status, ca) = certificate_authority(&paths.home, user.tls.ca).await;
     let routes = Arc::new(proxy(&user, ca, shutdown.clone()).await);
     let infra = Arc::new(ContainerInfra::new().await);
@@ -311,6 +311,20 @@ fn metrics_sources() -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
         Err(error) => tracing::debug!(%error, "container metrics unavailable"),
     }
     sources
+}
+
+/// Opens state.db. A database from before the Diesel store cannot be migrated;
+/// the error names the reset command (the first line reaches the spawning CLI).
+async fn open_store(db: &Path) -> anyhow::Result<devlanes_state::Store> {
+    match devlanes_state::Store::open(db).await {
+        Ok(store) => Ok(store),
+        Err(devlanes_state::Error::LegacySchema { version }) => Err(anyhow::anyhow!(
+            "STATE_LEGACY_SCHEMA: state.db has a pre-release schema ({version}); run `devlanes daemon reset-state --yes`\n\
+             database: {}",
+            db.display()
+        )),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Checks the file `devlanes certs trust --resolver` writes.
@@ -1490,5 +1504,40 @@ mod tests {
             certificate_authority_with(tmp.path(), devlanes_config::CaKind::Mkcert, &program).await;
         assert!(ca.is_none());
         assert_eq!(status["error"], "ca_invalid");
+    }
+
+    /// An empty one-page SQLite database whose header carries `user_version`.
+    fn legacy_database(user_version: u32) -> Vec<u8> {
+        let mut page = vec![0u8; 4096];
+        page[..16].copy_from_slice(b"SQLite format 3\0");
+        page[16..18].copy_from_slice(&4096u16.to_be_bytes());
+        page[18..24].copy_from_slice(&[1, 1, 0, 64, 32, 32]);
+        page[24..28].copy_from_slice(&1u32.to_be_bytes()); // change counter
+        page[28..32].copy_from_slice(&1u32.to_be_bytes()); // pages
+        page[44..48].copy_from_slice(&4u32.to_be_bytes()); // schema format
+        page[56..60].copy_from_slice(&1u32.to_be_bytes()); // UTF-8
+        page[60..64].copy_from_slice(&user_version.to_be_bytes());
+        page[92..96].copy_from_slice(&1u32.to_be_bytes()); // valid for counter 1
+        page[96..100].copy_from_slice(&3_045_000u32.to_be_bytes());
+        // Empty sqlite_schema: a table leaf with no cells, content at the page end.
+        page[100] = 0x0d;
+        page[105..107].copy_from_slice(&4096u16.to_be_bytes());
+        page
+    }
+
+    #[tokio::test]
+    /// A pre-Diesel state.db fails startup with the stable code and the reset
+    /// command on the first line, which the spawning CLI shows.
+    async fn legacy_state_names_the_reset_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("state.db");
+        std::fs::write(&db, legacy_database(4)).expect("db");
+        let error = open_store(&db).await.err().expect("legacy schema refused");
+        let message = error.to_string();
+        let first = message.lines().next().unwrap_or_default();
+        assert!(first.starts_with("STATE_LEGACY_SCHEMA:"), "{message}");
+        assert!(first.contains("devlanes daemon reset-state --yes"), "{message}");
+        assert!(first.len() < 127, "fits the readiness line");
+        assert!(message.contains(&db.display().to_string()));
     }
 }

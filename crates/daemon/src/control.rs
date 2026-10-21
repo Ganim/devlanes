@@ -99,7 +99,7 @@ impl Inner {
                 &lane,
                 StartOptions {
                     selectors,
-                    profile: selection.profile.clone(),
+                    profiles: selection.profile_names(),
                     env: carries_env(context),
                     overrides: selection.env.clone(),
                     actor: context.actor.clone(),
@@ -159,7 +159,7 @@ impl Inner {
                 &selectors,
                 StartOptions {
                     selectors: selectors.clone(),
-                    profile: None,
+                    profiles: selection.profile_names(),
                     env: carries_env(context),
                     overrides: selection.env.clone(),
                     actor: context.actor.clone(),
@@ -204,7 +204,7 @@ impl Inner {
                     &lane,
                     StartOptions {
                         selectors: Vec::new(),
-                        profile: None,
+                        profiles: Vec::new(),
                         env: Some(env.clone()),
                         overrides: EnvMap::new(),
                         actor: context.actor.clone(),
@@ -294,7 +294,7 @@ impl Inner {
                     &lane,
                     StartOptions {
                         selectors: Vec::new(),
-                        profile: None,
+                        profiles: Vec::new(),
                         env,
                         overrides: EnvMap::new(),
                         actor: context.actor.clone(),
@@ -481,6 +481,7 @@ impl Inner {
             stop: devlanes_core::StopPolicy::default(),
             literal_port: None,
             preset: None,
+            color: None,
         };
         let (host, _) = self.spawn_unit(&project, &lane, request).await?;
         host.set_state(crate::units::UnitState::Ready);
@@ -605,6 +606,26 @@ impl Inner {
             "exit_code": outcome.code,
             "state": if outcome.code == Some(0) { "exited" } else { "failed" },
         }))
+    }
+
+    /// `profile.list`: the profiles of the lane's config, for pickers. The lane's
+    /// current choice is `LaneSummary.profiles`.
+    pub(crate) async fn profile_list(
+        self: &Arc<Self>,
+        context: &Context,
+    ) -> Result<Value, RpcError> {
+        let (project, lane) = self.target_lane(context).await?;
+        let st = lane.st();
+        let reference = st.reference(&project.name());
+        let config = match &st.config {
+            crate::model::ConfigState::Loaded(config) => config,
+            crate::model::ConfigState::Invalid(error) => return Err(error.clone()),
+            crate::model::ConfigState::Missing => {
+                return Err(RpcError::new("no_config", json!({"lane": reference}), 1));
+            }
+        };
+        let items = devlanes_resolve::profile_summaries(config);
+        Ok(json!({"lane": reference, "items": items}))
     }
 
     /// `task.list`: tasks plus the `run_script` sources the config references.

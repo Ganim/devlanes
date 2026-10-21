@@ -85,6 +85,8 @@ pub(crate) struct Inner {
     pub pacing: crate::pacing::Pacing,
     /// Embedded DNS server state for `doctor` (`null` without the resolver strategy).
     pub dns: Mutex<Value>,
+    /// The latest state.db retention pass, for `doctor`.
+    pub last_prune: Mutex<Option<crate::maintenance::LastPrune>>,
 }
 
 /// Cheap handle implementing [`Handler`].
@@ -120,6 +122,7 @@ impl Engine {
                 remote: crate::remote::Remotes::default(),
                 pacing: crate::pacing::Pacing::default(),
                 dns: Mutex::new(Value::Null),
+                last_prune: Mutex::new(None),
             }),
         }
     }
@@ -293,6 +296,7 @@ impl Inner {
             Method::Exec => self.exec_method(params, &context).await,
             Method::Run => self.run_method(params, &context, &session).await,
             Method::TaskList => self.task_list(&context).await,
+            Method::ProfileList => self.profile_list(&context).await,
             Method::Logs => self.logs_method(params, &context, &session).await,
             Method::Wait => self.wait_method(params, &context).await,
             Method::Attach => self.attach_method(params, &context, &session).await,
@@ -547,6 +551,15 @@ impl Engine {
     /// Subscribes to engine events (tests and in-process clients).
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<devlanes_proto::Event> {
         self.inner.bus.subscribe()
+    }
+
+    /// Runs state.db retention now, as of `now_ms` (Unix milliseconds), with the
+    /// policy from the user config. The maintenance loop does this hourly.
+    pub async fn prune_state_at(
+        &self,
+        now_ms: i64,
+    ) -> Result<devlanes_state::PruneReport, devlanes_state::Error> {
+        self.inner.prune_state(now_ms).await
     }
 }
 

@@ -68,6 +68,17 @@ impl Readiness {
         self.finish(b"already-running\n")
     }
 
+    /// Reports a startup failure; the spawning client shows the line as the error.
+    /// The client reads at most 128 bytes, so longer messages are cut.
+    pub fn failed(self, message: &str) -> std::io::Result<()> {
+        let mut line: String = message.lines().next().unwrap_or_default().to_owned();
+        while line.len() > 126 {
+            line.pop();
+        }
+        line.push('\n');
+        self.finish(line.as_bytes())
+    }
+
     /// Redirecting stdout matters because a held pipe keeps the CLI's reader waiting forever.
     fn finish(self, line: &[u8]) -> std::io::Result<()> {
         if !self.enabled {

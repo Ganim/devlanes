@@ -660,13 +660,17 @@ impl Inner {
             {
                 push(&mut reasons, &error.code, error.data);
             }
-            if let Some((profile, selected)) = Inner::profile_services(&lane)
+            if let Some((profiles, selected)) = Inner::profile_services(&lane)
                 && !selected.contains(&service.name)
             {
                 if !service.autostart {
                     push(&mut reasons, "autostart_off", json!({}));
                 } else {
-                    push(&mut reasons, "not_in_profile", json!({"profile": profile}));
+                    push(
+                        &mut reasons,
+                        "not_in_profile",
+                        json!({"profile": profiles.first(), "profiles": profiles}),
+                    );
                 }
             }
             if crate::ready::tcp_open(service.port).await {
@@ -856,6 +860,7 @@ impl Inner {
             "subscribers": self.bus.subscribers(),
             "hosts": self.hosts_status(),
             "dns": self.dns_doctor().await,
+            "state": self.state_doctor().await,
         }))
     }
 }

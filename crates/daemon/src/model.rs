@@ -81,6 +81,8 @@ pub(crate) struct ServiceInfo {
     pub tags: Vec<String>,
     pub hidden: bool,
     pub autostart: bool,
+    /// Palette name from the layout.
+    pub color: String,
 }
 
 /// Synchronous layout of a lane, available while it is idle.
@@ -119,6 +121,8 @@ pub(crate) struct UnitRec {
     pub preset: Option<String>,
     /// Contributor-prepared files, kept for cross-lane launch checks.
     pub files: Vec<devlanes_core::contrib::PreparedFile>,
+    /// Palette name for `UnitSummary.color`.
+    pub color: Option<String>,
 }
 
 /// Mutable state of one worktree lane.
@@ -134,7 +138,8 @@ pub(crate) struct LaneSt {
     pub config_changed: bool,
     pub env: Option<Arc<EnvMap>>,
     pub overrides: EnvMap,
-    pub profile: Option<String>,
+    /// Profiles of the last start, in the order given; empty means the default.
+    pub profiles: Vec<String>,
     pub units: BTreeMap<String, UnitRec>,
     pub started_at_ms: Option<u64>,
     pub busy: Option<&'static str>,
@@ -172,7 +177,7 @@ impl LaneSt {
             config_changed: false,
             env: None,
             overrides: EnvMap::new(),
-            profile: None,
+            profiles: Vec::new(),
             units: BTreeMap::new(),
             started_at_ms: None,
             busy: None,
@@ -242,6 +247,38 @@ impl LaneSt {
                 .as_ref()
                 .is_some_and(|lane| lane.desired_state == DesiredState::Running)
     }
+}
+
+/// The lane's profiles for the single `lanes.profile` column: one name as is (what
+/// older daemons wrote), several as a JSON array.
+pub(crate) fn encode_profiles(names: &[String]) -> Option<String> {
+    match names {
+        [] => None,
+        [one] if !one.starts_with('[') => Some(one.clone()),
+        many => serde_json::to_string(many).ok(),
+    }
+}
+
+/// Reads what [`encode_profiles`] stored.
+pub(crate) fn decode_profiles(stored: Option<&str>) -> Vec<String> {
+    match stored {
+        None | Some("") => Vec::new(),
+        Some(text) => serde_json::from_str::<Vec<String>>(text)
+            .ok()
+            .filter(|_| text.starts_with('['))
+            .unwrap_or_else(|| vec![text.to_owned()]),
+    }
+}
+
+/// Color of a unit without config tags of its own (exec units, containers,
+/// infra commands): from its name and the project's `tags:` colors.
+pub(crate) fn derived_color(lane: &LaneSt, name: &str) -> String {
+    let overrides = lane
+        .config
+        .loaded()
+        .map(|config| devlanes_resolve::tag_colors(config))
+        .unwrap_or_default();
+    devlanes_core::color::unit_color(&[], name, None, &overrides).to_owned()
 }
 
 /// Directory name used in references of unassigned lanes.
@@ -388,8 +425,7 @@ pub(crate) fn unit_summary(lane: &str, name: &str, unit: &UnitRec) -> UnitSummar
         started_at_ms: Some(info.started_at_ms),
         cpu_percent: None,
         memory_bytes: None,
-        // The engine fills the resolved color later; config overrides are not reachable here.
-        color: None,
+        color: unit.color.clone(),
     }
 }
 
@@ -409,6 +445,7 @@ pub(crate) fn idle_summary(lane: &str, service: &ServiceInfo) -> UnitSummary {
         autostart: service.autostart,
         hidden: service.hidden,
         tags: service.tags.clone(),
+        color: Some(service.color.clone()),
         ..UnitSummary::default()
     }
 }
@@ -443,6 +480,11 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
             _ => None,
         })
         .or_else(|| lane.last_error.clone());
+    let profiles = if lane.profiles.is_empty() {
+        decode_profiles(lane.record.as_ref().and_then(|r| r.profile.as_deref()))
+    } else {
+        lane.profiles.clone()
+    };
     LaneSummary {
         reference,
         project: project.to_owned(),
@@ -452,10 +494,8 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
         state: lane.state_word().into(),
         config_changed: lane.config_changed,
         units,
-        profile: lane
-            .profile
-            .clone()
-            .or_else(|| lane.record.as_ref().and_then(|r| r.profile.clone())),
+        profile: profiles.first().cloned(),
+        profiles,
         moves_to: lane.moves_to,
         domain: lane.view.as_ref().map(|view| view.domain.clone()),
         port_block: lane.view.as_ref().map(|view| {
@@ -509,6 +549,7 @@ fn container_summaries(lane: &LaneSt) -> Vec<devlanes_proto::ContainerSummary> {
                 name: name.clone(),
                 ports,
                 hidden: hidden.contains(name),
+                color: Some(derived_color(lane, name)),
             }
         })
         .collect()
@@ -526,4 +567,21 @@ pub(crate) fn config_error(error: &devlanes_config::ConfigError) -> RpcError {
         }),
         1,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    /// One profile stays readable by older daemons; several round-trip as JSON.
+    fn profiles_round_trip_through_one_column() {
+        let names = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(encode_profiles(&[]), None);
+        assert_eq!(encode_profiles(&names(&["dev"])).as_deref(), Some("dev"));
+        for list in [vec![], names(&["dev"]), names(&["a", "b,c"]), names(&["[x"])] {
+            assert_eq!(decode_profiles(encode_profiles(&list).as_deref()), list);
+        }
+        assert_eq!(decode_profiles(Some("[broken")), names(&["[broken"]));
+    }
 }

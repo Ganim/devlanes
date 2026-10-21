@@ -383,6 +383,19 @@ pub trait RouteSink: Send + Sync {
     fn status(&self) -> Value {
         Value::Null
     }
+    /// Port the HTTPS listener bound (443, its fallback or `proxy.https_port`),
+    /// read from [`Self::status`]'s `https: {bound, port}`; public URLs carry it.
+    fn https_port(&self) -> Option<u16> {
+        let status = self.status();
+        let https = status.get("https")?;
+        if https.get("bound").and_then(Value::as_bool) != Some(true) {
+            return None;
+        }
+        https
+            .get("port")
+            .and_then(Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok())
+    }
 }
 
 /// Sink that drops routes, for tests and proxy-less setups.

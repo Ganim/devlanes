@@ -98,6 +98,7 @@ impl Inner {
 
     /// `hosts`: every route with its lane, unit, port and state.
     pub(crate) fn hosts(&self) -> Value {
+        let https_port = self.integ.routes.https_port();
         let items: Vec<Value> = self
             .route_entries()
             .into_iter()
@@ -109,8 +110,12 @@ impl Inner {
                     RouteStatus::Failed { .. } => "failed",
                     RouteStatus::Reconnecting => "reconnecting",
                 };
+                // Wildcards have no single address to open.
+                let url = (!route.host.contains('*'))
+                    .then(|| devlanes_resolve::https_url(&route.host, https_port));
                 json!({
                     "host": route.host,
+                    "url": url,
                     "project": route.project,
                     "lane": route.lane,
                     "unit": route.unit,

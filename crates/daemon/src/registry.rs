@@ -325,7 +325,7 @@ impl Inner {
                     .allocation(BlockOwner::Lane(record.id))
                     .await
                     .map_err(store_error)?;
-                st.profile = record.profile.clone();
+                st.profiles = crate::model::decode_profiles(record.profile.as_deref());
             }
             map.insert(worktree.id, new_lane(worktree.id, st));
         }
@@ -904,6 +904,7 @@ impl Inner {
         input.lanes_main = lanes_main;
         input.contributors = &self.integ.contributors;
         input.ca_env = &self.integ.ca_env;
+        input.public_https_port = self.integ.routes.https_port();
         let layout = devlanes_resolve::lane_layout(&input)
             .map_err(|error| crate::resolve::resolve_error(&error))?;
         let services = layout
@@ -919,6 +920,7 @@ impl Inner {
                 tags: service.tags.clone(),
                 hidden: service.hidden,
                 autostart: service.autostart,
+                color: service.color.clone(),
             })
             .collect();
         let infra_routes = infra_routes(&config, &facts, &layout, &infra, &client_env, &dotenv);

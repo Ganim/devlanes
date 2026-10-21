@@ -116,7 +116,8 @@ impl FakeUnit {
         if let Ok(mut sender) = self.sender.lock() {
             sender.take();
         }
-        let _ = self.exit.send(Some(outcome));
+        // send_replace: `send` drops the value while nobody waits yet.
+        self.exit.send_replace(Some(outcome));
     }
 
     /// Interprets the script.
@@ -262,7 +263,7 @@ impl Unit for FakeUnit {
     }
     /// Ends the unit with the requested signal.
     async fn stop(&self, policy: StopPolicy) -> Result<(), Error> {
-        let _ = self.stop.send(true);
+        self.stop.send_replace(true);
         self.end(ExitOutcome {
             code: None,
             signal: Some(policy.signal),

@@ -92,7 +92,7 @@ impl Inner {
         fallback: Option<Arc<EnvMap>>,
     ) -> Result<Arc<ResolvedLane>, RpcError> {
         let reference = lane.st().reference(&project.name());
-        let (config, allocation, env, overrides, profile, infra_ns, index) = {
+        let (config, allocation, env, overrides, profiles, infra_ns, index) = {
             let st = lane.st();
             let config = match &st.config {
                 ConfigState::Loaded(config) => config.clone(),
@@ -118,7 +118,7 @@ impl Inner {
                 allocation,
                 env,
                 st.overrides.clone(),
-                st.profile.clone(),
+                st.profiles.clone(),
                 st.infra_ns.clone().unwrap_or(Value::Null),
                 st.index(),
             )
@@ -141,11 +141,12 @@ impl Inner {
         input.infra = &infra_ns;
         input.lanes_main = lanes_main.as_ref();
         input.projects = &projects;
-        input.profile = profile.as_deref();
+        input.profiles = &profiles;
         input.overrides = &overrides;
         input.contributors = &self.integ.contributors;
         input.script_runners = &self.integ.script_runners;
         input.ca_env = &self.integ.ca_env;
+        input.public_https_port = self.integ.routes.https_port();
         devlanes_resolve::resolve_lane(input)
             .await
             .map(Arc::new)

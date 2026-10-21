@@ -318,22 +318,4 @@ impl Inner {
         }
         Ok(json!({"units": units}))
     }
-
-    /// Daily retention: run history 30 days, rollups per `metrics.retention`.
-    pub(crate) async fn retention_loop(self: Arc<Self>) {
-        let mut tick = tokio::time::interval(Duration::from_secs(86_400));
-        loop {
-            tokio::select! {
-                () = self.shutdown.cancelled() => return,
-                _ = tick.tick() => {}
-            }
-            let now = i64::try_from(now_ms()).unwrap_or(i64::MAX);
-            let runs = now - 30 * 86_400_000;
-            let metrics = now
-                - i64::try_from(self.opts.user.metrics.retention.0.as_millis()).unwrap_or(i64::MAX);
-            if let Err(error) = self.store.prune_history(runs, metrics.max(0)).await {
-                tracing::warn!(%error, "history retention failed");
-            }
-        }
-    }
 }

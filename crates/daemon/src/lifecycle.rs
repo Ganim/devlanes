@@ -26,7 +26,7 @@ use tokio::time::Instant;
 use crate::{
     Session,
     engine::{Inner, with_ownership},
-    integrations::{InfraPortNeed, ManagedUnit, PlannedUnit},
+    integrations::{InfraPortNeed, InfraSpec, ManagedUnit, PlannedUnit},
     model::{EnvMap, Kind, LaneRt, ProjectRt, UnitRec, core_actor, is_mine, unit_summary},
     ready::Readiness,
     registry::{internal, store_error},
@@ -56,6 +56,8 @@ pub(crate) struct SpawnRequest {
     pub stop: StopPolicy,
     pub literal_port: Option<u16>,
     pub preset: Option<String>,
+    /// Palette name; `None` derives one from the name at spawn.
+    pub color: Option<String>,
 }
 
 /// Copies an environment with its provenance (the type is deliberately not `Clone`).
@@ -88,6 +90,7 @@ impl SpawnRequest {
             stop: service.stop,
             literal_port: service.literal_port.then_some(service.port),
             preset: service.preset.clone(),
+            color: Some(service.color.clone()),
         }
     }
 
@@ -118,6 +121,7 @@ impl SpawnRequest {
             stop: StopPolicy::default(),
             literal_port: None,
             preset: None,
+            color: None,
         }
     }
 }
@@ -245,8 +249,13 @@ pub(crate) struct StartCx {
     pub reference: String,
     pub actor: Actor,
     pub services: Vec<String>,
-    pub profile: Option<String>,
+    /// Profiles in effect, in the order given.
+    pub profiles: Vec<String>,
+    /// False when the profiles turn infra off. Set from the selection before infra
+    /// (literal values), then from [`ResolvedLane::infra_enabled`] once resolved.
     pub infra_enabled: bool,
+    /// Some profile's `infra` is an expression, so only resolution can decide.
+    pub infra_templated: bool,
     pub whole_lane: bool,
     pub setup_only: bool,
     pub session: Option<Session>,
@@ -305,6 +314,14 @@ fn reason(code: &str, data: Value) -> RpcError {
     RpcError::new(code, data, 0)
 }
 
+/// Why infra and setup were skipped for the lane's profiles.
+fn profile_disables_infra(cx: &StartCx) -> RpcError {
+    reason(
+        "profile_disables_infra",
+        json!({"profile": cx.profiles.first(), "profiles": cx.profiles}),
+    )
+}
+
 /// Infra failures as RPC errors.
 fn infra_error(error: crate::integrations::InfraError) -> RpcError {
     RpcError::from(error)
@@ -340,12 +357,12 @@ impl LanePhase for InfraPhase {
             Err(error) => return PhaseResult::Error(error),
         };
         let skip = if !cx.infra_enabled {
-            Some(reason(
-                "profile_disables_infra",
-                json!({"profile": cx.profile}),
-            ))
+            Some(profile_disables_infra(cx))
         } else if !cx.whole_lane && !cx.setup_only {
             Some(reason("lane_running", json!({})))
+        } else if cx.infra_templated && !engine.profiles_enable_infra(cx, &spec).await {
+            cx.infra_enabled = false;
+            Some(profile_disables_infra(cx))
         } else {
             None
         };
@@ -385,6 +402,8 @@ impl LanePhase for ResolvePhase {
         engine.refresh_views(&cx.project).await;
         match engine.resolve_full(&cx.project, &cx.lane).await {
             Ok(resolved) => {
+                // Infra came up already when it was on; this governs `infra.setup`.
+                cx.infra_enabled &= resolved.infra_enabled;
                 cx.resolved = Some(resolved);
                 PhaseResult::Done
             }
@@ -407,10 +426,7 @@ impl LanePhase for SetupPhase {
             return PhaseResult::Skipped(reason("no_setup", json!({})));
         }
         if !cx.infra_enabled {
-            return PhaseResult::Skipped(reason(
-                "profile_disables_infra",
-                json!({"profile": cx.profile}),
-            ));
+            return PhaseResult::Skipped(profile_disables_infra(cx));
         }
         let Some(lane_id) = cx.lane.st().record.as_ref().map(|r| r.id) else {
             return PhaseResult::Error(RpcError::new(
@@ -760,7 +776,8 @@ pub(crate) struct TaskOutcome {
 /// Options of one start request.
 pub(crate) struct StartOptions {
     pub selectors: Vec<String>,
-    pub profile: Option<String>,
+    /// Requested profiles; empty keeps the lane's current ones.
+    pub profiles: Vec<String>,
     pub env: Option<Arc<EnvMap>>,
     pub overrides: EnvMap,
     pub actor: Actor,
@@ -781,8 +798,12 @@ impl Inner {
         lane: &Arc<LaneRt>,
         request: SpawnRequest,
     ) -> Result<Spawned, RpcError> {
-        let (lane_path, record, reference, previous) = {
+        let (lane_path, record, reference, previous, color) = {
             let st = lane.st();
+            let color = request
+                .color
+                .clone()
+                .unwrap_or_else(|| crate::model::derived_color(&st, &request.name));
             let reference = st.reference(&project.name());
             let record = st
                 .record
@@ -792,7 +813,7 @@ impl Inner {
                 .units
                 .get(&request.name)
                 .map(|rec| (rec.run_id, rec.host.clone()));
-            (st.path.clone(), record, reference, previous)
+            (st.path.clone(), record, reference, previous, color)
         };
         if let Some((run_id, host)) = previous {
             if host.is_alive() {
@@ -882,6 +903,7 @@ impl Inner {
                 failure_tail: Vec::new(),
                 preset: request.preset,
                 files: request.files,
+                color: Some(color),
             },
         );
         self.watch_unit(
@@ -1197,8 +1219,9 @@ impl Inner {
                 }
                 Some(launch) => {
                     let extra = lane.st().setup_env.clone();
-                    let request =
+                    let mut request =
                         SpawnRequest::oneshot(name, Kind::Task, launch, task.pty, &extra, actor);
+                    request.color = Some(task.color.clone());
                     let (host, _) = self.spawn_unit(project, lane, request).await?;
                     let exit = match session {
                         Some(session) => {
@@ -1318,9 +1341,6 @@ impl Inner {
                 )));
             }
             st.overrides = options.overrides.clone();
-            if options.profile.is_some() {
-                st.profile = options.profile.clone();
-            }
         }
         if let Some(env) = options.env.clone() {
             project.st().last_env = Some(env);
@@ -1335,9 +1355,16 @@ impl Inner {
             .loaded()
             .cloned()
             .ok_or_else(|| fail(RpcError::new("no_config", json!({"lane": reference}), 1)))?;
-        let profile = lane.st().profile.clone();
-        let selection = devlanes_resolve::select(&config, profile.as_deref(), &options.selectors)
-            .map_err(|error| fail(crate::resolve::resolve_error(&error)))?;
+        let requested = if options.profiles.is_empty() {
+            lane.st().profiles.clone()
+        } else {
+            options.profiles.clone()
+        };
+        let selection =
+            devlanes_resolve::select_profiles(&config, &requested, &options.selectors)
+                .map_err(|error| fail(crate::resolve::resolve_error(&error)))?;
+        // Kept only once valid, so a typo does not stick to the lane.
+        lane.st().profiles = selection.profiles.clone();
         let infra_enabled = !matches!(
             selection
                 .profile_options
@@ -1345,6 +1372,13 @@ impl Inner {
                 .and_then(|o| o.infra.as_ref()),
             Some(Templated::Literal(false))
         );
+        let infra_templated = selection.profiles.iter().any(|name| {
+            matches!(
+                config.profiles.get(name),
+                Some(devlanes_config::ProfileConfig::Object(options))
+                    if matches!(options.infra, Some(Templated::Expression(_)))
+            )
+        });
         let whole_lane = !lane.st().any_alive();
         {
             let mut st = lane.st();
@@ -1364,8 +1398,9 @@ impl Inner {
             reference: reference.clone(),
             actor: options.actor.clone(),
             services: selection.services.clone(),
-            profile: selection.profile.clone(),
+            profiles: selection.profiles.clone(),
             infra_enabled,
+            infra_templated,
             whole_lane,
             setup_only: options.setup_only,
             session: options.session.clone(),
@@ -1425,7 +1460,11 @@ impl Inner {
             };
             let _ = self
                 .store
-                .set_lane_desired(record.id, desired, selection.profile.clone())
+                .set_lane_desired(
+                    record.id,
+                    desired,
+                    crate::model::encode_profiles(&selection.profiles),
+                )
                 .await;
             if let Some(updated) = self.store.lane(record.id).await.ok().flatten() {
                 lane.st().record = Some(updated);
@@ -1603,6 +1642,14 @@ impl Inner {
             }
         }))
         .await;
+        if whole {
+            // An explicit full stop settles crashed services: the lane reads idle.
+            // Failed tasks keep their state, since a stop hook may just have failed.
+            let st = lane.st();
+            for rec in st.units.values().filter(|rec| rec.kind == Kind::Service) {
+                rec.host.acknowledge_failure();
+            }
+        }
         let record = lane.st().record.clone();
         if whole && let Some(record) = record {
             let _ = self
@@ -1678,6 +1725,30 @@ impl Inner {
         if !options.overrides.is_empty() {
             lane.st().overrides = options.overrides.clone();
         }
+        if !options.profiles.is_empty() {
+            let config = lane.st().config.loaded().cloned();
+            if let Some(config) = config {
+                let selection = devlanes_resolve::select_profiles(&config, &options.profiles, &[])
+                    .map_err(|error| {
+                        with_ownership(crate::resolve::resolve_error(&error), &reference, &[])
+                    })?;
+                lane.st().profiles = selection.profiles.clone();
+                let record = lane.st().record.clone();
+                if let Some(record) = record {
+                    let _ = self
+                        .store
+                        .set_lane_desired(
+                            record.id,
+                            record.desired_state,
+                            crate::model::encode_profiles(&selection.profiles),
+                        )
+                        .await;
+                    if let Some(updated) = self.store.lane(record.id).await.ok().flatten() {
+                        lane.st().record = Some(updated);
+                    }
+                }
+            }
+        }
         let candidates: Vec<(String, Vec<String>)> = {
             let st = lane.st();
             st.view
@@ -1745,8 +1816,9 @@ impl Inner {
             reference: reference.clone(),
             actor: options.actor.clone(),
             services,
-            profile: lane.st().profile.clone(),
+            profiles: lane.st().profiles.clone(),
             infra_enabled: true,
+            infra_templated: false,
             whole_lane: false,
             setup_only: false,
             session: options.session.clone(),
@@ -1885,7 +1957,7 @@ impl Inner {
             lane,
             StartOptions {
                 selectors: Vec::new(),
-                profile: None,
+                profiles: Vec::new(),
                 env,
                 overrides: EnvMap::new(),
                 actor: Actor::default(),
@@ -1914,12 +1986,26 @@ impl Inner {
         count
     }
 
-    /// The lane's profile and the services it selects, for `why`.
-    pub(crate) fn profile_services(lane: &LaneRt) -> Option<(Option<String>, BTreeSet<String>)> {
+    /// The lane's profiles and the services they select, for `why`.
+    pub(crate) fn profile_services(lane: &LaneRt) -> Option<(Vec<String>, BTreeSet<String>)> {
         let st = lane.st();
         let config = st.config.loaded()?;
-        let selection = devlanes_resolve::select(config, st.profile.as_deref(), &[]).ok()?;
-        Some((selection.profile, selection.services.into_iter().collect()))
+        let selection = devlanes_resolve::select_profiles(config, &st.profiles, &[]).ok()?;
+        Some((selection.profiles, selection.services.into_iter().collect()))
+    }
+
+    /// Settles a templated profile `infra` by planning the lane against what already
+    /// runs. A planning failure keeps infra on; the resolve phase reports it.
+    async fn profiles_enable_infra(self: &Arc<Self>, cx: &StartCx, spec: &InfraSpec) -> bool {
+        if let Ok(up) = self.integ.infra.namespace(spec).await {
+            let mut st = cx.lane.st();
+            st.infra_ns = Some(up.namespace);
+            st.setup_env = up.setup_env;
+        }
+        self.resolve_full(&cx.project, &cx.lane)
+            .await
+            .ok()
+            .is_none_or(|resolved| resolved.infra_enabled)
     }
 }
 

@@ -1,6 +1,8 @@
-//! Cross-unit log retention. Each live unit trims its own directory as it writes;
-//! this pass enforces `logs.retention` over every unit directory together, oldest
-//! segments first, so units that stopped long ago cannot keep the disk full.
+//! Background maintenance. Cross-unit log retention: each live unit trims its own
+//! directory as it writes; this pass enforces `logs.retention` over every unit
+//! directory together, oldest segments first, so units that stopped long ago
+//! cannot keep the disk full. State retention: state.db history and its size
+//! budget, from `history`, `metrics`, `logs` and `state` in the user config.
 
 use std::{
     collections::BTreeSet,
@@ -10,10 +12,119 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::{engine::Inner, units::LogRetention};
+use devlanes_config::UserConfig;
+use devlanes_state::{PruneReport, RetentionPolicy};
+use serde::Serialize;
+use serde_json::{Value, json};
 
-/// How often the pass runs.
+use crate::{engine::Inner, model::lock, units::LogRetention};
+
+/// How often the log pass runs.
 const INTERVAL: Duration = Duration::from_secs(600);
+/// The first state pass waits this long, so it never competes with startup.
+const STATE_FIRST: Duration = Duration::from_secs(60);
+/// How often the state pass runs afterwards.
+const STATE_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// The latest state pass, as `doctor` shows it.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct LastPrune {
+    pub at_ms: i64,
+    #[serde(flatten)]
+    pub report: PruneReport,
+}
+
+/// State retention from the user config.
+pub(crate) fn retention_policy(user: &UserConfig) -> RetentionPolicy {
+    RetentionPolicy {
+        run_history: user.history.retention.0,
+        metrics: user.metrics.retention.0,
+        logs: Duration::from_secs(u64::from(user.logs.retention.days).saturating_mul(86_400)),
+        remote_hosts: user.history.remote_hosts_retention.0,
+        max_size_bytes: user.state.max_size.0,
+    }
+}
+
+/// True when the pass deleted any row.
+fn deleted_any(report: &PruneReport) -> bool {
+    report.unit_runs
+        + report.task_runs
+        + report.metric_rollups
+        + report.run_summaries
+        + report.log_segments
+        + report.remote_hosts
+        > 0
+}
+
+/// Bytes of the database and its WAL and shared-memory files.
+fn database_bytes(db: &Path) -> u64 {
+    ["", "-wal", "-shm"]
+        .iter()
+        .filter_map(|suffix| {
+            let mut path = db.as_os_str().to_owned();
+            path.push(suffix);
+            std::fs::metadata(path).ok()
+        })
+        .map(|meta| meta.len())
+        .sum()
+}
+
+impl Inner {
+    /// One state retention pass as of `now_ms`, remembered for `doctor`.
+    pub(crate) async fn prune_state(
+        &self,
+        now_ms: i64,
+    ) -> Result<PruneReport, devlanes_state::Error> {
+        let report = self
+            .store
+            .prune_at(retention_policy(&self.opts.user), now_ms)
+            .await?;
+        if deleted_any(&report) {
+            tracing::info!(?report, "pruned state history");
+        }
+        if report.budget_exceeded {
+            tracing::warn!(
+                bytes = report.bytes_after,
+                budget = self.opts.user.state.max_size.0,
+                "state.db stays over state.max_size"
+            );
+        }
+        *lock(&self.last_prune) = Some(LastPrune {
+            at_ms: now_ms,
+            report: report.clone(),
+        });
+        Ok(report)
+    }
+
+    /// `doctor` facts: `{size_bytes, budget_bytes, last_prune}`.
+    pub(crate) async fn state_doctor(&self) -> Value {
+        let db = self.opts.db_path.clone();
+        let size = tokio::task::spawn_blocking(move || database_bytes(&db))
+            .await
+            .unwrap_or_default();
+        json!({
+            "size_bytes": size,
+            "budget_bytes": self.opts.user.state.max_size.0,
+            "last_prune": lock(&self.last_prune).clone(),
+        })
+    }
+
+    /// Runs [`Self::prune_state`] shortly after startup, then hourly, until shutdown.
+    pub(crate) async fn state_maintenance_loop(self: Arc<Self>) {
+        let mut wait = STATE_FIRST;
+        loop {
+            tokio::select! {
+                () = self.shutdown.cancelled() => return,
+                () = tokio::time::sleep(wait) => {}
+            }
+            wait = STATE_INTERVAL;
+            let now = i64::try_from(crate::units::now_ms()).unwrap_or(i64::MAX);
+            if let Err(error) = self.prune_state(now).await {
+                tracing::warn!(%error, "state retention failed");
+            }
+        }
+    }
+}
 
 /// What one pass removed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +290,33 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    /// Every limit comes from its user config key; the defaults match the store's.
+    fn state_policy_from_user_config() {
+        assert_eq!(
+            retention_policy(&UserConfig::default()),
+            RetentionPolicy::default()
+        );
+        let user = devlanes_config::parse_user(
+            "history: { retention: 2d, remote_hosts_retention: 5d }\n\
+             metrics: { retention: 3d }\n\
+             logs: { retention: { days: 4 } }\n\
+             state: { max_size: 1MiB }\n",
+        )
+        .expect("user config");
+        let day = Duration::from_secs(86_400);
+        assert_eq!(
+            retention_policy(&user),
+            RetentionPolicy {
+                run_history: day * 2,
+                metrics: day * 3,
+                logs: day * 4,
+                remote_hosts: day * 5,
+                max_size_bytes: 1 << 20,
+            }
+        );
+    }
 
     /// Writes a segment of `bytes` whose mtime is `age` in the past.
     fn segment(dir: &Path, seq: u64, bytes: usize, age: Duration, now: SystemTime) -> PathBuf {

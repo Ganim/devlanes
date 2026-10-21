@@ -140,6 +140,8 @@ const PUMP_DRAIN: Duration = Duration::from_secs(1);
 /// Time a stop may take beyond its policy timeout: the runner's SIGKILL sweep and
 /// output drain, plus [`PUMP_DRAIN`], with room for a loaded machine.
 const STOP_MARGIN: Duration = Duration::from_secs(10);
+/// How long a stop waits for the run's log to close after the exit.
+const LOG_CLOSE: Duration = Duration::from_secs(5);
 
 impl UnitHost {
     /// Starts pumping output immediately so a chatty process never blocks on a full PTY.
@@ -218,6 +220,21 @@ impl UnitHost {
         });
     }
 
+    /// After an explicit full stop, a run that had failed and exited reads as
+    /// stopped; the failure stays in `unit_runs`. Returns whether it changed.
+    pub fn acknowledge_failure(&self) -> bool {
+        let Some(outcome) = self.exit_outcome() else {
+            return false;
+        };
+        self.inner.state.send_if_modified(|state| {
+            if !matches!(state, UnitState::Failed(_)) {
+                return false;
+            }
+            *state = UnitState::Exited(outcome);
+            true
+        })
+    }
+
     /// The exit outcome once known; shared by every waiter.
     pub async fn wait_exit(&self) -> ExitOutcome {
         let mut exit = self.inner.exit.subscribe();
@@ -267,6 +284,7 @@ impl UnitHost {
     /// [`UnitHost::stop`] with an explicit margin, so tests need not wait the default.
     async fn stop_within(&self, policy: StopPolicy, margin: Duration) -> Result<(), RpcError> {
         if !self.is_alive() {
+            self.wait_log_closed().await;
             return Ok(());
         }
         self.inner
@@ -283,10 +301,22 @@ impl UnitHost {
             Ok(())
         })
         .await;
-        match stopped {
+        let result = match stopped {
             Ok(result) => result,
             Err(_) => self.settle_overdue_stop().await,
+        };
+        if result.is_ok() {
+            self.wait_log_closed().await;
         }
+        result
+    }
+
+    /// Waits briefly for the log thread to close this run's segments. A restart opens
+    /// the same directory right after `stop`, and opening while the old run still
+    /// compresses its last segment fails with ENOENT.
+    async fn wait_log_closed(&self) {
+        let mut done = self.inner.log_done.subscribe();
+        let _ = tokio::time::timeout(LOG_CLOSE, done.wait_for(|done| *done)).await;
     }
 
     /// Runs when a stop outlived its bound. If the leader is gone, its exit got lost

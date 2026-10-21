@@ -127,7 +127,7 @@ impl Inner {
             }
         });
         tokio::spawn(self.clone().sampler_loop());
-        tokio::spawn(self.clone().retention_loop());
+        tokio::spawn(self.clone().state_maintenance_loop());
         tokio::spawn(self.clone().log_maintenance_loop());
         if let Some(mut events) = self.integ.infra.events() {
             let engine = self.clone();
