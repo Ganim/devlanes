@@ -1,0 +1,1 @@
+{"ID":"00000000-0000-0000-0000-000000000000","Containers":10,"ContainersRunning":4,"Driver":"overlay2","KernelVersion":"7.0.14-orbstack-00374-gbbca68e8d741","OperatingSystem":"OrbStack","OSType":"linux","Architecture":"aarch64","NCPU":12,"MemTotal":12600696832,"Name":"orbstack","ServerVersion":"29.4.0","CgroupVersion":"2"}

@@ -1,0 +1,23 @@
+[package]
+name = "devlanes-metrics-docker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bollard = "0.21"
+devlanes-metrics = { path = "../metrics" }
+futures-util.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+devlanes-core = { path = "../core" }
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

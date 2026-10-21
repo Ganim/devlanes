@@ -1,0 +1,18 @@
+[package]
+name = "devlanes-metrics-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The crate is empty on other platforms, so its dependencies are macOS-only too.
+[target.'cfg(target_os = "macos")'.dependencies]
+async-trait.workspace = true
+devlanes-core = { path = "../core" }
+devlanes-metrics = { path = "../metrics" }
+libc = "0.2"
+tokio.workspace = true
+
+[lints]
+workspace = true
