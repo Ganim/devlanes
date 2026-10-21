@@ -1,0 +1,57 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      external:
+        description: Run ignored Docker tests on Linux
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo nextest run --workspace --all-features
+      - run: cargo test --workspace --doc --all-features
+      - run: cargo build --workspace --all-targets --all-features
+  external:
+    if: github.event_name == 'workflow_dispatch' && inputs.external
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: docker info
+      - run: docker compose version
+      # External tests use a docker_ name prefix so this job never invokes trust/SSH tests.
+      - run: cargo nextest run --workspace --all-features --run-ignored only -E 'test(/^docker_/)' --no-tests=pass
+  ssh:
+    # `needs ssh` tests against a throwaway sshd container; the script builds the box's
+    # Linux devlanes in rust:1.99.1-bookworm and always removes the container.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: docker info
+      - run: bash e2e/ssh/run.sh
