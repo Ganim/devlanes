@@ -1,0 +1,204 @@
+# yaml-language-server: $schema=https://devlanes.run/schema/v1.json
+#
+# Config-check fixture modelled on a Tauri desktop app backed by local wrangler workers
+# and a per-lane policy container. Everything is plain http://127.0.0.1:<port>; no
+# service declares hosts. Names are neutral; the shapes match a real dogfood config.
+project: acme-desktop
+
+templates:
+  worker:
+    platform: node
+    preset: wrangler
+    tags: [backend]
+    ready: { tcp: true, timeout: 180s }
+
+  watcher:
+    platform: node
+    tags: [watcher]
+
+lanes:
+  primary: main
+
+infra:
+  containers:
+    policy:
+      image: ghcr.io/cerbos/cerbos:0.55.0
+      command: [server, --config=/config/.cerbos.yaml]
+      volumes:
+        - ./policy/.cerbos.yaml:/config/.cerbos.yaml:ro
+        - ./policy/policies:/policies:ro
+      ports: { http: 3592, grpc: 3593 }
+      per_lane: true
+      ready: { http: { path: /_cerbos/health, timeout: 45s } }
+
+global_env:
+  ACME_CHANNEL: dev
+  RUST_BACKTRACE: "1"
+  PUBLIC_BUILD_CHAT_API_URL: ${{ svc.chat.url }}
+  PUBLIC_BUILD_MESSAGES_API_URL: ${{ svc.messages.url }}
+  DIRECTORY_API_URL: ${{ svc.directory.url }}
+  AUTHZ_API_URL: ${{ svc.authz.url }}
+  BILLING_API_URL: ${{ svc.billing.url }}
+  SKILLS_API_URL: ${{ svc.skills.url }}
+  ACME_WEBHOOKS_BASE_URL: ${{ svc.webhooks.url }}
+
+tasks:
+  sync-env:
+    run_script: package.json#sync:env
+    interactive: true
+  sidecar-build:
+    run_script: package.json#sidecar:build
+    when: lane.start
+    profiles: [default, backend, desktop, attach, remote]
+  build-deps:
+    run_script: package.json#build:deps
+    when: lane.start
+    profiles: [default, backend, desktop, attach, remote]
+  typegen:
+    run: >-
+      pnpm exec turbo run typegen --output-logs=errors-only
+      --filter=@acme/chat-worker --filter=@acme/messages-worker
+      --filter=@acme/billing-worker
+    when: lane.start
+    profiles: [default, backend]
+  d1-migrate:
+    run: |
+      set -eu
+      pnpm --filter @acme/chat-worker db:migrate:local
+      pnpm --filter @acme/messages-worker db:migrate:local
+      pnpm --filter @acme/directory-worker db:baseline:local
+      pnpm --filter @acme/directory-worker db:migrate:local
+      pnpm --filter @acme/billing-worker db:migrate:local
+    when: lane.start
+    profiles: [default, backend]
+  billing-seed:
+    run: node scripts/seed-billing.mjs
+    when: lane.start
+    profiles: [default, backend]
+  seed:
+    run_script: package.json#db:seed
+    after: services
+    when: lane.create
+    profiles: [default]
+  reset-local-data:
+    run: rm -rf .wrangler-local-state
+    confirm: Deletes this lane's local D1, KV, R2 and Durable Object state
+
+services:
+  chat:
+    extends: worker
+    run_script: workers/chat/package.json#dev
+    wrangler:
+      vars: { CHAT_API_PUBLIC_URL: "${{ self.url }}" }
+
+  messages:
+    extends: worker
+    run_script: workers/messages/package.json#dev
+    wrangler:
+      vars: { MEDIA_PUBLIC_ORIGIN: "${{ svc.media.url }}" }
+
+  billing:
+    extends: worker
+    run_script: workers/billing/package.json#dev
+    wrangler:
+      vars: { PUBLIC_BASE_URL: "${{ self.url }}" }
+
+  authz:
+    extends: worker
+    run_script: platform/authz/worker/package.json#dev
+    wrangler:
+      vars:
+        POLICY_HTTP_URL: http://127.0.0.1:${{ infra.policy.ports.http }}
+        POLICY_PDP_URL: http://127.0.0.1:${{ infra.policy.ports.http }}
+
+  directory:
+    extends: worker
+    run_script: workers/directory/package.json#dev
+
+  skills:
+    extends: worker
+    run_script: workers/skills/package.json#dev
+    wrangler:
+      vars:
+        CHECKOUT_REDIRECT_URL: ${{ self.url }}/checkout/callback
+        CHECKOUT_WEBHOOK_BASE_URL: ${{ self.url }}/checkout/webhooks
+
+  webhooks:
+    extends: worker
+    run_script: workers/webhooks/package.json#dev
+
+  media:
+    extends: worker
+    run_script: workers/media/package.json#dev
+
+  payments-webhooks:
+    platform: node
+    run: pnpm --filter @acme/billing-worker dev:payments -- --port ${{ svc.billing.port }}
+    autostart: false
+    tags: [backend]
+
+  workspace-dependencies:
+    extends: watcher
+    run: node scripts/run-build-deps.mjs --watch
+
+  desktop-package:
+    extends: watcher
+    run_script: apps/desktop/package.json#build:watch
+
+  docs:
+    platform: node
+    run_script: apps/docs/package.json#dev
+    env: { ACME_DOCS_PORT: "${{ self.port }}" }
+    ready: { http: { path: / } }
+    tags: [watcher]
+
+  desktop-web:
+    platform: node
+    run: pnpm --filter @acme/desktop-web dev --port ${{ self.port }} --strict-port
+    ready: { http: { path: /, timeout: 180s } }
+    tags: [desktop]
+
+  desktop:
+    platform: node
+    preset: tauri
+    run_script: apps/desktop/package.json#dev
+    tauri:
+      identifier: invalid.example.desktop.dev${{ '' if lane.index == 0 else '.slot-' ~ lane.index }}.client-${{ replica.index }}
+      dev_url: ${{ svc.desktop_web.url }}
+      before_dev_command: ""
+    replicas: 1
+    env:
+      ACME_DEV_INSTANCE_ID: ${{ '' if lane.index == 0 else 'slot-' ~ lane.index ~ '.' }}client-${{ replica.index }}
+      CEF_REMOTE_DEBUGGING_PORT: ${{ self.ports.cdp }}
+      DEEP_LINK_DEV_PORT: ${{ self.ports.deep_link }}
+      ACME_DESKTOP_REUSE_SERVER: "1"
+      ACME_DESKTOP_REUSE_SERVER_URL: ${{ svc.desktop_web.url }}
+    ready: { tcp: cdp, timeout: 15m }
+    tags: [desktop]
+
+profiles:
+  default: [+backend, +watcher, +desktop]
+  backend: [+backend]
+  desktop: [+watcher, +desktop]
+  attach:
+    include: [+watcher, +desktop]
+    infra: false
+    env:
+      PUBLIC_BUILD_CHAT_API_URL: ${{ lanes.main.svc.chat.url }}
+      PUBLIC_BUILD_MESSAGES_API_URL: ${{ lanes.main.svc.messages.url }}
+      DIRECTORY_API_URL: ${{ lanes.main.svc.directory.url }}
+      AUTHZ_API_URL: ${{ lanes.main.svc.authz.url }}
+      BILLING_API_URL: ${{ lanes.main.svc.billing.url }}
+      SKILLS_API_URL: ${{ lanes.main.svc.skills.url }}
+      ACME_WEBHOOKS_BASE_URL: ${{ lanes.main.svc.webhooks.url }}
+  remote:
+    include: [+watcher, +desktop]
+    infra: false
+    env:
+      PUBLIC_BUILD_CHAT_API_URL: https://chat.example.invalid
+      PUBLIC_BUILD_MESSAGES_API_URL: https://messages.example.invalid
+      DIRECTORY_API_URL: https://directory.example.invalid
+      AUTHZ_API_URL: https://authz.example.invalid
+      BILLING_API_URL: https://billing.example.invalid
+      SKILLS_API_URL: https://skills.example.invalid
+      ACME_WEBHOOKS_BASE_URL: ""

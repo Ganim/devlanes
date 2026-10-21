@@ -1,0 +1,683 @@
+---
+source: crates/config/tests/it/dogfood.rs
+expression: config
+---
+{
+  "project": "acme",
+  "templates": {
+    "fastify-api": {
+      "platform": "node",
+      "tags": [
+        "api"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/-/health",
+          "status": null,
+          "timeout": null
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      }
+    },
+    "wrangler-worker": {
+      "platform": "node",
+      "preset": "wrangler",
+      "tags": [
+        "worker"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/-/health",
+          "status": null,
+          "timeout": "90000ms"
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      }
+    },
+    "vite-web": {
+      "platform": "node",
+      "preset": "vite",
+      "tags": [
+        "web"
+      ]
+    }
+  },
+  "lanes": {
+    "primary": "trunk",
+    "new_worktrees": null,
+    "removed_worktrees": null,
+    "worktree_dir": null,
+    "block_size": null,
+    "max": 20,
+    "hosts_file": "always",
+    "vars": {
+      "pages_domain": "${{ 'pages' if lane.index == 0 else 'pages-' ~ lane.index }}.localhost",
+      "members_domain": "${{ 'members' if lane.index == 0 else 'members-' ~ lane.index }}.localhost",
+      "test_domain": "${{ 'test' if lane.index == 0 else 'test-' ~ lane.index }}.localhost",
+      "db_name": "${{ 'acme_v2' if lane.index == 0 else 'acme_v2_' ~ lane.name }}",
+      "redis_db": "${{ 0 if lane.index == 0 else 40 + lane.index }}",
+      "vhost": "${{ 'acme' if lane.index == 0 else 'acme_' ~ lane.name }}",
+      "bucket_suffix": "${{ '-dev' if lane.index == 0 else '-' ~ lane.name }}"
+    },
+    "matrix": null
+  },
+  "infra": {
+    "compose": "docker-compose.yml",
+    "project_name": "monorepo",
+    "exclude": [
+      "proxy"
+    ],
+    "per_lane": null,
+    "profiles": null,
+    "env": {
+      "ACME_DB_PORT": 15432,
+      "ACME_REDIS_PORT": 16379
+    },
+    "hosts": {
+      "object-store": [
+        "s3.${{ lane.domain }}"
+      ]
+    },
+    "hidden": [
+      "postgres",
+      "redis",
+      "rabbitmq"
+    ],
+    "containers": {},
+    "setup": {
+      "vhost": {
+        "run": "docker compose exec -T rabbitmq rabbitmqctl add_vhost ${{ lane.vhost }} || true\ndocker compose exec -T rabbitmq rabbitmqctl set_permissions -p ${{ lane.vhost }} acme '.*' '.*' '.*'\n",
+        "run_script": null,
+        "container": "rabbitmq",
+        "ignore_errors": null,
+        "cwd": null,
+        "env": {},
+        "timeout": null
+      },
+      "buckets": {
+        "run": "set -eu\nfor bucket in projects avatars; do\n  curl -fsS -o /dev/null -X PUT \"http://127.0.0.1:${{ infra.object_store.port }}/acme-$bucket${{ lane.bucket_suffix }}\" || true\ndone\n",
+        "run_script": null,
+        "container": "object-store",
+        "ignore_errors": null,
+        "cwd": null,
+        "env": {},
+        "timeout": null
+      }
+    },
+    "teardown": {
+      "database": "docker compose exec -T postgres dropdb -U postgres --if-exists --force ${{ lane.db_name }}",
+      "redis": "docker compose exec -T redis redis-cli -n ${{ lane.redis_db }} FLUSHDB",
+      "vhost": {
+        "run": "docker compose exec -T rabbitmq rabbitmqctl delete_vhost ${{ lane.vhost }}",
+        "run_script": null,
+        "container": null,
+        "ignore_errors": true,
+        "cwd": null,
+        "env": {},
+        "timeout": null
+      }
+    }
+  },
+  "fnox": null,
+  "global_env": {
+    "DOTENV_ROOT": "${{ project.primary_path }}",
+    "ACME_DOMAIN": "${{ lane.domain }}",
+    "ACME_PAGES_PUBLIC_DOMAIN": "${{ lane.pages_domain }}",
+    "ACME_MEMBERS_PUBLIC_DOMAIN": "${{ lane.members_domain }}",
+    "ACME_SHORT_LINK_DOMAIN": "link.${{ lane.domain }}",
+    "ACME_SMS_WORKER_BASE_URL": "https://sms-worker.${{ lane.domain }}",
+    "ACME_DB_PORT": "${{ infra.postgres.port }}",
+    "ACME_DB_DATABASE": "${{ lane.db_name }}",
+    "ACME_REDIS_URL": "redis://127.0.0.1:${{ infra.redis.port }}/${{ lane.redis_db }}",
+    "ACME_AMQP_VHOST": "${{ lane.vhost }}",
+    "ACME_S3_PROJECTS": "acme-projects${{ lane.bucket_suffix }}",
+    "ACME_S3_AVATARS": "acme-avatars${{ lane.bucket_suffix }}"
+  },
+  "tasks": {
+    "install": {
+      "run": "pnpm install --frozen-lockfile",
+      "run_script": null,
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.create",
+      "after": null,
+      "profiles": null,
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "build-deps": {
+      "run": null,
+      "run_script": "package.json#build-deps",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.start",
+      "after": null,
+      "profiles": [
+        "default",
+        "servers",
+        "everything",
+        "stage-web"
+      ],
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "migrate": {
+      "run": null,
+      "run_script": "models/package.json#db-deploy",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.start",
+      "after": null,
+      "profiles": [
+        "default",
+        "servers",
+        "everything",
+        "e2e"
+      ],
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "build": {
+      "run": null,
+      "run_script": "package.json#build",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.start",
+      "after": null,
+      "profiles": [
+        "e2e"
+      ],
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "seed": {
+      "run": null,
+      "run_script": "tools/seed/package.json#start",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.create",
+      "after": "services",
+      "profiles": [
+        "default",
+        "everything"
+      ],
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": "900000ms",
+      "pty": null
+    },
+    "seed-large": {
+      "run": null,
+      "run_script": "tools/seed/package.json#start:large",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": null,
+      "after": null,
+      "profiles": null,
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": "3600000ms",
+      "pty": null
+    },
+    "paid-plans": {
+      "run": [
+        "docker",
+        "compose",
+        "exec",
+        "-T",
+        "postgres",
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "${{ lane.db_name }}",
+        "-c",
+        "UPDATE billing.\"Plans\" SET free = false;"
+      ],
+      "run_script": null,
+      "cwd": null,
+      "env": {
+        "COMPOSE_PROJECT_NAME": "monorepo",
+        "COMPOSE_FILE": "${{ project.primary_path }}/docker-compose.yml"
+      },
+      "fnox": null,
+      "when": null,
+      "after": null,
+      "profiles": null,
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "db-reset": {
+      "run": null,
+      "run_script": "models/package.json#db-reset",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": null,
+      "after": null,
+      "profiles": null,
+      "steps": null,
+      "confirm": "Drops and recreates ${{ lane.db_name }}",
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "reset": {
+      "run": null,
+      "run_script": null,
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": null,
+      "after": null,
+      "profiles": null,
+      "steps": [
+        "db-reset",
+        "infra.teardown.redis"
+      ],
+      "confirm": "Resets ${{ lane.db_name }} and flushes Redis DB ${{ lane.redis_db }}",
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    }
+  },
+  "services": {
+    "core-api": {
+      "extends": "fastify-api",
+      "run_script": "servers/core/package.json#dev",
+      "platform": "node",
+      "hosts": [
+        "core.${{ lane.domain }}"
+      ],
+      "tags": [
+        "api",
+        "essential"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/-/health",
+          "status": null,
+          "timeout": null
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      },
+      "env": {
+        "ACME_CORE_PORT": "${{ self.port }}"
+      }
+    },
+    "crm-api": {
+      "extends": "fastify-api",
+      "run_script": "servers/crm/package.json#dev",
+      "platform": "node",
+      "hosts": [
+        "crm.${{ lane.domain }}"
+      ],
+      "tags": [
+        "api",
+        "essential"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/-/health",
+          "status": null,
+          "timeout": null
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      },
+      "env": {
+        "ACME_CRM_PORT": "${{ self.port }}"
+      }
+    },
+    "messaging-api": {
+      "extends": "fastify-api",
+      "run_script": "servers/messaging-api/package.json#dev",
+      "platform": "node",
+      "hosts": [
+        "messaging.${{ lane.domain }}"
+      ],
+      "tags": [
+        "api"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/-/health",
+          "status": null,
+          "timeout": null
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      },
+      "env": {
+        "ACME_MESSAGING_API_PORT": "${{ self.port }}"
+      }
+    },
+    "pages-server": {
+      "extends": "fastify-api",
+      "run_script": "servers/pages-server/package.json#dev",
+      "platform": "node",
+      "hosts": [
+        "pages-server.${{ lane.domain }}"
+      ],
+      "tags": [
+        "api"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/-/health",
+          "status": null,
+          "timeout": null
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      },
+      "env": {
+        "ACME_PAGES_SERVER_PORT": "${{ self.port }}"
+      }
+    },
+    "messaging-worker": {
+      "run_script": "servers/messaging-worker/package.json#dev",
+      "platform": "node",
+      "tags": [
+        "queue"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": null,
+        "log": "Connected to Redis",
+        "cmd": null,
+        "timeout": null
+      }
+    },
+    "app-web": {
+      "extends": "vite-web",
+      "run_script": "web/app/package.json#dev",
+      "platform": "node",
+      "preset": "vite",
+      "hosts": [
+        "app.${{ lane.domain }}"
+      ],
+      "tags": [
+        "web",
+        "stage-web",
+        "essential"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/",
+          "status": null,
+          "timeout": null
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      },
+      "env": {
+        "ACME_APP_PORT": "${{ self.port }}"
+      }
+    },
+    "members-portal": {
+      "extends": "vite-web",
+      "run_script": "web/members-portal/package.json#dev",
+      "platform": "node",
+      "preset": "vite",
+      "hosts": [
+        "members-portal.${{ lane.domain }}",
+        "${{ lane.members_domain }}",
+        "*.${{ lane.members_domain }}"
+      ],
+      "tags": [
+        "web",
+        "stage-web"
+      ],
+      "env": {
+        "ACME_MEMBERS_PORTAL_PORT": "${{ self.port }}"
+      }
+    },
+    "admin-web": {
+      "extends": "vite-web",
+      "run_script": "pages/admin/package.json#dev",
+      "platform": "node",
+      "preset": "vite",
+      "hosts": [
+        "admin.${{ lane.domain }}"
+      ],
+      "tags": [
+        "web",
+        "stage-web"
+      ],
+      "env": {
+        "ACME_ADMIN_PORT": "${{ self.port }}",
+        "ACME_ADMIN_INSPECTOR_PORT": "${{ self.ports.inspector }}"
+      }
+    },
+    "docs": {
+      "run": "pnpm --silent -F @acme/docs exec rspress dev --host 127.0.0.1 --port ${{ self.port }}",
+      "platform": "node",
+      "hosts": [
+        "docs.${{ lane.domain }}"
+      ],
+      "tags": [
+        "web"
+      ]
+    },
+    "api-gateway": {
+      "extends": "wrangler-worker",
+      "run_script": "workers/api-gateway/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "hosts": [
+        "api.${{ lane.domain }}",
+        {
+          "host": "*.${{ lane.domain }}",
+          "port": null,
+          "fallback": true,
+          "host_header": null
+        }
+      ],
+      "tags": [
+        "worker",
+        "essential"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/-/health",
+          "status": null,
+          "timeout": "90000ms"
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      },
+      "env": {
+        "ACME_API_GATEWAY_PORT": "${{ self.port }}"
+      }
+    },
+    "pages-worker": {
+      "extends": "wrangler-worker",
+      "run_script": "workers/pages/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "hosts": [
+        "pages.${{ lane.domain }}",
+        "link.${{ lane.domain }}",
+        "${{ lane.pages_domain }}",
+        "*.${{ lane.pages_domain }}",
+        "*.${{ lane.test_domain }}"
+      ],
+      "tags": [
+        "worker",
+        "essential"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/-/health",
+          "status": null,
+          "timeout": "90000ms"
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      },
+      "env": {
+        "ACME_PAGES_WORKER_PORT": "${{ self.port }}",
+        "ACME_PAGES_SERVER_PORT": "${{ svc.pages_server.port }}"
+      }
+    },
+    "mcp-worker": {
+      "extends": "wrangler-worker",
+      "run_script": "workers/mcp/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "hosts": [
+        "mcp.${{ lane.domain }}"
+      ],
+      "tags": [
+        "worker"
+      ],
+      "ready": "started",
+      "env": {
+        "ACME_MCP_PORT": "${{ self.port }}"
+      }
+    },
+    "sms-worker": {
+      "extends": "wrangler-worker",
+      "run_script": "workers/sms/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "hosts": [
+        "sms-worker.${{ lane.domain }}"
+      ],
+      "tags": [
+        "worker",
+        "messaging"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/-/health",
+          "status": null,
+          "timeout": "90000ms"
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      }
+    },
+    "sms-stub": {
+      "run_script": "servers/sms-stub/package.json#dev",
+      "platform": "node",
+      "hosts": [
+        "sms-stub.${{ lane.domain }}"
+      ],
+      "tags": [
+        "stub"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/health",
+          "status": null,
+          "timeout": null
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      },
+      "autostart": false,
+      "env": {
+        "ACME_SMS_STUB_PORT": "${{ self.port }}"
+      }
+    }
+  },
+  "profiles": {
+    "default": [
+      "+essential"
+    ],
+    "servers": [
+      "+api",
+      "+queue"
+    ],
+    "everything": {
+      "include": [
+        "*"
+      ],
+      "exclude": [
+        "+stub"
+      ],
+      "infra": null,
+      "env": {},
+      "run_scripts": {}
+    },
+    "stage-web": {
+      "include": [
+        "+stage-web"
+      ],
+      "exclude": null,
+      "infra": false,
+      "env": {
+        "ACME_USE_STAGE_APIS": "1"
+      },
+      "run_scripts": {}
+    },
+    "e2e": {
+      "include": [
+        "+api",
+        "+queue",
+        "+web",
+        "api-gateway",
+        "pages-worker",
+        "mcp-worker"
+      ],
+      "exclude": [
+        "docs"
+      ],
+      "infra": null,
+      "env": {},
+      "run_scripts": {
+        "dev": "start"
+      }
+    }
+  }
+}

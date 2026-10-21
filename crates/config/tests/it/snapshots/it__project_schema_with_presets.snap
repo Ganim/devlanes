@@ -148,7 +148,7 @@ expression: registered
             "string",
             "null"
           ],
-          "description": "Platform contributor, such as node or python; inferred when omitted."
+          "description": "Platform: node, bun, deno, python or rust; detected from project files when omitted."
         },
         "preset": {
           "type": [

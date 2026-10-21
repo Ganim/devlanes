@@ -1,0 +1,537 @@
+---
+source: crates/config/tests/it/dogfood.rs
+expression: config
+---
+{
+  "project": "acme-desktop",
+  "templates": {
+    "worker": {
+      "platform": "node",
+      "preset": "wrangler",
+      "tags": [
+        "backend"
+      ],
+      "ready": {
+        "tcp": true,
+        "http": null,
+        "log": null,
+        "cmd": null,
+        "timeout": "180000ms"
+      }
+    },
+    "watcher": {
+      "platform": "node",
+      "tags": [
+        "watcher"
+      ]
+    }
+  },
+  "lanes": {
+    "primary": "main",
+    "new_worktrees": null,
+    "removed_worktrees": null,
+    "worktree_dir": null,
+    "block_size": null,
+    "max": null,
+    "hosts_file": null,
+    "vars": {},
+    "matrix": null
+  },
+  "infra": {
+    "compose": null,
+    "project_name": null,
+    "exclude": null,
+    "per_lane": null,
+    "profiles": null,
+    "env": {},
+    "hosts": {},
+    "hidden": null,
+    "containers": {
+      "policy": {
+        "image": "ghcr.io/cerbos/cerbos:0.55.0",
+        "command": [
+          "server",
+          "--config=/config/.cerbos.yaml"
+        ],
+        "volumes": [
+          "./policy/.cerbos.yaml:/config/.cerbos.yaml:ro",
+          "./policy/policies:/policies:ro"
+        ],
+        "ports": {
+          "http": 3592,
+          "grpc": 3593
+        },
+        "per_lane": true,
+        "env": {},
+        "ready": {
+          "tcp": null,
+          "http": {
+            "path": "/_cerbos/health",
+            "status": null,
+            "timeout": "45000ms"
+          },
+          "log": null,
+          "cmd": null,
+          "timeout": null
+        }
+      }
+    },
+    "setup": {},
+    "teardown": {}
+  },
+  "fnox": null,
+  "global_env": {
+    "ACME_CHANNEL": "dev",
+    "RUST_BACKTRACE": "1",
+    "PUBLIC_BUILD_CHAT_API_URL": "${{ svc.chat.url }}",
+    "PUBLIC_BUILD_MESSAGES_API_URL": "${{ svc.messages.url }}",
+    "DIRECTORY_API_URL": "${{ svc.directory.url }}",
+    "AUTHZ_API_URL": "${{ svc.authz.url }}",
+    "BILLING_API_URL": "${{ svc.billing.url }}",
+    "SKILLS_API_URL": "${{ svc.skills.url }}",
+    "ACME_WEBHOOKS_BASE_URL": "${{ svc.webhooks.url }}"
+  },
+  "tasks": {
+    "sync-env": {
+      "run": null,
+      "run_script": "package.json#sync:env",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": null,
+      "after": null,
+      "profiles": null,
+      "steps": null,
+      "confirm": null,
+      "interactive": true,
+      "timeout": null,
+      "pty": null
+    },
+    "sidecar-build": {
+      "run": null,
+      "run_script": "package.json#sidecar:build",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.start",
+      "after": null,
+      "profiles": [
+        "default",
+        "backend",
+        "desktop",
+        "attach",
+        "remote"
+      ],
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "build-deps": {
+      "run": null,
+      "run_script": "package.json#build:deps",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.start",
+      "after": null,
+      "profiles": [
+        "default",
+        "backend",
+        "desktop",
+        "attach",
+        "remote"
+      ],
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "typegen": {
+      "run": "pnpm exec turbo run typegen --output-logs=errors-only --filter=@acme/chat-worker --filter=@acme/messages-worker --filter=@acme/billing-worker",
+      "run_script": null,
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.start",
+      "after": null,
+      "profiles": [
+        "default",
+        "backend"
+      ],
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "d1-migrate": {
+      "run": "set -eu\npnpm --filter @acme/chat-worker db:migrate:local\npnpm --filter @acme/messages-worker db:migrate:local\npnpm --filter @acme/directory-worker db:baseline:local\npnpm --filter @acme/directory-worker db:migrate:local\npnpm --filter @acme/billing-worker db:migrate:local\n",
+      "run_script": null,
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.start",
+      "after": null,
+      "profiles": [
+        "default",
+        "backend"
+      ],
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "billing-seed": {
+      "run": "node scripts/seed-billing.mjs",
+      "run_script": null,
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.start",
+      "after": null,
+      "profiles": [
+        "default",
+        "backend"
+      ],
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "seed": {
+      "run": null,
+      "run_script": "package.json#db:seed",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.create",
+      "after": "services",
+      "profiles": [
+        "default"
+      ],
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "reset-local-data": {
+      "run": "rm -rf .wrangler-local-state",
+      "run_script": null,
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": null,
+      "after": null,
+      "profiles": null,
+      "steps": null,
+      "confirm": "Deletes this lane's local D1, KV, R2 and Durable Object state",
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    }
+  },
+  "services": {
+    "chat": {
+      "extends": "worker",
+      "run_script": "workers/chat/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "tags": [
+        "backend"
+      ],
+      "ready": {
+        "tcp": true,
+        "http": null,
+        "log": null,
+        "cmd": null,
+        "timeout": "180000ms"
+      },
+      "wrangler": {
+        "vars": {
+          "CHAT_API_PUBLIC_URL": "${{ self.url }}"
+        }
+      }
+    },
+    "messages": {
+      "extends": "worker",
+      "run_script": "workers/messages/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "tags": [
+        "backend"
+      ],
+      "ready": {
+        "tcp": true,
+        "http": null,
+        "log": null,
+        "cmd": null,
+        "timeout": "180000ms"
+      },
+      "wrangler": {
+        "vars": {
+          "MEDIA_PUBLIC_ORIGIN": "${{ svc.media.url }}"
+        }
+      }
+    },
+    "billing": {
+      "extends": "worker",
+      "run_script": "workers/billing/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "tags": [
+        "backend"
+      ],
+      "ready": {
+        "tcp": true,
+        "http": null,
+        "log": null,
+        "cmd": null,
+        "timeout": "180000ms"
+      },
+      "wrangler": {
+        "vars": {
+          "PUBLIC_BASE_URL": "${{ self.url }}"
+        }
+      }
+    },
+    "authz": {
+      "extends": "worker",
+      "run_script": "platform/authz/worker/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "tags": [
+        "backend"
+      ],
+      "ready": {
+        "tcp": true,
+        "http": null,
+        "log": null,
+        "cmd": null,
+        "timeout": "180000ms"
+      },
+      "wrangler": {
+        "vars": {
+          "POLICY_HTTP_URL": "http://127.0.0.1:${{ infra.policy.ports.http }}",
+          "POLICY_PDP_URL": "http://127.0.0.1:${{ infra.policy.ports.http }}"
+        }
+      }
+    },
+    "directory": {
+      "extends": "worker",
+      "run_script": "workers/directory/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "tags": [
+        "backend"
+      ],
+      "ready": {
+        "tcp": true,
+        "http": null,
+        "log": null,
+        "cmd": null,
+        "timeout": "180000ms"
+      }
+    },
+    "skills": {
+      "extends": "worker",
+      "run_script": "workers/skills/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "tags": [
+        "backend"
+      ],
+      "ready": {
+        "tcp": true,
+        "http": null,
+        "log": null,
+        "cmd": null,
+        "timeout": "180000ms"
+      },
+      "wrangler": {
+        "vars": {
+          "CHECKOUT_REDIRECT_URL": "${{ self.url }}/checkout/callback",
+          "CHECKOUT_WEBHOOK_BASE_URL": "${{ self.url }}/checkout/webhooks"
+        }
+      }
+    },
+    "webhooks": {
+      "extends": "worker",
+      "run_script": "workers/webhooks/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "tags": [
+        "backend"
+      ],
+      "ready": {
+        "tcp": true,
+        "http": null,
+        "log": null,
+        "cmd": null,
+        "timeout": "180000ms"
+      }
+    },
+    "media": {
+      "extends": "worker",
+      "run_script": "workers/media/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "tags": [
+        "backend"
+      ],
+      "ready": {
+        "tcp": true,
+        "http": null,
+        "log": null,
+        "cmd": null,
+        "timeout": "180000ms"
+      }
+    },
+    "payments-webhooks": {
+      "run": "pnpm --filter @acme/billing-worker dev:payments -- --port ${{ svc.billing.port }}",
+      "platform": "node",
+      "tags": [
+        "backend"
+      ],
+      "autostart": false
+    },
+    "workspace-dependencies": {
+      "extends": "watcher",
+      "run": "node scripts/run-build-deps.mjs --watch",
+      "platform": "node",
+      "tags": [
+        "watcher"
+      ]
+    },
+    "desktop-package": {
+      "extends": "watcher",
+      "run_script": "apps/desktop/package.json#build:watch",
+      "platform": "node",
+      "tags": [
+        "watcher"
+      ]
+    },
+    "docs": {
+      "run_script": "apps/docs/package.json#dev",
+      "platform": "node",
+      "tags": [
+        "watcher"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/",
+          "status": null,
+          "timeout": null
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      },
+      "env": {
+        "ACME_DOCS_PORT": "${{ self.port }}"
+      }
+    },
+    "desktop-web": {
+      "run": "pnpm --filter @acme/desktop-web dev --port ${{ self.port }} --strict-port",
+      "platform": "node",
+      "tags": [
+        "desktop"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/",
+          "status": null,
+          "timeout": "180000ms"
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      }
+    },
+    "desktop": {
+      "run_script": "apps/desktop/package.json#dev",
+      "platform": "node",
+      "preset": "tauri",
+      "tags": [
+        "desktop"
+      ],
+      "ready": {
+        "tcp": "cdp",
+        "http": null,
+        "log": null,
+        "cmd": null,
+        "timeout": "900000ms"
+      },
+      "replicas": 1,
+      "env": {
+        "ACME_DEV_INSTANCE_ID": "${{ '' if lane.index == 0 else 'slot-' ~ lane.index ~ '.' }}client-${{ replica.index }}",
+        "CEF_REMOTE_DEBUGGING_PORT": "${{ self.ports.cdp }}",
+        "DEEP_LINK_DEV_PORT": "${{ self.ports.deep_link }}",
+        "ACME_DESKTOP_REUSE_SERVER": "1",
+        "ACME_DESKTOP_REUSE_SERVER_URL": "${{ svc.desktop_web.url }}"
+      },
+      "tauri": {
+        "identifier": "invalid.example.desktop.dev${{ '' if lane.index == 0 else '.slot-' ~ lane.index }}.client-${{ replica.index }}",
+        "dev_url": "${{ svc.desktop_web.url }}",
+        "before_dev_command": ""
+      }
+    }
+  },
+  "profiles": {
+    "default": [
+      "+backend",
+      "+watcher",
+      "+desktop"
+    ],
+    "backend": [
+      "+backend"
+    ],
+    "desktop": [
+      "+watcher",
+      "+desktop"
+    ],
+    "attach": {
+      "include": [
+        "+watcher",
+        "+desktop"
+      ],
+      "exclude": null,
+      "infra": false,
+      "env": {
+        "PUBLIC_BUILD_CHAT_API_URL": "${{ lanes.main.svc.chat.url }}",
+        "PUBLIC_BUILD_MESSAGES_API_URL": "${{ lanes.main.svc.messages.url }}",
+        "DIRECTORY_API_URL": "${{ lanes.main.svc.directory.url }}",
+        "AUTHZ_API_URL": "${{ lanes.main.svc.authz.url }}",
+        "BILLING_API_URL": "${{ lanes.main.svc.billing.url }}",
+        "SKILLS_API_URL": "${{ lanes.main.svc.skills.url }}",
+        "ACME_WEBHOOKS_BASE_URL": "${{ lanes.main.svc.webhooks.url }}"
+      },
+      "run_scripts": {}
+    },
+    "remote": {
+      "include": [
+        "+watcher",
+        "+desktop"
+      ],
+      "exclude": null,
+      "infra": false,
+      "env": {
+        "PUBLIC_BUILD_CHAT_API_URL": "https://chat.example.invalid",
+        "PUBLIC_BUILD_MESSAGES_API_URL": "https://messages.example.invalid",
+        "DIRECTORY_API_URL": "https://directory.example.invalid",
+        "AUTHZ_API_URL": "https://authz.example.invalid",
+        "BILLING_API_URL": "https://billing.example.invalid",
+        "SKILLS_API_URL": "https://skills.example.invalid",
+        "ACME_WEBHOOKS_BASE_URL": ""
+      },
+      "run_scripts": {}
+    }
+  }
+}

@@ -1,0 +1,245 @@
+# yaml-language-server: $schema=https://devlanes.run/schema/v1.json
+#
+# Config-check fixture modelled on a large pnpm monorepo: Fastify APIs, Vite SPAs,
+# Vite apps with the Cloudflare plugin, wrangler workers and queue consumers, sharing one
+# compose stack. Names are neutral; the shapes match a real dogfood config.
+project: acme
+
+templates:
+  fastify-api:
+    platform: node
+    tags: [api]
+    ready: { http: { path: /-/health } }
+
+  wrangler-worker:
+    platform: node
+    preset: wrangler
+    tags: [worker]
+    ready: { http: { path: /-/health, timeout: 90s } }
+
+  vite-web:
+    platform: node
+    preset: vite
+    tags: [web]
+
+lanes:
+  primary: trunk
+  hosts_file: always
+  max: 20
+  vars:
+    pages_domain: ${{ 'pages' if lane.index == 0 else 'pages-' ~ lane.index }}.localhost
+    members_domain: ${{ 'members' if lane.index == 0 else 'members-' ~ lane.index }}.localhost
+    test_domain: ${{ 'test' if lane.index == 0 else 'test-' ~ lane.index }}.localhost
+    db_name: ${{ 'acme_v2' if lane.index == 0 else 'acme_v2_' ~ lane.name }}
+    redis_db: ${{ 0 if lane.index == 0 else 40 + lane.index }}
+    vhost: ${{ 'acme' if lane.index == 0 else 'acme_' ~ lane.name }}
+    bucket_suffix: ${{ '-dev' if lane.index == 0 else '-' ~ lane.name }}
+
+infra:
+  compose: docker-compose.yml
+  project_name: monorepo
+  exclude: [proxy]
+  env:
+    ACME_DB_PORT: 15432
+    ACME_REDIS_PORT: 16379
+  hosts:
+    object-store: ["s3.${{ lane.domain }}"]
+  hidden: [postgres, redis, rabbitmq]
+  setup:
+    vhost:
+      run: |
+        docker compose exec -T rabbitmq rabbitmqctl add_vhost ${{ lane.vhost }} || true
+        docker compose exec -T rabbitmq rabbitmqctl set_permissions -p ${{ lane.vhost }} acme '.*' '.*' '.*'
+      container: rabbitmq
+    buckets:
+      run: |
+        set -eu
+        for bucket in projects avatars; do
+          curl -fsS -o /dev/null -X PUT "http://127.0.0.1:${{ infra.object_store.port }}/acme-$bucket${{ lane.bucket_suffix }}" || true
+        done
+      container: object-store
+  teardown:
+    database: docker compose exec -T postgres dropdb -U postgres --if-exists --force ${{ lane.db_name }}
+    redis: docker compose exec -T redis redis-cli -n ${{ lane.redis_db }} FLUSHDB
+    vhost:
+      run: docker compose exec -T rabbitmq rabbitmqctl delete_vhost ${{ lane.vhost }}
+      ignore_errors: true
+
+global_env:
+  DOTENV_ROOT: ${{ project.primary_path }}
+  ACME_DOMAIN: ${{ lane.domain }}
+  ACME_PAGES_PUBLIC_DOMAIN: ${{ lane.pages_domain }}
+  ACME_MEMBERS_PUBLIC_DOMAIN: ${{ lane.members_domain }}
+  ACME_SHORT_LINK_DOMAIN: link.${{ lane.domain }}
+  ACME_SMS_WORKER_BASE_URL: https://sms-worker.${{ lane.domain }}
+  ACME_DB_PORT: ${{ infra.postgres.port }}
+  ACME_DB_DATABASE: ${{ lane.db_name }}
+  ACME_REDIS_URL: redis://127.0.0.1:${{ infra.redis.port }}/${{ lane.redis_db }}
+  ACME_AMQP_VHOST: ${{ lane.vhost }}
+  ACME_S3_PROJECTS: acme-projects${{ lane.bucket_suffix }}
+  ACME_S3_AVATARS: acme-avatars${{ lane.bucket_suffix }}
+
+tasks:
+  install:
+    run: pnpm install --frozen-lockfile
+    when: lane.create
+  build-deps:
+    run_script: package.json#build-deps
+    when: lane.start
+    profiles: [default, servers, everything, stage-web]
+  migrate:
+    run_script: models/package.json#db-deploy
+    when: lane.start
+    profiles: [default, servers, everything, e2e]
+  build:
+    run_script: package.json#build
+    when: lane.start
+    profiles: [e2e]
+  seed:
+    run_script: tools/seed/package.json#start
+    when: lane.create
+    after: services
+    profiles: [default, everything]
+    timeout: 15m
+  seed-large:
+    run_script: tools/seed/package.json#start:large
+    timeout: 1h
+  paid-plans:
+    run: [docker, compose, exec, -T, postgres, psql, -U, postgres, -d, "${{ lane.db_name }}", -c, 'UPDATE billing."Plans" SET free = false;']
+    env:
+      COMPOSE_PROJECT_NAME: monorepo
+      COMPOSE_FILE: ${{ project.primary_path }}/docker-compose.yml
+  db-reset:
+    run_script: models/package.json#db-reset
+    confirm: Drops and recreates ${{ lane.db_name }}
+  reset:
+    steps: [db-reset, infra.teardown.redis]
+    confirm: Resets ${{ lane.db_name }} and flushes Redis DB ${{ lane.redis_db }}
+
+services:
+  core-api:
+    extends: fastify-api
+    run_script: servers/core/package.json#dev
+    env: { ACME_CORE_PORT: "${{ self.port }}" }
+    hosts: ["core.${{ lane.domain }}"]
+    tags: [api, essential]
+
+  crm-api:
+    extends: fastify-api
+    run_script: servers/crm/package.json#dev
+    env: { ACME_CRM_PORT: "${{ self.port }}" }
+    hosts: ["crm.${{ lane.domain }}"]
+    tags: [api, essential]
+
+  messaging-api:
+    extends: fastify-api
+    run_script: servers/messaging-api/package.json#dev
+    env: { ACME_MESSAGING_API_PORT: "${{ self.port }}" }
+    hosts: ["messaging.${{ lane.domain }}"]
+
+  pages-server:
+    extends: fastify-api
+    run_script: servers/pages-server/package.json#dev
+    env: { ACME_PAGES_SERVER_PORT: "${{ self.port }}" }
+    hosts: ["pages-server.${{ lane.domain }}"]
+
+  messaging-worker:
+    platform: node
+    run_script: servers/messaging-worker/package.json#dev
+    ready: { log: Connected to Redis }
+    tags: [queue]
+
+  app-web:
+    extends: vite-web
+    run_script: web/app/package.json#dev
+    env: { ACME_APP_PORT: "${{ self.port }}" }
+    hosts: ["app.${{ lane.domain }}"]
+    ready: { http: { path: / } }
+    tags: [web, stage-web, essential]
+
+  members-portal:
+    extends: vite-web
+    run_script: web/members-portal/package.json#dev
+    env: { ACME_MEMBERS_PORTAL_PORT: "${{ self.port }}" }
+    hosts:
+      - members-portal.${{ lane.domain }}
+      - ${{ lane.members_domain }}
+      - "*.${{ lane.members_domain }}"
+    tags: [web, stage-web]
+
+  admin-web:
+    extends: vite-web
+    run_script: pages/admin/package.json#dev
+    env:
+      ACME_ADMIN_PORT: ${{ self.port }}
+      ACME_ADMIN_INSPECTOR_PORT: ${{ self.ports.inspector }}
+    hosts: ["admin.${{ lane.domain }}"]
+    tags: [web, stage-web]
+
+  docs:
+    platform: node
+    run: pnpm --silent -F @acme/docs exec rspress dev --host 127.0.0.1 --port ${{ self.port }}
+    hosts: ["docs.${{ lane.domain }}"]
+    tags: [web]
+
+  api-gateway:
+    extends: wrangler-worker
+    run_script: workers/api-gateway/package.json#dev
+    env: { ACME_API_GATEWAY_PORT: "${{ self.port }}" }
+    hosts:
+      - api.${{ lane.domain }}
+      - host: "*.${{ lane.domain }}"
+        fallback: true
+    tags: [worker, essential]
+
+  pages-worker:
+    extends: wrangler-worker
+    run_script: workers/pages/package.json#dev
+    env:
+      ACME_PAGES_WORKER_PORT: ${{ self.port }}
+      ACME_PAGES_SERVER_PORT: ${{ svc.pages_server.port }}
+    hosts:
+      - pages.${{ lane.domain }}
+      - link.${{ lane.domain }}
+      - ${{ lane.pages_domain }}
+      - "*.${{ lane.pages_domain }}"
+      - "*.${{ lane.test_domain }}"
+    tags: [worker, essential]
+
+  mcp-worker:
+    extends: wrangler-worker
+    run_script: workers/mcp/package.json#dev
+    env: { ACME_MCP_PORT: "${{ self.port }}" }
+    hosts: ["mcp.${{ lane.domain }}"]
+    ready: started
+
+  sms-worker:
+    extends: wrangler-worker
+    run_script: workers/sms/package.json#dev
+    hosts: ["sms-worker.${{ lane.domain }}"]
+    tags: [worker, messaging]
+
+  sms-stub:
+    platform: node
+    run_script: servers/sms-stub/package.json#dev
+    env: { ACME_SMS_STUB_PORT: "${{ self.port }}" }
+    hosts: ["sms-stub.${{ lane.domain }}"]
+    ready: { http: { path: /health } }
+    autostart: false
+    tags: [stub]
+
+profiles:
+  default: [+essential]
+  servers: [+api, +queue]
+  everything:
+    include: ["*"]
+    exclude: [+stub]
+  stage-web:
+    include: [+stage-web]
+    infra: false
+    env:
+      ACME_USE_STAGE_APIS: "1"
+  e2e:
+    include: [+api, +queue, +web, api-gateway, pages-worker, mcp-worker]
+    exclude: [docs]
+    run_scripts: { dev: start }

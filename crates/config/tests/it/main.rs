@@ -1,3 +1,5 @@
+mod dogfood;
+
 use devlanes_config::*;
 use serde_json::json;
 
@@ -355,38 +357,10 @@ fn yaml_language_server_schemas() {
             .collect();
         assert!(errors.is_empty(), "{name}: {errors:#?}");
     }
-    // The planning checkout is optional on CI; when present its unmodified examples are checked too.
-    let original = std::env::var_os("DEVLANES_CONFIG_EXAMPLES")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples")
-        });
-    if original.is_dir() {
-        for entry in std::fs::read_dir(original).expect("examples") {
-            let path = entry.expect("entry").path();
-            if path.extension().is_some_and(|e| e == "yaml") {
-                let source = std::fs::read_to_string(&path).expect("original example");
-                let value: serde_json::Value =
-                    serde_saphyr::from_str(&source).expect("original YAML");
-                let validator = if path.file_name().is_some_and(|n| n == "user-config.yaml") {
-                    &user_validator
-                } else {
-                    &project_validator
-                };
-                assert!(
-                    validator.is_valid(&value),
-                    "original example is schema-invalid: {}",
-                    path.file_name().expect("name").display()
-                );
-                if path.file_name().is_some_and(|name| name == "devlanes.yaml") {
-                    let config = parse_project(&source, None).expect("updated binding reference");
-                    if let Some(ProfileConfig::Object(profile)) = config.profiles.get("e2e") {
-                        assert_eq!(profile.remap_script("dev"), "start");
-                        assert_eq!(config.tasks["build"].when, Some(TaskWhen::Start));
-                    }
-                }
-            }
-        }
+    let config = parse_project(FULL, None).expect("reference example");
+    if let Some(ProfileConfig::Object(profile)) = config.profiles.get("e2e") {
+        assert_eq!(profile.remap_script("dev"), "start");
+        assert_eq!(config.tasks["build"].when, Some(TaskWhen::Start));
     }
     // Deferred trust targets remain syntax-valid because UserConfig parses them before validation.
 }
@@ -422,36 +396,82 @@ fn user_validation() {
 fn local_error_location() {
     let error = parse_project(
         "project: demo\nservices:\n  api: { run: server }\n",
-        Some("services:\n  api:\n    run_script: package.json#dev\n"),
+        Some("services:\n  api:\n    run: other\n    run_script: package.json#dev\n"),
     )
     .expect_err("conflicting command");
     assert_eq!(error.location.file, "devlanes.local.yaml");
     assert_eq!(error.location.line, 3);
 }
 
-/// Map overlays merge recursively while explicitly empty lists replace inherited lists.
+/// Service objects replace atomically while profile lists can be explicitly cleared.
 #[test]
 fn nested_map_and_empty_list_overrides() {
     let base = "project: demo\nservices:\n  api:\n    run: server\n    ready: { http: { path: /health, timeout: 1s } }\n    stop: { signal: SIGINT, timeout: 10s }\nprofiles:\n  default:\n    include: [api]\n    exclude: [api]\n";
     let local = "services:\n  api:\n    ready: { http: { timeout: 5s } }\n    stop: { timeout: 20s }\nprofiles:\n  default:\n    include: []\n    exclude: []\n";
     let config = parse_project(base, Some(local)).expect("nested override");
     let service = &config.services["api"];
-    assert_eq!(
-        service.stop.as_ref().expect("stop").signal.as_deref(),
-        Some("SIGINT")
-    );
+    assert_eq!(service.stop.as_ref().expect("stop").signal.as_deref(), None);
     let ReadyConfig::Check(ready) = service.ready.as_ref().expect("ready") else {
         panic!("check")
     };
-    assert_eq!(
-        ready.http.as_ref().expect("http").path,
-        Some(Templated::Literal("/health".into()))
-    );
+    assert_eq!(ready.http.as_ref().expect("http").path, None);
     let ProfileConfig::Object(profile) = &config.profiles["default"] else {
         panic!("profile")
     };
     assert_eq!(profile.include, Some(vec![]));
     assert_eq!(profile.exclude, Some(vec![]));
+}
+
+/// Service and local overrides replace one-of settings while env keys retain their precedence.
+#[test]
+fn atomic_service_inheritance_and_local_overrides() {
+    let source = "project: demo\ntemplates:\n  base:\n    run: server\n    ready: { http: { path: /-/health } }\n    env: { KEEP: base, VALUE: base }\nservices:\n  api:\n    extends: base\n    run_script: package.json#dev\n    ready: { tcp: true }\n    env: { VALUE: service }\n";
+    let config = parse_project(source, None).expect("service replaces template forms");
+    let service = &config.services["api"];
+    assert!(service.run.is_none());
+    assert_eq!(
+        service
+            .run_script
+            .as_ref()
+            .expect("script")
+            .source_and_name()
+            .expect("source"),
+        ("package.json", "dev")
+    );
+    let ReadyConfig::Check(ready) = service.ready.as_ref().expect("ready") else {
+        panic!("check")
+    };
+    assert!(ready.http.is_none());
+    assert!(matches!(ready.tcp, Some(TcpReady::Enabled(true))));
+    assert_eq!(
+        service.env["KEEP"],
+        Templated::Literal(Scalar::String("base".into()))
+    );
+    assert_eq!(
+        service.env["VALUE"],
+        Templated::Literal(Scalar::String("service".into()))
+    );
+
+    let local = "services:\n  api:\n    run: local-server\n    ready: { log: listening }\n    env: { VALUE: local, EXTRA: local }\n";
+    let config = parse_project(source, Some(local)).expect("local replaces service forms");
+    let service = &config.services["api"];
+    assert!(service.run.is_some());
+    assert!(service.run_script.is_none());
+    let ReadyConfig::Check(ready) = service.ready.as_ref().expect("ready") else {
+        panic!("check")
+    };
+    assert!(ready.http.is_none());
+    assert!(ready.tcp.is_none());
+    assert_eq!(ready.log, Some(Templated::Literal("listening".into())));
+    assert_eq!(
+        service.env["KEEP"],
+        Templated::Literal(Scalar::String("base".into()))
+    );
+    assert_eq!(
+        service.env["VALUE"],
+        Templated::Literal(Scalar::String("local".into()))
+    );
+    assert!(service.env.contains_key("EXTRA"));
 }
 
 /// The caller can resolve lane/env graphs and then evaluate typed service fields.
@@ -764,7 +784,7 @@ fn opaque_preset_options_and_registry_validation() {
     let custom = parse_project("project: demo\ntemplates:\n  base:\n    preset: custom\n    custom: { nested: { keep: true, replace: old }, args: [old] }\nservices:\n  api:\n    extends: base\n    run: server\n    custom: { nested: { replace: new }, args: [] }\n",None).expect("unregistered preset before integration validation");
     assert_eq!(
         custom.services["api"].preset_options["custom"],
-        json!({"nested":{"keep":true,"replace":"new"},"args":[]})
+        json!({"nested":{"replace":"new"},"args":[]})
     );
     assert!(
         validate_with_presets(&custom, &registered_validator)

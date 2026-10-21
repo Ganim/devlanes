@@ -84,17 +84,12 @@ macro_rules! service_fields {
         }
 
         impl<E: Extensions> PartialService<E> {
-            /// Merge fields while preserving the source of every replacing value.
+            /// Template inheritance and local overlays replace service fields and preset blocks
+            /// atomically so one-of settings such as ready and run/run_script cannot mix forms.
+            /// Env entries merge per key; fnox retains unspecified fields.
             pub(crate) fn merge(&mut self, mut overlay: Self) {
-                if let (Some(base), Some(local)) = (&self.ready, &mut overlay.ready) {
-                    let mut merged = base.value.clone();
-                    crate::loader::merge_ready(&mut merged, local.value.clone());
-                    local.value = merged;
-                }
-                if let (Some(base), Some(local)) = (&self.stop, &mut overlay.stop) {
-                    if local.value.signal.is_none() { local.value.signal = base.value.signal.clone(); }
-                    if local.value.timeout.is_none() { local.value.timeout = base.value.timeout.clone(); }
-                }
+                if overlay.run.is_some() { self.run_script = None; }
+                if overlay.run_script.is_some() { self.run = None; }
                 if let (Some(base), Some(local)) = (&self.fnox, &mut overlay.fnox) {
                     if local.value.profile.is_none() { local.value.profile = base.value.profile.clone(); }
                 }
@@ -103,11 +98,7 @@ macro_rules! service_fields {
                     if let Some(base) = &mut self.env { base.value.extend(overlay.value); }
                     else { self.env = Some(overlay); }
                 }
-                for (key, value) in overlay.preset_options {
-                    if let Some(base) = self.preset_options.get_mut(&key) {
-                        E::merge_preset_options(&mut base.value, value.value);
-                    } else { self.preset_options.insert(key, value); }
-                }
+                self.preset_options.extend(overlay.preset_options);
             }
 
             /// Drop span metadata only after all merge decisions have been made.
@@ -197,7 +188,7 @@ service_fields! {
     run_script: RunScript,
     /// Working directory relative to the lane worktree.
     cwd: Templated<String>,
-    /// Platform contributor, such as node or python; inferred when omitted.
+    /// Platform: node, bun, deno, python or rust; detected from project files when omitted.
     platform: String,
     /// Registered framework preset; options use a sibling key with this name.
     preset: String,
