@@ -1,0 +1,64 @@
+---
+source: crates/config/tests/it/main.rs
+expression: "parse_project(base,Some(LOCAL)).expect(\"local with matching base\")"
+---
+{
+  "project": "acme",
+  "templates": {
+    "fastify-api": {
+      "platform": "node"
+    }
+  },
+  "lanes": {
+    "primary": null,
+    "new_worktrees": null,
+    "removed_worktrees": null,
+    "worktree_dir": null,
+    "block_size": null,
+    "max": 3,
+    "hosts_file": null,
+    "vars": {},
+    "matrix": null
+  },
+  "infra": {
+    "compose": null,
+    "project_name": null,
+    "exclude": null,
+    "per_lane": null,
+    "profiles": null,
+    "env": {},
+    "hosts": {},
+    "hidden": null,
+    "containers": {},
+    "setup": {},
+    "teardown": {}
+  },
+  "fnox": null,
+  "global_env": {
+    "LOG_LEVEL": "debug"
+  },
+  "tasks": {},
+  "services": {
+    "admin-web": {
+      "run": "node admin.mjs",
+      "tags": [
+        "essential"
+      ],
+      "autostart": false
+    },
+    "scratch-api": {
+      "extends": "fastify-api",
+      "run": "node scratch/server.mjs",
+      "platform": "node",
+      "hosts": [
+        "scratch.${{ lane.domain }}"
+      ]
+    }
+  },
+  "profiles": {
+    "default": [
+      "+essential",
+      "admin-web"
+    ]
+  }
+}

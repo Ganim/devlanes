@@ -1,0 +1,11 @@
+---
+source: crates/config/tests/it/main.rs
+expression: output
+---
+  × invalid type: boolean `false`, expected a preset options mapping at line 5, column 5
+   ╭─[devlanes.yaml:5:5]
+ 4 │     run: server
+ 5 │     autostrat: false
+   ·     ┬
+   ·     ╰── invalid type: boolean `false`, expected a preset options mapping at line 5, column 5
+   ╰────

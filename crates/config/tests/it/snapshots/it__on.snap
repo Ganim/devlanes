@@ -1,0 +1,11 @@
+---
+source: crates/config/tests/it/main.rs
+expression: output
+---
+  × unknown key `on`; use `when` for lifecycle hooks
+   ╭─[devlanes.yaml:5:5]
+ 4 │     run: migrate
+ 5 │     on: lane.start
+   ·     ┬
+   ·     ╰── unknown key `on`; use `when` for lifecycle hooks
+   ╰────

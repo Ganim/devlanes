@@ -1,0 +1,32 @@
+[package]
+name = "devlanes-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+serde-saphyr = { version = "2", features = ["miette"] }
+minijinja = { version = "3", features = ["serde", "json"] }
+schemars = { version = "1", features = ["indexmap2"] }
+indexmap = { version = "2", features = ["serde"] }
+miette = { version = "7", features = ["fancy"] }
+strsim = "0.11"
+globset = "0.4"
+serde_path_to_error = "0.1"
+
+[dev-dependencies]
+devlanes-preset-vite = { path = "../preset-vite" }
+devlanes-preset-next = { path = "../preset-next" }
+devlanes-preset-wrangler = { path = "../preset-wrangler" }
+devlanes-preset-tauri = { path = "../preset-tauri" }
+tempfile.workspace = true
+insta = { version = "1", features = ["json"] }
+jsonschema = { version = "0.59", default-features = false }
+
+[lints]
+workspace = true

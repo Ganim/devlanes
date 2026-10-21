@@ -1,0 +1,12 @@
+---
+source: crates/config/tests/it/main.rs
+expression: output
+---
+  × services.web.env.URL: unknown expression context `api`; use underscores or brackets
+  │ for dashed names
+   ╭─[devlanes.yaml:6:17]
+ 5 │     run: server
+ 6 │     env: { URL: '${{ svc.crm-api.url }}' }
+   ·                 ┬
+   ·                 ╰── services.web.env.URL: unknown expression context `api`; use underscores or brackets for dashed names
+   ╰────

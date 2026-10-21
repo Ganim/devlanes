@@ -1,0 +1,40 @@
+---
+source: crates/config/tests/it/main.rs
+expression: user
+---
+{
+  "hostnames": {
+    "resolver": "localhost",
+    "hosts_file": "auto",
+    "tld": null,
+    "base_domain": null,
+    "dns_provider": null
+  },
+  "ports": {
+    "range": "20000-32767"
+  },
+  "tls": {
+    "ca": "devlanes",
+    "trust": [
+      "system",
+      "firefox",
+      "ios-simulator",
+      "android-emulator"
+    ]
+  },
+  "proxy": {
+    "https_port": 443,
+    "http_port": 80,
+    "lan": false
+  },
+  "logs": {
+    "retention": {
+      "days": 7,
+      "max_size": "5368709120B"
+    }
+  },
+  "metrics": {
+    "retention": "2592000000ms"
+  },
+  "terminal": "ghostty"
+}

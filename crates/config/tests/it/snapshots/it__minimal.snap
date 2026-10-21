@@ -1,0 +1,76 @@
+---
+source: crates/config/tests/it/main.rs
+expression: "parse_project(MINIMAL,None).expect(\"minimal reference\")"
+---
+{
+  "project": "myapp",
+  "templates": {},
+  "lanes": {
+    "primary": null,
+    "new_worktrees": null,
+    "removed_worktrees": null,
+    "worktree_dir": null,
+    "block_size": null,
+    "max": null,
+    "hosts_file": null,
+    "vars": {},
+    "matrix": null
+  },
+  "infra": {
+    "compose": "docker-compose.yml",
+    "project_name": null,
+    "exclude": null,
+    "per_lane": null,
+    "profiles": null,
+    "env": {},
+    "hosts": {},
+    "hidden": null,
+    "containers": {},
+    "setup": {
+      "database": "docker compose exec -T postgres createdb -U postgres myapp_${{ lane.name }}"
+    },
+    "teardown": {
+      "database": "docker compose exec -T postgres dropdb -U postgres --if-exists myapp_${{ lane.name }}"
+    }
+  },
+  "fnox": null,
+  "global_env": {
+    "DATABASE_URL": "postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/myapp_${{ lane.name }}"
+  },
+  "tasks": {
+    "migrate": {
+      "run": null,
+      "run_script": "api/package.json#migrate",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.start",
+      "after": null,
+      "profiles": null,
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    }
+  },
+  "services": {
+    "api": {
+      "run_script": "api/package.json#dev",
+      "hosts": [
+        "api.${{ lane.domain }}"
+      ]
+    },
+    "web": {
+      "run_script": "web/package.json#dev",
+      "preset": "vite",
+      "hosts": [
+        "${{ lane.domain }}"
+      ],
+      "env": {
+        "VITE_API_URL": "${{ svc.api.public_url }}"
+      }
+    }
+  },
+  "profiles": {}
+}

@@ -1,0 +1,240 @@
+use crate::{
+    BuiltinExtensions, ConfigDuration, Env, Extensions, FnoxConfig, HostConfig, ReadyConfig, Run,
+    RunScript, SyncConfig, Templated,
+};
+use indexmap::IndexMap;
+use schemars::JsonSchema;
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{MapAccess, Visitor},
+    ser::SerializeMap,
+};
+use serde_saphyr::Spanned;
+use std::{fmt, marker::PhantomData};
+
+/// `deserialize_any` prevents YAML null from being coerced to an empty mapping.
+struct PresetMapping(serde_json::Map<String, serde_json::Value>);
+
+impl<'de> Deserialize<'de> for PresetMapping {
+    /// Reject every non-mapping YAML node at its original parser location.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MappingVisitor;
+        impl<'de> Visitor<'de> for MappingVisitor {
+            type Value = PresetMapping;
+            /// Explain the required node shape in source-labelled YAML errors.
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a preset options mapping")
+            }
+            /// Preserve arbitrary integration fields until the registered parser runs.
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut values = serde_json::Map::new();
+                while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    if values.insert(key.clone(), value).is_some() {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate preset option `{key}`"
+                        )));
+                    }
+                }
+                Ok(PresetMapping(values))
+            }
+        }
+        deserializer.deserialize_any(MappingVisitor)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StopConfig {
+    pub signal: Option<String>,
+    pub timeout: Option<Templated<ConfigDuration>>,
+}
+
+macro_rules! service_fields {
+    ($($(#[$meta:meta])* $field:ident: $ty:ty),* $(,)?) => {
+        /// Service settings after typed local and template merging.
+        #[derive(Debug, Clone, JsonSchema)]
+        #[schemars(bound = "E: Extensions", deny_unknown_fields)]
+        pub struct ServiceConfig<E: Extensions = BuiltinExtensions> {
+            $($(#[$meta])* pub $field: Option<$ty>,)*
+            /// Service-specific environment overrides, above global_env.
+            #[schemars(default)]
+            pub env: Env,
+            #[schemars(skip)]
+            pub preset_options: IndexMap<String, E::Options>,
+        }
+
+        /// Optional source-bearing fields keep local overrides separate from defaults.
+        #[derive(Debug, Clone)]
+        pub(crate) struct PartialService<E: Extensions> {
+            $(pub $field: Option<Spanned<$ty>>,)*
+            pub env: Option<Spanned<Env>>,
+            pub preset_options: IndexMap<String, Spanned<E::Options>>,
+        }
+
+        impl<E: Extensions> Default for PartialService<E> {
+            /// Keep every field absent until base and local sources have been merged.
+            fn default() -> Self {
+                Self { $($field: None,)* env: None, preset_options: IndexMap::new() }
+            }
+        }
+
+        impl<E: Extensions> Default for ServiceConfig<E> {
+            /// Construct an empty template; runnable services require a command.
+            fn default() -> Self { PartialService::<E>::default().finish() }
+        }
+
+        impl<E: Extensions> PartialService<E> {
+            /// Merge fields while preserving the source of every replacing value.
+            pub(crate) fn merge(&mut self, mut overlay: Self) {
+                if let (Some(base), Some(local)) = (&self.ready, &mut overlay.ready) {
+                    let mut merged = base.value.clone();
+                    crate::loader::merge_ready(&mut merged, local.value.clone());
+                    local.value = merged;
+                }
+                if let (Some(base), Some(local)) = (&self.stop, &mut overlay.stop) {
+                    if local.value.signal.is_none() { local.value.signal = base.value.signal.clone(); }
+                    if local.value.timeout.is_none() { local.value.timeout = base.value.timeout.clone(); }
+                }
+                if let (Some(base), Some(local)) = (&self.fnox, &mut overlay.fnox) {
+                    if local.value.profile.is_none() { local.value.profile = base.value.profile.clone(); }
+                }
+                $(if let Some(value) = overlay.$field { self.$field = Some(value); })*
+                if let Some(overlay) = overlay.env {
+                    if let Some(base) = &mut self.env { base.value.extend(overlay.value); }
+                    else { self.env = Some(overlay); }
+                }
+                for (key, value) in overlay.preset_options {
+                    if let Some(base) = self.preset_options.get_mut(&key) {
+                        E::merge_preset_options(&mut base.value, value.value);
+                    } else { self.preset_options.insert(key, value); }
+                }
+            }
+
+            /// Drop span metadata only after all merge decisions have been made.
+            pub(crate) fn finish(self) -> ServiceConfig<E> {
+                ServiceConfig {
+                    $($field: self.$field.map(|v| v.value),)*
+                    env: self.env.map(|v| v.value).unwrap_or_default(),
+                    preset_options: self.preset_options.into_iter().map(|(k,v)| (k,v.value)).collect(),
+                }
+            }
+        }
+
+        impl<'de, E: Extensions> Deserialize<'de> for PartialService<E> {
+            /// Parse known fields directly so YAML errors retain their original spans.
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                struct ServiceVisitor<E>(PhantomData<E>);
+                impl<'de, E: Extensions> Visitor<'de> for ServiceVisitor<E> {
+                    type Value = PartialService<E>;
+                    /// Describe the expected YAML shape in parser errors.
+                    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("service settings") }
+                    /// Delay preset/key agreement until inherited presets are resolved.
+                    fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                        let mut result = PartialService::default();
+                        let mut seen = std::collections::HashSet::new();
+                        while let Some(key) = map.next_key::<String>()? {
+                            if !seen.insert(key.clone()) { return Err(serde::de::Error::custom(format!("duplicate key `{key}`"))); }
+                            match key.as_str() {
+                                $(stringify!($field) => result.$field = map.next_value()?,)*
+                                "env" => result.env = Some(map.next_value()?),
+                                "gui" => return Err(serde::de::Error::custom("`gui` is not supported yet")),
+                                key if E::preset_names().contains(&key) || E::accepts_unregistered_presets() => {
+                                    let value: Spanned<PresetMapping> = map.next_value()?;
+                                    let parsed = E::parse_preset_options(key, serde_json::Value::Object(value.value.0)).map_err(|mut message| {
+                                        let known = [$(stringify!($field),)* "env"];
+                                        if let Some(suggestion) = known.iter().max_by(|a,b| strsim::jaro_winkler(key,a).total_cmp(&strsim::jaro_winkler(key,b)))
+                                            && strsim::jaro_winkler(key,suggestion) > 0.75 {
+                                            message.push_str(&format!("; did you mean `{suggestion}`?"));
+                                        }
+                                        serde::de::Error::custom(message)
+                                    })?;
+                                    result.preset_options.insert(key.into(), Spanned::new(parsed, value.referenced, value.defined));
+                                }
+                                key => {
+                                    let known = [$(stringify!($field),)* "env"];
+                                    let suggestion = known.iter().max_by(|a,b| strsim::jaro_winkler(key,a).total_cmp(&strsim::jaro_winkler(key,b)));
+                                    let message = match suggestion.filter(|s| strsim::jaro_winkler(key,s) > 0.75) {
+                                        Some(s) => format!("unknown key `{key}`; did you mean `{s}`?"),
+                                        None => format!("unknown key `{key}`"),
+                                    };
+                                    return Err(serde::de::Error::custom(message));
+                                }
+                            }
+                        }
+                        Ok(result)
+                    }
+                }
+                d.deserialize_map(ServiceVisitor(PhantomData))
+            }
+        }
+
+        impl<'de, E: Extensions> Deserialize<'de> for ServiceConfig<E> {
+            /// Deserialize a standalone service, retaining strict unknown-key checks.
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                PartialService::<E>::deserialize(d).map(PartialService::finish)
+            }
+        }
+
+        impl<E: Extensions> Serialize for ServiceConfig<E> {
+            /// Emit preset options under their declared names without flattening.
+            fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                let mut map = s.serialize_map(None)?;
+                $(if let Some(value) = &self.$field { map.serialize_entry(stringify!($field), value)?; })*
+                if !self.env.is_empty() { map.serialize_entry("env", &self.env)?; }
+                for (key, value) in &self.preset_options { map.serialize_entry(key, value)?; }
+                map.end()
+            }
+        }
+    }
+}
+
+service_fields! {
+    /// Template name; resolved after devlanes.local.yaml is merged.
+    extends: String,
+    /// Shell command or argv; exactly one of run and run_script is required after inheritance.
+    run: Run,
+    /// Script file and name, in shorthand or object form.
+    run_script: RunScript,
+    /// Working directory relative to the lane worktree.
+    cwd: Templated<String>,
+    /// Platform contributor, such as node or python; inferred when omitted.
+    platform: String,
+    /// Registered framework preset; options use a sibling key with this name.
+    preset: String,
+    /// HTTP hosts, wildcard hosts, and routes to named ports.
+    hosts: Vec<HostConfig>,
+    /// Tags used by +tag profile selectors.
+    tags: Vec<String>,
+    /// Readiness policy; defaults to TCP with hosts, otherwise started.
+    ready: ReadyConfig,
+    /// Use a pseudoterminal; defaults to true.
+    pty: Templated<bool>,
+    /// Stop signal and grace period before killing the process tree.
+    stop: StopConfig,
+    /// Prevent remote port mirroring; defaults to false.
+    hidden: Templated<bool>,
+    /// Start by default unless explicitly selected; defaults to true.
+    autostart: Templated<bool>,
+    /// Override the project fnox profile for this service.
+    fnox: FnoxConfig,
+    /// Folders copied to stable local or remote-client paths.
+    sync: Vec<SyncConfig>,
+    /// Number of instances; replica.index starts at one. Defaults to one.
+    replicas: Templated<u16>,
+}
+
+impl<E: Extensions> ServiceConfig<E> {
+    /// Return the implicit readiness policy when no explicit check is configured.
+    pub fn effective_ready(&self) -> ReadyConfig {
+        self.ready.clone().unwrap_or_else(|| {
+            if self.hosts.as_ref().is_some_and(|hosts| !hosts.is_empty()) {
+                ReadyConfig::Check(crate::ReadyCheck {
+                    tcp: Some(crate::TcpReady::Enabled(true)),
+                    ..Default::default()
+                })
+            } else {
+                ReadyConfig::Started(crate::Started::Started)
+            }
+        })
+    }
+}

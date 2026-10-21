@@ -1,0 +1,285 @@
+---
+source: crates/config/tests/it/main.rs
+expression: config
+---
+{
+  "project": "acme",
+  "templates": {
+    "api": {
+      "platform": "node",
+      "tags": [
+        "api"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/health",
+          "status": null,
+          "timeout": null
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      }
+    },
+    "worker": {
+      "platform": "node",
+      "preset": "wrangler",
+      "tags": [
+        "worker"
+      ]
+    }
+  },
+  "lanes": {
+    "primary": "main",
+    "new_worktrees": null,
+    "removed_worktrees": null,
+    "worktree_dir": null,
+    "block_size": null,
+    "max": null,
+    "hosts_file": "always",
+    "vars": {
+      "db_name": "acme_${{ lane.name }}",
+      "redis_db": "${{ lane.index }}",
+      "vhost": "acme_${{ lane.name }}"
+    },
+    "matrix": null
+  },
+  "infra": {
+    "compose": "compose.yaml",
+    "project_name": null,
+    "exclude": [
+      "legacy-proxy"
+    ],
+    "per_lane": null,
+    "profiles": null,
+    "env": {},
+    "hosts": {
+      "object-store": [
+        "storage.${{ lane.domain }}"
+      ]
+    },
+    "hidden": [
+      "postgres"
+    ],
+    "containers": {},
+    "setup": {
+      "database": [
+        "docker",
+        "compose",
+        "exec",
+        "-T",
+        "postgres",
+        "createdb",
+        "${{ lane.db_name }}"
+      ],
+      "vhost": {
+        "run": "docker compose exec -T rabbitmq rabbitmqctl add_vhost ${{ lane.vhost }}",
+        "run_script": null,
+        "container": "rabbitmq",
+        "ignore_errors": true,
+        "cwd": null,
+        "env": {},
+        "timeout": null
+      }
+    },
+    "teardown": {
+      "database": "docker compose exec -T postgres dropdb --if-exists ${{ lane.db_name }}",
+      "vhost": "docker compose exec -T rabbitmq rabbitmqctl delete_vhost ${{ lane.vhost }}"
+    }
+  },
+  "fnox": {
+    "profile": "development"
+  },
+  "global_env": {
+    "DATABASE_URL": "postgres://127.0.0.1:${{ infra.postgres.port }}/${{ lane.db_name }}",
+    "REDIS_URL": "redis://127.0.0.1:${{ infra.redis.port }}/${{ lane.redis_db }}"
+  },
+  "tasks": {
+    "build-dependencies": {
+      "run": null,
+      "run_script": "package.json#build-deps",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.create",
+      "after": null,
+      "profiles": null,
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "migrate": {
+      "run": null,
+      "run_script": "package.json#migrate",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.start",
+      "after": null,
+      "profiles": null,
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "seed": {
+      "run": null,
+      "run_script": "tools/seed/package.json#start",
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.create",
+      "after": "services",
+      "profiles": null,
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": "600000ms",
+      "pty": null
+    },
+    "build": {
+      "run": "pnpm build",
+      "run_script": null,
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": "lane.start",
+      "after": null,
+      "profiles": [
+        "e2e"
+      ],
+      "steps": null,
+      "confirm": null,
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    },
+    "reset": {
+      "run": null,
+      "run_script": null,
+      "cwd": null,
+      "env": {},
+      "fnox": null,
+      "when": null,
+      "after": null,
+      "profiles": null,
+      "steps": [
+        "infra.teardown.database",
+        "infra.setup.database",
+        "migrate",
+        "seed"
+      ],
+      "confirm": "Reset ${{ lane.db_name }}?",
+      "interactive": null,
+      "timeout": null,
+      "pty": null
+    }
+  },
+  "services": {
+    "accounts-api": {
+      "extends": "api",
+      "run_script": "apps/accounts/package.json#dev",
+      "platform": "node",
+      "hosts": [
+        "accounts.${{ lane.domain }}"
+      ],
+      "tags": [
+        "api"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": {
+          "path": "/health",
+          "status": null,
+          "timeout": null
+        },
+        "log": null,
+        "cmd": null,
+        "timeout": null
+      }
+    },
+    "gateway": {
+      "extends": "worker",
+      "run_script": "workers/gateway/package.json#dev",
+      "platform": "node",
+      "preset": "wrangler",
+      "hosts": [
+        "gateway.${{ lane.domain }}"
+      ],
+      "tags": [
+        "worker"
+      ],
+      "wrangler": {
+        "vars": {
+          "API_URL": "${{ svc.accounts_api.url }}"
+        }
+      }
+    },
+    "web": {
+      "run_script": "apps/web/package.json#dev",
+      "preset": "vite",
+      "hosts": [
+        "${{ lane.domain }}"
+      ],
+      "tags": [
+        "web"
+      ],
+      "env": {
+        "API_URL": "${{ svc.gateway.public_url }}"
+      }
+    },
+    "queue": {
+      "run_script": "workers/queue/package.json#dev",
+      "tags": [
+        "worker"
+      ],
+      "ready": {
+        "tcp": null,
+        "http": null,
+        "log": "Connected",
+        "cmd": null,
+        "timeout": null
+      }
+    }
+  },
+  "profiles": {
+    "default": [
+      "+api",
+      "+worker",
+      "+web"
+    ],
+    "backend": [
+      "+api",
+      "+worker"
+    ],
+    "frontend": {
+      "include": [
+        "+web"
+      ],
+      "exclude": null,
+      "infra": false,
+      "env": {
+        "API_URL": "https://api.example.test"
+      },
+      "run_scripts": {}
+    },
+    "e2e": {
+      "include": [
+        "+api",
+        "+web"
+      ],
+      "exclude": null,
+      "infra": null,
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "run_scripts": {
+        "dev": "start"
+      }
+    }
+  }
+}

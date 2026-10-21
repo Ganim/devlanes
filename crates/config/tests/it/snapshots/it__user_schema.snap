@@ -1,0 +1,308 @@
+---
+source: crates/config/tests/it/main.rs
+expression: user
+---
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "hostnames": {
+      "$ref": "#/$defs/HostnamesConfig",
+      "description": "Hostname resolution strategy and optional hosts-file policy.",
+      "default": {
+        "resolver": "localhost",
+        "hosts_file": null,
+        "tld": null,
+        "base_domain": null,
+        "dns_provider": null
+      }
+    },
+    "ports": {
+      "$ref": "#/$defs/PortsConfig",
+      "description": "Machine-wide pool shared by all project lane blocks.",
+      "default": {
+        "range": "20000-32767"
+      }
+    },
+    "tls": {
+      "$ref": "#/$defs/TlsConfig",
+      "description": "Certificate authority and explicitly requested trust targets.",
+      "default": {
+        "ca": "devlanes",
+        "trust": []
+      }
+    },
+    "proxy": {
+      "$ref": "#/$defs/ProxyConfig",
+      "description": "HTTP/HTTPS listening ports and LAN access policy.",
+      "default": {
+        "https_port": 443,
+        "http_port": 80,
+        "lan": false
+      }
+    },
+    "logs": {
+      "$ref": "#/$defs/LogsConfig",
+      "description": "Disk retention for service output.",
+      "default": {
+        "retention": {
+          "days": 7,
+          "max_size": "5368709120B"
+        }
+      }
+    },
+    "metrics": {
+      "$ref": "#/$defs/MetricsConfig",
+      "description": "Retention for monitor aggregates.",
+      "default": {
+        "retention": "2592000000ms"
+      }
+    },
+    "terminal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Terminal"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Terminal application used by open-in-terminal actions.",
+      "default": null
+    }
+  },
+  "description": "Per-user machine settings, separate from project configuration.",
+  "title": "UserConfig",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "HostnamesConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resolver": {
+          "$ref": "#/$defs/Resolver",
+          "description": "localhost or resolver in v1; public parses but is not supported yet.",
+          "default": "localhost"
+        },
+        "hosts_file": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostsFile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether exact hostnames should also be written to the system hosts file.",
+          "default": null
+        },
+        "tld": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Custom top-level domain for the embedded DNS strategy.",
+          "default": null
+        },
+        "base_domain": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Reserved public-resolver base domain; not supported yet.",
+          "default": null
+        },
+        "dns_provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DnsProvider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reserved DNS-01 provider settings; not supported yet.",
+          "default": null
+        }
+      }
+    },
+    "Resolver": {
+      "type": "string",
+      "enum": [
+        "localhost",
+        "hosts_file",
+        "resolver",
+        "public"
+      ]
+    },
+    "HostsFile": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "never",
+        "always"
+      ]
+    },
+    "DnsProvider": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cloudflare": {
+          "$ref": "#/$defs/CloudflareDns"
+        }
+      },
+      "required": [
+        "cloudflare"
+      ]
+    },
+    "CloudflareDns": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "token": {
+          "$ref": "#/$defs/Templated_string"
+        }
+      },
+      "required": [
+        "token"
+      ]
+    },
+    "Templated_string": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "description": "A literal value or a `${{ ... }}` template, checked against `T` after evaluation."
+    },
+    "PortsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "range": {
+          "type": "string",
+          "default": "20000-32767"
+        }
+      }
+    },
+    "TlsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ca": {
+          "$ref": "#/$defs/CaKind",
+          "default": "devlanes"
+        },
+        "trust": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrustTarget"
+          },
+          "default": []
+        }
+      }
+    },
+    "CaKind": {
+      "type": "string",
+      "enum": [
+        "devlanes",
+        "mkcert"
+      ]
+    },
+    "TrustTarget": {
+      "type": "string",
+      "enum": [
+        "system",
+        "firefox",
+        "chrome",
+        "ios-simulator",
+        "android-emulator"
+      ]
+    },
+    "ProxyConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "https_port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 443
+        },
+        "http_port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 80
+        },
+        "lan": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "LogsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "retention": {
+          "$ref": "#/$defs/LogRetention",
+          "default": {
+            "days": 7,
+            "max_size": "5368709120B"
+          }
+        }
+      }
+    },
+    "LogRetention": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "days": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 7
+        },
+        "max_size": {
+          "$ref": "#/$defs/ByteSize",
+          "default": "5368709120B"
+        }
+      }
+    },
+    "ByteSize": {
+      "type": "string",
+      "description": "A byte count with decimal or binary size units."
+    },
+    "MetricsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "retention": {
+          "$ref": "#/$defs/ConfigDuration",
+          "default": "2592000000ms"
+        }
+      }
+    },
+    "ConfigDuration": {
+      "type": "string",
+      "description": "A duration written with `ms`, `s`, `m`, `h`, or `d` units."
+    },
+    "Terminal": {
+      "type": "string",
+      "enum": [
+        "iterm2",
+        "ghostty",
+        "wezterm",
+        "kitty",
+        "terminal"
+      ]
+    }
+  },
+  "$id": "https://devlanes.run/schema/user-v1.json"
+}

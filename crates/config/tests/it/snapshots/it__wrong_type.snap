@@ -1,0 +1,11 @@
+---
+source: "../tests/it/main.rs"
+expression: output
+---
+  × invalid type: string "banana", expected u16 at line 3, column 15
+   ╭─[devlanes.yaml:3:15]
+ 2 │ lanes:
+ 3 │   block_size: banana
+   ·               ┬
+   ·               ╰── invalid type: string "banana", expected u16 at line 3, column 15
+   ╰────

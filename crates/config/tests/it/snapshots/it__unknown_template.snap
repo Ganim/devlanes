@@ -1,0 +1,12 @@
+---
+source: crates/config/tests/it/main.rs
+expression: output
+---
+  × services.api.extends: unknown template `missing`
+   ╭─[devlanes.yaml:4:14]
+ 3 │   api:
+ 4 │     extends: missing
+   ·              ┬
+   ·              ╰── services.api.extends: unknown template `missing`
+ 5 │     run: server
+   ╰────

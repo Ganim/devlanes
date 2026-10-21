@@ -1,0 +1,12 @@
+---
+source: "../tests/it/main.rs"
+expression: output
+---
+  × lanes.vars.a: expression/reference cycle: lane.a -> lane.b -> lane.a
+   ╭─[devlanes.yaml:4:8]
+ 3 │   vars:
+ 4 │     a: '${{ lane.b }}'
+   ·        ┬
+   ·        ╰── lanes.vars.a: expression/reference cycle: lane.a -> lane.b -> lane.a
+ 5 │     b: '${{ lane.a }}'
+   ╰────
