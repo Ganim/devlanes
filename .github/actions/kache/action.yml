@@ -35,7 +35,38 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install kache
+    # kache 1.2.2 can't wrap cl.exe: cc 1.9 routes C compiles through RUSTC_WRAPPER when
+    # it is kache, and 1.2.2 rejects `kache cl.exe ...`, so ring, libsqlite3-sys and
+    # zstd-sys fail to build. https://github.com/kunobi-ninja/kache/pull/1640 fixes it but
+    # was merged after 1.2.2. Until a release includes it, Windows builds kache from that
+    # commit; replace this with the release asset in the step below once one ships.
+    - if: runner.os == 'Windows'
+      id: windows-kache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/kache-git
+        key: kache-git-a37fb5ff3bcc86adfded7f3ecb4f7c5100f744c2-${{ runner.os }}-${{ runner.arch }}
+    - if: runner.os == 'Windows'
+      name: Install kache (Windows, from git)
+      shell: bash
+      env:
+        KACHE_REV: a37fb5ff3bcc86adfded7f3ecb4f7c5100f744c2
+        CACHED: ${{ steps.windows-kache.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        root=$RUNNER_TEMP/kache-git
+        if [ "$CACHED" != true ]; then
+          # Outside the checkout, so the repository's rustc-wrapper and toolchain don't apply.
+          cd "$RUNNER_TEMP"
+          env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= \
+            cargo install --locked --git https://github.com/kunobi-ninja/kache --rev "$KACHE_REV" --root "$root" kache
+        fi
+        "$root/bin/kache" --version
+        echo "$root/bin" >> "$GITHUB_PATH"
+        echo "KACHE_CACHE_DIR=$RUNNER_TEMP/kache" >> "$GITHUB_ENV"
+        echo "KACHE_MAX_SIZE=2GiB" >> "$GITHUB_ENV"
+    - if: runner.os != 'Windows'
+      name: Install kache
       shell: bash
       env:
         KACHE_VERSION: 1.2.2

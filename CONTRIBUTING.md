@@ -7,7 +7,17 @@ devlanes is a Cargo workspace: one binary (`bins/devlanes`) built from small cra
 - Rust comes from `rust-toolchain.toml`; rustup installs the pinned version on the first `cargo` call.
 - Install nextest: `cargo install cargo-nextest --locked`.
 - Install kache, the build cache every compile goes through (`.cargo/config.toml` sets it as rustc wrapper): `cargo install kache --locked`, then `kache init` once.
-- macOS (Apple Silicon and Intel) and Linux with glibc (x86_64 and arm64) are supported. Windows isn't.
+- macOS (Apple Silicon and Intel) and Linux with glibc (x86_64 and arm64) are supported. Windows support is in progress.
+
+On Windows you also need:
+
+- Visual Studio Build Tools with the C++ workload (`cl.exe`), for crates with C code such as `ring` and `libsqlite3-sys`.
+- Git for Windows; its `sh.exe` runs `run:` strings.
+- kache built from git. kache 1.2.2 can't pass `cl.exe` through, so those C crates fail to build; the fix ([kunobi-ninja/kache#1640](https://github.com/kunobi-ninja/kache/pull/1640)) is merged but not released yet. Build it without the wrapper, since the released kache would hit the same bug on kache's own C dependencies:
+
+  ```sh
+  env -u RUSTC_WRAPPER cargo install --locked --git https://github.com/kunobi-ninja/kache --rev a37fb5ff3bcc86adfded7f3ecb4f7c5100f744c2 kache
+  ```
 
 Optional tools, needed only by the ignored tests that mention them: Docker (OrbStack or Docker Desktop on macOS), `node` with npm/pnpm/yarn/bun, `just`, `deno`, `uv`, `poetry`, `mise`, `direnv`, `fnox` 1.39+, `certutil` (NSS), `dig`, `tmux`.
 

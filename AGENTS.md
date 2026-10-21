@@ -1,6 +1,6 @@
 # Repository conventions
 
-Rust 2024, pinned stable toolchain, macOS and Linux. Packages live in `crates/<name>` as `devlanes-<name>`; the composition root is `bins/devlanes`. Add crates when needed. Shared dependencies and lints belong in the root manifest.
+Rust 2024, pinned stable toolchain, macOS and Linux, with Windows in progress. OS-specific code lives in `cfg(unix)`/`cfg(windows)` modules, never in runtime branches of generic crates, and Win32 FFI belongs in `sys`. Packages live in `crates/<name>` as `devlanes-<name>`; the composition root is `bins/devlanes`. Add crates when needed. Shared dependencies and lints belong in the root manifest.
 
 `core` owns domain types and traits; integrations implement them; only the binary registers concrete integrations. `testing` provides isolated homes, Git repositories and `fixture-server`, initially without a core dependency. Core unit tests must not depend on testing. Keep integration tests in one binary per crate at `tests/it/main.rs`.
 

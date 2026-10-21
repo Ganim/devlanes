@@ -1,0 +1,6 @@
+# Windows checkouts with core.autocrlf=true would otherwise turn fixtures, snapshots,
+# generated schemas and shell scripts into CRLF and break their byte comparisons.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
