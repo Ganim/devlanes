@@ -413,6 +413,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+    )]
     fn project_args_resolve_paths_and_order_files() {
         let project = ComposeProject {
             name: Some("acme".into()),
@@ -444,6 +448,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+    )]
     fn default_name_omits_project_flag() {
         let project = ComposeProject {
             name: None,

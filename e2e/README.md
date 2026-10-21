@@ -2,6 +2,8 @@
 
 End-to-end tests that run the real `devlanes` binary as separate processes against the projects in `fixtures/`. The library in `src/` is the harness; the tests are in `tests/it/`. The SSH tests under `e2e/ssh` are separate (see its README).
 
+The harness and tests are Unix only for now. On Windows the crate compiles to nothing and runs no tests.
+
 ## Usage
 
 ```sh
@@ -33,7 +35,7 @@ DEVLANES_E2E_BIN_DIR="$PWD/target/debug" cargo nextest run --profile e2e
 
 ## Isolation
 
-Each lab has a short `DEVLANES_HOME` under `/tmp` (the socket path must fit), a Git repository with a local identity and `commit.gpgsign=false`, and an environment cleared down to `PATH` (with the binary directory first), `DEVLANES_AGENT=0` and `DEVLANES_OUTPUT=json`. Commands never see CI or agent markers from the outer shell.
+Each lab has a short `DEVLANES_HOME` under `/tmp` (the socket path must fit), a Git repository with a local identity and `commit.gpgsign=false`, an empty file as the global Git config, and an environment cleared down to `PATH` (with the binary directory first), `DEVLANES_AGENT=0` and `DEVLANES_OUTPUT=json`. Commands never see CI or agent markers from the outer shell.
 
 Labs lock one of 60 slots of 100 ports, starting at 26000, through files in `/tmp/devlanes-e2e-ports-<uid>`. The slot holds the lane port pool and the proxy's HTTP and HTTPS ports, written to `$DEVLANES_HOME/config.yaml`, so parallel tests and a developer's own daemon never compete for 443 or 8443.
 

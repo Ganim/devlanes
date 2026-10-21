@@ -7,29 +7,13 @@
 //!
 //! Requires a tokio runtime with IO, time and signal drivers enabled.
 //!
-//! ```no_run
-//! use devlanes_core::{LaunchSpec, Runner, StopPolicy, TerminalSize};
-//! use devlanes_runner_pty::PtyRunner;
-//!
-//! # async fn demo() -> Result<(), devlanes_core::Error> {
-//! let unit = PtyRunner::default()
-//!     .spawn(LaunchSpec {
-//!         program: "/bin/sh".into(),
-//!         args: vec!["-c".into(), "echo hi; sleep 5".into()],
-//!         cwd: "/".into(),
-//!         env: [("PATH".into(), "/usr/bin:/bin".into())].into(),
-//!         pty: true,
-//!         size: TerminalSize::default(),
-//!     })
-//!     .await?;
-//! let mut output = unit.output(); // the first subscriber sees output from launch
-//! unit.stop(StopPolicy::default()).await?;
-//! let exit = unit.wait().await?;
-//! # let _ = (output.try_recv(), exit);
-//! # Ok(())
-//! # }
-//! ```
+//! Unix only: on other platforms this crate is empty, and Windows units run through
+//! a separate runner. See [`PtyRunner`] for an example.
 
+// Sessions, PTYs and signals have no Windows equivalent here, so the whole crate is
+// compiled out there. rustdoc still collects crate-level doc tests from a crate that
+// is configured out, which is why the example lives on `PtyRunner`.
+#![cfg(unix)]
 // Unsafe code is limited to the pre-exec hook in `spawn` and master registration in
 // `unit`; each block documents its invariants.
 #![deny(unsafe_code)]
@@ -73,6 +57,29 @@ pub enum ExitSweep {
 }
 
 /// Spawns units in PTYs or pipes. Cheap to clone; holds only tuning values.
+///
+/// ```no_run
+/// use devlanes_core::{LaunchSpec, Runner, StopPolicy, TerminalSize};
+/// use devlanes_runner_pty::PtyRunner;
+///
+/// # async fn demo() -> Result<(), devlanes_core::Error> {
+/// let unit = PtyRunner::default()
+///     .spawn(LaunchSpec {
+///         program: "/bin/sh".into(),
+///         args: vec!["-c".into(), "echo hi; sleep 5".into()],
+///         cwd: "/".into(),
+///         env: [("PATH".into(), "/usr/bin:/bin".into())].into(),
+///         pty: true,
+///         size: TerminalSize::default(),
+///     })
+///     .await?;
+/// let mut output = unit.output(); // the first subscriber sees output from launch
+/// unit.stop(StopPolicy::default()).await?;
+/// let exit = unit.wait().await?;
+/// # let _ = (output.try_recv(), exit);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct PtyRunner {
     stderr: StderrMode,

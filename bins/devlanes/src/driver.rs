@@ -14,10 +14,7 @@ use devlanes_proto::{
     RpcError, Selection, StartResult, UnitPeak,
 };
 use serde_json::{Value, json};
-use tokio::{
-    signal::unix::{SignalKind, signal},
-    sync::mpsc,
-};
+use tokio::sync::mpsc;
 
 /// Byte budget of the first `logs --all` page per unit; small, so one response for
 /// many units stays far below the frame limit. Longer logs continue per unit.
@@ -48,9 +45,35 @@ pub struct Signals(mpsc::UnboundedReceiver<Stop>);
 
 impl Signals {
     /// Replaces the default dispositions for the rest of the process.
+    #[cfg(unix)]
     pub fn install() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
         let mut interrupt = signal(SignalKind::interrupt())?;
         let mut terminate = signal(SignalKind::terminate())?;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let received = tokio::select! {
+                    Some(()) = interrupt.recv() => Stop::Interrupt,
+                    Some(()) = terminate.recv() => Stop::Terminate,
+                    else => break,
+                };
+                if sender.send(received).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Self(receiver))
+    }
+
+    /// Replaces the default console handling for the rest of the process. Ctrl-C
+    /// maps to [`Stop::Interrupt`] and Ctrl-Break, the closest thing to SIGTERM a
+    /// console delivers, to [`Stop::Terminate`].
+    #[cfg(windows)]
+    pub fn install() -> std::io::Result<Self> {
+        use tokio::signal::windows::{ctrl_break, ctrl_c};
+        let mut interrupt = ctrl_c()?;
+        let mut terminate = ctrl_break()?;
         let (sender, receiver) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             loop {
@@ -258,9 +281,61 @@ fn interrupted(stop: Stop) -> RpcError {
 
 /// Whether this process is in the terminal's foreground process group, so a Ctrl-C
 /// on the terminal already reached the child (it shares the group).
+#[cfg(unix)]
 fn terminal_foreground() -> bool {
     rustix::termios::tcgetpgrp(std::io::stdin())
         .is_ok_and(|group| group == rustix::process::getpgrp())
+}
+
+/// Passes a stop on to the `with` command (`pid` as spawned).
+#[cfg(unix)]
+fn forward_stop(pid: Option<u32>, stop: Stop) {
+    let Some(pid) = pid
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return;
+    };
+    let signal = match stop {
+        // In the terminal's foreground group the child got the terminal's
+        // SIGINT already; a second one would hit it twice.
+        Stop::Interrupt if terminal_foreground() => return,
+        Stop::Interrupt => rustix::process::Signal::INT,
+        // A terminal never sends SIGTERM; CI cancellation sends it to us only.
+        Stop::Terminate => rustix::process::Signal::TERM,
+    };
+    let _ = rustix::process::kill_process(pid, signal);
+}
+
+/// Nothing to pass on: the `with` command shares this console, so Ctrl-C and
+/// Ctrl-Break already reached it.
+#[cfg(windows)]
+fn forward_stop(_pid: Option<u32>, _stop: Stop) {}
+
+/// The `with` command's exit: its code, or the signal that killed it.
+#[cfg(unix)]
+fn command_exit(status: std::process::ExitStatus) -> CommandExit {
+    use std::os::unix::process::ExitStatusExt;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => CommandExit::Code(u8::try_from(code).unwrap_or(1)),
+        (None, Some(signal)) => CommandExit::Signal(u8::try_from(signal).unwrap_or(1)),
+        (None, None) => CommandExit::Code(1),
+    }
+}
+
+/// `STATUS_CONTROL_C_EXIT` (`0xC000013A`) as an exit code: the process ended on Ctrl-C.
+#[cfg(windows)]
+const STATUS_CONTROL_C_EXIT: i32 = -1_073_741_510;
+
+/// The `with` command's exit code. A Ctrl-C exit reads like SIGINT on Unix, so
+/// `with` reports and exits the same way on both.
+#[cfg(windows)]
+fn command_exit(status: std::process::ExitStatus) -> CommandExit {
+    match status.code() {
+        Some(STATUS_CONTROL_C_EXIT) => CommandExit::Signal(Stop::Interrupt.number()),
+        Some(code) => CommandExit::Code(u8::try_from(code).unwrap_or(1)),
+        None => CommandExit::Code(1),
+    }
 }
 
 /// Transport errors become exit code 4 (daemon unreachable), RPC errors keep their own.
@@ -316,6 +391,7 @@ pub fn startup_code(reason: &str) -> Option<(String, String)> {
 /// user's), `not_a_directory`, `unreadable`, or `mode` when tightening an own
 /// directory to 0700 failed; only `mode` has a `fix` (`chmod 700 <path>`), since
 /// the others need a person to decide. `owner` is the owning uid.
+#[cfg(unix)]
 pub fn unsafe_directory(path: &Path) -> RpcError {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let metadata = std::fs::symlink_metadata(path).ok();
@@ -341,6 +417,30 @@ pub fn unsafe_directory(path: &Path) -> RpcError {
             devlanes_cli::shell_quote(&path.display().to_string())
         ));
     }
+    RpcError::new("unsafe_home", data, 4)
+}
+
+/// `unsafe_home` (exit 4): a state directory devlanes refuses, `{message, path,
+/// problem}`. `problem` is `symlink` (also junctions), `not_a_directory`,
+/// `unreadable`, or `acl` for anything else. No `fix` yet: the owner and ACL
+/// details come with the Windows private-directory checks.
+#[cfg(windows)]
+pub fn unsafe_directory(path: &Path) -> RpcError {
+    use std::os::windows::fs::MetadataExt;
+    // FILE_ATTRIBUTE_REPARSE_POINT: symlinks and junctions both carry it.
+    const REPARSE_POINT: u32 = 0x400;
+    let metadata = std::fs::symlink_metadata(path).ok();
+    let problem = match &metadata {
+        None => "unreadable",
+        Some(meta) if meta.file_attributes() & REPARSE_POINT != 0 => "symlink",
+        Some(meta) if !meta.is_dir() => "not_a_directory",
+        Some(_) => "acl",
+    };
+    let data = json!({
+        "message": format!("unsafe devlanes home: {}", path.display()),
+        "path": path,
+        "problem": problem,
+    });
     RpcError::new("unsafe_home", data, 4)
 }
 
@@ -606,15 +706,7 @@ impl WithDriver for ClientDriver {
                     127,
                 )
             })?;
-        let pid = child
-            .id()
-            .and_then(|pid| i32::try_from(pid).ok())
-            .and_then(rustix::process::Pid::from_raw);
-        let forward = |signal| {
-            if let Some(pid) = pid {
-                let _ = rustix::process::kill_process(pid, signal);
-            }
-        };
+        let pid = child.id();
         loop {
             let received = async {
                 match self.signals.as_mut() {
@@ -625,21 +717,9 @@ impl WithDriver for ClientDriver {
             tokio::select! {
                 status = child.wait() => {
                     let status = status.map_err(|error| RpcError::new("wait_failed", json!({"message": error.to_string()}), 1))?;
-                    use std::os::unix::process::ExitStatusExt;
-                    return Ok(match (status.code(), status.signal()) {
-                        (Some(code), _) => CommandExit::Code(u8::try_from(code).unwrap_or(1)),
-                        (None, Some(signal)) => CommandExit::Signal(u8::try_from(signal).unwrap_or(1)),
-                        (None, None) => CommandExit::Code(1),
-                    });
+                    return Ok(command_exit(status));
                 }
-                Some(stop) = received => match stop {
-                    // In the terminal's foreground group the child got the terminal's
-                    // SIGINT already; a second one would hit it twice.
-                    Stop::Interrupt if terminal_foreground() => {}
-                    Stop::Interrupt => forward(rustix::process::Signal::INT),
-                    // A terminal never sends SIGTERM; CI cancellation sends it to us only.
-                    Stop::Terminate => forward(rustix::process::Signal::TERM),
-                },
+                Some(stop) = received => forward_stop(pid, stop),
             }
         }
     }
@@ -648,6 +728,7 @@ impl WithDriver for ClientDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     /// A lane summary with `(unit, state)` pairs.
@@ -710,6 +791,8 @@ mod tests {
 
     /// A fake daemon on `paths.socket`: answers hello, then hands every request of
     /// each accepted connection to `answer`; `None` drops that connection.
+    // Windows has no local listener until named pipes land.
+    #[cfg(unix)]
     fn fake_daemon(
         paths: &Paths,
         connections: usize,
@@ -752,6 +835,7 @@ mod tests {
     }
 
     /// Paths with the socket inside `home`, away from the runner's XDG_RUNTIME_DIR.
+    #[cfg(unix)]
     fn test_paths(home: &Path) -> Paths {
         let mut paths = Paths::new(home).expect("paths");
         paths.socket = paths.run.join("daemon.sock");
@@ -760,12 +844,14 @@ mod tests {
     }
 
     /// One log line of `unit`.
+    #[cfg(unix)]
     fn line(unit: &str, seq: u64) -> Value {
         json!({"unit": unit, "seq": seq, "timestamp_ms": seq, "text": format!("line {seq}"), "level": null})
     }
 
     /// `with --logs-dir` gets every line: a truncated unit continues page by page
     /// with its cursor until the daemon has no more.
+    #[cfg(unix)]
     #[tokio::test]
     async fn logs_page_each_truncated_unit_to_the_end() {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -815,6 +901,7 @@ mod tests {
 
     /// A connection that broke (say, on an oversized frame) does not cost the
     /// teardown: stop reconnects once, without spawning a daemon.
+    #[cfg(unix)]
     #[tokio::test]
     async fn stop_reconnects_after_a_broken_connection() {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -886,6 +973,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     /// `unsafe_home` carries path, mode and owner; an own home whose tightening
     /// failed carries `chmod 700 <dir>` as its fix, a symlinked one no command,
@@ -908,5 +996,36 @@ mod tests {
         let error = rpc_error(ClientError::UnsafeDirectory(link));
         assert_eq!(error.data["problem"], "symlink");
         assert!(error.data.get("fix").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// Without owner and ACL checks the problem is named, never with a mode or fix.
+    fn unsafe_directory_names_the_problem() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let problem = |path: &Path| {
+            let error = rpc_error(ClientError::UnsafeDirectory(path.to_owned()));
+            assert_eq!(error.code, "unsafe_home");
+            assert_eq!(error.exit_code, 4);
+            assert!(error.data.get("mode").is_none() && error.data.get("fix").is_none());
+            error.data["problem"].clone()
+        };
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"").expect("file");
+        assert_eq!(problem(&file), "not_a_directory");
+        assert_eq!(problem(&tmp.path().join("missing")), "unreadable");
+        assert_eq!(problem(tmp.path()), "acl");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// A command ended by Ctrl-C exits like one killed by SIGINT on Unix.
+    fn ctrl_c_exit_reads_as_sigint() {
+        use std::os::windows::process::ExitStatusExt;
+        let exit = |code: u32| command_exit(std::process::ExitStatus::from_raw(code));
+        assert!(matches!(exit(0xC000_013A), CommandExit::Signal(2)));
+        assert!(matches!(exit(0), CommandExit::Code(0)));
+        assert!(matches!(exit(3), CommandExit::Code(3)));
+        assert!(matches!(exit(300), CommandExit::Code(1)));
     }
 }

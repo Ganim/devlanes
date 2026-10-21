@@ -68,10 +68,8 @@ pub fn server_label() -> String {
 
 /// True on Linux when systemd stops the user's processes at logout, which would
 /// stop a daemon the tunnel started once the SSH session ends.
+#[cfg(target_os = "linux")]
 fn linger_off() -> bool {
-    if !cfg!(target_os = "linux") {
-        return false;
-    }
     let user = rustix::process::getuid().as_raw().to_string();
     std::process::Command::new("loginctl")
         .args(["show-user", &user, "--property=Linger", "--value"])
@@ -79,6 +77,12 @@ fn linger_off() -> bool {
         .stderr(std::process::Stdio::null())
         .output()
         .is_ok_and(|output| output.status.success() && output.stdout.trim_ascii() == b"no")
+}
+
+/// Always false: only systemd stops user processes at logout.
+#[cfg(not(target_os = "linux"))]
+fn linger_off() -> bool {
+    false
 }
 
 /// Serves one client over this process's stdin and stdout until it leaves.

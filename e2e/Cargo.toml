@@ -12,7 +12,10 @@ workspace = true
 
 [dependencies]
 devlanes-testing = { path = "../crates/testing" }
-rustix = { version = "1", features = ["process"] }
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+
+# The harness is Unix only for now; see the crate docs.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }

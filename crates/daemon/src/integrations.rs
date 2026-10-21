@@ -509,6 +509,7 @@ impl ProcessTable for SysProcesses {
     }
 
     /// SIGTERM to the verified session, then SIGKILL to verified survivors.
+    #[cfg(unix)]
     async fn terminate(&self, identity: ProcessIdentity, grace: Duration) {
         let signal_all = move |signal: devlanes_sys::Signal| {
             let snapshot = devlanes_sys::processes().unwrap_or_default();
@@ -547,6 +548,15 @@ impl ProcessTable for SysProcesses {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let _ = tokio::task::spawn_blocking(move || signal_all(devlanes_sys::Signal::KILL)).await;
+    }
+
+    /// Not implemented on Windows yet: orphans are reported but left running.
+    #[cfg(windows)]
+    async fn terminate(&self, identity: ProcessIdentity, _grace: Duration) {
+        tracing::warn!(
+            pid = identity.pid,
+            "terminating an orphaned process is not supported on Windows yet"
+        );
     }
 }
 

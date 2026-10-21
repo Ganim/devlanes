@@ -196,10 +196,25 @@ impl CommandExecutor for SystemExecutor {
 }
 
 /// Whether `path` is a regular file with an execute bit.
+#[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::metadata(path)
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+/// Whether `path` is a regular file with an extension Windows runs directly.
+#[cfg(windows)]
+fn is_executable(path: &Path) -> bool {
+    const EXTENSIONS: [&str; 4] = ["exe", "com", "bat", "cmd"];
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| {
+            EXTENSIONS
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        })
+        && std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
 }
 
 /// Runs `command`, mapping a missing program to [`TrustError::ToolMissing`].
@@ -294,6 +309,7 @@ mod tests {
         assert_eq!(command.argv(), ["certutil", "-n", "devlanes CA", ""]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn system_programs_never_come_from_path() {
         let fake = crate::fake::FakeExecutor::new(|_| Ok(CommandOutput::ok("")))
@@ -324,6 +340,26 @@ mod tests {
         );
     }
 
+    /// Windows runs files by extension: listed extensions count in any case,
+    /// other files and directories do not.
+    #[cfg(windows)]
+    #[test]
+    fn windows_executables_are_files_with_a_runnable_extension() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        for name in ["tool.EXE", "script.cmd", "notes.txt", "plain"] {
+            std::fs::write(dir.path().join(name), "")?;
+        }
+        std::fs::create_dir(dir.path().join("folder.exe"))?;
+        assert!(is_executable(&dir.path().join("tool.EXE")));
+        assert!(is_executable(&dir.path().join("script.cmd")));
+        assert!(!is_executable(&dir.path().join("notes.txt")));
+        assert!(!is_executable(&dir.path().join("plain")));
+        assert!(!is_executable(&dir.path().join("folder.exe")));
+        assert!(!is_executable(&dir.path().join("missing.exe")));
+        Ok(())
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn system_executor_captures_output() {
         let command = CommandLine::new("sh").args(["-c", "echo out; echo err >&2; exit 3"]);

@@ -9,16 +9,21 @@ use std::{
 
 use async_trait::async_trait;
 use devlanes_client::Paths;
+#[cfg(unix)]
+use devlanes_core::{ExitOutcome, OutputChunk, ProcessIdentity, StopPolicy, TerminalSize, Unit};
 use devlanes_core::{
-    ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopPolicy, TerminalSize, Unit,
+    LaunchSpec,
     contrib::{CA_BUNDLE_ENV, CA_CERT_ENV, Contributor, ScriptRunner},
+};
+#[cfg(unix)]
+use devlanes_daemon::integrations::{
+    ConnectOptions, ExitDetails, RemoteConnector, RemotePrompt, RemotePrompter,
 };
 use devlanes_daemon::{
     Engine, EngineOptions, Handler,
     integrations::{
-        ConnectOptions, ExitDetails, InfraContainer, InfraError, InfraEvent, InfraPortNeed,
-        InfraProvider, InfraSpec, InfraUp, Integrations, LaunchCheck, ManagedUnit, PlannedUnit,
-        PortInspector, PortScope, PresetEntry, RemoteConnector, RemotePrompt, RemotePrompter,
+        InfraContainer, InfraError, InfraEvent, InfraPortNeed, InfraProvider, InfraSpec, InfraUp,
+        Integrations, LaunchCheck, ManagedUnit, PlannedUnit, PortInspector, PortScope, PresetEntry,
         RouteEntry, RouteSink, RouteStatus, SysProcesses, UnitRunner, unavailable,
     },
 };
@@ -104,9 +109,7 @@ pub async fn engine(
     let ca_permitted = ca.as_ref().and_then(|ca| ca.permitted_dns_names());
     let routes = Arc::new(proxy(&user, ca, shutdown.clone()).await);
     let infra = Arc::new(ContainerInfra::new().await);
-    let mut integ = Integrations::with_runner(Arc::new(PtyUnits(
-        devlanes_runner_pty::PtyRunner::default(),
-    )));
+    let mut integ = Integrations::with_runner(unit_runner());
     integ.contributors = contributors();
     integ.script_runners = script_runners();
     integ.secrets = Some(Arc::new(devlanes_secrets_fnox::FnoxProvider::default()));
@@ -120,10 +123,15 @@ pub async fn engine(
     integ.ca_permitted = ca_permitted;
     integ.presets = presets();
     integ.launch_checks = vec![Arc::new(DistinctTauriIdentifiers)];
-    integ.remote = Arc::new(SshConnector {
-        home: paths.home.clone(),
-        exe: std::env::current_exe().ok(),
-    });
+    // Windows keeps the default connector, which refuses with `not_supported_yet`
+    // until the SSH transport has a Windows mode.
+    #[cfg(unix)]
+    {
+        integ.remote = Arc::new(SshConnector {
+            home: paths.home.clone(),
+            exe: std::env::current_exe().ok(),
+        });
+    }
     integ.hosts = hosts_file(hosts_policy, hosts_tld, hosts_probe)
         .await
         .map(Arc::new);
@@ -144,6 +152,7 @@ const HOSTS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The `/etc/hosts` fallback over `sudo -n` and the installed helper. Only names
 /// under `.localhost` are written when the configured TLD is one the helper refuses.
+#[cfg(unix)]
 async fn hosts_file(
     policy: devlanes_resolver_hosts::HostsFilePolicy,
     tld: Option<String>,
@@ -187,6 +196,21 @@ async fn hosts_file(
             expected_version: env!("CARGO_PKG_VERSION").into(),
         },
     ))
+}
+
+/// No hosts file fallback on Windows: it needs a privileged writer, which comes
+/// with the hosts service. `None` leaves the hosts file alone whatever the policy.
+#[cfg(windows)]
+async fn hosts_file(
+    policy: devlanes_resolver_hosts::HostsFilePolicy,
+    _tld: Option<String>,
+    probe: Option<tokio::task::JoinHandle<devlanes_resolver_hosts::LocalhostResolution>>,
+) -> Option<devlanes_daemon::hosts::HostsFile> {
+    if let Some(probe) = probe {
+        probe.abort();
+    }
+    tracing::info!(mode = %policy.user_mode(), "hosts file fallback is not supported on Windows yet");
+    None
 }
 
 /// `~/.devlanes/config.yaml`, or defaults when absent or invalid (logged).
@@ -473,11 +497,7 @@ async fn certificate_authority_with(
             ),
         };
         if !directory.exists() {
-            use std::os::unix::fs::DirBuilderExt;
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&directory)?;
+            create_private_dir(&directory)?;
         }
         let system = [
             "/etc/ssl/cert.pem",
@@ -520,6 +540,23 @@ async fn certificate_authority_with(
         Ok(Err(error)) => failed(kind_word, "ca_invalid", error.to_string()),
         Err(error) => failed(kind_word, "ca_invalid", error.to_string()),
     }
+}
+
+/// Creates the CA directory readable by the owner only.
+#[cfg(unix)]
+fn create_private_dir(directory: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+}
+
+/// Creates the CA directory. It inherits the ACL of the devlanes home until the
+/// home gets a private ACL on Windows.
+#[cfg(windows)]
+fn create_private_dir(directory: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory)
 }
 
 /// Binds the proxy (HTTP with fallback 8080, HTTPS with fallback 8443 when a CA
@@ -727,6 +764,7 @@ fn listener_status(bound: &Value, health: &[devlanes_proxy::ListenerHealth]) -> 
 }
 
 /// `connect` over system OpenSSH, with ssh's prompts relayed to the attached CLI.
+#[cfg(unix)]
 struct SshConnector {
     /// `$DEVLANES_HOME`; control sockets live in its `run/ssh`.
     home: PathBuf,
@@ -734,6 +772,7 @@ struct SshConnector {
     exe: Option<PathBuf>,
 }
 
+#[cfg(unix)]
 impl RemoteConnector for SshConnector {
     /// One SSH transport (and ControlMaster) per box.
     fn transport(
@@ -769,8 +808,10 @@ impl RemoteConnector for SshConnector {
 }
 
 /// Adapts the daemon's prompt relay to the SSH transport's.
+#[cfg(unix)]
 struct PromptBridge(Arc<dyn RemotePrompter>);
 
+#[cfg(unix)]
 #[async_trait]
 impl devlanes_transport_ssh::PromptRelay for PromptBridge {
     /// Forwards with the CLI's prompt kind words.
@@ -790,9 +831,39 @@ impl devlanes_transport_ssh::PromptRelay for PromptBridge {
     }
 }
 
+/// The unit runner the daemon spawns services and tasks with.
+#[cfg(unix)]
+fn unit_runner() -> Arc<dyn UnitRunner> {
+    Arc::new(PtyUnits(devlanes_runner_pty::PtyRunner::default()))
+}
+
+/// The unit runner the daemon spawns services and tasks with; a stub on Windows
+/// until the Windows runner exists.
+#[cfg(windows)]
+fn unit_runner() -> Arc<dyn UnitRunner> {
+    Arc::new(NoUnits)
+}
+
+/// Refuses every spawn, so the rest of the daemon runs on Windows before units can.
+#[cfg(windows)]
+struct NoUnits;
+
+#[cfg(windows)]
+#[async_trait]
+impl UnitRunner for NoUnits {
+    /// Always [`devlanes_core::Error::Unsupported`].
+    async fn spawn(&self, _: LaunchSpec) -> Result<Arc<dyn ManagedUnit>, devlanes_core::Error> {
+        Err(devlanes_core::Error::Unsupported(
+            "running units on Windows is not implemented yet".into(),
+        ))
+    }
+}
+
 /// The PTY runner with identity and socket inspection.
+#[cfg(unix)]
 struct PtyUnits(devlanes_runner_pty::PtyRunner);
 
+#[cfg(unix)]
 #[async_trait]
 impl UnitRunner for PtyUnits {
     /// Spawns in a PTY or pipes per the spec.
@@ -814,8 +885,10 @@ impl UnitRunner for PtyUnits {
 }
 
 /// [`devlanes_runner_pty::PtyUnit`] as a daemon unit.
+#[cfg(unix)]
 struct PtyManaged(Arc<devlanes_runner_pty::PtyUnit>);
 
+#[cfg(unix)]
 #[async_trait]
 impl Unit for PtyManaged {
     /// Delegates.
@@ -844,6 +917,7 @@ impl Unit for PtyManaged {
     }
 }
 
+#[cfg(unix)]
 #[async_trait]
 impl ManagedUnit for PtyManaged {
     /// Leader identity recorded at spawn.
@@ -1870,6 +1944,7 @@ mod tests {
     }
 
     /// A fake `mkcert` that prints `caroot` for `-CAROOT`.
+    #[cfg(unix)]
     fn fake_mkcert(dir: &Path, caroot: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let program = dir.join("mkcert");
@@ -1882,6 +1957,8 @@ mod tests {
         program
     }
 
+    // Windows needs a fake mkcert that is not a shell script.
+    #[cfg(unix)]
     #[tokio::test]
     /// With `tls.ca: mkcert` the daemon loads mkcert's root, points the cert env at
     /// it and still writes the bundle under `$DEVLANES_HOME/ca`.
@@ -1957,7 +2034,14 @@ mod tests {
                 .as_str()
                 .is_some_and(|m| m.contains("tls.ca"))
         );
+        // Windows needs a fake mkcert that is not a shell script.
+        #[cfg(unix)]
+        unusable_mkcert_caroot_is_reported(&tmp).await;
+    }
 
+    /// A CAROOT that is empty or relative leaves HTTPS off with the matching error.
+    #[cfg(unix)]
+    async fn unusable_mkcert_caroot_is_reported(tmp: &tempfile::TempDir) {
         // An empty CAROOT is an invalid CA, not a missing program.
         let empty = tmp.path().join("empty");
         std::fs::create_dir(&empty).expect("empty");
@@ -2093,6 +2177,7 @@ mod tests {
     async fn offline_reset_moves_a_legacy_database_aside() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().join("home");
+        #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
             // The daemon lock only accepts a private home, like $DEVLANES_HOME.
@@ -2101,6 +2186,8 @@ mod tests {
                 .create(&home)
                 .expect("home");
         }
+        #[cfg(windows)]
+        std::fs::create_dir(&home).expect("home");
         let db = home.join("state.db");
         let legacy = legacy_database(4);
         std::fs::write(&db, &legacy).expect("db");

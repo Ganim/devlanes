@@ -1,4 +1,7 @@
 //! Live process-table checks against this test process and short-lived children.
+//!
+//! Unix only for now: they signal children and inspect PTYs and pipes.
+#![cfg(unix)]
 
 use std::{
     net::TcpListener,

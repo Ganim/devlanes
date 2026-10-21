@@ -392,6 +392,10 @@ mod tests {
 
     /// Each replica gets its own overlay file, `--config` and env pointer.
     #[tokio::test]
+    #[cfg_attr(
+        windows,
+        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+    )]
     async fn adapter_prepares_overlay_per_replica() {
         let memo = ContribMemo::default();
         for replica in [1_u16, 2] {
@@ -497,6 +501,10 @@ mod tests {
 
     /// `--config` and the env variable point at the same file.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+    )]
     fn contribution_points_at_overlay() {
         let options = options("com.acme.app.dev.client1");
         let path = overlay_path(Path::new("/lanes/acme"), "desktop", 1);

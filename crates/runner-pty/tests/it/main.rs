@@ -1,6 +1,9 @@
 //! Process-lifecycle tests with standard tools. Every test is time-bounded and kills
 //! what it spawned, including escaped descendants, through [`Cleanup`].
 
+// The runner is Unix only; the crate is empty elsewhere.
+#![cfg(unix)]
+
 use std::{
     collections::BTreeMap,
     future::Future,

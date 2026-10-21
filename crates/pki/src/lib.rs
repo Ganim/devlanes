@@ -373,17 +373,26 @@ fn valid_dns_name(name: &str) -> bool {
 
 /// Existing directories are checked, never silently chmodded.
 fn create_private_directory(path: &Path) -> Result<(), Error> {
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(path) {
+    match private_dir_builder().create(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => check_private(path, true),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Creates directories only the owner can enter.
+#[cfg(unix)]
+fn private_dir_builder() -> fs::DirBuilder {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder
+}
+
+/// Without mode bits the directory inherits its parent's ACL.
+#[cfg(not(unix))]
+fn private_dir_builder() -> fs::DirBuilder {
+    fs::DirBuilder::new()
 }
 
 /// Rejects symlinks and group/world access before secret material is opened.

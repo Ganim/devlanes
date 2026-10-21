@@ -1,10 +1,10 @@
 //! Follows the daemon's own log file. Blocking; the runtime calls it from
 //! `spawn_blocking`.
 
+use devlanes_sys::FileIdentity;
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
-    os::unix::fs::MetadataExt,
     path::Path,
 };
 
@@ -17,8 +17,9 @@ const MAX_READ: u64 = 4 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LogPosition {
     pub offset: u64,
-    /// `(device, inode)`; a rotated log is a different file at the same path.
-    pub file: (u64, u64),
+    /// File identity (device and inode on Unix); a rotated log is a different
+    /// file at the same path.
+    pub file: FileIdentity,
 }
 
 /// New complete lines since the last read.
@@ -38,7 +39,7 @@ pub fn read(path: &Path, from: LogPosition) -> io::Result<LogChunk> {
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
     let len = metadata.len();
-    let identity = (metadata.dev(), metadata.ino());
+    let identity = devlanes_sys::file_identity(&file)?;
     let same_file = identity == from.file && from.offset > 0 && len >= from.offset;
     let (mut start, mut reset) = if same_file {
         (from.offset, false)

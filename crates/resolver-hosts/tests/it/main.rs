@@ -8,6 +8,9 @@
 //!   cargo test -p devlanes-resolver-hosts --test it -- --ignored --nocapture
 //! ```
 
+// The helper and its sudo rule only exist on Unix.
+#![cfg(unix)]
+
 use std::collections::BTreeSet;
 use std::net::ToSocketAddrs as _;
 use std::path::PathBuf;

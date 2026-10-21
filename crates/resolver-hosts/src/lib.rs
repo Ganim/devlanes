@@ -12,6 +12,10 @@
 //! Validation rules and paths come from `devlanes-hosts-helper`, so the daemon
 //! filters names exactly the way the helper checks them. The helper's README
 //! explains why the fallback exists and its security model.
+//!
+//! Windows has no helper yet: [`SystemFs`] reports `Unsupported` there, so a
+//! [`HostsClient`] built on it fails with [`HostsError::Unsupported`], and
+//! [`install::install`] and [`install::uninstall`] refuse to run.
 
 pub mod client;
 pub mod exec;

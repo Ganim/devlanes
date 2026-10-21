@@ -208,7 +208,7 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
                 lane.into_iter()
                     .map(|(key, value)| (key.into(), value.into())),
             );
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell());
             let status = tokio::process::Command::new(shell)
                 .env_clear()
                 .envs(env)
@@ -346,6 +346,19 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
     }
 }
 
+/// The shell `env shell` runs when `SHELL` is unset.
+#[cfg(unix)]
+fn default_shell() -> String {
+    "/bin/sh".into()
+}
+
+/// The shell `env shell` runs when `SHELL` is unset: the console's command
+/// interpreter.
+#[cfg(windows)]
+fn default_shell() -> String {
+    std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into())
+}
+
 /// Longest `daemon restart` waits for the old daemon, which first stops every unit
 /// with its stop policy.
 const DAEMON_EXIT_WAIT: Duration = Duration::from_secs(300);
@@ -355,13 +368,7 @@ const DAEMON_EXIT_WAIT: Duration = Duration::from_secs(300);
 async fn wait_for_daemon_exit(paths: &Paths, pid: Option<i32>) -> Result<(), RpcError> {
     let deadline = tokio::time::Instant::now() + DAEMON_EXIT_WAIT;
     loop {
-        let gone = match pid.and_then(rustix::process::Pid::from_raw) {
-            Some(pid) => rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH),
-            None => Client::connect_any(paths)
-                .await
-                .is_err_and(|error| error.is_not_running()),
-        };
-        if gone {
+        if daemon_gone(paths, pid).await {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -373,6 +380,28 @@ async fn wait_for_daemon_exit(paths: &Paths, pid: Option<i32>) -> Result<(), Rpc
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Whether the old daemon `pid` has exited; without a pid, whether its socket
+/// stopped answering.
+#[cfg(unix)]
+async fn daemon_gone(paths: &Paths, pid: Option<i32>) -> bool {
+    match pid.and_then(rustix::process::Pid::from_raw) {
+        Some(pid) => rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH),
+        None => Client::connect_any(paths)
+            .await
+            .is_err_and(|error| error.is_not_running()),
+    }
+}
+
+/// Whether the old daemon's pipe stopped answering. The pipe can close shortly
+/// before the process releases its lock; waiting on the process itself needs a
+/// process handle, which comes with the Windows process support in `sys`.
+#[cfg(windows)]
+async fn daemon_gone(paths: &Paths, _pid: Option<i32>) -> bool {
+    Client::connect_any(paths)
+        .await
+        .is_err_and(|error| error.is_not_running())
 }
 
 /// One-shot request returning the data, for actions that post-process it locally.
@@ -793,6 +822,7 @@ fn printable(text: &str) -> String {
 
 /// Shows `prompt` on `/dev/tty` and reads one line, without echo for secrets.
 /// Returns the line with its newline, so an empty answer stays distinct from cancel.
+#[cfg(unix)]
 fn read_tty(prompt: &str, kind: &str) -> Option<String> {
     use std::io::{BufRead, Write};
     let tty = std::fs::OpenOptions::new()
@@ -825,6 +855,13 @@ fn read_tty(prompt: &str, kind: &str) -> Option<String> {
         Ok(0) | Err(_) => None,
         Ok(_) => Some(format!("{}\n", line.trim_end_matches(['\r', '\n']))),
     }
+}
+
+/// Reading a prompt answer from the console is not supported on Windows yet, so
+/// every prompt is cancelled (`None`), as when no terminal is available on Unix.
+#[cfg(windows)]
+fn read_tty(_prompt: &str, _kind: &str) -> Option<String> {
+    None
 }
 
 /// Renders the response data with the mode's reporter.
@@ -987,15 +1024,15 @@ fn confirm(runtime: &Runtime, question: &str) -> Result<bool, RpcError> {
 }
 
 /// The browser is launched by the client, never the daemon (it may be remote or headless).
+#[cfg(unix)]
 async fn open_url(url: &str) -> Result<(), RpcError> {
     if url.is_empty() {
         return Err(RpcError::new("no_url", Value::Null, 3));
     }
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
     tokio::process::Command::new(opener)
         .arg(url)
         .status()
@@ -1004,7 +1041,21 @@ async fn open_url(url: &str) -> Result<(), RpcError> {
     Ok(())
 }
 
+/// Opening a browser is not supported on Windows yet; the error data keeps the URL.
+#[cfg(windows)]
+async fn open_url(url: &str) -> Result<(), RpcError> {
+    if url.is_empty() {
+        return Err(RpcError::new("no_url", Value::Null, 3));
+    }
+    Err(RpcError::new(
+        "not_supported_yet",
+        json!({"feature": "opening a browser on Windows", "url": url}),
+        1,
+    ))
+}
+
 /// Reads the daemon's own log file directly; works even when the daemon is wedged.
+#[cfg(unix)]
 async fn daemon_logs(follow: bool, tail: usize) -> Result<u8, RpcError> {
     let paths = paths()?;
     let path = paths.logs.join("daemon.log");
@@ -1022,6 +1073,16 @@ async fn daemon_logs(follow: bool, tail: usize) -> Result<u8, RpcError> {
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1))
+}
+
+/// `daemon logs` runs `tail`, which Windows lacks; refused until it reads the file itself.
+#[cfg(windows)]
+async fn daemon_logs(_follow: bool, _tail: usize) -> Result<u8, RpcError> {
+    Err(RpcError::new(
+        "not_supported_yet",
+        json!({"feature": "daemon logs on Windows"}),
+        1,
+    ))
 }
 
 /// Opens the TUI; it is just another client of the same daemon.
@@ -1043,6 +1104,10 @@ mod tests {
 
     /// Without a daemon, `daemon status` says so in each mode and exits 1.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+    )]
     fn daemon_not_running_in_every_mode() {
         let paths = Paths::new("/home/u/.devlanes").expect("paths");
         let socket = paths.socket.display().to_string();
@@ -1069,6 +1134,7 @@ mod tests {
     }
 
     /// The restart wait ends once the old daemon's pid is gone.
+    #[cfg(unix)]
     #[tokio::test]
     async fn restart_waits_for_the_old_pid() {
         let mut child = std::process::Command::new("true").spawn().expect("spawn");

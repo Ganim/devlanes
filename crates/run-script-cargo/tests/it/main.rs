@@ -77,6 +77,10 @@ fn discovers_binaries() {
 
 /// Member manifests run in place; a root manifest selects the member with `-p`.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
+)]
 fn renders_cargo_run() {
     let temp = tempfile::tempdir().expect("tempdir");
     fixture(temp.path());
@@ -121,6 +125,10 @@ fn renders_cargo_run() {
 
 /// Missing, ambiguous and disabled binaries are errors with the alternatives.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
+)]
 fn errors() {
     let temp = tempfile::tempdir().expect("tempdir");
     fixture(temp.path());

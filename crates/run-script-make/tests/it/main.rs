@@ -98,6 +98,10 @@ fn renders_make_argv() {
 
 /// A certainly missing target is an error listing the known ones.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
+)]
 fn missing_target_is_an_error() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_files(

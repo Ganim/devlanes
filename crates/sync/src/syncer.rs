@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read as _};
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
+use devlanes_sys::FileIdentity;
 use notify::event::{AccessKind, AccessMode, ModifyKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::held::{Probe, probe_source};
-use crate::target::MODE_MASK;
+use crate::mode::mode_of;
 use crate::{ContentHash, HeldFile, IgnoreRules, Manifest, RelPath, SyncError, SyncTarget};
 
 /// Default quiet period before a burst of events is processed.
@@ -336,7 +336,7 @@ impl From<&fs::Metadata> for FileMeta {
         Self {
             size: meta.len(),
             mtime: meta.modified().ok(),
-            mode: meta.permissions().mode() & MODE_MASK,
+            mode: mode_of(meta),
         }
     }
 }
@@ -722,8 +722,8 @@ struct SourceWatch {
     _watcher: RecommendedWatcher,
     events: mpsc::Receiver<notify::Result<Event>>,
     overflow: Arc<AtomicBool>,
-    /// Device and inode of the root when the watch started.
-    identity: Option<(u64, u64)>,
+    /// File identity of the root when the watch started.
+    identity: Option<FileIdentity>,
 }
 
 impl SourceWatch {
@@ -761,14 +761,14 @@ impl SourceWatch {
     }
 }
 
-/// Device and inode of `root`, or `None` when it is missing or not a directory.
-async fn root_identity(root: &Path) -> Option<(u64, u64)> {
+/// File identity of `root`, or `None` when it is missing or not a directory.
+async fn root_identity(root: &Path) -> Option<FileIdentity> {
     let root = root.to_owned();
     tokio::task::spawn_blocking(move || {
-        fs::symlink_metadata(root)
+        fs::symlink_metadata(&root)
             .ok()
-            .filter(fs::Metadata::is_dir)
-            .map(|meta| (meta.dev(), meta.ino()))
+            .filter(fs::Metadata::is_dir)?;
+        devlanes_sys::path_identity(&root).ok()
     })
     .await
     .ok()
@@ -992,7 +992,7 @@ fn read_source(
     let tracked = Tracked {
         size: contents.len() as u64,
         mtime: settled_mtime(&meta),
-        mode: meta.permissions().mode() & MODE_MASK,
+        mode: mode_of(&meta),
         hash: ContentHash::of(&contents),
     };
     Ok(Some((Bytes::from(contents), tracked)))

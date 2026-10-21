@@ -103,6 +103,10 @@ fn argument_errors() {
 
 /// Missing recipes are errors unless an import could provide them.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
+)]
 fn missing_and_unverifiable_recipes() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_files(

@@ -76,7 +76,7 @@ pub async fn run(paths: &Paths, request: Request) -> anyhow::Result<u8> {
             }
         }
     });
-    let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+    let mut resizes = Resizes::new()?;
     let mut prefix = false;
     loop {
         tokio::select! {
@@ -118,11 +118,64 @@ pub async fn run(paths: &Paths, request: Request) -> anyhow::Result<u8> {
                     client.send_bytes(attach.stream_id, Bytes::from(forward)).await?;
                 }
             },
-            _ = winch.recv() => {
-                if let Ok((columns, rows)) = crossterm::terminal::size() {
+            size = resizes.next() => {
+                if let Some((columns, rows)) = size {
                     let params = serde_json::to_value(ResizeParams { stream_id: attach.stream_id, columns, rows })?;
                     client.begin_request(Method::Resize, params, request.context.clone()).await?;
                 }
+            }
+        }
+    }
+}
+
+/// Terminal size changes, from SIGWINCH.
+#[cfg(unix)]
+struct Resizes(tokio::signal::unix::Signal);
+
+#[cfg(unix)]
+impl Resizes {
+    /// Listens for SIGWINCH.
+    fn new() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self(signal(SignalKind::window_change())?))
+    }
+
+    /// Waits for the next SIGWINCH; the new size, or `None` when it can't be read.
+    async fn next(&mut self) -> Option<(u16, u16)> {
+        self.0.recv().await;
+        crossterm::terminal::size().ok()
+    }
+}
+
+/// Terminal size changes, by polling: consoles have no SIGWINCH, and reading
+/// console input events would compete with the raw stdin reader.
+#[cfg(windows)]
+struct Resizes {
+    interval: tokio::time::Interval,
+    last: Option<(u16, u16)>,
+}
+
+#[cfg(windows)]
+impl Resizes {
+    /// Starts from the current size, so only later changes are reported.
+    fn new() -> std::io::Result<Self> {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        Ok(Self {
+            interval,
+            last: crossterm::terminal::size().ok(),
+        })
+    }
+
+    /// Waits until the size differs from the last one reported. Cancel-safe:
+    /// nothing is awaited after a size is read.
+    async fn next(&mut self) -> Option<(u16, u16)> {
+        loop {
+            self.interval.tick().await;
+            let size = crossterm::terminal::size().ok();
+            if size.is_some() && size != self.last {
+                self.last = size;
+                return size;
             }
         }
     }

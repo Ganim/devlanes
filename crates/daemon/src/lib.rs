@@ -41,7 +41,6 @@ pub use engine::{Engine, EngineOptions};
 
 use std::{
     fs::{File, OpenOptions},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -49,14 +48,13 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use devlanes_ipc::{Connection, Frame};
-use devlanes_proto::{Control, Event, Hello, Method, Outcome, Request, Response, RpcError};
-use fs2::FileExt;
-use serde_json::{Value, json};
-use tokio::{
-    net::{UnixListener, UnixStream},
-    sync::{mpsc, oneshot},
+use devlanes_ipc::{
+    Connection, Frame,
+    local::{self, BindError, LocalListener, LocalStream},
 };
+use devlanes_proto::{Control, Event, Hello, Method, Outcome, Request, Response, RpcError};
+use serde_json::{Value, json};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -186,7 +184,7 @@ pub trait Handler: Send + Sync + 'static {
 
 /// Owns the singleton lock until all shutdown work and socket cleanup complete.
 pub struct Server {
-    listener: UnixListener,
+    listener: LocalListener,
     _lock: File,
     options: Options,
     started: Instant,
@@ -198,15 +196,11 @@ impl Server {
     pub async fn bind(options: Options) -> Result<Self, Error> {
         let prepared = options.clone();
         let lock = tokio::task::spawn_blocking(move || prepare(&prepared)).await??;
-        match UnixStream::connect(&options.socket).await {
-            Ok(_) => return Err(Error::AlreadyRunning),
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                tokio::fs::remove_file(&options.socket).await?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        let listener = UnixListener::bind(&options.socket)?;
+        let listener = match LocalListener::bind(&options.socket).await {
+            Ok(listener) => listener,
+            Err(BindError::AlreadyListening(_)) => return Err(Error::AlreadyRunning),
+            Err(BindError::Io(error)) => return Err(error.into()),
+        };
         Ok(Self {
             listener,
             _lock: lock,
@@ -233,12 +227,12 @@ impl Server {
             if let Err(stopped) = handler.shutdown().await {
                 tracing::warn!(code = %stopped.code, "shutdown after a failed reconcile");
             }
-            let _ = tokio::fs::remove_file(&self.options.socket).await;
+            let _ = local::remove(&self.options.socket).await;
             return Err(Error::Reconcile(startup_reason(&error)));
         }
         ready()?;
         let Self {
-            listener,
+            mut listener,
             options,
             started,
             shutdown,
@@ -252,7 +246,7 @@ impl Server {
                     // One client's failure must never end the daemon: a peer that closes
                     // before its credentials are read (macOS: ENOTCONN) used to exit here.
                     let stream = match accepted {
-                        Ok((stream, _)) => stream,
+                        Ok(stream) => stream,
                         Err(error) => {
                             tracing::warn!(%error, "accept failed");
                             // Out of descriptors: give closing units a moment instead of spinning.
@@ -260,9 +254,9 @@ impl Server {
                             continue;
                         }
                     };
-                    match stream.peer_cred() {
-                        Ok(cred) if cred.uid() == rustix::process::getuid().as_raw() => {}
-                        Ok(_) => continue,
+                    match stream.peer_is_current_user() {
+                        Ok(true) => {}
+                        Ok(false) => continue,
                         Err(error) => {
                             tracing::debug!(%error, "client left before its credentials were read");
                             continue;
@@ -284,12 +278,12 @@ impl Server {
         }
         // No new connection from here on; connected clients get `daemon_stopping`
         // for anything that would start work.
-        drop(listener);
+        listener.close();
         // Stop resources before closing subscribers so they can observe final state.
         let stopped = handler.shutdown().await;
         clients.abort_all();
         while clients.join_next().await.is_some() {}
-        let remove = tokio::fs::remove_file(&options.socket).await;
+        let remove = local::remove(&options.socket).await;
         stopped.map_err(|error| Error::Shutdown(error.code))?;
         remove?;
         Ok(())
@@ -340,26 +334,61 @@ pub fn lock_singleton(home: &Path) -> Result<File, Error> {
     secure_directory(home)?;
     let run = home.join("run");
     secure_directory(&run)?;
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(run.join("daemon.lock"))?;
-    match FileExt::try_lock_exclusive(&lock) {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    no_follow(&mut options);
+    let lock = options.open(run.join("daemon.lock"))?;
+    refuse_reparse_point(&lock, &run)?;
+    match lock.try_lock() {
         Ok(()) => Ok(lock),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Err(Error::AlreadyRunning),
-        Err(error) => Err(error.into()),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Error::AlreadyRunning),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
     }
 }
+
+/// Owner-only, and never through a symlink planted in `run/`.
+#[cfg(unix)]
+fn no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+/// Opens a symlink or junction itself instead of its target; the lock then refuses it.
+#[cfg(windows)]
+fn no_follow(options: &mut OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_FLAG_OPEN_REPARSE_POINT
+    options.custom_flags(0x0020_0000);
+}
+
+/// `O_NOFOLLOW` already refused a symlink while opening.
+#[cfg(unix)]
+fn refuse_reparse_point(_lock: &File, _run: &Path) -> Result<(), Error> {
+    Ok(())
+}
+
+/// Windows opened a reparse point itself; locking it would not protect the real file.
+#[cfg(windows)]
+fn refuse_reparse_point(lock: &File, run: &Path) -> Result<(), Error> {
+    use std::os::windows::fs::MetadataExt;
+    if lock.metadata()?.file_attributes() & REPARSE_POINT != 0 {
+        return Err(Error::UnsafeDirectory(run.into()));
+    }
+    Ok(())
+}
+
+/// `FILE_ATTRIBUTE_REPARSE_POINT`, set on symlinks and junctions.
+#[cfg(windows)]
+const REPARSE_POINT: u32 = 0x400;
 
 /// Creates `path` private, or tightens an existing directory of this user to
 /// 0700. A symlink, a non-directory or another user's directory is refused: it
 /// may not be ours to change.
+#[cfg(unix)]
 fn secure_directory(path: &Path) -> Result<(), Error> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     match std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -377,6 +406,19 @@ fn secure_directory(path: &Path) -> Result<(), Error> {
         let mode = metadata.mode() & 0o7777;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         tracing::warn!(path = %path.display(), mode = format!("{mode:o}"), "tightened a devlanes directory to 0700");
+    }
+    Ok(())
+}
+
+/// Creates missing directories and refuses symlinks, junctions and files. Owner and
+/// ACL checks are not implemented on Windows yet.
+#[cfg(windows)]
+fn secure_directory(path: &Path) -> Result<(), Error> {
+    use std::os::windows::fs::MetadataExt;
+    std::fs::create_dir_all(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_attributes() & REPARSE_POINT != 0 {
+        return Err(Error::UnsafeDirectory(path.into()));
     }
     Ok(())
 }
@@ -452,7 +494,7 @@ async fn finish_tap(
 
 /// One bounded outgoing queue prevents slow terminals from consuming unbounded memory.
 async fn serve_client(
-    stream: UnixStream,
+    stream: LocalStream,
     handler: Arc<dyn Handler>,
     shutdown: CancellationToken,
     started: Instant,
@@ -465,6 +507,14 @@ async fn serve_client(
     let Frame::Control(Control::Hello(peer)) = first else {
         return Err(devlanes_ipc::Error::InvalidFrame);
     };
+    // A Windows pipe server can only check its client after reading from it.
+    if !connection.get_ref().confirm_peer_after_read()? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "client runs as another user",
+        )
+        .into());
+    }
     let mut hello = Hello::current(handler.managed_processes());
     hello
         .features
@@ -610,6 +660,8 @@ async fn serve_client(
 mod tests {
     use super::*;
 
+    // Tests that bind a real endpoint run on Unix until the Windows pipe exists.
+    #[cfg(unix)]
     #[tokio::test]
     async fn lock_prevents_a_second_bind() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -626,10 +678,21 @@ mod tests {
         Ok(())
     }
 
+    /// The singleton lock still works through std's file locking on every platform.
+    #[test]
+    fn lock_singleton_refuses_a_second_holder() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let _first = lock_singleton(&home)?;
+        assert!(matches!(lock_singleton(&home), Err(Error::AlreadyRunning)));
+        Ok(())
+    }
+
+    #[cfg(unix)]
     #[test]
     /// An existing directory of this user that others can read is made private.
     fn tightens_an_open_home() -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let dir = tempfile::tempdir()?;
         let home = dir.path().join("home");
         std::fs::create_dir(&home)?;
@@ -639,6 +702,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn refuses_a_symlinked_home() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
@@ -652,12 +716,14 @@ mod tests {
     }
 
     /// Answers every request with `reply`; reconciliation fails when `broken`.
+    #[cfg(unix)]
     struct Fixed {
         reply: Value,
         broken: bool,
         shut_down: std::sync::atomic::AtomicBool,
     }
 
+    #[cfg(unix)]
     #[async_trait]
     impl Handler for Fixed {
         fn managed_processes(&self) -> usize {
@@ -687,6 +753,7 @@ mod tests {
     }
 
     /// Options under a short temporary directory (socket paths are bounded).
+    #[cfg(unix)]
     fn short_options() -> (tempfile::TempDir, Options) {
         let dir = tempfile::Builder::new()
             .prefix("dls-")
@@ -701,7 +768,8 @@ mod tests {
     }
 
     /// Sends request `id` and waits for its outcome.
-    async fn ask(connection: &mut Connection<UnixStream>, id: u64, method: Method) -> Outcome {
+    #[cfg(unix)]
+    async fn ask(connection: &mut Connection<LocalStream>, id: u64, method: Method) -> Outcome {
         connection
             .send(Frame::Control(Control::Request(Request {
                 id,
@@ -721,6 +789,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     /// A response larger than a frame becomes an error reply on a connection
     /// that keeps working.
@@ -736,8 +805,7 @@ mod tests {
                 shut_down: Default::default(),
             });
             let running = tokio::spawn(server.run(handler, || Ok(())));
-            let mut connection =
-                Connection::new(UnixStream::connect(&socket).await.expect("connect"));
+            let mut connection = Connection::new(local::connect(&socket).await.expect("connect"));
             connection
                 .send(Frame::Control(Control::Hello(Hello::current(0))))
                 .await
@@ -758,6 +826,7 @@ mod tests {
         .expect("timeout");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     /// A failed reconcile still shuts the handler down (records exits, closes
     /// the store), removes the socket and reports `CODE: message`.

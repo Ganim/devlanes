@@ -1,3 +1,7 @@
+//! Client behaviour against mock daemons on Unix sockets. Unix only until the
+//! Windows named-pipe endpoint exists.
+#![cfg(unix)]
+
 use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 use bytes::Bytes;

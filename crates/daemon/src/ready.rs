@@ -503,7 +503,9 @@ mod tests {
     }
 
     /// `cmd` probes see the unit's environment only, and a hanging attempt is cut
-    /// at the deadline instead of blocking the check.
+    /// at the deadline instead of blocking the check. Unix only until probes pick
+    /// a Windows shell.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cmd_probe_uses_unit_env_and_is_bounded() {
         let cwd = std::env::temp_dir();

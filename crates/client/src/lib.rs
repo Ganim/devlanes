@@ -1,4 +1,5 @@
-//! Thin Unix-socket client shared by CLI, completion, and TUI frontends.
+//! Thin daemon client shared by CLI, completion, and TUI frontends. It talks over the
+//! local endpoint from [`devlanes_ipc::local`].
 
 mod paths;
 pub mod update;
@@ -6,15 +7,17 @@ pub mod update;
 use std::{collections::VecDeque, path::PathBuf, process::Stdio, time::Duration};
 
 use bytes::Bytes;
-use devlanes_ipc::Connection;
 pub use devlanes_ipc::Frame;
+use devlanes_ipc::{
+    Connection,
+    local::{self, LocalStream, ProbeError},
+};
 pub use devlanes_proto::{Context, Hello, Method, RpcError};
 use devlanes_proto::{Control, Outcome, PROTOCOL_VERSION, Request};
-pub use paths::Paths;
+pub use paths::{Paths, user_home};
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    net::UnixStream,
     process::Command,
     time::{Instant, sleep, timeout},
 };
@@ -87,7 +90,7 @@ impl Error {
 
 /// One client serializes requests; use begin_request/next_frame for streaming consumers.
 pub struct Client {
-    connection: Connection<UnixStream>,
+    connection: Connection<LocalStream>,
     pub peer: Hello,
     /// True when this connection's `connect_or_spawn` started the daemon; `devlanes with`
     /// stops only a daemon it started itself.
@@ -148,8 +151,8 @@ impl Client {
     /// Connects to the socket and exchanges hellos within [`CONNECT_TIMEOUT`].
     async fn exchange(paths: &Paths, strict: bool) -> Result<Self> {
         timeout(CONNECT_TIMEOUT, async {
-            let stream = UnixStream::connect(&paths.socket).await?;
-            if stream.peer_cred()?.uid() != rustix::process::geteuid().as_raw() {
+            let stream = local::connect(&paths.socket).await?;
+            if !stream.peer_is_current_user()? {
                 return Err(Error::WrongPeer);
             }
             let mut connection = Connection::new(stream);
@@ -541,17 +544,12 @@ fn daemon_env(
 
 /// A bind probe catches socket restrictions even when the launcher omitted sandbox markers.
 fn probe_socket(paths: &Paths) -> Result<()> {
-    let parent = paths.socket.parent().ok_or(Error::InvalidSocketPath)?;
-    let path = tempfile::Builder::new()
-        .prefix("p")
-        .rand_bytes(3)
-        .tempfile_in(parent)?
-        .into_temp_path();
-    std::fs::remove_file(&path)?;
-    let listener = std::os::unix::net::UnixListener::bind(&path)
-        .map_err(|_| Error::Sandbox("Unix socket bind probe failed"))?;
-    drop(listener);
-    Ok(())
+    paths.socket.parent().ok_or(Error::InvalidSocketPath)?;
+    match local::probe(&paths.socket) {
+        Ok(()) => Ok(()),
+        Err(ProbeError::Setup(error)) => Err(error.into()),
+        Err(ProbeError::Endpoint(_)) => Err(Error::Sandbox("local endpoint bind probe failed")),
+    }
 }
 
 /// Accounts for control payloads too, so a short event count cannot conceal excessive memory.

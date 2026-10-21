@@ -2,8 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::Path,
     time::Duration,
 };
 
@@ -13,7 +12,9 @@ use devlanes_core::contrib::{
 use devlanes_env_direnv::DirenvContributor;
 
 /// Writes an executable shell script and returns its path.
-fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+#[cfg(unix)]
+fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -62,6 +63,7 @@ async fn apply(
     Ok(draft)
 }
 
+#[cfg(unix)]
 #[tokio::test]
 /// Sets and unsets reach the draft; the client env is what direnv diffs against.
 async fn applies_export_diff() {
@@ -101,48 +103,52 @@ async fn blocked_missing_and_failures() {
     let draft = apply(&missing, lane.path(), &client).await.expect("apply");
     assert!(draft.env.is_empty() && draft.notes.is_empty());
 
-    std::fs::write(lane.path().join(".envrc"), "export A=1\n").expect("write");
-    let bin = tempfile::tempdir().expect("tempdir");
-    let blocked = script(
-        bin.path(),
-        "blocked",
-        "echo 'direnv: error /w/.envrc is blocked. Run `direnv allow` to approve its content' >&2; exit 1",
-    );
-    let draft = apply(
-        &DirenvContributor::new(blocked, Duration::from_secs(5)),
-        lane.path(),
-        &client,
-    )
-    .await
-    .expect("apply");
-    assert!(draft.notes[0].contains("direnv allow"));
-    assert!(draft.env.is_empty());
+    // The fake direnv is a `#!/bin/sh` script, which Windows cannot run.
+    #[cfg(unix)]
+    {
+        std::fs::write(lane.path().join(".envrc"), "export A=1\n").expect("write");
+        let bin = tempfile::tempdir().expect("tempdir");
+        let blocked = script(
+            bin.path(),
+            "blocked",
+            "echo 'direnv: error /w/.envrc is blocked. Run `direnv allow` to approve its content' >&2; exit 1",
+        );
+        let draft = apply(
+            &DirenvContributor::new(blocked, Duration::from_secs(5)),
+            lane.path(),
+            &client,
+        )
+        .await
+        .expect("apply");
+        assert!(draft.notes[0].contains("direnv allow"));
+        assert!(draft.env.is_empty());
 
-    let broken = script(
-        bin.path(),
-        "broken",
-        "echo 'direnv: loading .envrc' >&2; echo 'direnv: error exit status 1' >&2; exit 1",
-    );
-    let error = apply(
-        &DirenvContributor::new(broken, Duration::from_secs(5)),
-        lane.path(),
-        &client,
-    )
-    .await
-    .err()
-    .expect("fails");
-    assert!(error.to_string().contains("direnv: error exit status 1"));
+        let broken = script(
+            bin.path(),
+            "broken",
+            "echo 'direnv: loading .envrc' >&2; echo 'direnv: error exit status 1' >&2; exit 1",
+        );
+        let error = apply(
+            &DirenvContributor::new(broken, Duration::from_secs(5)),
+            lane.path(),
+            &client,
+        )
+        .await
+        .err()
+        .expect("fails");
+        assert!(error.to_string().contains("direnv: error exit status 1"));
 
-    let slow = script(bin.path(), "slow", "exec /bin/sleep 5");
-    let error = apply(
-        &DirenvContributor::new(slow, Duration::from_millis(200)),
-        lane.path(),
-        &client,
-    )
-    .await
-    .err()
-    .expect("times out");
-    assert!(error.to_string().contains("timed out"));
+        let slow = script(bin.path(), "slow", "exec /bin/sleep 5");
+        let error = apply(
+            &DirenvContributor::new(slow, Duration::from_millis(200)),
+            lane.path(),
+            &client,
+        )
+        .await
+        .err()
+        .expect("times out");
+        assert!(error.to_string().contains("timed out"));
+    }
 }
 
 #[tokio::test]

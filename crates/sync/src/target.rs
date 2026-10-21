@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::{self, Permissions};
+use std::fs;
 use std::io::{self, Write as _};
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -11,6 +10,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::mode::{mode_of, persist_with_mode};
 use crate::{RelPath, SyncError};
 
 /// Prefix of in-flight temp files; manifests skip them so a crash never syncs one.
@@ -162,7 +162,7 @@ impl LocalTarget {
             walk(&root, |rel, path| {
                 let meta = fs::symlink_metadata(path)?;
                 let mtime = meta.modified().ok();
-                let mode = meta.permissions().mode() & MODE_MASK;
+                let mode = mode_of(&meta);
                 let known = cache.entries.get(&rel).filter(|known| {
                     known.size == meta.len() && known.mode == mode && mtime == Some(known.mtime)
                 });
@@ -296,10 +296,7 @@ impl PartialFile {
         let (dest, mode, owned) = (self.dest.clone(), self.mode, self.owned);
         blocking(format!("writing {}", self.dest.display()), move || {
             clear_directory(&dest, owned)?;
-            temp.as_file()
-                .set_permissions(Permissions::from_mode(mode & MODE_MASK))?;
-            temp.persist(&dest).map_err(|error| error.error)?;
-            Ok(())
+            persist_with_mode(temp, &dest, mode)
         })
         .await
     }
@@ -444,7 +441,7 @@ fn local_manifest(root: &Path) -> io::Result<Manifest> {
             rel,
             ManifestEntry {
                 size: meta.len(),
-                mode: meta.permissions().mode() & MODE_MASK,
+                mode: mode_of(&meta),
                 hash,
             },
         );
@@ -492,10 +489,7 @@ fn write_local(
         .suffix(".tmp")
         .tempfile_in(&parent)?;
     temp.write_all(contents)?;
-    temp.as_file()
-        .set_permissions(Permissions::from_mode(mode & MODE_MASK))?;
-    temp.persist(&dest).map_err(|error| error.error)?;
-    Ok(())
+    persist_with_mode(temp, &dest, mode)
 }
 
 /// Blocking removal with empty-parent pruning.
@@ -553,11 +547,15 @@ mod tests {
             .expect("write");
         let path = dir.path().join("out/a/b/run.sh");
         assert_eq!(fs::read(&path).expect("read"), b"#!/bin/sh\n");
-        assert_eq!(
-            fs::metadata(&path).expect("meta").permissions().mode() & 0o7777,
-            0o755,
-            "setuid dropped"
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&path).expect("meta").permissions().mode() & 0o7777,
+                0o755,
+                "setuid dropped"
+            );
+        }
         let manifest = target.manifest().await.expect("manifest");
         assert_eq!(manifest.len(), 1);
         assert_eq!(
@@ -574,6 +572,45 @@ mod tests {
             .expect("absent is fine");
     }
 
+    /// Windows keeps only the read-only attribute: a mode without write bits
+    /// sets it, exec bits are dropped, and read-only files are still replaced
+    /// and removed.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_maps_modes_to_the_read_only_attribute() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = LocalTarget::new(dir.path().join("out"));
+        let path = dir.path().join("out/locked.txt");
+        target
+            .write_file(&rel("locked.txt"), Bytes::from_static(b"one"), 0o555)
+            .await
+            .expect("write read-only");
+        assert!(fs::metadata(&path).expect("meta").permissions().readonly());
+        assert_eq!(
+            target.manifest().await.expect("manifest")[&rel("locked.txt")].mode,
+            0o444
+        );
+
+        target
+            .write_file(&rel("locked.txt"), Bytes::from_static(b"two"), 0o755)
+            .await
+            .expect("replace read-only");
+        assert_eq!(fs::read(&path).expect("read"), b"two");
+        assert!(!fs::metadata(&path).expect("meta").permissions().readonly());
+        assert_eq!(
+            target.manifest().await.expect("manifest")[&rel("locked.txt")].mode,
+            0o644
+        );
+
+        target
+            .write_file(&rel("locked.txt"), Bytes::from_static(b"three"), 0o444)
+            .await
+            .expect("write read-only again");
+        target.remove(&rel("locked.txt")).await.expect("remove");
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn never_follows_symlinked_directories() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -32,7 +32,8 @@ All functions block. Call them from `spawn_blocking` in async code.
 - `boot_id`: an opaque token for the current boot, so records from before a reboot are never matched against live PIDs.
 - `listening_tcp`: TCP listeners of a set of PIDs, for diagnostics only.
 - `open_file`, `holders`: find processes that still hold a PTY slave or pipe open.
-- `raise_nofile_limit`, `child_nofile_limit`: raise the daemon's open-file limit and keep the original for children.
+- `raise_nofile_limit`, `child_nofile_limit`: raise the daemon's open-file limit and keep the original for children. Both report no limit on Windows.
+- `file_identity`, `path_identity`: device and inode on Unix, volume serial and file index on Windows, for noticing that a path now names a different file.
 - `macos` (macOS only): safe rusage, mach time, host CPU and sysctl readings for `devlanes-metrics-macos`.
 
 ## Behaviour
@@ -41,7 +42,7 @@ Start times are clock ticks since boot on Linux and microseconds since the epoch
 
 On macOS, `listening_tcp` runs `/usr/sbin/lsof`, and zombies are read through `sysctl` because libproc no longer reports them. Linux reads everything from procfs.
 
-`unsafe` code is confined to the macOS modules (libproc, mach and sysctl calls).
+`unsafe` code is confined to the macOS modules (libproc, mach and sysctl calls) and the Windows module (Win32 calls). On Windows the process queries are not implemented yet and return `Error::Unsupported`; signalling, sessions and descriptor holders are Unix-only.
 
 ## License
 

@@ -35,14 +35,15 @@ regex = "1"
 strip-ansi-escapes = "0.2"
 vt100 = "0.18"
 bytes.workspace = true
-fs2 = "0.4"
-rustix = { version = "1", features = ["process", "fs", "stdio"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process", "fs", "stdio"] }
 
 [dev-dependencies]
 devlanes-client = { path = "../client" }

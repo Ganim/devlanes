@@ -138,6 +138,7 @@ async fn alternate_ipv6_binding() -> Result {
 }
 
 /// SIGTERM resistance leaves the listener alive until explicitly killed.
+#[cfg(unix)]
 #[tokio::test]
 async fn ignores_sigterm() -> Result {
     let mut server = Server::start(&["--ignore-sigterm"]).await?;
@@ -154,24 +155,26 @@ async fn ignores_sigterm() -> Result {
 /// Explicit environment output, log lines and exit deadlines work without a daemon.
 #[tokio::test]
 async fn output_and_deadline() -> Result {
-    let output = timeout(
-        Duration::from_secs(5),
-        Command::new(env!("CARGO_BIN_EXE_fixture-server"))
-            .args([
-                "--port",
-                "0",
-                "--log-line",
-                "ready marker",
-                "--print-env",
-                "--exit-after",
-                "20ms",
-            ])
-            .env_clear()
-            .env("FIXTURE_MARKER", "value")
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await??;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fixture-server"));
+    command
+        .args([
+            "--port",
+            "0",
+            "--log-line",
+            "ready marker",
+            "--print-env",
+            "--exit-after",
+            "20ms",
+        ])
+        .env_clear()
+        .env("FIXTURE_MARKER", "value")
+        .kill_on_drop(true);
+    // Winsock fails to start without SystemRoot, even in an otherwise empty environment.
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", root);
+    }
+    let output = timeout(Duration::from_secs(5), command.output()).await??;
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout)?;
     assert!(stdout.contains("ready marker\n"));
@@ -201,6 +204,7 @@ async fn bind_failure_does_not_spawn() -> Result {
 }
 
 /// A real grandchild can escape into its own session and remains deadline-bounded.
+#[cfg(unix)]
 #[tokio::test]
 async fn escaped_grandchild() -> Result {
     let mut server = Server::start(&["--setsid-grandchild"]).await?;
@@ -237,5 +241,44 @@ async fn escaped_grandchild() -> Result {
         Ok::<_, Box<dyn std::error::Error>>(())
     })
     .await??;
+    Ok(())
+}
+
+/// Descendants announce their PID and exit with the inherited deadline.
+#[tokio::test]
+async fn spawned_grandchild_announces_itself() -> Result {
+    let mut server = Server::start(&["--spawn-grandchild"]).await?;
+    let mut announced = server
+        .startup
+        .iter()
+        .any(|line| line.starts_with("grandchild pid="));
+    // Every holder of stdout exits at the deadline (10 s), which ends the stream.
+    timeout(Duration::from_secs(12), async {
+        while let Some(line) = server.lines.next_line().await? {
+            announced |= line.starts_with("grandchild pid=");
+        }
+        server.child.wait().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
+    .await??;
+    assert!(announced, "grandchild announcement missing");
+    Ok(())
+}
+
+/// Without Unix sessions, `--setsid-grandchild` fails before anything is spawned.
+#[cfg(not(unix))]
+#[tokio::test]
+async fn setsid_grandchild_is_refused() -> Result {
+    let output = timeout(
+        Duration::from_secs(5),
+        Command::new(env!("CARGO_BIN_EXE_fixture-server"))
+            .args(["--port", "0", "--setsid-grandchild", "--exit-after", "1s"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--setsid-grandchild"));
     Ok(())
 }

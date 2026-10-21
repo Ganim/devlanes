@@ -2,6 +2,8 @@
 
 The SSH `Transport` for `devlanes remote connect`. It runs the system `ssh` with a ControlMaster per box and starts `devlanes tunnel --stdio` there, so `~/.ssh/config`, agents, ProxyJump and certificates apply as usual. The binary's composition root registers it; `devlanes-transport` runs the protocol on top.
 
+Unix only for now. On Windows the crate compiles to an empty library.
+
 ## Usage
 
 ```rust

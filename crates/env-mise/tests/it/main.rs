@@ -2,8 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::Path,
     time::Duration,
 };
 
@@ -13,7 +12,9 @@ use devlanes_core::contrib::{
 use devlanes_env_mise::MiseContributor;
 
 /// Writes an executable shell script and returns its path.
-fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+#[cfg(unix)]
+fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -62,6 +63,7 @@ async fn apply(
     Ok(draft)
 }
 
+#[cfg(unix)]
 #[tokio::test]
 /// mise runs in the lane with the client env, once per resolution.
 async fn runs_mise_env_once_per_lane() {
@@ -110,19 +112,24 @@ async fn skips_and_notes() {
         .expect("apply");
     assert_eq!(draft.notes.len(), 1);
 
-    let bin = tempfile::tempdir().expect("tempdir");
-    let untrusted = script(
-        bin.path(),
-        "mise",
-        "echo 'mise ERROR Config files in ./mise.toml are not trusted.' >&2; exit 1",
-    );
-    let contributor = MiseContributor::new(untrusted, Duration::from_secs(5));
-    let draft = apply(&contributor, lane.path(), &ContribMemo::default())
-        .await
-        .expect("apply");
-    assert!(draft.notes[0].contains("mise trust"));
+    // The fake mise is a `#!/bin/sh` script, which Windows cannot run.
+    #[cfg(unix)]
+    {
+        let bin = tempfile::tempdir().expect("tempdir");
+        let untrusted = script(
+            bin.path(),
+            "mise",
+            "echo 'mise ERROR Config files in ./mise.toml are not trusted.' >&2; exit 1",
+        );
+        let contributor = MiseContributor::new(untrusted, Duration::from_secs(5));
+        let draft = apply(&contributor, lane.path(), &ContribMemo::default())
+            .await
+            .expect("apply");
+        assert!(draft.notes[0].contains("mise trust"));
+    }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 /// Other failures and hangs fail the unit with a bounded error.
 async fn failures_and_timeouts() {

@@ -119,6 +119,7 @@ pub fn run() -> ExitCode {
 
 /// SIGTERM and SIGINT (a service manager, logout, `kill`) shut the daemon down
 /// like `devlanes daemon stop`: units stop, exits are recorded, state.db closes.
+#[cfg(unix)]
 fn watch_signals(shutdown: CancellationToken) {
     use tokio::signal::unix::{SignalKind, signal};
     let (mut term, mut interrupt) = match (
@@ -135,6 +136,30 @@ fn watch_signals(shutdown: CancellationToken) {
         let name = tokio::select! {
             _ = term.recv() => "SIGTERM",
             _ = interrupt.recv() => "SIGINT",
+            () = shutdown.cancelled() => return,
+        };
+        tracing::info!(signal = name, "shutting down");
+        shutdown.cancel();
+    });
+}
+
+/// Ctrl-C and Ctrl-Break shut down a daemon run by hand in a console, like
+/// `devlanes daemon stop`. A detached daemon has no console and gets neither;
+/// it stops through `daemon stop`.
+#[cfg(windows)]
+fn watch_signals(shutdown: CancellationToken) {
+    use tokio::signal::windows::{ctrl_break, ctrl_c};
+    let (mut interrupt, mut brk) = match (ctrl_c(), ctrl_break()) {
+        (Ok(interrupt), Ok(brk)) => (interrupt, brk),
+        (Err(error), _) | (_, Err(error)) => {
+            tracing::warn!(%error, "console handlers not installed; Ctrl-C ends the daemon without a shutdown");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let name = tokio::select! {
+            _ = interrupt.recv() => "Ctrl-C",
+            _ = brk.recv() => "Ctrl-Break",
             () = shutdown.cancelled() => return,
         };
         tracing::info!(signal = name, "shutting down");
@@ -183,6 +208,7 @@ pub async fn ui(paths: &Paths) -> Result<u8, RpcError> {
 }
 
 /// Installs a per-user service so the daemon starts outside agent sandboxes and at login.
+#[cfg(unix)]
 pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
     let exe = std::env::current_exe().map_err(io)?;
     let paths = Paths::discover()
@@ -213,27 +239,13 @@ pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
 }
 
 /// Removes the per-user service definition (the running daemon keeps running).
+#[cfg(unix)]
 pub async fn uninstall(runtime: &Runtime) -> Result<u8, RpcError> {
     let exe = std::env::current_exe().map_err(io)?;
     let paths = Paths::discover()
         .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
     let (path, _, _) = service_definition(&exe, &paths)?;
-    let disable: Vec<Vec<String>> = if cfg!(target_os = "macos") {
-        vec![vec![
-            "launchctl".into(),
-            "bootout".into(),
-            format!("gui/{}", rustix::process::getuid().as_raw()),
-            path.display().to_string(),
-        ]]
-    } else {
-        vec![vec![
-            "systemctl".into(),
-            "--user".into(),
-            "disable".into(),
-            "devlanes.service".into(),
-        ]]
-    };
-    for command in disable {
+    for command in disable_commands(&path) {
         let _ = tokio::process::Command::new(&command[0])
             .args(&command[1..])
             .status()
@@ -249,14 +261,58 @@ pub async fn uninstall(runtime: &Runtime) -> Result<u8, RpcError> {
     Ok(0)
 }
 
+/// `daemon install` on Windows: refused until the daemon can start at logon there.
+#[cfg(windows)]
+pub async fn install(_: &Runtime) -> Result<u8, RpcError> {
+    Err(service_unsupported())
+}
+
+/// `daemon uninstall` on Windows: refused, since `install` installs nothing yet.
+#[cfg(windows)]
+pub async fn uninstall(_: &Runtime) -> Result<u8, RpcError> {
+    Err(service_unsupported())
+}
+
+/// The error for `daemon install`/`uninstall` on Windows.
+#[cfg(windows)]
+fn service_unsupported() -> RpcError {
+    RpcError::new(
+        "not_supported_yet",
+        json!({"feature": "daemon install on Windows"}),
+        1,
+    )
+}
+
+/// Unloads the launchd agent at `path`.
+#[cfg(target_os = "macos")]
+fn disable_commands(path: &Path) -> Vec<Vec<String>> {
+    vec![vec![
+        "launchctl".into(),
+        "bootout".into(),
+        format!("gui/{}", rustix::process::getuid().as_raw()),
+        path.display().to_string(),
+    ]]
+}
+
+/// Disables the systemd user unit; `path` is the unit file, removed afterwards.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn disable_commands(_path: &Path) -> Vec<Vec<String>> {
+    vec![vec![
+        "systemctl".into(),
+        "--user".into(),
+        "disable".into(),
+        "devlanes.service".into(),
+    ]]
+}
+
 /// launchd agent on macOS, systemd user unit on Linux (compile-time choice).
+#[cfg(unix)]
 fn service_definition(
     exe: &std::path::Path,
     paths: &Paths,
 ) -> Result<(std::path::PathBuf, String, Vec<Vec<String>>), RpcError> {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| RpcError::new("no_home", json!({}), 1))?;
+    let home =
+        devlanes_client::user_home().ok_or_else(|| RpcError::new("no_home", json!({}), 1))?;
     #[cfg(target_os = "macos")]
     {
         let path = home.join("Library/LaunchAgents/run.devlanes.daemon.plist");
@@ -428,6 +484,7 @@ pub fn utc_stamp(seconds: u64) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[tokio::test]
     /// SIGTERM cancels the server's shutdown token, the path `daemon stop` takes.
     async fn sigterm_starts_the_graceful_shutdown() {

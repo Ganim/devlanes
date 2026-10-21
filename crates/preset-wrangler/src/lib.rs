@@ -304,6 +304,10 @@ mod tests {
 
     /// Flags, vars (sorted by key) and user args render in a fixed order.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+    )]
     fn renders_ports_vars_and_args() {
         let options = WranglerOptions {
             vars: BTreeMap::from([

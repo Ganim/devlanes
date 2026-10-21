@@ -1,15 +1,11 @@
 //! Private Diesel projections and write models. Public records stay SQL-independent.
 
+pub(crate) use crate::paths::{path_bytes, path_from_bytes};
 use crate::{schema::*, *};
 use devlanes_core::{
     Actor, ActorKind, ExitOutcome, LaneId, ProcessIdentity, ProjectId, UnitRunId, WorktreeId,
 };
 use diesel::prelude::*;
-use std::{
-    ffi::OsString,
-    os::unix::ffi::{OsStrExt, OsStringExt},
-    path::{Path, PathBuf},
-};
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = projects, check_for_backend(diesel::sqlite::Sqlite))]
@@ -360,14 +356,6 @@ pub(crate) fn sql_u64(value: u64) -> i64 {
 /// Valid counters are nonnegative; legacy corrupt values read as zero.
 pub(crate) fn from_sql_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
-}
-/// Preserves Unix path bytes in BLOB columns.
-pub(crate) fn path_bytes(path: &Path) -> Vec<u8> {
-    path.as_os_str().as_bytes().to_vec()
-}
-/// Restores a path supplied by Git or the filesystem.
-pub(crate) fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
-    OsString::from_vec(bytes).into()
 }
 /// Stable actor representation used by inserts.
 pub(crate) fn actor_kind(kind: ActorKind) -> String {

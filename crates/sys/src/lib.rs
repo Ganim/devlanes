@@ -1,23 +1,29 @@
 //! Operating-system process queries for supervision, reconciliation and diagnostics.
 //!
 //! Platform code is selected at compile time: procfs on Linux, libproc and `lsof`
-//! on macOS. Every query is blocking; async callers should use `spawn_blocking`.
+//! on macOS, Win32 on Windows. Every query is blocking; async callers should use
+//! `spawn_blocking`.
 //!
 //! ```
+//! # #[cfg(unix)] {
 //! let me = devlanes_sys::identity(std::process::id())?.expect("own process is visible");
 //! assert!(devlanes_sys::matches(&me)?);
+//! # }
 //! # Ok::<(), devlanes_sys::Error>(())
 //! ```
 
-// Unsafe code is limited to the macOS FFI modules; each block documents its invariants.
+// Unsafe code is limited to the macOS and Windows FFI modules; each block documents
+// its invariants.
 #![deny(unsafe_code)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 use std::net::SocketAddr;
 
 pub use devlanes_core::ProcessIdentity;
+#[cfg(unix)]
 pub use rustix::process::Signal;
 
+mod file;
 mod rlimit;
 mod tree;
 
@@ -36,6 +42,11 @@ mod os;
 #[path = "macos.rs"]
 mod os;
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+#[path = "windows/mod.rs"]
+mod os;
+
 /// Safe wrappers over macOS libproc, mach and sysctl calls for the metrics and
 /// pressure collectors, so those crates need no `unsafe`.
 #[cfg(target_os = "macos")]
@@ -43,6 +54,7 @@ mod os;
 #[path = "darwin.rs"]
 pub mod macos;
 
+pub use file::{FileIdentity, file_identity, path_identity};
 pub use rlimit::{NofileLimit, child_nofile_limit, raise_nofile_limit};
 pub use tree::{DescendantTracker, session_members, session_members_known};
 
@@ -61,13 +73,18 @@ pub enum Error {
     /// A diagnostic helper command was unavailable or failed.
     #[error("{tool} failed: {detail}")]
     Tool { tool: &'static str, detail: String },
+    /// The query has no implementation on this platform yet.
+    #[error("{0} is not supported on this platform")]
+    Unsupported(&'static str),
 }
 
 impl From<Error> for devlanes_core::Error {
-    /// Keeps I/O failures typed and reports other process-table failures as integration errors.
+    /// Keeps I/O and unsupported failures typed and reports other process-table
+    /// failures as integration errors.
     fn from(error: Error) -> Self {
         match error {
             Error::Io(error) => Self::Io(error),
+            Error::Unsupported(what) => Self::Unsupported(what.to_owned()),
             other => Self::Integration(other.to_string()),
         }
     }
@@ -169,6 +186,7 @@ pub fn matches(identity: &ProcessIdentity) -> Result<bool, Error> {
 ///
 /// Reconciliation uses this so a recycled PID is never killed. The check and the
 /// signal are not atomic, but reuse within that window requires PID wraparound.
+#[cfg(unix)]
 pub fn signal_verified(identity: &ProcessIdentity, signal: Signal) -> Result<SignalOutcome, Error> {
     let Some(info) = process(identity.pid)? else {
         return Ok(SignalOutcome::Gone);
@@ -204,12 +222,14 @@ pub fn listening_tcp(pids: &[u32]) -> Result<Vec<ListeningSocket>, Error> {
 }
 
 /// Session ID of `pid`, or `None` once it exited or the kernel refused to say.
+#[cfg(unix)]
 pub fn session(pid: u32) -> Option<u32> {
     let sid = rustix::process::getsid(Some(raw_pid(pid)?)).ok()?;
     u32::try_from(sid.as_raw_nonzero().get()).ok()
 }
 
 /// Real user ID of this process; other users' processes are never a unit's.
+#[cfg(unix)]
 pub fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()
 }
@@ -226,6 +246,7 @@ pub enum OpenFile {
 
 /// Identifies what `fd` refers to, for a later [`holders`] lookup. Only character
 /// devices and pipes are supported.
+#[cfg(unix)]
 pub fn open_file(fd: std::os::fd::BorrowedFd<'_>) -> Result<OpenFile, Error> {
     os::open_file(fd)
 }
@@ -236,6 +257,7 @@ pub fn open_file(fd: std::os::fd::BorrowedFd<'_>) -> Result<OpenFile, Error> {
 /// typically daemonized grandchildren that were never seen in a snapshot. Processes
 /// that exit or cannot be inspected during the scan are skipped. Blocking; the cost
 /// grows with the descriptors of every candidate, so pass a filtered set.
+#[cfg(unix)]
 pub fn holders(target: OpenFile, pids: &[u32]) -> Result<Vec<u32>, Error> {
     let mut found = Vec::new();
     for &pid in pids {
@@ -247,6 +269,7 @@ pub fn holders(target: OpenFile, pids: &[u32]) -> Result<Vec<u32>, Error> {
 }
 
 /// Converts a kernel PID; 0 and values beyond `pid_t` are not addressable processes.
+#[cfg(unix)]
 fn raw_pid(pid: u32) -> Option<rustix::process::Pid> {
     rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)
 }

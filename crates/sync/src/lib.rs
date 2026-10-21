@@ -12,6 +12,7 @@
 
 mod held;
 mod ignore;
+mod mode;
 mod path;
 mod syncer;
 mod target;

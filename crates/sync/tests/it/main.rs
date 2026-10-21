@@ -1,7 +1,8 @@
 //! Syncer behavior in tempdirs with the real filesystem watcher.
 
 use std::fs;
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -38,6 +39,7 @@ fn read(path: &Path) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     fs::metadata(path).expect("metadata").permissions().mode() & 0o777
 }
@@ -97,6 +99,7 @@ async fn files_over_the_limit_are_reported_and_skipped() {
     assert!(status.errors[0].message.contains("over the sync limit"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn initial_copy_keeps_modes_skips_symlinks_and_ignores() {
     let d = dirs();
@@ -206,6 +209,7 @@ async fn rapid_edits_converge_on_the_last_write() {
     handle.stop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn ignored_and_symlinked_paths_created_later_stay_out() {
     let d = dirs();
@@ -234,6 +238,7 @@ async fn ignored_and_symlinked_paths_created_later_stay_out() {
     handle.stop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn chmod_alone_updates_the_mode() {
     let d = dirs();
@@ -255,13 +260,13 @@ async fn initial_copy_reuses_matching_files_and_prunes_stale_ones() {
     write(&d.dst.join("changed.txt"), "old");
     write(&d.dst.join("stale.txt"), "stale");
     write(&d.dst.join("local.map"), "user file under an ignored name");
-    let inode = fs::metadata(d.dst.join("same.txt")).expect("meta").ino();
+    let identity = devlanes_sys::path_identity(&d.dst.join("same.txt")).expect("identity");
 
     let status = syncer(&d, &["*.map"]).sync_once().await.expect("sync");
     assert_eq!((status.written, status.removed, status.files), (1, 1, 2));
     assert_eq!(
-        fs::metadata(d.dst.join("same.txt")).expect("meta").ino(),
-        inode,
+        devlanes_sys::path_identity(&d.dst.join("same.txt")).expect("identity"),
+        identity,
         "identical file not rewritten"
     );
     assert_eq!(read(&d.dst.join("changed.txt")).as_deref(), Some("new"));
@@ -283,7 +288,7 @@ async fn offered_held_files_replace_the_target_manifest() {
     write(&d.dst.join("stale.txt"), "stale");
     write(&d.dst.join("dir/also-stale/x.txt"), "stale");
     write(&d.dst.join("local.map"), "user file under an ignored name");
-    let inode = fs::metadata(d.dst.join("same.txt")).expect("meta").ino();
+    let inode = devlanes_sys::path_identity(&d.dst.join("same.txt")).expect("identity");
     // The source mtimes must be settled, or the pass rehashes (correctly, but
     // then this test would not show that matches are skipped without reading).
     let settled = std::time::SystemTime::now() - Duration::from_secs(60);
@@ -308,7 +313,7 @@ async fn offered_held_files_replace_the_target_manifest() {
     let status = syncer.sync_once().await.expect("sync");
     assert_eq!((status.written, status.removed), (2, 2), "{status:?}");
     assert_eq!(
-        fs::metadata(d.dst.join("same.txt")).expect("meta").ino(),
+        devlanes_sys::path_identity(&d.dst.join("same.txt")).expect("identity"),
         inode,
         "identical file not rewritten"
     );

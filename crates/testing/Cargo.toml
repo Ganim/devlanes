@@ -15,12 +15,14 @@ axum = { version = "0.8", features = ["ws"] }
 clap.workspace = true
 futures-util.workspace = true
 humantime = "2"
-rustix = { version = "1", features = ["process"] }
 serde_json.workspace = true
 socket2 = "0.6"
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"

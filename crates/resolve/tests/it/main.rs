@@ -1097,6 +1097,10 @@ services:
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+)]
 /// Snapshot of examples/minimal.yaml in lane 1 with fake integrations.
 async fn snapshot_minimal() {
     let config = parse(MINIMAL);
@@ -1126,6 +1130,10 @@ async fn snapshot_minimal() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+)]
 /// Snapshot of examples/devlanes.yaml in lane 2 with fake integrations and secrets.
 async fn snapshot_reference() {
     let config = parse(FULL);

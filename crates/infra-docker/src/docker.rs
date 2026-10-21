@@ -570,6 +570,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+    )]
     fn create_body_binds_ports_and_volumes() {
         let spec = spec();
         let mounts = validate(&spec).expect("valid");

@@ -239,7 +239,7 @@ fn store(
         };
         trust.store(target)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
         use devlanes_trust_linux::{LinuxTrust, Privilege};
         let _ = own_ca;
@@ -250,13 +250,20 @@ fn store(
             },
             root => root,
         };
-        let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        let home = devlanes_client::user_home().ok_or_else(|| {
             devlanes_trust::TrustError::io(
                 "finding the home directory",
                 std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"),
             )
         })?;
         LinuxTrust::new(Arc::new(devlanes_trust::SystemExecutor), home, privilege).store(target)
+    }
+    #[cfg(windows)]
+    {
+        let _ = (target, own_ca, can_prompt);
+        Err(devlanes_trust::TrustError::UnsupportedSystem(
+            "trust stores on Windows are not supported yet".into(),
+        ))
     }
 }
 
@@ -397,6 +404,7 @@ async fn trust(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
 
 /// The OS resolver file that sends `tld` lookups to the daemon's DNS server at
 /// `server`. Blocking: on Linux it asks `systemctl` for the systemd version.
+#[cfg(unix)]
 pub fn resolver_file(tld: &str, server: SocketAddr) -> Result<ResolverFile, String> {
     let zone = devlanes_resolver_dns::Zone::new(tld).map_err(|error| error.to_string())?;
     #[cfg(target_os = "macos")]
@@ -419,8 +427,15 @@ pub fn resolver_file(tld: &str, server: SocketAddr) -> Result<ResolverFile, Stri
     }
 }
 
+/// No OS resolver file on Windows: the resolver strategy there needs NRPT rules,
+/// which devlanes does not write yet.
+#[cfg(windows)]
+pub fn resolver_file(_tld: &str, _server: SocketAddr) -> Result<ResolverFile, String> {
+    Err("the resolver strategy is not supported on Windows yet".into())
+}
+
 /// The version from `systemctl --version`'s first line, `systemd 255 (255.4-1)`.
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 fn systemd_version(output: &str) -> Option<u32> {
     let mut words = output.lines().next()?.split_whitespace();
     (words.next()? == "systemd").then_some(())?;
@@ -539,6 +554,7 @@ fn not_configured() -> RpcError {
 /// Either way the OS is told to reload. Files without the devlanes marker are
 /// never touched.
 async fn resolver_install(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
+    crate::hosts::privileged_supported("the resolver strategy on Windows")?;
     let paths = Paths::discover()
         .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
     let config = devlanes_config::load_user(paths.home.join("config.yaml")).unwrap_or_default();
@@ -785,6 +801,7 @@ mod tests {
     }
 
     /// An `Output` with exit `code` and `stdout`.
+    #[cfg(unix)]
     fn output(code: i32, stdout: &str) -> std::process::Output {
         use std::os::unix::process::ExitStatusExt;
         std::process::Output {
@@ -795,6 +812,7 @@ mod tests {
     }
 
     /// A CA without name constraints, as devlanes created before it added them.
+    #[cfg(unix)]
     const UNCONSTRAINED_CA: &str = "-----BEGIN CERTIFICATE-----
 MIICPTCCAeSgAwIBAgIJAJaVCy5tlb5jMAoGCCqGSM49BAMCMB8xHTAbBgNVBAMM
 FG9sZCBkZXZsYW5lcyB0ZXN0IENBMCAXDTI2MTAyMTE0NTI1MloYDzIxMjYwOTI3
@@ -812,6 +830,8 @@ oA==
 -----END CERTIFICATE-----
 ";
 
+    // The recreate hint is a Unix command line with a Unix path.
+    #[cfg(unix)]
     #[test]
     /// An old unconstrained CA gets recreate instructions; a new one does not.
     fn unconstrained_ca_is_reported() {
@@ -853,6 +873,8 @@ oA==
         }
     }
 
+    // Unix exit statuses and absolute paths.
+    #[cfg(unix)]
     #[test]
     /// CAROOT needs a successful exit and a non-empty absolute path.
     fn mkcert_caroot_is_validated() {

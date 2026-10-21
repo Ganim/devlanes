@@ -1,4 +1,7 @@
-//! Bounded framing shared by Unix sockets and tunneled daemon connections.
+//! Bounded framing shared by local daemon connections and tunneled ones, plus the
+//! local endpoint itself ([`local`]).
+
+pub mod local;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use devlanes_proto::{Control, MAX_FRAME_SIZE};
@@ -47,6 +50,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         Self {
             framed: Framed::new(stream, codec),
         }
+    }
+
+    /// The wrapped stream, for checks that need the transport after the handshake.
+    pub fn get_ref(&self) -> &T {
+        self.framed.get_ref()
     }
 
     /// Sends a complete bounded frame with backpressure from the peer.

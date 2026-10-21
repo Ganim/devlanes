@@ -807,8 +807,10 @@ async fn accept_errors_do_not_stop_the_listener() -> Result {
 }
 
 /// Restores the file descriptor limit even when the test fails.
+#[cfg(unix)]
 struct NofileGuard(rustix::process::Rlimit);
 
+#[cfg(unix)]
 impl Drop for NofileGuard {
     /// Puts back the soft limit captured before the test lowered it.
     fn drop(&mut self) {
@@ -817,6 +819,7 @@ impl Drop for NofileGuard {
 }
 
 /// EMFILE on accept is reported through listener health, and the listener recovers.
+#[cfg(unix)]
 #[tokio::test]
 async fn emfile_is_reported_and_recovered() -> Result {
     use std::os::fd::AsRawFd;

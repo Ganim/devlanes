@@ -1,4 +1,5 @@
 //! Argv tests for the Linux stores, plus ignored tests against real sudo and certutil.
+#![cfg(unix)]
 
 use std::sync::{Arc, Mutex};
 

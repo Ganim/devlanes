@@ -25,7 +25,7 @@ CI also shares kache's cache through a remote bucket when the repository has one
 
 ## Checks
 
-Run these before sending a change. CI runs the same ones on macOS and Linux.
+Run these before sending a change. CI runs the same ones on macOS, Linux and Windows.
 
 ```sh
 cargo fmt --all --check

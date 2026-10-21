@@ -137,6 +137,10 @@ fn no_source_exits_3_naming_the_files() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "POSIX absolute paths in fixtures are relative on Windows, ported in the Windows path step"
+)]
 fn json_output_has_path_sources_yaml_and_notes() {
     let (home, dir) = project(&[(
         "mprocs.yaml",

@@ -162,6 +162,26 @@ fn describe(data: &Value) -> String {
 }
 
 /// Symbolic name of the exec errors a spawn can report; the number otherwise.
+#[cfg(windows)]
+fn errno_name(code: i32) -> String {
+    let name = match code {
+        2 => "ERROR_FILE_NOT_FOUND",
+        3 => "ERROR_PATH_NOT_FOUND",
+        5 => "ERROR_ACCESS_DENIED",
+        8 => "ERROR_NOT_ENOUGH_MEMORY",
+        87 => "ERROR_INVALID_PARAMETER",
+        123 => "ERROR_INVALID_NAME",
+        193 => "ERROR_BAD_EXE_FORMAT",
+        206 => "ERROR_FILENAME_EXCED_RANGE",
+        267 => "ERROR_DIRECTORY",
+        740 => "ERROR_ELEVATION_REQUIRED",
+        _ => return format!("error {code}"),
+    };
+    name.to_owned()
+}
+
+/// Symbolic name of the exec errors a spawn can report; the number otherwise.
+#[cfg(unix)]
 fn errno_name(errno: i32) -> String {
     let errno = rustix::io::Errno::from_raw_os_error(errno);
     let name = [
@@ -213,6 +233,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Unix PATH and errno names, ported with Windows command resolution"
+    )]
     /// A program missing from PATH names the program and the directories searched.
     fn missing_program_lists_the_path() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -250,6 +274,7 @@ mod tests {
         assert_eq!(error.data["path_more"], 8);
     }
 
+    #[cfg(unix)]
     #[test]
     /// A file without the execute bit is reported as not executable.
     fn non_executable_program() {
@@ -289,6 +314,7 @@ mod tests {
         assert!(log_line(&error).contains("does not exist"));
     }
 
+    #[cfg(unix)]
     #[test]
     /// Other errors keep their message and gain the program and errno name.
     fn other_errors_keep_the_message() {

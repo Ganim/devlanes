@@ -78,7 +78,7 @@ impl InstallMethod {
         let cargo_home = std::env::var_os("CARGO_HOME")
             .filter(|home| !home.is_empty())
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
+            .or_else(|| crate::user_home().map(|home| home.join(".cargo")));
         let cargo_home = cargo_home.map(|home| std::fs::canonicalize(&home).unwrap_or(home));
         let listed = cargo_home.as_deref().is_some_and(|home| {
             std::fs::read_to_string(home.join("binstall/crates-v1.json"))

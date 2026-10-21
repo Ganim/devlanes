@@ -447,6 +447,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+    )]
     fn relative_paths_resolve_against_base_dir() {
         assert_eq!(
             resolve("./infra/cerbos:/policies:ro", Scope::Shared).ok(),

@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 use std::process::Stdio;
@@ -210,6 +211,7 @@ pub struct SystemFs;
 
 impl FsProbe for SystemFs {
     /// `std::fs::symlink_metadata`, mapping `NotFound` to `None`.
+    #[cfg(unix)]
     fn lstat(&self, path: &Path) -> io::Result<Option<FileInfo>> {
         match std::fs::symlink_metadata(path) {
             Ok(meta) => {
@@ -234,6 +236,20 @@ impl FsProbe for SystemFs {
         }
     }
 
+    /// Always fails with `Unsupported`: owner uid and mode bits have no Windows
+    /// equivalent, so nothing here can prove a root-owned helper. Callers then treat
+    /// the helper as unavailable.
+    #[cfg(not(unix))]
+    fn lstat(&self, path: &Path) -> io::Result<Option<FileInfo>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "cannot check {}: the hosts file fallback is not supported on Windows yet",
+                path.display()
+            ),
+        ))
+    }
+
     /// `std::fs::read`. Only the installer calls it, once, on a binary of under a
     /// megabyte, from the CLI's terminal session.
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
@@ -251,6 +267,8 @@ mod tests {
         assert_eq!(command.to_string(), "sudo -n 'a b' ''");
     }
 
+    // The executor tests drive `sh`; Windows versions need a portable fake tool.
+    #[cfg(unix)]
     #[tokio::test]
     async fn system_executor_pipes_stdin() {
         let command = CommandSpec::new("sh")
@@ -273,6 +291,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn early_exit_is_not_an_epipe_error() {
         let command = CommandSpec::new("sh")
@@ -288,6 +307,7 @@ mod tests {
         assert_eq!(output.code, Some(1));
     }
 
+    #[cfg(unix)]
     #[test]
     fn system_fs_reports_kinds() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -311,5 +331,13 @@ mod tests {
             SystemFs.lstat(&dir.path().join("none")).expect("missing"),
             None
         );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn system_fs_is_unsupported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = SystemFs.lstat(dir.path()).expect_err("unsupported");
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     }
 }

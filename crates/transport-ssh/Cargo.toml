@@ -13,12 +13,16 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 devlanes-transport = { path = "../transport" }
-openssh = { version = "0.11", default-features = false, features = ["process-mux"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+# openssh refuses to build elsewhere (ControlMaster needs Unix sockets), and the
+# crate body is Unix-only until a Windows transport exists.
+[target.'cfg(unix)'.dependencies]
+openssh = { version = "0.11", default-features = false, features = ["process-mux"] }
 
 [dev-dependencies]
 sha2 = "0.10"

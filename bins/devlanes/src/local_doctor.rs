@@ -47,8 +47,37 @@ pub async fn facts(paths: &Paths) -> Value {
     })
 }
 
+/// `{path, exists, problem?}` for the devlanes home. Reports symlinks and
+/// junctions and non-directories; owner and ACL findings come with the Windows
+/// private-directory checks.
+#[cfg(windows)]
+fn home_check(home: &Path) -> Value {
+    use std::os::windows::fs::MetadataExt;
+    // FILE_ATTRIBUTE_REPARSE_POINT: symlinks and junctions both carry it.
+    const REPARSE_POINT: u32 = 0x400;
+    match std::fs::symlink_metadata(home) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            json!({"path": home, "exists": false})
+        }
+        Err(error) => {
+            json!({"path": home, "exists": true, "problem": "unreadable", "message": error.to_string()})
+        }
+        Ok(meta) => {
+            let problem = if meta.file_attributes() & REPARSE_POINT != 0 {
+                Some("symlink")
+            } else if !meta.is_dir() {
+                Some("not_a_directory")
+            } else {
+                None
+            };
+            json!({"path": home, "exists": true, "problem": problem})
+        }
+    }
+}
+
 /// `{path, private, mode?}` for the devlanes home: the client refuses another
 /// user's or a symlinked home, and the daemon tightens an open one to 0700.
+#[cfg(unix)]
 fn home_check(home: &Path) -> Value {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     match std::fs::symlink_metadata(home) {
@@ -199,12 +228,13 @@ async fn hosts_helper() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     /// A home others can read is a finding; a missing one is not (the first
     /// command creates it).
+    #[cfg(unix)]
     #[test]
     fn home_permissions() {
+        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("h");
         assert_eq!(home_check(&home)["exists"], false);

@@ -43,6 +43,10 @@ fn request<'a>(
 
 /// Runner choice, entry points and notes for each project layout.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
+)]
 fn runner_selection_table() {
     let uv_only = "[project]\nname = \"acme\"\n[project.scripts]\nserve = \"acme:main\"\n[tool.uv]\ndev-dependencies = []\n";
     let uv_packaged = "[project]\nname = \"acme\"\n[project.scripts]\nserve = \"acme:main\"\n[tool.uv]\npackage = true\n";
@@ -126,6 +130,10 @@ fn uv_workspace_member() {
 
 /// Missing scripts list both tables; bad sources and names are rejected.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
+)]
 fn errors() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_files(

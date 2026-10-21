@@ -5,6 +5,9 @@
 //! not a terminal so CI with passwordless sudo works and a missing password fails
 //! fast with [`TrustError::InteractionRequired`] instead of hanging. In a terminal,
 //! sudo prompts on `/dev/tty`. NSS databases belong to the user and need no sudo.
+//!
+//! Empty on Windows. It builds on macOS so the argv tests run there too.
+#![cfg(unix)]
 
 use std::io::{self, IsTerminal as _};
 use std::path::{Path, PathBuf};

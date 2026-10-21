@@ -399,6 +399,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        windows,
+        ignore = "git rejects verbatim `\\\\?\\` temp paths, ported in the Windows path step"
+    )]
     async fn moved_worktree_keeps_its_identity() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::timeout(Duration::from_secs(15), async {
             let dir = tempfile::tempdir()?;

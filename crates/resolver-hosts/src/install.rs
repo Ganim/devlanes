@@ -13,7 +13,10 @@
 //! rule is never read before it is renamed. A failure after activation starts puts
 //! the previous helper and rule back.
 
-use std::io::{self, Read as _, Write as _};
+#[cfg(unix)]
+use std::io::Write as _;
+use std::io::{self, Read as _};
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -831,6 +834,7 @@ pub async fn install(
 }
 
 /// Removes the block, the rule and the helper.
+#[cfg(unix)]
 pub async fn uninstall(
     executor: &dyn Executor,
     fs: &dyn FsProbe,
@@ -840,6 +844,17 @@ pub async fn uninstall(
         Ok(Some(info)) if info.kind == FileKind::File
     );
     run_steps(executor, &uninstall_plan(helper_installed)).await
+}
+
+/// Fails with [`InstallError::Unsupported`] before running anything. Without this,
+/// the plan would hand `sudo /bin/rm` to whatever `sudo` is on `PATH` (Windows 11
+/// ships one that raises a UAC prompt).
+#[cfg(not(unix))]
+pub async fn uninstall(
+    _executor: &dyn Executor,
+    _fs: &dyn FsProbe,
+) -> Result<Vec<String>, InstallError> {
+    Err(InstallError::Unsupported)
 }
 
 /// A `0700` temp directory holding the private helper copy and the staged rule.
@@ -893,6 +908,7 @@ impl PrivateCopies {
 }
 
 /// Creates `path` exclusively with `mode` and writes `bytes`.
+#[cfg(unix)]
 fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), InstallError> {
     std::fs::OpenOptions::new()
         .write(true)
@@ -903,7 +919,16 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), InstallError> {
         .map_err(|error| InstallError::io(format!("writing {}", path.display()), error))
 }
 
-#[cfg(test)]
+/// Fails with [`InstallError::Unsupported`]: a private copy needs Unix modes.
+/// [`install`] refuses earlier through [`Platform::current`], so this is never reached.
+#[cfg(not(unix))]
+fn write_new(_path: &Path, _bytes: &[u8], _mode: u32) -> Result<(), InstallError> {
+    Err(InstallError::Unsupported)
+}
+
+// The plans hold Unix paths (`/tmp/...` is not absolute on Windows) and `install`
+// refuses to run off macOS and Linux.
+#[cfg(all(test, unix))]
 mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
 

@@ -373,6 +373,13 @@ DEVLANES_HOSTS_HELPER=$PWD/target/release/devlanes-hosts \
 Bump `PROTOCOL` in `src/lib.rs` whenever arguments, input or output change in a
 way an older daemon or helper would misread.
 
+## Windows
+
+The helper is Unix only. On Windows the `cli`, `flush` and `write` modules are
+compiled out, the binary prints `devlanes-hosts: not supported on this platform`
+and exits 2, and the integration tests don't build. `names`, `block` and the
+constants stay available for a Windows hosts writer.
+
 ## License
 
 Apache-2.0

@@ -38,7 +38,9 @@ HTTP paths return the request path, headers and PID as JSON. `/ws` echoes text/b
 
 ## Behaviour
 
-Helpers perform blocking work; `TestRepo` requires Git on PATH and disables global Git configuration and hooks. `TestHome::configure` sets home variables on a command without changing the caller's environment. Temporary directories are removed on drop, so stop owned processes first.
+Helpers perform blocking work; `TestRepo` requires Git on PATH and disables global Git configuration (through an empty file from `empty_git_config`) and hooks. `TestHome::configure` sets home variables on a command without changing the caller's environment. Temporary directories are removed on drop, so stop owned processes first.
+
+On Unix, homes live under `/tmp` with mode `0700`. On Windows they live in the user's temp directory without mode bits, and `configure` also sets `USERPROFILE`. `fixture-server` has no SIGTERM there, so `--ignore-sigterm` has no effect, and `--setsid-grandchild` exits with an error before spawning anything.
 
 Server descendants deliberately survive parent termination. Tests must clean them up and supply an exit deadline as a fallback. Clear the subprocess environment before testing `--print-env` to avoid recording credentials.
 

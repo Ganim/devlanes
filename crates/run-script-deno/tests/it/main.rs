@@ -39,6 +39,10 @@ fn request<'a>(
 
 /// `deno task <name> <args>` in the config's directory, with the task body.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
+)]
 fn renders_deno_task() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_files(
@@ -82,6 +86,10 @@ fn renders_deno_task() {
 
 /// Missing tasks list the defined ones; bad sources and names are rejected.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
+)]
 fn errors() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_files(

@@ -111,6 +111,7 @@ fn docker_info_fixture_gives_vm_capacity() {
     assert_eq!(DockerVmInfo::from_info(&SystemInfo::default()).cpus, 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn empty_request_makes_no_engine_calls() {
     // A regular file passes bollard's existence check, but every request fails.

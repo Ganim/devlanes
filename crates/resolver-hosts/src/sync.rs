@@ -177,7 +177,9 @@ async fn run(
                     tracing::warn!(code = error.code(), %error, "updating /etc/hosts failed");
                     if matches!(
                         error,
-                        HostsError::SudoDenied { .. } | HostsError::Outdated { .. }
+                        HostsError::SudoDenied { .. }
+                            | HostsError::Outdated { .. }
+                            | HostsError::Unsupported
                     ) {
                         blocked_until = Some(Instant::now() + config.denied_backoff);
                     }

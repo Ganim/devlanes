@@ -74,6 +74,9 @@ pub enum HostsError {
     /// The helper did not finish in time.
     #[error("the hosts helper did not finish within {0:?}")]
     Timeout(Duration),
+    /// This platform has no hosts helper (Windows, for now).
+    #[error("the hosts file fallback is not supported on Windows yet")]
+    Unsupported,
 }
 
 impl HostsError {
@@ -88,6 +91,7 @@ impl HostsError {
             Self::Outdated { .. } => "helper_outdated",
             Self::HelperFailed { .. } => "helper_failed",
             Self::Timeout(_) => "helper_timeout",
+            Self::Unsupported => "hosts_unsupported",
         }
     }
 
@@ -298,9 +302,17 @@ impl HostsClient {
     }
 
     /// Fails with [`HostsError::HelperMissing`] unless the helper is a regular file.
+    ///
+    /// Off Unix, an `Unsupported` probe (what [`crate::SystemFs`] returns there) fails
+    /// with [`HostsError::Unsupported`] instead, so every call says the fallback
+    /// doesn't exist on this platform rather than asking for an install.
     fn ensure_installed(&self) -> Result<(), HostsError> {
         match self.fs.lstat(&self.helper) {
             Ok(Some(info)) if info.kind == FileKind::File => Ok(()),
+            #[cfg(not(unix))]
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                Err(HostsError::Unsupported)
+            }
             _ => Err(HostsError::HelperMissing {
                 path: self.helper.clone(),
             }),
@@ -470,6 +482,19 @@ mod tests {
         let error =
             HostsClient::new(executor.clone(), installed_fs(), Some("dev")).expect_err("dev");
         assert_eq!(error.code(), "hosts_tld_unsupported");
+        assert!(executor.calls().is_empty());
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn the_system_probe_reports_unsupported_without_running_anything() {
+        let executor = Arc::new(FakeExecutor::new(|_| Ok(CommandOutput::ok(""))));
+        let client =
+            HostsClient::new(executor.clone(), Arc::new(crate::SystemFs), None).expect("client");
+        let names = names(&["web.acme.localhost"]);
+        assert_eq!(client.apply(&names).await, Err(HostsError::Unsupported));
+        assert_eq!(client.clear().await, Err(HostsError::Unsupported));
+        assert_eq!(client.version().await, Err(HostsError::Unsupported));
         assert!(executor.calls().is_empty());
     }
 

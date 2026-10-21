@@ -8,13 +8,19 @@
 //! reasoning and the security model.
 //!
 //! The library half holds the pure logic ([`names`], [`block`]) and the file
-//! replacement ([`write`](mod@write)), so the daemon side (`devlanes-resolver-hosts`) can share
+//! replacement (`write`), so the daemon side (`devlanes-resolver-hosts`) can share
 //! the same validation and constants.
+//!
+//! The helper itself (`cli`, `flush`, `write`) is Unix only. `names`, `block` and
+//! the constants build everywhere so a Windows hosts writer can reuse them.
 
 pub mod block;
+#[cfg(unix)]
 pub mod cli;
+#[cfg(unix)]
 pub mod flush;
 pub mod names;
+#[cfg(unix)]
 pub mod write;
 
 /// The file the helper edits.

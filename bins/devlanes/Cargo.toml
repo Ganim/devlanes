@@ -23,8 +23,13 @@ workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 devlanes-trust-macos = { path = "../../crates/trust-macos" }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 devlanes-trust-linux = { path = "../../crates/trust-linux" }
+
+[target.'cfg(unix)'.dependencies]
+devlanes-runner-pty = { path = "../../crates/runner-pty" }
+devlanes-transport-ssh = { path = "../../crates/transport-ssh" }
+rustix = { version = "1", features = ["process", "termios"] }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -83,12 +88,10 @@ devlanes-resolver-hosts = { path = "../../crates/resolver-hosts" }
 devlanes-run-script-just = { path = "../../crates/run-script-just" }
 devlanes-run-script-make = { path = "../../crates/run-script-make" }
 devlanes-run-script-npm = { path = "../../crates/run-script-npm" }
-devlanes-runner-pty = { path = "../../crates/runner-pty" }
 devlanes-start-gate = { path = "../../crates/start-gate" }
 devlanes-state = { path = "../../crates/state" }
 devlanes-sys = { path = "../../crates/sys" }
 devlanes-transport = { path = "../../crates/transport" }
-devlanes-transport-ssh = { path = "../../crates/transport-ssh" }
 devlanes-tunnel = { path = "../../crates/tunnel" }
 futures-util.workspace = true
 tokio-util.workspace = true
@@ -96,7 +99,6 @@ anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 crossterm = "0.29"
-rustix = { version = "1", features = ["process", "termios"] }
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

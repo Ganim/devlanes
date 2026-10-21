@@ -1,17 +1,14 @@
 //! `FnoxProvider` against fake `fnox` scripts, plus an opt-in real-binary test.
 
-use std::{
-    collections::BTreeMap,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use devlanes_core::contrib::{SecretsError, SecretsProvider, SecretsRequest};
 use devlanes_secrets_fnox::FnoxProvider;
 
 /// Writes an executable shell script and returns its path.
-fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+#[cfg(unix)]
+fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -33,6 +30,7 @@ fn request<'a>(
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 /// fnox runs in the worktree with the profile flag and the client env.
 async fn resolves_through_fnox() {
@@ -83,6 +81,7 @@ async fn skips_without_config() {
     assert!(matches!(error, SecretsError::Other(m) if m.contains("not installed")));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 /// Error documents map to locked or other; missing documents and hangs are errors.
 async fn failures() {

@@ -58,6 +58,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+    )]
     fn builds_setup_env() {
         let env = setup_env(&shared(), Some("acme-lane2")).expect("valid");
         assert_eq!(env["COMPOSE_PROJECT_NAME"], "monorepo");

@@ -1,8 +1,8 @@
 //! The `devlanes-hosts` binary against a temp hosts file.
 //!
 //! `--hosts-file` exists only in debug builds, so these tests are compiled out of
-//! release test runs.
-#![cfg(debug_assertions)]
+//! release test runs. The helper only runs on Unix.
+#![cfg(all(unix, debug_assertions))]
 
 use std::fs;
 use std::io::Write as _;

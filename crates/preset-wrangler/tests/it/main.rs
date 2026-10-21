@@ -112,6 +112,10 @@ fn adapter_required_ports() {
 
 /// Ports, scalar vars and args land in the draft; the registry is per lane.
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+)]
 async fn adapter_renders_flags_and_env() {
     let mut fake = Fake::new(script_command());
     fake.options = Some(serde_json::json!({
@@ -208,6 +212,10 @@ fn rejects_hardcoded_port_from_package_json() {
 
 /// Renders `<pm> run dev <preset args>` for every package manager and preset.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
+)]
 fn preset_arg_rendering_matrix() {
     let lane = Path::new(LANE);
     let ports = BTreeMap::from([(INSPECTOR_PORT.to_owned(), 20011)]);

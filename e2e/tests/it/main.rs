@@ -1,5 +1,8 @@
 //! End-to-end tests: every test drives the real `devlanes` binary in its own [`Lab`].
 
+// The harness is Unix only until it learns Windows processes and ports.
+#![cfg(unix)]
+
 mod cli;
 mod diagnostics;
 // Docker test names must start with `docker_` including the module path, for the CI filter.

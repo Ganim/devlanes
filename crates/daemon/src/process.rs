@@ -1,8 +1,11 @@
 //! Daemon process setup required by the client's auto-spawn contract.
 
-use std::{fs::File, io::Write};
+#[cfg(unix)]
+use std::fs::File;
+use std::io::Write;
 
 /// Leaves the spawning terminal's session so terminal hangups and job control never reach units.
+#[cfg(unix)]
 pub fn detach() -> std::io::Result<()> {
     match rustix::process::setsid() {
         Ok(_) => Ok(()),
@@ -10,6 +13,13 @@ pub fn detach() -> std::io::Result<()> {
         Err(rustix::io::Errno::PERM) => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Nothing to do: on Windows the spawning client starts the daemon without a console
+/// (`DETACHED_PROCESS`), which is what keeps terminal events away from it.
+#[cfg(windows)]
+pub fn detach() -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Routes panics through `tracing`, so a crash leaves its message, location and
@@ -87,8 +97,21 @@ impl Readiness {
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(line)?;
         stdout.flush()?;
-        let null = File::options().write(true).open("/dev/null")?;
-        rustix::stdio::dup2_stdout(&null)?;
-        Ok(())
+        release_stdout()
     }
+}
+
+/// Points stdout at `/dev/null`, closing the client's pipe.
+#[cfg(unix)]
+fn release_stdout() -> std::io::Result<()> {
+    let null = File::options().write(true).open("/dev/null")?;
+    rustix::stdio::dup2_stdout(&null)?;
+    Ok(())
+}
+
+/// Keeps the pipe for now: the client stops reading at the newline, so it is not
+/// blocked. Swapping the standard handle for `NUL` needs a Win32 call from `sys`.
+#[cfg(windows)]
+fn release_stdout() -> std::io::Result<()> {
+    Ok(())
 }

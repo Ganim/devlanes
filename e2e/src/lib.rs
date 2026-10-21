@@ -3,6 +3,11 @@
 //! Each [`Lab`] owns a short `DEVLANES_HOME`, a Git repository copied from a fixture, a
 //! private slice of the port pool and proxy ports, and a deadline. Dropping it stops the
 //! daemon and kills only processes the test saw (identified by PID and start time).
+//!
+//! Unix only for now: ports are locked under `/tmp`, and processes are inspected with
+//! `ps` and `lsof` and killed with signals. On other platforms the crate is empty.
+
+#![cfg(unix)]
 
 use std::{
     fmt,
@@ -250,6 +255,8 @@ struct Owned {
 pub struct Lab {
     home: TestHome,
     repo: TestRepo,
+    /// Empty file every command uses as its global Git config.
+    git_config: tempfile::TempPath,
     worktrees: tempfile::TempDir,
     slot: PortSlot,
     deadline: Instant,
@@ -335,6 +342,7 @@ impl Lab {
         Ok(Self {
             home,
             repo,
+            git_config: devlanes_testing::empty_git_config()?,
             worktrees,
             slot,
             deadline,
@@ -402,7 +410,7 @@ impl Lab {
         self.home.configure(&mut command);
         command
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", &self.git_config)
             .env("DEVLANES_AGENT", "0")
             .env("DEVLANES_OUTPUT", "json")
             .env("DEVLANES_LOG", "debug");

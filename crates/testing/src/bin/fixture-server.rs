@@ -11,11 +11,7 @@ use axum::{
 };
 use clap::Parser;
 use futures_util::stream;
-use tokio::{
-    net::TcpListener,
-    process::Command,
-    signal::unix::{SignalKind, signal},
-};
+use tokio::{net::TcpListener, process::Command};
 
 /// Options for deterministic server and process-lifecycle tests.
 #[derive(Debug, Parser)]
@@ -46,9 +42,10 @@ struct Args {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let mut terminate = signal(SignalKind::terminate())?;
+    platform::check(&args)?;
+    let mut terminate = platform::Terminate::new()?;
     if args.descendant.as_deref() == Some("grandchild") && args.setsid_grandchild {
-        rustix::process::setsid()?;
+        platform::setsid()?;
     }
 
     for line in &args.log_line {
@@ -81,11 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if let Some(role) = &args.descendant {
-        println!(
-            "{role} pid={} sid={}",
-            std::process::id(),
-            rustix::process::getsid(None)?.as_raw_nonzero()
-        );
+        println!("{role} {}", platform::identity()?);
     } else if let Some(listener) = &listener {
         println!("LISTENING {}", listener.local_addr()?);
     }
@@ -125,6 +118,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = child.try_wait()?;
     }
     Ok(())
+}
+
+/// Unix signals and sessions.
+#[cfg(unix)]
+mod platform {
+    use tokio::signal::unix::{Signal, SignalKind, signal};
+
+    use super::Args;
+
+    /// Every flag works on Unix.
+    pub fn check(_args: &Args) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// SIGTERM deliveries, subscribed before anything else runs so an early stop
+    /// isn't lost.
+    pub struct Terminate(Signal);
+
+    impl Terminate {
+        /// Subscribes to SIGTERM.
+        pub fn new() -> std::io::Result<Self> {
+            Ok(Self(signal(SignalKind::terminate())?))
+        }
+
+        /// Waits for the next SIGTERM.
+        pub async fn recv(&mut self) {
+            self.0.recv().await;
+        }
+    }
+
+    /// Makes this process lead a new session (`--setsid-grandchild`).
+    pub fn setsid() -> rustix::io::Result<()> {
+        rustix::process::setsid()?;
+        Ok(())
+    }
+
+    /// `pid=<pid> sid=<session>`, announced by descendants for session assertions.
+    pub fn identity() -> rustix::io::Result<String> {
+        Ok(format!(
+            "pid={} sid={}",
+            std::process::id(),
+            rustix::process::getsid(None)?.as_raw_nonzero()
+        ))
+    }
+}
+
+/// Windows stand-ins until the fixture gets console-event and job flags.
+#[cfg(not(unix))]
+mod platform {
+    use super::Args;
+
+    /// Refuses flags that need Unix sessions, before anything is spawned.
+    pub fn check(args: &Args) -> Result<(), String> {
+        if args.setsid_grandchild {
+            return Err("--setsid-grandchild needs Unix sessions".into());
+        }
+        Ok(())
+    }
+
+    /// Never fires: Windows has no SIGTERM, so `--ignore-sigterm` has nothing to
+    /// ignore and Ctrl-C remains the way to stop the server.
+    pub struct Terminate;
+
+    impl Terminate {
+        /// Nothing to subscribe to.
+        pub fn new() -> std::io::Result<Self> {
+            Ok(Self)
+        }
+
+        /// Waits forever.
+        pub async fn recv(&mut self) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Unreachable: [`check`] rejects `--setsid-grandchild` first.
+    pub fn setsid() -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+
+    /// `pid=<pid>`; Windows has no session id to report.
+    pub fn identity() -> std::io::Result<String> {
+        Ok(format!("pid={}", std::process::id()))
+    }
 }
 
 /// Spawns another copy without inheriting server bindings or environment output flags.

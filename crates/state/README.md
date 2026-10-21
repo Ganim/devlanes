@@ -49,6 +49,8 @@ The daemon builds its `RetentionPolicy` from these settings, `metrics.retention`
 
 Only the daemon opens the database. Client environments and secret-provider values stay in memory; log bodies are stored separately from their database metadata.
 
+Paths are stored in their native form: raw bytes on Unix, UTF-16LE code units on Windows. A database file is not portable between operating systems. On Windows the database path must be valid Unicode, because SQLite opens URI filenames as UTF-8.
+
 Opening runs pending embedded Diesel migrations and configures WAL, foreign keys, and a five-second busy timeout. Old rusqlite development databases using `user_version` are refused with `STATE_LEGACY_SCHEMA`: run `devlanes daemon reset-state`. Newer Diesel schemas require an upgrade.
 
 Call retention periodically from the daemon with configuration-derived limits. Defaults are 30 days for finished runs and metrics, 7 days for log segment rows, 90 days since a remote host's last connection, and a 512 MiB database budget. These defaults are exported as `DEFAULT_*` constants. Log files have separate retention; this store removes their metadata only.

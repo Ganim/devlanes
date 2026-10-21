@@ -27,6 +27,7 @@ const BLOCK_BEGIN: &str = "# devlanes begin";
 
 /// Installs the helper and its sudo rule, then asks a running daemon to reapply.
 pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
+    privileged_supported("the hosts file fallback on Windows")?;
     let source = helper_source(
         &SystemFs,
         std::env::var_os(HELPER_SOURCE_ENV),
@@ -76,6 +77,7 @@ pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
 
 /// Clears the block, removes the rule and the helper, and prints what could not be done.
 pub async fn uninstall(runtime: &Runtime) -> Result<u8, RpcError> {
+    privileged_supported("the hosts file fallback on Windows")?;
     let had_helper = matches!(
         SystemFs.lstat(Path::new(INSTALL_PATH)),
         Ok(Some(info)) if info.kind == FileKind::File
@@ -122,6 +124,23 @@ pub fn helper_source(
             None => Err(InstallError::SourceMissing(Vec::new())),
         },
     }
+}
+
+/// Privileged installs go through sudo, which every supported Unix has.
+#[cfg(unix)]
+pub(crate) fn privileged_supported(_feature: &str) -> Result<(), RpcError> {
+    Ok(())
+}
+
+/// Windows has no sudo; the hosts file and resolver installs need their own
+/// elevated paths there, which do not exist yet. `feature` names what was refused.
+#[cfg(windows)]
+pub(crate) fn privileged_supported(feature: &str) -> Result<(), RpcError> {
+    Err(RpcError::new(
+        "not_supported_yet",
+        json!({"feature": feature}),
+        2,
+    ))
 }
 
 /// The executor for privileged steps. sudo may prompt in an interactive terminal;
@@ -219,6 +238,8 @@ mod tests {
         (dir, exe)
     }
 
+    // `SystemFs` can't inspect files on Windows yet.
+    #[cfg(unix)]
     #[test]
     fn the_sibling_of_the_running_binary_is_installed() {
         let (dir, exe) = layout(true);
@@ -230,6 +251,8 @@ mod tests {
         assert_eq!(found, dir.path().join("devlanes-hosts"));
     }
 
+    // Creating symlinks on Windows needs developer mode or admin rights.
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_binary_finds_the_helper_next_to_its_target() {
         let (dir, exe) = layout(true);
@@ -244,6 +267,8 @@ mod tests {
         );
     }
 
+    // `SystemFs` can't inspect files on Windows yet.
+    #[cfg(unix)]
     #[test]
     fn the_override_wins_and_is_not_second_guessed() {
         let (dir, exe) = layout(true);

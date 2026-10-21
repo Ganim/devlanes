@@ -202,7 +202,6 @@ fn imports_mkcert_layout() -> Result {
 /// A root without name constraints (what mkcert makes) permits any name.
 #[test]
 fn unconstrained_roots_report_no_permitted_names() -> Result {
-    use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir()?;
     let key = rcgen::KeyPair::generate()?;
     let mut params = rcgen::CertificateParams::new(Vec::<String>::new())?;
@@ -215,7 +214,11 @@ fn unconstrained_roots_report_no_permitted_names() -> Result {
     let key_path = directory.path().join("rootCA-key.pem");
     fs::write(directory.path().join("rootCA.pem"), cert.pem())?;
     fs::write(&key_path, key.serialize_pem())?;
-    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+    }
     let ca = CertificateAuthority::from_mkcert(directory.path())?;
     assert_eq!(ca.permitted_dns_names(), None);
     Ok(())

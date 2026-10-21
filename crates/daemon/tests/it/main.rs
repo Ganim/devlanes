@@ -1,6 +1,10 @@
 //! In-process engine tests over temporary homes and real temporary git repositories,
 //! with fake runner, infra and process table. Every test has a timeout and stops
 //! what it started.
+//!
+//! Unix only for now: the helpers use `/tmp`, POSIX shell commands and Unix
+//! sockets. They are enabled on Windows once paths and the pipe endpoint are ported.
+#![cfg(unix)]
 
 mod attach;
 mod containers;
