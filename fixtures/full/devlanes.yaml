@@ -1,0 +1,44 @@
+# Infra, setup, tasks and services together; needs Docker. psql runs inside the
+# container, so the host needs no Postgres client.
+project: fixture-full
+
+lanes:
+  vars:
+    db_name: full_${{ lane.index }}
+
+infra:
+  compose: compose.yaml
+  # A fixed name, so tasks can reach the shared container with docker compose exec.
+  project_name: devlanes-fixture-full
+  # Once per lane, after Postgres is healthy: the lane's own database.
+  setup:
+    database: docker compose exec -T postgres psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${{ lane.db_name }}"
+  teardown:
+    database: docker compose exec -T postgres psql -U postgres -c "DROP DATABASE IF EXISTS ${{ lane.db_name }} WITH (FORCE)"
+
+global_env:
+  COMPOSE_PROJECT_NAME: devlanes-fixture-full
+
+tasks:
+  migrate:
+    run: docker compose exec -T postgres psql -U postgres -d ${{ lane.db_name }} -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS items (id serial PRIMARY KEY, name text NOT NULL)"
+    # Every start; the statement is idempotent.
+    when: lane.start
+  seed:
+    run: docker compose exec -T postgres psql -U postgres -d ${{ lane.db_name }} -v ON_ERROR_STOP=1 -c "INSERT INTO items (name) VALUES ('seeded')"
+    # Once per lane, when every started service is ready.
+    when: lane.create
+    after: services
+
+services:
+  api:
+    run: [fixture-server, --log-line, api-ready]
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/${{ lane.db_name }}
+    hosts: ["api.${{ lane.domain }}"]
+    ready: { http: { path: /healthz } }
+  web:
+    run: [fixture-server, --log-line, web-ready]
+    env: { API_URL: "${{ svc.api.url }}" }
+    hosts: ["${{ lane.domain }}"]
+    ready: { http: { path: /healthz } }

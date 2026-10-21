@@ -8,6 +8,7 @@
 //! # Ok::<(), devlanes_testing::Error>(())
 //! ```
 
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -32,8 +33,14 @@ impl TestHome {
     /// This blocking filesystem helper should run outside async executor threads.
     pub fn new() -> Result<Self, Error> {
         // macOS TMPDIR is often too long for a nested daemon socket path.
-        let dir = tempfile::Builder::new().prefix("dl-").tempdir_in("/tmp")?;
-        std::fs::create_dir(dir.path().join("run"))?;
+        let dir = tempfile::Builder::new()
+            .prefix("dl-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")?;
+        // The client and daemon refuse a home or run directory that others can read.
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir.path().join("run"))?;
         Ok(Self(dir))
     }
 

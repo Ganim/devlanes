@@ -4,6 +4,7 @@ Native service configurations for integration tests. They use `fixture-server` w
 
 - `two-services/devlanes.yaml`: API/web routing and worktree isolation.
 - `many-services/devlanes.yaml`: 40 services for terminal and concurrency checks.
+- `full/`: shared Postgres through Compose, a database per lane in `infra.setup`, a `migrate` task on every start, a `seed` task after the services, and two services. Needs Docker; the `docker_*` tests of `devlanes-e2e` run it. Set `FULL_PG_PORT` in the primary worktree's `.env` to move Postgres off 25432.
 - `dogfood-monorepo/devlanes.yaml` and `dogfood-desktop/devlanes.yaml`: config-check shapes of a pnpm monorepo and a Tauri desktop app, loaded and validated by `devlanes-config` tests. Their commands are not runnable.
 
 ## Usage

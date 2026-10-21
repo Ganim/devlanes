@@ -83,8 +83,9 @@ The `/etc/hosts` helper needs a release build, because its installer refuses deb
 
 ```sh
 cargo build --release -p devlanes-hosts-helper
-DEVLANES_HOSTS_HELPER="$PWD/target/release/devlanes-hosts" dl trust --hosts
-dl untrust --hosts
+DEVLANES_HOSTS_HELPER="$PWD/target/release/devlanes-hosts" dl trust --hosts   # CA + helper
+dl untrust --hosts             # removes both
+dl untrust --hosts --keep-ca   # removes only the helper
 ```
 
 `crates/hosts-helper/README.md` explains what that installs and why.
@@ -121,6 +122,19 @@ dl connect mybox          # streams connection status; Ctrl-C detaches, the conn
 dl --host mybox status
 dl disconnect mybox
 ```
+
+## End-to-end tests
+
+`e2e/` runs the real `devlanes` binary against the projects in `fixtures/`. Without `DEVLANES_E2E_BIN_DIR`, each test process builds `devlanes` and `fixture-server` with cargo first; set it to skip that:
+
+```sh
+cargo build -p devlanes -p devlanes-testing
+export DEVLANES_E2E_BIN_DIR="$PWD/target/debug"
+cargo nextest run -p devlanes-e2e
+cargo nextest run -p devlanes-e2e --run-ignored only -E 'test(/^docker_/)'   # needs Docker
+```
+
+`e2e/README.md` covers isolation, port slots and debugging.
 
 ## Tests that need other tools
 

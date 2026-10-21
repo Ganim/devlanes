@@ -1,5 +1,5 @@
 [workspace]
-members = ["bins/devlanes", "crates/*"]
+members = ["bins/devlanes", "crates/*", "e2e"]
 resolver = "3"
 
 [workspace.package]
@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 async-trait = "0.1"
 anyhow = "1"
+base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = { version = "0.3", features = ["sink"] }
@@ -35,3 +36,10 @@ unwrap_used = "deny"
 
 [profile.dev]
 debug = "line-tables-only"
+
+# Release binaries are shipped (GitHub releases, Homebrew, npm); size and speed matter
+# more than build time there.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

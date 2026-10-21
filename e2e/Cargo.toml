@@ -1,0 +1,18 @@
+[package]
+name = "devlanes-e2e"
+description = "End-to-end tests that drive the real devlanes binary against fixture projects."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+devlanes-testing = { path = "../crates/testing" }
+rustix = { version = "1", features = ["process"] }
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
