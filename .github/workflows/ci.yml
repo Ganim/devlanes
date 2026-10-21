@@ -29,6 +29,11 @@ jobs:
       - uses: ./.github/actions/kache
         with:
           store: rust
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key: ${{ secrets.KACHE_S3_ACCESS_KEY }}
+          s3-secret-key: ${{ secrets.KACHE_S3_SECRET_KEY }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # kache's store holds the compiled dependencies; this caches only the registry.
@@ -44,7 +49,10 @@ jobs:
       - run: cargo build --workspace --all-targets --all-features --locked
       - name: kache stats
         if: ${{ !cancelled() }}
-        run: kache stats
+        run: |
+          kache stats
+          # Lets the daemon finish its queued uploads before the runner goes away.
+          kache daemon stop
   packaging:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -75,6 +83,11 @@ jobs:
       - uses: ./.github/actions/kache
         with:
           store: e2e
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key: ${{ secrets.KACHE_S3_ACCESS_KEY }}
+          s3-secret-key: ${{ secrets.KACHE_S3_SECRET_KEY }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-targets: "false"
@@ -88,7 +101,10 @@ jobs:
           DEVLANES_E2E_BIN_DIR: ${{ github.workspace }}/target/debug
       - name: kache stats
         if: ${{ !cancelled() }}
-        run: kache stats
+        run: |
+          kache stats
+          # Lets the daemon finish its queued uploads before the runner goes away.
+          kache daemon stop
   docker-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -101,6 +117,11 @@ jobs:
         with:
           store: e2e
           save: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key: ${{ secrets.KACHE_S3_ACCESS_KEY }}
+          s3-secret-key: ${{ secrets.KACHE_S3_SECRET_KEY }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-targets: "false"
@@ -115,7 +136,10 @@ jobs:
           DEVLANES_E2E_BIN_DIR: ${{ github.workspace }}/target/debug
       - name: kache stats
         if: ${{ !cancelled() }}
-        run: kache stats
+        run: |
+          kache stats
+          # Lets the daemon finish its queued uploads before the runner goes away.
+          kache daemon stop
   external:
     if: github.event_name == 'workflow_dispatch' && inputs.external
     runs-on: ubuntu-latest
@@ -129,6 +153,11 @@ jobs:
         with:
           store: rust
           save: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key: ${{ secrets.KACHE_S3_ACCESS_KEY }}
+          s3-secret-key: ${{ secrets.KACHE_S3_SECRET_KEY }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-targets: "false"
@@ -141,7 +170,10 @@ jobs:
       - run: cargo nextest run --workspace --all-features --locked --run-ignored only -E 'test(/^docker_/)' --no-tests=pass
       - name: kache stats
         if: ${{ !cancelled() }}
-        run: kache stats
+        run: |
+          kache stats
+          # Lets the daemon finish its queued uploads before the runner goes away.
+          kache daemon stop
   ssh:
     # `needs ssh` tests against a throwaway sshd container; the script builds the box's
     # Linux devlanes in rust:1.99.1-bookworm and always removes the container.
@@ -154,6 +186,11 @@ jobs:
       - uses: ./.github/actions/kache
         with:
           store: ssh
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key: ${{ secrets.KACHE_S3_ACCESS_KEY }}
+          s3-secret-key: ${{ secrets.KACHE_S3_SECRET_KEY }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-targets: "false"
@@ -169,4 +206,7 @@ jobs:
           DEVLANES_TEST_SSH_CACHE: ${{ runner.temp }}/ssh-box
       - name: kache stats
         if: ${{ !cancelled() }}
-        run: kache stats
+        run: |
+          kache stats
+          # Lets the daemon finish its queued uploads before the runner goes away.
+          kache daemon stop

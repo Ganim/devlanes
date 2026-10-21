@@ -1,14 +1,37 @@
 name: kache
-description: Install the pinned kache release that .cargo/config.toml uses as rustc wrapper, and restore its local store.
+description: >-
+  Install the pinned kache release that .cargo/config.toml uses as rustc wrapper, and connect
+  it to the shared S3 cache. Without the bucket and both keys (fork pull requests never get
+  secrets), the local store is persisted with the Actions cache instead.
 inputs:
   store:
-    description: Name of the persisted local store. Empty skips persistence.
+    description: Name of the local store persisted with the Actions cache when no remote is configured. Empty skips persistence.
     required: false
     default: ""
   save:
-    description: Save the store when the job ends. "false" only restores it.
+    description: Save that local store when the job ends. "false" only restores it.
     required: false
     default: "true"
+  s3-bucket:
+    description: Remote cache bucket.
+    required: false
+    default: ""
+  s3-endpoint:
+    description: S3 endpoint, such as https://<account-id>.r2.cloudflarestorage.com for R2.
+    required: false
+    default: ""
+  s3-region:
+    description: Bucket region; "auto" for R2.
+    required: false
+    default: ""
+  s3-access-key:
+    description: Access key id for the bucket.
+    required: false
+    default: ""
+  s3-secret-key:
+    description: Secret access key for the bucket.
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -46,15 +69,50 @@ runs:
         echo "KACHE_CACHE_DIR=$RUNNER_TEMP/kache" >> "$GITHUB_ENV"
         # Keeps each saved store small against the repository's Actions cache quota.
         echo "KACHE_MAX_SIZE=2GiB" >> "$GITHUB_ENV"
+    # The daemon uploads what the build compiles and fetches what it misses. It drops
+    # remote settings from the environment, so they go in the config file, and it keeps
+    # the credentials it was started with, so only this step sees the secrets.
+    - name: Connect the remote cache
+      id: remote
+      shell: bash
+      env:
+        BUCKET: ${{ inputs.s3-bucket }}
+        ENDPOINT: ${{ inputs.s3-endpoint }}
+        REGION: ${{ inputs.s3-region }}
+        ACCESS_KEY: ${{ inputs.s3-access-key }}
+        SECRET_KEY: ${{ inputs.s3-secret-key }}
+        # Only pushes to the default branch upload. kache also refuses uploads from any
+        # job that is not a push to a protected branch.
+        WRITE: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      run: |
+        set -euo pipefail
+        if [ -z "$BUCKET" ] || [ -z "$ACCESS_KEY" ] || [ -z "$SECRET_KEY" ]; then
+          echo "No remote cache configured; the local store uses the Actions cache."
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        config=$RUNNER_TEMP/kache.toml
+        {
+          echo "[cache]"
+          if [ "$WRITE" != true ]; then echo "remote_readonly = true"; fi
+          echo "[cache.remote]"
+          echo 'type = "s3"'
+          echo "bucket = \"$BUCKET\""
+          if [ -n "$ENDPOINT" ]; then echo "endpoint = \"$ENDPOINT\""; fi
+          if [ -n "$REGION" ]; then echo "region = \"$REGION\""; fi
+        } > "$config"
+        echo "KACHE_CONFIG=$config" >> "$GITHUB_ENV"
+        KACHE_CONFIG=$config KACHE_S3_ACCESS_KEY=$ACCESS_KEY KACHE_S3_SECRET_KEY=$SECRET_KEY kache daemon start
+        echo "enabled=true" >> "$GITHUB_OUTPUT"
     # The key changes with the toolchain or the lockfile; restore-keys start a new
     # key from the previous store, so only changed dependencies compile again.
-    - if: inputs.store != '' && inputs.save == 'true'
+    - if: inputs.store != '' && steps.remote.outputs.enabled != 'true' && inputs.save == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/kache
         key: kache-${{ inputs.store }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
         restore-keys: kache-${{ inputs.store }}-${{ runner.os }}-${{ runner.arch }}-
-    - if: inputs.store != '' && inputs.save != 'true'
+    - if: inputs.store != '' && steps.remote.outputs.enabled != 'true' && inputs.save != 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/kache
