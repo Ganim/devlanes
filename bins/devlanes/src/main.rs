@@ -9,6 +9,7 @@ mod daemon;
 mod driver;
 mod local;
 mod output;
+mod remote;
 mod wiring;
 
 use std::process::ExitCode;

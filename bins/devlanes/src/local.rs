@@ -25,11 +25,7 @@ pub async fn run(runtime: &Runtime, action: Action) -> Result<u8, RpcError> {
         Action::Trust { hosts: false } => trust(runtime, true).await,
         Action::Untrust => trust(runtime, false).await,
         Action::Unlock(context) => unlock(context).await,
-        Action::Tunnel | Action::Askpass(_) => Err(RpcError::new(
-            "not_supported_yet",
-            json!({"milestone": "M14"}),
-            2,
-        )),
+        action @ (Action::Tunnel | Action::Askpass(_)) => crate::remote::run(action).await,
         _ => Err(RpcError::new(
             "usage",
             json!({"message": "unexpected action"}),
