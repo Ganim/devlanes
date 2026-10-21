@@ -1,0 +1,43 @@
+[package]
+name = "devlanes-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+devlanes-proto = { path = "../proto" }
+devlanes-ipc = { path = "../ipc" }
+devlanes-core = { path = "../core" }
+devlanes-logs = { path = "../logs" }
+devlanes-config = { path = "../config" }
+devlanes-git = { path = "../git" }
+devlanes-metrics = { path = "../metrics" }
+devlanes-resolve = { path = "../resolve" }
+devlanes-state = { path = "../state" }
+devlanes-sys = { path = "../sys" }
+async-trait.workspace = true
+futures-util.workspace = true
+globset = "0.4"
+indexmap = "2"
+schemars = "1"
+serde.workspace = true
+regex = "1"
+strip-ansi-escapes = "0.2"
+vt100 = "0.18"
+bytes.workspace = true
+fs2 = "0.4"
+rustix = { version = "1", features = ["process", "fs", "stdio"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+devlanes-runner-pty = { path = "../runner-pty" }
+tempfile.workspace = true
