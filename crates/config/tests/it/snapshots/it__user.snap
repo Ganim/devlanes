@@ -36,6 +36,13 @@ expression: user
   "metrics": {
     "retention": "2592000000ms"
   },
+  "history": {
+    "retention": "2592000000ms",
+    "remote_hosts_retention": "7776000000ms"
+  },
+  "state": {
+    "max_size": "536870912B"
+  },
   "startup": {
     "mode": "adaptive",
     "initial": 2,

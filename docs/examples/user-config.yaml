@@ -38,11 +38,20 @@ startup:
   settle_cpu: 10%
   # Give the slot back after this even if the service isn't ready.
   slot_timeout: 20s
-# Service output kept on disk, by age and total size.
+# Service output kept on disk, by age and total size; days also bounds database log metadata.
 logs:
   retention: { days: 7, max_size: 5GiB }
-# How long CPU and memory history is kept.
+# How long CPU and memory history is kept, including database aggregates and run summaries.
 metrics:
   retention: 30d
+# Finished unit/task history and disconnected remote-host records in the database.
+history:
+  retention: 30d
+  # Age since the host's last successful connection.
+  remote_hosts_retention: 90d
+# Soft database budget, including SQLite WAL and shared-memory files.
+# Old metrics and history are pruned first; live registry and completion records are preserved.
+state:
+  max_size: 512MiB
 # Terminal app the TUI's O key opens a unit in: ghostty, iterm2, kitty, wezterm or terminal.
 terminal: ghostty

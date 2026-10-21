@@ -1,6 +1,7 @@
 mod dogfood;
 
 mod artifacts;
+mod retention;
 mod schema_docs;
 mod service_keys;
 mod tags;

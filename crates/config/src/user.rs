@@ -1,7 +1,15 @@
 use crate::{ByteSize, ConfigDuration, ConfigError, HostsFile, Percent, Templated};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{num::NonZeroU32, path::Path};
+use std::{num::NonZeroU32, path::Path, time::Duration};
+
+/// Finished unit/task history lifetime, duplicated from the state crate to avoid a dependency.
+/// The binary's retention-default test keeps these independent definitions aligned.
+pub const DEFAULT_RUN_HISTORY_RETENTION: Duration = Duration::from_secs(30 * 86_400);
+/// Disconnected remote-host lifetime, duplicated from the state crate and checked by the binary test.
+pub const DEFAULT_REMOTE_HOST_RETENTION: Duration = Duration::from_secs(90 * 86_400);
+/// Database and SQLite sidecar budget, duplicated from the state crate and checked by the binary test.
+pub const DEFAULT_MAX_SIZE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Per-user machine settings, separate from project configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -16,14 +24,60 @@ pub struct UserConfig {
     pub tls: TlsConfig,
     /// HTTP/HTTPS listening ports and LAN access policy.
     pub proxy: ProxyConfig,
-    /// Disk retention for service output.
+    /// Retention for service output files and their database metadata.
     pub logs: LogsConfig,
-    /// Retention for monitor aggregates.
+    /// Retention for monitor history, including aggregates stored in the database.
     pub metrics: MetricsConfig,
+    /// Retention for finished unit/task history and disconnected remote hosts in the database.
+    pub history: HistoryConfig,
+    /// Soft disk budget for the state database and its SQLite sidecar files.
+    pub state: StateConfig,
     /// How many services start at once, across all lanes and projects.
     pub startup: StartupConfig,
     /// Terminal application used by open-in-terminal actions.
     pub terminal: Option<Terminal>,
+}
+
+/// Age limits for finished unit/task history and disconnected remote-host records.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(extend("examples" = [{"retention":"30d","remote_hosts_retention":"90d"}]))]
+pub struct HistoryConfig {
+    /// Maximum age since a unit or task finished; defaults to 30d. Disk pressure may prune it sooner.
+    #[schemars(extend("examples" = ["30d","14d"]))]
+    pub retention: ConfigDuration,
+    /// Maximum age since a remote host last connected successfully; defaults to 90d. Records without a timestamp are retained.
+    #[schemars(extend("examples" = ["90d","180d"]))]
+    pub remote_hosts_retention: ConfigDuration,
+}
+
+impl Default for HistoryConfig {
+    /// Use the documented history defaults shared with the state retention policy.
+    fn default() -> Self {
+        Self {
+            retention: ConfigDuration(DEFAULT_RUN_HISTORY_RETENTION),
+            remote_hosts_retention: ConfigDuration(DEFAULT_REMOTE_HOST_RETENTION),
+        }
+    }
+}
+
+/// Soft disk budget for the database; live registry and completion records are preserved.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(extend("examples" = [{"max_size":"512MiB"}]))]
+pub struct StateConfig {
+    /// Budget for the database plus WAL and shared-memory files; defaults to 512MiB and must be nonzero. Old metrics and history are pruned first; protected live state may exceed it.
+    #[schemars(extend("examples" = ["512MiB","1GiB"]))]
+    pub max_size: ByteSize,
+}
+
+impl Default for StateConfig {
+    /// Use the documented database budget shared with the state retention policy.
+    fn default() -> Self {
+        Self {
+            max_size: ByteSize(DEFAULT_MAX_SIZE_BYTES),
+        }
+    }
 }
 
 /// The startup mode used when `startup.mode` is absent. `fixed` ships as the
@@ -297,10 +351,10 @@ impl Default for ProxyConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-/// Retention settings for stored service and task output.
+/// Retention settings for stored service/task output and database log metadata.
 #[schemars(extend("examples" = [{"retention":{"days":7,"max_size":"5GiB"}}]))]
 pub struct LogsConfig {
-    /// Age and total-size bounds for stored log output.
+    /// Age and total-size bounds for log files; the age limit also bounds database log-segment metadata.
     pub retention: LogRetention,
 }
 
@@ -309,7 +363,7 @@ pub struct LogsConfig {
 /// Disk retention bounded by both age and total log size.
 #[schemars(extend("examples" = [{"days":7,"max_size":"5GiB"}]))]
 pub struct LogRetention {
-    /// Number of days to retain logs; defaults to 7.
+    /// Number of days to retain logs and database log-segment metadata; defaults to 7.
     #[schemars(extend("examples" = [7]))]
     pub days: u32,
     /// Maximum total size of retained logs; defaults to 5GiB.
@@ -328,10 +382,10 @@ impl Default for LogRetention {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-/// Retention for monitor history used by graphs and service baselines.
+/// Retention for monitor history used by graphs and service baselines, including database aggregates.
 #[schemars(extend("examples" = [{"retention":"30d"}]))]
 pub struct MetricsConfig {
-    /// Maximum age of persisted monitor samples; defaults to 30d.
+    /// Maximum age of persisted monitor samples and database run summaries; defaults to 30d.
     #[schemars(extend("examples" = ["30d"]))]
     pub retention: ConfigDuration,
 }
@@ -370,6 +424,11 @@ pub enum Terminal {
 impl UserConfig {
     /// Reject deferred v2 settings and invalid machine-wide resource ranges.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.state.max_size.0 == 0 {
+            return Err(ConfigError::plain(
+                "state.max_size must be greater than zero",
+            ));
+        }
         if self.hostnames.resolver == Resolver::Public
             || self.hostnames.base_domain.is_some()
             || self.hostnames.dns_provider.is_some()

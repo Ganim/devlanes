@@ -89,6 +89,37 @@
       ],
       "type": "object"
     },
+    "HistoryConfig": {
+      "additionalProperties": false,
+      "description": "Age limits for finished unit/task history and disconnected remote-host records.",
+      "examples": [
+        {
+          "remote_hosts_retention": "90d",
+          "retention": "30d"
+        }
+      ],
+      "properties": {
+        "remote_hosts_retention": {
+          "$ref": "#/$defs/ConfigDuration",
+          "default": "7776000000ms",
+          "description": "Maximum age since a remote host last connected successfully; defaults to 90d. Records without a timestamp are retained.",
+          "examples": [
+            "90d",
+            "180d"
+          ]
+        },
+        "retention": {
+          "$ref": "#/$defs/ConfigDuration",
+          "default": "2592000000ms",
+          "description": "Maximum age since a unit or task finished; defaults to 30d. Disk pressure may prune it sooner.",
+          "examples": [
+            "30d",
+            "14d"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "HostnamesConfig": {
       "additionalProperties": false,
       "description": "Hostname resolution and optional system hosts-file entries.",
@@ -235,7 +266,7 @@
       "properties": {
         "days": {
           "default": 7,
-          "description": "Number of days to retain logs; defaults to 7.",
+          "description": "Number of days to retain logs and database log-segment metadata; defaults to 7.",
           "examples": [
             7
           ],
@@ -256,7 +287,7 @@
     },
     "LogsConfig": {
       "additionalProperties": false,
-      "description": "Retention settings for stored service and task output.",
+      "description": "Retention settings for stored service/task output and database log metadata.",
       "examples": [
         {
           "retention": {
@@ -272,7 +303,7 @@
             "days": 7,
             "max_size": "5368709120B"
           },
-          "description": "Age and total-size bounds for stored log output.",
+          "description": "Age and total-size bounds for log files; the age limit also bounds database log-segment metadata.",
           "examples": [
             {
               "days": 7,
@@ -285,7 +316,7 @@
     },
     "MetricsConfig": {
       "additionalProperties": false,
-      "description": "Retention for monitor history used by graphs and service baselines.",
+      "description": "Retention for monitor history used by graphs and service baselines, including database aggregates.",
       "examples": [
         {
           "retention": "30d"
@@ -295,7 +326,7 @@
         "retention": {
           "$ref": "#/$defs/ConfigDuration",
           "default": "2592000000ms",
-          "description": "Maximum age of persisted monitor samples; defaults to 30d.",
+          "description": "Maximum age of persisted monitor samples and database run summaries; defaults to 30d.",
           "examples": [
             "30d"
           ]
@@ -539,6 +570,27 @@
         }
       ]
     },
+    "StateConfig": {
+      "additionalProperties": false,
+      "description": "Soft disk budget for the database; live registry and completion records are preserved.",
+      "examples": [
+        {
+          "max_size": "512MiB"
+        }
+      ],
+      "properties": {
+        "max_size": {
+          "$ref": "#/$defs/ByteSize",
+          "default": "536870912B",
+          "description": "Budget for the database plus WAL and shared-memory files; defaults to 512MiB and must be nonzero. Old metrics and history are pruned first; protected live state may exceed it.",
+          "examples": [
+            "512MiB",
+            "1GiB"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Templated_string": {
       "anyOf": [
         {
@@ -729,6 +781,20 @@
     }
   ],
   "properties": {
+    "history": {
+      "$ref": "#/$defs/HistoryConfig",
+      "default": {
+        "remote_hosts_retention": "7776000000ms",
+        "retention": "2592000000ms"
+      },
+      "description": "Retention for finished unit/task history and disconnected remote hosts in the database.",
+      "examples": [
+        {
+          "remote_hosts_retention": "90d",
+          "retention": "30d"
+        }
+      ]
+    },
     "hostnames": {
       "$ref": "#/$defs/HostnamesConfig",
       "default": {
@@ -758,7 +824,7 @@
           "max_size": "5368709120B"
         }
       },
-      "description": "Disk retention for service output.",
+      "description": "Retention for service output files and their database metadata.",
       "examples": [
         {
           "retention": {
@@ -773,7 +839,7 @@
       "default": {
         "retention": "2592000000ms"
       },
-      "description": "Retention for monitor aggregates.",
+      "description": "Retention for monitor history, including aggregates stored in the database.",
       "examples": [
         {
           "retention": "30d"
@@ -831,6 +897,18 @@
           "settle_cpu": "10%",
           "slot_timeout": "20s",
           "target_cpu": "75%"
+        }
+      ]
+    },
+    "state": {
+      "$ref": "#/$defs/StateConfig",
+      "default": {
+        "max_size": "536870912B"
+      },
+      "description": "Soft disk budget for the state database and its SQLite sidecar files.",
+      "examples": [
+        {
+          "max_size": "512MiB"
         }
       ]
     },
