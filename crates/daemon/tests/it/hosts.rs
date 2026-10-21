@@ -151,7 +151,7 @@ async fn routes_reach_the_helper_and_retry_reapplies() {
         assert_eq!(retried["hosts"]["state"], "applied", "{retried}");
         assert_eq!(retried["hosts"]["names"], 1);
         assert_eq!(applies(&executor).len(), 2);
-        let _ = engine.shutdown().await;
+        let _ = engine.shutdown(crate::signal_shutdown()).await;
         assert!(
             executor
                 .argvs()

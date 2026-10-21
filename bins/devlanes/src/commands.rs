@@ -438,6 +438,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
             Err(error) if error.is_not_running() => {
                 let mut data = crate::local_doctor::facts(&paths).await;
                 crate::notices::annotate_doctor(None, &mut data).await;
+                data["service"] = crate::daemon::service_report().await;
                 return render_result(runtime, Method::Doctor, &data, None);
             }
             Err(error) => return Err(rpc_error(error)),
@@ -505,6 +506,10 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                                 // CLI checks them, not the daemon.
                                 if data.get("ca").is_some_and(Value::is_object) {
                                     data["ca"]["trust"] = crate::local::trust_report().await;
+                                }
+                                // The service definition is in this user's home, read here.
+                                if data.is_object() {
+                                    data["service"] = crate::daemon::service_report().await;
                                 }
                             }
                             // The counterpart of the not-running answer's `false`.

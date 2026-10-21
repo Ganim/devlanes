@@ -240,6 +240,9 @@ pub(crate) struct LaneSt {
     pub closing: bool,
     /// The config files as of the last reload; `None` before the first one.
     pub config_stamp: Option<crate::registry::ConfigStamp>,
+    /// Set while an explicit daemon shutdown runs this lane's `lane.stop`
+    /// tasks: their spawns pass the refusal that starts with the shutdown.
+    pub shutdown_hooks: bool,
 }
 
 impl LaneSt {
@@ -286,6 +289,7 @@ impl LaneSt {
             adhoc_cancel: None,
             closing: false,
             config_stamp: None,
+            shutdown_hooks: false,
         }
     }
 

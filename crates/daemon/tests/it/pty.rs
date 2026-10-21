@@ -49,7 +49,10 @@ async fn two_services_with_pty_runner() {
         for port in &ports {
             assert!(tokio::net::TcpStream::connect(("127.0.0.1", *port)).await.is_ok());
         }
-        engine.shutdown().await.expect("shutdown");
+        engine
+            .shutdown(crate::signal_shutdown())
+            .await
+            .expect("shutdown");
         // The listening socket can outlive the reaped process by a moment.
         for port in ports {
             let closed = crate::eventually(Duration::from_secs(5), || async move {

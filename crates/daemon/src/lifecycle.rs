@@ -49,6 +49,13 @@ const START_POLL: Duration = Duration::from_millis(25);
 /// Nested `steps` deeper than this are treated as a cycle.
 const MAX_STEP_DEPTH: usize = 16;
 
+/// Whether the lane's `lane.stop` and `lane.clean` tasks can run: a lane whose
+/// worktree is gone (or that never got an env or record) has no directory or
+/// environment to run them in.
+fn hooks_runnable(st: &crate::model::LaneSt) -> bool {
+    st.present && st.env.is_some() && st.record.is_some()
+}
+
 /// Everything needed to spawn one unit.
 pub(crate) struct SpawnRequest {
     pub name: String,
@@ -1016,9 +1023,10 @@ impl Inner {
         request: SpawnRequest,
     ) -> Result<Spawned, RpcError> {
         // Counted before the shutdown check: once shutdown saw no spawn in flight,
-        // every later one sees the cancelled token and refuses.
+        // every later one sees the cancelled token and refuses. The lane's own
+        // `lane.stop` tasks of an explicit shutdown are the exception.
         let _spawning = lane.spawn_guard();
-        if self.shutdown.is_cancelled() {
+        if self.shutdown.is_cancelled() && !lane.st().shutdown_hooks {
             return Err(crate::engine::daemon_stopping());
         }
         let (lane_path, record, reference, previous, color) = {
@@ -2205,14 +2213,11 @@ impl Inner {
         lane.spawns_settled().await;
         let reference = lane.st().reference(&project.name());
         let whole = selectors.as_ref().is_none_or(Vec::is_empty) && mine.is_none();
-        // A lane whose worktree is gone (or that never got an env or record) stops
-        // without its `lane.stop` tasks: they would have no directory to run in.
-        let runnable = {
-            let st = lane.st();
-            st.present && st.env.is_some() && st.record.is_some()
-        };
+        let runnable = hooks_runnable(&lane.st());
         if whole && runnable {
-            self.run_hook(project, lane, TaskWhen::Stop, &Actor::default())
+            // Daemon shutdown interrupts a hook that never ends; it waits for this lane.
+            let cancel = self.shutdown.child_token();
+            self.run_hook(project, lane, TaskWhen::Stop, &Actor::default(), &cancel)
                 .await;
         }
         let names = Self::matching_units(lane, &reference, selectors.as_deref())?;
@@ -2352,13 +2357,15 @@ impl Inner {
         stopped
     }
 
-    /// Runs `lane.stop` or `lane.clean` tasks in file order; failures are reported only.
+    /// Runs `lane.stop` or `lane.clean` tasks in file order until `cancel`
+    /// fires; failures are reported only.
     async fn run_hook(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
         lane: &Arc<LaneRt>,
         hook: TaskWhen,
         actor: &Actor,
+        cancel: &CancellationToken,
     ) -> Vec<Value> {
         let Ok(resolved) = self.resolve_full(project, lane).await else {
             return Vec::new();
@@ -2370,15 +2377,18 @@ impl Inner {
             TaskWhen::Start => "lane.start",
         };
         let mut results = Vec::new();
-        // Daemon shutdown interrupts a hook that never ends; it waits for this lane.
-        let cancel = self.shutdown.child_token();
         for (name, task) in &resolved.tasks {
             if task.when != Some(hook) || !task.active {
                 continue;
             }
+            // An interrupted hook starts nothing more; the rest read as cancelled.
+            if cancel.is_cancelled() {
+                results.push(json!({"task": name, "error": {"code": "cancelled", "data": null}}));
+                continue;
+            }
             let outcome = self
                 .run_task(
-                    project, lane, &resolved, name, trigger, actor, None, &cancel, 0,
+                    project, lane, &resolved, name, trigger, actor, None, cancel, 0,
                 )
                 .await;
             results.push(match outcome {
@@ -2635,14 +2645,14 @@ impl Inner {
         self.refuse_running(project, lane)?;
         let mut tasks = Vec::new();
         let mut teardown = Vec::new();
-        let runnable = {
-            let st = lane.st();
-            st.present && st.env.is_some() && st.record.is_some()
-        };
+        let runnable = hooks_runnable(&lane.st());
         if runnable {
-            tasks = self.run_hook(project, lane, TaskWhen::Clean, &actor).await;
+            // Daemon shutdown interrupts a task or entry that never ends.
+            let cancel = self.shutdown.child_token();
+            tasks = self
+                .run_hook(project, lane, TaskWhen::Clean, &actor, &cancel)
+                .await;
             if let Ok(resolved) = self.resolve_full(project, lane).await {
-                let cancel = self.shutdown.child_token();
                 for (name, command) in &resolved.teardown {
                     let result = self
                         .run_command(project, lane, "teardown", command, &actor, &cancel)
@@ -2752,11 +2762,58 @@ impl Inner {
         .map(drop)
     }
 
-    /// Daemon shutdown: stops every live unit with its policy; returns the count.
-    pub(crate) async fn stop_everything(self: &Arc<Self>) -> usize {
+    /// Daemon shutdown: stops every live unit with its policy. With `hooks` (an
+    /// explicit shutdown) each lane with live units first runs its `lane.stop`
+    /// tasks, as a whole-lane stop does, until `hooks` fires. Returns the
+    /// stopped units (`{lane, unit}`) and the task results.
+    pub(crate) async fn stop_everything(
+        self: &Arc<Self>,
+        hooks: Option<&CancellationToken>,
+    ) -> (Vec<Value>, Vec<Value>) {
         let lanes = self.all_lanes();
         let _ops = self.lock_lanes(&lanes).await;
-        Self::stop_lanes_locked(&lanes).await
+        let tasks = match hooks {
+            Some(cancel) => self.shutdown_hooks(&lanes, cancel).await,
+            None => Vec::new(),
+        };
+        (Self::stop_lanes_locked(&lanes).await, tasks)
+    }
+
+    /// The `lane.stop` tasks of an explicit daemon shutdown, for every lane in
+    /// `lanes` with live units (the caller holds their `op`): lanes run
+    /// concurrently, each lane's tasks in file order. Each result is
+    /// `{lane, task, exit_code | error}`; a failed task is logged and reported
+    /// and never keeps the other tasks or the unit stops from running.
+    async fn shutdown_hooks(
+        self: &Arc<Self>,
+        lanes: &[crate::engine::LanePair],
+        cancel: &CancellationToken,
+    ) -> Vec<Value> {
+        let runs = lanes
+            .iter()
+            .filter(|(_, lane)| {
+                let st = lane.st();
+                hooks_runnable(&st) && st.any_alive()
+            })
+            .map(|(project, lane)| async move {
+                lane.st().shutdown_hooks = true;
+                let results = self
+                    .run_hook(project, lane, TaskWhen::Stop, &Actor::default(), cancel)
+                    .await;
+                lane.st().shutdown_hooks = false;
+                let reference = lane.st().reference(&project.name());
+                results
+                    .into_iter()
+                    .map(|mut result| {
+                        if result.get("exit_code").and_then(Value::as_i64) != Some(0) {
+                            tracing::warn!(lane = %reference, task = %result["task"], result = %result, "lane.stop task failed during daemon shutdown");
+                        }
+                        result["lane"] = json!(reference);
+                        result
+                    })
+                    .collect::<Vec<_>>()
+            });
+        join_all(runs).await.into_iter().flatten().collect()
     }
 
     /// Withdraws every queued start, interrupts running starts and takes the `op`
@@ -2777,19 +2834,22 @@ impl Inner {
     }
 
     /// Stops every live unit of `lanes`, whose `op` locks the caller holds, once
-    /// their spawns in flight landed; returns the count.
-    pub(crate) async fn stop_lanes_locked(lanes: &[crate::engine::LanePair]) -> usize {
+    /// their spawns in flight landed; all at once, so the longest stop timeout
+    /// bounds the wait. Returns the stopped units as `{lane, unit}`.
+    pub(crate) async fn stop_lanes_locked(lanes: &[crate::engine::LanePair]) -> Vec<Value> {
         let mut stops = Vec::new();
-        for (_, lane) in lanes {
+        let mut stopped = Vec::new();
+        for (project, lane) in lanes {
             lane.spawns_settled().await;
             let st = lane.st();
-            for rec in st.units.values().filter(|rec| rec.host.is_alive()) {
+            let reference = st.reference(&project.name());
+            for (name, rec) in st.units.iter().filter(|(_, rec)| rec.host.is_alive()) {
                 stops.push((rec.host.clone(), rec.stop));
+                stopped.push(json!({"lane": reference, "unit": name}));
             }
         }
-        let count = stops.len();
         join_all(stops.iter().map(|(host, policy)| host.stop(*policy))).await;
-        count
+        stopped
     }
 
     /// `lane_running` while a unit or a previous daemon's orphan still runs in `lane`.

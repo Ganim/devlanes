@@ -8,6 +8,7 @@ mod docker_pg_redis;
 mod lanes;
 mod lifecycle;
 mod proxy;
+mod shutdown;
 mod tasks;
 mod with;
 mod worktrees;

@@ -45,6 +45,14 @@ Any command except `devlanes daemon status`, `daemon stop`, `daemon reset-state`
 
 Everything lives under `~/.devlanes`, or `DEVLANES_HOME` when set: `state.db`, `config.yaml`, `logs/` (including `daemon.log`), `ca/` and `run/daemon.sock`. When the socket path is too long for macOS, it moves to a short temporary directory. devlanes refuses a home that other users can read or write, so create it with `mkdir -m 700 ~/.devlanes` when you add `config.yaml` before the first run.
 
+## Daemon shutdown
+
+`devlanes daemon stop` and `devlanes daemon restart` first run the `lane.stop` tasks of every lane with running units, as `devlanes stop` does for one lane: lanes in parallel, each lane's tasks in file order and within their own timeouts. Then every unit stops with its stop policy, all at once. A failed task is logged and listed in the result, and the other tasks and the stops still run. The result names the stopped units and each task's outcome. Containers keep running.
+
+SIGTERM or SIGINT (launchd, systemd, logout, system shutdown, `kill`) stops the units the same way but runs no `lane.stop` task, so a machine shutdown does not wait for them. A signal that arrives while `daemon stop` runs its tasks interrupts them and skips the rest.
+
+`devlanes daemon install` gives the daemon 60 seconds between SIGTERM and SIGKILL: `ExitTimeOut` in the launchd plist, `TimeoutStopSec` in the systemd unit. Without it, launchd allows 5 seconds (macOS 26; `launchd.plist(5)` only says the default is system-defined) and systemd 90 seconds. A shutdown takes about the longest unit stop timeout (10 seconds unless `stop.timeout` sets one) plus a few seconds, so the window covers stop timeouts up to 55 seconds. `devlanes doctor` names each unit whose stop timeout does not fit, with the fix. Running `daemon install` again rewrites a definition that differs and reloads it: systemd keeps the running daemon, and launchd restarts the daemon it runs, which stops its units.
+
 ## Diagnostics
 
 `-v` (or `DEVLANES_VERBOSE=1`) prints timestamped debug lines on stderr: the output mode and why it was chosen, the home, config and socket paths, connecting to or spawning the daemon and how long that took, the versions exchanged, each request with its duration, and why the exit code is what it is. The daemon adds its own lines for that request, marked `daemon +<ms>`: lane resolution, config reads, port allocation, the Docker Compose commands it runs and their output, start gate waits, readiness probes and each spawn with its program, working directory and environment variable names. The run ends with a table of timings per request and start phase. `-vv` (or `DEVLANES_VERBOSE=2`) adds trace detail and span durations. stdout is untouched, so `--json -v` still prints parseable JSON. Environment and secret values never appear, only variable names. `-v` keeps `start` out of the TUI so the lines stay visible.

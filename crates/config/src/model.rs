@@ -262,7 +262,7 @@ pub enum TaskWhen {
     #[schemars(extend("examples" = ["lane.start"]))]
     #[serde(rename = "lane.start")]
     Start,
-    /// Run when the lane stops, but not on daemon shutdown.
+    /// Run when the whole lane stops, on `devlanes daemon stop` and on `daemon restart`; skipped when a signal (logout, system shutdown) stops the daemon.
     #[schemars(extend("examples" = ["lane.stop"]))]
     #[serde(rename = "lane.stop")]
     Stop,

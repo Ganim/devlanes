@@ -827,7 +827,110 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
             .fix("stop that process, or set proxy ports in ~/.devlanes/config.yaml"),
         );
     }
+    checks.extend(service_checks(data));
     checks.extend(tls_and_hosts_checks(data, running, cx));
+    checks
+}
+
+/// Seconds a shutdown needs past a unit's stop timeout, to record exits and
+/// close state.db.
+const SHUTDOWN_MARGIN_S: i64 = 5;
+
+/// Units a doctor line names before it counts the rest.
+const NAMED_UNITS: usize = 5;
+
+/// The per-user service (`service`: its manager, file and stop window) and the
+/// services whose stop timeout (`stop_timeouts`) does not fit in that window
+/// with the shutdown's margin: the service manager kills the daemon before
+/// they stopped, which leaves them running.
+fn service_checks(data: &Value) -> Vec<Check> {
+    let service = &data["service"];
+    let Some(window) = int(service, "stop_window_s") else {
+        return Vec::new();
+    };
+    let manager = text(service, "manager");
+    let installed = service.get("installed").and_then(Value::as_bool) == Some(true);
+    let recommended = int(service, "recommended_window_s").unwrap_or(window);
+    let mut checks = Vec::new();
+    if installed {
+        let path = text(service, "path");
+        checks.push(if window < recommended {
+            let source = if text(service, "window_source") == "default" {
+                ", its default"
+            } else {
+                ""
+            };
+            Check::new(
+                "service",
+                Outcome::Skip,
+                format!(
+                    "the {manager} at {path} gives the daemon {window}s to stop{source}; devlanes now installs {recommended}s"
+                ),
+            )
+            .fix("devlanes daemon install")
+        } else {
+            Check::new(
+                "service",
+                Outcome::Ok,
+                format!("{manager} at {path}; the daemon gets {window}s to stop"),
+            )
+        });
+    }
+    let late: Vec<(String, i64)> = list(data, "stop_timeouts")
+        .iter()
+        .filter_map(|entry| {
+            let seconds = (int(entry, "timeout_ms")? + 999) / 1000;
+            (seconds + SHUTDOWN_MARGIN_S > window).then(|| {
+                (
+                    format!("{}:{}", text(entry, "project"), text(entry, "unit")),
+                    seconds,
+                )
+            })
+        })
+        .collect();
+    let Some(longest) = late.iter().map(|(_, seconds)| *seconds).max() else {
+        return checks;
+    };
+    let mut named: Vec<String> = late
+        .iter()
+        .take(NAMED_UNITS)
+        .map(|(unit, seconds)| format!("{unit} ({seconds}s)"))
+        .collect();
+    if late.len() > NAMED_UNITS {
+        named.push(format!("{} more", late.len() - NAMED_UNITS));
+    }
+    let window_words = if installed {
+        format!("the {window}s the {manager} gives the daemon to stop")
+    } else {
+        format!(
+            "the {window}s a {manager} gets by default (devlanes is not installed as a service)"
+        )
+    };
+    let fits = recommended - SHUTDOWN_MARGIN_S;
+    let fix = if window >= recommended {
+        format!(
+            "lower services.<name>.stop.timeout to {}s or less",
+            window - SHUTDOWN_MARGIN_S
+        )
+    } else if longest <= fits {
+        format!("devlanes daemon install, which gives the daemon {recommended}s")
+    } else {
+        format!(
+            "devlanes daemon install, and lower services.<name>.stop.timeout to {fits}s or less"
+        )
+    };
+    checks.push(
+        Check::new(
+            "service",
+            Outcome::Skip,
+            format!(
+                "{} with a stop timeout longer than {window_words}: {}",
+                plural(late.len(), "unit"),
+                named.join(", ")
+            ),
+        )
+        .fix(fix),
+    );
     checks
 }
 
@@ -1366,15 +1469,41 @@ pub(super) fn daemon_status(data: &Value) -> Vec<String> {
     lines
 }
 
-/// `daemon stop`.
+/// `daemon stop`: the stopped units and the `lane.stop` tasks it ran, each
+/// failed task on its own line. A daemon from before the report answered
+/// before stopping, with the process count alone.
 pub(super) fn daemon_shutdown(data: &Value) -> Vec<String> {
-    match int(data, "processes") {
-        Some(0) | None => vec!["stopping the daemon".into()],
-        Some(_) => vec![format!(
-            "stopping the daemon and {}",
-            count(data, "processes", "process")
-        )],
+    let Some(stopped) = data.get("stopped").and_then(Value::as_array) else {
+        return match int(data, "processes") {
+            Some(0) | None => vec!["stopping the daemon".into()],
+            Some(_) => vec![format!(
+                "stopping the daemon and {}",
+                count(data, "processes", "process")
+            )],
+        };
+    };
+    let mut lines = vec![match stopped.len() {
+        0 => "stopped the daemon".to_owned(),
+        units => format!("stopped the daemon and {}", plural(units, "unit")),
+    }];
+    let tasks = list(data, "tasks");
+    if !tasks.is_empty() {
+        lines.push(format!("ran {}", plural(tasks.len(), "lane.stop task")));
     }
+    for task in tasks {
+        let outcome = match (int(task, "exit_code"), task["error"].get("code")) {
+            (Some(0), _) => continue,
+            (Some(code), _) => format!("exit {code}"),
+            (None, Some(code)) => display_value(code),
+            (None, None) => "interrupted".to_owned(),
+        };
+        lines.push(format!(
+            "  {} {}: {outcome}",
+            text(task, "lane"),
+            text(task, "task")
+        ));
+    }
+    lines
 }
 
 /// `1 project`, `3 projects` from an integer field; `? projects` when absent.

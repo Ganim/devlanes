@@ -180,8 +180,139 @@ pub trait Handler: Send + Sync + 'static {
     /// Routes bytes only to an attach stream previously authorized for this client.
     async fn input(&self, stream_id: u64, data: Bytes, session: Session) -> Result<(), RpcError>;
 
-    /// Explicit daemon shutdown stops owned processes but preserves adopted containers.
-    async fn shutdown(&self) -> Result<(), RpcError>;
+    /// Stops owned processes but preserves adopted containers. Returns the
+    /// report an explicit `daemon.shutdown` request answers with.
+    async fn shutdown(&self, request: Shutdown) -> Result<Value, RpcError>;
+}
+
+/// Why the daemon shuts down. Only an explicit shutdown runs the lanes'
+/// `lane.stop` tasks; on a signal units stop without them, so a logout or a
+/// machine shutdown does not wait for tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownReason {
+    /// `daemon.shutdown`: `devlanes daemon stop` or `daemon restart`.
+    Explicit,
+    /// SIGTERM or SIGINT (launchd, systemd, logout, system shutdown), a failed
+    /// reconcile, or an embedder cancelling [`Server::shutdown_token`].
+    Signal,
+}
+
+impl ShutdownReason {
+    /// `explicit` or `signal`, as reports and logs show it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Signal => "signal",
+        }
+    }
+}
+
+/// What [`Handler::shutdown`] is asked to do.
+#[derive(Debug, Clone)]
+pub struct Shutdown {
+    pub reason: ShutdownReason,
+    /// Fires on a signal during an explicit shutdown: the running `lane.stop`
+    /// tasks stop and the rest are skipped, so the units still stop in time.
+    pub interrupt: CancellationToken,
+}
+
+impl Shutdown {
+    /// A shutdown for `reason` that nothing interrupts.
+    pub fn new(reason: ShutdownReason) -> Self {
+        Self {
+            reason,
+            interrupt: CancellationToken::new(),
+        }
+    }
+}
+
+/// Longest the server waits for explicit `daemon.shutdown` requests to deliver
+/// their answers before it closes the connections.
+const ANSWER_WAIT: Duration = Duration::from_secs(5);
+
+/// The explicit `daemon.shutdown` requests and the report they answer with.
+struct Stops {
+    state: std::sync::Mutex<StopState>,
+    /// Cancelled by [`Server::interrupt_token`] holders (the signal handler).
+    interrupt: CancellationToken,
+    /// The handler's shutdown result, once it is done.
+    report: tokio::sync::watch::Sender<Option<Result<Value, RpcError>>>,
+}
+
+struct StopState {
+    explicit: bool,
+    /// The run loop read the reason; later requests no longer change it.
+    decided: bool,
+    /// Cloned by each request waiting for the report and dropped once its
+    /// answer was delivered; `None` once the server stopped waiting for them.
+    answering: Option<mpsc::Sender<()>>,
+}
+
+/// A `daemon.shutdown` request's view of the shutdown: the report to wait for
+/// and the guard that keeps the connections open until its answer is out.
+type StopWaiter = (
+    tokio::sync::watch::Receiver<Option<Result<Value, RpcError>>>,
+    Option<mpsc::Sender<()>>,
+);
+
+impl Stops {
+    /// The shared state and the receiver that ends once every answer is out.
+    fn new() -> (Arc<Self>, mpsc::Receiver<()>) {
+        let (answering, answered) = mpsc::channel(1);
+        let stops = Self {
+            state: std::sync::Mutex::new(StopState {
+                explicit: false,
+                decided: false,
+                answering: Some(answering),
+            }),
+            interrupt: CancellationToken::new(),
+            report: tokio::sync::watch::channel(None).0,
+        };
+        (Arc::new(stops), answered)
+    }
+
+    /// Records an explicit request, unless a signal's shutdown already began.
+    fn join(&self) -> StopWaiter {
+        let mut state = model::lock(&self.state);
+        if !state.decided {
+            state.explicit = true;
+        }
+        (self.report.subscribe(), state.answering.clone())
+    }
+
+    /// The reason, fixed from here on.
+    fn decide(&self) -> ShutdownReason {
+        let mut state = model::lock(&self.state);
+        state.decided = true;
+        if state.explicit {
+            ShutdownReason::Explicit
+        } else {
+            ShutdownReason::Signal
+        }
+    }
+
+    /// Publishes the report; requests arriving later answer with it at once.
+    fn finish(&self, report: Result<Value, RpcError>) {
+        self.report.send_replace(Some(report));
+        model::lock(&self.state).answering = None;
+    }
+}
+
+/// The `daemon.shutdown` answer: the handler's report plus `stopping` and the
+/// live process count at the request, the fields older clients read.
+fn shutdown_answer(
+    report: Option<Result<Value, RpcError>>,
+    processes: usize,
+) -> Result<Value, RpcError> {
+    match report {
+        Some(Ok(Value::Object(mut fields))) => {
+            fields.insert("stopping".into(), json!(true));
+            fields.insert("processes".into(), json!(processes));
+            Ok(Value::Object(fields))
+        }
+        Some(Err(error)) => Err(error),
+        _ => Ok(json!({"stopping": true, "processes": processes})),
+    }
 }
 
 /// Owns the singleton lock until all shutdown work and socket cleanup complete.
@@ -191,6 +322,8 @@ pub struct Server {
     options: Options,
     started: Instant,
     shutdown: CancellationToken,
+    stops: Arc<Stops>,
+    answered: mpsc::Receiver<()>,
 }
 
 impl Server {
@@ -207,18 +340,30 @@ impl Server {
             Err(error) => return Err(error.into()),
         }
         let listener = UnixListener::bind(&options.socket)?;
+        let (stops, answered) = Stops::new();
         Ok(Self {
             listener,
             _lock: lock,
             options,
             started: Instant::now(),
             shutdown: CancellationToken::new(),
+            stops,
+            answered,
         })
     }
 
-    /// A service manager can request the same explicit shutdown path as the CLI.
+    /// Cancelling it shuts the daemon down: units stop as on `daemon stop`, but
+    /// without `lane.stop` tasks ([`ShutdownReason::Signal`]) unless a
+    /// `daemon.shutdown` request asked first. It also tells the handler that new
+    /// work is refused.
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown.clone()
+    }
+
+    /// Cancelled on a signal: interrupts the `lane.stop` tasks of an explicit
+    /// shutdown that is running, so a service manager's stop is not held up.
+    pub fn interrupt_token(&self) -> CancellationToken {
+        self.stops.interrupt.clone()
     }
 
     /// Reconciliation precedes the callback so a connecting client sees coherent state.
@@ -230,7 +375,10 @@ impl Server {
         ready: impl FnOnce() -> std::io::Result<()>,
     ) -> Result<(), Error> {
         if let Err(error) = handler.reconcile().await {
-            if let Err(stopped) = handler.shutdown().await {
+            if let Err(stopped) = handler
+                .shutdown(Shutdown::new(ShutdownReason::Signal))
+                .await
+            {
                 tracing::warn!(code = %stopped.code, "shutdown after a failed reconcile");
             }
             let _ = tokio::fs::remove_file(&self.options.socket).await;
@@ -242,6 +390,8 @@ impl Server {
             options,
             started,
             shutdown,
+            stops,
+            mut answered,
             _lock,
         } = self;
         let mut clients = tokio::task::JoinSet::new();
@@ -270,9 +420,10 @@ impl Server {
                     }
                     let handler = handler.clone();
                     let shutdown = shutdown.clone();
+                    let stops = stops.clone();
                     let socket = options.socket.clone();
                     clients.spawn(async move {
-                        if let Err(error) = serve_client(stream, handler, shutdown, started, socket).await {
+                        if let Err(error) = serve_client(stream, handler, shutdown, stops, started, socket).await {
                             tracing::debug!(%error, "client connection ended");
                         }
                     });
@@ -286,7 +437,15 @@ impl Server {
         // for anything that would start work.
         drop(listener);
         // Stop resources before closing subscribers so they can observe final state.
-        let stopped = handler.shutdown().await;
+        let request = Shutdown {
+            reason: stops.decide(),
+            interrupt: stops.interrupt.clone(),
+        };
+        tracing::info!(reason = request.reason.as_str(), "daemon shutting down");
+        let stopped = handler.shutdown(request).await;
+        stops.finish(stopped.clone());
+        // `recv` ends once every waiting request delivered its answer.
+        let _ = tokio::time::timeout(ANSWER_WAIT, answered.recv()).await;
         clients.abort_all();
         while clients.join_next().await.is_some() {}
         let remove = tokio::fs::remove_file(&options.socket).await;
@@ -455,6 +614,7 @@ async fn serve_client(
     stream: UnixStream,
     handler: Arc<dyn Handler>,
     shutdown: CancellationToken,
+    stops: Arc<Stops>,
     started: Instant,
     socket: PathBuf,
 ) -> Result<(), devlanes_ipc::Error> {
@@ -532,12 +692,14 @@ async fn serve_client(
                             let handler = handler.clone();
                             let session = session.clone();
                             let shutdown = shutdown.clone();
+                            let stops = stops.clone();
                             let socket = socket.clone();
                             let mismatch = mismatch.clone();
                             // Requests outlive connections: detaching must not cancel a lane start.
                             tokio::spawn(async move {
                                 let id = request.id;
-                                let stop = request.method == Method::DaemonShutdown;
+                                // Held by a `daemon.shutdown` request until its answer is out.
+                                let mut answering = None;
                                 let (span, tap) = request_span(&request, compatible, &session);
                                 let begun = Instant::now();
                                 let result = async { match request.method {
@@ -567,7 +729,16 @@ async fn serve_client(
                                     Method::DaemonShutdown if handler.managed_processes() > 0 && !request.context.yes => {
                                         Err(RpcError::new("confirmation_required", json!({"processes": handler.managed_processes()}), 2))
                                     }
-                                    Method::DaemonShutdown => Ok(json!({"stopping": true, "processes": handler.managed_processes()})),
+                                    // Answered once the shutdown is done (`Server::run` runs it
+                                    // after the accept loop), with what it stopped and ran.
+                                    Method::DaemonShutdown => {
+                                        let processes = handler.managed_processes();
+                                        let (mut report, guard) = stops.join();
+                                        answering = guard;
+                                        shutdown.cancel();
+                                        let report = report.wait_for(Option::is_some).await.ok().and_then(|report| report.clone());
+                                        shutdown_answer(report, processes)
+                                    }
                                     _ if !compatible => Err(mismatch),
                                     _ => handler.handle(request, session.clone()).await,
                                 } }.instrument(span.clone()).await;
@@ -581,13 +752,12 @@ async fn serve_client(
                                 if let Some((guard, forwarder)) = tap {
                                     finish_tap(guard, forwarder, &session).await;
                                 }
-                                let accepted = result.is_ok();
                                 let outcome = match result {
                                     Ok(data) => Outcome::Ok { data },
                                     Err(error) => Outcome::Error { error },
                                 };
                                 let _ = session.send(Frame::Control(Control::Response(Response { id, result: outcome }))).await;
-                                if stop && accepted { shutdown.cancel(); }
+                                drop(answering);
                             });
                         }
                         // Queued per stream: a unit that never reads must not stall this loop.
@@ -652,10 +822,11 @@ mod tests {
     }
 
     /// Answers every request with `reply`; reconciliation fails when `broken`.
+    /// `shut_down` records the reason of its shutdown.
     struct Fixed {
         reply: Value,
         broken: bool,
-        shut_down: std::sync::atomic::AtomicBool,
+        shut_down: std::sync::Mutex<Option<ShutdownReason>>,
     }
 
     #[async_trait]
@@ -679,10 +850,9 @@ mod tests {
         async fn input(&self, _: u64, _: Bytes, _: Session) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn shutdown(&self) -> Result<(), RpcError> {
-            self.shut_down
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
+        async fn shutdown(&self, request: Shutdown) -> Result<Value, RpcError> {
+            *model::lock(&self.shut_down) = Some(request.reason);
+            Ok(json!({"reason": request.reason.as_str(), "stopped": []}))
         }
     }
 
@@ -782,7 +952,76 @@ mod tests {
         };
         assert_eq!(message, "STATE_ERROR: state.db is unreadable");
         assert!(!announced, "never announced ready");
-        assert!(handler.shut_down.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            *model::lock(&handler.shut_down),
+            Some(ShutdownReason::Signal)
+        );
         assert!(!socket.exists());
+    }
+
+    /// A served handler answering `null`, with a handshaken connection to it.
+    async fn serve() -> (
+        tempfile::TempDir,
+        Arc<Fixed>,
+        CancellationToken,
+        tokio::task::JoinHandle<Result<(), Error>>,
+        Connection<UnixStream>,
+    ) {
+        let (dir, options) = short_options();
+        let socket = options.socket.clone();
+        let server = Server::bind(options).await.expect("bind");
+        let token = server.shutdown_token();
+        let handler = Arc::new(Fixed {
+            reply: Value::Null,
+            broken: false,
+            shut_down: Default::default(),
+        });
+        let running = tokio::spawn(server.run(handler.clone(), || Ok(())));
+        let mut connection = Connection::new(UnixStream::connect(&socket).await.expect("connect"));
+        connection
+            .send(Frame::Control(Control::Hello(Hello::current(0))))
+            .await
+            .expect("hello");
+        connection.recv().await.expect("hello reply");
+        (dir, handler, token, running, connection)
+    }
+
+    #[tokio::test]
+    /// `daemon.shutdown` is an explicit shutdown, answered after the handler's
+    /// shutdown with its report plus the fields older clients read.
+    async fn daemon_shutdown_answers_with_the_report() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (_dir, handler, _token, running, mut connection) = serve().await;
+            let Outcome::Ok { data } = ask(&mut connection, 1, Method::DaemonShutdown).await else {
+                panic!("an answer");
+            };
+            assert_eq!(data["reason"], "explicit", "{data}");
+            assert_eq!(data["stopped"], json!([]), "{data}");
+            assert_eq!(data["stopping"], true, "{data}");
+            assert_eq!(data["processes"], 0, "{data}");
+            assert_eq!(
+                *model::lock(&handler.shut_down),
+                Some(ShutdownReason::Explicit)
+            );
+            running.await.expect("join").expect("clean shutdown");
+        })
+        .await
+        .expect("timeout");
+    }
+
+    #[tokio::test]
+    /// Cancelling the token (the signal handler's path) is a signal shutdown.
+    async fn a_cancelled_token_is_a_signal_shutdown() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (_dir, handler, token, running, _connection) = serve().await;
+            token.cancel();
+            running.await.expect("join").expect("clean shutdown");
+            assert_eq!(
+                *model::lock(&handler.shut_down),
+                Some(ShutdownReason::Signal)
+            );
+        })
+        .await
+        .expect("timeout");
     }
 }
