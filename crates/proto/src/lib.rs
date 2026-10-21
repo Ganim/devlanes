@@ -5,6 +5,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod release;
+
 /// Changes only when an older peer cannot safely interpret this protocol.
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -413,6 +415,38 @@ pub struct UnitSummary {
     /// ms); set only for `orphaned` units and orphans a stop just terminated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orphaned_since_ms: Option<u64>,
+    /// After the run ended: daemons a task started that were kept running.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_running: Vec<LeftProcess>,
+    /// After the run ended: processes that survived the final sweep or still hold
+    /// the unit's terminal or output pipe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escaped: Vec<LeftProcess>,
+}
+
+/// A process that outlived its unit, by pid and process name.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LeftProcess {
+    pub pid: u32,
+    pub command: String,
+}
+
+/// Processes one task or setup command left behind (see [`UnitSummary::left_running`]
+/// and [`UnitSummary::escaped`]). Listed only when one of them is non-empty.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Leftovers {
+    pub unit: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_running: Vec<LeftProcess>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escaped: Vec<LeftProcess>,
+}
+
+impl Leftovers {
+    /// True when nothing was left behind.
+    pub fn is_empty(&self) -> bool {
+        self.left_running.is_empty() && self.escaped.is_empty()
+    }
 }
 
 /// Unit state of a process left running by a previous daemon (see [`UnitSummary`]).
@@ -457,7 +491,7 @@ pub struct LaneSummary {
 }
 
 /// A container a lane uses (shared or per-lane) and its published host ports.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ContainerSummary {
     pub name: String,
     pub ports: BTreeMap<String, u16>,
@@ -467,6 +501,14 @@ pub struct ContainerSummary {
     /// Palette name, as for [`UnitSummary::color`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Shared project infra rather than the lane's own container.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
+    /// Latest Docker stats sample, as `docker stats` reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
 }
 
 /// Opens a terminal stream. The daemon answers with [`AttachResult`], then sends a
@@ -541,6 +583,24 @@ pub struct StartResult {
     pub skipped_tasks: Vec<String>,
     #[serde(default)]
     pub units: Vec<UnitSummary>,
+    /// Advice that did not block the start, as in `lane.warning` events.
+    #[serde(default)]
+    pub warnings: Vec<LaneWarning>,
+    /// Tasks and setup commands of this start that left processes behind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leftovers: Vec<Leftovers>,
+}
+
+/// Advice about a lane that never blocks it. Code `host_outside_ca`:
+/// `{lane, unit, host, permitted, suggestion}` for a routed hostname the
+/// devlanes CA's name constraints exclude: HTTPS certificates for it are
+/// rejected by clients, plain HTTP still works; `suggestion` is a name under
+/// the lane's domain.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LaneWarning {
+    pub code: String,
+    #[serde(default)]
+    pub data: Value,
 }
 
 /// A failed unit or task with the data clients need for annotations and hints.

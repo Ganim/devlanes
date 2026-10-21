@@ -598,14 +598,19 @@ impl Inner {
                 .map_err(|_| RpcError::new("timeout", json!({"task": run.task}), 124))??,
             None => future.await?,
         };
-        Ok(json!({
+        let mut result = json!({
             "task": run.task,
             "lane": reference,
             "unit": unit,
             "interactive": false,
             "exit_code": outcome.code,
             "state": if outcome.code == Some(0) { "exited" } else { "failed" },
-        }))
+        });
+        // Daemons the task started (`pg_ctl start`) outlive it on purpose; say so.
+        if !outcome.leftovers.is_empty() {
+            result["leftovers"] = json!(outcome.leftovers);
+        }
+        Ok(result)
     }
 
     /// `profile.list`: the profiles of the lane's config, for pickers. The lane's
@@ -729,16 +734,20 @@ impl Inner {
             ));
         }
         let stopped = self.stop_everything().await;
+        // The reset would erase the only record of orphans (of known and unknown
+        // lanes) and their escaped descendants, so they are terminated first.
+        let terminated = self.end_recorded_runs().await?;
         for project in self.all_projects() {
             project.watch.cancel();
         }
+        // A refused reset leaves the loaded projects in place.
+        self.store.reset().await.map_err(store_error)?;
         lock(&self.projects).clear();
         self.secrets.forget(None);
-        self.store.reset().await.map_err(store_error)?;
         self.publish_routes();
         self.bus
             .emit(events::RESYNC, json!({"reason": "reset_state"}));
-        Ok(json!({"stopped": stopped}))
+        Ok(json!({"stopped": stopped, "terminated": terminated}))
     }
 
     /// Spec with ports for the request's lane, allocating infra ports first.
@@ -770,6 +779,7 @@ impl Inner {
         {
             let mut st = lane.st();
             st.infra_ns = Some(up.namespace.clone());
+            st.infra_containers = up.containers.clone();
             st.setup_env = up.setup_env.clone();
         }
         self.refresh_views(&project).await;
@@ -823,19 +833,12 @@ impl Inner {
             .await
             .map_err(|error| internal("io", error))?
             .ok_or_else(|| RpcError::new("not_found", json!({"reference": context.cwd}), 3))?;
-        let presets = self.integ.presets.clone();
+        let checks = self.config_checks();
         let known = crate::platforms::known(&self.integ.contributors);
         let path = file.clone();
         let (report, unknown) = tokio::task::spawn_blocking(move || {
             let config = devlanes_config::load_project_with::<OpaqueExtensions>(&path)?;
-            let validator = |name: &str, options: Option<&Value>| -> Result<(), String> {
-                match presets.iter().find(|preset| preset.name == name) {
-                    Some(preset) => (preset.parse)(options),
-                    None if presets.is_empty() => Ok(()),
-                    None => Err(format!("unknown preset `{name}`")),
-                }
-            };
-            let report = devlanes_config::validate_with_presets(&config, &validator)?;
+            let report = crate::registry::check_config(&config, &checks)?;
             Ok::<_, devlanes_config::ConfigError>((
                 report,
                 crate::platforms::unknown(&config, &known),
@@ -848,6 +851,35 @@ impl Inner {
             serde_json::to_value(&report.warnings).map_err(|e| internal("encode", e))?;
         if let Some(list) = warnings.as_array_mut() {
             list.extend(unknown);
+            // Hostnames need the lane's evaluated layout; a lane that cannot be
+            // laid out yet (unassigned) only misses this advice.
+            if let Ok((project, lane)) = self.target_lane(context).await {
+                let st = lane.st();
+                for warning in self.ca_warnings(&st.reference(&project.name()), &st) {
+                    let data = &warning.data;
+                    let path = st
+                        .view
+                        .as_ref()
+                        .and_then(|view| {
+                            view.routes
+                                .iter()
+                                .find(|route| route.host == data["host"])
+                                .map(|route| format!("services.{}.hosts", route.service))
+                        })
+                        .unwrap_or_else(|| "infra.hosts".into());
+                    list.push(json!({
+                        "path": path,
+                        "message": format!(
+                            "{} is outside the names the devlanes CA can certify, so HTTPS fails there (plain HTTP works); use a name like {}",
+                            data["host"].as_str().unwrap_or_default(),
+                            data["suggestion"].as_str().unwrap_or_default(),
+                        ),
+                        "code": warning.code,
+                        "host": data["host"],
+                        "suggestion": data["suggestion"],
+                    }));
+                }
+            }
         }
         Ok(json!({"project": report.project, "path": file, "warnings": warnings}))
     }

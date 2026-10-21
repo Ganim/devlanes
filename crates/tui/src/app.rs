@@ -11,6 +11,7 @@ use devlanes_proto::{
     ActorKind, AttachResult, Event, LaneSummary, LogLine, LogQuery, Method, ORPHANED, Page,
     RpcError, RunParams, Selection, UnitSummary, events,
 };
+use devlanes_term::{Progress, StartTracker};
 use ratatui::layout::Rect;
 use serde_json::Value;
 
@@ -347,6 +348,11 @@ pub enum Msg {
     /// The new daemon's status after a restart.
     DaemonRestarted(Result<Value, ApiError>),
     DaemonStarted(Result<Value, ApiError>),
+    /// How devlanes was installed, and the release notices dismissed earlier.
+    Notices {
+        method: devlanes_client::update::InstallMethod,
+        dismissed: Vec<String>,
+    },
     Profiles {
         lane: String,
         result: Result<crate::api::ProfileList, ApiError>,
@@ -413,6 +419,10 @@ pub enum Effect {
     /// Sends `yes`; only produced by a confirmed dialog.
     LaneGc,
     FetchDaemon,
+    /// Finds how devlanes was installed and which release notices were dismissed.
+    LoadNotices,
+    /// Remembers that the release notice `key` was dismissed.
+    DismissNotice(String),
     ReadDaemonLog {
         from: crate::logfile::LogPosition,
     },
@@ -491,6 +501,8 @@ pub struct App {
     pub errors: VecDeque<ErrorEntry>,
     pub daemon: DaemonView,
     pub size: (u16, u16),
+    /// How devlanes was installed (`None` until known) and dismissed release notices.
+    pub release: (Option<devlanes_client::update::InstallMethod>, Vec<String>),
     expanded: HashMap<String, bool>,
     /// Lanes with a clean in flight; their rows say so.
     cleaning: HashSet<String>,
@@ -507,7 +519,14 @@ pub struct App {
     notice_ticks: u8,
     generation: u64,
     reconnect_pending: bool,
+    /// Start progress of every lane starting now, for the tab's progress bar.
+    starts: StartTracker,
+    /// Ticks a failed start has been shown red.
+    start_error_ticks: u8,
 }
+
+/// Ticks (seconds) a failed start stays red in the tab's progress bar.
+const START_ERROR_TICKS: u8 = 3;
 
 impl App {
     /// Creates the state for a terminal of `width` x `height`.
@@ -529,6 +548,7 @@ impl App {
             errors: VecDeque::new(),
             daemon: DaemonView::default(),
             size: (width, height),
+            release: (None, Vec::new()),
             expanded: HashMap::new(),
             cleaning: HashSet::new(),
             target_errors: HashMap::new(),
@@ -539,6 +559,31 @@ impl App {
             notice_ticks: 0,
             generation: 0,
             reconnect_pending: false,
+            starts: StartTracker::viewer(),
+            start_error_ticks: 0,
+        }
+    }
+
+    /// The tab's progress bar: every lane starting now, together. The selected
+    /// lane alone would jump around while the user browses.
+    pub fn start_progress(&self) -> Progress {
+        self.starts.progress()
+    }
+
+    /// Feeds the start tracker; a failed start is forgotten after
+    /// [`START_ERROR_TICKS`] so its red bar ends.
+    fn track_starts(&mut self, msg: &Msg) {
+        match msg {
+            Msg::Status(Ok(lanes)) => self.starts.seed(lanes),
+            Msg::Event(event) => self.starts.event(event),
+            Msg::Tick if matches!(self.starts.progress(), Progress::Error(_)) => {
+                self.start_error_ticks += 1;
+                if self.start_error_ticks >= START_ERROR_TICKS {
+                    self.starts.forget_failures();
+                    self.start_error_ticks = 0;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -551,6 +596,7 @@ impl App {
     /// Applies one message.
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
         let mut effects = Vec::new();
+        self.track_starts(&msg);
         match msg {
             Msg::Key(key) => self.key(key, &mut effects),
             Msg::Mouse(mouse) => self.mouse(mouse, &mut effects),
@@ -768,6 +814,7 @@ impl App {
                     Err(error) => self.api_error("lane gc", None, error, &mut effects),
                 }
             }
+            Msg::Notices { method, dismissed } => self.release = (Some(method), dismissed),
             Msg::DaemonInfo { status, doctor } => {
                 let mut failure = None;
                 match status {
@@ -1455,6 +1502,12 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        if key.code == KeyCode::Char('u')
+            && key.modifiers.is_empty()
+            && self.dismiss_release(effects)
+        {
+            return;
         }
         match self.tab {
             Tab::Monitor => self.monitor_key(key, effects),
@@ -2496,6 +2549,46 @@ impl App {
     }
 
     /// Shows a short status message in the header; errors go through [`App::report`].
+    /// The release notice for the header and its key: the daemon runs another
+    /// version than this TUI, or a newer release is out. `None` once dismissed.
+    pub fn release_badge(&self) -> Option<(String, String)> {
+        use devlanes_client::update;
+        let status = self.daemon.status.as_ref()?;
+        let own = env!("CARGO_PKG_VERSION");
+        let daemon = status.get("version").and_then(Value::as_str);
+        let notice = match daemon {
+            Some(daemon) if daemon != own => Some((
+                update::skew_key(daemon, own),
+                format!(
+                    "daemon runs {daemon}, this TUI {own}: restart it when convenient (it stops services)"
+                ),
+            )),
+            _ => None,
+        };
+        let notice = notice.or_else(|| {
+            let latest = status.pointer("/update/latest").and_then(Value::as_str)?;
+            if !devlanes_proto::release::is_newer(latest, own) {
+                return None;
+            }
+            let command = self.release.0.as_ref()?.upgrade_command(latest);
+            Some((
+                update::update_key(latest),
+                format!("devlanes {latest} is available: {command}"),
+            ))
+        })?;
+        (!self.release.1.contains(&notice.0)).then_some(notice)
+    }
+
+    /// Hides the release notice for good; a newer version shows again.
+    fn dismiss_release(&mut self, effects: &mut Vec<Effect>) -> bool {
+        let Some((key, _)) = self.release_badge() else {
+            return false;
+        };
+        self.release.1.push(key.clone());
+        effects.push(Effect::DismissNotice(key));
+        true
+    }
+
     pub fn set_notice(&mut self, notice: String) {
         self.notice = Some(Notice {
             text: text::clean(&notice),

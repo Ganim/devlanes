@@ -74,6 +74,15 @@ diesel::table! {
         actor_agent_id -> Nullable<Text>,
         actor_session_id -> Nullable<Text>,
         log_path -> Nullable<Binary>,
+        boot_id -> Nullable<Text>,
+    }
+}
+diesel::table! {
+    unit_run_members (unit_run_id, pid, process_start_time) {
+        unit_run_id -> BigInt,
+        pid -> BigInt,
+        sid -> BigInt,
+        process_start_time -> Text,
     }
 }
 diesel::table! {
@@ -157,6 +166,15 @@ diesel::table! {
         last_connected -> Nullable<BigInt>,
     }
 }
+diesel::table! {
+    startup_peaks (id) {
+        id -> BigInt,
+        series -> Text,
+        recorded_at -> BigInt,
+        peak -> BigInt,
+        duration_ms -> BigInt,
+    }
+}
 diesel::allow_tables_to_appear_in_same_query!(
     projects,
     worktrees,
@@ -164,6 +182,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     port_blocks,
     port_offsets,
     unit_runs,
+    unit_run_members,
     lane_setup,
     task_runs,
     task_completions,
@@ -171,4 +190,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     metric_rollups,
     run_summaries,
     remote_hosts,
+    startup_peaks,
 );

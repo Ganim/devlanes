@@ -143,7 +143,10 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             (format!("! {}", notice.text), Style::new().fg(FAILED))
         }
         (Connection::Online, Some(notice)) => (notice.text.clone(), Style::new()),
-        (Connection::Online, None) => return,
+        (Connection::Online, None) => match app.release_badge() {
+            Some((_, text)) => (format!("{text} · u hides"), Style::new().fg(MUTED)),
+            None => return,
+        },
     };
     // One column of space after the tabs and one at the right edge.
     let room = area.width.saturating_sub(used + 2);

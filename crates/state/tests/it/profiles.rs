@@ -70,7 +70,10 @@ async fn migration_converts_legacy_values_and_down_preserves_selections() {
         ids.push(id);
     }
     let store = Store::open(&path).await.expect("upgrade");
-    assert_eq!(store.schema_version().await.expect("version"), 6);
+    assert_eq!(
+        store.schema_version().await.expect("version"),
+        devlanes_state::SCHEMA_VERSION
+    );
     for (id, (_, expected)) in ids.iter().zip(&cases) {
         let row = store
             .lane(devlanes_core::LaneId(*id))
@@ -83,6 +86,11 @@ async fn migration_converts_legacy_values_and_down_preserves_selections() {
         assert_eq!(row.created_at, 1);
     }
     // Keep the actor idle while checking the reversible migration on this connection.
+    // Later migrations go first; 006 is the one under test.
+    for _ in 6..devlanes_state::SCHEMA_VERSION {
+        c.revert_last_migration(MIGRATIONS)
+            .expect("down a later migration");
+    }
     c.revert_last_migration(MIGRATIONS).expect("down 006");
     for (id, (_, expected)) in ids.iter().zip(&cases) {
         let legacy: Option<String> = schema::lanes::table

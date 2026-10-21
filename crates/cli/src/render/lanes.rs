@@ -5,8 +5,8 @@ use devlanes_proto::{LaneSummary, RpcError, StartResult, UnitFailureData, UnitSu
 use serde_json::Value;
 
 use super::{
-    Ctx, Outcome, bytes, cap_line, clean, display_value, int, list, percent, plural, table,
-    tail_lines, text, tree, words,
+    Ctx, Outcome, bytes, cap_line, clean, display_value, int, leftover_notes, leftover_notes_of,
+    list, percent, plural, table, tail_lines, text, tree, words,
 };
 use crate::Hint;
 
@@ -98,6 +98,7 @@ fn unit_block(unit: &UnitSummary, tail: &[Value], cx: &Ctx<'_>) -> Vec<String> {
     if orphaned(unit) {
         lines.push(format!("  {}", orphan_note(unit)));
     }
+    lines.extend(leftover_notes("  ", &unit.left_running, &unit.escaped));
     if unit.state == "failed" {
         lines.extend(tail_lines(tail));
         if cx.agent() {
@@ -118,7 +119,9 @@ fn loose_unit(value: &Value) -> Option<UnitSummary> {
         return None;
     };
     for (key, field) in fields {
-        if target.contains_key(key) && !field.is_null() {
+        // These lists are left out of the defaults' JSON while empty.
+        let listed = matches!(key.as_str(), "left_running" | "escaped");
+        if (listed || target.contains_key(key)) && !field.is_null() {
             target.insert(key.clone(), field.clone());
         }
     }
@@ -328,6 +331,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
                 Hint::command(["status", lane.as_str()]).0
             ));
         }
+        lines.extend(start_leftovers(result, ""));
         return lines;
     }
     lines.push(match &result.branch {
@@ -412,11 +416,27 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
     for task in &result.skipped_tasks {
         lines.push(cx.skipped(&clean(task), cause.as_deref()));
     }
+    lines.extend(start_leftovers(result, "  "));
     if let Some((name, _, _)) = view.failed.first() {
         lines.push(String::new());
         lines.push(format!("logs: {}", Hint::logs(&lane, name, 200).0));
     }
     lines
+}
+
+/// `<unit>: left running: ...` notes for the start's tasks and setup commands.
+fn start_leftovers(result: &StartResult, indent: &str) -> Vec<String> {
+    result
+        .leftovers
+        .iter()
+        .flat_map(|leftovers| {
+            leftover_notes(
+                &format!("{indent}{}: ", clean(&leftovers.unit)),
+                &leftovers.left_running,
+                &leftovers.escaped,
+            )
+        })
+        .collect()
 }
 
 /// `resume`: one start summary per lane, or the lane's error.
@@ -547,10 +567,22 @@ fn lane_url(lane: &LaneSummary, scheme: Option<&str>) -> String {
     }
 }
 
-/// Sum of the units' CPU and memory, when sampled.
-fn usage(units: &[UnitSummary]) -> (Option<f64>, Option<u64>) {
-    let cpu: Vec<f64> = units.iter().filter_map(|unit| unit.cpu_percent).collect();
-    let memory: Vec<u64> = units.iter().filter_map(|unit| unit.memory_bytes).collect();
+/// Sum of the units' and the lane's own containers' CPU and memory, when sampled.
+/// Shared containers serve every lane, so no lane total counts them.
+fn usage(lane: &LaneSummary) -> (Option<f64>, Option<u64>) {
+    let own = lane.containers.iter().filter(|container| !container.shared);
+    let cpu: Vec<f64> = lane
+        .units
+        .iter()
+        .filter_map(|unit| unit.cpu_percent)
+        .chain(own.clone().filter_map(|container| container.cpu_percent))
+        .collect();
+    let memory: Vec<u64> = lane
+        .units
+        .iter()
+        .filter_map(|unit| unit.memory_bytes)
+        .chain(own.filter_map(|container| container.memory_bytes))
+        .collect();
     (
         (!cpu.is_empty()).then(|| cpu.iter().sum()),
         (!memory.is_empty()).then(|| memory.iter().sum()),
@@ -627,7 +659,7 @@ pub(super) fn status(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             lane.state.as_str(),
             "running" | "failed" | "starting" | "stopping"
         );
-        let (cpu, memory) = usage(&lane.units);
+        let (cpu, memory) = usage(lane);
         rows.push(vec![
             lane.index.map_or("–".into(), |index| index.to_string()),
             lane.branch.as_deref().map_or("–".into(), clean),
@@ -746,6 +778,36 @@ fn unit_table(lane: &LaneSummary, cx: &Ctx<'_>) -> Vec<String> {
             let note = format!("{}: {}", clean(&unit.name), orphan_note(unit));
             extra.push(format!("  {}", cx.state_text(&unit.state, &note)));
         }
+        extra.extend(leftover_notes(
+            &format!("  {}: ", clean(&unit.name)),
+            &unit.left_running,
+            &unit.escaped,
+        ));
+    }
+    // Containers with a Docker stats sample are running; the rest stay in `infra status`.
+    for container in lane
+        .containers
+        .iter()
+        .filter(|c| c.cpu_percent.is_some() || c.memory_bytes.is_some())
+    {
+        let ports: Vec<String> = container.ports.values().map(u16::to_string).collect();
+        let kind = if container.shared {
+            "shared container"
+        } else {
+            "container"
+        };
+        rows.push(vec![
+            cx.unit_name(&clean(&container.name), "ready", container.color.as_deref()),
+            cx.state_text("idle", kind),
+            if ports.is_empty() {
+                "–".into()
+            } else {
+                ports.join(",")
+            },
+            container.cpu_percent.map_or("–".into(), percent),
+            container.memory_bytes.map_or("–".into(), bytes),
+            String::new(),
+        ]);
     }
     let mut lines = table(&rows, "  ");
     lines.extend(extra);
@@ -969,8 +1031,10 @@ pub(super) fn errors(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
 pub(super) fn why(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
     let (lane, unit) = (text(data, "lane"), text(data, "unit"));
     let mut lines = vec![format!("{} {lane}:{unit}", cx.state(&text(data, "state")))];
+    let leftovers = leftover_notes_of("  ", data);
     let reasons = list(data, "reasons");
     if reasons.is_empty() {
+        lines.extend(leftovers);
         lines.push(format!(
             "  no blocking reason found; {}",
             Hint::logs(&lane, &unit, 200).0
@@ -990,6 +1054,7 @@ pub(super) fn why(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             None => format!("  {message}"),
         });
     }
+    lines.extend(leftovers);
     lines
 }
 

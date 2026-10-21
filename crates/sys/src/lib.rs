@@ -138,6 +138,19 @@ pub fn start_time(pid: u32) -> Result<Option<u64>, Error> {
     Ok(process(pid)?.map(|info| info.start_time))
 }
 
+/// Identifies the current boot: `/proc/sys/kernel/random/boot_id` on Linux,
+/// `kern.bootsessionuuid` on macOS. PIDs and start times recorded under another
+/// boot name unrelated processes. Compare values for equality only. The first
+/// successful read is cached, so later calls do not touch the kernel.
+pub fn boot_id() -> Result<String, Error> {
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(id) = BOOT.get() {
+        return Ok(id.clone());
+    }
+    let id = os::boot_id()?;
+    Ok(BOOT.get_or_init(|| id).clone())
+}
+
 /// Captures a process identity for later verification.
 pub fn identity(pid: u32) -> Result<Option<ProcessIdentity>, Error> {
     Ok(process(pid)?.map(|info| info.identity()))

@@ -139,29 +139,87 @@ pub fn parse_meminfo_available(text: &str) -> Result<u64, Error> {
     }
 }
 
+/// The cgroup v2 path of a process from `/proc/<pid>/cgroup` (the `0::` line),
+/// relative to the cgroup mount; `None` on cgroup v1-only systems.
+pub fn parse_cgroup_v2_path(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(|path| path.trim().trim_start_matches('/').to_owned())
+}
+
+/// A cgroup v2 `memory.max`: the limit in bytes, `None` for `max` (no limit)
+/// or anything unparsable.
+pub fn parse_memory_max(text: &str) -> Option<u64> {
+    text.trim().parse().ok()
+}
+
+/// Memory still available under a cgroup limit: `max - current`, never above
+/// the system's `available`.
+pub fn cgroup_available(available: u64, max: Option<u64>, current: Option<u64>) -> u64 {
+    match (max, current) {
+        (Some(max), Some(current)) => available.min(max.saturating_sub(current)),
+        _ => available,
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub use source::LinuxPressure;
 
 #[cfg(target_os = "linux")]
 mod source {
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::{
+        path::PathBuf,
+        sync::{
+            Arc, Mutex, PoisonError,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use async_trait::async_trait;
     use devlanes_core::gate::{PressureSample, PressureSource};
 
-    use super::{CpuTimes, parse_meminfo_available, parse_proc_stat_cpu, parse_psi};
+    use super::{
+        CpuTimes, cgroup_available, parse_cgroup_v2_path, parse_meminfo_available,
+        parse_memory_max, parse_proc_stat_cpu, parse_psi,
+    };
 
-    /// Reads `/proc/stat`, `/proc/pressure/*` and `/proc/meminfo`. Kernels or
-    /// containers without PSI report no memory level instead of failing.
+    /// Reads `/proc/stat`, PSI and available memory. When the daemon runs in a
+    /// cgroup v2 group (containers, systemd units), its `memory.pressure` and
+    /// `memory.max - memory.current` take precedence: services started by the
+    /// daemon live under the same limit. Without PSI there is no memory level;
+    /// that is logged once.
     #[derive(Debug, Clone, Default)]
     pub struct LinuxPressure {
         previous: Arc<Mutex<Option<CpuTimes>>>,
+        /// The daemon's cgroup directory, looked up once.
+        cgroup: Option<PathBuf>,
+        psi_missing_logged: Arc<AtomicBool>,
     }
 
     impl LinuxPressure {
-        /// A source with no previous CPU reading.
+        /// A source with no previous CPU reading, bound to this process's cgroup.
         pub fn new() -> Self {
-            Self::default()
+            let cgroup = std::fs::read_to_string("/proc/self/cgroup")
+                .ok()
+                .and_then(|text| parse_cgroup_v2_path(&text))
+                .map(|path| PathBuf::from("/sys/fs/cgroup").join(path))
+                .filter(|path| path.join("memory.current").exists());
+            Self {
+                cgroup,
+                ..Self::default()
+            }
+        }
+
+        /// Reads one file of the daemon's cgroup.
+        fn cgroup_file(&self, name: &str) -> Option<String> {
+            std::fs::read_to_string(self.cgroup.as_ref()?.join(name)).ok()
+        }
+
+        /// Memory pressure: the cgroup's PSI when present, else the system's.
+        fn memory_psi(&self) -> Option<super::Psi> {
+            self.cgroup_file("memory.pressure")
+                .or_else(|| std::fs::read_to_string("/proc/pressure/memory").ok())
+                .and_then(|text| parse_psi(&text).ok())
         }
 
         /// Reads every file on the calling thread; blocking but short.
@@ -176,16 +234,33 @@ mod source {
                 *previous = Some(times);
                 percent
             };
-            let psi = |resource: &str| {
-                std::fs::read_to_string(format!("/proc/pressure/{resource}"))
-                    .ok()
-                    .and_then(|text| parse_psi(&text).ok())
-            };
+            let memory = self.memory_psi();
+            if memory.is_none() && !self.psi_missing_logged.swap(true, Ordering::Relaxed) {
+                tracing::info!(
+                    "no memory PSI (/proc/pressure/memory): start pacing sees no memory pressure level"
+                );
+            }
+            let cpu = std::fs::read_to_string("/proc/pressure/cpu")
+                .ok()
+                .and_then(|text| parse_psi(&text).ok());
             Ok(PressureSample {
                 cpu_percent,
-                memory: psi("memory").map(|psi| psi.memory_level()),
-                cpu_stall_percent: psi("cpu").map(|psi| psi.some_avg10),
+                memory: memory.map(|psi| psi.memory_level()),
+                cpu_stall_percent: cpu.map(|psi| psi.some_avg10),
             })
+        }
+
+        /// `MemAvailable`, lowered to the room left under the cgroup's limit.
+        pub fn available_memory_blocking(&self) -> Result<Option<u64>, devlanes_core::Error> {
+            let text = std::fs::read_to_string("/proc/meminfo")?;
+            let available = parse_meminfo_available(&text).map_err(integration)?;
+            let max = self
+                .cgroup_file("memory.max")
+                .and_then(|text| parse_memory_max(&text));
+            let current = self
+                .cgroup_file("memory.current")
+                .and_then(|text| text.trim().parse().ok());
+            Ok(Some(cgroup_available(available, max, current)))
         }
     }
 
@@ -216,15 +291,10 @@ mod source {
             blocking(move || source.sample_blocking()).await
         }
 
-        /// `MemAvailable`.
+        /// `MemAvailable`, or less under a cgroup memory limit.
         async fn available_memory(&self) -> Result<Option<u64>, devlanes_core::Error> {
-            blocking(|| {
-                let text = std::fs::read_to_string("/proc/meminfo")?;
-                parse_meminfo_available(&text)
-                    .map(Some)
-                    .map_err(integration)
-            })
-            .await
+            let source = self.clone();
+            blocking(move || source.available_memory_blocking()).await
         }
     }
 }

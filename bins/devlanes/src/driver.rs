@@ -75,6 +75,8 @@ pub struct ClientDriver {
     paths: Paths,
     ownership: WithOwnership,
     signals: Option<Signals>,
+    /// The tab progress bar during the start phase, when this invocation draws it.
+    progress: Option<devlanes_term::Wrap>,
 }
 
 impl ClientDriver {
@@ -90,12 +92,20 @@ impl ClientDriver {
             paths,
             ownership,
             signals: None,
+            progress: None,
         }
     }
 
     /// Lets SIGINT/SIGTERM cancel the start and reach the test command.
     pub fn with_signals(mut self, signals: Signals) -> Self {
         self.signals = Some(signals);
+        self
+    }
+
+    /// Draws the start's progress in the terminal tab; it ends before the
+    /// command runs, so the command's own output keeps the tab.
+    pub fn with_progress(mut self, wrap: Option<devlanes_term::Wrap>) -> Self {
+        self.progress = wrap;
         self
     }
 
@@ -327,107 +337,119 @@ impl WithDriver for ClientDriver {
         request: &Request,
         events: &mut (dyn FnMut(Event) + Send),
     ) -> Result<WithStart, RpcError> {
-        if let Some(stop) = self.pending_signal() {
-            return Err(interrupted(stop));
-        }
-        // Only needed to work out ownership if a signal cuts the start short.
-        let before = match self.signals {
-            Some(_) => self.lanes(&request.context).await,
-            None => None,
-        };
-        let id = self
-            .client
-            .begin_request(
-                request.method,
-                request.params.clone(),
-                request.context.clone(),
-            )
-            .await
-            .map_err(rpc_error)?;
-        let mut lane = request.context.lane.clone();
-        loop {
-            let frame = match self.signals.as_mut() {
-                Some(signals) => tokio::select! {
-                    frame = self.client.next_frame() => frame,
-                    Some(stop) = signals.0.recv() => {
-                        // The daemon keeps starting after a client leaves, so the units
-                        // this start brought up so far are stopped by the teardown.
-                        if let Some(before) = &before {
-                            let after = self.lanes(&request.context).await.unwrap_or_default();
-                            if let Some(owned) = interrupted_ownership(
-                                before,
-                                &after,
-                                lane.as_deref(),
-                                &request.context.cwd,
-                            ) {
-                                self.ownership = WithOwnership {
-                                    daemon_spawned: self.ownership.daemon_spawned,
-                                    ..owned
-                                };
-                            }
-                        }
-                        return Err(interrupted(stop));
-                    }
-                },
-                None => self.client.next_frame().await,
+        // The tab's progress bar covers the start only; it is gone before the command runs.
+        let progress = crate::progress::Follower::start_with(&self.paths, self.progress, request);
+        let result: Result<WithStart, RpcError> = async {
+            if let Some(stop) = self.pending_signal() {
+                return Err(interrupted(stop));
+            }
+            // Only needed to work out ownership if a signal cuts the start short.
+            let before = match self.signals {
+                Some(_) => self.lanes(&request.context).await,
+                None => None,
             };
-            match frame.map_err(rpc_error)? {
-                Frame::Control(Control::Event(event)) => {
-                    if lane.is_none()
-                        && let Some(name) = event.data.get("lane").and_then(Value::as_str)
-                    {
-                        lane = Some(name.to_owned());
+            let id = self
+                .client
+                .begin_request(
+                    request.method,
+                    request.params.clone(),
+                    request.context.clone(),
+                )
+                .await
+                .map_err(rpc_error)?;
+            let mut lane = request.context.lane.clone();
+            loop {
+                let frame = match self.signals.as_mut() {
+                    Some(signals) => tokio::select! {
+                        frame = self.client.next_frame() => frame,
+                        Some(stop) = signals.0.recv() => {
+                            // The daemon keeps starting after a client leaves, so the units
+                            // this start brought up so far are stopped by the teardown.
+                            if let Some(before) = &before {
+                                let after = self.lanes(&request.context).await.unwrap_or_default();
+                                if let Some(owned) = interrupted_ownership(
+                                    before,
+                                    &after,
+                                    lane.as_deref(),
+                                    &request.context.cwd,
+                                ) {
+                                    self.ownership = WithOwnership {
+                                        daemon_spawned: self.ownership.daemon_spawned,
+                                        ..owned
+                                    };
+                                }
+                            }
+                            return Err(interrupted(stop));
+                        }
+                    },
+                    None => self.client.next_frame().await,
+                };
+                match frame.map_err(rpc_error)? {
+                    Frame::Control(Control::Event(event)) => {
+                        if lane.is_none()
+                            && let Some(name) = event.data.get("lane").and_then(Value::as_str)
+                        {
+                            lane = Some(name.to_owned());
+                        }
+                        events(event)
                     }
-                    events(event)
-                }
-                Frame::Control(Control::Response(response)) if response.id == id => {
-                    return match response.result {
-                        Outcome::Ok { data } => {
-                            let result: StartResult =
-                                serde_json::from_value(data).map_err(|error| {
-                                    RpcError::new(
-                                        "bad_response",
-                                        json!({"message": error.to_string()}),
-                                        1,
-                                    )
-                                })?;
-                            self.ownership.lane.clone_from(&result.lane);
-                            self.ownership.units.clone_from(&result.started);
-                            self.ownership.whole_lane = result.whole_lane;
-                            Ok(WithStart {
-                                ready: result.ready && result.failures.is_empty(),
-                                failures: result
-                                    .failures
-                                    .into_iter()
-                                    .map(|failure| UnitFailure {
-                                        lane: failure.lane,
-                                        unit: failure.unit,
-                                        exit_code: failure.exit_code,
-                                        log_tail: failure.log_tail,
-                                    })
-                                    .collect(),
-                            })
-                        }
-                        Outcome::Error { error } => {
-                            // A failed start may still name its lane, so teardown can find it.
-                            if let Some(lane) = error.data.get("lane").and_then(Value::as_str) {
-                                self.ownership.lane = lane.to_owned();
+                    Frame::Control(Control::Response(response)) if response.id == id => {
+                        return match response.result {
+                            Outcome::Ok { data } => {
+                                let result: StartResult =
+                                    serde_json::from_value(data).map_err(|error| {
+                                        RpcError::new(
+                                            "bad_response",
+                                            json!({"message": error.to_string()}),
+                                            1,
+                                        )
+                                    })?;
+                                self.ownership.lane.clone_from(&result.lane);
+                                self.ownership.units.clone_from(&result.started);
+                                self.ownership.whole_lane = result.whole_lane;
+                                Ok(WithStart {
+                                    ready: result.ready && result.failures.is_empty(),
+                                    failures: result
+                                        .failures
+                                        .into_iter()
+                                        .map(|failure| UnitFailure {
+                                            lane: failure.lane,
+                                            unit: failure.unit,
+                                            exit_code: failure.exit_code,
+                                            log_tail: failure.log_tail,
+                                        })
+                                        .collect(),
+                                })
                             }
-                            if let Some(started) =
-                                error.data.get("started").and_then(Value::as_array)
-                            {
-                                self.ownership.units = started
-                                    .iter()
-                                    .filter_map(|v| v.as_str().map(str::to_owned))
-                                    .collect();
+                            Outcome::Error { error } => {
+                                // A failed start may still name its lane, so teardown can find it.
+                                if let Some(lane) = error.data.get("lane").and_then(Value::as_str) {
+                                    self.ownership.lane = lane.to_owned();
+                                }
+                                if let Some(started) =
+                                    error.data.get("started").and_then(Value::as_array)
+                                {
+                                    self.ownership.units = started
+                                        .iter()
+                                        .filter_map(|v| v.as_str().map(str::to_owned))
+                                        .collect();
+                                }
+                                Err(error)
                             }
-                            Err(error)
-                        }
-                    };
+                        };
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
+        .await;
+        // A signal ends the start on purpose; only a real failure turns the bar red.
+        let ok = match &result {
+            Ok(start) => start.ready && start.failures.is_empty(),
+            Err(error) => error.code == "interrupted",
+        };
+        progress.finish(ok).await;
+        result
     }
 
     /// The journal recorded by `start`.

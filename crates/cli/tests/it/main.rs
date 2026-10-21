@@ -1293,4 +1293,5 @@ fn completion_is_lazy_and_filters_existing_candidates() {
 mod agent_guide;
 mod ci;
 mod help;
+mod progress;
 mod render;

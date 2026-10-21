@@ -53,10 +53,47 @@ pub(crate) fn internal(code: &str, error: impl std::fmt::Display) -> RpcError {
     RpcError::new(code, json!({"message": error.to_string()}), 1)
 }
 
-/// Maps store failures; pool exhaustion keeps its own code.
+/// Maps store failures; pool exhaustion keeps its own code, and the failures a
+/// user can act on get a code and a message saying what to do.
 pub(crate) fn store_error(error: devlanes_state::Error) -> RpcError {
+    use devlanes_state::Error as E;
     match error {
-        devlanes_state::Error::Allocation(error) => allocation_error(&error),
+        E::Allocation(error) => allocation_error(&error),
+        E::ActiveRuns { units, tasks } => RpcError::new(
+            "active_runs",
+            json!({
+                "units": units,
+                "tasks": tasks,
+                "message": format!(
+                    "{units} unit run(s) and {tasks} task run(s) are still recorded as running; \
+                     stop them with `devlanes stop` (orphaned units included) and wait for \
+                     running tasks to finish, then retry"
+                ),
+            }),
+            1,
+        ),
+        E::Conflict { constraint } => RpcError::new(
+            "state_conflict",
+            json!({
+                "constraint": constraint,
+                "message": format!(
+                    "state.db already has a conflicting record ({constraint}); \
+                     `devlanes status` shows what is still running"
+                ),
+            }),
+            1,
+        ),
+        E::Corrupt(detail) => RpcError::new(
+            "state_corrupt",
+            json!({
+                "detail": detail,
+                "message": format!(
+                    "state.db holds an unreadable value ({detail}); \
+                     `devlanes daemon reset-state --yes` starts over"
+                ),
+            }),
+            1,
+        ),
         other => internal("state_error", other),
     }
 }
@@ -126,7 +163,61 @@ pub(crate) async fn read_dotenv(lane_dir: PathBuf, primary_dir: PathBuf) -> EnvM
 
 /// Loads `devlanes.yaml` from a lane's config directory. The local override and
 /// `.env` fall back to the primary worktree's when the lane has none.
-pub(crate) async fn load_config(lane_dir: PathBuf, primary_dir: PathBuf) -> ConfigState {
+/// What the composition root registered that config validation needs: preset
+/// option parsers and the contributors that name each preset's ports.
+#[derive(Clone)]
+pub(crate) struct ConfigChecks {
+    pub presets: Vec<crate::integrations::PresetEntry>,
+    pub contributors: Vec<Arc<dyn devlanes_core::contrib::Contributor>>,
+}
+
+impl Inner {
+    /// The registered presets and contributors, for [`check_config`].
+    pub(crate) fn config_checks(&self) -> ConfigChecks {
+        ConfigChecks {
+            presets: self.integ.presets.clone(),
+            contributors: self.integ.contributors.clone(),
+        }
+    }
+}
+
+/// Validates preset options against the registered presets and counts each
+/// preset's required ports against a fixed `lanes.block_size`.
+pub(crate) fn check_config(
+    config: &ProjectConfig,
+    checks: &ConfigChecks,
+) -> Result<devlanes_config::CheckReport, devlanes_config::ConfigError> {
+    let validator = |name: &str, options: Option<&Value>| -> Result<(), String> {
+        match checks.presets.iter().find(|preset| preset.name == name) {
+            Some(preset) => (preset.parse)(options),
+            None if checks.presets.is_empty() => Ok(()),
+            None => Err(format!("unknown preset `{name}`")),
+        }
+    };
+    let ports = |preset: &str| -> Vec<String> {
+        let view = devlanes_core::contrib::ServiceView {
+            name: "",
+            platform: None,
+            preset: Some(preset),
+            tags: &[],
+        };
+        let mut names: Vec<String> = checks
+            .contributors
+            .iter()
+            .flat_map(|contributor| contributor.required_ports(&view))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    };
+    devlanes_config::validate_with_preset_ports(config, &validator, &ports)
+}
+
+pub(crate) async fn load_config(
+    lane_dir: PathBuf,
+    primary_dir: PathBuf,
+    checks: ConfigChecks,
+) -> ConfigState {
     tokio::task::spawn_blocking(move || {
         let file = lane_dir.join("devlanes.yaml");
         let source = match std::fs::read_to_string(&file) {
@@ -148,7 +239,10 @@ pub(crate) async fn load_config(lane_dir: PathBuf, primary_dir: PathBuf) -> Conf
             local_file = primary_dir.join("devlanes.local.yaml");
             local = std::fs::read_to_string(&local_file).ok();
         }
-        match devlanes_config::parse_project_with::<OpaqueExtensions>(&source, local.as_deref()) {
+        let checked =
+            devlanes_config::parse_project_with::<OpaqueExtensions>(&source, local.as_deref())
+                .and_then(|config| check_config(&config, &checks).map(|_| config));
+        match checked {
             Ok(config) => ConfigState::Loaded(Arc::new(config)),
             Err(error) => {
                 let mut shaped = config_error(&error);
@@ -208,17 +302,18 @@ impl Inner {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        let config = match load_config(config_dir.clone(), config_dir.clone()).await {
-            ConfigState::Loaded(config) => config,
-            ConfigState::Invalid(error) => return Err(error),
-            ConfigState::Missing => {
-                return Err(RpcError::new(
-                    "not_found",
-                    json!({"reference": config_file}),
-                    3,
-                ));
-            }
-        };
+        let config =
+            match load_config(config_dir.clone(), config_dir.clone(), self.config_checks()).await {
+                ConfigState::Loaded(config) => config,
+                ConfigState::Invalid(error) => return Err(error),
+                ConfigState::Missing => {
+                    return Err(RpcError::new(
+                        "not_found",
+                        json!({"reference": config_file}),
+                        3,
+                    ));
+                }
+            };
         let repository = devlanes_git::discover(&config_dir, config.lanes.primary.as_deref())
             .await
             .map_err(|error| internal("git_failed", error))?;
@@ -789,7 +884,8 @@ impl Inner {
         lane: &Arc<LaneRt>,
     ) {
         let (lane_dir, primary_dir) = self.config_dirs(project, lane);
-        let config = self.with_resolver_domain(load_config(lane_dir, primary_dir).await);
+        let config = self
+            .with_resolver_domain(load_config(lane_dir, primary_dir, self.config_checks()).await);
         let mut st = lane.st();
         let before = match &st.config {
             ConfigState::Loaded(config) => serde_json::to_value(config.as_ref()).ok(),

@@ -9,7 +9,7 @@ mod lanes;
 mod other;
 mod words;
 
-use devlanes_proto::{Event, Method, events};
+use devlanes_proto::{Event, LeftProcess, Method, events};
 use serde_json::Value;
 
 pub(crate) use words::error_message;
@@ -328,6 +328,37 @@ pub(crate) fn tail_lines(tail: &[Value]) -> Vec<String> {
         .filter_map(|v| v.as_str().or_else(|| v.get("text").and_then(Value::as_str)))
         .map(|line| format!("  | {}", cap_line(&clean(line), 300)))
         .collect()
+}
+
+/// One line per non-empty list: `left running: pg_ctl (pid 4242)` and
+/// `escaped: node (pid 51)`, prefixed with `prefix` (such as `setup.db: `).
+pub(crate) fn leftover_notes(
+    prefix: &str,
+    left_running: &[LeftProcess],
+    escaped: &[LeftProcess],
+) -> Vec<String> {
+    [("left running", left_running), ("escaped", escaped)]
+        .into_iter()
+        .filter(|(_, processes)| !processes.is_empty())
+        .map(|(label, processes)| {
+            let names: Vec<String> = processes
+                .iter()
+                .map(|process| format!("{} (pid {})", clean(&process.command), process.pid))
+                .collect();
+            format!("{prefix}{label}: {}", names.join(", "))
+        })
+        .collect()
+}
+
+/// [`leftover_notes`] for a JSON object with `left_running`/`escaped` arrays.
+pub(crate) fn leftover_notes_of(prefix: &str, value: &Value) -> Vec<String> {
+    let processes = |key: &str| -> Vec<LeftProcess> {
+        value
+            .get(key)
+            .and_then(|list| serde_json::from_value(list.clone()).ok())
+            .unwrap_or_default()
+    };
+    leftover_notes(prefix, &processes("left_running"), &processes("escaped"))
 }
 
 /// Indented `key: value` view of any JSON, for shapes without a dedicated renderer

@@ -6,8 +6,8 @@ use devlanes_proto::{Event, LogLine, Method, RpcError, events};
 use serde_json::Value;
 
 use super::{
-    Ctx, Outcome, bytes, cap_line, clean, compact_fields, display_value, duration, int, list,
-    percent, plural, table, tail_lines, text, tree, words,
+    Ctx, Outcome, bytes, cap_line, clean, compact_fields, display_value, duration, int,
+    leftover_notes_of, list, percent, plural, table, tail_lines, text, tree, words,
 };
 use crate::Hint;
 
@@ -162,6 +162,14 @@ pub(super) fn run(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             line.push_str(&format!(" exit={code}"));
         }
         let mut lines = vec![line];
+        for leftovers in list(data, "leftovers") {
+            // Steps run as their own units; name them, but not the task itself.
+            let prefix = match text(leftovers, "unit") {
+                name if name == task => "  ".to_owned(),
+                name => format!("  {name}: "),
+            };
+            lines.extend(leftover_notes_of(&prefix, leftovers));
+        }
         if failed {
             // Set by the client when the output budget hid the end of the task's output.
             lines.extend(tail_lines(list(data, "log_tail")));
@@ -832,6 +840,9 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
             display_value(&data["subscribers"])
         ),
     ));
+    if let Some(release) = data.get("release").filter(|r| r.is_object()) {
+        checks.extend(release_checks(release));
+    }
     checks.push(Check::new(
         "output",
         Outcome::Ok,
@@ -842,6 +853,85 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
         ),
     ));
     checks
+}
+
+/// The `release` facts the client adds to doctor: this binary, how it was
+/// installed, a version difference with the daemon and the latest release.
+fn release_checks(release: &Value) -> Vec<Check> {
+    let version = text(release, "version");
+    let build = match release.get("build").and_then(Value::as_str) {
+        Some("local") | None => "local build".to_owned(),
+        Some(build) => format!("release build {build}"),
+    };
+    let mut checks = vec![Check::new(
+        "release",
+        Outcome::Ok,
+        format!(
+            "devlanes {version} ({build}), installed with {}",
+            text(release, "install_method")
+        ),
+    )];
+    let daemon = text(release, "daemon_version");
+    if !daemon.is_empty() && daemon != version {
+        checks.push(
+            Check::new(
+                "release",
+                Outcome::Skip,
+                format!("the daemon runs {daemon}, this CLI is {version}"),
+            )
+            .fix("devlanes daemon restart when convenient (it stops services)"),
+        );
+    }
+    let latest = release.get("latest").and_then(Value::as_str);
+    let checked = release
+        .get("checked_at")
+        .and_then(Value::as_u64)
+        .map(|ms| format!(", checked {}", ago(ms)))
+        .unwrap_or_default();
+    let check = match release.get("check").and_then(Value::as_str) {
+        Some("off") => Check::new(
+            "release",
+            Outcome::Ok,
+            match release.get("check_off_reason").and_then(Value::as_str) {
+                Some("config") => "release checks are off (updates.check: false)",
+                Some("env") => "release checks are off (DEVLANES_NO_UPDATE_CHECK)",
+                Some("ci") => "release checks are off in CI",
+                Some("debug_build") => "release checks are off in debug builds",
+                _ => "release checks are off",
+            },
+        ),
+        Some("ok") if release.get("update_available").and_then(Value::as_bool) == Some(true) => {
+            Check::new(
+                "release",
+                Outcome::Skip,
+                format!("devlanes {} is available{checked}", latest.unwrap_or("?")),
+            )
+            .fix(text(release, "command"))
+        }
+        Some("ok") => Check::new(
+            "release",
+            Outcome::Ok,
+            format!("latest release {}{checked}", latest.unwrap_or("?")),
+        ),
+        _ => Check::new("release", Outcome::Ok, "no release check yet"),
+    };
+    checks.push(check);
+    checks
+}
+
+/// A past epoch-milliseconds time as `5m ago`, `3h ago` or `2d ago`.
+fn ago(ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let seconds = now.saturating_sub(ms) / 1000;
+    match seconds {
+        0..60 => "just now".into(),
+        60..3600 => format!("{}m ago", seconds / 60),
+        3600..86_400 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
 }
 
 /// `doctor`: grouped checks, each failing or degraded one with a fix.

@@ -114,6 +114,7 @@ pub(crate) struct UnitRunRow {
     pub actor_agent_id: Option<String>,
     pub actor_session_id: Option<String>,
     pub log_path: Option<Vec<u8>>,
+    pub boot_id: Option<String>,
 }
 #[derive(Insertable)]
 #[diesel(table_name = unit_runs)]
@@ -128,6 +129,15 @@ pub(crate) struct NewUnitRun {
     pub actor_agent_id: Option<String>,
     pub actor_session_id: Option<String>,
     pub log_path: Option<Vec<u8>>,
+    pub boot_id: Option<String>,
+}
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = unit_run_members, check_for_backend(diesel::sqlite::Sqlite))]
+pub(crate) struct MemberRow {
+    pub unit_run_id: i64,
+    pub pid: i64,
+    pub sid: i64,
+    pub process_start_time: String,
 }
 #[derive(Queryable, Selectable, Insertable, AsChangeset)]
 #[diesel(table_name = lane_setup, primary_key(lane_id, entry), treat_none_as_null = true, check_for_backend(diesel::sqlite::Sqlite))]
@@ -204,6 +214,14 @@ pub(crate) struct SummaryRow {
     pub cpu_peak: f64,
     pub rss_peak: i64,
 }
+#[derive(Queryable, Selectable, Insertable)]
+#[diesel(table_name = startup_peaks, check_for_backend(diesel::sqlite::Sqlite))]
+pub(crate) struct PeakRow {
+    pub series: String,
+    pub recorded_at: i64,
+    pub peak: i64,
+    pub duration_ms: i64,
+}
 #[derive(Queryable, Selectable, Insertable, AsChangeset)]
 #[diesel(table_name = remote_hosts, primary_key(name), treat_none_as_null = true, check_for_backend(diesel::sqlite::Sqlite))]
 pub(crate) struct RemoteRow {
@@ -247,16 +265,17 @@ impl TryFrom<LaneRow> for Lane {
     /// Rejects corrupt states and indices rather than inventing defaults.
     fn try_from(row: LaneRow) -> Result<Self, Error> {
         let profiles: Vec<String> = serde_json::from_str(&row.profiles)
-            .map_err(|_| Error::Invalid("corrupt lane profiles".into()))?;
+            .map_err(|_| Error::Corrupt(format!("lane {} profiles", row.id)))?;
         if row.profile.as_ref() != profiles.first() {
-            return Err(Error::Invalid(
-                "lane profile does not match profiles first entry".into(),
-            ));
+            return Err(Error::Corrupt(format!(
+                "lane {} profile does not match the first entry of its profiles",
+                row.id
+            )));
         }
         let desired_state = match row.desired_state.as_str() {
             "running" => DesiredState::Running,
             "stopped" => DesiredState::Stopped,
-            _ => return Err(Error::Invalid("corrupt desired state".into())),
+            _ => return Err(Error::Corrupt(format!("lane {} desired state", row.id))),
         };
         Ok(Self {
             id: LaneId(row.id),
@@ -283,10 +302,7 @@ impl TryFrom<UnitRunRow> for UnitRun {
             process: ProcessIdentity {
                 pid: checked(row.pid)?,
                 sid: checked(row.sid)?,
-                start_time: row
-                    .process_start_time
-                    .parse()
-                    .map_err(|_| Error::Invalid("corrupt process birth token".into()))?,
+                start_time: birth_token(&row.process_start_time)?,
             },
             started_at: row.started_at,
             ended_at: row.ended_at,
@@ -296,6 +312,18 @@ impl TryFrom<UnitRunRow> for UnitRun {
             }),
             actor: actor(row.actor_kind, row.actor_agent_id, row.actor_session_id)?,
             log_path: row.log_path.map(path_from_bytes),
+            boot_id: row.boot_id,
+        })
+    }
+}
+impl TryFrom<MemberRow> for ProcessIdentity {
+    type Error = Error;
+    /// Restores a persisted descendant identity.
+    fn try_from(row: MemberRow) -> Result<Self, Error> {
+        Ok(Self {
+            pid: checked(row.pid)?,
+            sid: checked(row.sid)?,
+            start_time: birth_token(&row.process_start_time)?,
         })
     }
 }
@@ -318,7 +346,12 @@ impl TryFrom<TaskRow> for TaskRun {
 
 /// Checks numeric projections instead of silently wrapping identifiers.
 pub(crate) fn checked<T: TryFrom<i64>>(value: i64) -> Result<T, Error> {
-    T::try_from(value).map_err(|_| Error::Invalid("database integer out of range".into()))
+    T::try_from(value).map_err(|_| Error::Corrupt(format!("integer {value} out of range")))
+}
+/// Full-width unsigned OS birth tokens are stored as decimal text.
+fn birth_token(text: &str) -> Result<u64, Error> {
+    text.parse()
+        .map_err(|_| Error::Corrupt(format!("process birth token {text:?}")))
 }
 /// Saturates counters to SQLite's signed integer range, preserving the existing API.
 pub(crate) fn sql_u64(value: u64) -> i64 {
@@ -353,7 +386,7 @@ fn actor(
     let kind = match kind.as_str() {
         "human" => ActorKind::Human,
         "agent" => ActorKind::Agent,
-        _ => return Err(Error::Invalid("corrupt actor kind".into())),
+        _ => return Err(Error::Corrupt(format!("actor kind {kind:?}"))),
     };
     Ok(Actor {
         kind,

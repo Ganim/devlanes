@@ -8,12 +8,12 @@
 use crate::{
     ComposeFiles, HostConfig, HostRoute, InfraCommand, InfraCommandOptions, ProfileConfig,
     ProfileOptions, ReadyCheck, ReadyConfig, Run, RunScript, Scalar, ScriptSource, Started,
-    TcpReady, Templated,
+    TcpReady, Templated, Terminal, TerminalConfig, TerminalSettings,
 };
 use serde::{
     Deserialize, Deserializer,
     de::{
-        self, MapAccess, SeqAccess, Visitor,
+        self, IntoDeserializer, MapAccess, SeqAccess, Visitor,
         value::{MapAccessDeserializer, SeqAccessDeserializer},
     },
 };
@@ -123,6 +123,14 @@ shape!(TcpReady, "true or a named port",
     fn visit_bool<E: de::Error>(self, value: bool) -> Result<TcpReady, E> {
         Ok(TcpReady::Enabled(value))
     }
+);
+
+shape!(TerminalConfig, "a terminal app name or a mapping with app and progress",
+    /// Parse the app name; an unknown one lists the known apps.
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<TerminalConfig, E> {
+        Terminal::deserialize(value.into_deserializer()).map(TerminalConfig::App)
+    }
+    mapping!(TerminalConfig::Settings, TerminalSettings);
 );
 
 shape!(ComposeFiles, "a Compose file name or a list of them",

@@ -45,7 +45,7 @@ async fn pressure() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Pressure
 
-System CPU is the busy share of all cores between two calls, from `host_statistics(HOST_CPU_LOAD_INFO)` tick counters. The memory level is `kern.memorystatus_vm_pressure_level` (1 normal, 2 warn, 4 critical). Available memory is `kern.memorystatus_level` percent of `hw.memsize`.
+System CPU is the busy share of all cores between two calls, from per-core `host_processor_info(PROCESSOR_CPU_LOAD_INFO)` tick counters (`host_statistics` is rate-limited for non-platform binaries and returns stale counters). A counter that goes backwards without wrapping makes that reading empty. The memory level is `kern.memorystatus_vm_pressure_level` (1 normal, 2 warn, 4 critical). Available memory is `kern.memorystatus_level` percent of `hw.memsize`.
 
 ## Behaviour
 

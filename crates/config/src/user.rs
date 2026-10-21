@@ -38,8 +38,28 @@ pub struct UserConfig {
     pub state: StateConfig,
     /// How many services start at once, across all lanes and projects.
     pub startup: StartupConfig,
-    /// Terminal application used by open-in-terminal actions.
-    pub terminal: Option<Terminal>,
+    /// Terminal app for open-in-terminal actions, alone or with the progress-bar setting.
+    pub terminal: Option<TerminalConfig>,
+    /// Whether the daemon looks for new devlanes releases.
+    pub updates: UpdatesConfig,
+}
+
+/// Release checks: the daemon reads the latest release's version once a day and
+/// commands print a one-line notice. Nothing is downloaded or installed.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(extend("examples" = [{"check":false}]))]
+pub struct UpdatesConfig {
+    /// Check GitHub once a day for a newer devlanes release and show the upgrade command; defaults to true.
+    #[schemars(extend("examples" = [true,false]))]
+    pub check: bool,
+}
+
+impl Default for UpdatesConfig {
+    /// Checks are on unless turned off.
+    fn default() -> Self {
+        Self { check: true }
+    }
 }
 
 /// Age limits for finished unit/task history and disconnected remote-host records.
@@ -423,6 +443,68 @@ pub enum Terminal {
     /// Open a session in macOS Terminal.app.
     #[schemars(extend("examples" = ["terminal"]))]
     Terminal,
+}
+
+/// The terminal app name alone, or a mapping with the app and the progress-bar setting.
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(extend("examples" = ["ghostty",{"app":"ghostty","progress":"auto"}]))]
+pub enum TerminalConfig {
+    /// Terminal app used by open-in-terminal actions; progress stays on auto.
+    #[schemars(extend("examples" = ["ghostty"]))]
+    App(Terminal),
+    /// Terminal app and progress-bar setting written as separate fields.
+    #[schemars(extend("examples" = [{"app":"wezterm","progress":"never"}]))]
+    Settings(TerminalSettings),
+}
+
+/// Terminal app and how devlanes uses the terminal's own progress bar.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(extend("examples" = [{"app":"ghostty","progress":"auto"},{"progress":"never"}]))]
+pub struct TerminalSettings {
+    /// Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, else the first one installed.
+    #[schemars(extend("examples" = ["ghostty","iterm2"]))]
+    pub app: Option<Terminal>,
+    /// Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto.
+    #[schemars(extend("examples" = ["auto","never"]))]
+    pub progress: TerminalProgress,
+}
+
+/// When start progress goes to the terminal tab's progress bar. Only a terminal
+/// session in human output ever gets it; `DEVLANES_TERM_PROGRESS=0` or `1` overrides this.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(extend("examples" = ["auto","always","never"]))]
+pub enum TerminalProgress {
+    /// Only in terminals known to draw it (Ghostty, WezTerm, recent iTerm2, Windows Terminal, ConEmu, Ptyxis, Konsole), never inside tmux or screen.
+    #[default]
+    #[schemars(extend("examples" = ["auto"]))]
+    Auto,
+    /// In any terminal, also kitty 0.47 or later and inside tmux (needs `allow-passthrough on`).
+    #[schemars(extend("examples" = ["always"]))]
+    Always,
+    /// Never.
+    #[schemars(extend("examples" = ["never"]))]
+    Never,
+}
+
+impl TerminalConfig {
+    /// The app for open-in-terminal actions, if one is set.
+    pub fn app(&self) -> Option<Terminal> {
+        match self {
+            Self::App(app) => Some(*app),
+            Self::Settings(settings) => settings.app,
+        }
+    }
+
+    /// The progress-bar setting; the bare app form keeps it on auto.
+    pub fn progress(&self) -> TerminalProgress {
+        match self {
+            Self::App(_) => TerminalProgress::Auto,
+            Self::Settings(settings) => settings.progress,
+        }
+    }
 }
 
 impl UserConfig {

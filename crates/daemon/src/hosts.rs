@@ -9,7 +9,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -18,8 +18,8 @@ use std::{
 use devlanes_config::{Resolver, UserConfig};
 use devlanes_proto::RpcError;
 use devlanes_resolver_hosts::{
-    DesiredHosts, HostsClient, HostsError, HostsFileMode, HostsFilePolicy, HostsSync,
-    LocalhostResolution, Suffixes, SyncConfig, SyncState,
+    DesiredHosts, HelperVersion, HostsClient, HostsError, HostsFileMode, HostsFilePolicy,
+    HostsSync, LocalhostResolution, Suffixes, SyncConfig, SyncState,
 };
 use serde_json::{Value, json};
 
@@ -104,6 +104,66 @@ pub struct HostsOptions {
     pub tld_error: Option<HostsError>,
     /// Debounce and backoff timing.
     pub sync: SyncConfig,
+    /// The running devlanes version; the installed helper should match it.
+    pub expected_version: String,
+}
+
+/// The fix for an outdated, missing or broken helper.
+const REINSTALL: &str = "devlanes certs trust --hosts";
+
+/// `doctor`'s `helper` object from the installed helper's `version`:
+/// `{state, level, installed, expected, message?, fix?}` with `state` one of
+/// `ok`, `mismatch` (other version, same protocol), `incompatible` (another
+/// protocol: updates fail), `missing` or `unrunnable`; `level` is `ok` or `warning`.
+pub fn helper_check(result: &Result<HelperVersion, HostsError>, expected: &str) -> Value {
+    let warn = |state: &str, installed: Option<&str>, message: String| {
+        json!({
+            "state": state,
+            "level": "warning",
+            "installed": installed,
+            "expected": expected,
+            "message": message,
+            "fix": REINSTALL,
+        })
+    };
+    match result {
+        Ok(found) if found.version == expected => json!({
+            "state": "ok",
+            "level": "ok",
+            "installed": found.version,
+            "expected": expected,
+        }),
+        Ok(found) => warn(
+            "mismatch",
+            Some(&found.version),
+            format!(
+                "The installed hosts helper is version {} and devlanes is {expected}. Run `{REINSTALL}` to reinstall it.",
+                found.version
+            ),
+        ),
+        Err(HostsError::Outdated { found }) => warn(
+            "incompatible",
+            None,
+            format!(
+                "The installed hosts helper does not match devlanes {expected} (it reports {found}), so /etc/hosts updates fail. Run `{REINSTALL}` to reinstall it."
+            ),
+        ),
+        Err(HostsError::HelperMissing { path }) => warn(
+            "missing",
+            None,
+            format!(
+                "The hosts helper is not installed at {}. Run `{REINSTALL}` to install it.",
+                path.display()
+            ),
+        ),
+        Err(error) => warn(
+            "unrunnable",
+            None,
+            format!(
+                "Cannot run the installed hosts helper to read its version: {error}. Run `{REINSTALL}` to reinstall it."
+            ),
+        ),
+    }
 }
 
 /// The daemon's view of the hosts fallback: policy, probe result and the sync task.
@@ -119,21 +179,79 @@ pub struct HostsFile {
     armed: AtomicBool,
     /// Last computed set, for `doctor` and `why`.
     desired: Mutex<DesiredHosts>,
+    client: HostsClient,
+    expected_version: String,
+    /// [`helper_check`] of the installed helper, read once per daemon run.
+    helper: Arc<tokio::sync::OnceCell<Value>>,
+    checking: AtomicBool,
 }
 
 impl HostsFile {
-    /// Starts the sync task on the current runtime.
+    /// Starts the sync task on the current runtime. With the helper installed,
+    /// its version is checked right away; otherwise when names are first needed.
     pub fn spawn(client: HostsClient, options: HostsOptions) -> Self {
         let suffixes = client.suffixes().clone();
-        Self {
+        let hosts = Self {
             policy: options.policy,
             resolution: options.resolution,
             suffixes,
             tld_error: options.tld_error,
-            sync: HostsSync::spawn(client, options.sync),
+            sync: HostsSync::spawn(client.clone(), options.sync),
             armed: AtomicBool::new(options.installed),
             desired: Mutex::new(DesiredHosts::default()),
+            client,
+            expected_version: options.expected_version,
+            helper: Arc::default(),
+            checking: AtomicBool::new(false),
+        };
+        if options.installed {
+            hosts.check_helper();
         }
+        hosts
+    }
+
+    /// Reads the installed helper's version once, in the background: `version`
+    /// runs without sudo, so it never prompts, and with the client's timeout.
+    fn check_helper(&self) {
+        if self.checking.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (client, expected, cell) = (
+            self.client.clone(),
+            self.expected_version.clone(),
+            self.helper.clone(),
+        );
+        tokio::spawn(async move {
+            let check = helper_check(&client.version().await, &expected);
+            if check["level"] == "warning" {
+                tracing::warn!(
+                    state = %check["state"],
+                    message = %check["message"].as_str().unwrap_or_default(),
+                    "hosts helper"
+                );
+            }
+            let _ = cell.set(check);
+        });
+    }
+
+    /// The cached check, `null` until it ran.
+    fn helper_status(&self) -> Value {
+        self.helper.get().cloned().unwrap_or(Value::Null)
+    }
+
+    /// A failure's `{code, message}`; when the helper version is off, the version
+    /// is what the user needs to hear, not the generic failure.
+    fn failure_value(&self, error: &HostsError) -> Value {
+        let helper = self.helper_status();
+        if helper["level"] == "warning" && helper["state"] != "missing" {
+            return json!({
+                "code": "helper_version_mismatch",
+                "message": helper["message"],
+                "fix": REINSTALL,
+                "cause": error_value(error),
+            });
+        }
+        error_value(error)
     }
 
     /// Recomputes the names for `routes` and hands them to the sync task, which
@@ -148,6 +266,8 @@ impl HostsFile {
             return;
         }
         self.armed.store(true, Ordering::SeqCst);
+        // First use of the fallback: learn whether the helper matches this devlanes.
+        self.check_helper();
         self.sync.update(names);
     }
 
@@ -166,13 +286,14 @@ impl HostsFile {
     }
 
     /// `doctor`'s `hosts` object: `{mode, probe, state, names, desired, skipped,
-    /// last_error, tld_error}`. `last_error` is set while the latest attempt failed.
+    /// last_error, tld_error, helper}`. `last_error` is set while the latest
+    /// attempt failed; `helper` is [`helper_check`] once it ran (else `null`).
     pub fn status(&self) -> Value {
         let state = self.sync.state().borrow().clone();
         let (word, names, last_error) = match &state {
             SyncState::Idle => ("idle", Value::Null, Value::Null),
             SyncState::Applied { names, .. } => ("applied", json!(names), Value::Null),
-            SyncState::Failed(error) => ("failed", Value::Null, error_value(error)),
+            SyncState::Failed(error) => ("failed", Value::Null, self.failure_value(error)),
         };
         let desired = lock(&self.desired);
         json!({
@@ -184,23 +305,29 @@ impl HostsFile {
             "skipped": desired.skipped.len(),
             "last_error": last_error,
             "tld_error": self.tld_error.as_ref().map(error_value),
+            "helper": self.helper_status(),
         })
     }
 
     /// A `why` reason when `hosts` should be in the block but the helper cannot
-    /// write it: `helper_missing`, `sudo_denied` or `helper_outdated`, each fixed
-    /// by `devlanes certs trust --hosts`.
+    /// write it: `helper_missing`, `sudo_denied`, `helper_outdated` or (any failure
+    /// with an installed helper of another version) `helper_version_mismatch`,
+    /// each fixed by `devlanes certs trust --hosts`.
     pub fn reason(&self, hosts: &[String]) -> Option<(&'static str, Value)> {
         let state = self.sync.state().borrow().clone();
         let SyncState::Failed(error) = state else {
             return None;
         };
-        if !matches!(
-            error,
-            HostsError::HelperMissing { .. }
-                | HostsError::SudoDenied { .. }
-                | HostsError::Outdated { .. }
-        ) {
+        let failure = self.failure_value(&error);
+        let mismatch = failure["code"] == "helper_version_mismatch";
+        if !mismatch
+            && !matches!(
+                error,
+                HostsError::HelperMissing { .. }
+                    | HostsError::SudoDenied { .. }
+                    | HostsError::Outdated { .. }
+            )
+        {
             return None;
         }
         let desired = lock(&self.desired);
@@ -210,6 +337,12 @@ impl HostsFile {
             .collect();
         if affected.is_empty() {
             return None;
+        }
+        if mismatch {
+            return Some((
+                "helper_version_mismatch",
+                json!({"hosts": affected, "message": failure["message"], "fix": REINSTALL, "helper": self.helper_status()}),
+            ));
         }
         Some((
             error.code(),
@@ -427,6 +560,7 @@ mod tests {
                 installed,
                 tld_error: None,
                 sync: SyncConfig::default(),
+                expected_version: "0.1.0".into(),
             },
         )
     }
@@ -508,5 +642,117 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(hosts.status()["last_error"]["code"], "helper_missing");
         assert!(executor.calls().is_empty(), "no sudo without the helper");
+        assert_eq!(hosts.status()["helper"]["state"], "missing");
+    }
+
+    /// An installed helper whose `version` prints `line` (or fails to start).
+    fn versioned(line: Option<&'static str>, deny: bool) -> Arc<FakeExecutor> {
+        Arc::new(FakeExecutor::new(move |command| {
+            if command.args.iter().any(|arg| arg == "version") {
+                assert_ne!(command.program, "sudo", "version never goes through sudo");
+                return match line {
+                    Some(line) => Ok(CommandOutput::ok(format!("{line}\n"))),
+                    None => Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+                };
+            }
+            if deny {
+                return Ok(CommandOutput::failed(1, "sudo: a password is required\n"));
+            }
+            Ok(CommandOutput::ok("changed names=0\n"))
+        }))
+    }
+
+    #[test]
+    /// Matching, older, other-protocol, missing and unrunnable helpers.
+    fn helper_versions_are_judged() {
+        let found = |version: &str| HelperVersion {
+            version: version.into(),
+            protocol: PROTOCOL,
+            build: "release".into(),
+        };
+        let ok = helper_check(&Ok(found("0.4.0")), "0.4.0");
+        assert_eq!(
+            (ok["state"].as_str(), ok["level"].as_str()),
+            (Some("ok"), Some("ok"))
+        );
+        let older = helper_check(&Ok(found("0.3.0")), "0.4.0");
+        assert_eq!(older["state"], "mismatch");
+        assert_eq!(older["level"], "warning");
+        assert_eq!(older["fix"], "devlanes certs trust --hosts");
+        assert_eq!(
+            older["message"],
+            "The installed hosts helper is version 0.3.0 and devlanes is 0.4.0. Run `devlanes certs trust --hosts` to reinstall it."
+        );
+        let other = helper_check(&Err(HostsError::Outdated { found: "2".into() }), "0.4.0");
+        assert_eq!(other["state"], "incompatible");
+        let missing = helper_check(
+            &Err(HostsError::HelperMissing {
+                path: INSTALL_PATH.into(),
+            }),
+            "0.4.0",
+        );
+        assert_eq!(missing["state"], "missing");
+        let broken = helper_check(
+            &Err(HostsError::HelperFailed {
+                code: None,
+                message: "permission denied".into(),
+            }),
+            "0.4.0",
+        );
+        assert_eq!(broken["state"], "unrunnable");
+        assert!(
+            broken["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("permission denied"))
+        );
+        for check in [&older, &other, &missing, &broken] {
+            assert!(
+                !check["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains('\u{2014}')
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    /// An installed older helper is reported at startup without sudo, and a
+    /// later update failure is named as the version mismatch.
+    async fn an_older_installed_helper_is_named() {
+        let executor = versioned(Some("devlanes-hosts 0.0.9 protocol=1 build=release"), true);
+        let hosts = hosts_file(executor.clone(), Always, true);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let helper = hosts.status()["helper"].clone();
+        assert_eq!(helper["state"], "mismatch", "{helper}");
+        assert_eq!(helper["installed"], "0.0.9");
+        assert_eq!(helper["expected"], "0.1.0");
+
+        hosts.update(&routes(), &hints());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let status = hosts.status();
+        assert_eq!(
+            status["last_error"]["code"], "helper_version_mismatch",
+            "{status}"
+        );
+        assert_eq!(status["last_error"]["cause"]["code"], "sudo_denied");
+        let (code, data) = hosts
+            .reason(&["web.acme-2.localhost".into()])
+            .expect("why reason");
+        assert_eq!(code, "helper_version_mismatch");
+        assert_eq!(data["fix"], "devlanes certs trust --hosts");
+    }
+
+    #[tokio::test(start_paused = true)]
+    /// A matching helper is fine; one that cannot be run is reported as such.
+    async fn matching_and_unrunnable_helpers() {
+        let matching = hosts_file(
+            versioned(Some("devlanes-hosts 0.1.0 protocol=1 build=release"), false),
+            Always,
+            true,
+        );
+        let broken = hosts_file(versioned(None, false), Always, true);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(matching.status()["helper"]["state"], "ok");
+        assert_eq!(broken.status()["helper"]["state"], "unrunnable");
     }
 }

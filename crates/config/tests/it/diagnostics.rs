@@ -61,6 +61,34 @@ fn did_you_mean_outside_services() {
     assert_eq!(error.location.line, 2);
 }
 
+/// `terminal` is the app name alone or a mapping with the progress setting.
+#[test]
+fn terminal_takes_a_name_or_a_mapping() {
+    let bare = parse_user("terminal: kitty\n").expect("name");
+    let terminal = bare.terminal.expect("terminal");
+    assert!(matches!(terminal.app(), Some(Terminal::Kitty)));
+    assert_eq!(terminal.progress(), TerminalProgress::Auto);
+    let mapped = parse_user("terminal:\n  app: ghostty\n  progress: never\n").expect("mapping");
+    let terminal = mapped.terminal.expect("terminal");
+    assert!(matches!(terminal.app(), Some(Terminal::Ghostty)));
+    assert_eq!(terminal.progress(), TerminalProgress::Never);
+    let progress_only = parse_user("terminal: { progress: always }\n").expect("progress only");
+    let terminal = progress_only.terminal.expect("terminal");
+    assert!(terminal.app().is_none());
+    assert_eq!(terminal.progress(), TerminalProgress::Always);
+    let source = "terminal:\n  app: ghostty\n  progres: never\n";
+    let error = parse_user(source).expect_err("typo");
+    assert!(
+        error
+            .message
+            .contains("unknown key `progres`; did you mean `progress`?"),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.location.line, 3);
+    assert!(parse_user("terminal: xterm\n").is_err());
+}
+
 /// Values with several YAML forms report the chosen form's own unknown keys.
 #[test]
 fn alternative_forms_keep_struct_errors() {

@@ -49,5 +49,11 @@ expression: user
     "settle_cpu": "10%",
     "slot_timeout": "20000ms"
   },
-  "terminal": "ghostty"
+  "terminal": {
+    "app": "ghostty",
+    "progress": "auto"
+  },
+  "updates": {
+    "check": true
+  }
 }

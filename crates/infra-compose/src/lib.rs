@@ -29,7 +29,7 @@ pub use infra::{
 };
 pub use model::{
     ComposeModel, ContainerStatus, Health, PortModel, Publisher, ServiceModel, ServiceVolume,
-    VolumeModel, parse_ps, service_health,
+    VolumeModel, parse_ps, service_containers, service_health,
 };
 pub use overrides::{
     LaneOverride, OVERRIDE_FILE, labels, lane_labels, render_override, write_override,

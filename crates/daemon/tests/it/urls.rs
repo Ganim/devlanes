@@ -106,3 +106,68 @@ async fn public_urls_use_the_bound_https_port() {
     .await
     .expect("timeout");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+/// A routed host outside the devlanes CA's names keeps its route but is named in
+/// the start result, `doctor` and `config check` with a name under the lane's
+/// domain; an unconstrained CA (mkcert) gives no warning.
+async fn hosts_outside_the_ca_are_warned_about() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config = "project: demo\nservices:\n  web:\n    run: serve\n    hosts: [\"web.${{ lane.domain }}\", \"web.example.com\"]\n";
+        let main = repo(&tmp.path, "r", config);
+        let constrained: Vec<String> = ["localhost", "test", "internal", "home.arpa"]
+            .map(str::to_owned)
+            .to_vec();
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                ca_permitted: Some(constrained),
+                ..Setup::default()
+            },
+        )
+        .await;
+        let started = h
+            .call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        let warnings = started["warnings"].as_array().expect("warnings");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0]["code"], "host_outside_ca");
+        assert_eq!(warnings[0]["data"]["host"], "web.example.com");
+        assert_eq!(warnings[0]["data"]["unit"], "web");
+        assert_eq!(warnings[0]["data"]["suggestion"], "web.demo.localhost");
+        let hosts = h.call(Method::Hosts, json!({}), cx(&main)).await.expect("hosts");
+        assert!(
+            hosts.to_string().contains("\"web.example.com\""),
+            "the route stays"
+        );
+        let doctor = h.call(Method::Doctor, json!({}), cx(&main)).await.expect("doctor");
+        assert_eq!(doctor["ca_warnings"][0]["data"]["host"], "web.example.com");
+        let check = h
+            .call(Method::ConfigCheck, json!({}), cx(&main))
+            .await
+            .expect("config check");
+        let found = check["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .find(|w| w["code"] == "host_outside_ca")
+            .expect("config check warns");
+        assert_eq!(found["path"], "services.web.hosts");
+        assert!(found["message"].as_str().is_some_and(|m| m.contains("web.demo.localhost")));
+        h.call(Method::Stop, json!({}), cx(&main)).await.expect("stop");
+        h.close().await;
+
+        let mkcert = harness(&tmp.path.join("home2"), Setup::default()).await;
+        let started = mkcert
+            .call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        assert_eq!(started["warnings"], json!([]));
+        mkcert.call(Method::Stop, json!({}), cx(&main)).await.expect("stop");
+        mkcert.close().await;
+    })
+    .await
+    .expect("timeout");
+}

@@ -15,7 +15,7 @@ use devlanes_core::{
     env::Environment,
 };
 use devlanes_proto::{
-    Actor, LogQuery, RpcError, StartResult, UnitFailureData, UnitSummary, events,
+    Actor, Leftovers, LogQuery, RpcError, StartResult, UnitFailureData, UnitSummary, events,
 };
 use devlanes_resolve::{Launch, ReadySpec, ResolvedCommand, ResolvedLane, ResolvedService};
 use devlanes_state::{DesiredState, TaskRunInput};
@@ -233,6 +233,14 @@ pub(crate) async fn failure_of(lane: &str, name: &str, host: &UnitHost) -> UnitF
     }
 }
 
+/// What the ended run behind `host` left behind; `None` when nothing was or a
+/// newer run of `unit` replaced it.
+pub(crate) fn ended_leftovers(lane: &LaneRt, unit: &str, host: &UnitHost) -> Option<Leftovers> {
+    let st = lane.st();
+    let rec = st.units.get(unit).filter(|rec| rec.host.same_run(host))?;
+    Some(rec.leftovers(unit)).filter(|leftovers| !leftovers.is_empty())
+}
+
 /// Outcome of one pipeline phase.
 pub(crate) enum PhaseResult {
     Done,
@@ -267,6 +275,8 @@ pub(crate) struct StartCx {
     pub already_running: Vec<String>,
     pub failures: Vec<UnitFailureData>,
     pub skipped_tasks: Vec<String>,
+    /// Tasks and setup commands of this start that left processes behind.
+    pub leftovers: Vec<Leftovers>,
     pub infra_needs: Vec<InfraPortNeed>,
     pub timed_out: bool,
     /// Bypass the start gate (`Selection.all_at_once`).
@@ -376,6 +386,7 @@ impl LanePhase for InfraPhase {
             Ok(up) => {
                 let mut st = cx.lane.st();
                 st.infra_ns = Some(up.namespace);
+                st.infra_containers = up.containers;
                 st.setup_env = up.setup_env;
             }
             Err(error) if skip.is_some() => {
@@ -491,6 +502,10 @@ impl LanePhase for SetupPhase {
         let results = join_all(runs).await;
         let mut failed = Vec::new();
         for (name, result) in results {
+            if let Ok((_, host)) = &result {
+                cx.leftovers
+                    .extend(ended_leftovers(&cx.lane, &format!("setup.{name}"), host));
+            }
             let ignore = resolved.setup.get(&name).is_some_and(|c| c.ignore_errors);
             let ok = matches!(&result, Ok((outcome, _)) if outcome.code == Some(0));
             if ok || ignore {
@@ -643,9 +658,12 @@ impl LanePhase for TasksPhase {
                     0,
                 )
                 .await;
+            if let Ok(outcome) = &outcome {
+                cx.leftovers.extend(outcome.leftovers.iter().cloned());
+            }
             match outcome {
                 Ok(TaskOutcome { code: Some(0), .. }) => {}
-                Ok(TaskOutcome { code, host }) => {
+                Ok(TaskOutcome { code, host, .. }) => {
                     let mut failure = match &host {
                         Some(host) => failure_of(&cx.reference, &name, host).await,
                         None => UnitFailureData {
@@ -784,6 +802,8 @@ impl LanePhase for ServicesPhase {
 pub(crate) struct TaskOutcome {
     pub code: Option<i32>,
     pub host: Option<UnitHost>,
+    /// Every unit of the task (steps included) that left processes behind.
+    pub leftovers: Vec<Leftovers>,
 }
 
 /// Options of one start request.
@@ -840,12 +860,19 @@ impl Inner {
                 ));
             }
             // The watcher may not have recorded the exit yet; finishing is idempotent.
+            // While the old row stays unfinished, a new run could not be recorded.
             if let Some(id) = run_id {
                 let outcome = host.exit_outcome().unwrap_or(ExitOutcome {
                     code: None,
                     signal: None,
                 });
-                let _ = self.store.finish_unit_run(id, outcome).await;
+                if !self.finish_run(id, outcome).await {
+                    return Err(RpcError::new(
+                        "state_error",
+                        json!({"lane": reference, "unit": request.name, "message": "the previous run could not be recorded as finished in state.db"}),
+                        1,
+                    ));
+                }
             }
         }
         write_files(lane_path, request.files.clone()).await?;
@@ -888,19 +915,33 @@ impl Inner {
             }
         };
         let run_id = match identity {
-            Some(process) if process.pid > 0 && process.sid > 0 => self
-                .store
-                .record_unit_run(devlanes_state::UnitRunInput {
-                    lane_id: record.id,
-                    unit: request.name.clone(),
-                    process,
-                    actor: core_actor(&request.actor),
-                    log_path: Some(log_dir),
-                })
-                .await
-                .map(|run| run.id)
-                .map_err(|error| tracing::warn!(%error, "unit run not recorded"))
-                .ok(),
+            Some(process) if process.pid > 0 && process.sid > 0 => {
+                let boot_id = tokio::task::spawn_blocking(devlanes_sys::boot_id)
+                    .await
+                    .ok()
+                    .and_then(Result::ok);
+                let recorded = self
+                    .store
+                    .record_unit_run(devlanes_state::UnitRunInput {
+                        lane_id: record.id,
+                        unit: request.name.clone(),
+                        process,
+                        actor: core_actor(&request.actor),
+                        log_path: Some(log_dir),
+                        boot_id,
+                    })
+                    .await;
+                match recorded {
+                    Ok(run) => Some(run.id),
+                    Err(error) => {
+                        // An unrecorded process would survive a daemon crash with no
+                        // way to find or stop it, so it does not run at all.
+                        tracing::warn!(%error, unit = %request.name, "unit run not recorded; stopping it");
+                        let _ = host.stop(request.stop).await;
+                        return Err(store_error(error));
+                    }
+                }
+            }
             _ => None,
         };
         lane.st().units.insert(
@@ -921,6 +962,7 @@ impl Inner {
                 preset: request.preset,
                 files: request.files,
                 color: Some(color),
+                managed: managed.clone(),
             },
         );
         self.watch_unit(
@@ -930,6 +972,9 @@ impl Inner {
             host.clone(),
             run_id,
         );
+        if let Some(run) = run_id {
+            self.track_escaped(host.clone(), run);
+        }
         Ok((host, managed))
     }
 
@@ -967,8 +1012,10 @@ impl Inner {
                 }
             }
             let outcome = host.wait_exit().await;
+            // On failure the lane's record keeps `run_id`; the next start of this
+            // unit finishes the row again before recording a new run.
             if let Some(id) = run_id {
-                let _ = engine.store.finish_unit_run(id, outcome).await;
+                engine.finish_run(id, outcome).await;
             }
             engine.emit_unit(&project, &lane, &name, &host);
             if let Some(id) = run_id {
@@ -1202,59 +1249,84 @@ impl Inner {
                 })
                 .await
                 .map_err(store_error)?;
-            let mut outcome = TaskOutcome {
-                code: Some(0),
-                host: None,
-            };
-            match &task.launch {
-                None => {
-                    for step in &task.steps {
-                        let step_outcome = if let Some(entry) = step.strip_prefix("infra.setup.") {
-                            self.step_command(project, lane, resolved, "setup", entry, actor)
+            // Every exit path finishes the row: an unfinished task run would block
+            // `lane clean` until the next daemon start abandons it.
+            let result: Result<TaskOutcome, RpcError> = async {
+                let mut outcome = TaskOutcome {
+                    code: Some(0),
+                    host: None,
+                    leftovers: Vec::new(),
+                };
+                let mut leftovers = Vec::new();
+                match &task.launch {
+                    None => {
+                        for step in &task.steps {
+                            let step_outcome = if let Some(entry) =
+                                step.strip_prefix("infra.setup.")
+                            {
+                                self.step_command(project, lane, resolved, "setup", entry, actor)
+                                    .await?
+                            } else if let Some(entry) = step.strip_prefix("infra.teardown.") {
+                                self.step_command(project, lane, resolved, "teardown", entry, actor)
+                                    .await?
+                            } else {
+                                self.run_task(
+                                    project,
+                                    lane,
+                                    resolved,
+                                    step,
+                                    "step",
+                                    actor,
+                                    session,
+                                    depth + 1,
+                                )
                                 .await?
-                        } else if let Some(entry) = step.strip_prefix("infra.teardown.") {
-                            self.step_command(project, lane, resolved, "teardown", entry, actor)
-                                .await?
-                        } else {
-                            self.run_task(
-                                project,
-                                lane,
-                                resolved,
-                                step,
-                                "step",
-                                actor,
-                                session,
-                                depth + 1,
-                            )
-                            .await?
-                        };
-                        if step_outcome.code != Some(0) {
-                            outcome = step_outcome;
-                            break;
+                            };
+                            leftovers.extend(step_outcome.leftovers.iter().cloned());
+                            if step_outcome.code != Some(0) {
+                                outcome = step_outcome;
+                                break;
+                            }
                         }
                     }
+                    Some(launch) => {
+                        let extra = lane.st().setup_env.clone();
+                        let mut request = SpawnRequest::oneshot(
+                            name,
+                            Kind::Task,
+                            launch,
+                            task.pty,
+                            &extra,
+                            actor,
+                        );
+                        request.color = Some(task.color.clone());
+                        let (host, _) = self.spawn_unit(project, lane, request).await?;
+                        let exit = match session {
+                            Some(session) => {
+                                let follower = stream_logs(host.clone(), session.clone());
+                                let (exit, ()) =
+                                    tokio::join!(finish(&host, task.timeout), follower);
+                                exit
+                            }
+                            None => finish(&host, task.timeout).await,
+                        };
+                        leftovers.extend(ended_leftovers(lane, name, &host));
+                        outcome = TaskOutcome {
+                            code: exit.code,
+                            host: Some(host),
+                            leftovers: Vec::new(),
+                        };
+                    }
                 }
-                Some(launch) => {
-                    let extra = lane.st().setup_env.clone();
-                    let mut request =
-                        SpawnRequest::oneshot(name, Kind::Task, launch, task.pty, &extra, actor);
-                    request.color = Some(task.color.clone());
-                    let (host, _) = self.spawn_unit(project, lane, request).await?;
-                    let exit = match session {
-                        Some(session) => {
-                            let follower = stream_logs(host.clone(), session.clone());
-                            let (exit, ()) = tokio::join!(finish(&host, task.timeout), follower);
-                            exit
-                        }
-                        None => finish(&host, task.timeout).await,
-                    };
-                    outcome = TaskOutcome {
-                        code: exit.code,
-                        host: Some(host),
-                    };
-                }
+                outcome.leftovers = leftovers;
+                Ok(outcome)
             }
-            let _ = self.store.finish_task_run(run.id, outcome.code).await;
+            .await;
+            let code = result.as_ref().ok().and_then(|outcome| outcome.code);
+            if let Err(error) = self.store.finish_task_run(run.id, code).await {
+                tracing::warn!(%error, task = name, "task run not recorded as finished");
+            }
+            let outcome = result?;
             let state = if outcome.code == Some(0) {
                 "done"
             } else {
@@ -1305,9 +1377,13 @@ impl Inner {
                     .await;
             }
         }
+        let leftovers = ended_leftovers(lane, &format!("{phase}.{entry}"), &host)
+            .into_iter()
+            .collect();
         Ok(TaskOutcome {
             code: if ok { Some(0) } else { outcome.code },
             host: Some(host),
+            leftovers,
         })
     }
 
@@ -1426,6 +1502,7 @@ impl Inner {
             already_running: Vec::new(),
             failures: Vec::new(),
             skipped_tasks: Vec::new(),
+            leftovers: Vec::new(),
             infra_needs: Vec::new(),
             timed_out: false,
             all_at_once: options.all_at_once,
@@ -1545,7 +1622,15 @@ impl Inner {
         }
         let all_ready = units.iter().all(|u| u.state == "ready");
         let branch = cx.lane.st().branch.clone();
+        let warnings = self.ca_warnings(&cx.reference, &cx.lane.st());
+        for warning in &warnings {
+            self.bus.emit(
+                events::LANE_WARNING,
+                json!({"lane": cx.reference, "code": warning.code, "data": warning.data}),
+            );
+        }
         StartResult {
+            warnings,
             started: cx
                 .started
                 .iter()
@@ -1563,6 +1648,7 @@ impl Inner {
             timed_out: cx.timed_out,
             failures: cx.failures,
             skipped_tasks: cx.skipped_tasks,
+            leftovers: cx.leftovers,
             units,
         }
     }
@@ -1881,6 +1967,7 @@ impl Inner {
             already_running: Vec::new(),
             failures: Vec::new(),
             skipped_tasks: Vec::new(),
+            leftovers: Vec::new(),
             infra_needs: Vec::new(),
             timed_out: false,
             all_at_once: options.all_at_once,
@@ -1956,12 +2043,11 @@ impl Inner {
                     code: None,
                     signal: None,
                 });
-                let _ = self.store.finish_unit_run(id, outcome).await;
+                // A row left unfinished makes `clean_lane` refuse with `active_runs`.
+                self.finish_run(id, outcome).await;
             }
-            self.store
-                .forget_lane_lifecycle(record.id)
-                .await
-                .map_err(store_error)?;
+            // Setup records, once-only markers and task history go in the same
+            // transaction as the lane's block.
             self.store
                 .clean_lane(record.id)
                 .await
@@ -1977,6 +2063,7 @@ impl Inner {
             st.units.clear();
             st.started_at_ms = None;
             st.infra_ns = None;
+            st.infra_containers.clear();
             st.peaks.clear();
             st.moves_to = None;
             st.present
@@ -2053,6 +2140,7 @@ impl Inner {
         if let Ok(up) = self.integ.infra.namespace(spec).await {
             let mut st = cx.lane.st();
             st.infra_ns = Some(up.namespace);
+            st.infra_containers = up.containers;
             st.setup_env = up.setup_env;
         }
         self.resolve_full(&cx.project, &cx.lane)

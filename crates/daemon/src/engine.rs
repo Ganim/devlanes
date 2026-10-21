@@ -48,6 +48,11 @@ pub struct EngineOptions {
     /// Where the embedded DNS server listens under the `resolver` hostname
     /// strategy; port 0 picks an ephemeral port (tests).
     pub dns_listen: std::net::SocketAddr,
+    /// Why the user config could not be used (`{message, file, line, column}`);
+    /// `user` then holds the defaults. `doctor` shows it.
+    pub user_config_error: Option<Value>,
+    /// Release checks (see `update`); never downloads or installs anything.
+    pub update_check: crate::update::UpdateCheckOptions,
 }
 
 impl EngineOptions {
@@ -63,6 +68,8 @@ impl EngineOptions {
             watch: true,
             start_timeout: Duration::from_secs(180),
             dns_listen: devlanes_resolver_dns::default_listen(),
+            user_config_error: None,
+            update_check: crate::update::UpdateCheckOptions::from_env(),
         }
     }
 }
@@ -87,6 +94,8 @@ pub(crate) struct Inner {
     pub dns: Mutex<Value>,
     /// The latest state.db retention pass, for `doctor`.
     pub last_prune: Mutex<Option<crate::maintenance::LastPrune>>,
+    /// The latest release the background check read.
+    pub update: crate::update::UpdateState,
 }
 
 /// Cheap handle implementing [`Handler`].
@@ -123,6 +132,7 @@ impl Engine {
                 pacing: crate::pacing::Pacing::default(),
                 dns: Mutex::new(Value::Null),
                 last_prune: Mutex::new(None),
+                update: crate::update::UpdateState::default(),
             }),
         }
     }
@@ -165,11 +175,16 @@ impl Handler for Engine {
         self.inner.input(stream_id, data, &session).await
     }
 
-    /// Stops every unit with its stop policy; containers keep running.
+    /// Stops every unit with its stop policy; containers keep running. Records
+    /// the exits, then closes state.db so its WAL is checkpointed before exit.
     async fn shutdown(&self) -> Result<(), RpcError> {
         self.inner.remote_shutdown().await;
         let stopped = self.inner.stop_everything().await;
         tracing::info!(stopped, "daemon shutdown stopped units");
+        self.inner.finish_stopped_runs().await;
+        if let Err(error) = self.inner.store.close().await {
+            tracing::warn!(%error, "state.db did not close cleanly");
+        }
         Ok(())
     }
 }
@@ -271,11 +286,12 @@ impl Inner {
             ..
         } = request;
         match method {
-            Method::DaemonStatus => Ok(json!({
+            Method::DaemonStatus => Ok(self.with_update(json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "pid": std::process::id(),
                 "uptime_ms": self.started.elapsed().as_millis(),
-            })),
+                "release_check": self.release_check(),
+            }))),
             Method::DaemonShutdown => Ok(json!({"stopping": true})),
             Method::DaemonResetState => self.reset_state(&context).await,
             Method::Doctor => self.doctor().await,
@@ -284,7 +300,10 @@ impl Inner {
             Method::Stop => self.stop_method(params, &context).await,
             Method::Restart => self.restart_method(params, &context, &session).await,
             Method::Resume => self.resume_method(params, &context, &session).await,
-            Method::Status => self.remote_status(params, &context, &session).await,
+            Method::Status => self
+                .remote_status(params, &context, &session)
+                .await
+                .map(|result| self.with_update(result)),
             Method::LaneList => self.lane_list(&context).await,
             Method::LaneNew => self.lane_new(params, &context, &session).await,
             Method::LaneClean => self.lane_clean_method(params, &context).await,

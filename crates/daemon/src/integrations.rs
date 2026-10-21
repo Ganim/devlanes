@@ -21,6 +21,23 @@ pub trait ManagedUnit: Unit {
     fn identity(&self) -> Option<ProcessIdentity>;
     /// TCP ports the unit's process tree listens on (diagnostics only).
     async fn listening_ports(&self) -> Vec<u16>;
+    /// How the unit ended, once it has; `None` while it runs or when the runner
+    /// keeps no more than the [`ExitOutcome`] that [`Unit::wait`] returns.
+    fn exit_details(&self) -> Option<ExitDetails> {
+        None
+    }
+}
+
+/// A finished unit's status plus the processes it left behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitDetails {
+    pub outcome: ExitOutcome,
+    /// Daemons a task started outside its session, kept running on purpose
+    /// ([`UnitRunner::spawn_task`]).
+    pub left_running: Vec<devlanes_proto::LeftProcess>,
+    /// Processes that survived the final sweep or still hold the unit's terminal
+    /// or output pipe.
+    pub escaped: Vec<devlanes_proto::LeftProcess>,
 }
 
 /// Spawns daemon-owned units.
@@ -255,6 +272,19 @@ pub struct InfraUp {
     pub setup_env: BTreeMap<String, String>,
     /// Structured report for clients (services, health, adopted containers).
     pub report: Value,
+    /// Running containers behind the namespace entries, sampled for Docker stats.
+    pub containers: Vec<InfraContainer>,
+}
+
+/// One running container behind an `infra` namespace entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InfraContainer {
+    /// The namespace key: compose service or `infra.containers` name.
+    pub name: String,
+    /// Container name or id the Docker API accepts.
+    pub docker: String,
+    /// Shared project infra rather than the lane's own container.
+    pub shared: bool,
 }
 
 /// A container lifecycle change for the event bus.
@@ -543,6 +573,10 @@ pub struct Integrations {
     pub ca_env: BTreeMap<String, String>,
     /// CA facts for `doctor` (`present`, `path`).
     pub ca_status: Value,
+    /// DNS names the CA's name constraints permit (subtrees such as `localhost`);
+    /// `None` when it has none (mkcert) or there is no CA. Routed hosts outside
+    /// them get a warning, since browsers reject their certificates.
+    pub ca_permitted: Option<Vec<String>>,
     /// Preset option parsers that `config check` uses.
     pub presets: Vec<PresetEntry>,
     pub launch_checks: Vec<Arc<dyn LaunchCheck>>,
@@ -653,6 +687,7 @@ impl Integrations {
             processes: Arc::new(SysProcesses),
             ca_env: BTreeMap::new(),
             ca_status: Value::Null,
+            ca_permitted: None,
             presets: Vec::new(),
             launch_checks: Vec::new(),
             remote: Arc::new(NoRemote),

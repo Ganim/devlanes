@@ -98,6 +98,9 @@ unsafe extern "C" {
     fn mach_absolute_time() -> u64;
     /// `<mach/mach_init.h>`; the host port. libc deprecates its binding.
     fn mach_host_self() -> libc::mach_port_t;
+    /// `<mach/mach_init.h>`; this task's port, what the `mach_task_self()` macro
+    /// reads. Set before `main` and never changed.
+    static mach_task_self_: libc::mach_port_t;
 }
 
 /// Mach tick to nanosecond ratio.
@@ -225,29 +228,74 @@ impl HostPort {
         Self(unsafe { mach_host_self() })
     }
 
-    /// Cumulative CPU ticks of all cores, indexed by `libc::CPU_STATE_*` (user,
-    /// system, idle, nice). The counters are 32-bit and wrap.
-    pub fn cpu_ticks(self) -> io::Result<[u32; 4]> {
-        let mut info = libc::host_cpu_load_info {
-            cpu_ticks: [0; libc::CPU_STATE_MAX as usize],
-        };
-        let mut count: libc::mach_msg_type_number_t = libc::HOST_CPU_LOAD_INFO_COUNT;
-        // SAFETY: `info` is a writable `host_cpu_load_info`, and `count` holds its
-        // size in `integer_t` units as `host_statistics` requires.
+    /// Cumulative CPU ticks per core, each indexed by `libc::CPU_STATE_*` (user,
+    /// system, idle, nice), from `host_processor_info(PROCESSOR_CPU_LOAD_INFO)`.
+    /// `host_statistics(HOST_CPU_LOAD_INFO)` is rate-limited by the kernel for
+    /// non-platform binaries and then returns stale counters. The counters are
+    /// 32-bit and wrap.
+    pub fn processor_ticks(self) -> io::Result<Vec<[u32; 4]>> {
+        let mut cpus: libc::natural_t = 0;
+        let mut info: libc::processor_info_array_t = std::ptr::null_mut();
+        let mut len: libc::mach_msg_type_number_t = 0;
+        // SAFETY: every out-pointer refers to a writable local. On success the
+        // kernel maps `len` `integer_t`s at `info` into this task.
         let status = unsafe {
-            libc::host_statistics(
+            libc::host_processor_info(
                 self.0,
-                libc::HOST_CPU_LOAD_INFO,
-                (&raw mut info).cast::<libc::integer_t>(),
-                &raw mut count,
+                libc::PROCESSOR_CPU_LOAD_INFO,
+                &raw mut cpus,
+                &raw mut info,
+                &raw mut len,
             )
         };
         if status != libc::KERN_SUCCESS {
             return Err(io::Error::other(format!(
-                "host_statistics failed with {status}"
+                "host_processor_info failed with {status}"
             )));
         }
-        Ok(info.cpu_ticks)
+        if info.is_null() {
+            return Err(io::Error::other("host_processor_info returned no data"));
+        }
+        let len = usize::try_from(len).unwrap_or(0);
+        let states = libc::CPU_STATE_MAX as usize;
+        let cpus = usize::try_from(cpus).unwrap_or(0);
+        // SAFETY: the kernel returned `len` initialized `integer_t`s at `info`,
+        // valid until the `vm_deallocate` below; the slice is not used after it.
+        let raw = unsafe { std::slice::from_raw_parts(info, len) };
+        let ticks: Vec<[u32; 4]> = raw
+            .chunks_exact(states)
+            .take(cpus)
+            .map(|cpu| {
+                [
+                    cpu[0].cast_unsigned(),
+                    cpu[1].cast_unsigned(),
+                    cpu[2].cast_unsigned(),
+                    cpu[3].cast_unsigned(),
+                ]
+            })
+            .collect();
+        let bytes = len.saturating_mul(size_of::<libc::integer_t>());
+        // SAFETY: `mach_task_self_` is initialized by the runtime before `main`
+        // and only read here. `info` and `bytes` describe exactly the region the
+        // kernel allocated in this task above, and nothing refers to it any more.
+        let freed = unsafe {
+            libc::vm_deallocate(
+                mach_task_self_,
+                info as libc::vm_address_t,
+                bytes as libc::vm_size_t,
+            )
+        };
+        if freed != libc::KERN_SUCCESS {
+            return Err(io::Error::other(format!(
+                "vm_deallocate failed with {freed}"
+            )));
+        }
+        if ticks.len() != cpus || cpus == 0 {
+            return Err(io::Error::other(format!(
+                "host_processor_info returned {len} values for {cpus} CPUs"
+            )));
+        }
+        Ok(ticks)
     }
 }
 
@@ -321,8 +369,10 @@ mod tests {
         let timebase = Timebase::read().expect("timebase");
         assert!(timebase.nanos(mach_now()) > 0);
         assert!(list_pids().expect("pids").contains(&pid));
-        let ticks = HostPort::new().cpu_ticks().expect("cpu ticks");
-        assert!(ticks.iter().any(|&t| t > 0));
+        let ticks = HostPort::new().processor_ticks().expect("cpu ticks");
+        let cpus = sysctl::<i32>(c"hw.ncpu").expect("ncpu");
+        assert_eq!(ticks.len(), usize::try_from(cpus).expect("cpu count"));
+        assert!(ticks.iter().flatten().any(|&t| t > 0));
         assert!(sysctl::<u64>(c"hw.memsize").expect("memsize") > 0);
         assert!(sysctl::<u32>(c"hw.memsize").is_err());
     }

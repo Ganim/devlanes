@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::Duration,
 };
@@ -24,7 +24,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use devlanes_proto::AttachParams;
-use devlanes_term::LaunchRequest;
+use devlanes_term::{LaunchRequest, Progress, ProgressBar, Wrap};
 use futures_util::{Stream, StreamExt};
 use ratatui::{Terminal, backend::Backend};
 use tokio::{
@@ -54,6 +54,17 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Wakes the loop after a panic on any thread, so it ends instead of drawing
 /// over the terminal the hook already restored.
 static PANICKED: OnceLock<Notify> = OnceLock::new();
+/// The progress bar's wrap (0 off, 1 bare, 2 tmux), so [`restore`] can clear
+/// it after a panic.
+static PROGRESS: AtomicU8 = AtomicU8::new(0);
+
+/// [`PROGRESS`]'s code for `wrap`.
+fn wrap_code(wrap: Wrap) -> u8 {
+    match wrap {
+        Wrap::Bare => 1,
+        Wrap::Tmux => 2,
+    }
+}
 
 /// Puts the terminal into TUI mode and restores it on drop and on panic.
 pub struct TerminalGuard;
@@ -87,6 +98,17 @@ impl Drop for TerminalGuard {
 fn restore() {
     if !ACTIVE.swap(false, Ordering::SeqCst) {
         return;
+    }
+    // A panic skips the executor's drop, which would clear the tab's progress bar.
+    let wrap = match PROGRESS.load(Ordering::SeqCst) {
+        1 => Some(Wrap::Bare),
+        2 => Some(Wrap::Tmux),
+        _ => None,
+    };
+    if let Some(wrap) = wrap {
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(wrap.apply(&Progress::Clear.sequence()).as_bytes());
+        let _ = stdout.flush();
     }
     // This can run while unwinding, so failures are printed rather than raised;
     // by now the alternate screen is gone and stderr is readable.
@@ -140,6 +162,7 @@ where
     for effect in app.start() {
         executor.execute(effect);
     }
+    executor.execute(Effect::LoadNotices);
     if !executor.flush(&mut app) {
         return Ok(());
     }
@@ -174,6 +197,7 @@ where
             continue;
         };
         dirty = true;
+        let ticked = matches!(msg, Msg::Tick);
         if !executor.apply(&mut app, msg) {
             return Ok(());
         }
@@ -187,6 +211,7 @@ where
                 return Ok(());
             }
         }
+        executor.show_progress(app.start_progress(), ticked);
     }
 }
 
@@ -222,7 +247,9 @@ struct Executor {
     sender: mpsc::Sender<Msg>,
     /// Launchers and the configured terminal; picked per launch, off the loop.
     options: Options,
-    clipboard: Box<dyn Write + Send>,
+    /// The terminal output for OSC sequences: clipboard copies and the tab's
+    /// progress bar, which clears when the executor drops.
+    out: ProgressBar<Box<dyn Write + Send>>,
     /// Set inside tmux, whose OSC 52 needs passthrough wrapping.
     in_tmux: bool,
     subscription: Option<JoinHandle<()>>,
@@ -244,11 +271,14 @@ impl Executor {
         options: &Options,
         clipboard: Box<dyn Write + Send>,
     ) -> Self {
+        if let Some(wrap) = options.progress {
+            PROGRESS.store(wrap_code(wrap), Ordering::SeqCst);
+        }
         Self {
             api,
             sender,
             options: options.clone(),
-            clipboard,
+            out: ProgressBar::new(clipboard, options.progress),
             in_tmux: std::env::var_os("TMUX").is_some(),
             subscription: None,
             attach: None,
@@ -256,6 +286,16 @@ impl Executor {
             daemon: None,
             log: None,
             local: Vec::new(),
+        }
+    }
+
+    /// Writes the tab's progress bar when it changed, and every second while it
+    /// shows: Ghostty drops a bar that is not repeated.
+    fn show_progress(&mut self, progress: Progress, tick: bool) {
+        let shown = self.out.shown().unwrap_or(Progress::Clear);
+        if shown != progress || tick && shown != Progress::Clear {
+            // The bar is decoration; a failed write is not worth a notice.
+            let _ = self.out.set(progress);
         }
     }
 
@@ -449,10 +489,10 @@ impl Executor {
                     return true;
                 }
                 let sequence = input::osc52(&text, self.in_tmux);
-                let written = self
-                    .clipboard
+                let out = self.out.get_mut();
+                let written = out
                     .write_all(sequence.as_bytes())
-                    .and_then(|()| self.clipboard.flush());
+                    .and_then(|()| out.flush());
                 if let Err(error) = written {
                     self.fail("copy", error.to_string());
                 }
@@ -477,6 +517,26 @@ impl Executor {
                     let (status, doctor) = tokio::join!(api.daemon_status(), api.doctor());
                     deliver(&sender, Msg::DaemonInfo { status, doctor }).await;
                 }));
+            }
+            Effect::LoadNotices => {
+                let home = api.home();
+                tokio::task::spawn_blocking(move || {
+                    let method = devlanes_client::update::InstallMethod::current();
+                    let dismissed = home
+                        .map(|home| devlanes_client::update::NoticeLog::load(&home).dismissed)
+                        .unwrap_or_default();
+                    deliver_blocking(&sender, Msg::Notices { method, dismissed });
+                });
+            }
+            Effect::DismissNotice(key) => {
+                if let Some(home) = api.home() {
+                    tokio::task::spawn_blocking(move || {
+                        let mut log = devlanes_client::update::NoticeLog::load(&home);
+                        log.dismiss(&key);
+                        // Losing a dismissal only shows the notice again.
+                        let _ = log.save(&home);
+                    });
+                }
             }
             Effect::ReadDaemonLog { from } => {
                 if self.log.as_ref().is_some_and(|task| !task.is_finished()) {

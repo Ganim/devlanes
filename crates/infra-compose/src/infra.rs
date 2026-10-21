@@ -11,7 +11,7 @@ use tokio::sync::{OnceCell, OwnedMutexGuard};
 use crate::{
     Error, NameConflict,
     cli::{ComposeCli, ComposeProject, ExistingContainer, UpOptions},
-    model::{ComposeModel, Health, service_health},
+    model::{ComposeModel, Health, service_containers, service_health},
     overrides::{render_override, write_override},
     ports::{Endpoints, LanePorts, PortBlock, PortRequest, endpoints_from_ps, port_requests},
     version::ComposeVersion,
@@ -77,6 +77,8 @@ pub struct SharedReport {
     pub adopted: Vec<String>,
     pub endpoints: Endpoints,
     pub health: BTreeMap<String, Health>,
+    /// Running container names per service, from [`service_containers`].
+    pub containers: BTreeMap<String, Vec<String>>,
 }
 
 /// State of a lane project after `up` or `status`.
@@ -90,6 +92,8 @@ pub struct LaneReport {
     /// Isolation problems that devlanes cannot fix with an override, such as external
     /// volumes shared by every lane.
     pub warnings: Vec<String>,
+    /// Running container names per service, from [`service_containers`].
+    pub containers: BTreeMap<String, Vec<String>>,
 }
 
 /// Serializes mutating operations per compose project name. Concurrent lane starts share
@@ -200,6 +204,7 @@ impl Compose {
         Ok(SharedReport {
             project: name,
             health: service_health(&services, &statuses),
+            containers: service_containers(&services, &statuses),
             services,
             adopted,
             endpoints,
@@ -216,6 +221,7 @@ impl Compose {
         Ok(SharedReport {
             project: model.name,
             health: service_health(&services, &statuses),
+            containers: service_containers(&services, &statuses),
             services,
             adopted: Vec::new(),
             endpoints,
@@ -269,6 +275,7 @@ impl Compose {
         Ok(LaneReport {
             project: name,
             health: service_health(&services, &statuses),
+            containers: service_containers(&services, &statuses),
             warnings: volume_warnings(&model, &services),
             services,
             override_path: Some(override_path),
@@ -287,6 +294,7 @@ impl Compose {
         Ok(LaneReport {
             project: name,
             health: service_health(&services, &statuses),
+            containers: service_containers(&services, &statuses),
             warnings: volume_warnings(&model, &services),
             services,
             override_path: None,

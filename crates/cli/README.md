@@ -33,6 +33,8 @@ The caller executes the returned action and writes the reporter's separate stdou
 Output mode: the first matching setting wins: `--output`, `--json`, `DEVLANES_OUTPUT`, agent detection, CI detection, then terminal detection.
 `DEVLANES_AGENT=0` disables agent detection. CI defaults to plain output and disables prompts.
 
+Progress bar: in human output on a terminal, `start`, `restart`, `lane resume`, `lane new --start`, `wait` and the start phase of `with` drive the terminal tab's progress bar. `start_tracker` picks the lanes and units a request follows, and `Runtime::progress_wrap` decides whether to draw at all; the binary follows the events and writes it. A failed start stays red for `ERROR_HOLD` before the command exits, and the bar is cleared on every exit and on Ctrl-C.
+
 ## License
 
 Apache-2.0

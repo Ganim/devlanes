@@ -16,6 +16,7 @@ devlanes-metrics = { path = "../metrics" }
 async-trait.workspace = true
 rustix = { version = "1", features = ["param"] }
 tokio.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

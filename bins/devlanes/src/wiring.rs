@@ -16,10 +16,10 @@ use devlanes_core::{
 use devlanes_daemon::{
     Engine, EngineOptions, Handler,
     integrations::{
-        ConnectOptions, InfraError, InfraEvent, InfraPortNeed, InfraProvider, InfraSpec, InfraUp,
-        Integrations, LaunchCheck, ManagedUnit, PlannedUnit, PortInspector, PortScope, PresetEntry,
-        RemoteConnector, RemotePrompt, RemotePrompter, RouteEntry, RouteSink, RouteStatus,
-        SysProcesses, UnitRunner, unavailable,
+        ConnectOptions, ExitDetails, InfraContainer, InfraError, InfraEvent, InfraPortNeed,
+        InfraProvider, InfraSpec, InfraUp, Integrations, LaunchCheck, ManagedUnit, PlannedUnit,
+        PortInspector, PortScope, PresetEntry, RemoteConnector, RemotePrompt, RemotePrompter,
+        RouteEntry, RouteSink, RouteStatus, SysProcesses, UnitRunner, unavailable,
     },
 };
 use devlanes_proto::RpcError;
@@ -41,15 +41,21 @@ fn launchers() -> Vec<Arc<dyn devlanes_term::TerminalLauncher>> {
 /// The user's preferred terminal from `~/.devlanes/config.yaml`, if it parses.
 fn preferred_terminal(paths: &Paths) -> Option<String> {
     let config = devlanes_config::load_user(paths.home.join("config.yaml")).ok()?;
-    let value = serde_json::to_value(config.terminal?).ok()?;
+    let value = serde_json::to_value(config.terminal?.app()?).ok()?;
     value.as_str().map(str::to_owned)
 }
 
 /// Opens the TUI; closing it never stops anything.
 pub async fn ui(paths: &Paths) -> Result<u8, RpcError> {
+    use std::io::IsTerminal;
     let options = devlanes_tui::Options {
         launchers: launchers(),
         terminal: preferred_terminal(paths),
+        // The TUI is always human output; it still needs a terminal that draws the bar.
+        progress: devlanes_term::progress_support_from_env(
+            crate::progress::configured_mode(paths),
+            std::io::stdout().is_terminal(),
+        ),
     };
     devlanes_tui::run_with(paths.clone(), options)
         .await
@@ -73,7 +79,7 @@ pub async fn engine(
         Ok(limit) => tracing::info!(?limit, "raised the open-file limit"),
         Err(error) => tracing::warn!(%error, "cannot raise the open-file limit"),
     }
-    let user = load_user_config(&paths.home).await;
+    let (user, user_config_error) = load_user_config(&paths.home).await;
     let (hosts_policy, hosts_tld) = devlanes_daemon::hosts::user_policy(&user);
     // The probe can wait on upstream DNS, so it runs while the store, CA and proxy start.
     let hosts_probe = (hosts_policy.user_mode() != devlanes_resolver_hosts::HostsFileMode::Never)
@@ -86,6 +92,7 @@ pub async fn engine(
     let ca_tld = crate::local::ca_tld(&user);
     let (ca_env, ca_status, ca) =
         certificate_authority(&paths.home, user.tls.ca, ca_tld.as_deref()).await;
+    let ca_permitted = ca.as_ref().and_then(|ca| ca.permitted_dns_names());
     let routes = Arc::new(proxy(&user, ca, shutdown.clone()).await);
     let infra = Arc::new(ContainerInfra::new().await);
     let mut integ = Integrations::with_runner(Arc::new(PtyUnits(
@@ -101,6 +108,7 @@ pub async fn engine(
     integ.processes = Arc::new(SysProcesses);
     integ.ca_env = ca_env;
     integ.ca_status = ca_status;
+    integ.ca_permitted = ca_permitted;
     integ.presets = presets();
     integ.launch_checks = vec![Arc::new(DistinctTauriIdentifiers)];
     integ.remote = Arc::new(SshConnector {
@@ -117,6 +125,7 @@ pub async fn engine(
     options.db_path = paths.db.clone();
     options.logs = paths.logs.clone();
     options.user = user;
+    options.user_config_error = user_config_error;
     let engine: Arc<dyn Handler> = Arc::new(Engine::new(options, store, integ, shutdown));
     Ok(engine)
 }
@@ -165,21 +174,33 @@ async fn hosts_file(
             installed,
             tld_error,
             sync: devlanes_resolver_hosts::SyncConfig::default(),
+            // Shipped together: the helper next to this binary has this version.
+            expected_version: env!("CARGO_PKG_VERSION").into(),
         },
     ))
 }
 
 /// `~/.devlanes/config.yaml`, or defaults when absent or invalid (logged).
-async fn load_user_config(home: &Path) -> devlanes_config::UserConfig {
+async fn load_user_config(home: &Path) -> (devlanes_config::UserConfig, Option<Value>) {
     let path = home.join("config.yaml");
     tokio::task::spawn_blocking(move || {
         if !path.exists() {
-            return devlanes_config::UserConfig::default();
+            return (devlanes_config::UserConfig::default(), None);
         }
-        devlanes_config::load_user(&path).unwrap_or_else(|error| {
-            tracing::warn!(error = %error.message, "invalid user config; using defaults");
-            devlanes_config::UserConfig::default()
-        })
+        match devlanes_config::load_user(&path) {
+            Ok(config) => (config, None),
+            // Defaults keep the daemon usable; doctor shows why they apply.
+            Err(error) => {
+                tracing::warn!(error = %error.message, "invalid user config; using defaults");
+                let located = json!({
+                    "message": error.message,
+                    "file": error.location.file,
+                    "line": error.location.line,
+                    "column": error.location.column,
+                });
+                (devlanes_config::UserConfig::default(), Some(located))
+            }
+        }
     })
     .await
     .unwrap_or_default()
@@ -294,7 +315,15 @@ fn start_gate(
             Arc::new(FixedWindow::with_pressure(max, options, clock, pressure))
         }
         // Without pressure readings an adaptive window could never grow.
-        (_, None) => Arc::new(FixedWindow::new(max, options, clock)),
+        (mode, None) => {
+            if mode == devlanes_config::StartupMode::Adaptive {
+                tracing::warn!(
+                    max,
+                    "startup.mode adaptive needs CPU and memory readings, which this platform lacks; using a fixed window of `max`"
+                );
+            }
+            Arc::new(FixedWindow::new(max, options, clock))
+        }
     }
 }
 
@@ -607,10 +636,50 @@ impl RouteSink for ProxyRoutes {
         }
     }
 
-    /// Listener facts.
+    /// Bind results plus the accept loops' live health.
     fn status(&self) -> Value {
-        self.status.clone()
+        listener_status(&self.status, &self.proxy.listener_health())
     }
+}
+
+/// `{http, https}` from the bind results, each bound one extended with
+/// `serving` (every listener of that kind running without a pending accept
+/// error) and its `listeners`: `[{address, running, accept_errors, last_error}]`.
+fn listener_status(bound: &Value, health: &[devlanes_proxy::ListenerHealth]) -> Value {
+    let mut status = bound.clone();
+    for (kind, tls) in [("http", false), ("https", true)] {
+        let Some(entry) = status.get_mut(kind).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        if entry.get("bound").and_then(Value::as_bool) != Some(true) {
+            entry.insert("serving".into(), Value::Bool(false));
+            continue;
+        }
+        let listeners: Vec<&devlanes_proxy::ListenerHealth> = health
+            .iter()
+            .filter(|listener| listener.tls == tls)
+            .collect();
+        let serving = !listeners.is_empty()
+            && listeners
+                .iter()
+                .all(|listener| listener.running && listener.last_error.is_none());
+        entry.insert("serving".into(), Value::Bool(serving));
+        entry.insert(
+            "listeners".into(),
+            listeners
+                .iter()
+                .map(|listener| {
+                    json!({
+                        "address": listener.address,
+                        "running": listener.running,
+                        "accept_errors": listener.accept_errors,
+                        "last_error": listener.last_error,
+                    })
+                })
+                .collect(),
+        );
+    }
+    status
 }
 
 /// `connect` over system OpenSSH, with ssh's prompts relayed to the attached CLI.
@@ -750,6 +819,23 @@ impl ManagedUnit for PtyManaged {
         ports.sort_unstable();
         ports.dedup();
         ports
+    }
+    /// The runner's exit report with leftover processes by pid and name.
+    fn exit_details(&self) -> Option<ExitDetails> {
+        let report = self.0.exit_report()?;
+        let processes = |list: Vec<devlanes_sys::ProcessInfo>| {
+            list.into_iter()
+                .map(|process| devlanes_proto::LeftProcess {
+                    pid: process.pid,
+                    command: process.name,
+                })
+                .collect()
+        };
+        Some(ExitDetails {
+            outcome: report.outcome,
+            left_running: processes(report.left_running),
+            escaped: processes(report.escaped),
+        })
     }
 }
 
@@ -1033,6 +1119,38 @@ impl ContainerInfra {
         }
     }
 
+    /// Stats targets for compose services, one per running replica.
+    fn compose_targets(
+        targets: &mut Vec<InfraContainer>,
+        containers: &BTreeMap<String, Vec<String>>,
+        shared: bool,
+    ) {
+        for (service, names) in containers {
+            targets.extend(names.iter().map(|docker| InfraContainer {
+                name: service.clone(),
+                docker: docker.clone(),
+                shared,
+            }));
+        }
+    }
+
+    /// Stats targets for plain containers. Their names are deterministic, so no
+    /// engine call is needed; a container that is not running yields no sample.
+    fn plain_targets(
+        targets: &mut Vec<InfraContainer>,
+        containers: &[devlanes_infra_docker::ContainerSpec],
+    ) {
+        targets.extend(containers.iter().map(|container| InfraContainer {
+            name: container.name.clone(),
+            docker: devlanes_infra_docker::container_name(
+                &container.project,
+                &container.name,
+                container.scope,
+            ),
+            shared: container.scope == devlanes_infra_docker::Scope::Shared,
+        }));
+    }
+
     /// Setup env for `infra.setup` entries.
     async fn setup_env(&self, spec: &InfraSpec) -> BTreeMap<String, String> {
         if spec.compose_files.is_empty() {
@@ -1130,6 +1248,7 @@ impl InfraProvider for ContainerInfra {
     async fn up(&self, spec: &InfraSpec) -> Result<InfraUp, InfraError> {
         let mut namespace = serde_json::Map::new();
         let mut report = serde_json::Map::new();
+        let mut targets = Vec::new();
         if !spec.compose_files.is_empty() {
             let shared = self
                 .compose
@@ -1140,6 +1259,7 @@ impl InfraProvider for ContainerInfra {
                 .await
                 .map_err(compose_error)?;
             Self::compose_namespace(&mut namespace, &shared.endpoints);
+            Self::compose_targets(&mut targets, &shared.containers, true);
             report.insert("shared".into(), json!(shared));
             self.watch_events(&shared.project);
         }
@@ -1173,6 +1293,7 @@ impl InfraProvider for ContainerInfra {
                 .await
                 .map_err(compose_error)?;
             Self::compose_namespace(&mut namespace, &lane_report.endpoints);
+            Self::compose_targets(&mut targets, &lane_report.containers, false);
             report.insert("lane".into(), json!(lane_report));
         }
         let containers = Self::containers(spec)?;
@@ -1191,6 +1312,7 @@ impl InfraProvider for ContainerInfra {
                 );
             }
             Self::container_namespace(&mut namespace, &containers);
+            Self::plain_targets(&mut targets, &containers);
             report.insert("containers".into(), json!(ensured));
             self.watch_events(&spec.project);
         }
@@ -1198,29 +1320,35 @@ impl InfraProvider for ContainerInfra {
             namespace: Value::Object(namespace),
             setup_env: self.setup_env(spec).await,
             report: Value::Object(report),
+            containers: targets,
         })
     }
 
     /// Endpoints of what already runs, without starting anything.
     async fn namespace(&self, spec: &InfraSpec) -> Result<InfraUp, InfraError> {
         let mut namespace = serde_json::Map::new();
+        let mut targets = Vec::new();
         if !spec.compose_files.is_empty()
             && let Ok(shared) = self.compose.shared_status(&Self::shared(spec)).await
         {
             Self::compose_namespace(&mut namespace, &shared.endpoints);
+            Self::compose_targets(&mut targets, &shared.containers, true);
         }
         if Self::has_lane_services(spec)
             && let Ok(lane) = self.compose.lane_status(&Self::lane(spec)).await
         {
             Self::compose_namespace(&mut namespace, &lane.endpoints);
+            Self::compose_targets(&mut targets, &lane.containers, false);
         }
         if let Ok(containers) = Self::containers(spec) {
             Self::container_namespace(&mut namespace, &containers);
+            Self::plain_targets(&mut targets, &containers);
         }
         Ok(InfraUp {
             namespace: Value::Object(namespace),
             setup_env: self.setup_env(spec).await,
             report: Value::Null,
+            containers: targets,
         })
     }
 
@@ -1614,6 +1742,69 @@ mod tests {
         );
         assert!(first.len() < 127, "fits the readiness line");
         assert!(message.contains(&db.display().to_string()));
+    }
+
+    #[tokio::test]
+    /// An invalid user config falls back to defaults but keeps the located error
+    /// for `doctor`; a missing file is no error.
+    async fn invalid_user_config_is_kept_for_doctor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (_, error) = load_user_config(tmp.path()).await;
+        assert!(error.is_none(), "no file, no error");
+        std::fs::write(
+            tmp.path().join("config.yaml"),
+            "proxy:\n  http_port: [not, a, port]\n",
+        )
+        .expect("config");
+        let (user, error) = load_user_config(tmp.path()).await;
+        let error = error.expect("error kept");
+        assert!(!error["message"].as_str().unwrap_or_default().is_empty());
+        assert_eq!(error["line"], 2, "{error}");
+        assert!(
+            error["file"]
+                .as_str()
+                .is_some_and(|file| file.ends_with("config.yaml"))
+        );
+        assert_eq!(
+            user.proxy.http_port,
+            devlanes_config::UserConfig::default().proxy.http_port
+        );
+    }
+
+    #[test]
+    /// Doctor's proxy facts follow the accept loops: serving only while every
+    /// listener of a kind runs without a pending accept error; never when unbound.
+    fn proxy_status_reflects_listener_health() {
+        let bound = json!({
+            "http": {"bound": true, "port": 8080},
+            "https": {"bound": false, "reason": "no_ca"},
+        });
+        let listener =
+            |port: u16, running: bool, error: Option<&str>| devlanes_proxy::ListenerHealth {
+                address: ([127, 0, 0, 1], port).into(),
+                tls: false,
+                running,
+                accept_errors: u64::from(error.is_some()),
+                last_error: error.map(str::to_owned),
+            };
+        let healthy = listener_status(&bound, &[listener(8080, true, None)]);
+        assert_eq!(healthy["http"]["serving"], true);
+        assert_eq!(healthy["http"]["listeners"][0]["address"], "127.0.0.1:8080");
+        assert_eq!(healthy["https"]["serving"], false);
+        assert_eq!(healthy["https"]["reason"], "no_ca");
+
+        let failing = listener_status(
+            &bound,
+            &[
+                listener(8080, true, None),
+                listener(8080, true, Some("Too many open files")),
+            ],
+        );
+        assert_eq!(failing["http"]["serving"], false);
+        assert_eq!(failing["http"]["listeners"][1]["accept_errors"], 1);
+        let stopped = listener_status(&bound, &[listener(8080, false, None)]);
+        assert_eq!(stopped["http"]["serving"], false);
+        assert_eq!(listener_status(&bound, &[])["http"]["serving"], false);
     }
 
     #[tokio::test]

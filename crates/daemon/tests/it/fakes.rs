@@ -5,7 +5,8 @@
 //! up), `tcp-echo` (echoes every connection on `$PORT`), `http <body>` (answers
 //! every request on `$PORT` with `<body>`), `sleep` (stays up), `exit <code>`,
 //! `fail` (prints `boom`, exits 1), `deaf` (stops reading input: writes block
-//! until the unit stops).
+//! until the unit stops), `daemonize <name>` and `escape <name>` (report a
+//! process left running or escaped once the unit ends).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -23,9 +24,10 @@ use devlanes_core::{
     TerminalSize, Unit,
 };
 use devlanes_daemon::integrations::{
-    InfraError, InfraPortNeed, InfraProvider, InfraSpec, InfraUp, ManagedUnit, PortScope,
-    ProcessTable, UnitRunner,
+    ExitDetails, InfraContainer, InfraError, InfraPortNeed, InfraProvider, InfraSpec, InfraUp,
+    ManagedUnit, PortScope, ProcessTable, UnitRunner,
 };
+use devlanes_proto::LeftProcess;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
 
@@ -84,6 +86,7 @@ impl UnitRunner for FakeRunner {
             stop: watch::channel(false).0,
             deaf: AtomicBool::new(false),
             resizes: self.resizes.clone(),
+            leftovers: Mutex::default(),
         });
         let runner = unit.clone();
         tokio::spawn(async move { runner.run(script, spec.env).await });
@@ -101,6 +104,8 @@ pub struct FakeUnit {
     /// Set by `deaf`: input never completes, like a process that stopped reading.
     deaf: AtomicBool,
     resizes: Journal,
+    /// `(left_running, escaped)` recorded by `daemonize` and `escape`.
+    leftovers: Mutex<(Vec<LeftProcess>, Vec<LeftProcess>)>,
 }
 
 impl FakeUnit {
@@ -139,6 +144,19 @@ impl FakeUnit {
                 "echo" => self.print(rest),
                 "deaf" => self.deaf.store(true, Ordering::SeqCst),
                 "printenv" => self.print(env.get(rest).map_or("", String::as_str)),
+                "daemonize" | "escape" => {
+                    let process = LeftProcess {
+                        pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
+                        command: rest.to_owned(),
+                    };
+                    if let Ok(mut leftovers) = self.leftovers.lock() {
+                        if word == "daemonize" {
+                            leftovers.0.push(process);
+                        } else {
+                            leftovers.1.push(process);
+                        }
+                    }
+                }
                 "exit" => {
                     let code = rest.trim().parse().unwrap_or(0);
                     self.end(ExitOutcome {
@@ -332,6 +350,16 @@ impl ManagedUnit for FakeUnit {
     async fn listening_ports(&self) -> Vec<u16> {
         Vec::new()
     }
+    /// The outcome plus what `daemonize` and `escape` recorded.
+    fn exit_details(&self) -> Option<ExitDetails> {
+        let outcome = (*self.exit.borrow())?;
+        let (left_running, escaped) = self.leftovers.lock().ok()?.clone();
+        Some(ExitDetails {
+            outcome,
+            left_running,
+            escaped,
+        })
+    }
 }
 
 /// Process table with a fixed set of "alive" identities.
@@ -381,6 +409,22 @@ impl FakeInfra {
         let port = spec.ports.get("infra.db/5432").copied();
         json!({"db": {"port": port, "ports": {"5432": port}}})
     }
+
+    /// The lane's `db` container and a shared `cache`, named like compose would.
+    fn containers(spec: &InfraSpec) -> Vec<InfraContainer> {
+        vec![
+            InfraContainer {
+                name: "db".into(),
+                docker: format!("{}-lane{}-db-1", spec.project, spec.lane),
+                shared: false,
+            },
+            InfraContainer {
+                name: "cache".into(),
+                docker: format!("{}-cache-1", spec.project),
+                shared: true,
+            },
+        ]
+    }
 }
 
 #[async_trait]
@@ -401,11 +445,13 @@ impl InfraProvider for FakeInfra {
             namespace: Self::namespace(spec),
             setup_env: BTreeMap::from([("COMPOSE_PROJECT_NAME".into(), "fake".into())]),
             report: json!({"services": ["db"]}),
+            containers: Self::containers(spec),
         })
     }
     async fn namespace(&self, spec: &InfraSpec) -> Result<InfraUp, InfraError> {
         Ok(InfraUp {
             namespace: Self::namespace(spec),
+            containers: Self::containers(spec),
             ..InfraUp::default()
         })
     }

@@ -21,6 +21,7 @@ pub struct TaskRunId(pub i64);
 pub struct SetupRecord {
     pub lane_id: LaneId,
     pub entry: String,
+    /// Unix milliseconds when the entry last completed.
     pub done_at: i64,
     pub container_started_at: Option<String>,
 }
@@ -41,8 +42,11 @@ pub struct TaskRun {
     pub lane_id: LaneId,
     pub task: String,
     pub trigger: String,
+    /// Unix milliseconds when the task started.
     pub started_at: i64,
+    /// Unix milliseconds when the task finished or was abandoned.
     pub ended_at: Option<i64>,
+    /// `None` after a signal, a daemon-side failure or abandonment.
     pub exit_code: Option<i32>,
     pub actor: Actor,
 }
@@ -75,6 +79,22 @@ pub struct RollupRow {
     pub rss_max: u64,
 }
 
+/// Peak process-tree memory of one unit start, from spawn until it was ready
+/// or settled; the start gate uses recent ones as the unit's memory need.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupPeak {
+    /// Metrics series key of the unit (`unit:<project>:<lane>:<unit>`).
+    pub series: String,
+    /// Unix milliseconds when the startup ended.
+    pub recorded_ms: u64,
+    pub peak_bytes: u64,
+    /// How long the startup took.
+    pub duration_ms: u64,
+}
+
+/// Startup peaks kept per series; older ones are dropped on insert.
+pub const STARTUP_PEAKS_PER_SERIES: usize = 10;
+
 /// Resource profile of a finished run, used for baselines.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunSummaryRow {
@@ -99,15 +119,8 @@ pub struct RemoteHost {
     pub transport: String,
     pub address: String,
     pub daemon_version: Option<String>,
+    /// Unix milliseconds of the last successful connection.
     pub last_connected: Option<i64>,
-}
-
-/// Compatibility result for the original cutoff-based history API.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Pruned {
-    pub unit_runs: usize,
-    pub task_runs: usize,
-    pub rollups: usize,
 }
 
 impl Store {
@@ -284,20 +297,20 @@ impl Store {
         })
         .await
     }
-    /// Resets setup and task completion state after lane cleanup.
-    pub async fn forget_lane_lifecycle(&self, lane: LaneId) -> Result<(), Error> {
-        self.call(move |c| {
-            c.immediate_transaction(|c| {
-                diesel::delete(lane_setup::table.filter(lane_setup::lane_id.eq(lane.0)))
-                    .execute(c)?;
-                diesel::delete(
-                    task_completions::table.filter(task_completions::lane_id.eq(lane.0)),
-                )
-                .execute(c)?;
-                diesel::delete(task_runs::table.filter(task_runs::lane_id.eq(lane.0)))
-                    .execute(c)?;
-                Ok(())
-            })
+    /// Ends every unfinished task run with no exit code. Call at daemon startup:
+    /// a task's bookkeeping lives in the daemon that started it, so nothing can
+    /// finish these rows later, and they would block lane clean forever.
+    /// Returns how many runs were ended.
+    pub async fn abandon_task_runs(&self) -> Result<usize, Error> {
+        self.call(|c| {
+            Ok(
+                diesel::update(task_runs::table.filter(task_runs::ended_at.is_null()))
+                    .set((
+                        task_runs::ended_at.eq(now()?),
+                        task_runs::exit_code.eq(None::<i32>),
+                    ))
+                    .execute(c)?,
+            )
         })
         .await
     }
@@ -434,6 +447,62 @@ impl Store {
         })
         .await
     }
+    /// Records one startup peak and keeps only the newest
+    /// [`STARTUP_PEAKS_PER_SERIES`] of its series.
+    pub async fn record_startup_peak(&self, peak: StartupPeak) -> Result<(), Error> {
+        self.call(move |c| {
+            c.immediate_transaction(|c| {
+                diesel::insert_into(startup_peaks::table)
+                    .values(PeakRow {
+                        series: peak.series.clone(),
+                        recorded_at: sql_u64(peak.recorded_ms),
+                        peak: sql_u64(peak.peak_bytes),
+                        duration_ms: sql_u64(peak.duration_ms),
+                    })
+                    .execute(c)?;
+                let keep: Vec<i64> = startup_peaks::table
+                    .filter(startup_peaks::series.eq(&peak.series))
+                    .order((startup_peaks::recorded_at.desc(), startup_peaks::id.desc()))
+                    .limit(i64::try_from(STARTUP_PEAKS_PER_SERIES).unwrap_or(i64::MAX))
+                    .select(startup_peaks::id)
+                    .load(c)?;
+                diesel::delete(
+                    startup_peaks::table
+                        .filter(startup_peaks::series.eq(&peak.series))
+                        .filter(startup_peaks::id.ne_all(keep)),
+                )
+                .execute(c)?;
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    /// Recent startup peaks of a series, newest first.
+    pub async fn startup_peaks(
+        &self,
+        series: String,
+        limit: u32,
+    ) -> Result<Vec<StartupPeak>, Error> {
+        self.call(move |c| {
+            Ok(startup_peaks::table
+                .filter(startup_peaks::series.eq(series))
+                .order((startup_peaks::recorded_at.desc(), startup_peaks::id.desc()))
+                .limit(i64::from(limit))
+                .select(PeakRow::as_select())
+                .load::<PeakRow>(c)?
+                .into_iter()
+                .map(|row| StartupPeak {
+                    series: row.series,
+                    recorded_ms: from_sql_u64(row.recorded_at),
+                    peak_bytes: from_sql_u64(row.peak),
+                    duration_ms: from_sql_u64(row.duration_ms),
+                })
+                .collect())
+        })
+        .await
+    }
+
     /// Returns recent profiles, newest first, for baseline calculation.
     pub async fn run_summaries(
         &self,
@@ -508,41 +577,23 @@ impl Store {
         })
         .await
     }
-    /// Compatibility cutoff-based retention. New callers should use `prune`.
-    pub async fn prune_history(
-        &self,
-        runs_before_ms: i64,
-        rollups_before_ms: i64,
-    ) -> Result<Pruned, Error> {
-        self.call(move |c| {
-            c.immediate_transaction(|c| {
-                let unit_runs =
-                    diesel::delete(unit_runs::table.filter(unit_runs::ended_at.lt(runs_before_ms)))
-                        .execute(c)?;
-                let task_runs =
-                    diesel::delete(task_runs::table.filter(task_runs::ended_at.lt(runs_before_ms)))
-                        .execute(c)?;
-                let rollups = diesel::delete(
-                    metric_rollups::table.filter(metric_rollups::minute.lt(rollups_before_ms)),
-                )
-                .execute(c)?;
-                Ok(Pruned {
-                    unit_runs,
-                    task_runs,
-                    rollups,
-                })
-            })
-        })
-        .await
-    }
     /// Deletes all application records after resources have been stopped.
-    /// Migration history and monotonic IDs are retained.
+    /// Migration history and monotonic IDs are retained. Fails with
+    /// [`Error::ActiveRuns`] while any unit run is unfinished: those rows are the
+    /// only record of processes that may still be running, so the caller must
+    /// stop them and finish their runs first. Unfinished task runs carry no
+    /// process identity and are deleted.
     pub async fn reset(&self) -> Result<(), Error> {
         self.call(|c| {
             c.immediate_transaction(|c| {
+                if let (units @ 1.., tasks) = crate::queries::active_runs(c, None)? {
+                    return Err(Error::ActiveRuns { units, tasks });
+                }
                 diesel::delete(log_segments::table).execute(c)?;
                 diesel::delete(run_summaries::table).execute(c)?;
                 diesel::delete(metric_rollups::table).execute(c)?;
+                diesel::delete(startup_peaks::table).execute(c)?;
+                diesel::delete(unit_run_members::table).execute(c)?;
                 diesel::delete(remote_hosts::table).execute(c)?;
                 diesel::delete(lane_setup::table).execute(c)?;
                 diesel::delete(task_completions::table).execute(c)?;

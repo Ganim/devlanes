@@ -93,6 +93,9 @@ jobs:
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
       - name: Build
+        # The tag marks official builds in the daemon handshake and doctor; others say local.
+        env:
+          DEVLANES_BUILD_ID: ${{ github.ref_name }}
         run: cargo build --release --locked --target "$TARGET" -p devlanes -p devlanes-hosts-helper
       # build.rs regenerates the served schemas; a difference means they were committed stale.
       - name: Check the committed schemas

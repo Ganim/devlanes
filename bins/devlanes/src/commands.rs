@@ -251,8 +251,10 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
             let signals = Signals::install()
                 .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
             let client = connect(&paths).await?;
-            let mut driver =
-                ClientDriver::new(client, plan.start.context.clone(), paths).with_signals(signals);
+            let progress = crate::progress::wrap(&paths, runtime);
+            let mut driver = ClientDriver::new(client, plan.start.context.clone(), paths)
+                .with_signals(signals)
+                .with_progress(progress);
             let outcome =
                 run_with(&plan, runtime, &mut driver, &mut |rendered| emit(&rendered)).await;
             Ok(outcome.exit_code)
@@ -374,6 +376,8 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
             )
     });
     let open_ended = matches!(method, Method::Logs | Method::Subscribe | Method::Status);
+    // The tab's progress bar while a start is followed; a no-op otherwise.
+    let progress = crate::progress::Follower::start(&paths, runtime, &request);
     let id = client
         .begin_request(method, request.params.clone(), request.context.clone())
         .await
@@ -408,6 +412,9 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                 Frame::Control(Control::Response(response)) if response.id == id => {
                     return match response.result {
                         Outcome::Ok { mut data } => {
+                            if method == Method::Doctor {
+                                crate::notices::annotate_doctor(&mut client, &mut data).await;
+                            }
                             // The budget hid the end of a failed task's output: show its tail.
                             if let Some(stream) = &log_stream
                                 && data.get("state").and_then(Value::as_str) == Some("failed")
@@ -460,10 +467,19 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
             None => stream.await,
         }
     };
-    tokio::select! {
+    let result = tokio::select! {
         result = limited => result,
-        _ = tokio::signal::ctrl_c() => interrupted(cli, runtime, &paths, &request).await,
+        _ = tokio::signal::ctrl_c() => {
+            // Detaching is not a failure: the bar just goes.
+            progress.finish(true).await;
+            return interrupted(cli, runtime, &paths, &request).await;
+        }
+    };
+    progress.finish(matches!(result, Ok(0))).await;
+    if result.is_ok() {
+        crate::notices::after_command(&mut client, runtime, &paths, method).await;
     }
+    result
 }
 
 /// Ctrl-C during a request, per [`InterruptPolicy`]: services never stop, but a

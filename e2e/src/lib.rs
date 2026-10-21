@@ -162,10 +162,10 @@ impl PortSlot {
                 .open(dir.join(format!("{slot}.lock")))?;
             match file.try_lock() {
                 Ok(()) => {
-                    return Ok(Self {
-                        base: SLOT_BASE + slot * SLOT_SIZE,
-                        _lock: file,
-                    });
+                    let base = SLOT_BASE + slot * SLOT_SIZE;
+                    // An earlier run that died before its cleanup may have left these.
+                    reap_fixture_listeners(base, base + SLOT_SIZE - 1);
+                    return Ok(Self { base, _lock: file });
                 }
                 Err(fs::TryLockError::WouldBlock) => {}
                 Err(fs::TryLockError::Error(error)) => return Err(error.into()),
@@ -536,13 +536,21 @@ impl Lab {
         }
     }
 
-    /// Stops the daemon, removes Docker resources and kills recorded processes.
+    /// Stops the daemon, removes Docker resources and kills recorded processes:
+    /// every unit the lanes still list (a previous daemon's orphans included,
+    /// which `daemon stop` leaves running), with their process groups, and any
+    /// fixture still listening on the slot's ports.
     fn shutdown(&self) {
         if self.daemon_running() {
-            if let Ok(command) = self.command(self.repo(), &["daemon", "status", "--json"])
-                && let Ok(output) = run_bounded(command, Duration::from_secs(10))
-            {
-                output.ndjson().iter().for_each(|v| self.track_json(v));
+            for args in [
+                &["daemon", "status", "--json"][..],
+                &["status", "--all", "--json"][..],
+            ] {
+                if let Ok(command) = self.command(self.repo(), args)
+                    && let Ok(output) = run_bounded(command, Duration::from_secs(10))
+                {
+                    output.ndjson().iter().for_each(|v| self.track_json(v));
+                }
             }
             if let Ok(command) = self.command(self.repo(), &["daemon", "stop", "--yes"]) {
                 let _ = run_bounded(command, Duration::from_secs(20));
@@ -578,9 +586,10 @@ impl Lab {
             .unwrap_or_else(|_| Vec::new());
         for (pid, started) in owned {
             if start_time(pid).as_deref() == Some(started.as_str()) {
-                kill(pid);
+                kill_tree(pid);
             }
         }
+        reap_fixture_listeners(self.slot.base, self.slot.base + SLOT_SIZE - 1);
     }
 
     /// Prints the end of the daemon log, which disappears with the home.
@@ -718,6 +727,54 @@ pub fn alive(pid: i32) -> bool {
 pub fn kill(pid: i32) {
     if let Some(pid) = rustix::process::Pid::from_raw(pid) {
         let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+}
+
+/// SIGKILL to `pid` and, when it leads a process group (every unit does), to
+/// the whole group, so a unit's children die with it.
+pub fn kill_tree(pid: i32) {
+    if let Some(leader) = rustix::process::Pid::from_raw(pid)
+        && rustix::process::getpgid(Some(leader)).ok() == Some(leader)
+    {
+        let _ = rustix::process::kill_process_group(leader, rustix::process::Signal::KILL);
+    }
+    kill(pid);
+}
+
+/// Kills `fixture-server` processes listening on ports `first..=last`. A test
+/// that failed before cleaning up (or a daemon's orphan) must not hold the
+/// slot's ports for later runs; nothing but the fixture is ever touched.
+fn reap_fixture_listeners(first: u16, last: u16) {
+    let Ok(output) = Command::new("lsof")
+        .args([
+            "-nP",
+            "-t",
+            &format!("-iTCP:{first}-{last}"),
+            "-sTCP:LISTEN",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return;
+    };
+    for pid in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<i32>().ok())
+    {
+        let command = Command::new("ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .unwrap_or_default();
+        if Path::new(&command)
+            .file_name()
+            .is_some_and(|name| name == "fixture-server")
+        {
+            kill_tree(pid);
+        }
     }
 }
 

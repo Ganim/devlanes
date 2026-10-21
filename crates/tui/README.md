@@ -72,7 +72,9 @@ In terminal focus every key except `shift+tab` goes to the unit, encoded for its
 terminal: kitty
 ```
 
-`O` then opens a kitty window in the lane's worktree, attached to the selected unit. Without `terminal:`, the TUI uses Terminal.app.
+`O` then opens a kitty window in the lane's worktree, attached to the selected unit. Without `terminal:`, the TUI uses Terminal.app on macOS, else the first launcher that is installed.
+
+While lanes start, the terminal tab's progress bar shows ready services over the services starting, across every starting lane (the selected lane alone would jump while you browse). A failed start shows red for three seconds. Quitting, a panic or `terminal.progress: never` clears it; see `devlanes-term` for where it is drawn.
 
 ## Behaviour
 

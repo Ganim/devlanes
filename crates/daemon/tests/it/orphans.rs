@@ -198,6 +198,248 @@ async fn a_crashed_daemons_units_stay_running_as_orphans() {
     .expect("timeout");
 }
 
+/// Records `members` as escaped descendants of the unfinished run of `unit`.
+async fn record_members(home: &std::path::Path, unit: &str, members: &[u32]) {
+    let store = devlanes_state::Store::open(home.join("state.db"))
+        .await
+        .expect("store");
+    let run = store
+        .active_unit_runs()
+        .await
+        .expect("runs")
+        .into_iter()
+        .find(|run| run.unit == unit)
+        .expect("run");
+    let members = members
+        .iter()
+        .map(|&pid| devlanes_core::ProcessIdentity {
+            pid,
+            sid: pid,
+            start_time: 1,
+        })
+        .collect();
+    store
+        .record_unit_run_members(run.id, members)
+        .await
+        .expect("members");
+    store.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Descendants that left the session are signalled with their orphan, and keep
+/// it orphaned after the leader itself exited.
+async fn escaped_descendants_are_stopped_with_their_orphan() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let home = tmp.path.join("home");
+        let first = harness(&home, Setup::default()).await;
+        let started: StartResult = serde_json::from_value(
+            first
+                .call(Method::Start, json!({}), cx(&main))
+                .await
+                .expect("start"),
+        )
+        .expect("start result");
+        let pids: std::collections::BTreeMap<String, u32> = started
+            .units
+            .iter()
+            .map(|u| (u.name.clone(), u.pid.expect("pid")))
+            .collect();
+        drop(first);
+        record_members(&home, "web", &[900_001]).await;
+        record_members(&home, "worker", &[900_002]).await;
+        let processes = FakeProcesses::default();
+        // The worker's leader exited; only its escaped daemon still runs.
+        processes
+            .alive
+            .lock()
+            .expect("lock")
+            .extend([pids["web"], 900_001, 900_002]);
+        let h = harness(
+            &home,
+            Setup {
+                processes: Some(processes.clone()),
+                logs: Some(tmp.path.join("logs-after-crash")),
+                ..Setup::default()
+            },
+        )
+        .await;
+        let summary = lane(&h, &main).await;
+        assert_eq!(unit(&summary, "web").state, "orphaned");
+        assert_eq!(unit(&summary, "worker").state, "orphaned");
+        assert_eq!(unit(&summary, "api").state, "idle");
+
+        h.call(Method::Stop, json!({"units": ["web"]}), cx(&main))
+            .await
+            .expect("stop");
+        let mut killed = processes.killed.lock().expect("lock").clone();
+        killed.sort_unstable();
+        let mut expected = vec![pids["web"], 900_001];
+        expected.sort_unstable();
+        assert_eq!(killed, expected);
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop all");
+        assert!(processes.killed.lock().expect("lock").contains(&900_002));
+        assert!(active_runs(&home).await.is_empty());
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A unit whose run cannot be recorded is stopped instead of running untracked,
+/// and the task that started it still gets its task run finished.
+async fn an_unrecorded_spawn_is_refused_and_its_task_run_finished() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(
+            &tmp.path,
+            "r",
+            "project: demo\nservices:\n  web: { run: sleep }\ntasks:\n  seed: { run: sleep }\n",
+        );
+        let home = tmp.path.join("home");
+        let h = harness(&home, Setup::default()).await;
+        lane(&h, &main).await;
+        // A stale unfinished row this daemon does not know holds the unit's slot.
+        let store = devlanes_state::Store::open(home.join("state.db"))
+            .await
+            .expect("store");
+        let lane_id = store.lanes(None).await.expect("lanes")[0].id;
+        let actor = devlanes_core::Actor {
+            kind: devlanes_core::ActorKind::Human,
+            agent_id: None,
+            session_id: None,
+        };
+        store
+            .record_unit_run(devlanes_state::UnitRunInput {
+                lane_id,
+                unit: "seed".into(),
+                process: devlanes_core::ProcessIdentity {
+                    pid: 900_004,
+                    sid: 900_004,
+                    start_time: 1,
+                },
+                actor,
+                log_path: None,
+                boot_id: None,
+            })
+            .await
+            .expect("stale run");
+
+        let error = h
+            .call(Method::Run, json!({"task": "seed"}), cx(&main))
+            .await
+            .expect_err("refused");
+        assert_eq!(error.code, "state_conflict", "{error:?}");
+        let tasks = store.task_runs(lane_id, 1).await.expect("task runs");
+        assert_eq!(tasks[0].task, "seed");
+        assert!(tasks[0].ended_at.is_some() && tasks[0].exit_code.is_none());
+        let summary = lane(&h, &main).await;
+        assert!(
+            summary.units.iter().all(|u| u.name != "seed"),
+            "the unrecorded unit is not kept: {:?}",
+            summary.units
+        );
+        store.close().await.expect("close");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// `daemon reset-state` terminates orphans, including those of a lane this
+/// daemon never loaded, and only then empties the store.
+async fn reset_state_terminates_orphans_before_resetting() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let (h, processes, pids) = crashed(&tmp, &main, &["web"]).await;
+        let home = tmp.path.join("home");
+        // A run of a lane the daemon does not know (no project config directory).
+        let store = devlanes_state::Store::open(home.join("state.db"))
+            .await
+            .expect("store");
+        let ghost = store
+            .upsert_project(devlanes_state::ProjectInput {
+                name: "ghost".into(),
+                common_dir: None,
+                root_path: tmp.path.join("ghost"),
+                primary_branch: "main".into(),
+            })
+            .await
+            .expect("project");
+        let worktree = store
+            .upsert_worktree(devlanes_state::WorktreeInput {
+                project_id: ghost.id,
+                identity: "main".into(),
+                path: tmp.path.join("ghost"),
+                branch: None,
+                present: true,
+            })
+            .await
+            .expect("worktree");
+        let ghost_lane = store
+            .upsert_lane(devlanes_state::LaneInput {
+                project_id: ghost.id,
+                worktree_id: worktree.id,
+                index: 0,
+                name: "ghost".into(),
+                desired_state: devlanes_state::DesiredState::Running,
+                profile: None,
+                profiles: Vec::new(),
+            })
+            .await
+            .expect("lane");
+        store
+            .record_unit_run(devlanes_state::UnitRunInput {
+                lane_id: ghost_lane.id,
+                unit: "daemon".into(),
+                process: devlanes_core::ProcessIdentity {
+                    pid: 900_003,
+                    sid: 900_003,
+                    start_time: 1,
+                },
+                actor: devlanes_core::Actor {
+                    kind: devlanes_core::ActorKind::Human,
+                    agent_id: None,
+                    session_id: None,
+                },
+                log_path: None,
+                boot_id: None,
+            })
+            .await
+            .expect("ghost run");
+        store.close().await.expect("close");
+        processes.alive.lock().expect("lock").insert(900_003);
+
+        let reset = h
+            .call(
+                Method::DaemonResetState,
+                json!({}),
+                devlanes_proto::Context {
+                    yes: true,
+                    ..cx(&main)
+                },
+            )
+            .await
+            .expect("reset");
+        assert_eq!(reset["terminated"], 2, "{reset}");
+        let mut killed = processes.killed.lock().expect("lock").clone();
+        killed.sort_unstable();
+        let mut expected = vec![pids["web"], 900_003];
+        expected.sort_unstable();
+        assert_eq!(killed, expected);
+        assert!(active_runs(&home).await.is_empty());
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 /// A full lane stop terminates orphans; one whose process exits on its own is
 /// cleared by the periodic check.

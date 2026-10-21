@@ -101,6 +101,32 @@ fn psi_fixtures_grade_memory_pressure() {
 }
 
 #[test]
+fn cgroup_v2_path_and_limits() {
+    use devlanes_metrics_linux::pressure::{
+        cgroup_available, parse_cgroup_v2_path, parse_memory_max,
+    };
+    assert_eq!(
+        parse_cgroup_v2_path("0::/user.slice/user-1000.slice/session-3.scope\n").as_deref(),
+        Some("user.slice/user-1000.slice/session-3.scope")
+    );
+    assert_eq!(parse_cgroup_v2_path("0::/\n").as_deref(), Some(""));
+    // cgroup v1 only: no unified line.
+    assert_eq!(parse_cgroup_v2_path("12:memory:/docker/abc\n"), None);
+    assert_eq!(parse_memory_max("max\n"), None);
+    assert_eq!(parse_memory_max("2147483648\n"), Some(2 << 30));
+    assert_eq!(
+        cgroup_available(8 << 30, Some(2 << 30), Some(1 << 30)),
+        1 << 30
+    );
+    assert_eq!(
+        cgroup_available(512 << 20, Some(2 << 30), Some(1 << 30)),
+        512 << 20
+    );
+    assert_eq!(cgroup_available(8 << 30, None, Some(1 << 30)), 8 << 30);
+    assert_eq!(cgroup_available(8 << 30, Some(1 << 30), Some(3 << 30)), 0);
+}
+
+#[test]
 fn meminfo_fixture_gives_available_bytes() {
     assert_eq!(
         parse_meminfo_available(include_str!("../../fixtures/meminfo.txt")).expect("meminfo"),
@@ -119,6 +145,11 @@ fn live_pressure_reads_proc() {
         let first = source.sample_blocking().expect("first reading");
         assert_eq!(first.cpu_percent, None);
         std::thread::sleep(std::time::Duration::from_millis(200));
+        let available = source
+            .available_memory_blocking()
+            .expect("meminfo")
+            .expect("available");
+        assert!(available > 0);
         let second = source.sample_blocking().expect("second reading");
         assert!(
             second

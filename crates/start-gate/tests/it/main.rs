@@ -292,6 +292,316 @@ impl Trace {
     }
 }
 
+/// A fixed window of `max` over a trace with calm CPU and `memory` bytes free.
+fn memory_gate(
+    max: usize,
+    slot_timeout: u64,
+    memory: fn(u64) -> Option<u64>,
+) -> (FixedWindow, ManualClock) {
+    let clock = ManualClock::new();
+    let trace = Arc::new(Trace {
+        clock: clock.clone(),
+        script: |_| reading(10.0, MemoryPressure::Normal),
+        memory,
+        readings: Mutex::new(Vec::new()),
+    });
+    let gate =
+        FixedWindow::with_pressure(max, options(slot_timeout), Arc::new(clock.clone()), trace);
+    (gate, clock)
+}
+
+/// A source whose memory reads fail.
+struct FailingMemory;
+
+#[async_trait]
+impl PressureSource for FailingMemory {
+    fn name(&self) -> &'static str {
+        "failing"
+    }
+
+    async fn sample(&self) -> Result<PressureSample, devlanes_core::Error> {
+        Ok(reading(10.0, MemoryPressure::Normal))
+    }
+
+    async fn available_memory(&self) -> Result<Option<u64>, devlanes_core::Error> {
+        Err(devlanes_core::Error::Integration("sysctl failed".into()))
+    }
+}
+
+/// Grants by unit name, removing them from `tickets`.
+fn take_named(tickets: &mut Vec<(String, StartTicket)>) -> Vec<(String, StartSlot)> {
+    let mut granted = Vec::new();
+    tickets.retain_mut(|(name, ticket)| match try_take(ticket) {
+        Some(slot) => {
+            granted.push((name.clone(), slot));
+            false
+        }
+        None => true,
+    });
+    granted
+}
+
+#[tokio::test]
+async fn arrival_keeps_the_place_taken_before_the_batch_is_known() {
+    bounded(async {
+        let (gate, _clock) = fixed(1, 60);
+        let holder = gate.acquire(request("other@1", "holder", 0)).await;
+        // acme@1 arrives first but needs time to look up its memory needs.
+        let early = gate.arrive();
+        let mut later: Vec<(String, StartTicket)> = vec![(
+            "acme@2:web".into(),
+            gate.enqueue(request("acme@2", "web", 0)),
+        )];
+        let mut tickets: Vec<(String, StartTicket)> = vec![(
+            "acme@1:web".into(),
+            gate.enqueue_batch_at(early, vec![request("acme@1", "web", 0)])
+                .pop()
+                .expect("one ticket"),
+        )];
+        tickets.append(&mut later);
+        holder.release(Release::Ready);
+        let first = take_named(&mut tickets);
+        assert_eq!(
+            first
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["acme@1:web"]
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn first_wave_waits_for_a_memory_reading() {
+    bounded(async {
+        let (gate, _clock) = memory_gate(4, 60, |_| Some(1000));
+        let mut tickets = gate.enqueue_batch(vec![
+            needing("acme@1", "a", 0, 600),
+            needing("acme@1", "b", 1, 600),
+            needing("acme@1", "c", 2, 100),
+        ]);
+        // Nothing in flight: the first start needs no reading.
+        let first = take_granted(&mut tickets);
+        assert_eq!(first.len(), 1);
+        let snapshot = gate.snapshot();
+        assert_eq!(snapshot.hold, Some(HoldReason::Memory));
+        assert_eq!(snapshot.available_memory, None, "no reading yet");
+        // The driver reads at once; b does not fit next to a, and c waits behind b.
+        settle().await;
+        assert!(take_granted(&mut tickets).is_empty());
+        let snapshot = gate.snapshot();
+        assert_eq!(snapshot.available_memory, Some(1000));
+        assert_eq!(snapshot.hold, Some(HoldReason::Memory));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn stale_memory_reading_holds_until_the_driver_reads() {
+    bounded(async {
+        let (gate, clock) = memory_gate(4, 60, |_| Some(10_000));
+        let _a = gate.acquire(needing("acme@1", "a", 0, 100)).await;
+        settle().await;
+        // Time passes without the driver running: the reading is now 5 s old.
+        clock.advance(Duration::from_secs(5));
+        let mut next = vec![gate.enqueue(needing("acme@1", "b", 1, 100))];
+        assert!(take_granted(&mut next).is_empty());
+        assert_eq!(gate.snapshot().hold, Some(HoldReason::Memory));
+        settle().await;
+        assert_eq!(take_granted(&mut next).len(), 1, "fresh reading fits");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn failed_memory_reads_do_not_block() {
+    bounded(async {
+        let clock = ManualClock::new();
+        let gate = FixedWindow::with_pressure(
+            4,
+            options(60),
+            Arc::new(clock.clone()),
+            Arc::new(FailingMemory),
+        );
+        let _a = gate.acquire(needing("acme@1", "a", 0, 100)).await;
+        let mut big = vec![gate.enqueue(needing("acme@1", "big", 1, u64::MAX))];
+        settle().await;
+        assert_eq!(take_granted(&mut big).len(), 1);
+        assert_eq!(gate.snapshot().available_memory, None);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn reported_footprint_and_grant_cap_shrink_reservations() {
+    bounded(async {
+        let (gate, _clock) = memory_gate(4, 60, |_| Some(1000));
+        let holder = gate.acquire(needing("acme@1", "holder", 0, 0)).await;
+        settle().await;
+        let mut tickets = gate.enqueue_batch(vec![
+            needing("acme@1", "big", 0, 5000),
+            needing("acme@1", "small", 1, 300),
+        ]);
+        assert!(
+            take_granted(&mut tickets).is_empty(),
+            "big waits next to holder"
+        );
+        drop(holder);
+        // Alone, big goes ahead; it reserves at most the 1000 available bytes.
+        let big = take_granted(&mut tickets);
+        assert_eq!(big.len(), 1);
+        assert!(
+            take_granted(&mut tickets).is_empty(),
+            "1000 reserved, 0 left"
+        );
+        // Big already holds 800 of them, so only 200 are still to come.
+        big[0].report_memory(800);
+        assert_eq!(take_granted(&mut tickets).len(), 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn withdrawing_a_memory_blocked_head_lets_the_next_one_in() {
+    bounded(async {
+        let (gate, _clock) = memory_gate(4, 60, |_| Some(1000));
+        let _holder = gate.acquire(needing("acme@1", "holder", 0, 800)).await;
+        settle().await;
+        let mut tickets = gate.enqueue_batch(vec![
+            needing("acme@1", "big", 0, 600),
+            needing("acme@1", "small", 1, 100),
+        ]);
+        assert!(take_granted(&mut tickets).is_empty());
+        let big = tickets.remove(0);
+        drop(big);
+        assert_eq!(take_granted(&mut tickets).len(), 1, "small fits in 200");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn granted_ticket_dropped_before_poll_frees_its_slot() {
+    bounded(async {
+        let (gate, _clock) = fixed(1, 60);
+        let first = gate.acquire(request("acme@1", "a", 0)).await;
+        let unpolled = gate.enqueue(request("acme@1", "b", 1));
+        let mut last = vec![gate.enqueue(request("acme@1", "c", 2))];
+        first.release(Release::Ready);
+        // b holds the slot in its ticket now; dropping the ticket returns it.
+        assert_eq!(gate.snapshot().in_flight, 1);
+        drop(unpolled);
+        let last = take_granted(&mut last);
+        assert_eq!(last.len(), 1);
+        assert_eq!(gate.snapshot().in_flight, 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn holder_panic_releases_the_slot() {
+    bounded(async {
+        let (gate, _clock) = fixed(1, 60);
+        let slot = gate.acquire(request("acme@1", "a", 0)).await;
+        let mut next = vec![gate.enqueue(request("acme@1", "b", 1))];
+        let crashed = tokio::spawn(async move {
+            let _slot = slot;
+            panic!("holder failed");
+        })
+        .await;
+        assert!(crashed.is_err());
+        assert_eq!(take_granted(&mut next).len(), 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn report_cpu_after_timeout_changes_nothing() {
+    bounded(async {
+        let (gate, clock) = fixed(1, 5);
+        let slot = gate.acquire(request("acme@1", "a", 0)).await;
+        settle().await;
+        tick(&clock, 5).await;
+        assert_eq!(slot.released(), Some(Release::Timeout));
+        for _ in 0..3 {
+            slot.report_cpu(0.0);
+            slot.report_memory(1);
+            tick(&clock, 1).await;
+        }
+        assert_eq!(slot.released(), Some(Release::Timeout));
+        assert_eq!(gate.snapshot().in_flight, 0);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn driver_exits_when_the_gate_is_dropped() {
+    bounded(async {
+        let clock = Arc::new(ManualClock::new());
+        let gate = FixedWindow::new(1, options(60), clock.clone());
+        let slot = gate.acquire(request("acme@1", "a", 0)).await;
+        settle().await;
+        // This test, the gate and its driver.
+        assert_eq!(Arc::strong_count(&clock), 3);
+        drop(slot);
+        drop(gate);
+        settle().await;
+        assert_eq!(Arc::strong_count(&clock), 1, "driver still holds the clock");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn many_units_across_lanes_with_mixed_releases() {
+    bounded(async {
+        let (gate, clock) = fixed(4, 10);
+        let lanes = ["acme@1", "acme@2", "other@1"];
+        let mut tickets: Vec<(String, StartTicket)> = Vec::new();
+        let mut expected = Vec::new();
+        for lane in lanes {
+            let names: Vec<String> = (0..15).map(|i| format!("{lane}:s{i}")).collect();
+            let batch = gate.enqueue_batch(
+                (0..15)
+                    .map(|i| request(lane, &format!("s{i}"), i))
+                    .collect(),
+            );
+            tickets.extend(names.iter().cloned().zip(batch));
+            expected.extend(names);
+        }
+        let mut order = Vec::new();
+        // Every third unit never reports back and leaves by timeout.
+        let mut timing_out = Vec::new();
+        for _ in 0..200 {
+            loop {
+                let granted = take_named(&mut tickets);
+                if granted.is_empty() {
+                    break;
+                }
+                for (name, slot) in granted {
+                    assert!(gate.snapshot().in_flight <= 4, "window exceeded");
+                    match order.len() % 3 {
+                        0 => slot.release(Release::Ready),
+                        1 => slot.release(Release::Failed),
+                        _ => timing_out.push(slot),
+                    }
+                    order.push(name);
+                }
+            }
+            if tickets.is_empty() {
+                break;
+            }
+            tick(&clock, 1).await;
+        }
+        assert_eq!(order, expected, "first come, first served by request");
+        assert!(
+            timing_out
+                .iter()
+                .all(|slot| slot.released().is_none_or(|r| r == Release::Timeout))
+        );
+    })
+    .await;
+}
+
 #[async_trait]
 impl PressureSource for Trace {
     fn name(&self) -> &'static str {
@@ -374,12 +684,21 @@ async fn adaptive_window_follows_a_pressure_trace() {
                 5, 5, 5, 2, 2, 2, 1, 1, // halved after 3 s above 90%, again 3 s later
                 1, 1, 1, 1, // warn: halving floors at 1
                 1, 1, 1, // critical: paused
-                1, 1, 2, 2, // recovers by +1 every 2 s
+                // Recovers by +1 every 2 s, counted from the first reading
+                // where the window (not the pause) holds starts back.
+                1, 1, 1, 2,
             ]
         );
         // Started units never exceed the largest window reached (5).
         assert_eq!(slots.len(), 5);
         assert_eq!(gate.snapshot().in_flight, 5);
+        // The busy period's conditions, for reading measured start times.
+        let burst = gate.snapshot().burst.expect("busy period");
+        assert_eq!(burst.granted, 5);
+        assert_eq!(burst.max_window, Some(5));
+        assert_eq!(burst.peak_cpu_percent, Some(97.0));
+        assert_eq!(burst.worst_memory, Some(MemoryPressure::Critical));
+        assert_eq!(burst.duration_ms, 26_000);
         let readings = trace.readings.lock().map(|r| r.clone()).unwrap_or_default();
         assert_eq!(readings.first(), Some(&0));
         assert!(readings.windows(2).all(|pair| pair[1] == pair[0] + 1));
@@ -415,8 +734,10 @@ async fn adaptive_gate_restarts_at_initial_after_idle() {
         for slot in &slots {
             slot.release(Release::Ready);
         }
-        tick(&clock, 1).await;
+        // Back to idle resets at once, without waiting for a driver pass, so a
+        // request arriving right after still starts a fresh period.
         assert_eq!(gate.snapshot().window, Some(2));
+        assert_eq!(gate.snapshot().pressure, None);
         // The next busy period starts with a fresh CPU baseline again.
         let _again = gate.enqueue(request("acme@1", "again", 0));
         settle().await;
@@ -446,7 +767,7 @@ async fn head_waits_for_memory_then_goes_ahead() {
             readings: Mutex::new(Vec::new()),
         });
         let gate = FixedWindow::with_pressure(4, options(60), Arc::new(clock.clone()), trace);
-        // The first start runs before any reading: unknown memory never blocks.
+        // Nothing is in flight, so the first start goes ahead before any reading.
         let holder = gate.acquire(needing("acme@1", "holder", 0, 0)).await;
         settle().await;
         assert_eq!(gate.snapshot().available_memory, Some(1000));

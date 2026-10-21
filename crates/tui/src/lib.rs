@@ -43,8 +43,11 @@ pub enum Error {
 pub struct Options {
     /// Every available launcher; the binary registers them.
     pub launchers: Vec<Arc<dyn TerminalLauncher>>,
-    /// The user config's `terminal:` value, matched against [`TerminalLauncher::name`].
+    /// The user config's terminal app, matched against [`TerminalLauncher::name`].
     pub terminal: Option<String>,
+    /// How to draw start progress in the tab's progress bar, from
+    /// [`devlanes_term::progress_support`]; `None` draws nothing.
+    pub progress: Option<devlanes_term::Wrap>,
 }
 
 impl Options {
@@ -140,6 +143,7 @@ mod tests {
                 .map(|(name, there)| Arc::new(Fake(name, *there)) as Arc<dyn TerminalLauncher>)
                 .collect(),
             terminal: terminal.map(str::to_owned),
+            progress: None,
         }
     }
 

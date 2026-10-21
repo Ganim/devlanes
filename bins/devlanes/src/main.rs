@@ -9,7 +9,9 @@ mod daemon;
 mod driver;
 mod hosts;
 mod local;
+mod notices;
 mod output;
+mod progress;
 mod remote;
 mod wiring;
 

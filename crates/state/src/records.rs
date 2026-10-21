@@ -27,6 +27,7 @@ pub struct Project {
     pub common_dir: Option<PathBuf>,
     pub root_path: PathBuf,
     pub primary_branch: String,
+    /// Unix milliseconds of the last shell-driven start.
     pub last_start: Option<i64>,
 }
 
@@ -49,7 +50,9 @@ pub struct Worktree {
     pub path: PathBuf,
     pub branch: Option<String>,
     pub present: bool,
+    /// Unix milliseconds of the first registration.
     pub first_seen: i64,
+    /// Unix milliseconds of the latest registration or missing mark.
     pub last_seen: i64,
 }
 
@@ -101,7 +104,10 @@ pub struct Lane {
     /// Ordered selection, including every profile needed for resume.
     #[serde(default)]
     pub profiles: Vec<String>,
+    /// Unix milliseconds when the lane was registered. Re-registering a cleaned
+    /// lane resets it, since the revived lane starts with fresh setup state.
     pub created_at: i64,
+    /// Unix milliseconds of the last clean; `None` while the lane is active.
     pub cleaned_at: Option<i64>,
 }
 
@@ -149,6 +155,9 @@ pub struct UnitRunInput {
     pub process: ProcessIdentity,
     pub actor: Actor,
     pub log_path: Option<PathBuf>,
+    /// Boot the process was started in (`devlanes_sys::boot_id`); `None` when
+    /// the platform could not tell.
+    pub boot_id: Option<String>,
 }
 
 /// Run history and identity; unfinished rows are reconciliation candidates only.
@@ -158,9 +167,14 @@ pub struct UnitRun {
     pub lane_id: LaneId,
     pub unit: String,
     pub process: ProcessIdentity,
+    /// Unix milliseconds when the run was recorded.
     pub started_at: i64,
+    /// Unix milliseconds when the run was finished; `None` while unfinished.
     pub ended_at: Option<i64>,
     pub outcome: Option<ExitOutcome>,
     pub actor: Actor,
     pub log_path: Option<PathBuf>,
+    /// Boot the run was recorded in; `None` for rows from before boot tracking.
+    #[serde(default)]
+    pub boot_id: Option<String>,
 }

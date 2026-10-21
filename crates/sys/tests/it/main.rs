@@ -57,6 +57,16 @@ fn enumeration_includes_self() -> Result<(), devlanes_sys::Error> {
     Ok(())
 }
 
+/// The boot ID is a nonempty token that stays the same while the machine runs.
+#[test]
+fn boot_id_is_stable() -> Result<(), devlanes_sys::Error> {
+    let first = devlanes_sys::boot_id()?;
+    assert!(!first.trim().is_empty());
+    assert_eq!(first.trim(), first);
+    assert_eq!(devlanes_sys::boot_id()?, first);
+    Ok(())
+}
+
 /// A wrong start time is a mismatch and must not deliver the signal.
 #[test]
 fn verified_signals_reject_recycled_identity() -> Result<(), devlanes_sys::Error> {

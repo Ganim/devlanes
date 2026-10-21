@@ -1,6 +1,7 @@
 //! Thin Unix-socket client shared by CLI, completion, and TUI frontends.
 
 mod paths;
+pub mod update;
 
 use std::{collections::VecDeque, path::PathBuf, process::Stdio, time::Duration};
 

@@ -5,7 +5,7 @@
 //! platforms this crate is empty.
 //!
 //! `MacosPressure` is the start gate's `PressureSource`: system CPU from
-//! `host_statistics`, memory pressure from `kern.memorystatus_vm_pressure_level`.
+//! `host_processor_info`, memory pressure from `kern.memorystatus_vm_pressure_level`.
 //!
 //! All system calls go through the safe wrappers in `devlanes_sys::macos`.
 

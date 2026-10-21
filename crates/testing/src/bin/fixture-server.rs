@@ -162,6 +162,10 @@ fn bind(args: &Args) -> std::io::Result<TcpListener> {
     if args.bind_ipv6_only {
         socket.set_only_v6(true)?;
     }
+    // A killed earlier server leaves its connections in TIME_WAIT on this port;
+    // without this, a test reusing the port right after fails with AddrInUse.
+    // A live listener still refuses the bind.
+    socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&addr.into())?;
     socket.listen(128)?;

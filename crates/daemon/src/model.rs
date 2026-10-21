@@ -123,6 +123,24 @@ pub(crate) struct UnitRec {
     pub files: Vec<devlanes_core::contrib::PreparedFile>,
     /// Palette name for `UnitSummary.color`.
     pub color: Option<String>,
+    /// The runner's handle, for what the run left behind once it ended.
+    pub managed: Arc<dyn crate::integrations::ManagedUnit>,
+}
+
+impl UnitRec {
+    /// Processes the ended run left running or that escaped its final sweep;
+    /// empty while it runs.
+    pub(crate) fn leftovers(&self, unit: &str) -> devlanes_proto::Leftovers {
+        let details = self.managed.exit_details();
+        devlanes_proto::Leftovers {
+            unit: unit.to_owned(),
+            left_running: details
+                .as_ref()
+                .map(|d| d.left_running.clone())
+                .unwrap_or_default(),
+            escaped: details.map(|d| d.escaped).unwrap_or_default(),
+        }
+    }
 }
 
 /// A process a previous daemon started that still runs (identity verified at
@@ -137,6 +155,9 @@ pub(crate) struct Orphan {
     /// When this daemon found it (Unix ms).
     pub since_ms: u64,
     pub actor: Actor,
+    /// Descendants that left the leader's session, as the previous daemon recorded
+    /// them; signalled with the leader and counted for liveness.
+    pub members: Vec<devlanes_core::ProcessIdentity>,
 }
 
 /// Mutable state of one worktree lane.
@@ -160,6 +181,8 @@ pub(crate) struct LaneSt {
     pub view: Option<Arc<LaneView>>,
     pub allocation: Option<Allocation>,
     pub infra_ns: Option<Value>,
+    /// Running containers behind `infra_ns`, for Docker stats.
+    pub infra_containers: Vec<crate::integrations::InfraContainer>,
     pub setup_env: EnvMap,
     pub last_error: Option<RpcError>,
     pub skipped_tasks: Vec<String>,
@@ -200,6 +223,7 @@ impl LaneSt {
             view: None,
             allocation: None,
             infra_ns: None,
+            infra_containers: Vec::new(),
             setup_env: EnvMap::new(),
             last_error: None,
             skipped_tasks: Vec::new(),
@@ -444,6 +468,7 @@ pub(crate) fn unit_summary(lane: &str, name: &str, unit: &UnitRec) -> UnitSummar
         _ => None,
     };
     let info = unit.host.info();
+    let leftovers = unit.leftovers(name);
     UnitSummary {
         name: name.to_owned(),
         lane: lane.to_owned(),
@@ -463,6 +488,8 @@ pub(crate) fn unit_summary(lane: &str, name: &str, unit: &UnitRec) -> UnitSummar
         memory_bytes: None,
         color: unit.color.clone(),
         orphaned_since_ms: None,
+        left_running: leftovers.left_running,
+        escaped: leftovers.escaped,
     }
 }
 
@@ -637,6 +664,12 @@ fn container_summaries(lane: &LaneSt) -> Vec<devlanes_proto::ContainerSummary> {
                 ports,
                 hidden: hidden.contains(name),
                 color: Some(derived_color(lane, name)),
+                shared: lane
+                    .infra_containers
+                    .iter()
+                    .any(|container| &container.name == name && container.shared),
+                cpu_percent: None,
+                memory_bytes: None,
             }
         })
         .collect()

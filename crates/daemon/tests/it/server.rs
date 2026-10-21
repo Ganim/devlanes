@@ -17,10 +17,15 @@ const ANSWER: Duration = Duration::from_secs(2);
 
 /// A handshaken client connection.
 async fn client(socket: &std::path::Path) -> Connection<UnixStream> {
+    client_with(socket, Hello::current(0)).await
+}
+
+/// A connection that introduced itself with `hello`.
+async fn client_with(socket: &std::path::Path, hello: Hello) -> Connection<UnixStream> {
     let stream = UnixStream::connect(socket).await.expect("connect");
     let mut connection = Connection::new(stream);
     connection
-        .send(Frame::Control(Control::Hello(Hello::current(0))))
+        .send(Frame::Control(Control::Hello(hello)))
         .await
         .expect("hello");
     let Frame::Control(Control::Hello(_)) = connection.recv().await.expect("hello reply") else {
@@ -273,6 +278,86 @@ async fn a_unit_that_never_reads_does_not_stall_the_connection() {
             .expect("stop");
         token.cancel();
         running.await.expect("join").expect("clean shutdown");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Another protocol still gets the frozen `daemon.status` and `daemon.shutdown`
+/// and a structured refusal for the rest; unknown frame types are skipped and
+/// unknown methods answer `unknown_method`, all without closing the connection.
+async fn other_protocols_and_unknown_frames_keep_the_connection() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        let options = Options {
+            home: tmp.path.join("srv"),
+            socket: tmp.path.join("srv/run/d.sock"),
+        };
+        let socket = options.socket.clone();
+        let server = Server::bind(options).await.expect("bind");
+        let token = server.shutdown_token();
+        let handler: Arc<dyn Handler> = Arc::new(h.engine.clone());
+        let running = tokio::spawn(server.run(handler, || Ok(())));
+
+        let mut newer = Hello::current(0);
+        newer.protocol += 1;
+        let mut old = client_with(&socket, newer).await;
+        let status = request(
+            &mut old,
+            1,
+            Method::DaemonStatus,
+            json!({}),
+            Context::default(),
+        )
+        .await;
+        assert!(matches!(status, Outcome::Ok { .. }), "{status:?}");
+        let Outcome::Error { error } =
+            request(&mut old, 2, Method::Status, json!({}), Context::default()).await
+        else {
+            panic!("status needs the same protocol");
+        };
+        assert_eq!(error.code, "protocol_mismatch");
+        assert_eq!(
+            error.data["client_protocol"],
+            Hello::current(0).protocol + 1
+        );
+
+        let mut same = client(&socket).await;
+        same.send(Frame::Control(Control::Unknown))
+            .await
+            .expect("unknown frame");
+        let Outcome::Error { error } =
+            request(&mut same, 3, Method::Unknown, json!({}), Context::default()).await
+        else {
+            panic!("unknown method");
+        };
+        assert_eq!(error.code, "unknown_method");
+        assert_eq!(error.exit_code, 2);
+        let status = request(
+            &mut same,
+            4,
+            Method::DaemonStatus,
+            json!({}),
+            Context::default(),
+        )
+        .await;
+        assert!(matches!(status, Outcome::Ok { .. }), "still connected");
+
+        // The upgrade path: a mismatched client can still stop the daemon.
+        let stopped = request(
+            &mut old,
+            5,
+            Method::DaemonShutdown,
+            json!({}),
+            Context::default(),
+        )
+        .await;
+        assert!(matches!(stopped, Outcome::Ok { .. }), "{stopped:?}");
+        running.await.expect("join").expect("clean shutdown");
+        assert!(token.is_cancelled());
         h.close().await;
     })
     .await

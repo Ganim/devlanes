@@ -1,7 +1,9 @@
 //! Setup records, task history, rollups, remote hosts, retention and reset.
 
 use devlanes_core::{Actor, ActorKind, ExitOutcome, ProcessIdentity};
-use devlanes_state::{RemoteHost, RollupRow, SCHEMA_VERSION, Store, TaskRunInput, UnitRunInput};
+use devlanes_state::{
+    Error, RemoteHost, RollupRow, SCHEMA_VERSION, Store, TaskRunInput, UnitRunInput,
+};
 
 use crate::{lane, project};
 
@@ -23,6 +25,7 @@ async fn all_lifecycle_write_models_round_trip_and_replace() {
             },
             actor: human(),
             log_path: Some("web.log".into()),
+            boot_id: None,
         })
         .await
         .expect("run");
@@ -160,8 +163,28 @@ async fn all_lifecycle_write_models_round_trip_and_replace() {
         .await
         .expect("replace host");
     assert_eq!(store.remote_hosts().await.expect("hosts"), [host]);
+    assert!(matches!(
+        store.reset().await,
+        Err(Error::ActiveRuns { units: 1, .. })
+    ));
+    assert_eq!(
+        store.active_unit_runs().await.expect("units"),
+        std::slice::from_ref(&run),
+        "a refused reset keeps the identity of a possibly running process"
+    );
+    store
+        .finish_unit_run(
+            run.id,
+            ExitOutcome {
+                code: None,
+                signal: Some(15),
+            },
+        )
+        .await
+        .expect("finish");
     store.reset().await.expect("reset");
     assert!(store.active_unit_runs().await.expect("units").is_empty());
+    assert!(store.unit_runs(lane.id, 10).await.expect("runs").is_empty());
     assert!(
         store
             .log_segments(run.id)
@@ -285,7 +308,38 @@ async fn setup_and_task_history() {
     let runs = store.task_runs(lane.id, 10).await.expect("runs");
     assert_eq!(runs[0].exit_code, Some(0));
 
-    store.forget_lane_lifecycle(lane.id).await.expect("forget");
+    // A clean refused for an unfinished task changes nothing.
+    let pending = store
+        .start_task_run(TaskRunInput {
+            lane_id: lane.id,
+            task: "migrate".into(),
+            trigger: "manual".into(),
+            actor: human(),
+        })
+        .await
+        .expect("start");
+    assert!(matches!(
+        store.clean_lane(lane.id).await,
+        Err(Error::ActiveRuns { units: 0, tasks: 1 })
+    ));
+    assert_eq!(
+        store.setup_records(lane.id).await.expect("records").len(),
+        1
+    );
+    assert!(
+        store
+            .task_succeeded(lane.id, "seed".into())
+            .await
+            .expect("query")
+    );
+    // A restarted daemon cannot finish a task it did not start.
+    assert_eq!(store.abandon_task_runs().await.expect("abandon"), 1);
+    let abandoned = store.task_runs(lane.id, 1).await.expect("runs");
+    assert_eq!(abandoned[0].id, pending.id);
+    assert!(abandoned[0].ended_at.is_some() && abandoned[0].exit_code.is_none());
+    assert_eq!(store.abandon_task_runs().await.expect("abandon"), 0);
+
+    store.clean_lane(lane.id).await.expect("clean");
     assert!(
         store
             .setup_records(lane.id)
@@ -299,6 +353,7 @@ async fn setup_and_task_history() {
             .await
             .expect("query")
     );
+    assert!(store.task_runs(lane.id, 10).await.expect("runs").is_empty());
 }
 
 #[tokio::test]
@@ -321,6 +376,7 @@ async fn history_retention_and_reset() {
             },
             actor: human(),
             log_path: None,
+            boot_id: None,
         })
         .await
         .expect("run");
@@ -356,12 +412,24 @@ async fn history_retention_and_reset() {
         .expect("host");
     assert_eq!(store.remote_hosts().await.expect("hosts").len(), 1);
 
-    let pruned = store.prune_history(i64::MAX, 120_000).await.expect("prune");
+    let expire_all = devlanes_state::RetentionPolicy {
+        run_history: std::time::Duration::ZERO,
+        metrics: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    let pruned = store
+        .prune_at(expire_all.clone(), 120_000)
+        .await
+        .expect("prune");
     assert_eq!(
-        (pruned.unit_runs, pruned.rollups),
+        (pruned.unit_runs, pruned.metric_rollups),
         (0, 1),
         "unfinished runs stay"
     );
+    assert!(matches!(
+        store.reset().await,
+        Err(Error::ActiveRuns { units: 1, tasks: 0 })
+    ));
     store
         .finish_unit_run(
             run.id,
@@ -372,9 +440,10 @@ async fn history_retention_and_reset() {
         )
         .await
         .expect("finish");
+    let finished = store.unit_runs(lane.id, 1).await.expect("runs")[0].clone();
     assert_eq!(
         store
-            .prune_history(i64::MAX, 0)
+            .prune_at(expire_all, finished.ended_at.expect("ended") + 1)
             .await
             .expect("prune")
             .unit_runs,
@@ -390,5 +459,55 @@ async fn history_retention_and_reset() {
             .await
             .expect("periodic prune")
             .budget_exceeded
+    );
+}
+
+#[tokio::test]
+/// Startup peaks come back newest first, are capped per series and age out
+/// with metrics retention.
+async fn startup_peaks_are_capped_and_pruned() {
+    use devlanes_state::{RetentionPolicy, STARTUP_PEAKS_PER_SERIES, StartupPeak};
+    let store = Store::open(":memory:").await.expect("store");
+    let peak = |series: &str, recorded_ms: u64, peak_bytes: u64| StartupPeak {
+        series: series.into(),
+        recorded_ms,
+        peak_bytes,
+        duration_ms: 1_500,
+    };
+    for index in 0..15_u64 {
+        store
+            .record_startup_peak(peak("unit:1:1:web", 1_000 + index, index << 20))
+            .await
+            .expect("record");
+    }
+    store
+        .record_startup_peak(peak("unit:1:1:api", 1_000, 7))
+        .await
+        .expect("other series");
+    let web = store
+        .startup_peaks("unit:1:1:web".into(), 100)
+        .await
+        .expect("peaks");
+    assert_eq!(web.len(), STARTUP_PEAKS_PER_SERIES);
+    assert_eq!(web[0], peak("unit:1:1:web", 1_014, 14 << 20));
+    assert_eq!(web.last().map(|p| p.recorded_ms), Some(1_005));
+    assert_eq!(
+        store
+            .startup_peaks("unit:1:1:api".into(), 5)
+            .await
+            .expect("api")
+            .len(),
+        1
+    );
+    let policy = RetentionPolicy::default();
+    let later = i64::try_from(policy.metrics.as_millis()).expect("millis") + 1_010;
+    store.prune_at(policy, later).await.expect("prune");
+    let left = store
+        .startup_peaks("unit:1:1:web".into(), 100)
+        .await
+        .expect("after prune");
+    assert_eq!(
+        left.iter().map(|p| p.recorded_ms).collect::<Vec<_>>(),
+        [1_014, 1_013, 1_012, 1_011, 1_010]
     );
 }

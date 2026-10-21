@@ -172,6 +172,27 @@ impl CertificateAuthority {
         })
     }
 
+    /// The DNS subtrees the root's name constraints permit, lowercased, or `None`
+    /// when it has none (mkcert roots): then any host name can be certified.
+    /// Read from the certificate itself, so a CA created before a TLD was
+    /// configured reports what it really allows.
+    pub fn permitted_dns_names(&self) -> Option<Vec<String>> {
+        let (_, parsed) = x509_parser::parse_x509_certificate(&self.certificate).ok()?;
+        let constraints = parsed.name_constraints().ok().flatten()?;
+        let subtrees = constraints.value.permitted_subtrees.as_ref()?;
+        Some(
+            subtrees
+                .iter()
+                .filter_map(|subtree| match &subtree.base {
+                    x509_parser::extensions::GeneralName::DNSName(name) => {
+                        Some(name.trim_start_matches('.').to_ascii_lowercase())
+                    }
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
     /// Supplies the public root for client trust configuration.
     pub fn certificate_der(&self) -> CertificateDer<'static> {
         self.certificate.clone()

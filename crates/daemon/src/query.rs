@@ -119,10 +119,15 @@ impl Inner {
         context: &Context,
         all: bool,
     ) -> Result<Vec<LanePair>, RpcError> {
-        let cwd_project = self.project_for_cwd(&context.cwd).await.ok().flatten();
+        // Never registers a project: completion asks `all` without a cwd.
         if all {
             return Ok(self.all_lanes());
         }
+        let cwd_project = if context.cwd.as_os_str().is_empty() {
+            None
+        } else {
+            self.project_for_cwd(&context.cwd).await.ok().flatten()
+        };
         if context.lane.is_some() {
             return Ok(vec![self.target_lane(context).await?]);
         }
@@ -154,9 +159,10 @@ impl Inner {
         mine: Option<&devlanes_proto::Actor>,
     ) -> Vec<LaneSummary> {
         let mut items = Vec::new();
+        let gate = self.gate_snapshot();
         for (project, lane) in lanes {
             let mut summary = lane_summary(&project.name(), &lane.st());
-            self.fill_queued(&mut summary);
+            self.fill_queued_with(gate.as_ref(), &mut summary);
             if let Some(caller) = mine {
                 summary
                     .units
@@ -186,11 +192,19 @@ impl Inner {
         if args.watch {
             let scope: BTreeSet<String> = items.iter().map(|lane| lane.reference.clone()).collect();
             let everything = args.all || context.lane.is_none() && context.project.is_none();
-            for item in &items {
-                self.bus.emit(events::LANE_CHANGED, json!({"lane": item}));
-            }
+            // The first snapshot goes to this watcher only, after it subscribed.
+            let snapshot = |seq: u64| {
+                items
+                    .iter()
+                    .map(|item| devlanes_proto::Event {
+                        seq,
+                        event: events::LANE_CHANGED.into(),
+                        data: json!({"lane": item}),
+                    })
+                    .collect()
+            };
             self.bus
-                .forward(session, |event| {
+                .forward_from(session, snapshot, |event| {
                     event.event == events::LANE_CHANGED
                         && (everything
                             || event
@@ -239,9 +253,7 @@ impl Inner {
                     .join(project.name())
                     .join(index.to_string())
                     .join(unit.replace('/', "_"));
-                let retention =
-                    crate::units::LogRetention::from_config(&self.opts.user.logs.retention);
-                query_log_dir(dir, unit.to_owned(), query, retention).await
+                query_log_dir(dir, unit.to_owned(), query).await
             }
         }
     }
@@ -712,7 +724,19 @@ impl Inner {
             }
             None => state,
         };
-        Ok(json!({"lane": reference, "unit": name, "state": state, "reasons": reasons}))
+        let mut result =
+            json!({"lane": reference, "unit": name, "state": state, "reasons": reasons});
+        // What the last run left behind: kept daemons, or processes that escaped.
+        let leftovers = lane.st().units.get(&name).map(|rec| rec.leftovers(&name));
+        if let Some(leftovers) = leftovers.filter(|l| !l.is_empty()) {
+            if !leftovers.left_running.is_empty() {
+                result["left_running"] = json!(leftovers.left_running);
+            }
+            if !leftovers.escaped.is_empty() {
+                result["escaped"] = json!(leftovers.escaped);
+            }
+        }
+        Ok(result)
     }
 
     /// `env`: lane env (`lane_env: true` or no unit) or one unit's env, optionally
@@ -846,7 +870,16 @@ impl Inner {
             let items = self.bus.recent();
             return serde_json::to_value(Page::complete(items)).map_err(|e| internal("encode", e));
         }
-        self.bus.forward(session, |_| true).await;
+        // A resync to this subscriber only: a status fetched right after it
+        // subscribed may predate a change, so the client fetches again.
+        let resync = |seq: u64| {
+            vec![devlanes_proto::Event {
+                seq,
+                event: events::RESYNC.into(),
+                data: json!({"reason": "subscribed"}),
+            }]
+        };
+        self.bus.forward_from(session, resync, |_| true).await;
         Ok(json!({}))
     }
 
@@ -869,11 +902,19 @@ impl Inner {
             "infra": self.integ.infra.doctor().await,
             "proxy": self.integ.routes.status(),
             "ca": self.integ.ca_status,
+            // Routed hosts the CA cannot certify (`host_outside_ca`, see `certs`).
+            "ca_warnings": self.all_ca_warnings(),
             "projects": self.all_projects().len(),
             "subscribers": self.bus.subscribers(),
             "hosts": self.hosts_status(),
             "dns": self.dns_doctor().await,
             "state": self.state_doctor().await,
+            "user_config": {
+                "path": self.opts.home.join("config.yaml"),
+                "valid": self.opts.user_config_error.is_none(),
+                "error": self.opts.user_config_error,
+                "warnings": self.opts.user.warnings(),
+            },
         }))
     }
 }

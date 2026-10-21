@@ -12,6 +12,7 @@ async-trait.workspace = true
 clap.workspace = true
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 devlanes-proto = { path = "../proto" }
+devlanes-term = { path = "../term" }
 is-ai-agent = "0.7"
 serde.workspace = true
 serde_json.workspace = true

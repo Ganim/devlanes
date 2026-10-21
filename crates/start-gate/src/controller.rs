@@ -90,8 +90,9 @@ impl Controller {
         *self = Self::new(self.config);
     }
 
-    /// Applies one reading taken at `now`. `demand` is true while starts are
-    /// queued: the window only grows when it is the limit.
+    /// Applies one reading taken at `now`. `demand` is true only while the
+    /// window is what holds queued starts back (not memory or a pause): the
+    /// window only grows when it is the limit.
     pub fn observe(&mut self, now: Duration, sample: &PressureSample, demand: bool) {
         let config = self.config;
         self.memory = sample.memory.unwrap_or_default();

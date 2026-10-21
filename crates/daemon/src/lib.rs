@@ -6,6 +6,7 @@
 
 mod attach;
 pub mod bus;
+mod certs;
 mod control;
 mod dns;
 mod engine;
@@ -29,6 +30,7 @@ mod routes;
 mod sampler;
 pub mod secrets;
 pub mod units;
+pub mod update;
 
 pub use engine::{Engine, EngineOptions};
 
@@ -344,9 +346,20 @@ async fn serve_client(
     connection
         .send(Frame::Control(Control::Hello(hello.clone())))
         .await?;
-    if peer.protocol != hello.protocol {
-        return Ok(());
-    }
+    // A client of another protocol may still ask the frozen `daemon.status` and
+    // `daemon.shutdown`, so an upgrade can always find and stop the old daemon.
+    let compatible = peer.protocol == hello.protocol;
+    let mismatch = RpcError::new(
+        "protocol_mismatch",
+        json!({
+            "protocol": hello.protocol,
+            "client_protocol": peer.protocol,
+            "version": hello.version,
+            "build_id": hello.build_id,
+            "managed_processes": hello.managed_processes,
+        }),
+        1,
+    );
 
     let (sender, mut outgoing) = mpsc::channel(128);
     let disconnected = CancellationToken::new();
@@ -374,6 +387,7 @@ async fn serve_client(
                             let session = session.clone();
                             let shutdown = shutdown.clone();
                             let socket = socket.clone();
+                            let mismatch = mismatch.clone();
                             // Requests outlive connections: detaching must not cancel a lane start.
                             tokio::spawn(async move {
                                 let id = request.id;
@@ -390,6 +404,7 @@ async fn serve_client(
                                         Err(RpcError::new("confirmation_required", json!({"processes": handler.managed_processes()}), 2))
                                     }
                                     Method::DaemonShutdown => Ok(json!({"stopping": true, "processes": handler.managed_processes()})),
+                                    _ if !compatible => Err(mismatch),
                                     _ => handler.handle(request, session.clone()).await,
                                 };
                                 let accepted = result.is_ok();
@@ -402,7 +417,11 @@ async fn serve_client(
                             });
                         }
                         // Queued per stream: a unit that never reads must not stall this loop.
-                        Frame::Bytes { stream_id, data } => inputs.push(stream_id, data),
+                        // A mismatched client cannot have opened a stream.
+                        Frame::Bytes { stream_id, data } if compatible => inputs.push(stream_id, data),
+                        Frame::Bytes { .. } => {}
+                        // A newer client's frame type: skipped, the connection stays.
+                        Frame::Control(Control::Unknown) => {}
                         _ => return Err(devlanes_ipc::Error::InvalidFrame),
                     }
                 }

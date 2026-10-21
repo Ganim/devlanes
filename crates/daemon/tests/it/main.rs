@@ -3,10 +3,12 @@
 //! what it started.
 
 mod attach;
+mod containers;
 mod engine;
 mod failures;
 mod fakes;
 mod hosts;
+mod leftovers;
 mod orphans;
 mod pacing;
 mod profiles;
@@ -15,7 +17,9 @@ mod remote;
 mod resolver;
 mod retention;
 mod server;
+mod update;
 mod urls;
+mod watch;
 
 use std::{
     collections::BTreeMap,
@@ -134,6 +138,10 @@ pub struct Setup {
     /// Logs directory instead of `<home>/logs`. A simulated crash leaves the old
     /// in-process engine holding its log writers, which a real crash would release.
     pub logs: Option<PathBuf>,
+    /// Name constraints of the CA (`None`: unconstrained, as with mkcert).
+    pub ca_permitted: Option<Vec<String>>,
+    /// Metrics collectors; none keeps the sampler off.
+    pub metrics: Vec<Arc<dyn devlanes_metrics::MetricsSource>>,
 }
 
 /// Opens an engine over `home` (reusing its state.db when present).
@@ -150,6 +158,8 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
     if let Some(routes) = setup.routes {
         integ.routes = routes;
     }
+    integ.ca_permitted = setup.ca_permitted;
+    integ.metrics = setup.metrics;
     std::fs::create_dir_all(home).expect("home");
     let store = Store::open(home.join("state.db")).await.expect("store");
     let mut options = EngineOptions::new(home, home.join("d.sock"));

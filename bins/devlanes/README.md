@@ -43,6 +43,19 @@ Any command auto-spawns the daemon (`devlanes daemon run`, a hidden subcommand) 
 
 Everything lives under `~/.devlanes`, or `DEVLANES_HOME` when set: `state.db`, `config.yaml`, `logs/` (including `daemon.log`), `ca/` and `run/daemon.sock`. When the socket path is too long for macOS, it moves to a short temporary directory.
 
+## Release notices
+
+Three minutes after it starts, and then once a day, the daemon reads the version in `https://github.com/devlanes-run/devlanes/releases/latest/download/release-manifest.json` with `curl` and caches it in `update-check.json`. A failed request keeps the cached answer. A release is reported once it is newer than the daemon and has been seen for two hours, the time Homebrew and npm take to publish it. devlanes never downloads, installs or restarts anything itself.
+
+In human output, a command then prints one line on stderr, at most once a day per version, with the upgrade command for how this binary was installed (Homebrew, npm, pnpm, Bun, Yarn, cargo binstall, cargo install or `install.sh`). When the daemon runs another version than the CLI, the line says to run `devlanes daemon restart` when convenient, since a restart stops services. Agent, JSON, plain and CI output never get these lines. The TUI shows the same notice in its header, and `u` hides it for that version. `devlanes doctor` always shows the version, build, install method, latest release and upgrade command. Shown and hidden notices are kept in `notices.json`.
+
+Checks are off in debug builds, when the daemon starts with CI variables set, with `DEVLANES_NO_UPDATE_CHECK=1`, or with this in `config.yaml`:
+
+```yaml
+updates:
+  check: false
+```
+
 ## License
 
 Apache-2.0

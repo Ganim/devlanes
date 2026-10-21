@@ -31,6 +31,7 @@ async fn run(store: &Store, lane: LaneId, name: &str, finished: bool) -> UnitRun
             },
             actor: human(),
             log_path: None,
+            boot_id: None,
         })
         .await
         .expect("run");
@@ -391,18 +392,20 @@ async fn size_budget_reclaims_pages_and_keeps_history_until_metrics_are_gone() {
         .bytes_after;
     store
         .insert_rollups(
-            (0..96)
+            (0..400)
                 .map(|i| metric(format!("series-{i:03}-{}", "x".repeat(4096)), i))
                 .collect(),
         )
         .await
         .expect("metrics");
+    // Batches grow from PRUNE_BATCH_ROWS / 16 rows, so the budget leaves room for
+    // well over that many rows to stay.
     let report = store
-        .prune_at(budget(baseline + 64 * 1024), NOW)
+        .prune_at(budget(baseline + 3 * 1024 * 1024), NOW)
         .await
         .expect("prune");
     assert!(
-        report.metric_rollups > 0 && report.metric_rollups < 96,
+        report.metric_rollups > 0 && report.metric_rollups < 400,
         "{report:?}"
     );
     assert_eq!(report.unit_runs, 0);
@@ -471,6 +474,65 @@ async fn size_budget_reclaims_pages_and_keeps_history_until_metrics_are_gone() {
     assert_eq!(store.projects().await.expect("projects").len(), 1);
     assert_eq!(store.worktrees(p.id).await.expect("worktrees").len(), 1);
     assert_eq!(store.lanes(None).await.expect("lanes").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Size-budget eviction of many rows runs as bounded batches: one pass deletes
+/// at most `PRUNE_MAX_BATCHES` growing batches, oldest first, flags `more`, and
+/// other store calls complete between its batches.
+async fn budget_pruning_is_batched_bounded_and_interleaves() {
+    let dir = tempfile::tempdir().expect("dir");
+    let store = Store::open(dir.path().join("state.db"))
+        .await
+        .expect("store");
+    let mut per_pass = 0;
+    let mut rows = PRUNE_BATCH_ROWS / 16;
+    for _ in 0..PRUNE_MAX_BATCHES {
+        per_pass += rows;
+        rows = (rows * 2).min(PRUNE_BATCH_ROWS);
+    }
+    let total = per_pass + 5_000;
+    for start in (0..total).step_by(4_000) {
+        store
+            .insert_rollups(
+                (start..(start + 4_000).min(total))
+                    .map(|minute| metric("series".into(), minute as u64))
+                    .collect(),
+            )
+            .await
+            .expect("metrics");
+    }
+
+    let pass = tokio::spawn({
+        let store = store.clone();
+        async move { store.prune_at(budget(1), NOW).await }
+    });
+    let mut between = 0;
+    while !pass.is_finished() {
+        store.schema_version().await.expect("interleaved call");
+        between += 1;
+    }
+    let first = pass.await.expect("task").expect("prune");
+    assert_eq!(first.metric_rollups, per_pass as u64, "{first:?}");
+    assert!(first.more && first.budget_exceeded, "{first:?}");
+    assert!(
+        between >= PRUNE_MAX_BATCHES / 2,
+        "only {between} calls ran during the pass"
+    );
+    let oldest = store
+        .rollups("series".into(), 0)
+        .await
+        .expect("left")
+        .first()
+        .map(|row| row.minute_ms);
+    assert_eq!(oldest, Some(per_pass as u64), "oldest minutes go first");
+
+    let second = store.prune_at(budget(1), NOW).await.expect("prune");
+    assert_eq!(second.metric_rollups, 5_000);
+    assert!(
+        !second.more && second.budget_exceeded,
+        "nothing deletable is left: {second:?}"
+    );
 }
 
 #[tokio::test]

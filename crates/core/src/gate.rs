@@ -61,6 +61,10 @@ pub trait SlotHandle: Send + Sync {
     fn release(&self, reason: Release);
     /// Feeds the unit's process-tree CPU (percent of one core) for the settle rule.
     fn report_cpu(&self, cpu_percent: f64);
+    /// Feeds the unit's current process-tree memory footprint in bytes. A gate
+    /// that checks memory subtracts it from the unit's reservation: that much of
+    /// its need is already part of the system's available-memory reading.
+    fn report_memory(&self, _footprint_bytes: u64) {}
     /// The reason the slot was released, by the holder or by the gate.
     fn released(&self) -> Option<Release>;
 }
@@ -99,6 +103,11 @@ impl StartSlot {
     /// Reports the unit's tree CPU; the gate may release the slot as [`Release::Settled`].
     pub fn report_cpu(&self, cpu_percent: f64) {
         self.0.0.report_cpu(cpu_percent);
+    }
+
+    /// Reports the unit's current tree footprint; see [`SlotHandle::report_memory`].
+    pub fn report_memory(&self, footprint_bytes: u64) {
+        self.0.0.report_memory(footprint_bytes);
     }
 
     /// Why the slot was released, if it was.
@@ -145,6 +154,8 @@ pub struct StartTicket {
     /// Gate-provided value whose `Drop` removes the queue entry. Kept until the
     /// ticket is dropped; after a grant the removal finds nothing.
     _leave: Option<Box<dyn Send + Sync>>,
+    /// Set once the ticket resolved; polling again is a caller bug.
+    finished: bool,
 }
 
 impl StartTicket {
@@ -158,6 +169,7 @@ impl StartTicket {
             receiver: Some(receiver),
             ready: None,
             _leave: Some(Box::new(leave)),
+            finished: false,
         }
     }
 
@@ -167,6 +179,7 @@ impl StartTicket {
             receiver: None,
             ready: Some(slot),
             _leave: None,
+            finished: false,
         }
     }
 }
@@ -176,16 +189,25 @@ impl Future for StartTicket {
 
     /// Resolves with the granted slot. A gate that vanished without granting
     /// yields an unmetered slot, so a start is never blocked by a dead gate.
+    /// The ticket is fused: once resolved it stays pending, and debug builds
+    /// assert, because a second slot would be a slot nobody granted.
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StartSlot> {
+        debug_assert!(!self.finished, "StartTicket polled after completion");
+        if self.finished {
+            return Poll::Pending;
+        }
         if let Some(slot) = self.ready.take() {
+            self.finished = true;
             return Poll::Ready(slot);
         }
         let Some(receiver) = self.receiver.as_mut() else {
+            self.finished = true;
             return Poll::Ready(StartSlot::unmetered());
         };
         match Pin::new(receiver).poll(cx) {
             Poll::Ready(result) => {
                 self.receiver = None;
+                self.finished = true;
                 Poll::Ready(result.unwrap_or_else(|_| StartSlot::unmetered()))
             }
             Poll::Pending => Poll::Pending,
@@ -210,8 +232,29 @@ pub enum HoldReason {
 /// A queued start and its 1-based place in line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedStart {
+    /// The start as it was queued.
     pub request: StartRequest,
+    /// 1 for the head of the queue, the next start to be granted.
     pub position: usize,
+}
+
+/// What the gate saw during one busy period (from the first queued start until
+/// nothing is queued or starting), so measured startup times can be read
+/// against the conditions they ran under. Informational only.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BurstStats {
+    /// Slots granted.
+    pub granted: u64,
+    /// Length of the period so far, or in total once it ended.
+    pub duration_ms: u64,
+    /// Largest window in effect; `None` for an unlimited gate.
+    pub max_window: Option<usize>,
+    /// Highest system CPU reading.
+    pub peak_cpu_percent: Option<f64>,
+    /// Worst memory pressure level read.
+    pub worst_memory: Option<MemoryPressure>,
+    /// Grant passes that stopped because the head waited for memory.
+    pub memory_holds: u64,
 }
 
 /// Point-in-time view of a gate, for `status` and `why`.
@@ -231,6 +274,8 @@ pub struct GateSnapshot {
     pub pressure: Option<PressureSample>,
     /// The gate's latest available-memory reading in bytes, if it reads one.
     pub available_memory: Option<u64>,
+    /// The current busy period, or the last one while idle.
+    pub burst: Option<BurstStats>,
 }
 
 impl GateSnapshot {
@@ -242,15 +287,30 @@ impl GateSnapshot {
     }
 }
 
+/// A place in a gate's line, taken by [`StartGate::arrive`]. Only meaningful
+/// for the gate that issued it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Arrival(pub u64);
+
 /// Decides when service starts may spawn. One instance is shared by every lane
 /// and project of the machine.
 #[async_trait]
 pub trait StartGate: Send + Sync {
-    /// Queues the units of one start request and returns at once, one ticket
-    /// per request in the same order. Batches are served in arrival order, so
-    /// a later lane never jumps ahead of an earlier one; within a batch, by
-    /// [`StartRequest::order`]. Dropping a ticket before its grant leaves the queue.
-    fn enqueue_batch(&self, requests: Vec<StartRequest>) -> Vec<StartTicket>;
+    /// Takes a place in line for a batch whose requests are not known yet, so a
+    /// caller can look up memory needs without losing its arrival order.
+    fn arrive(&self) -> Arrival;
+
+    /// Queues the units of one start request at the place `arrival` took and
+    /// returns at once, one ticket per request in the same order. Batches are
+    /// served by arrival, so a later lane never jumps ahead of an earlier one;
+    /// within a batch, by [`StartRequest::order`]. Dropping a ticket before
+    /// its grant leaves the queue.
+    fn enqueue_batch_at(&self, arrival: Arrival, requests: Vec<StartRequest>) -> Vec<StartTicket>;
+
+    /// [`StartGate::arrive`] and [`StartGate::enqueue_batch_at`] in one step.
+    fn enqueue_batch(&self, requests: Vec<StartRequest>) -> Vec<StartTicket> {
+        self.enqueue_batch_at(self.arrive(), requests)
+    }
 
     /// Queues a single start as its own batch.
     fn enqueue(&self, request: StartRequest) -> StartTicket {
@@ -274,9 +334,12 @@ pub trait StartGate: Send + Sync {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryPressure {
+    /// Memory is available without reclaiming.
     #[default]
     Normal,
+    /// The kernel is reclaiming or compressing; adaptive gates halve their window.
     Warn,
+    /// Allocations stall or the system is swapping hard; gates stop granting.
     Critical,
 }
 
@@ -316,6 +379,8 @@ pub trait PressureSource: Send + Sync {
     async fn sample(&self) -> Result<PressureSample, Error>;
 
     /// Memory the system could hand to new processes without swapping, in bytes.
+    /// `Ok(None)` means the platform cannot tell; gates then skip their memory
+    /// check rather than wait. `Err` is a failed read of a supported value.
     async fn available_memory(&self) -> Result<Option<u64>, Error>;
 }
 
@@ -370,6 +435,16 @@ mod tests {
         drop(sender);
         let slot = StartTicket::queued(receiver, ()).await;
         assert_eq!(slot.released(), None);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "polled after completion")]
+    fn ticket_is_fused() {
+        let mut ticket = StartTicket::granted(StartSlot::unmetered());
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(Pin::new(&mut ticket).poll(&mut cx).is_ready());
+        let _ = Pin::new(&mut ticket).poll(&mut cx);
     }
 
     #[test]

@@ -28,6 +28,7 @@ All functions block. Call them from `spawn_blocking` in async code.
 - `matches`, `signal_verified`: compare PID and start time before acting.
 - `DescendantTracker`: builds up a unit's process tree from repeated snapshots and keeps processes that later call `setsid`.
 - `session_members`: the leader and members of a recorded session, for reconciliation.
+- `boot_id`: an opaque token for the current boot, so records from before a reboot are never matched against live PIDs.
 - `listening_tcp`: TCP listeners of a set of PIDs, for diagnostics only.
 - `open_file`, `holders`: find processes that still hold a PTY slave or pipe open.
 - `raise_nofile_limit`, `child_nofile_limit`: raise the daemon's open-file limit and keep the original for children.

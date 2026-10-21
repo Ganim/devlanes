@@ -21,7 +21,12 @@ impl Inner {
         if !once(&self.background) {
             return Ok(());
         }
-        let runs = self.store.active_unit_runs().await.map_err(store_error)?;
+        let boot = self.end_stale_runs().await;
+        let mut runs = self.store.active_unit_runs().await.map_err(store_error)?;
+        // Should ending them have failed, rows of another boot are still never probed.
+        if let Some(boot) = &boot {
+            runs.retain(|run| run.boot_id.as_ref().is_none_or(|id| id == boot));
+        }
         self.load_known_projects().await?;
         self.track_orphans(runs).await;
         let names: Vec<String> = self.all_projects().iter().map(|p| p.name()).collect();
@@ -32,6 +37,33 @@ impl Inner {
         self.start_dns().await;
         self.start_background();
         Ok(())
+    }
+
+    /// Ends records no process can belong to any more: task runs of the previous
+    /// daemon, and unit runs recorded under another boot, whose PIDs now name
+    /// unrelated processes and so are never probed. Returns the current boot ID,
+    /// `None` when the platform cannot tell.
+    async fn end_stale_runs(&self) -> Option<String> {
+        match self.store.abandon_task_runs().await {
+            Ok(0) => {}
+            Ok(abandoned) => tracing::info!(abandoned, "ended task runs of a previous daemon"),
+            Err(error) => tracing::warn!(%error, "unfinished task runs not ended"),
+        }
+        let boot = tokio::task::spawn_blocking(devlanes_sys::boot_id)
+            .await
+            .ok()
+            .and_then(|boot| {
+                boot.map_err(|error| tracing::warn!(%error, "boot id unavailable"))
+                    .ok()
+            });
+        if let Some(boot) = &boot {
+            match self.store.finish_other_boot_runs(boot.clone()).await {
+                Ok(0) => {}
+                Ok(ended) => tracing::info!(ended, "ended unit runs of an earlier boot"),
+                Err(error) => tracing::warn!(%error, "unit runs of an earlier boot not ended"),
+            }
+        }
+        boot
     }
 
     /// Rebuilds projects and lanes from SQLite so `status` shows them before any
@@ -105,6 +137,7 @@ impl Inner {
         tokio::spawn(self.clone().state_maintenance_loop());
         tokio::spawn(self.clone().log_maintenance_loop());
         tokio::spawn(self.clone().orphan_watch_loop());
+        tokio::spawn(self.clone().update_check_loop());
         if let Some(mut events) = self.integ.infra.events() {
             let engine = self.clone();
             tokio::spawn(async move {

@@ -39,6 +39,7 @@ fn data(response: Response) -> Option<serde_json::Value> {
 - `Selection`, `LogQuery`, `ExecParams`, `RunParams`, `AttachParams`: request parameters shared by several commands.
 - `UnitSummary`, `LaneSummary`, `ContainerSummary`, `Page`: listing payloads; lists are `{items, truncated, next_cursor}`.
 - `remote`: messages for connected boxes.
+- `release`: semver ordering (`is_newer`) and the `update` and `release_check` fields of `daemon.status`.
 - `MAX_FRAME_SIZE`: the largest frame either side accepts.
 
 ## Behaviour

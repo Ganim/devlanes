@@ -4,6 +4,8 @@ mod daemon;
 mod errors;
 mod fake;
 mod orphans;
+mod progress;
+mod release;
 mod units;
 
 use std::{sync::Arc, time::Duration};

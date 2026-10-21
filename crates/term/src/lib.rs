@@ -1,7 +1,15 @@
-//! Opens a unit in the user's terminal application.
+//! Terminal integrations: opening a unit in the user's terminal application,
+//! and the terminal's own progress bar ([`progress`]).
 //!
 //! Each terminal integration lives in its own `term-*` crate and implements
 //! [`TerminalLauncher`]; only the composition root decides which ones exist.
+
+pub mod progress;
+
+pub use progress::{
+    PROGRESS_ENV, Progress, ProgressBar, ProgressMode, StartScope, StartTracker, Wrap,
+    progress_support, progress_support_from_env,
+};
 
 use std::{
     path::PathBuf,

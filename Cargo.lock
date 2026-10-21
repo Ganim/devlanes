@@ -961,6 +961,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "devlanes-proto",
+ "devlanes-term",
  "insta",
  "is-ai-agent",
  "serde",
@@ -979,6 +980,7 @@ dependencies = [
  "devlanes-ipc",
  "devlanes-proto",
  "rustix",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -1211,6 +1213,7 @@ dependencies = [
  "devlanes-metrics",
  "rustix",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1559,6 +1562,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1594,6 +1598,9 @@ dependencies = [
 name = "devlanes-term"
 version = "0.1.0"
 dependencies = [
+ "devlanes-proto",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

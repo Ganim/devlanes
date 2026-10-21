@@ -1,5 +1,7 @@
 //! Real SQLite round-trips and allocation transaction regressions.
 
+mod catalog;
+mod identity;
 mod lifecycle;
 mod profiles;
 mod retention;
@@ -416,16 +418,39 @@ async fn unit_identity_actor_and_exit_roundtrip_without_environment_columns() {
             process,
             actor: actor.clone(),
             log_path: Some("/test/api.log".into()),
+            boot_id: Some("boot-a".into()),
         })
         .await
         .expect("run");
     assert_eq!(run.process, process);
     assert_eq!(run.actor, actor);
+    assert_eq!(run.boot_id.as_deref(), Some("boot-a"));
     assert_eq!(
         store.active_unit_runs().await.expect("active").as_slice(),
         std::slice::from_ref(&run)
     );
-    assert!(store.clean_lane(lane.id).await.is_err());
+    let second = store
+        .record_unit_run(UnitRunInput {
+            lane_id: lane.id,
+            unit: "api".into(),
+            process: ProcessIdentity { pid: 43, ..process },
+            actor: actor.clone(),
+            log_path: None,
+            boot_id: Some("boot-a".into()),
+        })
+        .await;
+    assert!(
+        matches!(&second, Err(Error::Conflict { constraint }) if constraint.contains("unit_runs")),
+        "{second:?}"
+    );
+    assert!(matches!(
+        store.clean_lane(lane.id).await,
+        Err(Error::ActiveRuns { units: 1, tasks: 0 })
+    ));
+    assert!(matches!(
+        store.delete_project(project.id).await,
+        Err(Error::ActiveRuns { units: 1, tasks: 0 })
+    ));
     let outcome = ExitOutcome {
         code: None,
         signal: Some(15),
@@ -504,22 +529,6 @@ async fn relational_constraints_and_lossless_paths() {
             .expect("journal")
             .journal_mode,
         "wal"
-    );
-    #[derive(diesel::QueryableByName)]
-    struct Column {
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        name: String,
-    }
-    let columns: Vec<_> = diesel::sql_query("PRAGMA table_info('unit_runs')")
-        .load::<Column>(&mut connection)
-        .expect("columns")
-        .into_iter()
-        .map(|column| column.name)
-        .collect();
-    assert!(
-        columns
-            .iter()
-            .all(|name| !name.contains("env") && !name.contains("secret"))
     );
     use schema::port_blocks as p;
     assert!(

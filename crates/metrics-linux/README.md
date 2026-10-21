@@ -54,7 +54,7 @@ async fn pressure() -> Result<(), Box<dyn std::error::Error>> {
 
 Membership is a unit's sessions, tracked processes whose `starttime` still matches, and their descendants by parent PID. CPU comes from `utime + stime` in clock ticks, RSS from `statm`. The memory number is PSS from `smaps_rollup`, which splits shared pages between processes so a tree's sum is meaningful. Reading it walks page tables, so it is refreshed every 10 seconds by default (`LinuxSource::with_pss_interval`), and RSS is used until the first read or where the file is unreadable.
 
-For the start gate, system CPU is the busy share of all cores between two `/proc/stat` reads, and available memory is `MemAvailable` from `/proc/meminfo`. Memory pressure comes from `/proc/pressure/memory`: warn at `some avg10` of 10% or more, critical at `full avg10` of 10% or more. Kernels or containers without PSI report no level, and the gate treats that as normal.
+For the start gate, system CPU is the busy share of all cores between two `/proc/stat` reads, and available memory is `MemAvailable` from `/proc/meminfo`. Memory pressure comes from `/proc/pressure/memory`: warn at `some avg10` of 10% or more, critical at `full avg10` of 10% or more. When the daemon runs in a cgroup v2 group (a container or a systemd unit), that group's `memory.pressure` is used instead, and available memory is capped at `memory.max - memory.current`, because the services it starts share the limit. Kernels or containers without PSI report no level, which is logged once; the gate then treats memory pressure as normal.
 
 The collector only reads procfs and never limits or signals anything.
 

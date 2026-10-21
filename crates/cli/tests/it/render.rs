@@ -491,6 +491,109 @@ fn doctor_says_how_to_recreate_an_unconstrained_ca() {
 }
 
 #[test]
+fn doctor_shows_release_facts_and_the_upgrade_command() {
+    let release = |update_available: bool, daemon: &str| {
+        json!({"release": {
+            "version": "0.2.1", "build": "v0.2.1", "daemon_version": daemon,
+            "install_method": "Homebrew", "command": "brew upgrade devlanes-run/tap/devlanes",
+            "check": "ok", "check_off_reason": null, "latest": "0.3.0",
+            "checked_at": null, "update_available": update_available,
+        }})
+    };
+    let text = render_text(Method::Doctor, &release(true, "0.2.1"));
+    assert!(
+        text.contains("devlanes 0.2.1 (release build v0.2.1), installed with Homebrew"),
+        "{text}"
+    );
+    assert!(text.contains("devlanes 0.3.0 is available"), "{text}");
+    assert!(
+        text.contains("fix: brew upgrade devlanes-run/tap/devlanes"),
+        "{text}"
+    );
+    assert!(!text.contains("the daemon runs"), "{text}");
+
+    let text = render_text(Method::Doctor, &release(false, "0.2.0"));
+    assert!(text.contains("latest release 0.3.0"), "{text}");
+    assert!(
+        text.contains("the daemon runs 0.2.0, this CLI is 0.2.1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("devlanes daemon restart when convenient (it stops services)"),
+        "{text}"
+    );
+
+    let off = json!({"release": {"version": "0.2.1", "build": "local", "install_method": "install.sh",
+        "check": "off", "check_off_reason": "config"}});
+    let text = render_text(Method::Doctor, &off);
+    assert!(text.contains("(local build)"), "{text}");
+    assert!(
+        text.contains("release checks are off (updates.check: false)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn leftover_processes_get_a_one_line_note() {
+    let pg = json!([{"pid": 4242, "command": "pg_ctl"}]);
+    let run = json!({
+        "task": "boot", "lane": "acme@2", "unit": null, "interactive": false,
+        "exit_code": 0, "state": "exited",
+        "leftovers": [{"unit": "db", "left_running": pg}, {"unit": "boot", "escaped": [{"pid": 51, "command": "node"}]}],
+    });
+    let text = render_text(Method::Run, &run);
+    assert!(
+        text.contains("  db: left running: pg_ctl (pid 4242)"),
+        "{text}"
+    );
+    assert!(text.contains("  escaped: node (pid 51)"), "{text}");
+
+    let mut start = start_result();
+    start["leftovers"] = json!([{"unit": "setup.db", "left_running": pg}]);
+    let text = render_text(Method::Start, &start);
+    assert_eq!(
+        text.matches("setup.db: left running: pg_ctl (pid 4242)")
+            .count(),
+        3,
+        "{text}"
+    );
+
+    let mut task = unit("db-start", "exited");
+    task["kind"] = json!("task");
+    task["left_running"] = pg.clone();
+    let mut status = lane(
+        Some(2),
+        "feat/billing",
+        "running",
+        vec![unit("api", "ready"), task],
+    );
+    status["containers"] = json!([
+        {"name": "postgres", "ports": {"default": 20150}, "cpu_percent": 1.5, "memory_bytes": 52_000_000},
+        {"name": "redis", "ports": {}, "shared": true, "cpu_percent": 0.5, "memory_bytes": 8_000_000},
+        {"name": "mail", "ports": {}},
+    ]);
+    let text = render_text(Method::Status, &json!({"items": [status]}));
+    assert!(
+        text.contains("db-start: left running: pg_ctl (pid 4242)"),
+        "{text}"
+    );
+    let human = text.split("--- plain").next().unwrap_or_default();
+    assert!(human.contains("postgres  container"), "{human}");
+    assert!(human.contains("redis     shared container"), "{human}");
+    assert!(
+        !human.contains("mail"),
+        "unsampled containers stay out\n{human}"
+    );
+
+    let why = json!({
+        "lane": "acme@2", "unit": "db-start", "state": "stopped", "reasons": [],
+        "left_running": pg,
+    });
+    let text = render_text(Method::Why, &why);
+    assert!(text.contains("  left running: pg_ctl (pid 4242)"), "{text}");
+}
+
+#[test]
 fn agent_status_lines_start_with_a_stable_lowercase_word() {
     let words = [
         "ready",

@@ -11,6 +11,7 @@ publish.workspace = true
 bytes.workspace = true
 devlanes-ipc = { path = "../ipc" }
 devlanes-proto = { path = "../proto" }
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

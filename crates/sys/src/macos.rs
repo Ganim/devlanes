@@ -350,6 +350,43 @@ fn pipe_info(pid: c_int, fd: i32) -> Option<PipeFdInfo> {
     fd_info(pid, fd, PROC_PIDFDPIPEINFO)
 }
 
+/// Reads `kern.bootsessionuuid`, a UUID the kernel generates once per boot.
+/// `kern.boottime` is not used: XNU shifts it whenever the wall clock is stepped,
+/// so it can change while the machine keeps running.
+pub(crate) fn boot_id() -> Result<String, Error> {
+    let mut buffer = [0u8; 128];
+    let mut len = buffer.len();
+    // SAFETY: the name is a NUL-terminated literal, `buffer`/`len` describe a
+    // writable byte array of that length, and no new value is supplied.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &raw mut len,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let bytes = &buffer[..len.min(buffer.len())];
+    let bytes = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+    let id = std::str::from_utf8(bytes)
+        .map_err(|error| Error::Malformed {
+            source_name: "kern.bootsessionuuid",
+            detail: error.to_string(),
+        })?
+        .trim();
+    if id.is_empty() {
+        return Err(Error::Malformed {
+            source_name: "kern.bootsessionuuid",
+            detail: "empty".into(),
+        });
+    }
+    Ok(id.to_owned())
+}
+
 /// Caps the soft limit at `kern.maxfilesperproc`; macOS rejects larger values.
 pub(crate) fn max_nofile(hard: Option<u64>) -> Result<u64, Error> {
     let mut value: c_int = 0;

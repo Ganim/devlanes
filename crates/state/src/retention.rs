@@ -45,9 +45,16 @@ impl Default for RetentionPolicy {
     }
 }
 
-/// Actual deletion counts, including cascades, and post-vacuum disk usage.
-/// `budget_exceeded` can remain true when live data or pinned WAL readers prevent
-/// reclamation. Log files themselves remain owned by the log retention service.
+/// Most rows one size-budget batch deletes. Batches start at a sixteenth of this
+/// and double, so a database slightly over budget loses little extra history.
+pub const PRUNE_BATCH_ROWS: usize = 1024;
+/// Most size-budget batches in one pass; the rest waits for the next pass
+/// (see [`PruneReport::more`]).
+pub const PRUNE_MAX_BATCHES: usize = 16;
+
+/// Actual deletion counts and post-vacuum disk usage. `budget_exceeded` can
+/// remain true when live data or pinned WAL readers prevent reclamation. Log
+/// files themselves remain owned by the log retention service.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PruneReport {
     pub unit_runs: u64,
@@ -60,6 +67,29 @@ pub struct PruneReport {
     pub bytes_after: u64,
     pub budget_exceeded: bool,
     pub checkpoint_busy: bool,
+    /// The pass stopped at [`PRUNE_MAX_BATCHES`] while over budget with
+    /// deletable history left; run another pass soon.
+    #[serde(default)]
+    pub more: bool,
+}
+
+impl PruneReport {
+    /// Adds one batch's deletions.
+    fn add(&mut self, deleted: &PruneReport) {
+        self.unit_runs += deleted.unit_runs;
+        self.task_runs += deleted.task_runs;
+        self.metric_rollups += deleted.metric_rollups;
+        self.run_summaries += deleted.run_summaries;
+        self.log_segments += deleted.log_segments;
+        self.remote_hosts += deleted.remote_hosts;
+    }
+}
+
+/// Outcome of one size-budget batch.
+enum Batch {
+    /// Under budget, or nothing deletable is left.
+    Done,
+    Deleted(PruneReport),
 }
 
 impl Store {
@@ -71,6 +101,10 @@ impl Store {
 
     /// Runs retention at a supplied Unix-millisecond clock for deterministic tests
     /// and daemon scheduling. Negative clocks and zero budgets are rejected.
+    ///
+    /// Age pruning is one transaction; size-budget eviction then runs as separate
+    /// store jobs of at most [`PRUNE_BATCH_ROWS`] rows each, so other queued
+    /// store calls run between batches instead of waiting for the whole pass.
     pub async fn prune_at(
         &self,
         policy: RetentionPolicy,
@@ -82,48 +116,44 @@ impl Store {
             ));
         }
         let path = self.database_path.clone();
+        let max_size = policy.max_size_bytes;
+        let (mut report, page_budget, mut busy) = self
+            .call(move |c| {
+                let bytes_before = disk_bytes(c, &path)?;
+                let busy = checkpoint(c)?;
+                let sidecars = disk_bytes(c, &path)?.saturating_sub(allocated_bytes(c)?);
+                let page_budget = policy.max_size_bytes.saturating_sub(sidecars);
+                let mut report = c.immediate_transaction(|c| prune_age(c, &policy, now_ms))?;
+                report.bytes_before = bytes_before;
+                Ok((report, page_budget, busy))
+            })
+            .await?;
+        let mut rows = PRUNE_BATCH_ROWS / 16;
+        let mut batches = 0;
+        loop {
+            if batches == PRUNE_MAX_BATCHES {
+                report.more = true;
+                break;
+            }
+            let limit = rows;
+            match self
+                .call(move |c| c.immediate_transaction(|c| budget_batch(c, page_budget, limit)))
+                .await?
+            {
+                Batch::Done => break,
+                Batch::Deleted(deleted) => report.add(&deleted),
+            }
+            batches += 1;
+            rows = (rows * 2).min(PRUNE_BATCH_ROWS);
+        }
+        let path = self.database_path.clone();
         self.call(move |c| {
-            let bytes_before = disk_bytes(c, &path)?;
-            let mut busy = checkpoint(c)?;
-            let sidecars = disk_bytes(c, &path)?.saturating_sub(allocated_bytes(c)?);
-            let page_budget = policy.max_size_bytes.saturating_sub(sidecars);
-            let mut report = c.immediate_transaction(|c| {
-                let before = counts(c)?;
-                prune_age(c, &policy, now_ms)?;
-                while used_bytes(c)? > page_budget {
-                    let keys = metric_rollups::table
-                        .order((metric_rollups::minute, metric_rollups::series))
-                        .select((metric_rollups::series, metric_rollups::minute))
-                        .limit(256)
-                        .load::<(String, i64)>(c)?;
-                    if keys.is_empty() {
-                        break;
-                    }
-                    for key in keys {
-                        diesel::delete(metric_rollups::table.find(key)).execute(c)?;
-                        if used_bytes(c)? <= page_budget {
-                            break;
-                        }
-                    }
-                }
-                while used_bytes(c)? > page_budget && evict_history(c)? {}
-                let after = counts(c)?;
-                Ok::<_, Error>(PruneReport {
-                    unit_runs: before[0] - after[0],
-                    task_runs: before[1] - after[1],
-                    metric_rollups: before[2] - after[2],
-                    run_summaries: before[3] - after[3],
-                    log_segments: before[4] - after[4],
-                    remote_hosts: before[5] - after[5],
-                    bytes_before,
-                    ..Default::default()
-                })
-            })?;
             // Incremental mode returns free pages without rewriting the whole file.
             c.batch_execute("PRAGMA incremental_vacuum;")?;
             busy |= checkpoint(c)?;
             report.bytes_after = disk_bytes(c, &path)?;
-            report.budget_exceeded = report.bytes_after > policy.max_size_bytes;
+            report.budget_exceeded = report.bytes_after > max_size;
+            report.more &= report.budget_exceeded;
             report.checkpoint_busy = busy;
             Ok(report)
         })
@@ -137,60 +167,104 @@ fn cutoff(now_ms: i64, age: Duration) -> i64 {
 }
 
 /// Applies each group's age. Parent run rows stay while younger child history exists.
-fn prune_age(c: &mut SqliteConnection, policy: &RetentionPolicy, now_ms: i64) -> Result<(), Error> {
+/// Rows of a deleted unit run's own children (`unit_run_members`) cascade and are
+/// not counted; every other count is exact.
+fn prune_age(
+    c: &mut SqliteConnection,
+    policy: &RetentionPolicy,
+    now_ms: i64,
+) -> Result<PruneReport, Error> {
     // Segment rows describe closed files, even when their process is still running.
+    let log_segments = count(
+        diesel::delete(
+            log_segments::table.filter(log_segments::max_ts.lt(cutoff(now_ms, policy.logs))),
+        )
+        .execute(c)?,
+    );
+    let run_summaries = count(
+        diesel::delete(
+            run_summaries::table.filter(run_summaries::ended_at.lt(cutoff(now_ms, policy.metrics))),
+        )
+        .execute(c)?,
+    );
+    let metric_rollups = count(
+        diesel::delete(
+            metric_rollups::table.filter(metric_rollups::minute.lt(cutoff(now_ms, policy.metrics))),
+        )
+        .execute(c)?,
+    );
+    // Startup peaks are metrics history too; their count per series is capped on insert.
     diesel::delete(
-        log_segments::table.filter(log_segments::max_ts.lt(cutoff(now_ms, policy.logs))),
+        startup_peaks::table.filter(startup_peaks::recorded_at.lt(cutoff(now_ms, policy.metrics))),
     )
     .execute(c)?;
-    diesel::delete(
-        run_summaries::table.filter(run_summaries::ended_at.lt(cutoff(now_ms, policy.metrics))),
-    )
-    .execute(c)?;
-    diesel::delete(
-        metric_rollups::table.filter(metric_rollups::minute.lt(cutoff(now_ms, policy.metrics))),
-    )
-    .execute(c)?;
-    diesel::delete(
-        task_runs::table.filter(task_runs::ended_at.lt(cutoff(now_ms, policy.run_history))),
-    )
-    .execute(c)?;
-    diesel::delete(
-        unit_runs::table
-            .filter(unit_runs::ended_at.lt(cutoff(now_ms, policy.run_history)))
-            .filter(diesel::dsl::not(exists(
-                log_segments::table.filter(log_segments::unit_run_id.eq(unit_runs::id)),
-            )))
-            .filter(diesel::dsl::not(exists(
-                run_summaries::table.filter(run_summaries::unit_run_id.eq(unit_runs::id)),
-            ))),
-    )
-    .execute(c)?;
-    diesel::delete(
-        remote_hosts::table
-            .filter(remote_hosts::last_connected.lt(cutoff(now_ms, policy.remote_hosts))),
-    )
-    .execute(c)?;
-    Ok(())
+    let task_runs = count(
+        diesel::delete(
+            task_runs::table.filter(task_runs::ended_at.lt(cutoff(now_ms, policy.run_history))),
+        )
+        .execute(c)?,
+    );
+    let unit_runs = count(
+        diesel::delete(
+            unit_runs::table
+                .filter(unit_runs::ended_at.lt(cutoff(now_ms, policy.run_history)))
+                .filter(diesel::dsl::not(exists(
+                    log_segments::table.filter(log_segments::unit_run_id.eq(unit_runs::id)),
+                )))
+                .filter(diesel::dsl::not(exists(
+                    run_summaries::table.filter(run_summaries::unit_run_id.eq(unit_runs::id)),
+                ))),
+        )
+        .execute(c)?,
+    );
+    let remote_hosts = count(
+        diesel::delete(
+            remote_hosts::table
+                .filter(remote_hosts::last_connected.lt(cutoff(now_ms, policy.remote_hosts))),
+        )
+        .execute(c)?,
+    );
+    Ok(PruneReport {
+        unit_runs,
+        task_runs,
+        metric_rollups,
+        run_summaries,
+        log_segments,
+        remote_hosts,
+        ..PruneReport::default()
+    })
 }
 
-/// Samples counts under the writer transaction so cascade accounting is exact.
-fn counts(c: &mut SqliteConnection) -> Result<[u64; 6], Error> {
-    Ok([
-        from_sql_u64(unit_runs::table.count().get_result(c)?),
-        from_sql_u64(task_runs::table.count().get_result(c)?),
-        from_sql_u64(metric_rollups::table.count().get_result(c)?),
-        from_sql_u64(run_summaries::table.count().get_result(c)?),
-        from_sql_u64(log_segments::table.count().get_result(c)?),
-        from_sql_u64(remote_hosts::table.count().get_result(c)?),
-    ])
+/// Converts an affected-row count.
+fn count(rows: usize) -> u64 {
+    u64::try_from(rows).unwrap_or(u64::MAX)
 }
 
-/// Deletes the oldest eligible historical row across groups, including young
-/// history when required by the byte budget. Unfinished process/task rows stay;
-/// closed log segments and summaries are history regardless of parent run status.
-fn evict_history(c: &mut SqliteConnection) -> Result<bool, Error> {
-    let unit = unit_runs::table
+/// One size-budget batch, run in its own transaction. Measures usage once, then
+/// deletes up to `limit` of the oldest metric minutes or, once none are left, of
+/// the oldest history rows across groups. Unfinished process/task rows stay;
+/// closed log segments and summaries are history regardless of parent run status,
+/// and a run whose children go in this batch becomes eligible in the next one.
+fn budget_batch(c: &mut SqliteConnection, page_budget: u64, limit: usize) -> Result<Batch, Error> {
+    if used_bytes(c)? <= page_budget {
+        return Ok(Batch::Done);
+    }
+    let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let metrics = diesel::sql_query(
+        "DELETE FROM metric_rollups WHERE rowid IN \
+         (SELECT rowid FROM metric_rollups ORDER BY minute, series LIMIT ?)",
+    )
+    .bind::<diesel::sql_types::BigInt, _>(sql_limit)
+    .execute(c)?;
+    if metrics > 0 {
+        return Ok(Batch::Deleted(PruneReport {
+            metric_rollups: count(metrics),
+            ..PruneReport::default()
+        }));
+    }
+    // The oldest `limit` of each group, merged; each group query walks its index.
+    let mut candidates: Vec<(i64, u8, i64, String)> = Vec::new();
+    let units = unit_runs::table
         .filter(unit_runs::ended_at.is_not_null())
         .filter(diesel::dsl::not(exists(
             log_segments::table.filter(log_segments::unit_run_id.eq(unit_runs::id)),
@@ -200,64 +274,87 @@ fn evict_history(c: &mut SqliteConnection) -> Result<bool, Error> {
         )))
         .order((unit_runs::ended_at, unit_runs::id))
         .select((unit_runs::id, unit_runs::ended_at.assume_not_null()))
-        .first::<(i64, i64)>(c)
-        .optional()?;
-    let task = task_runs::table
+        .limit(sql_limit)
+        .load::<(i64, i64)>(c)?;
+    candidates.extend(units.into_iter().map(|(id, at)| (at, 0, id, String::new())));
+    let tasks = task_runs::table
         .filter(task_runs::ended_at.is_not_null())
         .order((task_runs::ended_at, task_runs::id))
         .select((task_runs::id, task_runs::ended_at.assume_not_null()))
-        .first::<(i64, i64)>(c)
-        .optional()?;
-    let summary = run_summaries::table
+        .limit(sql_limit)
+        .load::<(i64, i64)>(c)?;
+    candidates.extend(tasks.into_iter().map(|(id, at)| (at, 1, id, String::new())));
+    let summaries = run_summaries::table
         .order((run_summaries::ended_at, run_summaries::unit_run_id))
         .select((run_summaries::unit_run_id, run_summaries::ended_at))
-        .first::<(i64, i64)>(c)
-        .optional()?;
-    let log = log_segments::table
+        .limit(sql_limit)
+        .load::<(i64, i64)>(c)?;
+    candidates.extend(
+        summaries
+            .into_iter()
+            .map(|(id, at)| (at, 2, id, String::new())),
+    );
+    let segments = log_segments::table
         .order((log_segments::max_ts, log_segments::id))
         .select((log_segments::id, log_segments::max_ts))
-        .first::<(i64, i64)>(c)
-        .optional()?;
-    let remote = remote_hosts::table
+        .limit(sql_limit)
+        .load::<(i64, i64)>(c)?;
+    candidates.extend(
+        segments
+            .into_iter()
+            .map(|(id, at)| (at, 3, id, String::new())),
+    );
+    let remotes = remote_hosts::table
         .filter(remote_hosts::last_connected.is_not_null())
         .order((remote_hosts::last_connected, remote_hosts::name))
         .select((
             remote_hosts::name,
             remote_hosts::last_connected.assume_not_null(),
         ))
-        .first::<(String, i64)>(c)
-        .optional()?;
-    let mut candidates: Vec<_> = [unit, task, summary, log]
-        .into_iter()
-        .enumerate()
-        .filter_map(|(kind, row)| row.map(|(id, time)| (time, kind, id)))
-        .collect();
-    if let Some((_, time)) = &remote {
-        candidates.push((*time, 4, 0));
+        .limit(sql_limit)
+        .load::<(String, i64)>(c)?;
+    candidates.extend(remotes.into_iter().map(|(name, at)| (at, 4, 0, name)));
+    if candidates.is_empty() {
+        return Ok(Batch::Done);
     }
-    let Some((_, kind, id)) = candidates.into_iter().min() else {
-        return Ok(false);
+    candidates.sort_unstable();
+    candidates.truncate(limit);
+    let ids = |kind: u8| -> Vec<i64> {
+        candidates
+            .iter()
+            .filter(|candidate| candidate.1 == kind)
+            .map(|candidate| candidate.2)
+            .collect()
     };
-    match kind {
-        0 => {
-            diesel::delete(unit_runs::table.find(id)).execute(c)?;
-        }
-        1 => {
-            diesel::delete(task_runs::table.find(id)).execute(c)?;
-        }
-        2 => {
-            diesel::delete(run_summaries::table.find(id)).execute(c)?;
-        }
-        3 => {
-            diesel::delete(log_segments::table.find(id)).execute(c)?;
-        }
-        _ => {
-            if let Some((name, _)) = remote {
-                diesel::delete(remote_hosts::table.find(name)).execute(c)?;
-            }
-        }
-    }
-    Ok(true)
+    let (units, tasks, summaries, segments) = (ids(0), ids(1), ids(2), ids(3));
+    let remotes: Vec<&str> = candidates
+        .iter()
+        .filter(|candidate| candidate.1 == 4)
+        .map(|candidate| candidate.3.as_str())
+        .collect();
+    Ok(Batch::Deleted(PruneReport {
+        unit_runs: count(
+            diesel::delete(unit_runs::table.filter(unit_runs::id.eq_any(units))).execute(c)?,
+        ),
+        task_runs: count(
+            diesel::delete(task_runs::table.filter(task_runs::id.eq_any(tasks))).execute(c)?,
+        ),
+        run_summaries: count(
+            diesel::delete(
+                run_summaries::table.filter(run_summaries::unit_run_id.eq_any(summaries)),
+            )
+            .execute(c)?,
+        ),
+        log_segments: count(
+            diesel::delete(log_segments::table.filter(log_segments::id.eq_any(segments)))
+                .execute(c)?,
+        ),
+        remote_hosts: count(
+            diesel::delete(remote_hosts::table.filter(remote_hosts::name.eq_any(remotes)))
+                .execute(c)?,
+        ),
+        ..PruneReport::default()
+    }))
 }
 
 #[derive(diesel::QueryableByName)]
@@ -318,7 +415,7 @@ fn disk_bytes(c: &mut SqliteConnection, path: &Path) -> Result<u64, Error> {
         match std::fs::metadata(file) {
             Ok(metadata) => bytes = bytes.saturating_add(metadata.len()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Error::Filesystem(error.to_string())),
+            Err(error) => return Err(Error::Filesystem(error)),
         }
     }
     Ok(bytes)

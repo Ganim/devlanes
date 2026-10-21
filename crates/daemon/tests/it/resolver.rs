@@ -212,3 +212,39 @@ async fn finished_runs_record_log_segments() {
     .await
     .expect("timeout");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+/// `doctor` lists the user config's warnings (a deferred trust target here).
+async fn doctor_shows_user_config_warnings() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let user = devlanes_config::parse_user("tls:\n  trust: [system, ios-simulator]\n")
+            .expect("user config");
+        assert!(!user.warnings().is_empty());
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                user: Some(user),
+                ..Setup::default()
+            },
+        )
+        .await;
+        let doctor = h
+            .call(Method::Doctor, json!({}), cx(&main))
+            .await
+            .expect("doctor");
+        let section = &doctor["user_config"];
+        assert_eq!(section["valid"], true);
+        assert_eq!(section["error"], serde_json::Value::Null);
+        assert_eq!(section["warnings"][0]["path"], "tls.trust.1");
+        assert!(
+            section["warnings"][0]["message"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty())
+        );
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}

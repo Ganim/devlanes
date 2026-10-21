@@ -52,4 +52,13 @@ history:
 state:
   max_size: 512MiB
 # Terminal app the TUI's O key opens a unit in: ghostty, iterm2, kitty, wezterm or terminal.
-terminal: ghostty
+# `terminal: ghostty` alone works too. progress shows start progress in the tab's
+# progress bar: auto (terminals known to draw it), always or never.
+# DEVLANES_TERM_PROGRESS=0 or 1 overrides it.
+terminal:
+  app: ghostty
+  progress: auto
+# Once a day the daemon reads the version of the latest devlanes release, and commands
+# print the upgrade command when it is newer. false (or DEVLANES_NO_UPDATE_CHECK=1) turns it off.
+updates:
+  check: true

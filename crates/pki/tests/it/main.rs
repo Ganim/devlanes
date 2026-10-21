@@ -161,6 +161,21 @@ fn name_constraints_limit_new_cas() -> Result {
     )));
     let plain = CertificateAuthority::load_or_create(&directory.path().join("plain"))?;
     assert!(violation(verify(&plain, &["api.acme"], "api.acme")));
+    // The daemon reads the real constraints to warn about routes outside them.
+    assert_eq!(
+        ca.permitted_dns_names(),
+        Some(vec![
+            "localhost".to_owned(),
+            "test".into(),
+            "internal".into(),
+            "home.arpa".into(),
+            "acme".into()
+        ])
+    );
+    assert_eq!(
+        plain.permitted_dns_names().map(|names| names.len()),
+        Some(4)
+    );
     assert!(
         CertificateAuthority::load_or_create_with_tld(
             &directory.path().join("bad"),
@@ -181,6 +196,28 @@ fn imports_mkcert_layout() -> Result {
     fs::rename(path.join("ca-key.pem"), path.join("rootCA-key.pem"))?;
     let imported = CertificateAuthority::from_mkcert(&path)?;
     assert_eq!(original.certificate_der(), imported.certificate_der());
+    Ok(())
+}
+
+/// A root without name constraints (what mkcert makes) permits any name.
+#[test]
+fn unconstrained_roots_report_no_permitted_names() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir()?;
+    let key = rcgen::KeyPair::generate()?;
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new())?;
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+    ];
+    let cert = params.self_signed(&key)?;
+    let key_path = directory.path().join("rootCA-key.pem");
+    fs::write(directory.path().join("rootCA.pem"), cert.pem())?;
+    fs::write(&key_path, key.serialize_pem())?;
+    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+    let ca = CertificateAuthority::from_mkcert(directory.path())?;
+    assert_eq!(ca.permitted_dns_names(), None);
     Ok(())
 }
 

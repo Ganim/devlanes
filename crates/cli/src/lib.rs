@@ -4,6 +4,7 @@ mod args;
 mod ci;
 mod completion;
 mod output;
+mod progress;
 mod render;
 mod runtime;
 mod with;
@@ -14,6 +15,7 @@ pub use clap;
 pub use clap_complete::Shell;
 pub use completion::*;
 pub use output::*;
+pub use progress::*;
 pub use runtime::*;
 pub use with::*;
 

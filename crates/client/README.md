@@ -31,6 +31,7 @@ Auto-spawn is refused when sandbox markers are present or the socket-bind probe 
 - `Client::request` returns response data or a typed error, including `Error::Rpc`.
 - `begin_request`, `next_frame`, and `send_bytes` support events and raw terminal traffic.
 - `Client::peer` exposes the daemon hello; `Client::spawned` records whether this connection started the daemon.
+- `update::InstallMethod::current` tells how this binary was installed and `upgrade_command` gives the matching upgrade; `update::NoticeLog` records when release notices were shown or dismissed (`notices.json`).
 
 ## Behaviour
 

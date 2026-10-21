@@ -3,14 +3,15 @@
 //! units run, so CI summaries still get per-start peaks. Monitoring only.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use devlanes_core::UnitRunId;
 use devlanes_metrics::{
-    History, RunTracker, SampleRequest, Subject, UnitKey, UnitTarget, aggregate,
+    COARSE_CAPACITY, COARSE_INTERVAL_MS, ContainerTarget, History, RunTracker, Sample,
+    SampleRequest, Series, Subject, UnitKey, UnitTarget, aggregate,
 };
 use devlanes_proto::{Context, LaneSummary, RpcError, UnitPeak};
 use devlanes_state::{RollupRow, RunSummaryRow};
@@ -27,6 +28,14 @@ use crate::{
 const INTEREST: Duration = Duration::from_secs(15);
 /// Points of history returned per unit.
 const HISTORY_POINTS: usize = 120;
+/// The in-memory history horizon (the coarse ring, 6 hours). Series idle longer
+/// hold nothing a client can still be shown, so they are dropped with the
+/// per-unit entries that point at them; otherwise every removed lane or unit
+/// would keep its preallocated rings for the daemon's lifetime.
+const HISTORY_HORIZON: Duration =
+    Duration::from_millis(COARSE_INTERVAL_MS * COARSE_CAPACITY as u64);
+/// How often the sampler prunes; pruning walks every series.
+const PRUNE_EVERY_MS: u64 = 60_000;
 
 /// Sampler state shared with the `metrics` method.
 #[derive(Default)]
@@ -40,9 +49,53 @@ pub(crate) struct MetricsState {
     /// Latest unit CPU with its time and run, so the start gate's settle rule
     /// only counts new readings of the run it is watching.
     pub cpu_readings: BTreeMap<(String, String), CpuReading>,
+    /// Last [`CpuReading::seq`] handed out.
+    pub reading_seq: u64,
     /// Series key per `(lane reference, unit)` for history lookups.
     pub subjects: BTreeMap<(String, String), Subject>,
+    /// Infra containers of the last tick with their readings; rebuilt every tick,
+    /// so containers that went away drop out.
+    pub containers: BTreeMap<Subject, ContainerRow>,
     pub interest_until: Option<Instant>,
+    /// When the sampler last pruned (Unix ms).
+    pub last_prune_ms: u64,
+}
+
+impl MetricsState {
+    /// Forgets series idle past [`HISTORY_HORIZON`], then the per-unit entries of
+    /// units that are not sampled any more and whose series went with them. Call
+    /// after [`History::drain_rollups`] so no closed minute is lost. Runs at most
+    /// once per [`PRUNE_EVERY_MS`].
+    fn prune(&mut self, now_ms: u64, live: &BTreeSet<(String, String)>) {
+        if now_ms < self.last_prune_ms.saturating_add(PRUNE_EVERY_MS) {
+            return;
+        }
+        self.last_prune_ms = now_ms;
+        self.history.prune(now_ms, HISTORY_HORIZON);
+        let history = &self.history;
+        self.subjects
+            .retain(|key, subject| live.contains(key) || history.series(subject).is_some());
+        let subjects = &self.subjects;
+        self.latest.retain(|key, _| subjects.contains_key(key));
+        self.cpu_readings
+            .retain(|key, _| subjects.contains_key(key));
+    }
+}
+
+/// One sampled infra container and the lanes that use it.
+#[derive(Debug, Clone)]
+pub(crate) struct ContainerRow {
+    /// Namespace key (compose service or `infra.containers` name).
+    pub name: String,
+    /// Container name the Docker API was asked about.
+    pub docker: String,
+    pub shared: bool,
+    /// Monitor group: the lane reference, or `<project> (shared)` for shared infra.
+    pub group: String,
+    /// References of the lanes whose infra includes the container.
+    pub lanes: Vec<String>,
+    /// `(cpu, memory)` from this tick, when the engine reported one.
+    pub latest: Option<(f64, u64)>,
 }
 
 /// `metrics` parameters.
@@ -52,12 +105,15 @@ struct MetricsParams {
     peaks: bool,
 }
 
-/// One unit CPU reading.
+/// One unit CPU and footprint reading, for the start gate's slot holders.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CpuReading {
     pub cpu_percent: f64,
-    /// Unix milliseconds when the sample was taken.
-    pub at_ms: u64,
+    /// Increases with every stored reading; the settle rule compares these,
+    /// not wall-clock times, to tell new readings from repeats.
+    pub seq: u64,
+    /// The unit's process-tree footprint in the same sample.
+    pub footprint_bytes: u64,
     /// Leader PID of the run the sample belongs to.
     pub pid: Option<u32>,
 }
@@ -101,7 +157,9 @@ impl Inner {
     pub(crate) async fn sample_once(self: &Arc<Self>) {
         let mut targets = Vec::new();
         let mut request = SampleRequest::default();
+        let mut containers: BTreeMap<Subject, ContainerRow> = BTreeMap::new();
         for (project, lane) in self.all_lanes() {
+            let project_name = project.name();
             let (reference, lane_id, units) = {
                 let st = lane.st();
                 let Some(record) = &st.record else { continue };
@@ -111,7 +169,32 @@ impl Inner {
                     .filter(|(_, rec)| rec.host.is_alive())
                     .map(|(name, rec)| (name.clone(), rec.host.clone(), rec.run_id))
                     .collect();
-                (st.reference(&project.name()), record.id, units)
+                let reference = st.reference(&project_name);
+                // Shared infra appears in every lane's list; one row per container.
+                for container in &st.infra_containers {
+                    let subject = Subject::Container {
+                        project: project.id,
+                        lane: (!container.shared).then_some(record.id),
+                        id: container.docker.clone(),
+                    };
+                    containers
+                        .entry(subject)
+                        .or_insert_with(|| ContainerRow {
+                            name: container.name.clone(),
+                            docker: container.docker.clone(),
+                            shared: container.shared,
+                            group: if container.shared {
+                                format!("{project_name} (shared)")
+                            } else {
+                                reference.clone()
+                            },
+                            lanes: Vec::new(),
+                            latest: None,
+                        })
+                        .lanes
+                        .push(reference.clone());
+                }
+                (reference, record.id, units)
             };
             for (name, host, run) in units {
                 let key = UnitKey {
@@ -141,6 +224,17 @@ impl Inner {
                 });
             }
         }
+        request.containers = containers
+            .keys()
+            .filter_map(|subject| match subject {
+                Subject::Container { project, lane, id } => Some(ContainerTarget {
+                    project: *project,
+                    lane: *lane,
+                    id: id.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
         let mut leaves = Vec::new();
         for source in &self.integ.metrics {
             match source.sample(&request).await {
@@ -149,10 +243,26 @@ impl Inner {
             }
         }
         let totals = aggregate(&leaves);
+        // Container leaves get their own history, for the monitor and rollups.
+        let container_samples: Vec<Sample> = leaves
+            .into_iter()
+            .filter(|sample| containers.contains_key(&sample.subject))
+            .collect();
+        for sample in &container_samples {
+            if let Some(row) = containers.get_mut(&sample.subject) {
+                row.latest = Some((sample.cpu_percent, sample.footprint_bytes));
+            }
+        }
+        let sampled: BTreeSet<(String, String)> = targets
+            .iter()
+            .map(|target| (target.reference.clone(), target.name.clone()))
+            .collect();
         let now = now_ms();
         let (rollups, finished) = {
             let mut state = lock(&self.metrics);
             state.history.record_all(&totals);
+            state.history.record_all(&container_samples);
+            state.containers = containers;
             for target in &targets {
                 if let Some(run) = target.run
                     && !state.tracked.contains_key(&run)
@@ -195,11 +305,14 @@ impl Inner {
                     (target.reference.clone(), target.name.clone()),
                     (sample.cpu_percent, sample.footprint_bytes),
                 );
+                state.reading_seq += 1;
+                let seq = state.reading_seq;
                 state.cpu_readings.insert(
                     (target.reference.clone(), target.name.clone()),
                     CpuReading {
                         cpu_percent: sample.cpu_percent,
-                        at_ms: now,
+                        seq,
+                        footprint_bytes: sample.footprint_bytes,
                         pid: target.pid,
                     },
                 );
@@ -208,7 +321,9 @@ impl Inner {
                 peak.0 = Some(peak.0.unwrap_or(0).max(sample.footprint_bytes));
                 peak.1 = Some(peak.1.unwrap_or(0.0).max(sample.cpu_percent));
             }
-            (state.history.drain_rollups(now), finished)
+            let rollups = state.history.drain_rollups(now);
+            state.prune(now, &sampled);
+            (rollups, finished)
         };
         let rows: Vec<RollupRow> = rollups
             .into_iter()
@@ -260,6 +375,19 @@ impl Inner {
             {
                 unit.cpu_percent = Some(*cpu);
                 unit.memory_bytes = Some(*memory);
+            }
+        }
+        for container in &mut summary.containers {
+            // Replicas of one compose service add up to the service's numbers.
+            let readings: Vec<(f64, u64)> = state
+                .containers
+                .values()
+                .filter(|row| row.name == container.name && row.lanes.contains(&summary.reference))
+                .filter_map(|row| row.latest)
+                .collect();
+            if !readings.is_empty() {
+                container.cpu_percent = Some(readings.iter().map(|r| r.0).sum());
+                container.memory_bytes = Some(readings.iter().map(|r| r.1).sum());
             }
         }
     }
@@ -317,20 +445,12 @@ impl Inner {
                 }
                 let key = (reference.clone(), name.clone());
                 let latest = state.latest.get(&key).copied();
-                let history: Vec<Value> = state
-                    .subjects
-                    .get(&key)
-                    .and_then(|subject| state.history.series(subject))
-                    .map(|series| {
-                        let points: Vec<_> = series.points().collect();
-                        let skip = points.len().saturating_sub(HISTORY_POINTS);
-                        points
-                            .into_iter()
-                            .skip(skip)
-                            .map(|p| json!([p.ts_ms, p.cpu_percent, p.footprint_bytes]))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let history = recent_points(
+                    state
+                        .subjects
+                        .get(&key)
+                        .and_then(|subject| state.history.series(subject)),
+                );
                 units.push(json!({
                     "lane": reference,
                     "unit": name,
@@ -340,6 +460,120 @@ impl Inner {
                 }));
             }
         }
+        units.extend(container_entries(&state));
         Ok(json!({"units": units}))
+    }
+}
+
+/// The newest [`HISTORY_POINTS`] raw points as `[ts_ms, cpu, memory]`.
+fn recent_points(series: Option<&Series>) -> Vec<Value> {
+    let Some(series) = series else {
+        return Vec::new();
+    };
+    let skip = series.points().len().saturating_sub(HISTORY_POINTS);
+    series
+        .points()
+        .skip(skip)
+        .map(|p| json!([p.ts_ms, p.cpu_percent, p.footprint_bytes]))
+        .collect()
+}
+
+/// Running infra containers as `metrics` rows with `kind: container`, grouped
+/// under their lane or `<project> (shared)`. Replicas of one service are told
+/// apart by their container name.
+fn container_entries(state: &MetricsState) -> Vec<Value> {
+    let running: Vec<(&Subject, &ContainerRow)> = state
+        .containers
+        .iter()
+        .filter(|(_, row)| row.latest.is_some())
+        .collect();
+    running
+        .iter()
+        .map(|(subject, row)| {
+            let replicas = running
+                .iter()
+                .filter(|(_, other)| other.group == row.group && other.name == row.name)
+                .count();
+            let unit = if replicas > 1 { &row.docker } else { &row.name };
+            json!({
+                "lane": row.group,
+                "unit": unit,
+                "kind": "container",
+                "container": row.docker,
+                "shared": row.shared,
+                "cpu_percent": row.latest.map(|l| l.0),
+                "memory_bytes": row.latest.map(|l| l.1),
+                "history": recent_points(state.history.series(subject)),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use devlanes_core::{LaneId, ProjectId};
+
+    use super::*;
+
+    /// A unit total sampled at `ts_ms`.
+    fn unit_sample(unit: &str, ts_ms: u64) -> Sample {
+        Sample {
+            subject: Subject::Unit(UnitKey {
+                project: ProjectId(1),
+                lane: LaneId(1),
+                unit: unit.into(),
+            }),
+            cpu_percent: 1.0,
+            footprint_bytes: 1,
+            rss_bytes: 1,
+            ts_ms,
+        }
+    }
+
+    /// Fills every per-unit map for `unit` as one tick would.
+    fn track(state: &mut MetricsState, unit: &str, ts_ms: u64) {
+        let sample = unit_sample(unit, ts_ms);
+        state.history.record(&sample);
+        let key = ("acme@1".to_owned(), unit.to_owned());
+        state.subjects.insert(key.clone(), sample.subject.clone());
+        state.latest.insert(key.clone(), (1.0, 1));
+        state.cpu_readings.insert(
+            key,
+            CpuReading {
+                cpu_percent: 1.0,
+                seq: ts_ms,
+                footprint_bytes: 1,
+                pid: None,
+            },
+        );
+    }
+
+    /// A unit gone for longer than the history horizon loses its series and
+    /// entries; a live one and a recently gone one keep theirs.
+    #[test]
+    fn prune_forgets_units_gone_past_the_horizon() {
+        let horizon = HISTORY_HORIZON.as_millis() as u64;
+        let now = horizon + 600_000;
+        let mut state = MetricsState::default();
+        track(&mut state, "gone", 0);
+        track(&mut state, "recent", now - 60_000);
+        track(&mut state, "live", 0);
+        state.history.drain_rollups(now);
+        let live = BTreeSet::from([("acme@1".to_owned(), "live".to_owned())]);
+        state.prune(now, &live);
+        let units: Vec<&str> = state.subjects.keys().map(|(_, u)| u.as_str()).collect();
+        assert_eq!(units, ["live", "recent"]);
+        assert_eq!(state.latest.len(), 2);
+        assert_eq!(state.cpu_readings.len(), 2);
+        assert!(
+            state
+                .history
+                .series(&unit_sample("gone", 0).subject)
+                .is_none()
+        );
+        // Within a minute of the last pass nothing is walked again.
+        track(&mut state, "gone", 0);
+        state.prune(now + 1_000, &live);
+        assert_eq!(state.subjects.len(), 3);
     }
 }

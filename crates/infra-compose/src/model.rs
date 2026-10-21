@@ -265,6 +265,26 @@ pub fn service_health(
         .collect()
 }
 
+/// Names of the running containers per selected service (one per replica), for
+/// per-container stats. Services without a running container are left out.
+pub fn service_containers(
+    services: &[String],
+    statuses: &[ContainerStatus],
+) -> BTreeMap<String, Vec<String>> {
+    services
+        .iter()
+        .filter_map(|service| {
+            let mut names: Vec<String> = statuses
+                .iter()
+                .filter(|status| &status.service == service && status.state == "running")
+                .map(|status| status.name.clone())
+                .collect();
+            names.sort();
+            (!names.is_empty()).then(|| (service.clone(), names))
+        })
+        .collect()
+}
+
 /// Lower is worse; used to report the least healthy replica.
 fn health_rank(health: &Health) -> u8 {
     match health {
@@ -395,6 +415,21 @@ mod tests {
         assert_eq!(health["postgres"], Health::Healthy);
         assert_eq!(health["redis"], Health::Running);
         assert_eq!(health["mailpit"], Health::Missing);
+    }
+
+    #[test]
+    fn running_containers_per_service() {
+        let ps = r#"{"ID":"a","Name":"acme-web-2","Service":"web","State":"running"}
+{"ID":"b","Name":"acme-web-1","Service":"web","State":"running"}
+{"ID":"c","Name":"acme-db-1","Service":"db","State":"exited"}
+{"ID":"d","Name":"acme-other-1","Service":"other","State":"running"}"#;
+        let statuses = parse_ps(ps).unwrap_or_default();
+        let services = ["web".to_owned(), "db".to_owned()];
+        let containers = service_containers(&services, &statuses);
+        assert_eq!(
+            containers,
+            BTreeMap::from([("web".into(), vec!["acme-web-1".into(), "acme-web-2".into()])])
+        );
     }
 
     #[test]

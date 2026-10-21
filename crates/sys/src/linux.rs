@@ -12,6 +12,16 @@ fn malformed(source_name: &'static str, detail: impl Into<String>) -> Error {
     }
 }
 
+/// Reads the kernel's random per-boot UUID.
+pub(crate) fn boot_id() -> Result<String, Error> {
+    let id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(malformed("boot_id", "empty"));
+    }
+    Ok(id.to_owned())
+}
+
 /// Scans `/proc` for numeric entries; processes exiting mid-scan are skipped.
 pub(crate) fn processes() -> Result<Vec<ProcessInfo>, Error> {
     let mut processes = Vec::new();

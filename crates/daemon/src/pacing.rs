@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -23,6 +23,8 @@ use devlanes_core::{
 use devlanes_metrics::{Subject, UnitKey};
 use devlanes_proto::{Actor, LaneSummary, RpcError, UnitFailureData, events};
 use devlanes_resolve::{Ready, ReadySpec, ResolvedLane, ResolvedService};
+use devlanes_state::StartupPeak;
+use futures_util::future::join_all;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -40,10 +42,13 @@ use crate::{
 /// How often a slot holder looks at its unit: CPU reports for the settle rule
 /// and noticing a gate timeout.
 const HOLD_POLL: Duration = Duration::from_secs(1);
-/// Keeps the sampler on its one-second tick while a unit settles.
+/// Keeps the sampler on its one-second tick while a slot is held, for CPU
+/// settle and memory reports.
 const SAMPLER_INTEREST: Duration = Duration::from_secs(3);
-/// Past runs per unit used for the memory warning.
+/// Past runs (or startups) per unit used for baselines.
 const BASELINE_RUNS: u32 = 5;
+/// A startup peak covers at most this much time after the spawn.
+const STARTUP_WINDOW: Duration = Duration::from_secs(300);
 
 /// A queued start that `stop` can cancel.
 struct Waiting {
@@ -59,6 +64,8 @@ struct Waiting {
 pub(crate) struct Pacing {
     waiting: Mutex<HashMap<(WorktreeId, String), Waiting>>,
     next: AtomicU64,
+    /// Set once the "cannot measure settle" message was logged.
+    unmeasured_logged: AtomicBool,
 }
 
 impl Pacing {
@@ -120,6 +127,34 @@ struct PacedStart {
     after: Option<oneshot::Receiver<()>>,
     /// Dropped once this unit spawned or gave up.
     done: oneshot::Sender<()>,
+    /// Metrics series of the unit, where its startup peak is recorded.
+    series: Option<String>,
+}
+
+/// A granted slot and what its holder task watches.
+struct Hold {
+    host: UnitHost,
+    slot: StartSlot,
+    /// `ready: started`: hold until the tree CPU settles.
+    started: bool,
+    /// `(lane reference, unit)` in the sampler's maps.
+    key: (String, String),
+    series: Option<String>,
+}
+
+/// Which history a baseline comes from.
+#[derive(Debug, Clone, Copy)]
+enum Baseline {
+    /// Peak footprint while starting: the memory need of a start.
+    Startup,
+    /// Peak footprint over whole runs: what a lane usually peaks at.
+    Run,
+}
+
+/// Median of `values`; `None` when empty.
+fn median(mut values: Vec<u64>) -> Option<u64> {
+    values.sort_unstable();
+    values.get(values.len() / 2).copied()
 }
 
 /// How one paced start ended, as seen by the start request.
@@ -135,6 +170,11 @@ impl Inner {
     /// until each spawned or the start's deadline passed. Units still queued at
     /// the deadline keep their place and spawn later; they count as started and
     /// the start reports a timeout.
+    ///
+    /// The request's place in line is taken when its services phase begins,
+    /// before the baseline lookups. Earlier phases (infra, setup, tasks) run
+    /// before that, so a request that arrived earlier but has slow infra can
+    /// see a later request's services go first.
     pub(crate) async fn spawn_services(
         self: &Arc<Self>,
         cx: &mut StartCx,
@@ -145,12 +185,17 @@ impl Inner {
             return;
         }
         let gate = self.integ.start_gate.clone().filter(|_| !cx.all_at_once);
-        let peaks = if gate.is_some() || self.integ.pressure.is_some() {
-            self.baseline_peaks(cx, services).await
+        let arrival = gate.as_ref().map(|gate| gate.arrive());
+        let series = self.unit_series(cx, services);
+        let (needs, run_peaks) = if gate.is_some() || self.integ.pressure.is_some() {
+            tokio::join!(
+                self.baselines(&series, Baseline::Startup),
+                self.baselines(&series, Baseline::Run),
+            )
         } else {
-            HashMap::new()
+            (HashMap::new(), HashMap::new())
         };
-        self.warn_memory(cx, &peaks).await;
+        self.warn_memory(cx, &run_peaks).await;
         let mut ordered: Vec<(usize, &ResolvedService)> = services
             .iter()
             .map(|service| {
@@ -168,16 +213,17 @@ impl Inner {
         let mut after: Option<oneshot::Receiver<()>> = None;
         // The whole request is one batch, queued before anything spawns: the
         // gate serves it after earlier requests and in file order within it.
-        let mut tickets: Vec<Option<StartTicket>> = match &gate {
-            Some(gate) => gate
-                .enqueue_batch(
+        let mut tickets: Vec<Option<StartTicket>> = match (&gate, arrival) {
+            (Some(gate), Some(arrival)) => gate
+                .enqueue_batch_at(
+                    arrival,
                     ordered
                         .iter()
                         .map(|(order, service)| StartRequest {
                             lane: cx.reference.clone(),
                             unit: service.unit.clone(),
                             order: *order,
-                            memory_need: peaks
+                            memory_need: needs
                                 .get(&service.unit)
                                 .copied()
                                 .unwrap_or(DEFAULT_MEMORY_NEED),
@@ -187,7 +233,7 @@ impl Inner {
                 .into_iter()
                 .map(Some)
                 .collect(),
-            None => Vec::new(),
+            _ => Vec::new(),
         };
         tickets.resize_with(ordered.len(), || None);
         for ((_, service), ticket) in ordered.into_iter().zip(tickets) {
@@ -206,6 +252,7 @@ impl Inner {
                 token,
                 after: if gate.is_some() { after.take() } else { None },
                 done,
+                series: series.get(&service.unit).cloned(),
             };
             after = Some(next);
             let engine = self.clone();
@@ -255,6 +302,7 @@ impl Inner {
             token,
             after,
             done,
+            series,
         } = start;
         let name = request.name.clone();
         // `None` without a gate (or with `all_at_once`): nothing to hold.
@@ -300,7 +348,14 @@ impl Inner {
                     .await;
                 });
                 if let Some(slot) = slot {
-                    tokio::spawn(self.clone().hold_slot(host, slot, started, reference, name));
+                    let hold = Hold {
+                        host,
+                        slot,
+                        started,
+                        key: (reference, name),
+                        series,
+                    };
+                    tokio::spawn(self.clone().hold_slot(hold));
                 }
                 Paced::Spawned
             }
@@ -313,42 +368,56 @@ impl Inner {
         }
     }
 
-    /// Holds `slot` until the unit is ready or failed. `ready: started` units
-    /// are ready at once, so they hold it until their tree CPU settles. The gate
-    /// may end the hold earlier with its slot timeout.
-    async fn hold_slot(
-        self: Arc<Self>,
-        host: UnitHost,
-        slot: StartSlot,
-        started: bool,
-        reference: String,
-        name: String,
-    ) {
-        let mut state = host.watch_state();
-        let key = (reference, name);
-        // Only readings of this run taken after the last one reported count:
-        // the sampler can still hold (or, mid-sample, re-insert) the previous
-        // run's value, and a value read twice is not a second second of calm.
+    /// Holds a slot until the unit is ready or failed, feeding the gate the
+    /// unit's footprint and, for `ready: started` units (ready at once), its
+    /// tree CPU until it settles. The gate may end the hold earlier with its
+    /// slot timeout. The highest footprint seen is recorded as the unit's
+    /// startup peak.
+    async fn hold_slot(self: Arc<Self>, hold: Hold) {
+        let Hold {
+            host,
+            slot,
+            started,
+            key,
+            series,
+        } = hold;
         let pid = host.identity().map(|identity| identity.pid);
-        let mut reported_at = host.info().started_at_ms;
-        loop {
-            if slot.released().is_some() {
-                return;
+        if started && (self.integ.metrics.is_empty() || pid.is_none()) {
+            // Settling cannot be measured, and holding to `slot_timeout` would
+            // only delay everything queued behind it.
+            if !self.pacing.unmeasured_logged.swap(true, Ordering::Relaxed) {
+                tracing::info!(
+                    "no process metrics: `ready: started` units release their start slot when they start"
+                );
+            }
+            slot.release(Release::Ready);
+            return;
+        }
+        let begun = tokio::time::Instant::now();
+        let mut peak: u64 = 0;
+        let mut state = host.watch_state();
+        // Only readings of this run newer than the last one used count: the
+        // sampler can still hold (or, mid-sample, re-insert) the previous run's
+        // value, and a value read twice is not a second second of calm.
+        let mut last_seq = lock(&self.metrics).reading_seq;
+        let released = loop {
+            if let Some(reason) = slot.released() {
+                break reason;
             }
             let current = state.borrow_and_update().clone();
             let settling = match current {
                 UnitState::Failed(_) | UnitState::Exited(_) | UnitState::Stopping => {
                     slot.release(Release::Failed);
-                    return;
+                    break Release::Failed;
                 }
                 UnitState::Ready if !started => {
                     slot.release(Release::Ready);
-                    return;
+                    break Release::Ready;
                 }
                 UnitState::Ready => true,
                 UnitState::Starting => false,
             };
-            if settling {
+            {
                 let mut metrics = lock(&self.metrics);
                 let until = std::time::Instant::now() + SAMPLER_INTEREST;
                 metrics.interest_until =
@@ -358,55 +427,93 @@ impl Inner {
                 changed = state.changed() => {
                     if changed.is_err() {
                         slot.release(Release::Failed);
-                        return;
+                        break Release::Failed;
                     }
                 }
                 () = tokio::time::sleep(HOLD_POLL) => {
-                    if settling {
-                        let reading = lock(&self.metrics).cpu_readings.get(&key).copied();
-                        if let Some(reading) = fresh_reading(reading, pid, reported_at) {
-                            reported_at = reading.at_ms;
+                    let reading = lock(&self.metrics).cpu_readings.get(&key).copied();
+                    if let Some(reading) = fresh_reading(reading, pid, last_seq) {
+                        last_seq = reading.seq;
+                        if begun.elapsed() <= STARTUP_WINDOW {
+                            peak = peak.max(reading.footprint_bytes);
+                        }
+                        slot.report_memory(reading.footprint_bytes);
+                        if settling {
                             slot.report_cpu(reading.cpu_percent);
                         }
                     }
                 }
             }
+        };
+        // A failed start says nothing about what a healthy one needs.
+        if matches!(
+            released,
+            Release::Ready | Release::Settled | Release::Timeout
+        ) && peak > 0
+            && let Some(series) = series
+        {
+            let duration = begun.elapsed().min(STARTUP_WINDOW);
+            let record = StartupPeak {
+                series,
+                recorded_ms: crate::units::now_ms(),
+                peak_bytes: peak,
+                duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+            };
+            if let Err(error) = self.store.record_startup_peak(record).await {
+                tracing::debug!(%error, "startup peak not recorded");
+            }
         }
     }
 
-    /// Baseline peak memory per unit: the median `mem_peak` of its recent runs
-    /// in this lane. Units without history are absent.
-    async fn baseline_peaks(
-        &self,
-        cx: &StartCx,
-        services: &[&ResolvedService],
-    ) -> HashMap<String, u64> {
-        let mut baselines = HashMap::new();
+    /// Metrics series per unit; empty while the lane has no record.
+    fn unit_series(&self, cx: &StartCx, services: &[&ResolvedService]) -> HashMap<String, String> {
         let Some(lane_id) = cx.lane.st().record.as_ref().map(|record| record.id) else {
-            return baselines;
+            return HashMap::new();
         };
-        for service in services {
-            let series = Subject::Unit(UnitKey {
-                project: cx.project.id,
-                lane: lane_id,
-                unit: service.unit.clone(),
+        services
+            .iter()
+            .map(|service| {
+                let key = Subject::Unit(UnitKey {
+                    project: cx.project.id,
+                    lane: lane_id,
+                    unit: service.unit.clone(),
+                })
+                .key();
+                (service.unit.clone(), key)
             })
-            .key();
-            let Ok(runs) = self.store.run_summaries(series, BASELINE_RUNS).await else {
-                continue;
+            .collect()
+    }
+
+    /// Median of each unit's recent peaks, looked up concurrently. Units
+    /// without history are absent.
+    async fn baselines(
+        &self,
+        series: &HashMap<String, String>,
+        kind: Baseline,
+    ) -> HashMap<String, u64> {
+        let lookups = series.iter().map(|(unit, series)| async move {
+            let peaks: Vec<u64> = match kind {
+                Baseline::Startup => self
+                    .store
+                    .startup_peaks(series.clone(), BASELINE_RUNS)
+                    .await
+                    .map(|rows| rows.iter().map(|row| row.peak_bytes).collect())
+                    .unwrap_or_default(),
+                Baseline::Run => self
+                    .store
+                    .run_summaries(series.clone(), BASELINE_RUNS)
+                    .await
+                    .map(|rows| {
+                        rows.iter()
+                            .filter(|run| run.samples > 0)
+                            .map(|run| run.mem_peak)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             };
-            let mut peaks: Vec<u64> = runs
-                .iter()
-                .filter(|run| run.samples > 0)
-                .map(|run| run.mem_peak)
-                .collect();
-            if peaks.is_empty() {
-                continue;
-            }
-            peaks.sort_unstable();
-            baselines.insert(service.unit.clone(), peaks[peaks.len() / 2]);
-        }
-        baselines
+            median(peaks).map(|peak| (unit.clone(), peak))
+        });
+        join_all(lookups).await.into_iter().flatten().collect()
     }
 
     /// Emits `lane.warning` when the units about to start usually peak above
@@ -508,20 +615,30 @@ impl Inner {
         }
     }
 
+    /// The start gate's current snapshot, taken once per status call.
+    pub(crate) fn gate_snapshot(&self) -> Option<GateSnapshot> {
+        self.integ.start_gate.as_ref().map(|gate| gate.snapshot())
+    }
+
     /// Marks units waiting in the start gate as `queued`, with the reason data.
     pub(crate) fn fill_queued(&self, summary: &mut LaneSummary) {
-        let Some(gate) = &self.integ.start_gate else {
+        self.fill_queued_with(self.gate_snapshot().as_ref(), summary);
+    }
+
+    /// [`Inner::fill_queued`] against a snapshot the caller already took.
+    pub(crate) fn fill_queued_with(
+        &self,
+        snapshot: Option<&GateSnapshot>,
+        summary: &mut LaneSummary,
+    ) {
+        let Some(snapshot) = snapshot.filter(|snapshot| !snapshot.queued.is_empty()) else {
             return;
         };
-        let snapshot = gate.snapshot();
-        if snapshot.queued.is_empty() {
-            return;
-        }
         let waiting = lock(&self.pacing.waiting);
         for unit in &mut summary.units {
             if let Some(entry) = snapshot.find(&summary.reference, &unit.name) {
                 unit.state = "queued".into();
-                unit.reason = Some(RpcError::new("queued", queued_data(&snapshot, entry), 0));
+                unit.reason = Some(RpcError::new("queued", queued_data(snapshot, entry), 0));
                 // Idle summaries carry no actor; `status --mine` needs the requester.
                 if let Some((_, start)) = waiting.iter().find(|((_, name), start)| {
                     start.reference == summary.reference && *name == unit.name
@@ -540,20 +657,21 @@ impl Inner {
     }
 }
 
-/// A reading worth reporting to the settle rule: same run (leader PID) and
-/// taken after `reported_at` (Unix ms).
+/// A reading worth reporting to the gate: same run (leader PID) and newer than
+/// the last one used (`last_seq`, the sampler's reading sequence).
 fn fresh_reading(
     reading: Option<CpuReading>,
     pid: Option<u32>,
-    reported_at: u64,
+    last_seq: u64,
 ) -> Option<CpuReading> {
-    reading.filter(|reading| pid.is_some() && reading.pid == pid && reading.at_ms > reported_at)
+    reading.filter(|reading| pid.is_some() && reading.pid == pid && reading.seq > last_seq)
 }
 
 /// `{position, queued, in_flight, window, hold, memory_need_bytes,
-/// available_memory_bytes?, cpu_percent?, memory_pressure?}`. `hold` is
-/// `window_full`, `memory_critical` or `memory`.
-/// `window` is null for an unlimited gate.
+/// available_memory_bytes?, cpu_percent?, memory_pressure?, head?}`. `hold` is
+/// the head's reason: `window_full`, `memory_critical` or `memory`. For
+/// position > 1, `head` names the start everyone waits behind:
+/// `{lane, unit, memory_need_bytes}`. `window` is null for an unlimited gate.
 fn queued_data(snapshot: &GateSnapshot, entry: &QueuedStart) -> Value {
     let mut data = json!({
         "position": entry.position,
@@ -562,6 +680,15 @@ fn queued_data(snapshot: &GateSnapshot, entry: &QueuedStart) -> Value {
         "window": snapshot.window,
         "hold": snapshot.hold,
     });
+    if entry.position > 1
+        && let Some(head) = snapshot.queued.first()
+    {
+        data["head"] = json!({
+            "lane": head.request.lane,
+            "unit": head.request.unit,
+            "memory_need_bytes": head.request.memory_need,
+        });
+    }
     if let Some(pressure) = &snapshot.pressure {
         if let Some(cpu) = pressure.cpu_percent {
             data["cpu_percent"] = json!((cpu * 10.0).round() / 10.0);
@@ -581,10 +708,11 @@ fn queued_data(snapshot: &GateSnapshot, entry: &QueuedStart) -> Value {
 mod tests {
     use super::*;
 
-    fn reading(pid: u32, at_ms: u64) -> Option<CpuReading> {
+    fn reading(pid: u32, seq: u64) -> Option<CpuReading> {
         Some(CpuReading {
             cpu_percent: 1.0,
-            at_ms,
+            seq,
+            footprint_bytes: 1,
             pid: Some(pid),
         })
     }
@@ -592,13 +720,55 @@ mod tests {
     #[test]
     fn settle_only_counts_new_readings_of_the_same_run() {
         // The previous run's value (other PID), even if re-inserted late.
-        assert!(fresh_reading(reading(7, 2_000), Some(8), 1_000).is_none());
-        // Older than the run's start or than the last reported reading.
-        assert!(fresh_reading(reading(8, 900), Some(8), 1_000).is_none());
-        assert!(fresh_reading(reading(8, 1_000), Some(8), 1_000).is_none());
-        assert!(fresh_reading(reading(8, 1_500), Some(8), 1_000).is_some());
+        assert!(fresh_reading(reading(7, 20), Some(8), 10).is_none());
+        // Not newer than the hold's start or than the last reading used.
+        assert!(fresh_reading(reading(8, 9), Some(8), 10).is_none());
+        assert!(fresh_reading(reading(8, 10), Some(8), 10).is_none());
+        assert!(fresh_reading(reading(8, 11), Some(8), 10).is_some());
         // Without an identity nothing can be matched to the run.
-        assert!(fresh_reading(reading(8, 1_500), None, 1_000).is_none());
-        assert!(fresh_reading(None, Some(8), 1_000).is_none());
+        assert!(fresh_reading(reading(8, 11), None, 10).is_none());
+        assert!(fresh_reading(None, Some(8), 10).is_none());
+    }
+
+    #[test]
+    fn why_names_the_head_for_later_positions() {
+        let request = |unit: &str, memory_need| StartRequest {
+            lane: "acme@1".into(),
+            unit: unit.into(),
+            order: 0,
+            memory_need,
+        };
+        let snapshot = GateSnapshot {
+            queued: vec![
+                QueuedStart {
+                    request: request("db", 4 << 30),
+                    position: 1,
+                },
+                QueuedStart {
+                    request: request("web", 1 << 20),
+                    position: 2,
+                },
+            ],
+            hold: Some(devlanes_core::gate::HoldReason::Memory),
+            available_memory: Some(1 << 30),
+            ..GateSnapshot::default()
+        };
+        let head = queued_data(&snapshot, &snapshot.queued[0]);
+        assert!(head.get("head").is_none());
+        let second = queued_data(&snapshot, &snapshot.queued[1]);
+        assert_eq!(second["hold"], "memory");
+        assert_eq!(
+            second["head"],
+            json!({"lane": "acme@1", "unit": "db", "memory_need_bytes": 4_u64 << 30})
+        );
+        assert_eq!(second["memory_need_bytes"], 1 << 20);
+        assert_eq!(second["available_memory_bytes"], 1_u64 << 30);
+    }
+
+    #[test]
+    fn medians_of_peaks() {
+        assert_eq!(median(Vec::new()), None);
+        assert_eq!(median(vec![5, 1, 3]), Some(3));
+        assert_eq!(median(vec![4, 1]), Some(4));
     }
 }

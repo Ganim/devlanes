@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use devlanes_core::{
     clock::Clock,
-    gate::{GateSnapshot, PressureSource, StartGate, StartRequest, StartTicket},
+    gate::{Arrival, GateSnapshot, PressureSource, StartGate, StartRequest, StartTicket},
 };
 
 pub use controller::{AdaptiveConfig, Controller};
@@ -119,9 +119,18 @@ impl AdaptiveGate {
 macro_rules! start_gate {
     ($gate:ty) => {
         impl StartGate for $gate {
-            /// Queues one start request's units; see [`StartGate::enqueue_batch`].
-            fn enqueue_batch(&self, requests: Vec<StartRequest>) -> Vec<StartTicket> {
-                self.0.enqueue_batch(requests)
+            /// Takes a place in line; see [`StartGate::arrive`].
+            fn arrive(&self) -> Arrival {
+                self.0.arrive()
+            }
+
+            /// Queues one start request's units; see [`StartGate::enqueue_batch_at`].
+            fn enqueue_batch_at(
+                &self,
+                arrival: Arrival,
+                requests: Vec<StartRequest>,
+            ) -> Vec<StartTicket> {
+                self.0.enqueue_batch_at(arrival, requests)
             }
 
             /// Window, holders, queue and the latest pressure reading.

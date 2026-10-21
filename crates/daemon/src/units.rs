@@ -108,6 +108,13 @@ enum LogCommand {
     Output(Bytes, u64),
     /// Answered once every earlier command was applied, so queries see all output.
     Sync(tokio::sync::oneshot::Sender<()>),
+    /// The maintenance pass's share of the total budget, applied with
+    /// [`crate::maintenance::release`] on this thread, which owns the writer.
+    Trim {
+        bytes: u64,
+        close_active: bool,
+        reply: std::sync::mpsc::SyncSender<devlanes_logs::Result<u64>>,
+    },
     Finish,
 }
 
@@ -621,14 +628,64 @@ impl Inner {
     }
 }
 
+impl crate::maintenance::LiveLog for UnitHost {
+    /// The run's log directory.
+    fn dir(&self) -> &std::path::Path {
+        &self.inner.info.log_dir
+    }
+
+    /// The writer's segment metadata while its log thread still runs. Blocking.
+    fn segments(&self) -> Option<Vec<devlanes_logs::SegmentMetadata>> {
+        if *self.inner.log_done.borrow() {
+            return None;
+        }
+        self.inner.log.lock().ok().map(|log| log.segments())
+    }
+
+    /// Queues a trim behind pending output and waits for the answer, both within
+    /// [`TRIM_WAIT`]. Blocking: the maintenance pass calls it from the blocking pool.
+    fn release(&self, bytes: u64, close_active: bool) -> Option<u64> {
+        use std::sync::mpsc::TrySendError;
+        let deadline = Instant::now() + TRIM_WAIT;
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        let mut command = LogCommand::Trim {
+            bytes,
+            close_active,
+            reply,
+        };
+        // try_send: a blocking send could wait forever on a stuck writer.
+        loop {
+            match self.inner.log_tx.try_send(command) {
+                Ok(()) => break,
+                Err(TrySendError::Full(back)) if Instant::now() < deadline => {
+                    command = back;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                // Full past the deadline, or the log closed meanwhile.
+                Err(_) => return None,
+            }
+        }
+        match answer.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Ok(left)) => Some(left),
+            Ok(Err(error)) => {
+                tracing::warn!(unit = %self.inner.info.name, %error, "log trim failed");
+                None
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+/// How long a maintenance trim waits for a live unit's log thread.
+const TRIM_WAIT: Duration = Duration::from_secs(5);
+
 /// Queries the logs of a unit that has no live host (earlier runs, other daemons).
 /// Read-only: it recovers nothing and creates no files, so a unit starting in the
-/// same directory is unaffected. `_retention` is unused since reads never prune.
+/// same directory is unaffected.
 pub async fn query_log_dir(
     dir: PathBuf,
     unit: String,
     query: LogQuery,
-    _retention: LogRetention,
 ) -> Result<Page<LogLine>, RpcError> {
     tokio::task::spawn_blocking(move || {
         LogReader::open(&dir, unit.replace('#', "_"))
@@ -701,6 +758,19 @@ fn spawn_log_thread(
                     Ok(LogCommand::Output(bytes, ts)) => log.ingest(&bytes, ts),
                     Ok(LogCommand::Sync(done)) => {
                         let _ = done.send(());
+                        Ok(())
+                    }
+                    // A failed trim goes back to the pass; it does not stop the writer.
+                    Ok(LogCommand::Trim {
+                        bytes,
+                        close_active,
+                        reply,
+                    }) => {
+                        let _ = reply.send(crate::maintenance::release(
+                            &mut log,
+                            bytes,
+                            close_active,
+                        ));
                         Ok(())
                     }
                     _ => Ok(()),
@@ -922,14 +992,7 @@ mod tests {
     async fn live_output_reaches_read_only_directory_queries() {
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("missing");
-        let query = |dir: PathBuf| {
-            query_log_dir(
-                dir,
-                "web".into(),
-                LogQuery::default(),
-                LogRetention::default(),
-            )
-        };
+        let query = |dir: PathBuf| query_log_dir(dir, "web".into(), LogQuery::default());
         let page = query(missing.clone()).await.expect("query");
         assert!(page.items.is_empty());
         assert!(!missing.exists());

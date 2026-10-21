@@ -653,6 +653,110 @@
         }
       ]
     },
+    "TerminalConfig": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Terminal",
+          "description": "Terminal app used by open-in-terminal actions; progress stays on auto.",
+          "examples": [
+            "ghostty"
+          ]
+        },
+        {
+          "$ref": "#/$defs/TerminalSettings",
+          "description": "Terminal app and progress-bar setting written as separate fields.",
+          "examples": [
+            {
+              "app": "wezterm",
+              "progress": "never"
+            }
+          ]
+        }
+      ],
+      "description": "The terminal app name alone, or a mapping with the app and the progress-bar setting.",
+      "examples": [
+        "ghostty",
+        {
+          "app": "ghostty",
+          "progress": "auto"
+        }
+      ]
+    },
+    "TerminalProgress": {
+      "description": "When start progress goes to the terminal tab's progress bar. Only a terminal\nsession in human output ever gets it; `DEVLANES_TERM_PROGRESS=0` or `1` overrides this.",
+      "examples": [
+        "auto",
+        "always",
+        "never"
+      ],
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Only in terminals known to draw it (Ghostty, WezTerm, recent iTerm2, Windows Terminal, ConEmu, Ptyxis, Konsole), never inside tmux or screen.",
+          "examples": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "always",
+          "description": "In any terminal, also kitty 0.47 or later and inside tmux (needs `allow-passthrough on`).",
+          "examples": [
+            "always"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Never.",
+          "examples": [
+            "never"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TerminalSettings": {
+      "additionalProperties": false,
+      "description": "Terminal app and how devlanes uses the terminal's own progress bar.",
+      "examples": [
+        {
+          "app": "ghostty",
+          "progress": "auto"
+        },
+        {
+          "progress": "never"
+        }
+      ],
+      "properties": {
+        "app": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Terminal"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, else the first one installed.",
+          "examples": [
+            "ghostty",
+            "iterm2"
+          ]
+        },
+        "progress": {
+          "$ref": "#/$defs/TerminalProgress",
+          "default": "auto",
+          "description": "Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto.",
+          "examples": [
+            "auto",
+            "never"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "TlsConfig": {
       "additionalProperties": false,
       "description": "Certificate authority selection and requested certificate trust targets.",
@@ -754,6 +858,27 @@
           "type": "string"
         }
       ]
+    },
+    "UpdatesConfig": {
+      "additionalProperties": false,
+      "description": "Release checks: the daemon reads the latest release's version once a day and\ncommands print a one-line notice. Nothing is downloaded or installed.",
+      "examples": [
+        {
+          "check": false
+        }
+      ],
+      "properties": {
+        "check": {
+          "default": true,
+          "description": "Check GitHub once a day for a newer devlanes release and show the upgrade command; defaults to true.",
+          "examples": [
+            true,
+            false
+          ],
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     }
   },
   "$id": "https://devlanes.run/schema/user-v1.json",
@@ -906,20 +1031,20 @@
     "terminal": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Terminal"
+          "$ref": "#/$defs/TerminalConfig"
         },
         {
           "type": "null"
         }
       ],
       "default": null,
-      "description": "Terminal application used by open-in-terminal actions.",
+      "description": "Terminal app for open-in-terminal actions, alone or with the progress-bar setting.",
       "examples": [
-        "iterm2",
         "ghostty",
-        "wezterm",
-        "kitty",
-        "terminal"
+        {
+          "app": "ghostty",
+          "progress": "auto"
+        }
       ]
     },
     "tls": {
@@ -936,6 +1061,18 @@
             "system",
             "firefox"
           ]
+        }
+      ]
+    },
+    "updates": {
+      "$ref": "#/$defs/UpdatesConfig",
+      "default": {
+        "check": true
+      },
+      "description": "Whether the daemon looks for new devlanes releases.",
+      "examples": [
+        {
+          "check": false
         }
       ]
     }

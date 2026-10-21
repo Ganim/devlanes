@@ -48,13 +48,14 @@ fn killed_client_during_start_still_brings_the_lane_up() -> Result<()> {
     Ok(())
 }
 
-/// After SIGKILL of the daemon the next command spawns a new one, which kills orphans
-/// with a matching identity, shows lanes as needing an environment, and `lane resume`
-/// brings them back.
+/// After SIGKILL of the daemon the next command spawns a new one. A unit whose
+/// process survived (identity verified) keeps running as `orphaned` (decision 16):
+/// `start` refuses it and names the stop command, `stop` terminates it, and
+/// `lane resume` then brings the lane back.
 #[test]
 fn daemon_crash_reconciles_and_resumes() -> Result<()> {
     // A pipe-runner service survives its daemon (no PTY hangup), so reconciliation has
-    // a real orphan to kill.
+    // a real orphan; the PTY services die with the old daemon's terminals.
     let yaml = format!(
         "{}  bg:\n    run: [fixture-server, --log-line, bg-ready]\n    pty: false\n    ready: {{ http: {{ path: /healthz }} }}\n",
         fixture_yaml("two-services")?
@@ -73,15 +74,43 @@ fn daemon_crash_reconciles_and_resumes() -> Result<()> {
     })?;
     assert!(alive(orphan), "the pipe service should outlive the daemon");
 
-    let lanes = lab.lanes(lab.repo())?;
+    lab.lanes(lab.repo())?;
     let respawned = need_pid(lab.daemon_pid()?)?;
     assert_ne!(respawned, daemon, "a new daemon must have been spawned");
-    lab.eventually("the orphan to be killed", Duration::from_secs(15), || {
-        Ok((!alive(orphan)).then_some(()))
+    // The PTY services may still be exiting at reconcile; the liveness check clears them.
+    let crashed = lab.eventually("only bg to be orphaned", Duration::from_secs(15), || {
+        let lanes = lab.lanes(lab.repo())?;
+        Ok(lane(&lanes, "fixture-two@0")
+            .filter(|lane| units_in(lane, "orphaned") == ["bg"])
+            .cloned())
     })?;
-    let crashed = need(lane(&lanes, "fixture-two@0"), "lane 0 after crash")?;
-    assert_eq!(crashed["needs_env"], true, "{crashed}");
-    assert!(units_in(crashed, "ready").is_empty(), "{crashed}");
+    assert!(alive(orphan), "the new daemon leaves the orphan running");
+    let bg = need(unit(&crashed, "bg"), "bg")?;
+    assert_eq!(pid(bg), Some(orphan), "{bg}");
+    assert!(bg["orphaned_since_ms"].is_u64(), "{bg}");
+    assert_eq!(crashed["state"], "running", "{crashed}");
+    assert!(units_in(&crashed, "ready").is_empty(), "{crashed}");
+
+    let refused = lab.devlanes(lab.repo(), &["start", "bg"])?;
+    refused.expect_code(1)?;
+    assert!(
+        refused.stdout.contains("unit_orphaned") || refused.stderr.contains("unit_orphaned"),
+        "{refused}"
+    );
+    assert!(
+        format!("{}{}", refused.stdout, refused.stderr)
+            .contains("devlanes stop bg --lane fixture-two@0"),
+        "{refused}"
+    );
+    assert!(alive(orphan), "a refused start leaves the orphan alone");
+
+    let stopped = lab.json(lab.repo(), &["stop", "bg"])?;
+    assert!(stopped.to_string().contains("\"bg\""), "{stopped}");
+    lab.eventually(
+        "the orphan to be terminated",
+        Duration::from_secs(15),
+        || Ok((!alive(orphan)).then_some(())),
+    )?;
 
     let resumed = lab.devlanes(lab.repo(), &["lane", "resume"])?;
     resumed.expect_code(0)?;

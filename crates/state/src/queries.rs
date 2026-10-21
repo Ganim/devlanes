@@ -2,11 +2,15 @@
 
 use crate::{
     models::*,
-    schema::{lanes, port_blocks, projects, task_runs, unit_runs, worktrees},
+    schema::{
+        lane_setup, lanes, port_blocks, projects, task_completions, task_runs, unit_run_members,
+        unit_runs, worktrees,
+    },
     *,
 };
 use devlanes_core::{
-    ExitOutcome, LaneId, ProjectId, UnitRunId, WorktreeId, refs::valid_project_name,
+    ExitOutcome, LaneId, ProcessIdentity, ProjectId, UnitRunId, WorktreeId,
+    refs::valid_project_name,
 };
 use diesel::{dsl::exists, prelude::*};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,12 +78,21 @@ impl Store {
         .await
     }
     /// Removes project metadata after the caller has stopped its resources.
+    /// Fails with [`Error::ActiveRuns`] while any of its lanes has unfinished runs,
+    /// since the cascade would erase the identities needed to stop them.
     pub async fn delete_project(&self, id: ProjectId) -> Result<(), Error> {
         self.call(move |c| {
-            require_changed(
-                diesel::delete(projects::table.find(id.0)).execute(c)?,
-                "project",
-            )
+            c.immediate_transaction(|c| {
+                let lanes: Vec<i64> = lanes::table
+                    .filter(lanes::project_id.eq(id.0))
+                    .select(lanes::id)
+                    .load(c)?;
+                require_no_active_runs(c, Some(&lanes))?;
+                require_changed(
+                    diesel::delete(projects::table.find(id.0)).execute(c)?,
+                    "project",
+                )
+            })
         })
         .await
     }
@@ -176,6 +189,13 @@ impl Store {
                 {
                     return Err(Error::NotFound("project worktree"));
                 }
+                let revived = lanes::table
+                    .filter(lanes::worktree_id.eq(input.worktree_id.0))
+                    .select(lanes::cleaned_at)
+                    .first::<Option<i64>>(c)
+                    .optional()?
+                    .flatten()
+                    .is_some();
                 let row = NewLane {
                     project_id: input.project_id.0,
                     worktree_id: input.worktree_id.0,
@@ -198,8 +218,17 @@ impl Store {
                         lanes::profiles.eq(&row.profiles),
                         lanes::cleaned_at.eq(None::<i64>),
                     ))
-                    .returning(LaneRow::as_returning())
-                    .get_result::<LaneRow>(c)?
+                    .execute(c)?;
+                // A cleaned lane coming back starts over, so its age does too.
+                if revived {
+                    diesel::update(lanes::table.filter(lanes::worktree_id.eq(row.worktree_id)))
+                        .set(lanes::created_at.eq(row.created_at))
+                        .execute(c)?;
+                }
+                lanes::table
+                    .filter(lanes::worktree_id.eq(row.worktree_id))
+                    .select(LaneRow::as_select())
+                    .first::<LaneRow>(c)?
                     .try_into()
             })
         })
@@ -218,20 +247,26 @@ impl Store {
         })
         .await
     }
-    /// Lists one project's lanes, or all lanes for `None`.
+    /// Lists one project's lanes, or all lanes for `None`. A row that cannot be
+    /// decoded is logged and skipped so it cannot hide every other lane; `lane`
+    /// still reports it as [`Error::Corrupt`].
     pub async fn lanes(&self, project: Option<ProjectId>) -> Result<Vec<Lane>, Error> {
         self.call(move |c| {
             let mut query = lanes::table.into_boxed();
             if let Some(project) = project {
                 query = query.filter(lanes::project_id.eq(project.0));
             }
-            query
+            Ok(query
                 .order((lanes::project_id, lanes::lane_index, lanes::id))
                 .select(LaneRow::as_select())
                 .load::<LaneRow>(c)?
                 .into_iter()
-                .map(Lane::try_from)
-                .collect()
+                .filter_map(|row| {
+                    Lane::try_from(row)
+                        .map_err(|error| tracing::warn!(%error, "skipping unreadable lane row"))
+                        .ok()
+                })
+                .collect())
         })
         .await
     }
@@ -271,11 +306,14 @@ impl Store {
         })
         .await
     }
-    /// Frees the lane's range and active index after clean phases finish.
+    /// Frees the lane's range and active index after clean phases finish, and
+    /// forgets its setup records, once-only task markers and task history in the
+    /// same transaction, so a failed clean leaves the lane as it was. Unit run
+    /// history stays.
     pub async fn clean_lane(&self, id: LaneId) -> Result<(), Error> {
         self.call(move |c| {
             c.immediate_transaction(|c| {
-                require_no_active_runs(c, id)?;
+                require_no_active_runs(c, Some(&[id.0]))?;
                 require_changed(
                     diesel::update(lanes::table.find(id.0))
                         .set((
@@ -287,6 +325,11 @@ impl Store {
                 )?;
                 diesel::delete(port_blocks::table.filter(port_blocks::lane_id.eq(id.0)))
                     .execute(c)?;
+                diesel::delete(lane_setup::table.filter(lane_setup::lane_id.eq(id.0)))
+                    .execute(c)?;
+                diesel::delete(task_completions::table.filter(task_completions::lane_id.eq(id.0)))
+                    .execute(c)?;
+                diesel::delete(task_runs::table.filter(task_runs::lane_id.eq(id.0))).execute(c)?;
                 Ok(())
             })
         })
@@ -296,13 +339,14 @@ impl Store {
     pub async fn delete_lane(&self, id: LaneId) -> Result<(), Error> {
         self.call(move |c| {
             c.immediate_transaction(|c| {
-                require_no_active_runs(c, id)?;
+                require_no_active_runs(c, Some(&[id.0]))?;
                 require_changed(diesel::delete(lanes::table.find(id.0)).execute(c)?, "lane")
             })
         })
         .await
     }
-    /// Records the verified leader identity immediately after spawn.
+    /// Records the verified leader identity immediately after spawn. A second
+    /// unfinished run of the same lane and unit fails with [`Error::Conflict`].
     pub async fn record_unit_run(&self, input: UnitRunInput) -> Result<UnitRun, Error> {
         if input.unit.is_empty() || input.process.pid == 0 || input.process.sid == 0 {
             return Err(Error::Invalid(
@@ -331,6 +375,7 @@ impl Store {
                     actor_agent_id: input.actor.agent_id,
                     actor_session_id: input.actor.session_id,
                     log_path: input.log_path.as_deref().map(path_bytes),
+                    boot_id: input.boot_id,
                 };
                 diesel::insert_into(unit_runs::table)
                     .values(&row)
@@ -378,6 +423,83 @@ impl Store {
         })
         .await
     }
+    /// Finishes, with an unknown outcome, every unfinished run recorded under a
+    /// boot other than `current`. Their PIDs name unrelated processes now, so they
+    /// must never be probed or signalled. Rows without a boot ID are kept for the
+    /// caller's identity check. Returns how many runs ended.
+    pub async fn finish_other_boot_runs(&self, current: String) -> Result<usize, Error> {
+        self.call(move |c| {
+            Ok(diesel::update(
+                unit_runs::table
+                    .filter(unit_runs::ended_at.is_null())
+                    .filter(unit_runs::boot_id.is_not_null())
+                    .filter(unit_runs::boot_id.ne(current)),
+            )
+            .set((
+                unit_runs::ended_at.eq(now()?),
+                unit_runs::exit_code.eq(None::<i32>),
+                unit_runs::exit_signal.eq(None::<i32>),
+            ))
+            .execute(c)?)
+        })
+        .await
+    }
+    /// Remembers descendants of an unfinished run that left the leader's session,
+    /// so stopping the run after a daemon crash can still reach them. Repeated
+    /// identities are ignored; returns how many were new. Finished runs are not
+    /// extended.
+    pub async fn record_unit_run_members(
+        &self,
+        run: UnitRunId,
+        members: Vec<ProcessIdentity>,
+    ) -> Result<usize, Error> {
+        if members.is_empty() {
+            return Ok(0);
+        }
+        if members.iter().any(|member| member.pid == 0) {
+            return Err(Error::Invalid("member PID must be nonzero".into()));
+        }
+        self.call(move |c| {
+            c.immediate_transaction(|c| {
+                if !diesel::select(exists(
+                    unit_runs::table
+                        .find(run.0)
+                        .filter(unit_runs::ended_at.is_null()),
+                ))
+                .get_result::<bool>(c)?
+                {
+                    return Err(Error::NotFound("unfinished unit run"));
+                }
+                let rows: Vec<MemberRow> = members
+                    .into_iter()
+                    .map(|member| MemberRow {
+                        unit_run_id: run.0,
+                        pid: i64::from(member.pid),
+                        sid: i64::from(member.sid),
+                        process_start_time: member.start_time.to_string(),
+                    })
+                    .collect();
+                Ok(diesel::insert_or_ignore_into(unit_run_members::table)
+                    .values(&rows)
+                    .execute(c)?)
+            })
+        })
+        .await
+    }
+    /// Lists the recorded escaped descendants of a run, in PID order.
+    pub async fn unit_run_members(&self, run: UnitRunId) -> Result<Vec<ProcessIdentity>, Error> {
+        self.call(move |c| {
+            unit_run_members::table
+                .filter(unit_run_members::unit_run_id.eq(run.0))
+                .order((unit_run_members::pid, unit_run_members::process_start_time))
+                .select(MemberRow::as_select())
+                .load::<MemberRow>(c)?
+                .into_iter()
+                .map(ProcessIdentity::try_from)
+                .collect()
+        })
+        .await
+    }
     /// Lists bounded run history, newest first.
     pub async fn unit_runs(&self, lane: LaneId, limit: u32) -> Result<Vec<UnitRun>, Error> {
         self.call(move |c| {
@@ -407,24 +529,32 @@ fn encode_profiles(profiles: &[String]) -> Result<String, Error> {
     serde_json::to_string(profiles).map_err(|error| Error::Invalid(error.to_string()))
 }
 
-/// Rejects cleanup while process or task identities remain unfinished.
-fn require_no_active_runs(c: &mut SqliteConnection, lane: LaneId) -> Result<(), Error> {
-    let units = diesel::select(exists(
-        unit_runs::table
-            .filter(unit_runs::lane_id.eq(lane.0))
-            .filter(unit_runs::ended_at.is_null()),
-    ))
-    .get_result::<bool>(c)?;
-    let tasks = diesel::select(exists(
-        task_runs::table
-            .filter(task_runs::lane_id.eq(lane.0))
-            .filter(task_runs::ended_at.is_null()),
-    ))
-    .get_result::<bool>(c)?;
-    if units || tasks {
-        return Err(Error::Invalid("lane has unfinished runs".into()));
+/// Counts unfinished unit and task runs in `lanes`, or everywhere for `None`.
+pub(crate) fn active_runs(
+    c: &mut SqliteConnection,
+    lanes: Option<&[i64]>,
+) -> Result<(u64, u64), Error> {
+    let mut units = unit_runs::table
+        .filter(unit_runs::ended_at.is_null())
+        .into_boxed();
+    let mut tasks = task_runs::table
+        .filter(task_runs::ended_at.is_null())
+        .into_boxed();
+    if let Some(lanes) = lanes {
+        units = units.filter(unit_runs::lane_id.eq_any(lanes));
+        tasks = tasks.filter(task_runs::lane_id.eq_any(lanes));
     }
-    Ok(())
+    let units: i64 = units.count().get_result(c)?;
+    let tasks: i64 = tasks.count().get_result(c)?;
+    Ok((from_sql_u64(units), from_sql_u64(tasks)))
+}
+
+/// Rejects cleanup while process or task identities remain unfinished.
+fn require_no_active_runs(c: &mut SqliteConnection, lanes: Option<&[i64]>) -> Result<(), Error> {
+    match active_runs(c, lanes)? {
+        (0, 0) => Ok(()),
+        (units, tasks) => Err(Error::ActiveRuns { units, tasks }),
+    }
 }
 /// Converts an absent update to a domain not-found error.
 pub(crate) fn require_changed(changed: usize, record: &'static str) -> Result<(), Error> {

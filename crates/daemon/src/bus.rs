@@ -81,8 +81,25 @@ impl EventBus {
 
     /// Forwards events accepted by `filter` to `session` until it disconnects.
     pub async fn forward(&self, session: &Session, filter: impl Fn(&Event) -> bool) {
+        self.forward_from(session, |_| Vec::new(), filter).await;
+    }
+
+    /// Like [`Self::forward`], but subscribes first and then sends `initial`
+    /// (built with the current sequence number) to this session only, so a
+    /// snapshot never misses a change and other subscribers never see it.
+    pub async fn forward_from(
+        &self,
+        session: &Session,
+        initial: impl FnOnce(u64) -> Vec<Event>,
+        filter: impl Fn(&Event) -> bool,
+    ) {
         let mut receiver = self.subscribe();
         let disconnected = session.disconnected();
+        for event in initial(self.seq.load(Ordering::Relaxed)) {
+            if session.event(event).await.is_err() {
+                return;
+            }
+        }
         loop {
             let next = tokio::select! {
                 () = disconnected.cancelled() => return,
