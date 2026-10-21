@@ -55,7 +55,7 @@ pub fn schema() -> schemars::Schema {
 pub fn schema_with<E: Extensions>() -> schemars::Schema {
     let mut schema = schemars::schema_for!(ProjectConfig<E>);
     E::extend_schema(&mut schema);
-    schema.insert("$id".into(), "https://devlanes.run/schema/v1.json".into());
+    schema.insert("$id".into(), "https://devlanes.run/v1/schema.json".into());
     // The same modeline supports partial local overrides; loading still requires a base project.
     schema.remove("required");
     schema_docs::prepare(&mut schema, "devlanes");
@@ -163,7 +163,7 @@ pub fn user_schema() -> serde_json::Value {
     let mut schema = schemars::schema_for!(UserConfig);
     schema.insert(
         "$id".into(),
-        "https://devlanes.run/schema/user-v1.json".into(),
+        "https://devlanes.run/v1/user-schema.json".into(),
     );
     schema_docs::prepare(&mut schema, "devlanes user config");
     schema.to_value()

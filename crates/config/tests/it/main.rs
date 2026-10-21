@@ -364,8 +364,8 @@ fn yaml_language_server_schemas() {
     let project = project_schema();
     let registered = registered_schema();
     let user = user_schema();
-    assert_eq!(project["$id"], "https://devlanes.run/schema/v1.json");
-    assert_eq!(user["$id"], "https://devlanes.run/schema/user-v1.json");
+    assert_eq!(project["$id"], "https://devlanes.run/v1/schema.json");
+    assert_eq!(user["$id"], "https://devlanes.run/v1/user-schema.json");
     let project_validator =
         jsonschema::validator_for(&registered).expect("valid registered project schema");
     let opaque_validator =
@@ -850,7 +850,7 @@ fn injected_schema_reference_isolation() {
     let first = schemars::json_schema!({"$id":"https://example.test/first", "type":"object", "additionalProperties":false, "properties":{"option":{"$ref":"#/$defs/Shared"}}, "$defs":{"Shared":{"type":"boolean"}}});
     let second = schemars::json_schema!({"type":"object", "additionalProperties":false, "properties":{"option":{"$ref":"#/$defs/Shared"}}, "$defs":{"Shared":{"type":"integer"}}});
     let schema = project_schema_with_presets(&[("first", first), ("second", second)]);
-    assert_eq!(schema["$id"], "https://devlanes.run/schema/v1.json");
+    assert_eq!(schema["$id"], "https://devlanes.run/v1/schema.json");
     let validator = jsonschema::validator_for(&schema).expect("isolated local refs");
     assert!(validator.is_valid(&json!({"services":{"a":{"preset":"first","first":{"option":true}},"b":{"preset":"second","second":{"option":2}}}})));
     for value in [

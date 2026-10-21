@@ -2903,7 +2903,7 @@
       ]
     }
   },
-  "$id": "https://devlanes.run/schema/v1.json",
+  "$id": "https://devlanes.run/v1/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Fully merged project configuration. Map order is declaration order.",

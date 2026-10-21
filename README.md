@@ -8,10 +8,10 @@ devlanes runs a project's dev environment once per Git worktree on macOS and Lin
 brew install devlanes-run/tap/devlanes
 npm install -g devlanes
 cargo binstall --git https://github.com/devlanes-run/devlanes devlanes
-curl -fsSL https://raw.githubusercontent.com/devlanes-run/devlanes/main/install.sh | sh
+curl -fsSL https://devlanes.run/install.sh | sh
 ```
 
-These install release builds for macOS or Linux (glibc), arm64 or x86_64. Homebrew, npm and `install.sh` install both `devlanes` and the `devlanes-hosts` helper; cargo binstall installs `devlanes`, and `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-hosts-helper` adds the helper. No release has been tagged yet, so until the first one only the source build works:
+These install release builds for macOS or Linux (glibc), arm64 or x86_64. Homebrew, npm and `install.sh` install both `devlanes` and the `devlanes-hosts` helper; cargo binstall installs `devlanes`, and `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-hosts-helper` adds the helper. To build from source instead:
 
 ```sh
 cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes devlanes-hosts-helper

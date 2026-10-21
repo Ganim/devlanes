@@ -46,10 +46,10 @@ Local overrides merge before `extends` resolution, and both follow one rule: map
 Use this modeline in `devlanes.yaml` or `devlanes.local.yaml`:
 
 ```yaml
-# yaml-language-server: $schema=https://devlanes.run/schema/v1.json
+# yaml-language-server: $schema=https://devlanes.run/v1/schema.json
 ```
 
-For user configuration, use `# yaml-language-server: $schema=https://devlanes.run/schema/user-v1.json`.
+For user configuration, use `# yaml-language-server: $schema=https://devlanes.run/v1/user-schema.json`.
 
 ## License
 

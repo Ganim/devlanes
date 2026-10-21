@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://devlanes.run/schema/v1.json
+# yaml-language-server: $schema=https://devlanes.run/v1/schema.json
 #
 # Config-check fixture modelled on a large pnpm monorepo: Fastify APIs, Vite SPAs,
 # Vite apps with the Cloudflare plugin, wrangler workers and queue consumers, sharing one
