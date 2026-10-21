@@ -596,6 +596,41 @@ fn every_result_shape_in_every_text_mode() {
     }
 }
 
+/// Doctor without a daemon: the CLI's own facts, the stopped daemon as a warning
+/// (exit 0), and exit 1 once a local check fails.
+#[test]
+fn doctor_without_a_daemon() {
+    let mut data = json!({
+        "running": false, "version": "0.3.0", "home": "/home/u/.devlanes",
+        "socket": "/home/u/.devlanes/run/daemon.sock", "db_path": "/home/u/.devlanes/state.db",
+        "home_check": {"path": "/home/u/.devlanes", "exists": true, "mode": "700", "problem": null},
+        "sandbox": {"codex_sandbox": false, "app_sandbox": false},
+        "ca": {"present": true, "kind": "devlanes", "path": "/home/u/.devlanes/ca/ca.pem",
+               "name_constrained": true, "hint": null, "fix": null,
+               "trust": [{"store": "system", "state": "trusted"}]},
+        "user_config": {"path": "/home/u/.devlanes/config.yaml", "valid": true, "error": null, "errors": [], "warnings": []},
+        "port_holders": [{"listener": "https", "port": 443, "pid": 812, "command": "nginx"}],
+        "hosts": {"helper": {"state": "ok", "level": "ok", "installed": "0.3.0", "expected": "0.3.0"}},
+        "release": {"version": "0.3.0", "build": "local", "daemon_version": null, "install_method": "install.sh",
+                    "check": null, "latest": null},
+    });
+    let text = render_text(Method::Doctor, &data);
+    insta::assert_snapshot!("render_doctor_without_daemon", text);
+    assert!(text.contains("--- plain (exit 0)"), "{text}");
+    assert!(
+        !text.contains("Docker") && !text.contains("schema") && !text.contains("projects"),
+        "no daemon facts invented: {text}"
+    );
+    // A local failure still fails doctor.
+    data["ca"]["trust"] = json!([{"store": "system", "state": "untrusted"}]);
+    let text = render_text(Method::Doctor, &data);
+    assert!(text.contains("--- plain (exit 1)"), "{text}");
+    assert!(
+        text.contains("fail tls: CA not trusted by system"),
+        "{text}"
+    );
+}
+
 #[test]
 fn doctor_says_how_to_recreate_an_unconstrained_ca() {
     let data = json!({

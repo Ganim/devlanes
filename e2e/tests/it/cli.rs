@@ -180,6 +180,26 @@ fn daemon_status_never_spawns() -> Result<()> {
     Ok(())
 }
 
+/// `doctor` never starts a daemon either: without one it reports `running: false`
+/// with its local checks, and the stopped daemon is a warning, not a failure.
+#[test]
+fn doctor_without_a_daemon_checks_locally() -> Result<()> {
+    let lab = Lab::new("two-services", BUDGET)?;
+    let output = lab.devlanes(lab.repo(), &["doctor", "--json"])?;
+    output.expect_code(0)?;
+    let report = output.json()?;
+    assert_eq!(report["running"], false, "{output}");
+    assert!(report["user_config"]["valid"].is_boolean(), "{output}");
+    assert!(report["release"]["version"].is_string(), "{output}");
+    let mut plain = lab.command(lab.repo(), &["doctor"])?;
+    plain.env("DEVLANES_OUTPUT", "plain");
+    let plain = lab.run(plain, devlanes_e2e::COMMAND_TIMEOUT)?;
+    assert!(plain.stdout.contains("warn not running (socket"), "{plain}");
+    assert!(plain.stdout.contains("fix: devlanes start"), "{plain}");
+    assert!(!lab.daemon_running(), "doctor started a daemon");
+    Ok(())
+}
+
 /// A daemon that answers the hello with another protocol: the CLI exits 4 and says
 /// what runs and what a restart costs, without spawning a second daemon. The fake
 /// daemon stands in for a second binary build.

@@ -5,6 +5,7 @@
 //! up), `tcp-echo` (echoes every connection on `$PORT`), `http <body>` (answers
 //! every request on `$PORT` with `<body>`), `sleep` (stays up), `exit <code>`,
 //! `fail` (prints `boom`, exits 1), `nap <ms>` (waits, then goes on),
+//! `hold` (waits until the test calls [`FakeRunner::release`]),
 //! `deaf` (stops reading input: writes block
 //! until the unit stops), `daemonize <name>` and `escape <name>` (report a
 //! process left running or escaped once the unit ends), `stubborn` (ignores
@@ -56,6 +57,27 @@ pub struct FakeRunner {
     pub resizes: Journal,
     /// Identity given to `stubborn` units, e.g. the test process's own.
     pub stubborn_identity: Arc<Mutex<Option<ProcessIdentity>>>,
+    /// Opened by [`FakeRunner::release`]; `hold` waits for it.
+    pub gate: Gate,
+}
+
+/// What `hold` waits on: a test opens it once it has seen what it waits for, so
+/// a unit stays busy exactly as long as the test needs instead of a fixed time.
+#[derive(Clone)]
+pub struct Gate(Arc<watch::Sender<bool>>);
+
+impl Default for Gate {
+    /// Closed.
+    fn default() -> Self {
+        Self(Arc::new(watch::channel(false).0))
+    }
+}
+
+impl FakeRunner {
+    /// Lets every `hold` (now and later) go on.
+    pub fn release(&self) {
+        self.gate.0.send_replace(true);
+    }
 }
 
 /// Extracts the script from `/bin/sh -c <script>` or argv.
@@ -104,6 +126,7 @@ impl UnitRunner for FakeRunner {
             deaf: AtomicBool::new(false),
             resizes: self.resizes.clone(),
             leftovers: Mutex::default(),
+            gate: self.gate.0.subscribe(),
         });
         let runner = unit.clone();
         tokio::spawn(async move { runner.run(script, spec.env).await });
@@ -125,6 +148,8 @@ pub struct FakeUnit {
     resizes: Journal,
     /// `(left_running, escaped)` recorded by `daemonize` and `escape`.
     leftovers: Mutex<(Vec<LeftProcess>, Vec<LeftProcess>)>,
+    /// The runner's [`Gate`], for `hold`.
+    gate: watch::Receiver<bool>,
 }
 
 impl FakeUnit {
@@ -166,6 +191,13 @@ impl FakeUnit {
                     tokio::select! {
                         _ = stopped.wait_for(|s| *s) => return,
                         () = tokio::time::sleep(Duration::from_millis(ms)) => {}
+                    }
+                }
+                "hold" => {
+                    let mut gate = self.gate.clone();
+                    tokio::select! {
+                        _ = stopped.wait_for(|s| *s) => return,
+                        _ = gate.wait_for(|open| *open) => {}
                     }
                 }
                 "deaf" => self.deaf.store(true, Ordering::SeqCst),

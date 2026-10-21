@@ -889,9 +889,9 @@ async fn an_orphan_makes_a_start_partial() {
 async fn an_edit_mid_start_keeps_the_selected_config() {
     tokio::time::timeout(LIMIT, async {
         let tmp = temp();
-        // The nap holds the start open long enough for the watcher to see the edit
-        // even on a loaded machine; every wait below ends on an observed state.
-        let config = "project: reload\ntasks:\n  pause: { run: \"nap 8000\", when: lane.start }\nservices:\n  web: { run: \"echo first; sleep\", ready: started }\n";
+        // `hold` keeps the start in its task phase until the test has seen the
+        // watcher record the edit, however slow the machine: no wait is timed.
+        let config = "project: reload\ntasks:\n  pause: { run: \"hold\", when: lane.start }\nservices:\n  web: { run: \"echo first; sleep\", ready: started }\n";
         let main = repo(&tmp.path, "r", config);
         let h = harness(
             &tmp.path.join("home"),
@@ -903,26 +903,24 @@ async fn an_edit_mid_start_keeps_the_selected_config() {
         .await;
         let (_session, _frames, starting) =
             spawn_call(&h, Method::Start, json!({"timeout_ms": 40_000}), cx(&main));
-        let napping = eventually(Duration::from_secs(15), || async {
-            (h.runner.journal.entries() == ["nap 8000"]).then_some(())
+        let holding = eventually(Duration::from_secs(20), || async {
+            (h.runner.journal.entries() == ["hold"]).then_some(())
         })
         .await;
-        assert!(napping.is_some(), "the start reached its task");
+        assert!(holding.is_some(), "the start reached its task");
         let edited = config.replace("echo first", "echo second");
         // Rewritten on every try: a watcher that took its first snapshot after an
         // earlier write still sees a newer modification time.
-        let seen = eventually(Duration::from_secs(15), || async {
+        let seen = eventually(Duration::from_secs(20), || async {
             std::fs::write(main.join("devlanes.yaml"), &edited).expect("rewrite");
             lane(&h, &main).await.config_changed.then_some(())
         })
         .await;
         assert!(seen.is_some(), "the watcher recorded the edit");
-        assert!(!starting.is_finished(), "the edit came mid-start");
+        assert!(!starting.is_finished(), "the task still holds the start");
+        h.runner.release();
         starting.await.expect("join").expect("start");
-        assert_eq!(
-            h.runner.journal.entries(),
-            ["nap 8000", "echo first; sleep"]
-        );
+        assert_eq!(h.runner.journal.entries(), ["hold", "echo first; sleep"]);
         let reloaded = eventually(Duration::from_secs(15), || async {
             lane(&h, &main).await.config_changed.then_some(())
         })

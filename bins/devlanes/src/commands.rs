@@ -432,6 +432,16 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
             }
             Err(error) => return Err(rpc_error(error)),
         },
+        // `doctor` never starts a daemon: without one it checks what it can here.
+        Method::Doctor => match Client::connect(&paths).await {
+            Ok(client) => client,
+            Err(error) if error.is_not_running() => {
+                let mut data = crate::local_doctor::facts(&paths).await;
+                crate::notices::annotate_doctor(None, &mut data).await;
+                return render_result(runtime, Method::Doctor, &data, None);
+            }
+            Err(error) => return Err(rpc_error(error)),
+        },
         _ => connect(&paths).await?,
     };
     let method = request.method;
@@ -490,7 +500,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                     return match response.result {
                         Outcome::Ok { mut data } => {
                             if method == Method::Doctor {
-                                crate::notices::annotate_doctor(&mut client, &mut data).await;
+                                crate::notices::annotate_doctor(Some(&mut client), &mut data).await;
                                 // Trust stores belong to this user and machine, so the
                                 // CLI checks them, not the daemon.
                                 if data.get("ca").is_some_and(Value::is_object) {

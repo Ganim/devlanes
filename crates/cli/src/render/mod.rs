@@ -13,6 +13,7 @@ use devlanes_proto::{Event, LeftProcess, Method, events};
 use serde_json::Value;
 
 pub(crate) use lanes::display_url;
+pub(crate) use other::doctor_failed;
 pub(crate) use words::{EXAMPLE_CONFIG, error_message, has_wording};
 
 use crate::{OutputMode, Runtime};

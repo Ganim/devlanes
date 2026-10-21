@@ -11,6 +11,7 @@ mod daemon;
 mod driver;
 mod hosts;
 mod local;
+mod local_doctor;
 mod migrate;
 mod notices;
 mod output;

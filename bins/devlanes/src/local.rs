@@ -114,7 +114,10 @@ pub(crate) fn mkcert_caroot(output: &std::process::Output) -> Result<PathBuf, St
 /// For removal (`create` false) devlanes' own CA is only read: `ca.pem` alone is
 /// enough, and `None` means there is none to remove. Untrusting must never create
 /// a CA.
-async fn certificate(paths: &Paths, create: bool) -> Result<Option<CaCertificate>, RpcError> {
+pub(crate) async fn certificate(
+    paths: &Paths,
+    create: bool,
+) -> Result<Option<CaCertificate>, RpcError> {
     let mkcert = mkcert_selected(paths);
     let config = devlanes_config::load_user(paths.home.join("config.yaml")).unwrap_or_default();
     let tld = ca_tld(&config);
@@ -191,7 +194,7 @@ pub(crate) fn recreate_ca_command(home: &Path) -> String {
 }
 
 /// Whether the user config selects `tls.ca: mkcert`.
-fn mkcert_selected(paths: &Paths) -> bool {
+pub(crate) fn mkcert_selected(paths: &Paths) -> bool {
     let config = devlanes_config::load_user(paths.home.join("config.yaml")).unwrap_or_default();
     matches!(config.tls.ca, devlanes_config::CaKind::Mkcert)
 }

@@ -94,11 +94,19 @@ fn due_lines(
 
 /// Adds `release` to doctor data: this binary's version, build and install
 /// method, the daemon's release check, and the upgrade command.
-pub async fn annotate_doctor(client: &mut Client, data: &mut Value) {
-    let status = client
-        .request(Method::DaemonStatus, json!({}), Context::default())
-        .await
-        .unwrap_or(Value::Null);
+/// Without a daemon (`client` is `None`) the release check and the daemon's
+/// version are unknown; this binary's facts are still there.
+pub async fn annotate_doctor(client: Option<&mut Client>, data: &mut Value) {
+    let (status, daemon_version) = match client {
+        Some(client) => (
+            client
+                .request(Method::DaemonStatus, json!({}), Context::default())
+                .await
+                .unwrap_or(Value::Null),
+            Some(client.peer.version.clone()),
+        ),
+        None => (Value::Null, None),
+    };
     let check: ReleaseCheck = status
         .get("release_check")
         .cloned()
@@ -115,7 +123,7 @@ pub async fn annotate_doctor(client: &mut Client, data: &mut Value) {
             json!({
                 "version": OWN,
                 "build": Hello::current(0).build_id,
-                "daemon_version": client.peer.version,
+                "daemon_version": daemon_version,
                 "install_method": method.describe(
                     std::env::var_os("HOME").map(std::path::PathBuf::from).as_deref()
                 ),

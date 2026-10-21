@@ -35,7 +35,7 @@ Commands:
   secrets      Hand secrets from fnox to the daemon
   remote       Connect to boxes over SSH and mirror their lanes here
   daemon       Run, stop and install the background daemon
-  doctor       Check the daemon, Docker, proxy, CA, hosts file and output mode, each with a fix
+  doctor       Check the daemon, Docker, proxy, CA, hosts file and output mode, each with a fix; never starts the daemon
   agent-guide  Print the short guide for AI agents that use devlanes
   completions  Print shell completions; lane and unit names come from the running daemon
   help         Print this message or the help of the given subcommand(s)

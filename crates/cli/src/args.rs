@@ -238,7 +238,7 @@ the daemon.",
         #[command(subcommand)]
         command: DaemonCommand,
     },
-    /// Check the daemon, Docker, proxy, CA, hosts file and output mode, each with a fix
+    /// Check the daemon, Docker, proxy, CA, hosts file and output mode, each with a fix; never starts the daemon
     Doctor,
     /// Print the short guide for AI agents that use devlanes
     AgentGuide,

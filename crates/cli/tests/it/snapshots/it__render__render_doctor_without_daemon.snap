@@ -1,0 +1,64 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+daemon
+  ! not running (socket /home/u/.devlanes/run/daemon.sock)
+    fix: devlanes start, or devlanes daemon restart
+home
+  ✓ /home/u/.devlanes is private
+sandbox
+  ✓ not sandboxed
+proxy
+  ! port 443 is held by nginx (pid 812); the https proxy will fall back to another port
+    fix: stop that process, or set proxy ports in ~/.devlanes/config.yaml
+tls
+  ✓ CA at /home/u/.devlanes/ca/ca.pem
+  ✓ CA trusted by system
+hosts
+  ✓ hosts helper 0.3.0
+config
+  ✓ user config /home/u/.devlanes/config.yaml
+release
+  ✓ devlanes 0.3.0 (local build), installed with install.sh
+  ✓ no release check yet
+output
+  ✓ mode human (DEVLANES_OUTPUT)
+--- plain (exit 0)
+daemon
+  warn not running (socket /home/u/.devlanes/run/daemon.sock)
+    fix: devlanes start, or devlanes daemon restart
+home
+  ok /home/u/.devlanes is private
+sandbox
+  ok not sandboxed
+proxy
+  warn port 443 is held by nginx (pid 812); the https proxy will fall back to another port
+    fix: stop that process, or set proxy ports in ~/.devlanes/config.yaml
+tls
+  ok CA at /home/u/.devlanes/ca/ca.pem
+  ok CA trusted by system
+hosts
+  ok hosts helper 0.3.0
+config
+  ok user config /home/u/.devlanes/config.yaml
+release
+  ok devlanes 0.3.0 (local build), installed with install.sh
+  ok no release check yet
+output
+  ok mode plain (DEVLANES_OUTPUT)
+--- agent (exit 0)
+warn daemon: not running (socket /home/u/.devlanes/run/daemon.sock)
+  fix: devlanes start, or devlanes daemon restart
+warn proxy: port 443 is held by nginx (pid 812); the https proxy will fall back to another port
+  fix: stop that process, or set proxy ports in ~/.devlanes/config.yaml
+ok home: /home/u/.devlanes is private
+ok sandbox: not sandboxed
+ok tls: CA at /home/u/.devlanes/ca/ca.pem
+ok tls: CA trusted by system
+ok hosts: hosts helper 0.3.0
+ok config: user config /home/u/.devlanes/config.yaml
+ok release: devlanes 0.3.0 (local build), installed with install.sh
+ok release: no release check yet
+ok output: mode agent (DEVLANES_OUTPUT)

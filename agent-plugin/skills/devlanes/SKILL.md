@@ -101,4 +101,4 @@ devlanes stop --mine
 
 ## Daemon and sandboxes
 
-The CLI starts the daemon on first use. Inside a sandbox (for example Codex, which sets `CODEX_SANDBOX`) it refuses to and fails with `auto-spawn refused in sandbox`. Ask the user to run `devlanes daemon install` outside the sandbox. It registers a per-user service that starts the daemon now and at login. Then retry. `devlanes doctor` reports the socket and sandbox state.
+The CLI starts the daemon on first use. Inside a sandbox (for example Codex, which sets `CODEX_SANDBOX`) it refuses to and fails with `auto-spawn refused in sandbox`. Ask the user to run `devlanes daemon install` outside the sandbox. It registers a per-user service that starts the daemon now and at login. Then retry. `devlanes doctor` reports the socket and sandbox state, and never starts the daemon: without one it says `daemon: not running` and checks what it can locally.

@@ -2,7 +2,7 @@
 source: crates/cli/tests/it/render.rs
 expression: text
 ---
---- human (exit 0)
+--- human (exit 1)
 daemon
   ✓ devlanes 0.1.0, pid 4242, socket /home/u/.devlanes/run/daemon.sock
   ✓ state schema 5 at /home/u/.devlanes/state.db
@@ -23,7 +23,7 @@ hosts
     fix: devlanes certs trust --hosts
 output
   ✓ mode human (DEVLANES_OUTPUT)
---- plain (exit 0)
+--- plain (exit 1)
 daemon
   ok devlanes 0.1.0, pid 4242, socket /home/u/.devlanes/run/daemon.sock
   ok state schema 5 at /home/u/.devlanes/state.db
@@ -44,7 +44,7 @@ hosts
     fix: devlanes certs trust --hosts
 output
   ok mode plain (DEVLANES_OUTPUT)
---- agent (exit 0)
+--- agent (exit 1)
 fail hosts: /etc/hosts fallback auto: the hosts helper is not installed
   fix: devlanes certs trust --hosts
 warn docker: Docker is not reachable

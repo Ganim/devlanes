@@ -682,7 +682,7 @@ devlanes daemon reset-state [OPTIONS]
 
 ### devlanes doctor
 
-Check the daemon, Docker, proxy, CA, hosts file and output mode, each with a fix
+Check the daemon, Docker, proxy, CA, hosts file and output mode, each with a fix; never starts the daemon
 
 ```text
 devlanes doctor [OPTIONS]

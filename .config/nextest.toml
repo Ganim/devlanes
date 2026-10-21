@@ -1,7 +1,36 @@
 # devlanes-e2e drives the real binary and builds it on first use; it runs only with
 # `--profile e2e`, so the workspace run never starts nested cargo builds.
+#
+# Thread counts are capped: on macOS every new test binary goes through
+# syspolicyd, and a full parallel run alongside builds has overwhelmed it. Run one
+# nextest at a time per machine and keep these defaults.
+
+# Docker tests share one engine; heavy tests write tens of thousands of files.
+# Each group runs one test at a time, next to the other tests.
+[test-groups]
+docker = { max-threads = 1 }
+heavy = { max-threads = 1 }
+
 [profile.default]
 default-filter = 'not package(devlanes-e2e)'
+test-threads = 6
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)docker_/)'
+test-group = 'docker'
+
+# 50,000 files and several reconnects; its own timeout is six minutes.
+[[profile.default.overrides]]
+filter = 'test(/(^|::)large_sync_/)'
+test-group = 'heavy'
+slow-timeout = { period = "120s", terminate-after = 4 }
 
 [profile.e2e]
 default-filter = 'package(devlanes-e2e)'
+test-threads = 2
+slow-timeout = { period = "120s", terminate-after = 3 }
+
+[[profile.e2e.overrides]]
+filter = 'test(/(^|::)docker_/)'
+test-group = 'docker'

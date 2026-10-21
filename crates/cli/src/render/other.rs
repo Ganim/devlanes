@@ -721,20 +721,34 @@ fn listener(proxy: &Value, name: &'static str) -> Option<Check> {
 
 /// Every doctor check from the daemon facts and this invocation's output policy.
 fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
-    let mut checks = vec![Check::new(
-        "daemon",
-        Outcome::Ok,
-        format!(
-            "devlanes {}, pid {}, socket {}",
-            text(data, "version"),
-            display_value(&data["pid"]),
-            display_value(&data["socket"])
-        ),
-    )];
+    // `running: false` comes from the CLI's own checks when no daemon answered.
+    let running = data.get("running").and_then(Value::as_bool) != Some(false);
+    let mut checks = vec![if running {
+        Check::new(
+            "daemon",
+            Outcome::Ok,
+            format!(
+                "devlanes {}, pid {}, socket {}",
+                text(data, "version"),
+                display_value(&data["pid"]),
+                display_value(&data["socket"])
+            ),
+        )
+    } else {
+        Check::new(
+            "daemon",
+            Outcome::Skip,
+            format!("not running (socket {})", display_value(&data["socket"])),
+        )
+        .fix("devlanes start, or devlanes daemon restart")
+    }];
+    checks.extend(home_checks(&data["home_check"]));
     match (
         int(data, "schema_version"),
         int(data, "supported_schema_version"),
     ) {
+        // Only a running daemon reads the database.
+        _ if !running => {}
         (Some(found), Some(supported)) if found > supported => checks.push(
             Check::new(
                 "daemon",
@@ -771,10 +785,108 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
         Check::new(
             "sandbox",
             Outcome::Skip,
-            format!("daemon runs inside a sandbox ({})", sandboxed.join(", ")),
+            format!(
+                "{} inside a sandbox ({})",
+                if running {
+                    "daemon runs"
+                } else {
+                    "this shell runs"
+                },
+                sandboxed.join(", ")
+            ),
         )
         .fix("devlanes daemon install, so the daemon starts outside the sandbox")
     });
+    // Docker is the daemon's to ask; without one there is nothing to say.
+    if data.get("infra").is_some() {
+        checks.extend(docker_checks(data));
+    }
+    let proxy = &data["proxy"];
+    checks.extend(
+        ["http", "https"]
+            .into_iter()
+            .filter_map(|name| listener(proxy, name)),
+    );
+    // Without a daemon: what holds the ports its proxy will want.
+    for holder in list(data, "port_holders") {
+        let command = holder
+            .get("command")
+            .and_then(Value::as_str)
+            .map_or_else(|| "another process".to_owned(), clean);
+        checks.push(
+            Check::new(
+                "proxy",
+                Outcome::Skip,
+                format!(
+                    "port {} is held by {command} (pid {}); the {} proxy will fall back to another port",
+                    display_value(&holder["port"]),
+                    display_value(&holder["pid"]),
+                    text(holder, "listener")
+                ),
+            )
+            .fix("stop that process, or set proxy ports in ~/.devlanes/config.yaml"),
+        );
+    }
+    checks.extend(tls_and_hosts_checks(data, running, cx));
+    checks
+}
+
+/// Whether any doctor check failed; doctor then exits 1. Warnings (a stopped
+/// daemon included) do not count.
+pub(crate) fn doctor_failed(data: &Value, runtime: &crate::Runtime) -> bool {
+    let cx = Ctx {
+        mode: runtime.mode,
+        color: false,
+        runtime,
+    };
+    doctor_checks(data, &cx)
+        .iter()
+        .any(|check| check.outcome == Outcome::Fail)
+}
+
+/// `home_check` (`{path, exists, mode, problem}`) from the CLI's own checks.
+fn home_checks(home: &Value) -> Vec<Check> {
+    if !home.is_object() {
+        return Vec::new();
+    }
+    let path = text(home, "path");
+    let check = match home.get("problem").and_then(Value::as_str) {
+        _ if home.get("exists").and_then(Value::as_bool) == Some(false) => Check::new(
+            "home",
+            Outcome::Ok,
+            format!("{path} does not exist yet; the first command creates it"),
+        ),
+        None => Check::new("home", Outcome::Ok, format!("{path} is private")),
+        Some("mode") => Check::new(
+            "home",
+            Outcome::Skip,
+            format!(
+                "{path} has mode {}; the daemon makes it 0700 when it starts",
+                text(home, "mode")
+            ),
+        )
+        .fix(format!("chmod 700 {}", crate::shell_quote(&path))),
+        Some(problem) => Check::new(
+            "home",
+            Outcome::Fail,
+            format!(
+                "devlanes refuses {path}: {}",
+                match problem {
+                    "owner" => "another user owns it",
+                    "symlink" => "it is a symlink",
+                    "not_a_directory" => "it is not a directory",
+                    _ => "it cannot be read",
+                }
+            ),
+        )
+        .fix("point DEVLANES_HOME at a directory you own, or fix that path by hand"),
+    };
+    vec![check]
+}
+
+/// Docker and Compose from the daemon's `infra` facts.
+fn docker_checks(data: &Value) -> Vec<Check> {
+    let mut checks = Vec::new();
     let docker = &data["infra"]["docker"];
     let reachable = docker.get("reachable").and_then(Value::as_bool) == Some(true);
     checks.push(if reachable {
@@ -823,14 +935,21 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
             .fix("install the Docker Compose plugin"),
         );
     }
-    let proxy = &data["proxy"];
-    checks.extend(
-        ["http", "https"]
-            .into_iter()
-            .filter_map(|name| listener(proxy, name)),
-    );
+    checks
+}
+
+/// CA, trust, route warnings, hosts file, user config, daemon counts, release and
+/// output mode.
+fn tls_and_hosts_checks(data: &Value, running: bool, cx: &Ctx<'_>) -> Vec<Check> {
+    let mut checks = Vec::new();
     let ca = &data["ca"];
-    if ca.get("present").and_then(Value::as_bool) == Some(true) {
+    if ca.get("pending").and_then(Value::as_bool) == Some(true) {
+        checks.push(Check::new(
+            "tls",
+            Outcome::Ok,
+            "no CA yet; the daemon creates one when it starts",
+        ));
+    } else if ca.get("present").and_then(Value::as_bool) == Some(true) {
         checks.push(Check::new(
             "tls",
             Outcome::Ok,
@@ -898,7 +1017,10 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
         checks.push(Check::new("proxy", Outcome::Skip, line));
     }
     let hosts = &data["hosts"];
-    if hosts.is_object() {
+    // Without a daemon only the helper's version is known.
+    if hosts.is_object() && hosts.get("mode").is_none() {
+        checks.extend(helper_check(hosts));
+    } else if hosts.is_object() {
         let mode = text(hosts, "mode");
         let probe = hosts
             .get("probe")
@@ -944,15 +1066,17 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
         }
     }
     checks.extend(user_config_checks(&data["user_config"]));
-    checks.push(Check::new(
-        "daemon",
-        Outcome::Ok,
-        format!(
-            "{} loaded, {}",
-            count(data, "projects", "project"),
-            count(data, "subscribers", "event subscriber")
-        ),
-    ));
+    if running {
+        checks.push(Check::new(
+            "daemon",
+            Outcome::Ok,
+            format!(
+                "{} loaded, {}",
+                count(data, "projects", "project"),
+                count(data, "subscribers", "event subscriber")
+            ),
+        ));
+    }
     if let Some(release) = data.get("release").filter(|r| r.is_object()) {
         checks.extend(release_checks(release));
     }
