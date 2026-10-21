@@ -34,7 +34,7 @@ pub enum ResolveError {
         message: String,
     },
     /// The secrets provider needs an interactive unlock.
-    #[error("secrets{} are locked ({message}); run `devlanes unlock`", profile_suffix(.profile))]
+    #[error("secrets{} are locked ({message}); run `devlanes secrets unlock`", profile_suffix(.profile))]
     SecretsLocked {
         profile: Option<String>,
         message: String,

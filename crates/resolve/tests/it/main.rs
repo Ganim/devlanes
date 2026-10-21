@@ -9,15 +9,15 @@ use std::{
     sync::Arc,
 };
 
-use devlanes_config::{HostConfig, Templated};
+use devlanes_config::{HostConfig, Scalar, Templated};
 use devlanes_core::{
     contrib::{Contributor, DetectCx, ScriptRunner, SecretsProvider, UnitKind},
     env::EnvLayer,
     ports::{PortBlock, PortName},
 };
 use devlanes_resolve::{
-    ReadySpec, ResolveError, ResolveInput, detect_platform, lane_layout, port_needs, resolve_lane,
-    select,
+    ReadySpec, ResolveError, ResolveInput, detect_platform, lane_layout, port_needs,
+    profile_summaries, resolve_lane, select, select_profiles,
 };
 use serde_json::json;
 use support::*;
@@ -247,6 +247,287 @@ fn selection() {
     assert_eq!(
         (selection.services, selection.profile),
         (vec!["a".to_owned()], None)
+    );
+}
+
+/// Config with overlapping profiles for the multi-profile tests.
+const PROFILES: &str = r#"
+project: demo
+services:
+  api: { run_script: package.json#dev, tags: [api] }
+  tester: { run_script: package.json#test }
+  web: { run: web, tags: [web] }
+tasks:
+  only-a: { run: a, when: lane.start, profiles: [a] }
+  only-b: { run: b, when: lane.start, profiles: [b] }
+  only-default: { run: d, when: lane.start, profiles: [default] }
+  always: { run: x, when: lane.start }
+profiles:
+  a:
+    include: [api]
+    infra: false
+    env: { PX: a, PY: a }
+    run_scripts: { dev: start, test: ci }
+  b:
+    include: [web, api]
+    infra: false
+    env: { PX: b }
+    run_scripts: { dev: prod }
+  c: [tester]
+"#;
+
+/// Resolves [`PROFILES`] in lane 1 with `profile` first, then `profiles`.
+async fn with_profiles(profile: Option<&str>, profiles: &[&str]) -> devlanes_resolve::ResolvedLane {
+    let config = parse(PROFILES);
+    let facts = facts("demo", 1, Some("x"));
+    let (block, offsets) = allocation(&config, 21_000, &[]);
+    let runners: [Arc<dyn ScriptRunner>; 1] = [Arc::new(FakeRunner::new())];
+    let profiles: Vec<String> = profiles.iter().map(|p| (*p).to_owned()).collect();
+    let mut input = ResolveInput::new(&config, &facts, block, &offsets);
+    input.script_runners = &runners;
+    input.profile = profile;
+    input.profiles = &profiles;
+    let lane = resolve_lane(input).await.expect("resolves");
+    assert!(lane.errors.is_empty(), "{:?}", lane.errors);
+    lane
+}
+
+#[test]
+/// Several profiles select the union of their services in declaration order.
+fn multi_profile_selection() {
+    let config = parse(FULL);
+    let selection = select_profiles(&config, &["web", "crm"], &[]).expect("union");
+    assert_eq!(
+        selection.services,
+        ["catalog", "crm-api", "user-web", "docs"]
+    );
+    assert_eq!(selection.profiles, ["web", "crm"]);
+    assert_eq!(selection.profile.as_deref(), Some("web"));
+    let repeated = select_profiles(&config, &["crm", " ", "crm"], &[]).expect("dedup");
+    assert_eq!(repeated.profiles, ["crm"]);
+    assert!(matches!(
+        select_profiles(&config, &["web", "nope"], &[]),
+        Err(ResolveError::UnknownProfile { .. })
+    ));
+    let none: [&str; 0] = [];
+    assert_eq!(
+        select_profiles(&config, &none, &[])
+            .expect("default")
+            .profiles,
+        ["default"]
+    );
+
+    let config = parse(PROFILES);
+    let both = select_profiles(&config, &["a", "b"], &[]).expect("both");
+    let options = both.profile_options.expect("merged");
+    assert_eq!(
+        options.env["PX"],
+        Templated::Literal(Scalar::String("b".into()))
+    );
+    assert_eq!(
+        options.env["PY"],
+        Templated::Literal(Scalar::String("a".into()))
+    );
+    assert_eq!(options.run_scripts["dev"], "prod");
+    assert_eq!(options.run_scripts["test"], "ci");
+    assert!(matches!(options.infra, Some(Templated::Literal(false))));
+    let mixed = select_profiles(&config, &["a", "c"], &[]).expect("mixed");
+    assert_eq!(mixed.services, ["api", "tester"]);
+    assert!(
+        mixed
+            .profile_options
+            .expect("a has options")
+            .infra
+            .is_none()
+    );
+}
+
+#[tokio::test]
+/// Profile env applies in the order given; infra stays on unless every profile skips it.
+async fn multi_profile_env_and_infra() {
+    let ab = with_profiles(None, &["a", "b"]).await;
+    let env = &ab.services["api"].launch.env;
+    assert_eq!(
+        (env.values["PX"].as_str(), env.values["PY"].as_str()),
+        ("b", "a")
+    );
+    assert_eq!(env.sources["PX"], EnvLayer::Profile);
+    assert!(!ab.infra_enabled);
+    assert_eq!(ab.profiles, ["a", "b"]);
+
+    let ba = with_profiles(None, &["b", "a"]).await;
+    assert_eq!(ba.services["api"].launch.env.values["PX"], "a");
+    // The legacy single profile counts as the first entry.
+    let legacy = with_profiles(Some("b"), &["a"]).await;
+    assert_eq!(legacy.profiles, ["b", "a"]);
+    assert_eq!(legacy.profile.as_deref(), Some("b"));
+    assert_eq!(legacy.services["api"].launch.env.values["PX"], "a");
+
+    assert!(with_profiles(None, &["a", "c"]).await.infra_enabled);
+    assert!(!with_profiles(None, &["a"]).await.infra_enabled);
+    assert!(with_profiles(None, &[]).await.infra_enabled);
+}
+
+#[tokio::test]
+/// `run_scripts` remaps merge in order; later profiles win per script name.
+async fn multi_profile_run_scripts() {
+    let ab = with_profiles(None, &["a", "b"]).await;
+    assert_eq!(ab.services["api"].launch.args, ["run", "prod"]);
+    assert_eq!(ab.services["tester"].launch.args, ["run", "ci"]);
+    let ba = with_profiles(None, &["b", "a"]).await;
+    assert_eq!(ba.services["api"].launch.args, ["run", "start"]);
+}
+
+#[tokio::test]
+/// Tasks with `profiles:` run when any profile in effect matches.
+async fn multi_profile_task_filter() {
+    let active = |lane: &devlanes_resolve::ResolvedLane| -> Vec<String> {
+        lane.tasks
+            .values()
+            .filter(|t| t.active)
+            .map(|t| t.name.clone())
+            .collect()
+    };
+    assert_eq!(
+        active(&with_profiles(None, &["a"]).await),
+        ["only-a", "always"]
+    );
+    assert_eq!(
+        active(&with_profiles(None, &["b", "a"]).await),
+        ["only-a", "only-b", "always"]
+    );
+    assert_eq!(
+        active(&with_profiles(None, &[]).await),
+        ["only-default", "always"]
+    );
+}
+
+#[tokio::test]
+/// Public URLs and origins carry the proxy's HTTPS port unless it is 443.
+async fn public_https_port() {
+    let config = parse(MINIMAL);
+    let facts = facts("myapp", 1, Some("x"));
+    let (block, offsets) = allocation(&config, 21_000, &[]);
+    let infra = json!({"postgres": {"port": 15432, "ports": {"5432": 15432}}});
+    let runners: [Arc<dyn ScriptRunner>; 1] = [Arc::new(FakeRunner::new())];
+    for (port, suffix) in [
+        (None, ""),
+        (Some(443), ""),
+        (Some(8443), ":8443"),
+        (Some(9443), ":9443"),
+    ] {
+        let mut input = ResolveInput::new(&config, &facts, block, &offsets);
+        input.infra = &infra;
+        input.script_runners = &runners;
+        input.public_https_port = port;
+        let layout = lane_layout(&input).expect("layout");
+        let lane = resolve_lane(input).await.expect("resolves");
+        assert!(lane.errors.is_empty(), "{:?}", lane.errors);
+        let api_url = format!("https://api.myapp-1.localhost{suffix}");
+        let web_url = format!("https://myapp-1.localhost{suffix}");
+        assert_eq!(
+            layout.services["api"].public_url.as_deref(),
+            Some(api_url.as_str())
+        );
+        let api = &lane.services["api"];
+        assert_eq!(api.public_url.as_deref(), Some(api_url.as_str()));
+        assert_eq!(api.launch.env.values["DEVLANES_PUBLIC_URL"], api_url);
+        // svc.api.public_url feeds web's env through an expression.
+        assert_eq!(
+            lane.services["web"].launch.env.values["VITE_API_URL"],
+            api_url
+        );
+        assert_eq!(lane.lane_env()["DEVLANES_PUBLIC_URL_API"], api_url);
+        assert_eq!(lane.lane_env()["DEVLANES_PUBLIC_URL_WEB"], web_url);
+        assert_eq!(
+            lane.svc_namespace()["api"]["public_url"],
+            json!(api_url.as_str())
+        );
+        assert!(lane.origins.contains(&api_url) && lane.origins.contains(&web_url));
+        let origins = &api.launch.env.values["DEVLANES_ORIGINS"];
+        assert!(origins.split(',').any(|o| o == api_url), "{origins}");
+        // Routes keep bare hostnames: the proxy matches on Host without the port.
+        assert!(
+            lane.routes
+                .iter()
+                .any(|r| r.host == "api.myapp-1.localhost")
+        );
+    }
+    assert_eq!(
+        devlanes_resolve::https_url("a.localhost", Some(443)),
+        "https://a.localhost"
+    );
+    assert_eq!(
+        devlanes_resolve::https_url("a.localhost", Some(8443)),
+        "https://a.localhost:8443"
+    );
+}
+
+#[tokio::test]
+/// Services and tasks carry the core color: tag overrides, then categories, then hash.
+async fn unit_colors() {
+    let config = parse(
+        r#"
+project: demo
+tags:
+  essential: { color: bright-yellow, description: Always on }
+  api: {}
+services:
+  catalog: { run: a, tags: [essential, api] }
+  backend: { run: b, tags: [api] }
+  web: { run: w, preset: vite }
+  thing: { run: t }
+  sms-stub: { run: s, replicas: 2 }
+tasks:
+  seed: { run: s }
+"#,
+    );
+    assert_eq!(
+        devlanes_resolve::tag_colors(&config),
+        BTreeMap::from([("essential".to_owned(), "bright-yellow".to_owned())])
+    );
+    let facts = facts("demo", 1, None);
+    let (block, offsets) = allocation(&config, 21_000, &[]);
+    let lane = resolve_lane(ResolveInput::new(&config, &facts, block, &offsets))
+        .await
+        .expect("resolves");
+    let color = |unit: &str| lane.services[unit].color.as_str();
+    assert_eq!(color("catalog"), "bright-yellow");
+    assert_eq!(color("backend"), "blue");
+    assert_eq!(color("web"), "green");
+    assert_eq!(color("sms-stub.1"), "gray");
+    assert_eq!(color("sms-stub.2"), "gray");
+    let hashed = devlanes_core::color::unit_color(&[], "thing", None, &BTreeMap::new());
+    assert_eq!(color("thing"), hashed);
+    assert_ne!(hashed, "red");
+    assert_eq!(
+        lane.tasks["seed"].color,
+        devlanes_core::color::unit_color(&[], "seed", None, &BTreeMap::new())
+    );
+    let layout = lane_layout(&ResolveInput::new(&config, &facts, block, &offsets)).expect("layout");
+    assert_eq!(layout.services["catalog"].color, "bright-yellow");
+}
+
+#[test]
+/// Profile summaries list selectors and literal `infra: false` for clients.
+fn profile_summaries_for_clients() {
+    let summaries = profile_summaries(&parse(FULL));
+    let by_name = |name: &str| {
+        summaries
+            .iter()
+            .find(|s| s.name == name)
+            .expect("profile listed")
+    };
+    assert_eq!(summaries[0].name, "default");
+    assert!(by_name("default").is_default);
+    assert_eq!(by_name("default").include, ["+essential"]);
+    assert!(by_name("staging-web").skips_infra);
+    assert!(by_name("attach").skips_infra);
+    assert!(!by_name("e2e").skips_infra);
+    assert_eq!(by_name("everything").exclude, ["+desktop", "sms-stub"]);
+    assert_eq!(
+        serde_json::to_value(by_name("crm")).expect("json"),
+        json!({"name": "crm", "include": ["crm-*", "catalog"], "exclude": [], "skips_infra": false, "is_default": false})
     );
 }
 
@@ -501,7 +782,7 @@ async fn locked_secrets_fail_units() {
         &error,
         ResolveError::SecretsLocked { profile: Some(p), .. } if p == "admin-api"
     ));
-    assert!(error.to_string().contains("devlanes unlock"));
+    assert!(error.to_string().contains("devlanes secrets unlock"));
     let catalog = &lane.services["catalog"].launch.env;
     assert_eq!(catalog.values["STRIPE_KEY"], "sk_test");
     assert_eq!(catalog.sources["STRIPE_KEY"], EnvLayer::Secrets);

@@ -12,6 +12,7 @@ devlanes-config = { path = "../config" }
 devlanes-core = { path = "../core" }
 globset = "0.4"
 indexmap = "2"
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs"] }

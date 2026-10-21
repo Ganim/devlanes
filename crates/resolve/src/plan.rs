@@ -12,6 +12,7 @@ use devlanes_config::{
 };
 use devlanes_core::{
     StopPolicy,
+    color::unit_color,
     contrib::{
         ContribCx, ContribMemo, Contributor, DetectCx, DraftCommand, LaunchDraft, ScriptInfo,
         ScriptPlan, ScriptRequest, ScriptRunner, SecretEnv, SecretsError, SecretsRequest, UnitKind,
@@ -25,10 +26,16 @@ use crate::{
     DEFAULT_READY_TIMEOUT, Launch, Ready, ReadySpec, ResolveError, ResolveInput, ResolvedCommand,
     ResolvedLane, ResolvedService, ResolvedTask, ServiceLayout, SyncSpec,
     layout::{self, Namespaces, env_namespace, replica_value},
+    select::{active_profiles, merge_options},
     util::{shell_quote, signal_number},
 };
 
 /// Plans every service replica, task and infra command of a lane.
+///
+/// Profiles come from `input.profile` followed by `input.profiles`. Their `env`
+/// layers apply in that order (later wins), `run_scripts` remaps merge in that
+/// order, `infra` stays on unless every profile evaluates `infra: false`, and a
+/// task with `profiles:` runs when any profile in effect matches.
 ///
 /// Fails as a whole only for lane-level problems (an unknown profile, `lanes.vars`,
 /// ports, hostnames, `infra: false` or the project fnox profile). A failure in one
@@ -45,37 +52,41 @@ pub async fn resolve_lane<E: Extensions>(
     input: ResolveInput<'_, E>,
 ) -> Result<ResolvedLane, ResolveError> {
     let config = input.config;
-    let profile = match input.profile {
-        Some(name) if config.profiles.contains_key(name) || name == "default" => {
-            Some(name.to_owned())
-        }
-        Some(name) => {
-            return Err(ResolveError::UnknownProfile {
-                name: name.to_owned(),
-                available: config.profiles.keys().cloned().collect(),
-            });
-        }
-        None => config
-            .profiles
-            .contains_key("default")
-            .then(|| "default".to_owned()),
-    };
-    let options = profile
-        .as_deref()
-        .and_then(|name| match config.profiles.get(name) {
-            Some(ProfileConfig::Object(options)) => Some(options),
-            _ => None,
-        });
+    let requested: Vec<&str> = input
+        .profile
+        .into_iter()
+        .chain(input.profiles.iter().map(String::as_str))
+        .collect();
+    let profiles = active_profiles(config, &requested)?;
+    // Only the merged `run_scripts` is used from this; env layers stay per profile
+    // so error paths name the profile that failed.
+    let remap = merge_options(config, &profiles);
     let base_env = env_namespace(input.client_env, None, input.dotenv);
     let (layout, ns) = layout::build(&input, &base_env)?;
     let lane_context = ns.lane_context(&base_env);
-    let profile_path = format!("profiles.{}", profile.as_deref().unwrap_or("default"));
-    let infra_enabled = match options.and_then(|o| o.infra.as_ref()) {
-        Some(value) => value
-            .evaluate(&lane_context)
-            .map_err(|e| ResolveError::expression(format!("{profile_path}.infra"), e))?,
-        None => true,
-    };
+    let mut profile_envs = Vec::new();
+    let mut every_profile_skips_infra = !profiles.is_empty();
+    let mut any_configured = false;
+    for name in &profiles {
+        let Some(profile) = config.profiles.get(name) else {
+            continue;
+        };
+        any_configured = true;
+        let skips = match profile {
+            ProfileConfig::Object(options) => {
+                profile_envs.push((format!("profiles.{name}.env"), &options.env));
+                match &options.infra {
+                    Some(value) => !value.evaluate(&lane_context).map_err(|e| {
+                        ResolveError::expression(format!("profiles.{name}.infra"), e)
+                    })?,
+                    None => false,
+                }
+            }
+            ProfileConfig::Selectors(_) => false,
+        };
+        every_profile_skips_infra &= skips;
+    }
+    let infra_enabled = !(any_configured && every_profile_skips_infra);
     let project_fnox = match config.fnox.as_ref().and_then(|f| f.profile.as_ref()) {
         Some(value) => Some(
             value
@@ -99,8 +110,8 @@ pub async fn resolve_lane<E: Extensions>(
         input: &input,
         ns: &ns,
         lane_context,
-        options,
-        profile_env_path: format!("{profile_path}.env"),
+        remap: remap.as_ref(),
+        profile_envs,
         contributors,
         memo: ContribMemo::default(),
         secrets: BTreeMap::new(),
@@ -126,10 +137,16 @@ pub async fn resolve_lane<E: Extensions>(
             }
         }
     }
-    let active_profile = profile.as_deref().unwrap_or("default");
+    // Tasks limited to `default` run when no profile is in effect.
+    let default_only = ["default".to_owned()];
+    let task_profiles: &[String] = if profiles.is_empty() {
+        &default_only
+    } else {
+        &profiles
+    };
     let mut tasks = IndexMap::new();
     for (name, task) in &config.tasks {
-        match planner.task(name, task, active_profile).await {
+        match planner.task(name, task, task_profiles).await {
             Ok(task) => {
                 tasks.insert(name.clone(), task);
             }
@@ -161,7 +178,8 @@ pub async fn resolve_lane<E: Extensions>(
         domain: layout.domain,
         port: layout.port,
         vars: layout.vars,
-        profile,
+        profile: profiles.first().cloned(),
+        profiles,
         infra_enabled,
         services,
         tasks,
@@ -182,8 +200,10 @@ struct Planner<'p, 'a, E: Extensions> {
     ns: &'p Namespaces,
     /// Lane-level context without secrets, for fnox profile names.
     lane_context: ExpressionContext,
-    options: Option<&'a ProfileOptions>,
-    profile_env_path: String,
+    /// Merged profile options; only `run_scripts` is read.
+    remap: Option<&'p ProfileOptions>,
+    /// Each profile's `env` with its config path, in the order given.
+    profile_envs: Vec<(String, &'a Env)>,
     contributors: Vec<Arc<dyn Contributor>>,
     memo: ContribMemo,
     /// One provider call per (profile, explicit) per lane resolution.
@@ -301,7 +321,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
         let script = match &service.run_script {
             Some(script) => {
                 let (source, name) = script
-                    .source_and_name_for_profile(self.options)
+                    .source_and_name_for_profile(self.remap)
                     .map_err(|e| ResolveError::expression(format!("{path}.run_script"), e))?;
                 Some((source.to_owned(), name.to_owned()))
             }
@@ -354,6 +374,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
             autostart: layout.autostart,
             hidden: layout.hidden,
             tags: layout.tags.clone(),
+            color: layout.color.clone(),
             sync,
             literal_port: layout.literal_port,
             preset: service.preset.clone(),
@@ -365,7 +386,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
         &mut self,
         name: &str,
         task: &TaskConfig,
-        profile: &str,
+        profiles: &[String],
     ) -> Result<ResolvedTask, ResolveError> {
         let path = format!("tasks.{name}");
         let secrets = self.unit_secrets(task.fnox.as_ref()).await?;
@@ -430,11 +451,12 @@ impl<E: Extensions> Planner<'_, '_, E> {
             active: task
                 .profiles
                 .as_ref()
-                .is_none_or(|profiles| profiles.iter().any(|p| p == profile)),
+                .is_none_or(|only| only.iter().any(|p| profiles.contains(p))),
             confirm,
             interactive,
             timeout: duration(task.timeout.as_ref(), &context, &format!("{path}.timeout"))?,
             pty,
+            color: unit_color(&[], name, None, &BTreeMap::new()).to_owned(),
         })
     }
 
@@ -519,10 +541,11 @@ impl<E: Extensions> Planner<'_, '_, E> {
         let path = spec.path;
         let global = env_map(&input.config.global_env, context, "global_env")?;
         let own = env_map(spec.env, context, &format!("{path}.env"))?;
-        let profile = match self.options {
-            Some(options) => env_map(&options.env, context, &self.profile_env_path)?,
-            None => BTreeMap::new(),
-        };
+        // Later profiles win over earlier ones within the profile layer.
+        let mut profile = BTreeMap::new();
+        for (env_path, env) in &self.profile_envs {
+            profile.extend(env_map(env, context, env_path)?);
+        }
         let cwd = match spec.cwd {
             Some(value) => lane_path.join(
                 value

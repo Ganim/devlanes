@@ -42,14 +42,20 @@ pub struct ResolveInput<'a, E: Extensions = BuiltinExtensions> {
     pub lanes_main: Option<&'a Value>,
     /// `projects` namespace: `{project: {svc: {...}}}` for other running projects.
     pub projects: &'a Value,
-    /// Requested profile; `None` applies `default` when the config defines it.
+    /// Requested profile from single-profile callers; counts as the first entry
+    /// of `profiles`. With neither set, `default` applies when the config defines it.
     pub profile: Option<&'a str>,
+    /// Requested profiles in order; later profile `env` values win.
+    pub profiles: &'a [String],
     /// `--env K=V` values, the highest layer.
     pub overrides: &'a BTreeMap<String, String>,
     pub contributors: &'a [Arc<dyn Contributor>],
     pub script_runners: &'a [Arc<dyn ScriptRunner>],
     /// Trust variables from the CA, injected with the `DEVLANES_*` layer.
     pub ca_env: &'a BTreeMap<String, String>,
+    /// Port the proxy's HTTPS listener is bound to. Public URLs and origins add
+    /// `:<port>` unless it is 443; `None` renders them without a port.
+    pub public_https_port: Option<u16>,
 }
 
 impl<'a, E: Extensions> ResolveInput<'a, E> {
@@ -72,10 +78,12 @@ impl<'a, E: Extensions> ResolveInput<'a, E> {
             lanes_main: None,
             projects: &EMPTY_NAMESPACE,
             profile: None,
+            profiles: &[],
             overrides: &EMPTY_ENV,
             contributors: &[],
             script_runners: &[],
             ca_env: &EMPTY_ENV,
+            public_https_port: None,
         }
     }
 }
@@ -104,7 +112,7 @@ impl LaneLayout {
         svc_namespace(self.services.values())
     }
 
-    /// Variables for `devlanes with` and `devlanes env`: `DEVLANES`,
+    /// Variables for `devlanes with` and `devlanes env show`: `DEVLANES`,
     /// `DEVLANES_PROJECT`, `DEVLANES_LANE`, `DEVLANES_LANE_NAME`,
     /// `DEVLANES_PUBLIC_URL_<SERVICE>` for every service and the CA variables.
     pub fn lane_env(&self) -> &BTreeMap<String, String> {
@@ -138,7 +146,7 @@ pub struct ServiceLayout {
     pub ports: BTreeMap<String, u16>,
     /// `http://127.0.0.1:<port>`.
     pub url: String,
-    /// `https://<first non-wildcard host>`.
+    /// `https://<first non-wildcard host>[:<public_https_port>]`.
     pub public_url: Option<String>,
     pub hosts: Vec<String>,
     /// `env.PORT` is a literal: the same port in every lane.
@@ -146,6 +154,8 @@ pub struct ServiceLayout {
     pub hidden: bool,
     pub autostart: bool,
     pub tags: Vec<String>,
+    /// Palette name from [`devlanes_core::color::unit_color`].
+    pub color: String,
 }
 
 impl ServiceLayout {
@@ -299,6 +309,8 @@ pub struct ResolvedService {
     pub autostart: bool,
     pub hidden: bool,
     pub tags: Vec<String>,
+    /// Palette name from [`devlanes_core::color::unit_color`].
+    pub color: String,
     pub sync: Vec<SyncSpec>,
     /// Same port in every lane; refuse to start while another lane runs it.
     pub literal_port: bool,
@@ -315,12 +327,15 @@ pub struct ResolvedTask {
     /// `after: services`.
     pub after_services: bool,
     pub profiles: Option<Vec<String>>,
-    /// Whether the `when` hook runs for the resolved profile.
+    /// Whether the `when` hook runs: `profiles` is unset or names any profile in effect.
     pub active: bool,
     pub confirm: Option<String>,
     pub interactive: bool,
     pub timeout: Option<Duration>,
     pub pty: bool,
+    /// Palette name from [`devlanes_core::color::unit_color`]; tasks have no
+    /// tags, so it follows the name.
+    pub color: String,
 }
 
 /// One `infra.setup` or `infra.teardown` entry.
@@ -341,9 +356,11 @@ pub struct ResolvedLane {
     pub domain: String,
     pub port: u16,
     pub vars: IndexMap<String, Scalar>,
-    /// Profile in effect (`default` when defined and none was requested).
+    /// First profile in effect (`default` when defined and none was requested).
     pub profile: Option<String>,
-    /// False when the profile sets `infra: false`.
+    /// Every profile in effect, in the order given.
+    pub profiles: Vec<String>,
+    /// False only when every profile in effect evaluates `infra` to false.
     pub infra_enabled: bool,
     /// Every service replica that planned successfully, selected or not, keyed by unit.
     pub services: IndexMap<String, ResolvedService>,

@@ -4,7 +4,7 @@ use devlanes_config::{
     ExpressionContext, Extensions, HostConfig, HostHeader, ProjectConfig, Scalar, ServiceConfig,
     Templated,
 };
-use devlanes_core::ports::PortName;
+use devlanes_core::{color::unit_color, ports::PortName};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 
@@ -157,6 +157,8 @@ struct Pending<'c, E: Extensions> {
     replicas: u16,
     names: BTreeSet<String>,
     port: PortOverride,
+    /// Same for every replica: color follows tags, preset and name only.
+    color: &'static str,
 }
 
 /// Builds the layout and the namespaces (with a complete `svc`) for launch planning.
@@ -200,6 +202,7 @@ pub(crate) fn build<E: Extensions>(
         ));
     }
 
+    let colors = tag_colors(config);
     let mut pending = IndexMap::new();
     for (name, service) in &config.services {
         pending.insert(
@@ -209,6 +212,12 @@ pub(crate) fn build<E: Extensions>(
                 replicas: static_replicas(name, service)?,
                 names: service_port_names(name, service, input.contributors)?,
                 port: port_override(name, service)?,
+                color: unit_color(
+                    service.tags.as_deref().unwrap_or_default(),
+                    name,
+                    service.preset.as_deref(),
+                    &colors,
+                ),
             },
         );
     }
@@ -270,7 +279,7 @@ pub(crate) fn build<E: Extensions>(
             .hosts
             .iter()
             .filter(|h| !h.contains('*'))
-            .map(|h| format!("https://{h}"));
+            .map(|h| https_url(h, input.public_https_port));
         for origin in hosts.chain(local) {
             if !origins.contains(&origin) {
                 origins.push(origin);
@@ -307,6 +316,16 @@ pub(crate) fn build<E: Extensions>(
         lane_env,
     };
     Ok((layout, ns))
+}
+
+/// Public URL of `host` through the proxy: `https://host` on 443 (or when the
+/// port is unknown), `https://host:<port>` otherwise. Browsers send that same
+/// form as `Origin`, so origins use it too.
+pub fn https_url(host: &str, port: Option<u16>) -> String {
+    match port {
+        Some(port) if port != 443 => format!("https://{host}:{port}"),
+        _ => format!("https://{host}"),
+    }
 }
 
 /// `replica` namespace: `{index, count}`.
@@ -390,7 +409,7 @@ fn service_layout<E: Extensions>(
     let public_url = hosts
         .iter()
         .find(|h| !h.contains('*'))
-        .map(|h| format!("https://{h}"));
+        .map(|h| https_url(h, input.public_https_port));
     let flag = |value: &Option<Templated<bool>>, key: &str, default: bool| {
         value.as_ref().map_or(Ok(default), |v| {
             v.evaluate(&context)
@@ -411,7 +430,19 @@ fn service_layout<E: Extensions>(
         hidden: flag(&entry.service.hidden, "hidden", false)?,
         autostart: flag(&entry.service.autostart, "autostart", true)?,
         tags: entry.service.tags.clone().unwrap_or_default(),
+        color: entry.color.to_owned(),
     })
+}
+
+/// Tag colors configured under the top-level `tags:` key, as palette names, for
+/// [`devlanes_core::color::unit_color`]. The daemon uses the same map for exec
+/// units and containers.
+pub fn tag_colors<E: Extensions>(config: &ProjectConfig<E>) -> BTreeMap<String, String> {
+    config
+        .tags
+        .iter()
+        .filter_map(|(tag, settings)| Some((tag.clone(), settings.color?.as_str().to_owned())))
+        .collect()
 }
 
 /// Evaluates one host entry into a route.

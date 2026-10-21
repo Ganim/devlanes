@@ -36,7 +36,9 @@ In the daemon the block and offsets come from `devlanes-state`, and `ResolveInpu
 ## API
 
 - `port_needs`: port names to allocate, offsets reserved by `lane.port + N`, services with their own `PORT`.
-- `select`: services for a profile and `start` selectors (names, globs, `+tag`).
+- `select_profiles`: services for one or more profiles and `start` selectors (names, globs, `+tag`); `select` is the single-profile form.
+- `profile_summaries`: profile names, include/exclude selectors and literal `infra: false`, for clients.
+- `tag_colors`: tag colors from the config's `tags:` map, for `devlanes_core::color::unit_color`.
 - `lane_layout`: ports, URLs, routes and `lane_env()` without contributors or secrets, for idle lanes and lane 0's `svc_namespace()`.
 - `resolve_lane`: the full `ResolvedLane` with a `Launch` per unit.
 - `fixed_block_start`: block start from `lanes.vars.port` or a matrix row.
