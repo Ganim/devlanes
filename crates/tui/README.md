@@ -17,12 +17,16 @@ async fn main() -> Result<(), devlanes_tui::Error> {
         launchers: vec![Arc::new(Ghostty), Arc::new(TerminalApp)],
         // The user config's `terminal:` value, matched against each launcher's name.
         terminal: Some("ghostty".into()),
+        // No tab progress bar.
+        progress: None,
     };
     devlanes_tui::run_with(Paths::discover()?, options).await
 }
 ```
 
 `run_with` connects first, spawning the daemon if needed, and returns `Error::NotATerminal` without a TTY. `run(paths)` is the same with no terminal launchers.
+
+`run_start` opens the TUI on a start that is already running, for `devlanes start` on a terminal. The binary sends the start request with `events: true`, reads its answer with `start::follow_start`, and waits with `start::await_start` until the daemon accepted it (a refusal comes back as an error for the CLI to print). The TUI then selects the started lane, shows the running phase in the header and, when the result arrives, the result line, which stays. Failed services get their reason and log tail in the details pane. `run_start` returns `StartExit::Ready`, `Failed` or `Pending` (quit before the result; the daemon keeps starting).
 
 | key | does |
 |---|---|

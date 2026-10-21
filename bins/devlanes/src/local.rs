@@ -16,7 +16,7 @@ use devlanes_proto::{Context, Method, RpcError};
 use devlanes_resolver_dns::ResolverFile;
 use devlanes_resolver_hosts::CommandSpec;
 use devlanes_trust::{CaCertificate, TrustStatus, TrustStore, TrustTarget};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{driver::rpc_error, output::emit};
 
@@ -254,6 +254,51 @@ fn store(
             )
         })?;
         LinuxTrust::new(Arc::new(devlanes_trust::SystemExecutor), home, privilege).store(target)
+    }
+}
+
+/// Whether each configured trust store trusts the CA, for `doctor`:
+/// `[{store, state: trusted|untrusted|unknown, reason?}]`, `null` without a CA.
+/// Read-only and never prompts: a store that would need a password is `unknown`.
+pub(crate) async fn trust_report() -> Value {
+    let Ok(paths) = Paths::discover() else {
+        return Value::Null;
+    };
+    let mkcert = mkcert_selected(&paths);
+    let Ok(Some(certificate)) = certificate(&paths, false).await else {
+        return Value::Null;
+    };
+    let mut done = BTreeSet::new();
+    let mut report = Vec::new();
+    for target in targets(&paths) {
+        let status = async {
+            target.ensure_supported()?;
+            let store: Arc<dyn TrustStore> = Arc::from(store(target, !mkcert, false)?);
+            if !done.insert(store.id()) {
+                return Ok(None);
+            }
+            store.status(&certificate).await.map(Some)
+        }
+        .await;
+        report.push(match status {
+            Ok(None) => continue,
+            Ok(Some(status)) => trust_entry(target, &status),
+            Err(error) => {
+                json!({"store": target.as_str(), "state": "unknown", "reason": error.to_string()})
+            }
+        });
+    }
+    Value::Array(report)
+}
+
+/// One store's line of [`trust_report`].
+fn trust_entry(target: TrustTarget, status: &TrustStatus) -> Value {
+    match status {
+        TrustStatus::Installed => json!({"store": target.as_str(), "state": "trusted"}),
+        TrustStatus::Missing => json!({"store": target.as_str(), "state": "untrusted"}),
+        TrustStatus::Unknown { reason } => {
+            json!({"store": target.as_str(), "state": "unknown", "reason": reason})
+        }
     }
 }
 
@@ -689,6 +734,24 @@ async fn unlock(runtime: &Runtime, context: Context) -> Result<u8, RpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    /// Doctor's trust entries name the store and its state.
+    fn trust_entries_name_store_and_state() {
+        assert_eq!(
+            trust_entry(TrustTarget::System, &TrustStatus::Missing),
+            json!({"store": "system", "state": "untrusted"})
+        );
+        assert_eq!(
+            trust_entry(
+                TrustTarget::Firefox,
+                &TrustStatus::Unknown {
+                    reason: "certutil is missing".into()
+                }
+            ),
+            json!({"store": "firefox", "state": "unknown", "reason": "certutil is missing"})
+        );
+    }
 
     #[test]
     /// A failed untrust step is handed back for reporting and only raises the status.

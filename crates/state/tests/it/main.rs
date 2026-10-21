@@ -71,6 +71,7 @@ fn request(owner: BlockOwner, count: usize) -> AllocationRequest {
             .map(|n| PortName::new(format!("service-{n:03}"), "default"))
             .collect(),
         reserved: BTreeSet::new(),
+        avoid: BTreeSet::new(),
     }
 }
 
@@ -373,6 +374,56 @@ async fn explicit_conflicts_and_pool_exhaustion_do_not_leak_records() {
             .expect("query")
             .is_none()
     );
+}
+
+#[tokio::test]
+/// A lane with a fixed block start grows in place instead of conflicting with
+/// its own block, and still conflicts with other lanes' blocks.
+async fn fixed_start_blocks_grow_in_place() {
+    let store = Store::open(":memory:").await.expect("store");
+    let project = project(&store, "demo").await;
+    let a = lane(&store, project.id, 0).await;
+    let b = lane(&store, project.id, 1).await;
+    let mut small = request(BlockOwner::Lane(a.id), 1);
+    small.fixed_start = Some(30_000);
+    let first = store.allocate(small).await.expect("first");
+    assert_eq!((first.block.start, first.block.size), (30_000, 10));
+    let mut larger = request(BlockOwner::Lane(a.id), 11);
+    larger.fixed_start = Some(30_000);
+    let grown = store.allocate(larger).await.expect("grown in place");
+    assert_eq!((grown.block.start, grown.block.size), (30_000, 20));
+    assert_eq!(grown.previous, Some(first.block));
+    for (name, offset) in &first.offsets {
+        assert_eq!(grown.offsets[name], *offset);
+    }
+    let mut overlapping = request(BlockOwner::Lane(b.id), 1);
+    overlapping.fixed_start = Some(30_010);
+    assert!(matches!(
+        store.allocate(overlapping).await,
+        Err(Error::Allocation(_))
+    ));
+}
+
+#[tokio::test]
+/// Ports to avoid (a box's mirrored ports) keep new pool blocks clear of them;
+/// kept blocks and fixed starts ignore them, since local lanes win.
+async fn avoided_ports_stay_outside_new_blocks() {
+    let store = Store::open(":memory:").await.expect("store");
+    let project = project(&store, "demo").await;
+    let a = lane(&store, project.id, 0).await;
+    let b = lane(&store, project.id, 1).await;
+    let mut first = request(BlockOwner::Lane(a.id), 2);
+    first.avoid = BTreeSet::from([20_000, 20_001, 20_003]);
+    let placed = store.allocate(first.clone()).await.expect("placed");
+    assert_eq!(placed.block.start, 20_004);
+    first.avoid = BTreeSet::from([20_005]);
+    let kept = store.allocate(first).await.expect("kept");
+    assert_eq!(kept.block, placed.block, "a held block is not moved");
+    let mut fixed = request(BlockOwner::Lane(b.id), 1);
+    fixed.fixed_start = Some(31_000);
+    fixed.avoid = BTreeSet::from([31_000]);
+    let fixed = store.allocate(fixed).await.expect("fixed start wins");
+    assert_eq!(fixed.block.start, 31_000);
 }
 
 #[tokio::test]

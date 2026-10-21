@@ -13,6 +13,7 @@ pub enum CompletionKind {
     Task,
     Project,
     Host,
+    Profile,
 }
 
 /// Inject a short-timeout, existing-connection-only client at the composition root.
@@ -51,6 +52,7 @@ fn kind_of(id: &str) -> Option<CompletionKind> {
         "task" => CompletionKind::Task,
         "project" => CompletionKind::Project,
         "connect_host" | "disconnect_host" => CompletionKind::Host,
+        "profiles" => CompletionKind::Profile,
         _ => return None,
     })
 }

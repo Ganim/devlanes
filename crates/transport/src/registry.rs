@@ -3,7 +3,7 @@
 //! These are the transport's own serde types so the protocol does not depend on
 //! the daemon's internal model; the daemon maps its state into them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -235,12 +235,24 @@ impl Registry {
         self.units.get(key)
     }
 
-    /// Ports a client should mirror: every port of every non-hidden unit.
+    /// Ports a client should mirror: every port of every non-hidden unit that is
+    /// [`serving`]. An idle unit's port stays free on the client until it starts.
     pub fn mirrored_ports(&self) -> BTreeMap<u16, &UnitKey> {
         self.units
             .values()
-            .filter(|unit| !unit.hidden)
+            .filter(|unit| !unit.hidden && serving(&unit.state))
             .flat_map(|unit| unit.ports.iter().map(move |port| (port.port, &unit.key)))
+            .collect()
+    }
+
+    /// Every port of every non-hidden unit, idle ones included: the ports a client
+    /// keeps out of its own allocations so the box's units can be mirrored once
+    /// they start.
+    pub fn advertised_ports(&self) -> BTreeSet<u16> {
+        self.units
+            .values()
+            .filter(|unit| !unit.hidden)
+            .flat_map(|unit| unit.ports.iter().map(|port| port.port))
             .collect()
     }
 
@@ -278,9 +290,10 @@ impl Registry {
 }
 
 /// Unit states whose ports may be dialed: services that started or are starting
-/// (their port may already answer) and running containers.
+/// (their port may already answer), running containers, and services a previous
+/// box daemon left running (`orphaned`), which the box's own proxy routes too.
 pub fn serving(state: &str) -> bool {
-    matches!(state, "ready" | "starting" | "running")
+    matches!(state, "ready" | "starting" | "running" | "orphaned")
 }
 
 /// A target that passed [`Registry::authorize`]; only this crate constructs it.
@@ -503,10 +516,31 @@ mod tests {
             lanes: Vec::new(),
             units: vec![stopped],
         });
+        assert!(
+            registry.mirrored_ports().is_empty(),
+            "idle units are not mirrored"
+        );
+        assert_eq!(
+            registry.advertised_ports().into_iter().collect::<Vec<_>>(),
+            [20002]
+        );
         assert_eq!(
             registry.authorize(&DialTarget::Port { port: 20002 }),
             Err(RejectReason::NotRunning)
         );
+    }
+
+    #[test]
+    fn orphaned_units_stay_dialable() {
+        let mut orphan = unit("web", 20000, false);
+        orphan.state = "orphaned".into();
+        let registry = Registry::from_snapshot(RegistrySnapshot {
+            lanes: Vec::new(),
+            units: vec![orphan],
+        });
+        let target = registry.authorize(&DialTarget::Port { port: 20000 });
+        assert_eq!(target.map(|t| t.port()), Ok(20000));
+        assert!(serving("orphaned"));
     }
 
     #[test]

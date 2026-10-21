@@ -1,0 +1,33 @@
+[tools]
+node = "24"
+
+[env]
+API_MODE = "local"
+
+[tasks]
+lint = "eslint ."
+
+[tasks.build]
+description = "Build the web app"
+run = "vite build"
+dir = "{{config_root}}/web"
+sources = ["web/src/**/*"]
+outputs = ["web/dist/**/*"]
+
+[tasks.test]
+depends = ["build"]
+run = ["vitest run", "./scripts/test-e2e.sh"]
+env = { CI = "1" }
+
+[tasks.ci]
+depends = ["lint", "test"]
+
+[tasks.release]
+confirm = "Cut a new release?"
+file = "scripts/release.sh"
+
+[tasks.greet]
+run = '''
+#!/usr/bin/env bash
+echo "hello $1"
+'''

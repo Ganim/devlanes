@@ -1,13 +1,11 @@
 ---
 source: crates/config/tests/it/main.rs
-assertion_line: 162
 expression: output
 ---
-  × invalid duration `10fortnights`; a `${{ ... }}` expression is also allowed at line
-  │ 5, column 22
+  × invalid duration `10fortnights`; a `${{ ... }}` expression is also allowed
    ╭─[devlanes.yaml:5:22]
  4 │     run: server
  5 │     stop: { timeout: 10fortnights }
    ·                      ┬
-   ·                      ╰── invalid duration `10fortnights`; a `${{ ... }}` expression is also allowed at line 5, column 22
+   ·                      ╰── invalid duration `10fortnights`; a `${{ ... }}` expression is also allowed
    ╰────

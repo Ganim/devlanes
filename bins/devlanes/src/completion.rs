@@ -66,17 +66,20 @@ async fn candidates(kind: CompletionKind) -> Option<Vec<String>> {
             .ok()?;
         let page: Page<LaneSummary> = serde_json::from_value(data).ok()?;
         let mut names = Vec::new();
-        if kind == CompletionKind::Task {
+        // Tasks and profiles belong to the worktree's lane, named by reference.
+        if matches!(kind, CompletionKind::Task | CompletionKind::Profile) {
             let cwd = std::env::current_dir().ok()?;
             let lane = worktree_lane(&page.items, &cwd)?.to_owned();
             let context = Context {
                 lane: Some(lane),
                 ..Context::default()
             };
-            let data = client
-                .request(Method::TaskList, json!({}), context)
-                .await
-                .ok()?;
+            let method = if kind == CompletionKind::Task {
+                Method::TaskList
+            } else {
+                Method::ProfileList
+            };
+            let data = client.request(method, json!({}), context).await.ok()?;
             names = item_names(&data, "name");
         }
         for lane in &page.items {
@@ -89,7 +92,7 @@ async fn candidates(kind: CompletionKind) -> Option<Vec<String>> {
                         names.push(format!("{}:{}", lane.reference, unit.name));
                     }
                 }
-                CompletionKind::Task | CompletionKind::Host => {}
+                CompletionKind::Task | CompletionKind::Host | CompletionKind::Profile => {}
             }
         }
         names

@@ -15,8 +15,9 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::held::{Probe, probe_source};
 use crate::target::MODE_MASK;
-use crate::{ContentHash, IgnoreRules, Manifest, RelPath, SyncError, SyncTarget};
+use crate::{ContentHash, HeldFile, IgnoreRules, Manifest, RelPath, SyncError, SyncTarget};
 
 /// Default quiet period before a burst of events is processed.
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -135,6 +136,10 @@ pub struct Syncer {
     rules: Arc<IgnoreRules>,
     debounce: Duration,
     max_file: Option<u64>,
+    /// What the target said it holds, as index entries; see [`Syncer::offer_held`].
+    seed: Option<BTreeMap<RelPath, Tracked>>,
+    /// Source root resolved for [`Syncer::offer_held`]; `Some(None)` when absent.
+    held_root: Option<Option<PathBuf>>,
 }
 
 impl Syncer {
@@ -151,7 +156,45 @@ impl Syncer {
             rules: Arc::new(IgnoreRules::new(&options.ignore)?),
             debounce: options.debounce,
             max_file: options.max_file,
+            seed: None,
+            held_root: None,
         })
+    }
+
+    /// Takes one batch of what a remote target already holds, before
+    /// [`Syncer::start`]. Call it for every batch of the target's manifest; the
+    /// first pass then sends only files the target lacks or holds differently, and
+    /// deletes held files the source does not have (ignored paths excepted).
+    ///
+    /// Each batch is compared with the source right away (hashing source files
+    /// whose size and mode match), and only its outcome is kept: matching files
+    /// become entries of the index the syncer keeps for the source anyway, and
+    /// files the source lacks stay in it until the first pass deletes them. The
+    /// target's manifest itself is never held whole.
+    pub async fn offer_held(&mut self, batch: Vec<HeldFile>) -> Result<(), SyncError> {
+        let root = match &self.held_root {
+            Some(root) => root.clone(),
+            None => {
+                let root = canonical_source(&self.source).await?;
+                self.held_root = Some(root.clone());
+                root
+            }
+        };
+        let rules = self.rules.clone();
+        let max_file = self.max_file;
+        let entries = tokio::task::spawn_blocking(move || {
+            batch
+                .into_iter()
+                .filter_map(|held| held_entry(root.as_deref(), &rules, max_file, held))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|error| SyncError::Io {
+            context: "comparing the target's files".into(),
+            source: io::Error::other(error),
+        })?;
+        self.seed.get_or_insert_with(BTreeMap::new).extend(entries);
+        Ok(())
     }
 
     /// Runs one full pass without watching and returns the resulting status.
@@ -162,7 +205,7 @@ impl Syncer {
         check_overlap(&root, self.target.as_ref()).await?;
         let (status, _receiver) =
             watch::channel(SyncStatus::new(self.source.clone(), SyncState::Syncing));
-        let mut engine = self.engine(root, status);
+        let mut engine = self.engine(root, status, self.seed.clone());
         engine.pass(None).await;
         Ok(engine.status.borrow().clone())
     }
@@ -172,7 +215,7 @@ impl Syncer {
     /// When the source exists, the initial copy finishes before this returns, so a
     /// service can rely on its files. Otherwise the task waits for the source to
     /// appear and this returns at once in [`SyncState::WaitingForSource`].
-    pub async fn start(self) -> Result<SyncHandle, SyncError> {
+    pub async fn start(mut self) -> Result<SyncHandle, SyncError> {
         let root = canonical_source(&self.source).await?;
         if let Some(root) = &root {
             check_overlap(root, self.target.as_ref()).await?;
@@ -185,7 +228,8 @@ impl Syncer {
         let (status, receiver) = watch::channel(SyncStatus::new(self.source.clone(), state));
         let debounce = self.debounce;
         let cancel = CancellationToken::new();
-        let mut engine = self.engine(root.clone().unwrap_or_default(), status);
+        let seed = self.seed.take();
+        let mut engine = self.engine(root.clone().unwrap_or_default(), status, seed);
         let watch = match root {
             Some(root) => {
                 // Watch before copying so edits made during the copy are not missed.
@@ -203,15 +247,21 @@ impl Syncer {
         })
     }
 
-    /// Builds the engine for a canonical root.
-    fn engine(&self, root: PathBuf, status: watch::Sender<SyncStatus>) -> Engine {
+    /// Builds the engine for a canonical root. A seed from [`Syncer::offer_held`]
+    /// replaces reading the target's manifest.
+    fn engine(
+        &self,
+        root: PathBuf,
+        status: watch::Sender<SyncStatus>,
+        seed: Option<BTreeMap<RelPath, Tracked>>,
+    ) -> Engine {
         Engine {
             source: self.source.clone(),
             root,
             target: self.target.clone(),
             rules: self.rules.clone(),
-            index: BTreeMap::new(),
-            primed: false,
+            primed: seed.is_some(),
+            index: seed.unwrap_or_default(),
             status,
             max_file: self.max_file,
         }
@@ -929,17 +979,64 @@ fn read_source(
     if contents.len() as u64 > cap {
         return Err(too_large(contents.len() as u64, cap));
     }
-    let mtime = meta.modified().ok();
-    let racy = mtime.is_none_or(|mtime| {
-        SystemTime::now()
-            .duration_since(mtime)
-            .map_or(true, |age| age < RACY_WINDOW)
-    });
     let tracked = Tracked {
         size: contents.len() as u64,
-        mtime: if racy { None } else { mtime },
+        mtime: settled_mtime(&meta),
         mode: meta.permissions().mode() & MODE_MASK,
         hash: ContentHash::of(&contents),
     };
     Ok(Some((Bytes::from(contents), tracked)))
+}
+
+/// The mtime to trust for skipping, or `None` for racily clean files.
+fn settled_mtime(meta: &fs::Metadata) -> Option<SystemTime> {
+    let mtime = meta.modified().ok()?;
+    let racy = SystemTime::now()
+        .duration_since(mtime)
+        .map_or(true, |age| age < RACY_WINDOW);
+    (!racy).then_some(mtime)
+}
+
+/// The index entry a held file becomes, if any. Blocking.
+///
+/// A match is indexed with the source's own settled mtime, so the first pass skips
+/// it without reading; a held file the source lacks is indexed so the first pass
+/// deletes it; a different file is left out, so the pass sends it.
+fn held_entry(
+    root: Option<&Path>,
+    rules: &IgnoreRules,
+    max_file: Option<u64>,
+    held: HeldFile,
+) -> Option<(RelPath, Tracked)> {
+    // Ignored paths on the target belong to someone else; never compared or deleted.
+    if rules.is_ignored(&held.path) {
+        return None;
+    }
+    let probe = match root {
+        Some(root) => probe_source(root, &held, max_file, settled_mtime),
+        None => Probe::Absent,
+    };
+    match probe {
+        Probe::Matches { size, mtime, hash } => Some((
+            held.path,
+            Tracked {
+                size,
+                mtime,
+                mode: held.mode,
+                hash,
+            },
+        )),
+        Probe::Differs => None,
+        // The held hash stays: should the file appear in the source before the
+        // first pass, identical contents are still not resent.
+        Probe::Absent => Some((
+            held.path,
+            Tracked {
+                size: held.size,
+                mtime: None,
+                mode: held.mode,
+                hash: held.hash.unwrap_or_else(ContentHash::unknown),
+            },
+        )),
+    }
 }

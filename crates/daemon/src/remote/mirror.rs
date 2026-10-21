@@ -1,7 +1,11 @@
 //! Makes a box's non-hidden endpoints local (plan 14.4): every allocated port of
-//! its services and containers is bound on this machine's loopback addresses under
-//! the same number, and its hostnames join the local proxy's routing table. Each
-//! accepted connection becomes one mux data stream to the box.
+//! its serving services and containers is bound on this machine's loopback
+//! addresses under the same number, and its hostnames join the local proxy's
+//! routing table. Each accepted connection becomes one mux data stream to the box.
+//!
+//! Local lanes win: a box port inside one of this machine's port blocks is never
+//! bound (its hostnames still route through a relay), and local allocations keep
+//! clear of the box's ports (`Remotes::advertised_ports`).
 //!
 //! Listeners stay bound while the link reconnects; connections accepted meanwhile
 //! wait briefly for the new session and the proxy shows a reconnecting page.
@@ -13,9 +17,11 @@ use std::{
     time::Duration,
 };
 
+use devlanes_core::ports::PortBlock;
 use devlanes_proto::{events, remote as wire};
+use devlanes_state::BlockOwner;
 use devlanes_transport::{
-    DialTarget, HostHeader, LaneKey, LinkState, Registry, UnitInfo, UnitKind,
+    DialTarget, HostHeader, LaneKey, LinkState, Registry, UnitInfo, UnitKind, serving,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -39,6 +45,9 @@ const HOLD: Duration = Duration::from_secs(10);
 pub(super) struct View {
     pub routes: Vec<RouteEntry>,
     pub ports: Vec<Value>,
+    /// Ports with at least one listener, and the box unit behind each
+    /// (`project@lane:unit`), so a local spawn can tell whose port it hit.
+    pub bound: BTreeMap<u16, String>,
     pub skipped: Vec<Value>,
     /// Box hostnames outside the names this machine routes (`.localhost` or the
     /// configured TLD).
@@ -100,6 +109,8 @@ struct PortMirror {
     bound: Vec<Bound>,
     /// Addresses whose bind failed, with what the port inspector found.
     conflicts: BTreeMap<IpAddr, Value>,
+    /// Set while the port lies in a local lane's block: the message and the owner.
+    local: Option<(String, String)>,
 }
 
 impl PortMirror {
@@ -172,6 +183,8 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>) {
             changed = registry.changed() => changed.is_ok(),
             changed = state.changed() => changed.is_ok(),
             more = wake => more,
+            // A local spawn found one of its ports mirrored (`release_for_local`).
+            () = conn.wake.notified() => true,
         };
         if !go_on {
             break;
@@ -241,12 +254,14 @@ impl Mirror {
             .filter(|unit| !self.skipped.contains(&unit.key.lane))
             .collect();
 
+        // Idle units are not bound, so their numbers stay free until they start.
         let mut wanted: BTreeMap<u16, &UnitInfo> = BTreeMap::new();
-        for unit in &mirrored {
+        for unit in mirrored.iter().filter(|unit| serving(&unit.state)) {
             for port in &unit.ports {
                 wanted.entry(port.port).or_insert(unit);
             }
         }
+        let local = local_blocks(engine).await;
         self.ports.retain(|port, _| wanted.contains_key(port));
         for (port, unit) in &wanted {
             let mirror = self.ports.entry(*port).or_insert_with(|| PortMirror {
@@ -255,7 +270,44 @@ impl Mirror {
                 kind: unit.key.kind,
                 bound: Vec::new(),
                 conflicts: BTreeMap::new(),
+                local: None,
             });
+            let single = PortBlock {
+                start: *port,
+                size: 1,
+            };
+            let owner = local
+                .iter()
+                .find(|(block, _)| block.overlaps(single))
+                .map(|(_, owner)| owner);
+            if let Some(owner) = owner {
+                // Local lanes win: dropping the listeners frees the port for them.
+                mirror.bound.clear();
+                mirror.conflicts.clear();
+                if mirror
+                    .local
+                    .as_ref()
+                    .is_none_or(|(_, known)| known != owner)
+                {
+                    let message = format!("port {port} is allocated to {owner}; not mirrored");
+                    tracing::warn!(host = %self.conn.name, %message, "cannot mirror port");
+                    engine.bus.emit(
+                        wire::WARNING_EVENT,
+                        json!({
+                            "host": self.conn.name,
+                            "code": "port_in_use",
+                            "message": message,
+                            "port": port,
+                            "local": owner,
+                            "unit": mirror.unit,
+                            "lane": mirror.lane,
+                        }),
+                    );
+                    mirror.local = Some((message, owner.clone()));
+                }
+                continue;
+            }
+            mirror.local = None;
             let missing: Vec<IpAddr> = self
                 .addresses
                 .iter()
@@ -387,16 +439,26 @@ impl Mirror {
                 .ports
                 .iter()
                 .map(|(port, mirror)| {
+                    let mut conflicts: Vec<Value> = mirror.conflicts.values().cloned().collect();
+                    if let Some((message, owner)) = &mirror.local {
+                        conflicts.push(json!({"message": message, "local": owner}));
+                    }
                     json!({
                         "port": port,
                         "lane": mirror.lane,
                         "unit": mirror.unit,
                         "kind": mirror.kind,
                         "addresses": mirror.bound.iter().map(|b| b.address).collect::<Vec<_>>(),
-                        "conflicts": mirror.conflicts.values().collect::<Vec<_>>(),
+                        "conflicts": conflicts,
                         "relay": self.relays.get(port).map(|(local, _)| local),
                     })
                 })
+                .collect(),
+            bound: self
+                .ports
+                .iter()
+                .filter(|(_, mirror)| !mirror.bound.is_empty())
+                .map(|(port, mirror)| (*port, format!("{}:{}", mirror.lane, mirror.unit)))
                 .collect(),
             skipped: collisions
                 .iter()
@@ -446,13 +508,49 @@ fn route_status(state: &str, connected: bool) -> RouteStatus {
         return RouteStatus::Reconnecting;
     }
     match state {
-        "ready" | "running" => RouteStatus::Ready,
         "starting" => RouteStatus::Starting,
         "failed" => RouteStatus::Failed {
             log_tail: String::new(),
         },
+        state if serving(state) => RouteStatus::Ready,
         _ => RouteStatus::Idle,
     }
+}
+
+/// This machine's port blocks, each with a description of its owner for
+/// conflict messages. Box ports inside them are never mirrored.
+async fn local_blocks(engine: &Arc<Inner>) -> Vec<(PortBlock, String)> {
+    let records = match engine.store.port_blocks().await {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!(%error, "cannot read local port blocks for the mirror");
+            return Vec::new();
+        }
+    };
+    let lanes: BTreeMap<_, String> = engine
+        .all_lanes()
+        .iter()
+        .filter_map(|(project, lane)| {
+            let st = lane.st();
+            Some((st.record.as_ref()?.id, st.reference(&project.name())))
+        })
+        .collect();
+    records
+        .into_iter()
+        .map(|record| {
+            let owner = match record.owner {
+                BlockOwner::Lane(id) => lanes.get(&id).map_or_else(
+                    || "a local lane".to_owned(),
+                    |lane| format!("local lane {lane}"),
+                ),
+                BlockOwner::Project(id) => engine.project(id).map_or_else(
+                    || "a local project's shared infra".to_owned(),
+                    |project| format!("the shared infra of local project {}", project.name()),
+                ),
+            };
+            (record.block, owner)
+        })
+        .collect()
 }
 
 /// Name suffixes the box may route here: `localhost` and the configured TLD.

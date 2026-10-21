@@ -13,4 +13,4 @@ expression: draw(&app)?.backend()
 "│                                                                              │"
 "│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
-" j/k move  tab daemon  q quit                                                   "
+" j/k move  tab daemon  ? help  q quit                                           "

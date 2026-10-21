@@ -21,10 +21,11 @@ use crate::registry::{RegistryEvent, RegistrySnapshot};
 /// Wire protocol revision; both ends must match exactly.
 ///
 /// Covers the framing here and the opaque payloads devlanes puts in them
-/// (`devlanes_proto::remote`: forwarded requests, replies, sync manifests). Bump it
-/// whenever any of those shapes changes. Revision 2 added sync manifests sent by the
-/// client, `not_running` refusals and box-side method allowlisting.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// (`devlanes_proto::remote`: sync requests and manifests). Bump it whenever any
+/// of those shapes changes. Revision 2 added sync manifests sent by the client and
+/// `not_running` refusals; revision 3 streams the client's manifest in batches as
+/// sync input frames, ended by an explicit marker.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Frames above this size are rejected before allocation.
 pub(crate) const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
@@ -328,6 +329,17 @@ pub(crate) enum SyncFrame {
         error: crate::sync::SyncError,
     },
     End,
+}
+
+/// Client frames on a sync stream after the request, such as manifest batches.
+///
+/// As on RPC streams, EOF means the client left; `EndInput` is the only way to
+/// say that no more input follows while still reading.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum SyncClientFrame {
+    Input { value: Value },
+    EndInput,
 }
 
 #[cfg(test)]

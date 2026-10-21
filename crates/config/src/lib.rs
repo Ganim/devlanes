@@ -32,7 +32,8 @@ pub use expression::{
 pub use extensions::{Extensions, OpaqueExtensions};
 pub use hostname::normalize_host;
 pub use loader::{
-    ConfigSources, check, load_project, load_project_with, parse_project, parse_project_with,
+    ConfigSources, check, check_compose_files, load_project, load_project_with, parse_project,
+    parse_project_with,
 };
 pub use model::*;
 pub use scalar::{ByteSize, ConfigDuration, Percent, Scalar, Templated};
@@ -42,6 +43,7 @@ pub use user::*;
 pub use validation::{
     CheckReport, ConfigWarning, PresetPorts, PresetValidator, validate,
     validate_with_compose_services, validate_with_preset_ports, validate_with_presets,
+    validate_with_registry,
 };
 
 /// Generate the project JSON Schema, including the selected extension schemas.

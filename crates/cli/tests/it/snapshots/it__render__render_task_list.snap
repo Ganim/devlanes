@@ -4,15 +4,15 @@ expression: text
 ---
 --- human (exit 0)
 TASK     WHEN         AFTER     PROFILES  RUNS
-migrate  lane.start   -         -         package.json#db:migrate
-seed     lane.create  services  dev       run (confirm)
-reset    -            -         -         steps drop,migrate
+migrate  lane.start   -         -         script package.json#db:migrate
+seed     lane.create  services  dev       its `run` command (asks first)
+reset    -            -         -         tasks drop,migrate in order
 sources: package.json (npm)
 --- plain (exit 0)
 TASK     WHEN         AFTER     PROFILES  RUNS
-migrate  lane.start   -         -         package.json#db:migrate
-seed     lane.create  services  dev       run (confirm)
-reset    -            -         -         steps drop,migrate
+migrate  lane.start   -         -         script package.json#db:migrate
+seed     lane.create  services  dev       its `run` command (asks first)
+reset    -            -         -         tasks drop,migrate in order
 sources: package.json (npm)
 --- agent (exit 0)
 task migrate when=lane.start script=package.json#db:migrate

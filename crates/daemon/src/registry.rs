@@ -41,6 +41,19 @@ pub(crate) struct Tree {
     pub present: bool,
 }
 
+/// What a caller may do to a lane's port block and layout ([`Inner::lane_access`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaneAccess {
+    /// Nothing runs: the block may move and the layout follows the config.
+    Free,
+    /// Units, orphans or spawns are live: the block stays (plan 5.8), and the
+    /// layout follows the config only while that needs no other block.
+    Running,
+    /// Another operation holds the lane's `op`: block and layout stay until it
+    /// ends, then the pending refresh runs.
+    Held,
+}
+
 /// Lanes that appeared or disappeared during one re-list.
 #[derive(Default)]
 pub(crate) struct SyncReport {
@@ -210,7 +223,9 @@ pub(crate) fn check_config(
         names.dedup();
         names
     };
-    devlanes_config::validate_with_preset_ports(config, &validator, &ports)
+    // With the names, an unknown preset gets the closest registered one suggested.
+    let names: Vec<&str> = checks.presets.iter().map(|preset| preset.name).collect();
+    devlanes_config::validate_with_registry(config, &names, &validator, &ports)
 }
 
 pub(crate) async fn load_config(
@@ -259,6 +274,30 @@ pub(crate) async fn load_config(
     })
     .await
     .unwrap_or_else(|error| ConfigState::Invalid(internal("config_error", error)))
+}
+
+/// Modification time and size of each file a lane's config is read from
+/// (`devlanes.yaml`, then the lane's and the primary worktree's
+/// `devlanes.local.yaml`); a missing file is `None`.
+pub(crate) type ConfigStamp = Vec<Option<(std::time::SystemTime, u64)>>;
+
+/// Reads the [`ConfigStamp`] off the executor.
+pub(crate) async fn config_stamp(lane_dir: PathBuf, primary_dir: PathBuf) -> ConfigStamp {
+    tokio::task::spawn_blocking(move || {
+        [
+            lane_dir.join("devlanes.yaml"),
+            lane_dir.join("devlanes.local.yaml"),
+            primary_dir.join("devlanes.local.yaml"),
+        ]
+        .iter()
+        .map(|file| {
+            let meta = std::fs::metadata(file).ok()?;
+            Some((meta.modified().ok()?, meta.len()))
+        })
+        .collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Evaluates a literal-or-expression without lane context (block size, max).
@@ -383,7 +422,7 @@ impl Inner {
             )
             .await?;
         self.sync_worktrees(&project, trees).await?;
-        self.watch_project(&project, repository);
+        self.watch_project(&project, repository).await;
         Ok(project)
     }
 
@@ -436,6 +475,7 @@ impl Inner {
                 primary_branch,
                 last_env: None,
                 lanes: map,
+                former_names: Vec::new(),
             }),
             watching: std::sync::atomic::AtomicBool::new(false),
             watch: self.shutdown.child_token(),
@@ -790,13 +830,99 @@ impl Inner {
         Ok(())
     }
 
+    /// How far the caller may change `lane`'s block and layout right now; the one
+    /// check behind [`Self::allocate_lane`] and [`Self::refresh_views`] and their
+    /// `_held` forms. `held` says the caller holds the lane's `op` itself (a start
+    /// on its own lane, `infra up`). Otherwise the lane's `op` is tried: while
+    /// another operation holds it, normally a start between taking it and its
+    /// last spawn, the lane is [`LaneAccess::Held`] and a refresh is scheduled for
+    /// when it ends. The returned guard keeps a start from beginning until the
+    /// caller is done.
+    pub(crate) fn lane_access<'a>(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        lane: &'a Arc<LaneRt>,
+        held: bool,
+    ) -> (LaneAccess, Option<tokio::sync::MutexGuard<'a, ()>>) {
+        let guard = if held {
+            None
+        } else {
+            match lane.op.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    self.defer_refresh(project, lane);
+                    return (LaneAccess::Held, None);
+                }
+            }
+        };
+        let st = lane.st();
+        let access = if st.any_running() || st.spawning > 0 {
+            LaneAccess::Running
+        } else {
+            LaneAccess::Free
+        };
+        (access, guard)
+    }
+
+    /// Marks a refresh of `lane` pending and, unless one is already queued,
+    /// queues a task that runs it once it gets the lane's `op`: right after the
+    /// operation holding it ends, before or after the next one in line.
+    fn defer_refresh(self: &Arc<Self>, project: &Arc<ProjectRt>, lane: &Arc<LaneRt>) {
+        if std::mem::replace(&mut lane.st().refresh_pending, true) {
+            return;
+        }
+        let (engine, project, lane) = (self.clone(), project.clone(), lane.clone());
+        tokio::spawn(async move {
+            let _op = tokio::select! {
+                () = engine.shutdown.cancelled() => return,
+                // The project was dropped (`daemon reset-state`) or the lane removed.
+                () = project.watch.cancelled() => return,
+                () = lane.watch.cancelled() => return,
+                op = lane.op.lock() => op,
+            };
+            // A start on this lane may have refreshed it meanwhile.
+            if !lane.st().refresh_pending {
+                return;
+            }
+            let refresh: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+                Box::pin(engine.refresh_with(&project, Some(&lane)));
+            refresh.await;
+            engine.emit_lane(&project, &lane);
+        });
+    }
+
     /// Allocates (or resizes) the lane's block for the config's ports plus `infra`
-    /// needs, and the project's shared block when shared infra needs ports.
+    /// needs, and the project's shared block when shared infra needs ports. A lane
+    /// that runs something, or that another operation holds, keeps its block
+    /// ([`Self::lane_access`]).
     pub(crate) async fn allocate_lane(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
         lane: &Arc<LaneRt>,
         infra: &[InfraPortNeed],
+    ) -> Result<devlanes_state::Allocation, RpcError> {
+        let (access, _guard) = self.lane_access(project, lane, false);
+        self.allocate_with(project, lane, infra, access).await
+    }
+
+    /// [`Self::allocate_lane`] for a caller that holds the lane's `op`.
+    pub(crate) async fn allocate_lane_held(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        lane: &Arc<LaneRt>,
+        infra: &[InfraPortNeed],
+    ) -> Result<devlanes_state::Allocation, RpcError> {
+        let (access, _guard) = self.lane_access(project, lane, true);
+        self.allocate_with(project, lane, infra, access).await
+    }
+
+    /// The allocation itself, under an access the caller already checked.
+    async fn allocate_with(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        lane: &Arc<LaneRt>,
+        infra: &[InfraPortNeed],
+        access: LaneAccess,
     ) -> Result<devlanes_state::Allocation, RpcError> {
         let (config, record, facts_env) = {
             let st = lane.st();
@@ -826,22 +952,65 @@ impl Inner {
             devlanes_resolve::fixed_block_start(&config, &facts, &client_env, &dotenv)
                 .map_err(|error| crate::resolve::resolve_error(&error))?;
         let fixed_size = literal(&config.lanes.block_size);
-        {
-            // Running units keep the block they were spawned with (plan 5.8): a
-            // config that needs other ports waits for the next whole-lane start.
+        // Running units keep the block they were spawned with (plan 5.8): a
+        // config that needs another block waits for the next whole-lane start.
+        // A held lane's start has resolved (or is resolving) against the current
+        // block; the refresh after it decides. A lane without a block yet has
+        // nothing to keep.
+        let kept = {
             let mut st = lane.st();
-            if st.any_running()
+            if access == LaneAccess::Held
                 && let Some(current) = st.allocation.clone()
             {
-                st.ports_pending = names.iter().any(|name| !current.offsets.contains_key(name))
-                    || needs
+                return Ok(current);
+            }
+            match st.allocation.clone() {
+                Some(current) if access == LaneAccess::Running => {
+                    let moves = needs
                         .reserved
                         .iter()
                         .any(|offset| !current.reserved.contains(offset))
-                    || fixed_size.is_some_and(|size| size != current.block.size)
-                    || fixed_start.is_some_and(|start| start != current.block.start);
-                return Ok(current);
+                        || fixed_size.is_some_and(|size| size != current.block.size)
+                        || fixed_start.is_some_and(|start| start != current.block.start);
+                    let missing = names.iter().any(|name| !current.offsets.contains_key(name));
+                    if moves || !missing {
+                        st.ports_pending = moves;
+                        return Ok(current);
+                    }
+                    Some(current)
+                }
+                _ => None,
             }
+        };
+        if let Some(current) = kept {
+            // Only new port names: they take free offsets of the kept block, so
+            // a service added to a running lane can start without moving it.
+            let grown = self
+                .store
+                .allocate(AllocationRequest {
+                    owner: BlockOwner::Lane(record.id),
+                    pool,
+                    fixed_size: Some(current.block.size),
+                    fixed_start: Some(current.block.start),
+                    names,
+                    reserved: needs.reserved.clone(),
+                    avoid: self.remote.advertised_ports(),
+                })
+                .await;
+            let mut st = lane.st();
+            return Ok(match grown {
+                Ok(allocation) if allocation.block == current.block => {
+                    st.allocation = Some(allocation.clone());
+                    st.ports_pending = false;
+                    allocation
+                }
+                // The block has no room for them: they wait for the next
+                // whole-lane start, which moves it.
+                _ => {
+                    st.ports_pending = true;
+                    current
+                }
+            });
         }
         let allocation = self
             .store
@@ -852,9 +1021,17 @@ impl Inner {
                 fixed_start,
                 names,
                 reserved: needs.reserved.clone(),
+                avoid: self.remote.advertised_ports(),
             })
             .await
             .map_err(store_error)?;
+        tracing::debug!(
+            lane = record.index,
+            block_start = allocation.block.start,
+            block_size = allocation.block.size,
+            ports = allocation.offsets.len(),
+            "ports allocated"
+        );
         let shared: BTreeSet<PortName> = infra
             .iter()
             .filter(|n| n.scope == PortScope::Shared)
@@ -869,6 +1046,7 @@ impl Inner {
                     fixed_start: None,
                     names: shared,
                     reserved: BTreeSet::new(),
+                    avoid: self.remote.advertised_ports(),
                 })
                 .await
                 .map_err(store_error)?;
@@ -915,35 +1093,141 @@ impl Inner {
         (lane.st().path.join(&project.config_dir), primary)
     }
 
-    /// Reloads one lane's config. A change while units run sets `config_changed`;
-    /// running units are never touched (plan 5.8).
+    /// Reloads one lane's config. A change while units run, or while a start or
+    /// another operation holds the lane, sets `config_changed`; running units are
+    /// never touched (plan 5.8).
     pub(crate) async fn reload_config(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
         lane: &Arc<LaneRt>,
     ) {
         let (lane_dir, primary_dir) = self.config_dirs(project, lane);
+        // Taken before reading, so an edit during the load shows as a new stamp.
+        let stamp = config_stamp(lane_dir.clone(), primary_dir.clone()).await;
         let config = self
             .with_resolver_domain(load_config(lane_dir, primary_dir, self.config_checks()).await);
-        let mut st = lane.st();
-        let before = match &st.config {
-            ConfigState::Loaded(config) => serde_json::to_value(config.as_ref()).ok(),
-            _ => None,
-        };
-        let after = match &config {
-            ConfigState::Loaded(config) => serde_json::to_value(config.as_ref()).ok(),
-            _ => None,
-        };
-        let differs = before != after || before.is_none();
-        if differs && st.any_running() {
-            st.config_changed = true;
+        tracing::debug!(
+            path = %lane.st().path.display(),
+            state = match &config {
+                ConfigState::Loaded(_) => "loaded",
+                ConfigState::Missing => "missing",
+                ConfigState::Invalid(_) => "invalid",
+            },
+            "config read"
+        );
+        let in_flight = lane.op.try_lock().is_err();
+        let renamed = config.loaded().map(|config| config.project.clone());
+        {
+            let mut st = lane.st();
+            st.config_stamp = Some(stamp);
+            let before = match &st.config {
+                ConfigState::Loaded(config) => serde_json::to_value(config.as_ref()).ok(),
+                _ => None,
+            };
+            let after = match &config {
+                ConfigState::Loaded(config) => serde_json::to_value(config.as_ref()).ok(),
+                _ => None,
+            };
+            let differs = before != after || before.is_none();
+            if differs && (st.any_running() || in_flight || st.start.is_some()) {
+                st.config_changed = true;
+            }
+            st.config = config;
         }
-        st.config = config;
+        if let Some(name) = renamed {
+            self.follow_project_rename(project, lane, name).await;
+        }
     }
 
-    /// Recomputes idle layouts (ports, URLs, routes) for every assigned lane, lane 0
-    /// first so the others see `lanes.main.svc`.
+    /// Renames the project when the primary worktree's config changed `project:`.
+    /// Lane references are `<project>@<index>` from the in-memory name, so the
+    /// record and the name change together; every lane emits `lane.changed`.
+    /// Other worktrees' configs (a branch that renames) do not rename it.
+    async fn follow_project_rename(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        lane: &Arc<LaneRt>,
+        name: String,
+    ) {
+        let old = project.name();
+        if name == old {
+            return;
+        }
+        // Read before `primary_path`, which locks every lane, this one included.
+        let path = lane.st().path.clone();
+        if path != self.primary_path(project) {
+            return;
+        }
+        let input = {
+            let st = project.st();
+            ProjectInput {
+                name: name.clone(),
+                common_dir: st.common_dir.clone(),
+                root_path: st.root.clone(),
+                primary_branch: st.primary_branch.clone(),
+            }
+        };
+        if let Err(error) = self.store.upsert_project(input).await {
+            tracing::warn!(%error, project = %old, new = %name, "project rename not recorded");
+            return;
+        }
+        {
+            let mut st = project.st();
+            st.former_names.retain(|former| *former != name);
+            st.former_names.push(old.clone());
+            st.name = name.clone();
+        }
+        tracing::info!(project = %old, new = %name, "project renamed");
+        for each in project.lanes() {
+            self.emit_lane(project, &each);
+        }
+    }
+
+    /// Reloads the lane's config right away when its files changed since the last
+    /// load, so `start`, `restart`, `run`, `wait` and `config check` sent right
+    /// after an edit see it instead of waiting for the poller.
+    pub(crate) async fn fresh_config(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        lane: &Arc<LaneRt>,
+    ) {
+        let (lane_dir, primary_dir) = self.config_dirs(project, lane);
+        let present = lane.st().present;
+        if !present {
+            return;
+        }
+        let current = config_stamp(lane_dir, primary_dir).await;
+        if lane.st().config_stamp.as_ref() == Some(&current) {
+            return;
+        }
+        self.reload_config(project, lane).await;
+        if lane.st().record.is_none()
+            && let Err(error) = self.assign_pending(project).await
+        {
+            tracing::warn!(code = %error.code, "lane assignment failed");
+        }
+        self.refresh_views(project).await;
+        self.emit_lane(project, lane);
+    }
+
+    /// Recomputes layouts (ports, URLs, routes) for every assigned lane, lane 0
+    /// first so the others see `lanes.main.svc`. A lane another operation holds
+    /// keeps its layout until that operation ends ([`Self::lane_access`]).
     pub(crate) async fn refresh_views(self: &Arc<Self>, project: &Arc<ProjectRt>) {
+        self.refresh_with(project, None).await;
+    }
+
+    /// [`Self::refresh_views`] for a caller that holds `lane`'s `op`.
+    pub(crate) async fn refresh_views_held(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        lane: &Arc<LaneRt>,
+    ) {
+        self.refresh_with(project, Some(lane)).await;
+    }
+
+    /// The refresh, with the lane whose `op` the caller holds, if any.
+    async fn refresh_with(self: &Arc<Self>, project: &Arc<ProjectRt>, held: Option<&Arc<LaneRt>>) {
         let mut lanes = project.lanes();
         lanes.sort_by_key(|lane| {
             lane.st()
@@ -957,18 +1241,29 @@ impl Inner {
                 lane.st().view = None;
                 continue;
             }
+            let owned = held.is_some_and(|held| Arc::ptr_eq(held, &lane));
+            let (access, _guard) = self.lane_access(project, &lane, owned);
+            // A held lane's start resolves against the layout it has; the
+            // deferred refresh replaces it once the start ended.
+            if access == LaneAccess::Held {
+                if let Some(view) = lane.st().view.clone().filter(|_| index == Some(0)) {
+                    main_svc = Some(view.svc.clone());
+                }
+                continue;
+            }
+            // This refresh is the one a deferral waited for.
+            lane.st().refresh_pending = false;
             // A config that gained ports needs offsets before its layout resolves.
-            let pending = if self.needs_allocation(&lane) {
-                let _ = self.allocate_lane(project, &lane, &[]).await;
-                let st = lane.st();
-                st.ports_pending && st.any_running()
+            let keep = if self.needs_allocation(&lane) {
+                let _ = self.allocate_with(project, &lane, &[], access).await;
+                access == LaneAccess::Running && lane.st().ports_pending
             } else {
                 lane.st().ports_pending = false;
                 false
             };
             // While the block waits for the next whole-lane start, the running
-            // units' layout stays; the new config cannot resolve without it.
-            let kept = lane.st().view.clone().filter(|_| pending);
+            // units' layout stays; the new config cannot resolve without its block.
+            let kept = lane.st().view.clone().filter(|_| keep);
             if let Some(view) = kept {
                 if index == Some(0) {
                     main_svc = Some(view.svc.clone());
@@ -1110,8 +1405,10 @@ impl Inner {
             .emit(events::LANE_CHANGED, json!({"lane": summary}));
     }
 
-    /// Starts git and config watchers for a project once.
-    pub(crate) fn watch_project(
+    /// Starts git and config watchers for a project once. Returns once the git
+    /// watcher is live, so a worktree added right after the request that
+    /// registered the project is seen.
+    pub(crate) async fn watch_project(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
         repository: Option<devlanes_git::Repository>,
@@ -1120,29 +1417,34 @@ impl Inner {
             return;
         }
         if let Some(repository) = repository {
-            match devlanes_git::watch(repository) {
-                Ok(mut updates) => {
-                    let engine = self.clone();
-                    let project = project.clone();
-                    tokio::spawn(async move {
-                        loop {
-                            let update = tokio::select! {
-                                () = project.watch.cancelled() => break,
-                                update = updates.recv() => update,
-                            };
-                            let Some(update) = update else { break };
-                            let Ok(list) = update else { continue };
-                            let trees = list.iter().map(tree).collect();
-                            match engine.sync_worktrees(&project, trees).await {
-                                Ok(report) => engine.apply_policies(&project, report).await,
-                                Err(error) => {
-                                    tracing::warn!(code = %error.code, "worktree sync failed")
-                                }
-                            }
-                        }
-                    });
+            // Registering file-system watches can take seconds on a busy machine,
+            // so it runs on the blocking pool; the request waits for it, because
+            // until the watches exist a change produces no event at all.
+            let watched =
+                tokio::task::spawn_blocking(move || devlanes_git::watch(repository)).await;
+            let updates = match watched {
+                Ok(Ok(updates)) => Some(updates),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "worktree watch unavailable");
+                    None
                 }
-                Err(error) => tracing::warn!(%error, "worktree watch unavailable"),
+                Err(error) => {
+                    tracing::warn!(%error, "worktree watch unavailable");
+                    None
+                }
+            };
+            if let Some(mut updates) = updates {
+                // Worktrees that changed between the caller's listing and the
+                // watches going live left no event behind.
+                match self.relist(project).await {
+                    Ok(report) => self.apply_policies(project, report).await,
+                    Err(error) => tracing::warn!(code = %error.code, "worktree sync failed"),
+                }
+                let engine = self.clone();
+                let project = project.clone();
+                tokio::spawn(async move {
+                    engine.follow_worktrees(&project, &mut updates).await;
+                });
             }
         }
         let engine = self.clone();
@@ -1150,11 +1452,33 @@ impl Inner {
         tokio::spawn(async move { engine.watch_configs(project).await });
     }
 
+    /// Applies each worktree list the git watcher reports until the project goes away.
+    async fn follow_worktrees(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        updates: &mut tokio::sync::mpsc::Receiver<
+            Result<Vec<devlanes_git::Worktree>, devlanes_git::Error>,
+        >,
+    ) {
+        loop {
+            let update = tokio::select! {
+                () = project.watch.cancelled() => break,
+                update = updates.recv() => update,
+            };
+            let Some(update) = update else { break };
+            let Ok(list) = update else { continue };
+            let trees = list.iter().map(tree).collect();
+            match self.sync_worktrees(project, trees).await {
+                Ok(report) => self.apply_policies(project, report).await,
+                Err(error) => tracing::warn!(code = %error.code, "worktree sync failed"),
+            }
+        }
+    }
+
     /// Polls each lane's config files and reloads on change. Polling stays correct
     /// across editors that replace files and needs no per-lane OS watch handles.
     async fn watch_configs(self: Arc<Self>, project: Arc<ProjectRt>) {
         let mut stamps: BTreeMap<WorktreeId, Vec<Option<std::time::SystemTime>>> = BTreeMap::new();
-        let mut deferred: BTreeSet<WorktreeId> = BTreeSet::new();
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         loop {
             tokio::select! {
@@ -1181,26 +1505,14 @@ impl Inner {
                 })
                 .await
                 .unwrap_or_default();
-                let Some(previous) = stamps.insert(lane.worktree, current.clone()) else {
-                    continue;
-                };
-                let changed = previous != current;
-                if changed {
-                    self.reload_config(&project, &lane).await;
-                } else if !deferred.contains(&lane.worktree) {
+                let previous = stamps.insert(lane.worktree, current.clone());
+                if previous.is_none_or(|previous| previous == current) {
                     continue;
                 }
-                // A start or stop in progress owns the lane's block and layout:
-                // the new config is recorded now (`config_changed`), its ports
-                // and views once that operation has finished.
-                let Ok(_op) = lane.op.try_lock() else {
-                    deferred.insert(lane.worktree);
-                    if changed {
-                        self.emit_lane_event(&project, &lane);
-                    }
-                    continue;
-                };
-                deferred.remove(&lane.worktree);
+                // A start in flight keeps the lane's block and layout: the new
+                // config is recorded now (`config_changed`), its ports and views
+                // once the start ended (`lane_access`).
+                self.reload_config(&project, &lane).await;
                 if lane.st().record.is_none()
                     && let Err(error) = self.assign_pending(&project).await
                 {
@@ -1353,7 +1665,7 @@ fn infra_routes(
     infra: &Value,
     env: &EnvMap,
     dotenv: &EnvMap,
-) -> Vec<(String, String, u16)> {
+) -> Vec<crate::model::InfraRoute> {
     let context = lane_context(
         facts,
         &layout.domain,
@@ -1363,23 +1675,58 @@ fn infra_routes(
         env,
         dotenv,
     );
-    let mut routes = Vec::new();
-    for (container, hosts) in &config.infra.hosts {
-        let Some(port) = infra
-            .get(container)
-            .and_then(|entry| entry.get("port"))
+    let as_port = |value: Option<&Value>| {
+        value
             .and_then(Value::as_u64)
             .and_then(|port| u16::try_from(port).ok())
-        else {
+    };
+    let mut routes = Vec::new();
+    for (container, hosts) in &config.infra.hosts {
+        // Ports are known once the container's infra ran; until then it has no route.
+        let Some(entry) = infra.get(container) else {
             continue;
         };
         for host in hosts {
-            let template = match host {
-                devlanes_config::HostConfig::Name(name) => name,
-                devlanes_config::HostConfig::Route(route) => &route.host,
+            let (template, port, fallback, upstream) = match host {
+                devlanes_config::HostConfig::Name(name) => (name, None, None, false),
+                devlanes_config::HostConfig::Route(route) => (
+                    &route.host,
+                    route.port.as_deref(),
+                    route.fallback.as_ref(),
+                    matches!(
+                        route.host_header,
+                        Some(devlanes_config::HostHeader::Upstream)
+                    ),
+                ),
+            };
+            // A named port is a key of `infra.<container>.ports`: the container
+            // port for Compose services, the port's name for plain containers.
+            let port = match port {
+                Some(name) => as_port(entry.get("ports").and_then(|ports| ports.get(name))),
+                None => as_port(entry.get("port")),
+            };
+            let Some(port) = port else {
+                tracing::debug!(%container, "infra host route has no published port yet");
+                continue;
+            };
+            let fallback = match fallback {
+                Some(value) => match value.evaluate(&context) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::debug!(%container, message = %error.message, "infra host fallback unresolved");
+                        continue;
+                    }
+                },
+                None => false,
             };
             if let Ok(host) = template.evaluate(&context) {
-                routes.push((host, container.clone(), port));
+                routes.push(crate::model::InfraRoute {
+                    host,
+                    container: container.clone(),
+                    port,
+                    fallback,
+                    host_header_upstream: upstream,
+                });
             }
         }
     }
@@ -1389,6 +1736,32 @@ fn infra_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    /// An unregistered preset is refused with the closest registered name.
+    fn unknown_preset_names_the_closest() {
+        let config = devlanes_config::parse_project_with::<OpaqueExtensions>(
+            "project: demo\nservices:\n  web: { run: serve, preset: vtie }\n",
+            None,
+        )
+        .expect("parses");
+        let parse: Arc<crate::integrations::PresetParser> = Arc::new(|_| Ok(()));
+        let checks = ConfigChecks {
+            presets: ["vite", "next"]
+                .map(|name| crate::integrations::PresetEntry {
+                    name,
+                    parse: parse.clone(),
+                })
+                .to_vec(),
+            contributors: Vec::new(),
+        };
+        let error = check_config(&config, &checks).expect_err("unknown preset");
+        assert!(
+            error.message.contains("did you mean `vite`"),
+            "{}",
+            error.message
+        );
+    }
 
     #[test]
     /// `.env` parsing handles export, quotes and inline comments.

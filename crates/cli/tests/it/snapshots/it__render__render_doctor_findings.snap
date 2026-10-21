@@ -6,7 +6,7 @@ expression: text
 daemon
   ✓ devlanes 0.2.0, pid 4242, socket /home/u/.devlanes/run/daemon.sock
   ✓ state schema 5 at /home/u/.devlanes/state.db
-  ✓ 2 projects loaded, 1 event subscribers
+  ✓ 2 projects loaded, 1 event subscriber
 sandbox
   ✓ not sandboxed
 docker
@@ -19,6 +19,9 @@ proxy
   ! hostname web_app.localhost is invalid (acme@2:web): `web_app.localhost` contains `_`, which DNS names cannot; the route is left out
 tls
   ✓ CA at /home/u/.devlanes/ca/ca.pem
+  ✗ CA not trusted by system
+    fix: devlanes certs trust
+  ! cannot tell whether firefox trusts the CA: certutil is not installed
   ! the devlanes CA has no name constraints (it predates them), so a leaked key could sign certificates for any site
     fix: devlanes certs untrust && rm -r /home/u/.devlanes/ca && devlanes certs trust && devlanes daemon restart
   ! api.example.com is outside the CA's names; HTTPS will fail; try api.acme-2.localhost (acme@2:api)
@@ -36,7 +39,7 @@ output
 daemon
   ok devlanes 0.2.0, pid 4242, socket /home/u/.devlanes/run/daemon.sock
   ok state schema 5 at /home/u/.devlanes/state.db
-  ok 2 projects loaded, 1 event subscribers
+  ok 2 projects loaded, 1 event subscriber
 sandbox
   ok not sandboxed
 docker
@@ -49,6 +52,9 @@ proxy
   warn hostname web_app.localhost is invalid (acme@2:web): `web_app.localhost` contains `_`, which DNS names cannot; the route is left out
 tls
   ok CA at /home/u/.devlanes/ca/ca.pem
+  fail CA not trusted by system
+    fix: devlanes certs trust
+  warn cannot tell whether firefox trusts the CA: certutil is not installed
   warn the devlanes CA has no name constraints (it predates them), so a leaked key could sign certificates for any site
     fix: devlanes certs untrust && rm -r /home/u/.devlanes/ca && devlanes certs trust && devlanes daemon restart
   warn api.example.com is outside the CA's names; HTTPS will fail; try api.acme-2.localhost (acme@2:api)
@@ -65,8 +71,11 @@ output
 --- agent (exit 0)
 fail proxy: http on port 80 is not serving: 127.0.0.1:80: Too many open files (os error 24) (3 accept errors); [::1]:80 stopped accepting connections
   fix: devlanes daemon restart; if it persists, devlanes daemon logs
+fail tls: CA not trusted by system
+  fix: devlanes certs trust
 fail config: user config /home/u/.devlanes/config.yaml:4:1: unknown field `proxyy`
   fix: edit /home/u/.devlanes/config.yaml, then devlanes daemon restart
+warn tls: cannot tell whether firefox trusts the CA: certutil is not installed
 warn tls: the devlanes CA has no name constraints (it predates them), so a leaked key could sign certificates for any site
   fix: devlanes certs untrust && rm -r /home/u/.devlanes/ca && devlanes certs trust && devlanes daemon restart
 warn tls: api.example.com is outside the CA's names; HTTPS will fail; try api.acme-2.localhost (acme@2:api)
@@ -82,5 +91,5 @@ ok docker: Compose 2.29.1
 ok proxy: https on port 443
 ok tls: CA at /home/u/.devlanes/ca/ca.pem
 ok hosts: /etc/hosts fallback auto, resolver loopback, 3 names written
-ok daemon: 2 projects loaded, 1 event subscribers
+ok daemon: 2 projects loaded, 1 event subscriber
 ok output: mode agent (DEVLANES_OUTPUT)

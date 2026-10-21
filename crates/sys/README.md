@@ -27,7 +27,8 @@ All functions block. Call them from `spawn_blocking` in async code.
 - `processes`, `process`, `identity`, `start_time`: read the process table. `process` still returns unreaped zombies.
 - `matches`, `signal_verified`: compare PID and start time before acting.
 - `DescendantTracker`: builds up a unit's process tree from repeated snapshots and keeps processes that later call `setsid`.
-- `session_members`: the leader and members of a recorded session, for reconciliation.
+- `session_members`: the leader and members of a recorded session, for reconciliation. Empty once the leader is gone, since its session ID may then belong to another session.
+- `session_members_known`: the same, but a recorded member still in the session also proves it is ours, because a PID in use as a session ID is never reassigned. For a supervisor that reaped the leader itself.
 - `boot_id`: an opaque token for the current boot, so records from before a reboot are never matched against live PIDs.
 - `listening_tcp`: TCP listeners of a set of PIDs, for diagnostics only.
 - `open_file`, `holders`: find processes that still hold a PTY slave or pipe open.

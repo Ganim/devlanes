@@ -48,9 +48,10 @@ pub struct EngineOptions {
     /// Where the embedded DNS server listens under the `resolver` hostname
     /// strategy; port 0 picks an ephemeral port (tests).
     pub dns_listen: std::net::SocketAddr,
-    /// Why the user config could not be used (`{message, file, line, column}`);
-    /// `user` then holds the defaults. `doctor` shows it.
-    pub user_config_error: Option<Value>,
+    /// Problems of the user config at load, each `{message, file, line, column}`;
+    /// the keys they name use their defaults in `user`, every other key its
+    /// value. `daemon status` shows them; `doctor` checks the file again.
+    pub user_config_errors: Vec<Value>,
     /// Release checks (see `update`); never downloads or installs anything.
     pub update_check: crate::update::UpdateCheckOptions,
 }
@@ -68,7 +69,7 @@ impl EngineOptions {
             watch: true,
             start_timeout: Duration::from_secs(180),
             dns_listen: devlanes_resolver_dns::default_listen(),
-            user_config_error: None,
+            user_config_errors: Vec::new(),
             update_check: crate::update::UpdateCheckOptions::from_env(),
         }
     }
@@ -161,8 +162,9 @@ impl Handler for Engine {
             .sum()
     }
 
-    /// Kills verified orphans of a crashed daemon, reloads known projects and
-    /// starts background work.
+    /// Reloads known projects, records a previous daemon's units whose identity
+    /// still verifies as orphaned (left running, never killed here) and starts
+    /// background work.
     async fn reconcile(&self) -> Result<(), RpcError> {
         self.inner.reconcile().await
     }
@@ -335,6 +337,12 @@ impl Inner {
                 "pid": std::process::id(),
                 "uptime_ms": self.started.elapsed().as_millis(),
                 "release_check": self.release_check(),
+                // As loaded at startup, so `daemon restart` shows what it applied.
+                "user_config": {
+                    "path": self.opts.home.join("config.yaml"),
+                    "errors": self.opts.user_config_errors,
+                    "warnings": self.opts.user.warnings(),
+                },
             }))),
             Method::DaemonShutdown => Ok(json!({"stopping": true})),
             Method::DaemonResetState => self.reset_state(&context).await,
@@ -440,13 +448,35 @@ impl Inner {
                 .map(PathBuf::from),
         };
         let found = devlanes_core::refs::resolve_lane(&parsed, &candidates, &resolve)
-            .map_err(reference_error)?;
+            .map_err(reference_error)
+            .map_err(|error| self.renamed_hint(error, &parsed))?;
         map.get(&found.id).cloned().ok_or_else(|| {
             reference_error(ReferenceError::NotFound {
                 reference: reference.into(),
                 candidates: Vec::new(),
             })
         })
+    }
+
+    /// A `not_found` for `<old>@<lane>` after `project:` was renamed gains
+    /// `renamed_to` and `suggestion` (the same lane under the new name).
+    fn renamed_hint(&self, mut error: RpcError, parsed: &LaneRef) -> RpcError {
+        let Some(old) = &parsed.project else {
+            return error;
+        };
+        if error.code != "not_found" {
+            return error;
+        }
+        let renamed = self
+            .all_projects()
+            .into_iter()
+            .find(|project| project.st().former_names.contains(old));
+        if let Some(project) = renamed {
+            let name = project.name();
+            error.data["renamed_to"] = json!(name);
+            error.data["suggestion"] = json!(format!("{name}@{}", parsed.selector));
+        }
+        error
     }
 
     /// Finds a project by its config name; several projects with one name are ambiguous.
@@ -457,11 +487,22 @@ impl Inner {
             .filter(|project| project.name() == name)
             .collect();
         match found.len() {
-            0 => Err(RpcError::new(
-                "not_found",
-                json!({"reference": name, "candidates": self.all_projects().iter().map(|p| p.name()).collect::<Vec<_>>()}),
-                3,
-            )),
+            0 => {
+                let mut error = RpcError::new(
+                    "not_found",
+                    json!({"reference": name, "candidates": self.all_projects().iter().map(|p| p.name()).collect::<Vec<_>>()}),
+                    3,
+                );
+                let renamed = self
+                    .all_projects()
+                    .into_iter()
+                    .find(|project| project.st().former_names.iter().any(|n| n == name));
+                if let Some(project) = renamed {
+                    error.data["renamed_to"] = json!(project.name());
+                    error.data["suggestion"] = json!(project.name());
+                }
+                Err(error)
+            }
             1 => Ok(found.into_iter().next()),
             _ => Ok(None),
         }
@@ -497,6 +538,8 @@ impl Inner {
             if let Some((_, lane)) = best {
                 return Ok((project, lane));
             }
+        } else if !context.cwd.as_os_str().is_empty() {
+            return Err(no_config(&context.cwd).await);
         }
         let (candidates, _) = self.candidates();
         let mut names: Vec<String> = candidates
@@ -534,12 +577,40 @@ impl Inner {
             }
             selectors.push(parsed.selector);
         }
+        let by = if lane_ref.is_some() {
+            "unit reference"
+        } else if context.lane.is_some() {
+            "--lane"
+        } else {
+            "working directory"
+        };
         let pair = match lane_ref {
             Some(reference) => self.resolve_lane_ref(&reference, context).await?,
             None => self.target_lane(context).await?,
         };
+        tracing::debug!(
+            lane = %pair.1.st().reference(&pair.0.name()),
+            by,
+            cwd = %context.cwd.display(),
+            selectors = %selectors.join(","),
+            "lane resolved"
+        );
         Ok((pair, selectors))
     }
+}
+
+/// `no_config` (exit 3) for a cwd with no `devlanes.yaml` up to its repository
+/// root: `path` is the cwd, `searched_to` the last directory looked in.
+pub(crate) async fn no_config(cwd: &Path) -> RpcError {
+    let searched_to = match devlanes_git::search_config(cwd).await {
+        Ok(devlanes_git::ConfigSearch::Missing { searched_to }) => Some(searched_to),
+        _ => None,
+    };
+    RpcError::new(
+        "no_config",
+        json!({"path": cwd, "searched_to": searched_to}),
+        3,
+    )
 }
 
 /// Matches name, glob or `+tag` selectors against `(name, tags)` candidates.

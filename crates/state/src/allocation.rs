@@ -195,7 +195,22 @@ fn plan(
         .map_or(0, |offset| usize::from(offset) + 1);
     let needed = count.max(high);
     let mut size = ports::block_size(needed, request.fixed_size)?;
-    let occupied: Vec<_> = records.iter().map(|record| record.block).collect();
+    // A pool search keeps the owner's own block occupied so a resize moves to a
+    // new range; a fixed start may grow in place, so its own block must not
+    // count as a conflict.
+    let mut occupied: Vec<_> = records
+        .iter()
+        .filter(|record| request.fixed_start.is_none() || record.owner != request.owner)
+        .map(|record| record.block)
+        .collect();
+    if request.fixed_start.is_none() {
+        occupied.extend(
+            request
+                .avoid
+                .iter()
+                .filter_map(|port| PortBlock::new(*port, 1).ok()),
+        );
+    }
     let retained: BTreeSet<_> = existing.values().copied().collect();
     let reusable = old.filter(|block| {
         usize::from(block.size) >= needed

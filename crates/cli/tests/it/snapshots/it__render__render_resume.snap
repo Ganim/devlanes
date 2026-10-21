@@ -5,16 +5,16 @@ expression: text
 --- human (exit 1)
 acme@0 · main
 ✓ services  1 of 1 ready
-  ✓  api  https://api.acme-2.localhost
+  ✓  api  https://api.acme-2.localhost:8443
 
 failed acme@3: secrets for fnox profile dev are locked
 --- plain (exit 1)
 acme@0 · main
 ok services  1 of 1 ready
-  ok  api  https://api.acme-2.localhost
+  ok  api  https://api.acme-2.localhost:8443
 
 failed acme@3: secrets for fnox profile dev are locked
 --- agent (exit 1)
 acme@0 (main): 1/1 ready
-ready api https://api.acme-2.localhost
+ready api http://127.0.0.1:20103 https://api.acme-2.localhost:8443
 failed acme@3: secrets for fnox profile dev are locked

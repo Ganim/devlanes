@@ -1,6 +1,20 @@
-//! Ad-hoc units, config errors and agent output wording.
+//! Ad-hoc units, config errors, daemon protocol skew and agent output wording.
 
-use std::time::Duration;
+use std::{
+    fs,
+    io::{Read, Write},
+    os::unix::{
+        fs::DirBuilderExt,
+        net::{UnixListener, UnixStream},
+    },
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 use devlanes_e2e::{Lab, Result, alive, fixture_yaml, lane, pid, unit};
 
@@ -56,8 +70,9 @@ fn exec_unit_logs_and_stop() -> Result<()> {
     Ok(())
 }
 
-/// A broken `devlanes.yaml` fails `config check` and `start` with exit 1 and a
-/// `devlanes.yaml:<line>:<column>` location.
+/// A broken `devlanes.yaml` fails `config check` and `start` with exit 1, a
+/// `devlanes.yaml:<line>:<column>` location and, for a misspelt key, the key it
+/// probably meant.
 #[test]
 fn config_errors_point_at_the_line() -> Result<()> {
     let cases = [
@@ -65,19 +80,22 @@ fn config_errors_point_at_the_line() -> Result<()> {
         (
             "project: broken\nservices:\n  api:\n    run: [fixture-server]\n    raedy: { http: { path: /healthz } }\n",
             "devlanes.yaml:5:",
+            Some("unknown key `raedy`; did you mean `ready`?"),
         ),
         // Line 2: a misspelt top-level key.
         (
             "project: broken\nservces:\n  api:\n    run: [fixture-server]\n",
             "devlanes.yaml:2:",
+            Some("unknown key `servces`; did you mean `services`?"),
         ),
         // Line 4: a port that is not a number.
         (
             "project: broken\nservices:\n  api:\n    env: { PORT: [1] }\n    run: [fixture-server]\n",
             "devlanes.yaml:4:",
+            None,
         ),
     ];
-    for (yaml, location) in cases {
+    for (yaml, location, suggestion) in cases {
         let lab = Lab::with_config(yaml, BUDGET)?;
         for args in [&["config", "check"][..], &["start"][..]] {
             let mut command = lab.command(lab.repo(), args)?;
@@ -89,9 +107,191 @@ fn config_errors_point_at_the_line() -> Result<()> {
                 "expected {location} in stderr\n{output}"
             );
             assert!(output.stderr.starts_with("error: "), "{output}");
+            match suggestion {
+                Some(text) => assert!(
+                    output.stderr.contains(text),
+                    "expected {text:?} in stderr\n{output}"
+                ),
+                None => assert!(!output.stderr.contains("did you mean"), "{output}"),
+            }
         }
     }
     Ok(())
+}
+
+/// A repository without `devlanes.yaml`: `start` and `config check` exit 3 with the
+/// worded `no_config` error (where the search looked, and how to create the file),
+/// never the raw code.
+#[test]
+fn start_and_config_check_without_config() -> Result<()> {
+    let lab = Lab::without_config(BUDGET)?;
+    for args in [&["config", "check"][..], &["start"][..]] {
+        for mode in ["plain", "json"] {
+            let mut command = lab.command(lab.repo(), args)?;
+            command.env("DEVLANES_OUTPUT", mode);
+            let output = lab.run(command, devlanes_e2e::COMMAND_TIMEOUT)?;
+            output.expect_code(3)?;
+            assert!(output.stderr.starts_with("error: "), "{output}");
+            assert!(
+                output.stderr.contains("no devlanes.yaml in"),
+                "expected the no_config wording\n{output}"
+            );
+            assert!(
+                output.stderr.contains("create devlanes.yaml"),
+                "expected a hint that creates the file\n{output}"
+            );
+            assert!(
+                !format!("{}{}", output.stdout, output.stderr).contains("no_config"),
+                "the raw code leaked\n{output}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `daemon status` never starts a daemon: without one it says so and exits 1, and
+/// no daemon or socket exists afterwards; with one it reports `running: true`.
+#[test]
+fn daemon_status_never_spawns() -> Result<()> {
+    let lab = Lab::new("two-services", BUDGET)?;
+    let stopped = lab.devlanes(lab.repo(), &["daemon", "status", "--json"])?;
+    stopped.expect_code(1)?;
+    let report = stopped.json()?;
+    assert_eq!(report["running"], false, "{stopped}");
+    let socket = need(report["socket"].as_str(), "socket")?.to_owned();
+    let mut plain = lab.command(lab.repo(), &["daemon", "status"])?;
+    plain.env("DEVLANES_OUTPUT", "plain");
+    let plain = lab.run(plain, devlanes_e2e::COMMAND_TIMEOUT)?;
+    plain.expect_code(1)?;
+    assert!(
+        plain.stdout.contains("daemon is not running (socket"),
+        "{plain}"
+    );
+    assert!(!lab.daemon_running(), "daemon status started a daemon");
+    assert!(
+        !std::path::Path::new(&socket).exists(),
+        "daemon status created {socket}"
+    );
+
+    lab.json(lab.repo(), &["status"])?;
+    let running = lab.json(lab.repo(), &["daemon", "status", "--json"])?;
+    assert_eq!(running["running"], true, "{running}");
+    assert!(running["pid"].is_u64(), "{running}");
+    Ok(())
+}
+
+/// A daemon that answers the hello with another protocol: the CLI exits 4 and says
+/// what runs and what a restart costs, without spawning a second daemon. The fake
+/// daemon stands in for a second binary build.
+#[test]
+fn protocol_mismatch_exits_4() -> Result<()> {
+    let lab = Lab::new("two-services", BUDGET)?;
+    let _fake = FakeDaemon::serve(&lab.home().join("run"), 999, 3)?;
+    for args in [&["status"][..], &["start"][..]] {
+        let mut command = lab.command(lab.repo(), args)?;
+        command.env("DEVLANES_OUTPUT", "plain");
+        let output = lab.run(command, Duration::from_secs(30))?;
+        output.expect_code(4)?;
+        assert!(
+            output
+                .stderr
+                .contains("the running daemon is devlanes 0.0.0-fake (protocol 999"),
+            "{output}"
+        );
+        assert!(
+            output
+                .stderr
+                .contains("restarting it stops its 3 managed processes"),
+            "{output}"
+        );
+        assert!(
+            output.stderr.contains("hint: devlanes daemon restart"),
+            "{output}"
+        );
+        assert!(!output.stderr.contains("protocol_mismatch"), "{output}");
+    }
+    assert!(
+        !lab.daemon_running(),
+        "no real daemon may start next to the fake"
+    );
+    Ok(())
+}
+
+/// A Unix socket at the daemon's path that answers every hello with a fixed
+/// protocol and closes. Dropping it stops the thread and removes the socket.
+struct FakeDaemon {
+    socket: PathBuf,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl FakeDaemon {
+    /// Listens on `<run>/daemon.sock` (`run` is created private, as the client expects).
+    fn serve(run: &Path, protocol: u32, managed_processes: usize) -> Result<Self> {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(run)?;
+        let socket = run.join("daemon.sock");
+        let listener = UnixListener::bind(&socket)?;
+        listener.set_nonblocking(true)?;
+        let hello = serde_json::json!({
+            "type": "hello",
+            "body": {
+                "protocol": protocol,
+                "version": "0.0.0-fake",
+                "build_id": "fake",
+                "features": [],
+                "managed_processes": managed_processes,
+            },
+        });
+        let mut frame = vec![0u8];
+        frame.extend_from_slice(&serde_json::to_vec(&hello)?);
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = thread::spawn(move || {
+            let deadline = Instant::now() + BUDGET;
+            while !flag.load(Ordering::Relaxed) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = answer(stream, &frame);
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        });
+        Ok(Self {
+            socket,
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for FakeDaemon {
+    /// Stops accepting and removes the socket.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let _ = fs::remove_file(&self.socket);
+    }
+}
+
+/// Reads the client's hello frame (u32 length, then the payload) and sends `frame`.
+fn answer(mut stream: UnixStream, frame: &[u8]) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length)?;
+    let mut hello = vec![0u8; u32::from_be_bytes(length).min(1 << 20) as usize];
+    stream.read_exact(&mut hello)?;
+    let size = u32::try_from(frame.len()).map_err(std::io::Error::other)?;
+    stream.write_all(&size.to_be_bytes())?;
+    stream.write_all(frame)?;
+    stream.flush()
 }
 
 /// In agent mode every status line starts with a stable lowercase word: `ready`,

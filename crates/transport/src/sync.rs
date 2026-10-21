@@ -11,9 +11,11 @@ use futures_util::stream::{BoxStream, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::mux::MuxStream;
-use crate::wire::{self, Channel, SyncFrame, WireError};
+use crate::wire::{self, Channel, SyncClientFrame, SyncFrame, WireError};
 
 /// One sync message from the box.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,16 +65,50 @@ pub type SyncFeed = BoxStream<'static, Result<SyncMessage, SyncError>>;
 /// Box-side supplier of sync feeds, implemented by the sync crate.
 #[async_trait]
 pub trait SyncSource: Send + Sync {
-    /// Starts a feed for an opaque subscription request.
-    async fn subscribe(&self, request: Value) -> Result<SyncFeed, SyncError>;
+    /// Starts a feed for an opaque subscription request. `input` carries what the
+    /// client sends after the request, such as its manifest in batches.
+    async fn subscribe(&self, request: Value, input: SyncInput) -> Result<SyncFeed, SyncError>;
 }
+
+/// One item of client input on a sync stream.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyncInputEvent {
+    /// An opaque value from the client.
+    Value(Value),
+    /// The client said no more input follows; the subscription goes on.
+    End,
+}
+
+/// Client input of one subscription.
+///
+/// Values are queued with backpressure: a client sending faster than the source
+/// reads waits. Dropping the input discards later values.
+pub struct SyncInput {
+    receiver: mpsc::Receiver<SyncInputEvent>,
+}
+
+impl SyncInput {
+    /// Wraps a queue; for sources tested without a transport.
+    pub fn from_receiver(receiver: mpsc::Receiver<SyncInputEvent>) -> Self {
+        Self { receiver }
+    }
+
+    /// The next input. `None` after [`SyncInputEvent::End`], or when the client
+    /// left without ending its input.
+    pub async fn recv(&mut self) -> Option<SyncInputEvent> {
+        self.receiver.recv().await
+    }
+}
+
+/// Client input values queued per subscription before the client waits.
+const INPUT_QUEUE: usize = 4;
 
 /// A [`SyncSource`] that refuses every subscription, for boxes without sync.
 pub struct NoSync;
 
 #[async_trait]
 impl SyncSource for NoSync {
-    async fn subscribe(&self, _request: Value) -> Result<SyncFeed, SyncError> {
+    async fn subscribe(&self, _request: Value, _input: SyncInput) -> Result<SyncFeed, SyncError> {
         Err(SyncError::new("sync is not available on this box"))
     }
 }
@@ -84,12 +120,41 @@ pub(crate) async fn serve_subscription(
     source: Arc<dyn SyncSource>,
 ) {
     let (mut sink, mut client) = channel.split();
-    // The client never sends after opening, so any read completing means it left.
-    let gone = async move { while let Ok(Some(_)) = wire::recv::<_, Value>(&mut client).await {} };
-    tokio::pin!(gone);
+    let (input_tx, receiver) = mpsc::channel(INPUT_QUEUE);
+    let gone = CancellationToken::new();
+    let reader_gone = gone.clone();
+    let reader = tokio::spawn(async move {
+        let mut input_tx = Some(input_tx);
+        loop {
+            match wire::recv::<_, SyncClientFrame>(&mut client).await {
+                Ok(Some((SyncClientFrame::Input { value }, _))) => {
+                    // Waiting is the backpressure for manifest batches. A source that
+                    // dropped its input makes the send fail and reading resumes, so
+                    // the client leaving is still noticed.
+                    if let Some(tx) = &input_tx
+                        && tx.send(SyncInputEvent::Value(value)).await.is_err()
+                    {
+                        input_tx = None;
+                    }
+                }
+                Ok(Some((SyncClientFrame::EndInput, _))) => {
+                    if let Some(tx) = input_tx.take() {
+                        let _ = tx.send(SyncInputEvent::End).await;
+                    }
+                }
+                // EOF, a reset or a malformed frame: the client is gone.
+                Ok(None) | Err(_) => {
+                    reader_gone.cancel();
+                    return;
+                }
+            }
+        }
+    });
+    let _reader = AbortOnDrop(reader);
+    let input = SyncInput { receiver };
     let feed = tokio::select! {
-        feed = source.subscribe(request) => feed,
-        () = &mut gone => return,
+        feed = source.subscribe(request, input) => feed,
+        () = gone.cancelled() => return,
     };
     let mut feed = match feed {
         Ok(feed) => feed,
@@ -102,7 +167,7 @@ pub(crate) async fn serve_subscription(
     loop {
         let item = tokio::select! {
             item = feed.next() => item,
-            () = &mut gone => return,
+            () = gone.cancelled() => return,
         };
         let sent = match item {
             Some(Ok(SyncMessage::Manifest(manifest))) => {
@@ -136,6 +201,16 @@ pub(crate) async fn serve_subscription(
     let _ = sink.close().await;
 }
 
+/// Aborts the client reader when the subscription ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    /// Stops reading the client.
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Failure of a subscription as seen by the client.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncStreamError {
@@ -152,10 +227,11 @@ pub enum SyncStreamError {
 
 /// Client side of a subscription. Dropping it cancels the feed on the box.
 pub struct SyncSubscription {
-    // The sink half is kept so the write side stays open; closing it would cancel.
-    _sink: futures_util::stream::SplitSink<Channel<MuxStream>, wire::Frame>,
+    // Closing the write side would read as cancellation, so it stays open.
+    sink: futures_util::stream::SplitSink<Channel<MuxStream>, wire::Frame>,
     stream: SplitStream<Channel<MuxStream>>,
     done: bool,
+    input_ended: bool,
 }
 
 impl SyncSubscription {
@@ -163,10 +239,27 @@ impl SyncSubscription {
     pub(crate) fn new(channel: Channel<MuxStream>) -> Self {
         let (sink, stream) = channel.split();
         Self {
-            _sink: sink,
+            sink,
             stream,
             done: false,
+            input_ended: false,
         }
+    }
+
+    /// Sends one input value to the box's sync source; waits while the box is
+    /// behind.
+    pub async fn send(&mut self, value: Value) -> Result<(), SyncStreamError> {
+        wire::send(&mut self.sink, &SyncClientFrame::Input { value }).await?;
+        Ok(())
+    }
+
+    /// Tells the box no more input follows; messages keep flowing.
+    pub async fn finish_input(&mut self) -> Result<(), SyncStreamError> {
+        if !self.input_ended {
+            wire::send(&mut self.sink, &SyncClientFrame::EndInput).await?;
+            self.input_ended = true;
+        }
+        Ok(())
     }
 
     /// Next message; `None` once the box ended the feed normally.

@@ -1,7 +1,7 @@
 use crate::{
-    CheckReport, ConfigError, Env, Extensions, FnoxConfig, InfraCommand, InfraCommandOptions,
-    InfraConfig, LanesConfig, OpaqueExtensions, ProfileConfig, ProfileOptions, ProjectConfig,
-    TaskConfig, service::PartialService,
+    CheckReport, ComposeFiles, ConfigError, Env, Extensions, FnoxConfig, InfraCommand,
+    InfraCommandOptions, InfraConfig, LanesConfig, OpaqueExtensions, ProfileConfig, ProfileOptions,
+    ProjectConfig, TaskConfig, service::PartialService,
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, de::DeserializeOwned};
@@ -37,6 +37,25 @@ impl ConfigSources {
             ),
             None => error,
         }
+    }
+
+    /// Source position of the deepest YAML node on a dotted field path such as
+    /// `services.api.hosts.0`, preferring the local file when it sets that field.
+    /// `None` when the config was not parsed from YAML or no part of the path matches.
+    pub fn position(&self, path: &str) -> Option<crate::SourceLocation> {
+        let (file, source) = self.base.as_ref()?;
+        let error = locate(
+            ConfigError::plain(format!("{path}:")),
+            file,
+            source,
+            self.local.as_ref().map(|(f, s)| (f.as_str(), s.as_str())),
+        );
+        let local = self
+            .local
+            .as_ref()
+            .is_some_and(|(name, _)| *name == error.location.file);
+        let matched = local || source_position(source, path).is_some();
+        matched.then_some(error.location)
     }
 }
 
@@ -414,9 +433,13 @@ fn resolve<E: Extensions>(
             stack.join(" -> ")
         )));
     }
-    let template = templates
-        .get(&parent.value)
-        .ok_or_else(|| ConfigError::plain(format!("unknown template `{}`", parent.value)))?;
+    let template = templates.get(&parent.value).ok_or_else(|| {
+        ConfigError::plain(format!(
+            "unknown template `{}`{}",
+            parent.value,
+            did_you_mean(&parent.value, templates.keys().map(String::as_str))
+        ))
+    })?;
     stack.push(parent.value.clone());
     let mut resolved = resolve(template, templates, stack)?;
     stack.pop();
@@ -430,8 +453,8 @@ pub(crate) fn parse_yaml<T: DeserializeOwned>(file: &str, source: &str) -> Resul
         let offset = error.location().map_or(0, |l| {
             line_offset(source, l.line() as usize, l.column() as usize)
         });
-        // Miette owns source rendering; nesting serde-saphyr's snippet would duplicate it.
-        let mut message = error.without_snippet().to_string();
+        // Miette owns source rendering and the location, so drop serde-saphyr's own copies.
+        let mut message = strip_location(&error.without_snippet().to_string()).to_owned();
         if let Some((_, unknown)) = message.split_once("unknown field `")
             && let Some((key, expected)) = unknown.split_once('`')
             && let Some(hint) = unknown_key_hint(key, expected)
@@ -440,6 +463,41 @@ pub(crate) fn parse_yaml<T: DeserializeOwned>(file: &str, source: &str) -> Resul
         }
         ConfigError::at(file, source, offset, message)
     })
+}
+
+/// Remove a trailing ` at line N, column M`, which the diagnostic already shows.
+fn strip_location(message: &str) -> &str {
+    message
+        .rfind(" at line ")
+        .filter(|&start| {
+            let tail = &message[start + " at line ".len()..];
+            tail.split_once(", column ").is_some_and(|(line, column)| {
+                !line.is_empty()
+                    && !column.is_empty()
+                    && line.bytes().all(|b| b.is_ascii_digit())
+                    && column.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+        .map_or(message, |start| &message[..start])
+}
+
+/// The candidate closest to `key`, when one is close enough to be a typo.
+pub(crate) fn closest<'a>(
+    key: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    candidates
+        .into_iter()
+        .filter(|candidate| *candidate != key)
+        .max_by(|a, b| strsim::jaro_winkler(key, a).total_cmp(&strsim::jaro_winkler(key, b)))
+        .filter(|candidate| strsim::jaro_winkler(key, candidate) > 0.75)
+}
+
+/// `; did you mean `x`?` for the candidate closest to `key`, or nothing when none is close.
+pub(crate) fn did_you_mean<'a>(key: &str, candidates: impl IntoIterator<Item = &'a str>) -> String {
+    closest(key, candidates)
+        .map(|candidate| format!("; did you mean `{candidate}`?"))
+        .unwrap_or_default()
 }
 
 /// Name the closest expected key for an unknown-field error. serde-saphyr lists the expected
@@ -704,13 +762,43 @@ fn load_named<E: Extensions>(path: &Path) -> Result<(ProjectConfig<E>, CheckRepo
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(ConfigError::io(&local_path, error)),
     };
-    parse_named(
+    let (config, report) = parse_named::<E>(
         &file.display().to_string(),
         &source,
         local
             .as_deref()
             .map(|s| (local_path.to_str().unwrap_or("devlanes.local.yaml"), s)),
-    )
+    )?;
+    check_compose_files(&config, file.parent().unwrap_or(Path::new(".")))?;
+    Ok((config, report))
+}
+
+/// Fails, located at the entry, when an `infra.compose` file does not exist
+/// relative to `dir`, the directory of `devlanes.yaml`. Blocking: reads the
+/// filesystem.
+pub fn check_compose_files<E: Extensions>(
+    config: &ProjectConfig<E>,
+    dir: &Path,
+) -> Result<(), ConfigError> {
+    let compose: Vec<&String> = match &config.infra.compose {
+        Some(ComposeFiles::File(name)) => vec![name],
+        Some(ComposeFiles::Files(names)) => names.iter().collect(),
+        None => Vec::new(),
+    };
+    for (index, name) in compose.into_iter().enumerate() {
+        let path = dir.join(name);
+        if !path.is_file() {
+            let field = match &config.infra.compose {
+                Some(ComposeFiles::Files(_)) => format!("infra.compose.{index}"),
+                _ => "infra.compose".to_owned(),
+            };
+            return Err(config.sources.locate(ConfigError::plain(format!(
+                "{field}: Compose file not found: {}",
+                path.display()
+            ))));
+        }
+    }
+    Ok(())
 }
 
 /// Load and return warnings for `config check`; validation failures are errors.

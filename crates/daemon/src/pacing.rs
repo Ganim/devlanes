@@ -129,6 +129,8 @@ struct PacedStart {
     done: oneshot::Sender<()>,
     /// Metrics series of the unit, where its startup peak is recorded.
     series: Option<String>,
+    /// The start it belongs to, which a single-unit stop may withdraw it from.
+    start: Arc<crate::model::StartCtl>,
 }
 
 /// A granted slot and what its holder task watches.
@@ -239,6 +241,10 @@ impl Inner {
         };
         tickets.resize_with(ordered.len(), || None);
         for ((_, service), ticket) in ordered.into_iter().zip(tickets) {
+            // Withdrawn by a stop since the plan: its dropped ticket leaves the queue.
+            if cx.ctl.withdrawn_by(&service.unit).is_some() {
+                continue;
+            }
             let (id, token) =
                 self.pacing
                     .register(cx.lane.worktree, &cx.reference, &service.unit, &cx.actor);
@@ -255,12 +261,17 @@ impl Inner {
                 after: if gate.is_some() { after.take() } else { None },
                 done,
                 series: series.get(&service.unit).cloned(),
+                start: cx.ctl.clone(),
             };
             after = Some(next);
             let engine = self.clone();
+            let span = tracing::debug_span!("unit", unit = %service.unit, lane = %cx.reference);
             tasks.push((
                 service.unit.clone(),
-                tokio::spawn(async move { engine.start_one(start).await }),
+                tokio::spawn(tracing::Instrument::instrument(
+                    async move { engine.start_one(start).await },
+                    span,
+                )),
             ));
         }
         if gate.is_some() {
@@ -272,6 +283,11 @@ impl Inner {
                 Ok(Ok(Paced::Failed(error))) => cx.failures.push(UnitFailureData {
                     lane: cx.reference.clone(),
                     unit,
+                    // The same line the unit's log got, as its tail.
+                    log_tail: (error.code == "spawn_failed")
+                        .then(|| crate::spawn_error::log_line(&error))
+                        .into_iter()
+                        .collect(),
                     reason: Some(error),
                     ..UnitFailureData::default()
                 }),
@@ -305,14 +321,25 @@ impl Inner {
             after,
             done,
             series,
+            start,
         } = start;
         let name = request.name.clone();
         // `None` without a gate (or with `all_at_once`): nothing to hold.
         let slot: Option<StartSlot> = match ticket {
-            Some(ticket) => tokio::select! {
-                slot = ticket => Some(slot),
-                () = token.cancelled() => None,
-            },
+            Some(ticket) => {
+                tracing::debug!("waiting for a start slot from the start gate");
+                let waited = tokio::time::Instant::now();
+                let slot = tokio::select! {
+                    slot = ticket => Some(slot),
+                    () = token.cancelled() => None,
+                };
+                tracing::debug!(
+                    granted = slot.is_some(),
+                    waited_ms = waited.elapsed().as_millis() as u64,
+                    "start gate answered"
+                );
+                slot
+            }
             None => None,
         };
         if let Some(after) = after {
@@ -326,7 +353,8 @@ impl Inner {
         // withdraw it, so it waits for the unit to be recorded and stops that.
         let _spawning = lane.spawn_guard();
         self.pacing.unregister(lane.worktree, &name, id);
-        if token.is_cancelled() {
+        // A stop may have withdrawn it before it was queued, where `token` missed it.
+        if token.is_cancelled() || start.withdrawn_by(&name).is_some() {
             // Dropping a granted slot gives it straight back.
             drop(slot);
             self.emit_lane(&project, &lane);
@@ -343,15 +371,20 @@ impl Inner {
             Ok((host, managed)) => {
                 let started = matches!(ready.check, ReadySpec::Started);
                 let checked = host.clone();
-                tokio::spawn(async move {
-                    run_check(
-                        &checked,
-                        readiness(&ready.check, probe_env),
-                        ready.timeout,
-                        || async move { managed.listening_ports().await },
-                    )
-                    .await;
-                });
+                // In the unit's span, so a verbose start shows the probe attempts.
+                let span = tracing::debug_span!("readiness");
+                tokio::spawn(tracing::Instrument::instrument(
+                    async move {
+                        run_check(
+                            &checked,
+                            readiness(&ready.check, probe_env),
+                            ready.timeout,
+                            || async move { managed.listening_ports().await },
+                        )
+                        .await;
+                    },
+                    span,
+                ));
                 if let Some(slot) = slot {
                     let hold = Hold {
                         host,

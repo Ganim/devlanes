@@ -7,6 +7,9 @@
 //! and the client mirrors on `[::1]` only; routed hostnames then go through relay
 //! ports, which keeps every checked byte on the mux.
 
+#[path = "remote_sync.rs"]
+mod large_sync;
+
 use std::{
     net::{IpAddr, Ipv6Addr},
     path::Path,
@@ -656,6 +659,136 @@ async fn remote_box_end_to_end() {
         assert_eq!(
             stored["state"], "disconnected",
             "remote_hosts keeps the box: {stored}"
+        );
+
+        client.stop().await;
+        side.stop().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+/// A box lane with a serving unit and an idle one.
+const POOLED_BOX: &str = r#"project: pooledbox
+services:
+  web:
+    run: "http hello-from-box"
+  echo:
+    run: tcp-echo
+"#;
+
+/// The ports of every unit in `project`'s lanes on `h`.
+async fn project_ports(h: &Harness, project: &str) -> Vec<u16> {
+    box_lanes(h)
+        .await
+        .iter()
+        .filter(|lane| lane.project == project)
+        .flat_map(|lane| {
+            lane.units
+                .iter()
+                .flat_map(|unit| unit.ports.values().copied())
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Box and client allocate from the same pool. Idle box units are not mirrored,
+/// the client's lane 0 keeps clear of every box port, and a local fixed block
+/// over a mirrored port wins: the mirror lets go before the local service starts.
+async fn shared_pool_keeps_box_and_local_ports_apart() {
+    if !ipv6_loopback().await {
+        eprintln!("skipping shared_pool_keeps_box_and_local_ports_apart: no IPv6 loopback");
+        return;
+    }
+    tokio::time::timeout(LIMIT * 2, async {
+        let tmp = temp();
+        let pool = "27000-27499";
+        let box_repo = repo(&tmp.path, "pooledbox", POOLED_BOX);
+        let side = BoxSide::start(&tmp, "box", pool).await;
+        side.h
+            .call(Method::Start, json!({"units": ["echo"]}), cx(&box_repo))
+            .await
+            .expect("box start echo");
+        let (web, echo_port) = (
+            box_port(&side.h, 0, "web").await,
+            box_port(&side.h, 0, "echo").await,
+        );
+        let box_ports = project_ports(&side.h, "pooledbox").await;
+
+        let client = ClientSide::start(&tmp, "client", pool, &side).await;
+        client
+            .h
+            .call(
+                Method::Connect,
+                json!({"host": "box", "background": true}),
+                Context::default(),
+            )
+            .await
+            .expect("connect");
+        let mirrored = eventually(SOON, || async {
+            let ports = client.mirrored().await;
+            ports.contains(&echo_port).then_some(ports)
+        })
+        .await
+        .expect("echo mirrored");
+        assert!(!mirrored.contains(&web), "idle web mirrored: {mirrored:?}");
+        assert!(
+            TcpStream::connect((Ipv6Addr::LOCALHOST, web))
+                .await
+                .is_err(),
+            "idle web has no listener"
+        );
+
+        // A pool-placed local lane 0 shares no port with box lane 0, although
+        // both allocate first-fit from the same pool.
+        let local_config = POOLED_BOX.replace("pooledbox", "localapp");
+        let local_repo = repo(&tmp.path, "localapp", &local_config);
+        client
+            .h
+            .call(Method::Start, json!({"units": ["web"]}), cx(&local_repo))
+            .await
+            .expect("local start");
+        let local_ports = project_ports(&client.h, "localapp").await;
+        assert!(!local_ports.is_empty());
+        assert!(
+            local_ports.iter().all(|port| !box_ports.contains(port)),
+            "local {local_ports:?} overlaps box {box_ports:?}"
+        );
+
+        // A local lane whose fixed block covers the mirrored echo port: local wins.
+        let fixed_config = format!(
+            "project: fixedapp\nlanes:\n  block_size: 1\n  vars:\n    port: {echo_port}\nservices:\n  api:\n    run: sleep\n"
+        );
+        let fixed_repo = repo(&tmp.path, "fixedapp", &fixed_config);
+        client
+            .h
+            .call(Method::Start, json!({}), cx(&fixed_repo))
+            .await
+            .expect("local fixed start");
+        assert_eq!(project_ports(&client.h, "fixedapp").await, [echo_port]);
+        let released = eventually(SOON, || async {
+            let host = client.host().await;
+            let port = host["ports"]
+                .as_array()?
+                .iter()
+                .find(|port| port["port"] == echo_port)?
+                .clone();
+            (port["addresses"] == json!([])).then_some(host)
+        })
+        .await
+        .expect("mirror released the local port");
+        let local_wins = format!("port {echo_port} is allocated to local lane fixedapp@0");
+        assert!(
+            released["warnings"].as_array().is_some_and(|w| w
+                .iter()
+                .any(|m| m.as_str().is_some_and(|m| m.starts_with(&local_wins)))),
+            "{released}"
+        );
+        assert!(
+            TcpStream::connect((Ipv6Addr::LOCALHOST, echo_port))
+                .await
+                .is_err(),
+            "the mirror no longer listens on the local lane's port"
         );
 
         client.stop().await;

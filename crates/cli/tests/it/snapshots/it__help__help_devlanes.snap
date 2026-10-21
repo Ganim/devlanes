@@ -30,6 +30,7 @@ Commands:
   url          Print, open and list service URLs and routed hostnames
   infra        Start, stop and inspect the project's containers
   config       Validate devlanes.yaml
+  migrate      Convert mprocs, dekit, Procfile, pm2 and similar setups into devlanes.yaml
   certs        Trust the devlanes CA and install the /etc/hosts helper
   secrets      Hand secrets from fnox to the daemon
   remote       Connect to boxes over SSH and mirror their lanes here
@@ -79,6 +80,9 @@ Global options:
 
       --budget <BYTES>
           Cap agent-mode output at this many bytes [default: 16384, minimum: 256]
+
+  -v, --verbose...
+          Print timestamped diagnostics of the client and daemon to stderr; -vv for more [env: DEVLANES_VERBOSE=1|2]
 
 Examples:
   devlanes start                                bring up this worktree's lane

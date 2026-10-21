@@ -125,13 +125,13 @@ impl Inner {
                     status,
                 )
             });
-            let infra_routes = view.infra_routes.iter().map(|(host, container, port)| {
+            let infra_routes = view.infra_routes.iter().map(|route| {
                 (
-                    host.as_str(),
-                    container,
-                    *port,
-                    false,
-                    false,
+                    route.host.as_str(),
+                    &route.container,
+                    route.port,
+                    route.fallback,
+                    route.host_header_upstream,
                     RouteStatus::Ready,
                 )
             });

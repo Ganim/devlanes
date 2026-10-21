@@ -46,10 +46,17 @@ fn bind_listeners_with(
         Ok(listeners) => Ok(listeners),
         Err(error) if port != fallback_port && port_unavailable(&error) => {
             let mut listeners = bind_pair(fallback_port, lan, &bind)?;
-            let reason = format!(
-                "Could not bind port {port}: {error}; using {}. On Linux, configure CAP_NET_BIND_SERVICE or ip_unprivileged_port_start for low ports.",
-                listeners.port
-            );
+            let reason = if error.kind() == io::ErrorKind::AddrInUse {
+                format!(
+                    "Port {port} is in use by another process; using {}.",
+                    listeners.port
+                )
+            } else {
+                format!(
+                    "Could not bind port {port}: {error}; using {}. On Linux, configure CAP_NET_BIND_SERVICE or ip_unprivileged_port_start for low ports.",
+                    listeners.port
+                )
+            };
             tracing::warn!("{reason}");
             listeners.fallback_reason = Some(reason);
             Ok(listeners)
@@ -145,6 +152,18 @@ mod tests {
         assert!(bound.ipv6_error.is_some());
         assert!(bound.fallback_reason.is_none());
         assert_eq!(bound.listeners().count(), 1);
+        Ok(())
+    }
+
+    /// A configured port another process listens on falls back like a privileged one.
+    #[tokio::test]
+    async fn occupied_port_falls_back() -> io::Result<()> {
+        let taken = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let port = taken.local_addr()?.port();
+        let bound = bind_listeners_with(port, 0, false, bind)?;
+        assert_ne!(bound.port, port);
+        let reason = bound.fallback_reason.unwrap_or_default();
+        assert!(reason.contains("in use"), "{reason}");
         Ok(())
     }
 

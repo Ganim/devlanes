@@ -1,0 +1,22 @@
+---
+source: crates/cli/tests/it/choose.rs
+expression: output
+---
+--- human
+error: devlanes url open needs a service
+  Open a service's URL in the browser; agent mode only prints it
+services:
+  api    ready · https://api.acme.localhost:8443
+  web    idle · https://web.acme.localhost:8443
+  queue  starting · http://127.0.0.1:26000
+hint: devlanes --lane acme@0 url open api
+--- agent
+error: devlanes url open needs a service
+  Open a service's URL in the browser; agent mode only prints it
+services:
+  api    ready · https://api.acme.localhost:8443
+  web    idle · https://web.acme.localhost:8443
+  queue  starting · http://127.0.0.1:26000
+hint: devlanes --lane acme@0 url open api
+--- json
+{"error":{"code":"argument_missing","exit_code":2,"data":{"command":"url open","description":"Open a service's URL in the browser; agent mode only prints it","argument":"service","multiple":false,"options":[{"value":"api","detail":"ready · https://api.acme.localhost:8443"},{"value":"web","detail":"idle · https://web.acme.localhost:8443"},{"value":"queue","detail":"starting · http://127.0.0.1:26000"}],"total":3,"example":"devlanes --lane acme@0 url open api"}}}

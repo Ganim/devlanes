@@ -51,21 +51,49 @@ pub fn validate_with_preset_ports(
     validator: &PresetValidator<'_>,
     ports: &PresetPorts<'_>,
 ) -> Result<CheckReport, ConfigError> {
+    validate_with_registry(config, &[], validator, ports)
+}
+
+/// Like [`validate_with_preset_ports`], also rejecting a `preset:` that is not in `names`
+/// with the closest registered name. An empty `names` leaves that check to `validator`.
+pub fn validate_with_registry(
+    config: &ProjectConfig,
+    names: &[&str],
+    validator: &PresetValidator<'_>,
+    ports: &PresetPorts<'_>,
+) -> Result<CheckReport, ConfigError> {
     let report = validate_inner(config, None, Some(ports))?;
     for (name, service) in &config.services {
-        if let Some(preset) = &service.preset {
-            validator(preset, service.preset_options.get(preset)).map_err(|message| {
-                // Point at the offending option when the integration names it.
-                let field = message
-                    .split_once("unknown field `")
-                    .and_then(|(_, rest)| rest.split_once('`'))
-                    .map(|(key, _)| format!(".{key}"))
-                    .unwrap_or_default();
-                config
-                    .sources
-                    .locate(fail(&format!("services.{name}.{preset}{field}"), message))
-            })?;
+        let Some(preset) = &service.preset else {
+            continue;
+        };
+        let unknown = |message: String| {
+            config.sources.locate(fail(
+                &format!("services.{name}.preset"),
+                format!(
+                    "{message}{}",
+                    crate::loader::did_you_mean(preset, names.iter().copied())
+                ),
+            ))
+        };
+        if !names.is_empty() && !names.contains(&preset.as_str()) {
+            return Err(unknown(format!("unknown preset `{preset}`")));
         }
+        validator(preset, service.preset_options.get(preset)).map_err(|message| {
+            // Registries without a name list report unknown presets through the validator.
+            if message.starts_with("unknown preset") || message.starts_with("unregistered preset") {
+                return unknown(message);
+            }
+            // Point at the offending option when the integration names it.
+            let field = message
+                .split_once("unknown field `")
+                .and_then(|(_, rest)| rest.split_once('`'))
+                .map(|(key, _)| format!(".{key}"))
+                .unwrap_or_default();
+            config
+                .sources
+                .locate(fail(&format!("services.{name}.{preset}{field}"), message))
+        })?;
     }
     Ok(report)
 }
@@ -81,6 +109,15 @@ pub fn validate_with_compose_services<E: Extensions>(
 /// Add a precise configuration path to a semantic error.
 fn fail(path: &str, message: impl Into<String>) -> ConfigError {
     ConfigError::plain(format!("{path}: {}", message.into()))
+}
+
+/// Whether a literal `PORT` value is a usable port, as the resolver reads it.
+fn literal_port(value: &crate::Scalar) -> bool {
+    match value {
+        crate::Scalar::Integer(port) => u16::try_from(*port).is_ok_and(|p| p > 0),
+        crate::Scalar::String(text) => text.trim().parse::<u16>().is_ok_and(|p| p > 0),
+        _ => false,
+    }
 }
 
 /// Check executable declarations uniformly for services, tasks, and infra commands.
@@ -230,6 +267,14 @@ fn validate_inner<E: Extensions>(
                 ));
             }
         }
+        if let Some(Templated::Literal(port)) = template.env.get("PORT")
+            && !literal_port(port)
+        {
+            return Err(fail(
+                &format!("templates.{name}.env.PORT"),
+                "must be a port number from 1 to 65535 or a `${{ ... }}` expression",
+            ));
+        }
     }
     for name in config.services.keys() {
         if !aliases.insert(name.replace('-', "_")) {
@@ -254,7 +299,18 @@ fn validate_inner<E: Extensions>(
         {
             return Err(fail(
                 &format!("{path}.preset"),
-                format!("unknown preset `{preset}`"),
+                format!(
+                    "unknown preset `{preset}`{}",
+                    crate::loader::did_you_mean(preset, E::preset_names().iter().copied())
+                ),
+            ));
+        }
+        if let Some(Templated::Literal(port)) = service.env.get("PORT")
+            && !literal_port(port)
+        {
+            return Err(fail(
+                &format!("{path}.env.PORT"),
+                "must be a port number from 1 to 65535 or a `${{ ... }}` expression",
             ));
         }
         for option in service.preset_options.keys() {
@@ -394,15 +450,8 @@ fn validate_inner<E: Extensions>(
         .cloned()
         .chain(compose.into_iter().flatten().cloned())
         .collect();
+    // Compose service names are only known once the integration resolves the Compose model.
     let can_validate_infra = config.infra.compose.is_none() || compose.is_some();
-    if !can_validate_infra {
-        report.warnings.push(ConfigWarning {
-            path: "infra.compose".into(),
-            message:
-                "Compose service references require validation against the resolved Compose model"
-                    .into(),
-        });
-    }
     let infra_names = config
         .infra
         .hosts
@@ -460,14 +509,27 @@ fn validate_inner<E: Extensions>(
             }
         }
     }
-    expression_graph(config)?;
+    // A key from any matrix row is a lane attribute; rows missing it fail when evaluated.
+    let mut lane_keys: BTreeSet<String> = LANE_ATTRS.iter().map(|s| (*s).to_owned()).collect();
+    for key in config.lanes.vars.keys().chain(
+        config
+            .lanes
+            .matrix
+            .iter()
+            .flatten()
+            .flat_map(|row| row.keys()),
+    ) {
+        lane_keys.insert(key.clone());
+        lane_keys.insert(key.replace('-', "_"));
+    }
+    expression_graph(config, &lane_keys)?;
     if let Some(matrix) = &config.lanes.matrix {
         // Each matrix row is the lane's vars for one lane, so each row gets its own graph.
         for (index, row) in matrix.iter().enumerate() {
             let mut lane_config = config.clone();
             lane_config.lanes.vars = row.clone();
             lane_config.lanes.matrix = None;
-            expression_graph(&lane_config).map_err(|e| {
+            expression_graph(&lane_config, &lane_keys).map_err(|e| {
                 ConfigError::plain(e.message.replacen(
                     "lanes.vars.",
                     &format!("lanes.matrix.{index}."),
@@ -588,8 +650,202 @@ fn service_name<'a, E: Extensions>(config: &'a ProjectConfig<E>, alias: &str) ->
         .map(String::as_str)
 }
 
+/// Attributes of `lane` before `lanes.vars` or matrix keys are added.
+const LANE_ATTRS: &[&str] = &["index", "name", "label", "path", "domain", "port"];
+/// Attributes of `project`.
+const PROJECT_ATTRS: &[&str] = &["name", "primary_path"];
+/// Attributes of `self`, `svc.<name>` and `lanes.main.svc.<name>`.
+const SERVICE_ATTRS: &[&str] = &["name", "port", "ports", "url", "public_url", "hosts"];
+/// Attributes of `replica`.
+const REPLICA_ATTRS: &[&str] = &["index", "count"];
+/// Attributes of `infra.<container>`.
+const INFRA_ATTRS: &[&str] = &["port", "ports"];
+/// Expression roots; `env` and `projects` contents are only known at runtime.
+const ROOTS: &[&str] = &[
+    "project", "lane", "lanes", "self", "svc", "infra", "env", "projects", "replica",
+];
+
+/// Reject `<namespace>.<attr>` when `attr` is not one of `known`, naming the closest one.
+fn attribute<'a>(
+    path: &str,
+    namespace: &str,
+    attr: Option<&str>,
+    known: impl IntoIterator<Item = &'a str> + Clone,
+) -> Result<(), ConfigError> {
+    let Some(attr) = attr else {
+        return Ok(());
+    };
+    if known.clone().into_iter().any(|name| name == attr) {
+        return Ok(());
+    }
+    let hint = match crate::loader::closest(attr, known.clone()) {
+        Some(name) => format!("; did you mean `{namespace}.{name}`?"),
+        None => format!(
+            "; available: {}",
+            known.into_iter().collect::<Vec<_>>().join(", ")
+        ),
+    };
+    Err(fail(
+        path,
+        format!("`{namespace}.{attr}` is not defined{hint}"),
+    ))
+}
+
+/// Explain `svc.my-api.url`, which MiniJinja reads as `svc.my - api.url`.
+fn dashed_name_hint(text: &str) -> Option<String> {
+    let chain = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.';
+    let mut quote = None;
+    for (index, c) in text.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '-') => {
+                let before = &text[..index];
+                let after = &text[index + 1..];
+                let left_start = before.rfind(|c| !chain(c)).map_or(0, |i| i + 1);
+                let left = &before[left_start..];
+                let right_end = after.find(|c| !chain(c)).unwrap_or(after.len());
+                let right = &after[..right_end];
+                let (Some((prefix, last)), Some(first)) =
+                    (left.rsplit_once('.'), right.split('.').next())
+                else {
+                    continue;
+                };
+                if last.is_empty()
+                    || first.is_empty()
+                    || first.starts_with(|c: char| c.is_ascii_digit())
+                    || !ROOTS.contains(&prefix.split('.').next().unwrap_or_default())
+                {
+                    continue;
+                }
+                let rest = &right[first.len()..];
+                return Some(format!(
+                    "`{left}-{right}` reads as `{left} - {right}`; write `{prefix}['{last}-{first}']{rest}` or `{prefix}.{last}_{first}{rest}` for a dashed name"
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Check one static reference against the names the runtime context defines.
+fn check_reference<E: Extensions>(
+    config: &ProjectConfig<E>,
+    path: &str,
+    reference: &str,
+    lane_keys: &BTreeSet<String>,
+) -> Result<(), ConfigError> {
+    let components: Vec<&str> = reference.split('.').collect();
+    let at = |i: usize| components.get(i).copied();
+    let services = || config.services.keys().map(String::as_str);
+    let service = |alias: &str, namespace: &str| {
+        service_name(config, alias).ok_or_else(|| {
+            let scope = if namespace == "svc" {
+                String::new()
+            } else {
+                format!(" in {namespace}")
+            };
+            fail(
+                path,
+                format!(
+                    "unknown service reference `{alias}`{scope}{}",
+                    crate::loader::did_you_mean(alias, services())
+                ),
+            )
+        })
+    };
+    match components[0] {
+        "lane" => attribute(path, "lane", at(1), lane_keys.iter().map(String::as_str)),
+        "project" => attribute(path, "project", at(1), PROJECT_ATTRS.iter().copied()),
+        "self" => attribute(path, "self", at(1), SERVICE_ATTRS.iter().copied()),
+        "replica" => attribute(path, "replica", at(1), REPLICA_ATTRS.iter().copied()),
+        "svc" => match at(1) {
+            Some(alias) => {
+                service(alias, "svc")?;
+                attribute(
+                    path,
+                    &format!("svc.{alias}"),
+                    at(2),
+                    SERVICE_ATTRS.iter().copied(),
+                )
+            }
+            None => Ok(()),
+        },
+        "lanes" => {
+            attribute(path, "lanes", at(1), ["main"])?;
+            attribute(path, "lanes.main", at(2), ["svc"])?;
+            match at(3) {
+                Some(alias) => {
+                    service(alias, "lanes.main")?;
+                    attribute(
+                        path,
+                        &format!("lanes.main.svc.{alias}"),
+                        at(4),
+                        SERVICE_ATTRS.iter().copied(),
+                    )
+                }
+                None => Ok(()),
+            }
+        }
+        "infra" => {
+            let Some(name) = at(1) else {
+                return Ok(());
+            };
+            let container = config
+                .infra
+                .containers
+                .iter()
+                .find(|(key, _)| *key == name || key.replace('-', "_") == name);
+            if container.is_none() && config.infra.compose.is_none() {
+                return Err(fail(
+                    path,
+                    format!(
+                        "unknown container `{name}`; infra.containers does not declare it and there is no compose file{}",
+                        crate::loader::did_you_mean(
+                            name,
+                            config.infra.containers.keys().map(String::as_str)
+                        )
+                    ),
+                ));
+            }
+            attribute(
+                path,
+                &format!("infra.{name}"),
+                at(2),
+                INFRA_ATTRS.iter().copied(),
+            )?;
+            // Compose ports are keyed by container port; only declared containers have names.
+            if let (Some((_, container)), Some("ports")) = (container, at(2)) {
+                attribute(
+                    path,
+                    &format!("infra.{name}.ports"),
+                    at(3),
+                    container.ports.keys().map(String::as_str),
+                )?;
+            }
+            Ok(())
+        }
+        "env" | "projects" => Ok(()),
+        root => {
+            let hint = match crate::loader::closest(root, ROOTS.iter().copied()) {
+                Some(name) => format!("did you mean `{name}`?"),
+                None => "use underscores or brackets for dashed names".to_owned(),
+            };
+            Err(fail(
+                path,
+                format!("unknown expression context `{root}`; {hint}"),
+            ))
+        }
+    }
+}
+
 /// Build dependency edges from MiniJinja's static references, including PORT derivation.
-fn expression_graph<E: Extensions>(config: &ProjectConfig<E>) -> Result<(), ConfigError> {
+fn expression_graph<E: Extensions>(
+    config: &ProjectConfig<E>,
+    lane_keys: &BTreeSet<String>,
+) -> Result<(), ConfigError> {
     let value = serde_json::to_value(config).map_err(|e| ConfigError::plain(e.to_string()))?;
     let mut all = Vec::new();
     if let Some(map) = value.as_object() {
@@ -637,20 +893,14 @@ fn expression_graph<E: Extensions>(config: &ProjectConfig<E>) -> Result<(), Conf
             })
         };
         for reference in &refs {
+            check_reference(config, &path, reference, lane_keys).map_err(|error| {
+                match dashed_name_hint(&text) {
+                    Some(hint) => fail(&path, hint),
+                    None => error,
+                }
+            })?;
             let mut components = reference.split('.');
             let root = components.next().unwrap_or_default();
-            if ![
-                "project", "lane", "lanes", "self", "svc", "infra", "env", "projects", "replica",
-            ]
-            .contains(&root)
-            {
-                return Err(fail(
-                    &path,
-                    format!(
-                        "unknown expression context `{root}`; use underscores or brackets for dashed names"
-                    ),
-                ));
-            }
             if path.ends_with(".env.PORT")
                 && (reference == "self.port"
                     || reference.starts_with("self.url")
@@ -662,12 +912,9 @@ fn expression_graph<E: Extensions>(config: &ProjectConfig<E>) -> Result<(), Conf
                 ));
             }
             let target = match root {
-                "svc" => match components.next() {
-                    Some(alias) => Some(service_name(config, alias).ok_or_else(|| {
-                        fail(&path, format!("unknown service reference `{alias}`"))
-                    })?),
-                    None => None,
-                },
+                "svc" => components
+                    .next()
+                    .and_then(|alias| service_name(config, alias)),
                 "self" => current_service,
                 _ => None,
             };
@@ -691,32 +938,6 @@ fn expression_graph<E: Extensions>(config: &ProjectConfig<E>) -> Result<(), Conf
                 && let Some(name) = components.next()
             {
                 edges.insert(format!("lane.{}", name.replace('-', "_")));
-            }
-            if root == "infra"
-                && config.infra.compose.is_none()
-                && let Some(name) = components.next()
-                && !config
-                    .infra
-                    .containers
-                    .keys()
-                    .any(|key| key == name || key.replace('-', "_") == name)
-            {
-                return Err(fail(
-                    &path,
-                    format!(
-                        "unknown container `{name}`; infra.containers does not declare it and there is no compose file"
-                    ),
-                ));
-            }
-            if let Some(alias) = reference
-                .strip_prefix("lanes.main.svc.")
-                .and_then(|rest| rest.split('.').next())
-                && service_name(config, alias).is_none()
-            {
-                return Err(fail(
-                    &path,
-                    format!("unknown service reference `{alias}` in lanes.main"),
-                ));
             }
         }
         if let Some(node) = node {

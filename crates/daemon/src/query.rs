@@ -251,8 +251,10 @@ impl Inner {
         let (project, lane) = pair;
         let host = lane.st().units.get(unit).map(|rec| rec.host.clone());
         match host {
-            Some(host) => host.logs(query).await,
-            None => {
+            // A closed run's snapshot misses notes written after it, such as a
+            // failed respawn's `[devlanes]` line; the directory has them.
+            Some(host) if !host.log_closed() => host.logs(query).await,
+            _ => {
                 let Some(index) = lane.st().index() else {
                     return Ok(Page::complete(Vec::new()));
                 };
@@ -431,6 +433,10 @@ impl Inner {
         let as_unit = self
             .lane_for_units(std::slice::from_ref(&args.target), context)
             .await;
+        // A unit added by an edit just now must be known before it is looked up.
+        if let Ok(((project, lane), _)) = &as_unit {
+            self.fresh_config(project, lane).await;
+        }
         let unit_target = match &as_unit {
             Ok(((_, lane), selectors)) => {
                 let st = lane.st();
@@ -595,7 +601,13 @@ impl Inner {
                     };
                     host.logs(query)
                         .await
-                        .map(|page| page.items.into_iter().map(|l| l.text).collect())
+                        .map(|page| {
+                            page.items
+                                .into_iter()
+                                .filter(|line| host.of_this_run(line))
+                                .map(|l| l.text)
+                                .collect()
+                        })
                         .unwrap_or_default()
                 };
                 let mut conflicts = Vec::new();
@@ -829,7 +841,23 @@ impl Inner {
                     .get(&name)
                     .map(|s| &s.launch)
                     .or_else(|| resolved.tasks.get(&name).and_then(|t| t.launch.as_ref()))
-                    .ok_or_else(|| RpcError::new("not_found", json!({"reference": unit}), 3))?;
+                    .ok_or_else(|| {
+                        // Units with an environment of their own: services, then
+                        // tasks that launch something.
+                        let mut candidates: Vec<&String> = resolved.services.keys().collect();
+                        candidates.extend(
+                            resolved
+                                .tasks
+                                .iter()
+                                .filter(|(_, task)| task.launch.is_some())
+                                .map(|(name, _)| name),
+                        );
+                        RpcError::new(
+                            "not_found",
+                            json!({"reference": unit, "candidates": candidates}),
+                            3,
+                        )
+                    })?;
                 Arc::new(crate::lifecycle::copy_env(&launch.env))
             }
         };
@@ -931,7 +959,7 @@ impl Inner {
             "socket": self.opts.socket,
             "sandbox": sandbox,
             "infra": self.integ.infra.doctor().await,
-            "proxy": self.integ.routes.status(),
+            "proxy": self.proxy_doctor().await,
             "ca": self.integ.ca_status,
             // Routed hosts the CA cannot certify (`host_outside_ca`, see `certs`).
             "ca_warnings": self.all_ca_warnings(),
@@ -942,14 +970,87 @@ impl Inner {
             "hosts": self.hosts_status(),
             "dns": self.dns_doctor().await,
             "state": self.state_doctor().await,
-            "user_config": {
-                "path": self.opts.home.join("config.yaml"),
-                "valid": self.opts.user_config_error.is_none(),
-                "error": self.opts.user_config_error,
-                "warnings": self.opts.user.warnings(),
-            },
+            "user_config": self.user_config_doctor().await,
         }))
     }
+
+    /// The proxy's listener status; a listener that fell back from its
+    /// configured port (`requested_port`) names what holds that port now as
+    /// `requested_holder: {pid, command}`.
+    async fn proxy_doctor(&self) -> Value {
+        let mut status = self.integ.routes.status();
+        for listener in ["http", "https"] {
+            let Some(entry) = status.get_mut(listener) else {
+                continue;
+            };
+            let requested = entry
+                .get("requested_port")
+                .and_then(Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok());
+            let bound = entry
+                .get("port")
+                .and_then(Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok());
+            let Some(requested) = requested.filter(|requested| Some(*requested) != bound) else {
+                continue;
+            };
+            let Some(pid) = self.integ.ports.holder(requested).await else {
+                continue;
+            };
+            let command = tokio::task::spawn_blocking(move || {
+                devlanes_sys::process(pid)
+                    .ok()
+                    .flatten()
+                    .map(|info| info.name)
+            })
+            .await
+            .ok()
+            .flatten();
+            entry["requested_holder"] = json!({"pid": pid, "command": command});
+        }
+        status
+    }
+
+    /// `doctor`'s `user_config`: the file on disk checked now, since it may have
+    /// changed since the daemon loaded it. `errors` are located; `loaded_errors`
+    /// are the ones in effect since startup (a restart applies the file again).
+    async fn user_config_doctor(&self) -> Value {
+        let path = self.opts.home.join("config.yaml");
+        let file = path.clone();
+        let checked = tokio::task::spawn_blocking(move || {
+            if !file.exists() {
+                return None;
+            }
+            let (config, errors) = devlanes_config::load_user_lenient(&file);
+            let errors: Vec<Value> = errors.iter().map(located).collect();
+            Some((errors, config.warnings().to_vec()))
+        })
+        .await
+        .ok()
+        .flatten();
+        // Without a file the loaded settings are all there is to report.
+        let (errors, warnings) =
+            checked.unwrap_or_else(|| (Vec::new(), self.opts.user.warnings().to_vec()));
+        json!({
+            "path": path,
+            "valid": errors.is_empty(),
+            // The first error alone, for clients that show one.
+            "error": errors.first(),
+            "errors": errors,
+            "warnings": warnings,
+            "loaded_errors": self.opts.user_config_errors,
+        })
+    }
+}
+
+/// A config error as `{message, file, line, column}`.
+pub(crate) fn located(error: &devlanes_config::ConfigError) -> Value {
+    json!({
+        "message": error.message,
+        "file": error.location.file,
+        "line": error.location.line,
+        "column": error.location.column,
+    })
 }
 
 #[cfg(test)]

@@ -377,6 +377,8 @@ struct FakeDriver {
     start_failure: Option<RpcError>,
     /// The command cannot be spawned.
     missing_command: bool,
+    /// The daemon's start result, `null` for a driver without one.
+    result: Value,
 }
 
 impl Default for FakeDriver {
@@ -392,6 +394,7 @@ impl Default for FakeDriver {
             whole_lane: false,
             start_failure: None,
             missing_command: false,
+            result: Value::Null,
         }
     }
 }
@@ -429,6 +432,7 @@ impl WithDriver for FakeDriver {
                     log_tail: vec![],
                 }]
             },
+            result: self.result.clone(),
         })
     }
     /// No test can accidentally stop all units in another lane.
@@ -461,25 +465,38 @@ impl WithDriver for FakeDriver {
         assert_eq!(query.query.tail, None);
         assert_eq!(query.query.max_bytes, None);
         self.calls.push("logs".into());
-        Ok(vec![UnitLogs {
-            unit: "api".into(),
+        // `worker` and `db` ran before this invocation; only `api` is its own.
+        let unit = |name: &str, text: &str| UnitLogs {
+            unit: name.into(),
             lines: vec![LogLine {
-                unit: "api".into(),
+                unit: name.into(),
                 seq: 1,
                 timestamp_ms: 1,
-                text: "\x1b[31mmissing config\x1b[0m".into(),
+                text: text.into(),
                 level: None,
             }],
-        }])
+        };
+        Ok(vec![
+            unit("api", "\x1b[31mmissing config\x1b[0m"),
+            unit("worker", "waiting for queue"),
+            unit("db", "ready to accept connections"),
+        ])
     }
     /// Peak fixtures differ from instantaneous resource usage by contract.
     async fn metrics(&mut self, _lane: &str) -> Result<Vec<ResourcePeak>, RpcError> {
         self.calls.push("metrics".into());
-        Ok(vec![ResourcePeak {
-            unit: "api".into(),
-            peak_memory_bytes: Some(1_048_576),
-            peak_cpu_percent: Some(20.0),
-        }])
+        Ok(vec![
+            ResourcePeak {
+                unit: "api".into(),
+                peak_memory_bytes: Some(1_048_576),
+                peak_cpu_percent: Some(20.0),
+            },
+            ResourcePeak {
+                unit: "db".into(),
+                peak_memory_bytes: Some(2_097_152),
+                peak_cpu_percent: Some(3.0),
+            },
+        ])
     }
     /// Selective cleanup must not expand to a whole-lane stop.
     async fn stop(&mut self, lane: &str, selection: Selection) -> Result<Value, RpcError> {
@@ -697,6 +714,65 @@ async fn with_keep_existing_daemon_signals_and_cleanup_errors() {
     }
 }
 
+/// A start that timed out: the crashed unit and the one still starting are both
+/// failures with tails and annotations, inside the real start result; artifacts and
+/// the summary cover only the units this invocation started.
+#[tokio::test]
+async fn with_timed_out_start_reports_every_unready_unit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (plan, runtime) = plan(temp.path(), false);
+    let unit = |name: &str, state: &str| {
+        json!({"name": name, "lane": "acme@0", "state": state, "kind": "service",
+               "pid": null, "exit_code": null, "ports": {}, "actor": {"kind": "human"}, "reason": null,
+               "urls": if state == "ready" { json!(["https://db.acme.localhost"]) } else { json!([]) }})
+    };
+    let mut driver = FakeDriver {
+        ready: false,
+        result: json!({
+            "lane": "acme@0", "branch": "main", "started": ["acme@0:api"], "already_running": ["acme@0:db"],
+            "whole_lane": false, "ready": false, "timed_out": true,
+            "failures": [{"lane": "acme@0", "unit": "api", "exit_code": 1, "log_tail": []}],
+            "units": [unit("api", "failed"), unit("worker", "starting"), unit("db", "ready")],
+        }),
+        ..FakeDriver::default()
+    };
+    let mut output = String::new();
+    let outcome = run_with(&plan, &runtime, &mut driver, &mut |rendered| {
+        output.push_str(&rendered.stdout)
+    })
+    .await;
+    assert_eq!(outcome.exit_code, 1);
+    assert_eq!(
+        outcome
+            .log_files
+            .iter()
+            .map(|path| path
+                .file_name()
+                .expect("name")
+                .to_string_lossy()
+                .into_owned())
+            .collect::<Vec<_>>(),
+        ["unit-api.log"]
+    );
+    insta::assert_snapshot!(output, @r"
+    ::group::services
+    acme@0 · main
+    failed services  1 of 3 ready
+      failed  api     exited 1   missing config
+      failed  worker  did not become ready in time   waiting for queue
+      ok      db      https://db.acme.localhost
+    timed out before every unit was ready
+
+    logs: devlanes logs acme@0:api --tail 200
+    ::endgroup::
+    ::error title=api exited 1::missing config
+    ::error title=worker failed::waiting for queue
+    | Unit | Peak memory | Peak CPU |
+    | --- | ---: | ---: |
+    | api | 1.0 MiB | 20.0% |
+    ");
+}
+
 /// A signal during the start still stops what it started and exits 128 + n; a
 /// command that does not exist exits 127 like a shell.
 #[tokio::test]
@@ -813,6 +889,7 @@ async fn stop_artifacts_and_summary_do_not_stop_daemon() {
     // A normal stop keeps the unit's 143 without failing; the stopped unit is listed.
     assert_eq!(outcome.exit_code, 0);
     assert!(output.contains("api"), "{output}");
-    assert_eq!(outcome.log_files.len(), 1);
+    // Every unit of the lane: `stop --logs-dir` saves the lane, not one invocation's units.
+    assert_eq!(outcome.log_files.len(), 3);
     assert_eq!(driver.calls, ["logs", "metrics", "stop"]);
 }

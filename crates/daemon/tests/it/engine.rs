@@ -21,6 +21,68 @@ services:
     run: "printenv RUN; sleep"
 "#;
 
+#[tokio::test(flavor = "multi_thread")]
+/// In a repository without `devlanes.yaml`, `start`, `config check` and `lane
+/// new` answer `no_config` with the cwd and the repository root the search
+/// stopped at, even when a directory above the repository has a config.
+async fn fresh_repository_reports_no_config() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        std::fs::write(tmp.path.join("devlanes.yaml"), "project: outside\n").expect("outer");
+        let root = tmp.path.join("fresh");
+        std::fs::create_dir_all(root.join("src")).expect("mkdir");
+        git(&root, &["init", "-q", "-b", "main"]);
+        let cwd = root.join("src");
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        for (method, params) in [
+            (Method::Start, json!({})),
+            (Method::ConfigCheck, json!({})),
+            (Method::LaneNew, json!({"branch": "feature"})),
+        ] {
+            let error = h
+                .call(method, params, cx(&cwd))
+                .await
+                .expect_err("no config");
+            assert_eq!(
+                (error.code.as_str(), error.exit_code),
+                ("no_config", 3),
+                "{method:?}: {error:?}"
+            );
+            assert_eq!(error.data["path"], json!(cwd));
+            assert_eq!(error.data["searched_to"], json!(root));
+        }
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// `env` for an unknown unit lists the lane's units as candidates.
+async fn env_of_an_unknown_unit_lists_candidates() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", BASIC);
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        h.call(Method::LaneList, json!({}), cx(&main))
+            .await
+            .expect("lanes");
+        let error = h
+            .call(Method::Env, json!({"unit": "wbe"}), cx(&main))
+            .await
+            .expect_err("unknown unit");
+        assert_eq!((error.code.as_str(), error.exit_code), ("not_found", 3));
+        assert_eq!(
+            error.data["candidates"],
+            json!(["web", "worker"]),
+            "{error:?}"
+        );
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
 /// Lanes visible from `cwd` (no re-list).
 async fn status(h: &crate::Harness, context: Context, params: Value) -> Vec<LaneSummary> {
     let value = h
@@ -162,7 +224,22 @@ async fn worktrees_are_picked_up_live() {
                 .filter(|r| r.code == "worktree_missing")
         })
         .await;
-        assert!(missing.is_some(), "removal is noticed");
+        assert_eq!(missing.expect("removal is noticed").exit_code, 3);
+        let start = h
+            .call(
+                Method::Start,
+                json!({}),
+                Context {
+                    lane: Some(format!("demo@{index}")),
+                    ..cx(&main)
+                },
+            )
+            .await
+            .expect_err("no worktree to start in");
+        assert_eq!(
+            (start.code.as_str(), start.exit_code),
+            ("worktree_missing", 3)
+        );
         h.close().await;
     })
     .await
@@ -219,7 +296,8 @@ async fn start_pipeline_order_and_idempotence() {
         assert_eq!(h.infra.calls.entries(), ["up 0"]);
         let mut phases = Vec::new();
         while let Ok(event) = bus.try_recv() {
-            if event.event == events::PHASE {
+            // Detail on a running phase is covered in `stream`.
+            if event.event == events::PHASE && event.data["state"] != "progress" {
                 phases.push(format!(
                     "{}:{}",
                     event.data["phase"].as_str().unwrap_or(""),

@@ -46,6 +46,91 @@ pub fn start_tracker(request: &Request) -> Option<StartTracker> {
     }
 }
 
+/// Erases the previous line on a terminal: cursor up, clear line.
+const ERASE_LINE: &str = "\x1b[1A\x1b[2K";
+
+/// Turns a human start's `… phase` line into its outcome in place: the line
+/// printed when a phase began is replaced by each newer detail on it
+/// (`… infra: waiting for postgres (healthy 1 of 2)`), then by `✓ phase` (or
+/// erased when the phase had nothing to do), as long as nothing was printed in
+/// between.
+pub struct PhaseLines {
+    mode: PhaseMode,
+    /// `lane phase start_id` of the running phase's line printed last, while it
+    /// is still the last line on stdout.
+    open: Option<String>,
+}
+
+/// What happens to `started` and `progress` phase lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhaseMode {
+    /// Not human output, or not a terminal: no started lines.
+    Hide,
+    /// A terminal: started lines are replaced when the phase ends.
+    Replace,
+    /// Verbose output interleaves stderr, so lines are never erased.
+    Keep,
+}
+
+impl PhaseLines {
+    /// The policy for this invocation's stdout.
+    pub fn new(runtime: &Runtime) -> Self {
+        let mode = if runtime.mode != OutputMode::Human {
+            PhaseMode::Hide
+        } else if runtime.verbose > 0 {
+            PhaseMode::Keep
+        } else if runtime.stdout_tty && runtime.ci.is_none() {
+            PhaseMode::Replace
+        } else {
+            PhaseMode::Hide
+        };
+        Self { mode, open: None }
+    }
+
+    /// Adjusts the rendered stdout of `event` before it is written.
+    pub fn rewrite(&mut self, event: &devlanes_proto::Event, stdout: &mut String) {
+        if self.mode == PhaseMode::Keep {
+            return;
+        }
+        let phase = (event.event == devlanes_proto::events::PHASE).then(|| {
+            let data = &event.data;
+            let text = |key: &str| data.get(key).map(Value::to_string).unwrap_or_default();
+            (
+                format!("{} {} {}", text("lane"), text("phase"), text("start_id")),
+                data.get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+        });
+        match phase {
+            Some((key, state @ ("started" | "progress"))) => {
+                if self.mode == PhaseMode::Hide {
+                    stdout.clear();
+                    return;
+                }
+                if stdout.is_empty() {
+                    // A progress event without detail leaves the line as it is.
+                    if state == "started" {
+                        self.open = None;
+                    }
+                    return;
+                }
+                // New detail on the same phase replaces its line.
+                if state == "progress" && self.open.as_ref() == Some(&key) {
+                    stdout.insert_str(0, ERASE_LINE);
+                }
+                self.open = Some(key);
+            }
+            Some((key, _)) if self.open.as_ref() == Some(&key) => {
+                stdout.insert_str(0, ERASE_LINE);
+                self.open = None;
+            }
+            _ if !stdout.is_empty() => self.open = None,
+            _ => {}
+        }
+    }
+}
+
 impl Runtime {
     /// Whether this invocation draws the progress bar: only human output on a
     /// terminal, then as `mode`, [`devlanes_term::PROGRESS_ENV`] and the terminal

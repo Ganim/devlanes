@@ -6,6 +6,8 @@ Rust 2024, pinned stable toolchain, macOS and Linux. Packages live in `crates/<n
 
 Use typed library errors and propagate expected failures. Add concise rustdoc to functions and methods. Inline comments explain why, when or where. Unsafe code is denied except in explicitly approved OS-boundary crates, where each block needs a safety explanation. Keep blocking filesystem/process work off async executor threads.
 
+Accepted exception: the daemon depends on `git`, `resolver-dns`, `resolver-hosts` and `sync` directly instead of through core traits. They are daemon-internal mechanisms with one implementation each, so a trait would add indirection without a second implementer; reviews should not flag it.
+
 The daemon owns managed resources and SQLite. Clients own rendering and actor detection. Never persist client environments or secret-provider values. Reap managed processes by PID, never `waitpid(-1)`. Do not add auto-restart or resource enforcement.
 
 ## Crate READMEs

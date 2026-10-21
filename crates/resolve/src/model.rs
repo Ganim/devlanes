@@ -284,6 +284,37 @@ pub struct Ready {
     pub timeout: Duration,
 }
 
+/// `infra.containers.<name>.ready` after evaluation. Ports stay names, since a
+/// container's published host ports are known only once its infra is up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerReady {
+    pub check: ContainerCheck,
+    pub timeout: Duration,
+}
+
+/// The probe of a [`ContainerReady`]; `port: None` means the container's first
+/// declared port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainerCheck {
+    Tcp {
+        port: Option<String>,
+    },
+    Http {
+        port: Option<String>,
+        path: String,
+        status: Option<u16>,
+    },
+    /// Regex over the container's log lines.
+    Log {
+        pattern: String,
+    },
+    /// Shell command retried until it exits 0.
+    Cmd {
+        shell: String,
+        cwd: PathBuf,
+    },
+}
+
 /// `services.<name>.sync` entry with absolute paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncSpec {

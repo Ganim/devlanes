@@ -316,13 +316,37 @@ impl ComposeCli {
             command.env_remove(variable);
         }
         command.envs(&self.extra_env).envs(env);
-        match tokio::time::timeout(timeout, command.output()).await {
+        // The macros bring tracing's own `display` into scope, so name it first.
+        let shown = display(args);
+        // Keys only: the values can be secrets.
+        tracing::debug!(
+            command = %shown,
+            cwd = %cwd.display(),
+            env_keys = %env.keys().map(String::as_str).collect::<Vec<_>>().join(","),
+            "running"
+        );
+        let started = std::time::Instant::now();
+        let result = match tokio::time::timeout(timeout, command.output()).await {
             Ok(output) => Ok(output?),
             Err(_) => Err(Error::Timeout {
-                command: display(args),
+                command: shown.clone(),
                 timeout,
             }),
+        };
+        if let Ok(output) = &result {
+            // Compose writes its progress to stderr; stdout carries data (`ps`,
+            // `config`) that can hold resolved environment values, so it stays out.
+            for line in String::from_utf8_lossy(&output.stderr).lines() {
+                tracing::debug!(line, "compose output");
+            }
+            tracing::debug!(
+                command = %shown,
+                status = %output.status,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "finished"
+            );
         }
+        result
     }
 }
 

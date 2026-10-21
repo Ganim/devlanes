@@ -1,0 +1,27 @@
+---
+source: crates/cli/tests/it/choose.rs
+expression: output
+---
+--- url open plain (exit 3)
+error: no devlanes.yaml in /work/empty or its parents
+hint: create devlanes.yaml at the repository root; a minimal one: https://github.com/devlanes-run/devlanes/blob/main/docs/examples/minimal.yaml
+--- url open json (exit 3)
+{"error":{"code":"argument_missing","exit_code":3,"data":{"command":"url open","description":"Open a service's URL in the browser; agent mode only prints it","argument":"service","options":[],"total":0,"reason":"no_config","message":"no devlanes.yaml in /work/empty or its parents"}}}
+--- attach plain (exit 3)
+error: /work/acme is not in a lane devlanes knows
+hint: devlanes start
+--- attach json (exit 3)
+{"error":{"code":"argument_missing","exit_code":3,"data":{"command":"attach","description":"Attach this terminal to a unit's terminal; C-a d detaches","argument":"unit","options":[],"total":0,"reason":"no_lane","message":"/work/acme is not in a lane devlanes knows"}}}
+--- url open plain (exit 2)
+error: acme@0 has no services with URLs
+--- url open json (exit 2)
+{"error":{"code":"argument_missing","exit_code":2,"data":{"command":"url open","description":"Open a service's URL in the browser; agent mode only prints it","argument":"service","options":[],"total":0,"reason":"no_options","message":"acme@0 has no services with URLs"}}}
+--- attach plain (exit 2)
+error: acme@0 has no running units
+hint: devlanes start
+--- attach json (exit 2)
+{"error":{"code":"argument_missing","exit_code":2,"data":{"command":"attach","description":"Attach this terminal to a unit's terminal; C-a d detaches","argument":"unit","options":[],"total":0,"reason":"no_options","message":"acme@0 has no running units"}}}
+--- run plain (exit 2)
+error: acme@0 has no tasks
+--- run json (exit 2)
+{"error":{"code":"argument_missing","exit_code":2,"data":{"command":"run","description":"Run a task from devlanes.yaml and exit with its exit code","argument":"task","options":[],"total":0,"reason":"no_options","message":"acme@0 has no tasks"}}}

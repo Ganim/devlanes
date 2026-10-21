@@ -10,7 +10,9 @@ use std::{
     io::{self, Write},
 };
 
-use devlanes_proto::{Event, LaneSummary, UnitSummary, events};
+use devlanes_proto::{
+    ContainerPhase, Event, LaneSummary, PhaseContainer, PhaseStep, UnitSummary, events,
+};
 use serde_json::Value;
 
 /// Environment override for the config's `terminal.progress`: `0` turns the
@@ -414,6 +416,8 @@ impl StartTracker {
                         }
                         followed.phase = Some(phase.to_owned());
                     }
+                    // Detail on a phase that still runs.
+                    "progress" => followed.phase = Some(phase.to_owned()),
                     "failed" => {
                         followed.failed = true;
                         followed.phase = None;
@@ -587,6 +591,68 @@ fn memory_hold(unit: &UnitSummary) -> bool {
                 Some("memory" | "memory_critical")
             )
     })
+}
+
+/// What a running phase is doing, from the `containers` or `step` of a
+/// `lane.phase` `progress` event: `waiting for postgres (healthy 1 of 2)`,
+/// `migrate (2 of 3)`. The CLI's phase lines and the TUI's header both say it
+/// this way. `None` when the event carries neither.
+pub fn phase_detail(data: &Value) -> Option<String> {
+    if let Some(containers) = parse::<Vec<PhaseContainer>>(data.get("containers"))
+        && !containers.is_empty()
+    {
+        return Some(containers_detail(&containers));
+    }
+    let step = parse::<PhaseStep>(data.get("step"))?;
+    let name = printable(&step.name);
+    Some(if step.count > 1 {
+        format!("{name} ({} of {})", step.index, step.count)
+    } else {
+        name
+    })
+}
+
+/// The infra line: the first failed container, else the first one not healthy
+/// yet with what it waits for, and how many are healthy.
+fn containers_detail(containers: &[PhaseContainer]) -> String {
+    if let Some(failed) = containers
+        .iter()
+        .find(|c| c.state == ContainerPhase::Failed)
+    {
+        let health = failed.health.as_deref().map(printable);
+        return match health {
+            Some(health) => format!("{} failed ({health})", printable(&failed.name)),
+            None => format!("{} failed", printable(&failed.name)),
+        };
+    }
+    let total = containers.len();
+    let healthy = containers
+        .iter()
+        .filter(|c| c.state == ContainerPhase::Healthy)
+        .count();
+    let waiting: Vec<&PhaseContainer> = containers
+        .iter()
+        .filter(|c| c.state != ContainerPhase::Healthy)
+        .collect();
+    let Some(first) = waiting.first() else {
+        return format!("{healthy} of {total} healthy");
+    };
+    let name = printable(&first.name);
+    let mut line = match first.state {
+        ContainerPhase::Creating => format!("creating {name}"),
+        ContainerPhase::Starting => format!("starting {name}"),
+        _ => format!("waiting for {name}"),
+    };
+    if waiting.len() > 1 {
+        line.push_str(&format!(" and {} more", waiting.len() - 1));
+    }
+    line.push_str(&format!(" (healthy {healthy} of {total})"));
+    line
+}
+
+/// Config names as one line without terminal control characters.
+fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 /// Reads an event payload field, ignoring one this client cannot parse.
@@ -990,5 +1056,53 @@ mod tests {
         assert_eq!(tracker.progress(), Progress::Error(100));
         tracker.forget_failures();
         assert_eq!(tracker.progress(), Progress::Clear);
+    }
+
+    #[test]
+    fn phase_detail_names_what_infra_and_steps_wait_for() {
+        let containers = |list: Value| json!({ "containers": list });
+        assert_eq!(
+            phase_detail(&containers(json!([
+                {"name": "redis", "state": "healthy", "health": "healthy"},
+                {"name": "postgres", "state": "waiting_healthy", "health": "starting"},
+            ]))),
+            Some("waiting for postgres (healthy 1 of 2)".into())
+        );
+        assert_eq!(
+            phase_detail(&containers(json!([
+                {"name": "postgres", "state": "creating"},
+                {"name": "redis", "state": "starting", "health": "restarting"},
+                {"name": "mail", "state": "a_newer_state"},
+            ]))),
+            Some("creating postgres and 2 more (healthy 0 of 3)".into())
+        );
+        assert_eq!(
+            phase_detail(&containers(json!([
+                {"name": "redis", "state": "healthy"},
+                {"name": "postgres", "state": "failed", "health": "exited (1)"},
+            ]))),
+            Some("postgres failed (exited (1))".into())
+        );
+        assert_eq!(
+            phase_detail(&containers(json!([{"name": "redis", "state": "healthy"}]))),
+            Some("1 of 1 healthy".into())
+        );
+        let step =
+            |index, count| json!({"step": {"name": "migrate", "index": index, "count": count}});
+        assert_eq!(phase_detail(&step(2, 3)), Some("migrate (2 of 3)".into()));
+        assert_eq!(phase_detail(&step(1, 1)), Some("migrate".into()));
+        assert_eq!(phase_detail(&json!({"phase": "infra"})), None);
+    }
+
+    #[test]
+    fn progress_keeps_a_phase_running() {
+        let mut tracker = StartTracker::command();
+        tracker.event(&phase_of("acme@1", "infra", "started", 2, &[]));
+        tracker.event(&event(
+            events::PHASE,
+            json!({"lane": "acme@1", "phase": "infra", "state": "progress", "start_id": 2,
+                   "containers": [{"name": "db", "state": "starting"}]}),
+        ));
+        assert_eq!(tracker.progress(), Progress::Indeterminate);
     }
 }

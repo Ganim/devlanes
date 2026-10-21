@@ -1,28 +1,25 @@
-//! Folder syncs streamed to a client (plan 14.5): a [`Syncer`] per subscription
+//! Folder syncs streamed to a client (plan 14.5).
+//!
+//! On `follow`, the client sends its destination's manifest in batches, ended by
+//! an end-of-input marker. Each batch is compared with the source as it arrives
+//! ([`Syncer::offer_held`]); nothing is sent before the marker. Then a [`Syncer`]
 //! writes into [`MuxTarget`], which turns each file into a manifest header plus
-//! chunks on the sync stream. The client sends what it already holds, so after a
-//! reconnect only differences travel.
+//! chunks, and each deletion into a delete message, so only differences travel.
 
-use std::{
-    collections::BTreeSet,
-    path::Path,
-    sync::{Arc, Mutex, PoisonError},
-};
+use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_client::{Client, Paths};
 use devlanes_proto::{
     Context, Method,
-    remote::{MAX_SYNC_FILE, SyncEntry, SyncFile, SyncManifest, SyncRequest},
+    remote::{MAX_SYNC_FILE, ManifestBatch, SyncEntry, SyncFile, SyncManifest, SyncRequest},
 };
-use devlanes_sync::{
-    ContentHash, Manifest, ManifestEntry, RelPath, SyncOptions, SyncTarget, Syncer,
-};
-use devlanes_transport::{SyncError, SyncFeed, SyncMessage, SyncSource};
+use devlanes_sync::{ContentHash, HeldFile, Manifest, RelPath, SyncOptions, SyncTarget, Syncer};
+use devlanes_transport::{SyncError, SyncFeed, SyncInput, SyncInputEvent, SyncMessage, SyncSource};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 /// File bytes per chunk; well under the transport's 8 MiB frame limit.
 const CHUNK: usize = 1024 * 1024;
@@ -64,7 +61,7 @@ impl DaemonSync {
         lane: String,
         unit: String,
         index: usize,
-        have: Vec<SyncFile>,
+        input: SyncInput,
     ) -> Result<SyncFeed, SyncError> {
         let permit = self.slots.clone().try_acquire_owned().map_err(|_| {
             SyncError::new(format!(
@@ -81,45 +78,78 @@ impl DaemonSync {
                     "{lane}:{unit} has no sync entry {index} running on this box"
                 ))
             })?;
-        let have = client_manifest(have);
-        let (messages, receiver) = mpsc::channel(16);
-        let target = Arc::new(MuxTarget {
-            messages: messages.clone(),
-            files: Mutex::new(have.keys().map(|rel| rel.as_str().to_owned()).collect()),
-            have,
-        });
-        let options = SyncOptions {
-            ignore: entry.ignore.clone(),
-            max_file: Some(MAX_SYNC_FILE),
-            ..SyncOptions::default()
-        };
-        let syncer = Syncer::new(&entry.from, target.clone(), options)
-            .map_err(|error| SyncError::new(error.to_string()))?;
-        // `start` returns after the initial pass, which needs the feed being read.
-        tokio::spawn(async move {
-            let _permit = permit;
-            match syncer.start().await {
-                Ok(handle) => {
-                    let ready = SyncManifest::Ready {
-                        files: target.files(),
-                    };
-                    if let Ok(ready) = serde_json::to_value(ready)
-                        && messages
-                            .send(Ok(SyncMessage::Manifest(ready)))
-                            .await
-                            .is_ok()
-                    {
-                        messages.closed().await;
-                    }
-                    handle.stop().await;
-                }
-                Err(error) => {
-                    let _ = messages.send(Err(SyncError::new(error.to_string()))).await;
-                }
-            }
-        });
-        Ok(feed(receiver))
+        follow_entry(&entry, input, permit)
     }
+}
+
+/// Feeds one sync entry to a client whose manifest arrives on `input`.
+///
+/// A client that leaves before its end marker leaves nothing behind: the next
+/// subscription starts over with a fresh manifest.
+pub(crate) fn follow_entry(
+    entry: &SyncEntry,
+    mut input: SyncInput,
+    permit: OwnedSemaphorePermit,
+) -> Result<SyncFeed, SyncError> {
+    let (messages, receiver) = mpsc::channel(16);
+    let target = Arc::new(MuxTarget {
+        messages: messages.clone(),
+    });
+    let options = SyncOptions {
+        ignore: entry.ignore.clone(),
+        max_file: Some(MAX_SYNC_FILE),
+        ..SyncOptions::default()
+    };
+    let mut syncer = Syncer::new(&entry.from, target, options)
+        .map_err(|error| SyncError::new(error.to_string()))?;
+    tokio::spawn(async move {
+        let _permit = permit;
+        loop {
+            let event = tokio::select! {
+                () = messages.closed() => return,
+                event = input.recv() => event,
+            };
+            match event {
+                Some(SyncInputEvent::Value(value)) => {
+                    let batch = match serde_json::from_value::<ManifestBatch>(value) {
+                        Ok(batch) => batch,
+                        Err(error) => {
+                            let message = format!("bad manifest batch: {error}");
+                            let _ = messages.send(Err(SyncError::new(message))).await;
+                            return;
+                        }
+                    };
+                    let held = batch.files.into_iter().filter_map(held_file).collect();
+                    if let Err(error) = syncer.offer_held(held).await {
+                        let _ = messages.send(Err(SyncError::new(error.to_string()))).await;
+                        return;
+                    }
+                }
+                Some(SyncInputEvent::End) => break,
+                // The client left mid-manifest.
+                None => return,
+            }
+        }
+        drop(input);
+        // `start` returns after the initial pass, which needs the feed being read.
+        match syncer.start().await {
+            Ok(handle) => {
+                if let Ok(ready) = serde_json::to_value(SyncManifest::Ready)
+                    && messages
+                        .send(Ok(SyncMessage::Manifest(ready)))
+                        .await
+                        .is_ok()
+                {
+                    messages.closed().await;
+                }
+                handle.stop().await;
+            }
+            Err(error) => {
+                let _ = messages.send(Err(SyncError::new(error.to_string()))).await;
+            }
+        }
+    });
+    Ok(feed(receiver))
 }
 
 /// The receiver as a feed.
@@ -130,29 +160,22 @@ fn feed(receiver: mpsc::Receiver<Result<SyncMessage, SyncError>>) -> SyncFeed {
     .boxed()
 }
 
-/// The client's files as a manifest; entries with invalid paths or hashes are
-/// dropped, which only means they get sent again.
-fn client_manifest(have: Vec<SyncFile>) -> Manifest {
-    have.into_iter()
-        .filter_map(|file| {
-            let rel = RelPath::new(file.path).ok()?;
-            let hash = ContentHash::from_hex(&file.hash)?;
-            Some((
-                rel,
-                ManifestEntry {
-                    size: file.size,
-                    mode: file.mode,
-                    hash,
-                },
-            ))
-        })
-        .collect()
+/// A client manifest entry as a held file; an invalid path is dropped (it cannot
+/// name a source file), an unreadable hash means "send or delete it".
+fn held_file(file: SyncFile) -> Option<HeldFile> {
+    Some(HeldFile {
+        path: RelPath::new(file.path).ok()?,
+        size: file.size,
+        mode: file.mode,
+        hash: ContentHash::from_hex(&file.hash),
+        mtime: None,
+    })
 }
 
 #[async_trait]
 impl SyncSource for DaemonSync {
     /// Lists entries or follows one.
-    async fn subscribe(&self, request: Value) -> Result<SyncFeed, SyncError> {
+    async fn subscribe(&self, request: Value, input: SyncInput) -> Result<SyncFeed, SyncError> {
         match serde_json::from_value(request)
             .map_err(|error| SyncError::new(format!("bad sync request: {error}")))?
         {
@@ -167,12 +190,9 @@ impl SyncSource for DaemonSync {
                         .boxed(),
                 )
             }
-            SyncRequest::Follow {
-                lane,
-                unit,
-                index,
-                have,
-            } => self.follow(lane, unit, index, have).await,
+            SyncRequest::Follow { lane, unit, index } => {
+                self.follow(lane, unit, index, input).await
+            }
         }
     }
 }
@@ -180,23 +200,9 @@ impl SyncSource for DaemonSync {
 /// The client end of a sync as a [`SyncTarget`].
 struct MuxTarget {
     messages: mpsc::Sender<Result<SyncMessage, SyncError>>,
-    /// What the client said it holds when it subscribed.
-    have: Manifest,
-    /// Paths the client holds after this subscription's writes and removals.
-    files: Mutex<BTreeSet<String>>,
 }
 
 impl MuxTarget {
-    /// Paths written and not removed, for the `ready` manifest.
-    fn files(&self) -> Vec<String> {
-        self.lock().iter().cloned().collect()
-    }
-
-    /// Locks the path set; it stays consistent even if a holder panicked.
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
-        self.files.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// Queues one message; fails once the client is gone, which stops the syncer's pass.
     async fn send(&self, message: SyncMessage) -> Result<(), devlanes_sync::SyncError> {
         self.messages
@@ -208,10 +214,10 @@ impl MuxTarget {
 
 #[async_trait]
 impl SyncTarget for MuxTarget {
-    /// The client's own manifest, so unchanged files are skipped and files the
-    /// source no longer has are deleted.
+    /// Never read: the client's manifest arrives through [`Syncer::offer_held`]
+    /// (an empty manifest means an empty destination).
     async fn manifest(&self) -> Result<Manifest, devlanes_sync::SyncError> {
-        Ok(self.have.clone())
+        Ok(Manifest::new())
     }
 
     /// A `file` header, then the contents in chunks.
@@ -244,7 +250,6 @@ impl SyncTarget for MuxTarget {
             }
             offset = end;
         }
-        self.lock().insert(path.as_str().to_owned());
         Ok(())
     }
 
@@ -253,13 +258,200 @@ impl SyncTarget for MuxTarget {
         self.send(SyncMessage::Delete {
             path: path.as_str().to_owned(),
         })
-        .await?;
-        self.lock().remove(path.as_str());
-        Ok(())
+        .await
     }
 
     /// Remote: no local destination to compare against the source.
     fn local_root(&self) -> Option<&Path> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use devlanes_sync::{HashCache, LocalTarget};
+    use devlanes_transport::{
+        BoxServices, LoopbackDialer, RegistrySnapshot, ServeOptions, Session, SessionOptions,
+        SharedRegistry, SyncSubscription, memory::memory_transport, serve,
+    };
+
+    use super::*;
+
+    /// A box serving one fixed sync entry over an in-memory transport.
+    struct TestSource {
+        entry: SyncEntry,
+        slots: Arc<Semaphore>,
+    }
+
+    #[async_trait]
+    impl SyncSource for TestSource {
+        async fn subscribe(
+            &self,
+            _request: Value,
+            input: SyncInput,
+        ) -> Result<SyncFeed, SyncError> {
+            let permit = self
+                .slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| SyncError::new("busy"))?;
+            follow_entry(&self.entry, input, permit)
+        }
+    }
+
+    /// Starts the box and connects a client session.
+    async fn connect(source: &Path) -> Session {
+        let (transport, mut listener) = memory_transport();
+        let services = BoxServices {
+            registry: Arc::new(SharedRegistry::new(RegistrySnapshot::default(), 4)),
+            rpc: Arc::new(crate::rpc::Refuse),
+            dialer: Arc::new(LoopbackDialer),
+            sync: Arc::new(TestSource {
+                entry: SyncEntry {
+                    lane: "app@0".into(),
+                    project: "app".into(),
+                    unit: "web".into(),
+                    index: 0,
+                    from: source.to_path_buf(),
+                    leaf: "ext".into(),
+                    ignore: Vec::new(),
+                },
+                slots: Arc::new(Semaphore::new(4)),
+            }),
+        };
+        tokio::spawn(async move {
+            while let Some(link) = listener.accept().await {
+                let services = services.clone();
+                tokio::spawn(serve(link, services, ServeOptions::new("test-box")));
+            }
+        });
+        Session::connect(&transport, SessionOptions::new("test"))
+            .await
+            .expect("session")
+    }
+
+    /// Opens a follow subscription.
+    async fn follow(session: &Session) -> SyncSubscription {
+        let request = json!({"op": "follow", "lane": "app@0", "unit": "web", "index": 0});
+        session.subscribe_sync(request).await.expect("subscribe")
+    }
+
+    /// Sends a destination's manifest in batches of `batch`.
+    async fn send_manifest(sync: &mut SyncSubscription, destination: &Path, batch: usize) {
+        let mut walk = LocalTarget::new(destination).held(HashCache::default(), batch);
+        while let Some(files) = walk.next().await {
+            let files = files
+                .into_iter()
+                .map(|file| SyncFile {
+                    path: file.path.as_str().to_owned(),
+                    size: file.size,
+                    mode: file.mode,
+                    hash: file.hash.map(|hash| hash.to_hex()).unwrap_or_default(),
+                    mtime_ms: None,
+                })
+                .collect();
+            let batch = serde_json::to_value(ManifestBatch { files }).expect("batch");
+            sync.send(batch).await.expect("send batch");
+        }
+    }
+
+    /// Messages until `ready`, as `(written paths, deleted paths)`.
+    async fn until_ready(sync: &mut SyncSubscription) -> (Vec<String>, Vec<String>) {
+        let (mut written, mut deleted) = (Vec::new(), Vec::new());
+        while let Some(message) = sync.next().await {
+            match message.expect("message") {
+                SyncMessage::Manifest(value) => match serde_json::from_value(value) {
+                    Ok(SyncManifest::Ready) => return (written, deleted),
+                    Ok(SyncManifest::File { path, .. }) => written.push(path),
+                    _ => {}
+                },
+                SyncMessage::Delete { path } => deleted.push(path),
+                SyncMessage::Chunk { .. } => {}
+            }
+        }
+        panic!("the feed ended before ready");
+    }
+
+    /// Writes `count` files below `root` with settled mtimes.
+    fn tree(root: &Path, count: usize) {
+        let settled = std::time::SystemTime::now() - Duration::from_secs(60);
+        for i in 0..count {
+            let path = root.join(format!("d{}/f{i}.txt", i % 10));
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, format!("file {i}")).expect("write");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(settled))
+                .expect("mtime");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deletions_come_only_after_the_end_marker() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (source, destination) = (dir.path().join("src"), dir.path().join("dst"));
+            tree(&source, 20);
+            tree(&destination, 20);
+            std::fs::write(destination.join("stale.txt"), b"gone on the box").expect("stale");
+            std::fs::write(destination.join("d3/f3.txt"), b"changed here").expect("changed");
+            let session = connect(&source).await;
+            let mut sync = follow(&session).await;
+            send_manifest(&mut sync, &destination, 5).await;
+            // Before the end marker the box sends nothing, deletions included.
+            let early = tokio::time::timeout(Duration::from_millis(300), sync.next()).await;
+            assert!(early.is_err(), "box sent {early:?} before the end marker");
+            sync.finish_input().await.expect("end");
+            let (written, deleted) = until_ready(&mut sync).await;
+            assert_eq!(written, ["d3/f3.txt"]);
+            assert_eq!(deleted, ["stale.txt"]);
+        })
+        .await
+        .expect("timeout");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_subscription_dropped_mid_manifest_starts_over_cleanly() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (source, destination) = (dir.path().join("src"), dir.path().join("dst"));
+            tree(&source, 30);
+            tree(&destination, 30);
+            std::fs::write(destination.join("stale.txt"), b"x").expect("stale");
+            let session = connect(&source).await;
+            // Half a manifest, then the client goes away.
+            let mut partial = follow(&session).await;
+            let mut walk = LocalTarget::new(&destination).held(HashCache::default(), 10);
+            let first = walk.next().await.expect("batch");
+            let files = first
+                .into_iter()
+                .map(|file| SyncFile {
+                    path: file.path.as_str().to_owned(),
+                    size: file.size,
+                    mode: file.mode,
+                    hash: file.hash.map(|hash| hash.to_hex()).unwrap_or_default(),
+                    mtime_ms: None,
+                })
+                .collect();
+            let batch = serde_json::to_value(ManifestBatch { files }).expect("batch");
+            partial.send(batch).await.expect("send");
+            drop(partial);
+            drop(walk.finish().await);
+            // A new subscription with the whole manifest sees only the real difference,
+            // and the dropped one freed its slot.
+            for _ in 0..4 {
+                let mut sync = follow(&session).await;
+                send_manifest(&mut sync, &destination, 10).await;
+                sync.finish_input().await.expect("end");
+                let (written, deleted) = until_ready(&mut sync).await;
+                assert!(written.is_empty(), "{written:?}");
+                assert_eq!(deleted, ["stale.txt"]);
+            }
+        })
+        .await
+        .expect("timeout");
     }
 }

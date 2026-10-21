@@ -1,6 +1,7 @@
 //! Transport-independent command parsing, request construction, and presentation.
 
 mod args;
+mod choose;
 mod ci;
 mod completion;
 mod output;
@@ -10,6 +11,7 @@ mod runtime;
 mod with;
 
 pub use args::*;
+pub use choose::*;
 pub use ci::*;
 pub use clap;
 pub use clap_complete::Shell;
@@ -18,6 +20,13 @@ pub use output::*;
 pub use progress::*;
 pub use runtime::*;
 pub use with::*;
+
+/// Whether the CLI words daemon code `code` itself (tests keep every code the
+/// daemon sends covered).
+#[doc(hidden)]
+pub fn has_wording(code: &str) -> bool {
+    render::has_wording(code)
+}
 
 /// Local help for agents; process ownership always remains with the daemon.
 /// The same text is `agent-plugin/codex/AGENTS.md` (a test keeps them identical) and the

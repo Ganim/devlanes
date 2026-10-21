@@ -129,7 +129,7 @@ pub fn fixed_block_start<E: Extensions>(
         ..ExpressionContext::default()
     };
     let vars = devlanes_config::resolve_lane_vars(&config.lanes, &context)
-        .map_err(|e| ResolveError::expression("lanes.vars", e))?;
+        .map_err(|e| ResolveError::expression("lanes.vars", e).locate(config))?;
     match vars.get("port") {
         Some(Scalar::Integer(port)) => u16::try_from(*port)
             .ok()
@@ -148,7 +148,9 @@ pub fn fixed_block_start<E: Extensions>(
 /// `${{ env.X }}` sees the client env and `.env` only.
 pub fn lane_layout<E: Extensions>(input: &ResolveInput<'_, E>) -> Result<LaneLayout, ResolveError> {
     let env = env_namespace(input.client_env, None, input.dotenv);
-    build(input, &env).map(|(layout, _)| layout)
+    build(input, &env)
+        .map(|(layout, _)| layout)
+        .map_err(|error| error.locate(input.config))
 }
 
 /// Static per-service facts needed before evaluation.

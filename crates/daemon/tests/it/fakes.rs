@@ -30,7 +30,7 @@ use devlanes_daemon::integrations::{
     ExitDetails, InfraContainer, InfraError, InfraPortNeed, InfraProvider, InfraSpec, InfraUp,
     ManagedUnit, PortScope, ProcessTable, UnitRunner,
 };
-use devlanes_proto::LeftProcess;
+use devlanes_proto::{LeftProcess, PhaseContainer};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
 
@@ -423,6 +423,13 @@ pub struct FakeInfra {
     pub started_at: Arc<Mutex<Option<String>>>,
     /// When set, `up` fails with this error.
     pub fail_up: Arc<Mutex<Option<InfraError>>>,
+    /// Lines every container's log holds.
+    pub logs: Arc<Mutex<Vec<String>>>,
+    /// Snapshots `progress` hands out in turn, the last one for good. While
+    /// any is left, `up` waits until the last was handed out.
+    pub progress: Arc<Mutex<std::collections::VecDeque<Vec<PhaseContainer>>>>,
+    /// Fired when `progress` handed out the last snapshot.
+    pub progress_read: Arc<tokio::sync::Notify>,
 }
 
 impl FakeInfra {
@@ -470,6 +477,11 @@ impl InfraProvider for FakeInfra {
         if let Some(error) = self.fail_up.lock().ok().and_then(|e| e.clone()) {
             return Err(error);
         }
+        let scripted = self.progress.lock().is_ok_and(|script| !script.is_empty());
+        if scripted {
+            let read = self.progress_read.notified();
+            let _ = tokio::time::timeout(Duration::from_secs(20), read).await;
+        }
         Ok(InfraUp {
             namespace: Self::namespace(spec),
             setup_env: BTreeMap::from([("COMPOSE_PROJECT_NAME".into(), "fake".into())]),
@@ -502,10 +514,29 @@ impl InfraProvider for FakeInfra {
     ) -> Result<Option<String>, InfraError> {
         Ok(self.started_at.lock().ok().and_then(|s| s.clone()))
     }
+    async fn container_logs(
+        &self,
+        _: &InfraSpec,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<String>, InfraError> {
+        Ok(self.logs.lock().map(|l| l.clone()).unwrap_or_default())
+    }
     async fn adopt(&self, _: &[String]) -> Result<Value, InfraError> {
         Ok(Value::Null)
     }
     async fn doctor(&self) -> Value {
         json!({"docker": {"reachable": true}})
+    }
+    async fn progress(&self, _: &InfraSpec) -> Vec<PhaseContainer> {
+        let Ok(mut script) = self.progress.lock() else {
+            return Vec::new();
+        };
+        if script.len() > 1 {
+            return script.pop_front().unwrap_or_default();
+        }
+        // `notify_one` keeps a permit, so an `up` not waiting yet still sees it.
+        self.progress_read.notify_one();
+        script.front().cloned().unwrap_or_default()
     }
 }

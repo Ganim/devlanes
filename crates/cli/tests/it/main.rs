@@ -247,7 +247,8 @@ fn agent_mode_bounds_streams_and_terminals() {
             PathBuf::new(),
             BTreeMap::new
         ),
-        Ok(Action::RpcThenUi(_))
+        // A person at a terminal: the start runs inside the TUI.
+        Ok(Action::StartUi { forced: true, .. })
     ));
 }
 
@@ -538,16 +539,15 @@ fn defaults_follow_guards_and_interrupt_policy() {
 
 #[test]
 fn malformed_inputs_are_usage_errors() {
+    // `restart`, `run` and `logs` alone are not malformed: they offer a choice
+    // (tests/it/choose.rs).
     for args in [
-        vec!["restart"],
         vec!["exec", "--name", "x"],
-        vec!["run"],
         vec!["run", "task", "--list"],
         vec!["start", "--env", "missing-equals"],
         vec!["--timeout", "0"],
         vec!["--timeout", "18446744073709551615h"],
         vec!["--budget", "12"],
-        vec!["logs"],
     ] {
         let error =
             Cli::try_parse_from(std::iter::once("devlanes").chain(args)).expect_err("invalid args");
@@ -1291,7 +1291,12 @@ fn completion_is_lazy_and_filters_existing_candidates() {
     );
 }
 mod agent_guide;
+mod choose;
 mod ci;
+mod codes;
+mod diagnostics;
 mod help;
 mod progress;
+mod reference_docs;
 mod render;
+mod start_ui;

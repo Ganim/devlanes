@@ -6,7 +6,7 @@ expression: text
 daemon
   ✓ devlanes 0.1.0, pid 4242, socket /home/u/.devlanes/run/daemon.sock
   ✓ state schema 5 at /home/u/.devlanes/state.db
-  ✓ 2 projects loaded, 1 event subscribers
+  ✓ 2 projects loaded, 1 event subscriber
 sandbox
   ✓ not sandboxed
 docker
@@ -27,7 +27,7 @@ output
 daemon
   ok devlanes 0.1.0, pid 4242, socket /home/u/.devlanes/run/daemon.sock
   ok state schema 5 at /home/u/.devlanes/state.db
-  ok 2 projects loaded, 1 event subscribers
+  ok 2 projects loaded, 1 event subscriber
 sandbox
   ok not sandboxed
 docker
@@ -56,5 +56,5 @@ ok daemon: state schema 5 at /home/u/.devlanes/state.db
 ok sandbox: not sandboxed
 ok proxy: http on port 80
 ok tls: CA at /home/u/.devlanes/ca/ca.pem
-ok daemon: 2 projects loaded, 1 event subscribers
+ok daemon: 2 projects loaded, 1 event subscriber
 ok output: mode agent (DEVLANES_OUTPUT)

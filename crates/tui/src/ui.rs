@@ -138,13 +138,27 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             "daemon unreachable, reconnecting".to_owned(),
             Style::new().fg(FAILED),
         ),
-        (Connection::Connecting, _) => ("connecting".to_owned(), Style::new().fg(MUTED)),
+        (Connection::Connecting, _) if app.start_line().is_none() => {
+            ("connecting".to_owned(), Style::new().fg(MUTED))
+        }
         (Connection::Online, Some(notice)) if notice.error => {
             (format!("! {}", notice.text), Style::new().fg(FAILED))
         }
         (Connection::Online, Some(notice)) => (notice.text.clone(), Style::new()),
-        (Connection::Online, None) => match app.release_badge() {
-            Some((_, text)) => (format!("{text} · u hides"), Style::new().fg(MUTED)),
+        // The start this TUI opened for: its phase, then its result, which stays.
+        (Connection::Online | Connection::Connecting, _)
+            if let Some((line, ended)) = app.start_line() =>
+        {
+            let color = match ended {
+                None => PAINT,
+                Some(true) => READY,
+                Some(false) => FAILED,
+            };
+            (line, Style::new().fg(color))
+        }
+        (_, _) => match app.release_badge() {
+            // Key first: a clipped badge still says how to hide it.
+            Some((_, text)) => (format!("u hides · {text}"), Style::new().fg(MUTED)),
             None => return,
         },
     };
@@ -1092,11 +1106,12 @@ fn daemon_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         counts.push(format!("{processes} managed"));
     }
     if let Some(doctor) = doctor {
-        counts.push(format!(
-            "{} event subscribers",
-            doctor::fact(doctor, "subscribers")
-        ));
-        counts.push(format!("{} projects", doctor::fact(doctor, "projects")));
+        let count = |key: &str, word: &str| match doctor.get(key).and_then(|v| v.as_u64()) {
+            Some(1) => format!("1 {word}"),
+            _ => format!("{} {word}s", doctor::fact(doctor, key)),
+        };
+        counts.push(count("subscribers", "event subscriber"));
+        counts.push(count("projects", "project"));
     }
     if !counts.is_empty() {
         lines.extend(field("processes", &counts.join(" · "), width, plain));
@@ -1191,7 +1206,12 @@ fn render_daemon_log(app: &App, frame: &mut Frame, area: Rect) {
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     let mode = app.attached.as_ref().map(|a| &a.mode);
     let mut hints: Vec<(&str, &str)> = match (app.tab, app.focus, mode) {
-        (Tab::Monitor, _, _) => vec![("j/k", "move"), ("tab", "daemon"), ("q", "quit")],
+        (Tab::Monitor, _, _) => vec![
+            ("j/k", "move"),
+            ("tab", "daemon"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
         (Tab::Daemon, _, _) => {
             let mut hints = vec![
                 ("j/k", "scroll log"),
@@ -1199,6 +1219,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
                 ("S", "stop"),
                 ("X", "lane gc"),
                 ("tab", "lanes"),
+                ("?", "help"),
                 ("q", "quit"),
             ];
             if app.daemon.stopped {
@@ -1276,10 +1297,11 @@ const HELP: &[(&str, &str)] = &[
     ("o / O", "open the url / open in a new terminal"),
     ("C", "clean the lane (asks you to type its name)"),
     ("e", "recent errors in full"),
-    ("tab", "lanes / monitor / daemon, from the list"),
+    ("tab, 1 / 2 / 3", "next tab, or lanes / monitor / daemon"),
     ("R / S", "daemon tab: restart / stop the daemon"),
     ("X", "daemon tab: lane gc"),
     ("s", "daemon tab: start a stopped daemon"),
+    ("u", "hide the release or version notice"),
     ("q", "quit; everything keeps running"),
 ];
 

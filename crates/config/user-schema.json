@@ -859,6 +859,27 @@
         }
       ]
     },
+    "TuiConfig": {
+      "additionalProperties": false,
+      "description": "Terminal UI behaviour of the CLI.",
+      "examples": [
+        {
+          "open_on_start": false
+        }
+      ],
+      "properties": {
+        "open_on_start": {
+          "default": true,
+          "description": "Run `start`, `restart`, `lane resume` and `lane new --start` inside the TUI when typed at a terminal; defaults to true. false prints them as text, like `--no-ui` or DEVLANES_NO_UI=1.",
+          "examples": [
+            true,
+            false
+          ],
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "UpdatesConfig": {
       "additionalProperties": false,
       "description": "Release checks: the daemon reads the latest release's version once a day and\ncommands print a one-line notice. Nothing is downloaded or installed.",
@@ -1061,6 +1082,18 @@
             "system",
             "firefox"
           ]
+        }
+      ]
+    },
+    "tui": {
+      "$ref": "#/$defs/TuiConfig",
+      "default": {
+        "open_on_start": true
+      },
+      "description": "How commands use the terminal UI.",
+      "examples": [
+        {
+          "open_on_start": false
         }
       ]
     },

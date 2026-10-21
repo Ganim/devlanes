@@ -1,0 +1,45 @@
+tasks:
+  db:
+    cmd: ["postgres", "-D", ".data/db"]
+    ready: {log: "ready to accept connections (port 5432)"}
+  migrate:
+    type: job
+    cmd: ["./migrate.sh"]
+    deps: [db]
+  api:
+    cmd: ["cargo", "run", "-p", "api"]
+    deps: [db, migrate]
+    env:
+      PORT: "3000"
+    ready: {http: "http://localhost:3000/health", timeout: 30s}
+    autorestart: on-failure
+    autostart: true
+    tags: [api, autostart]
+    label: Acme API
+  logs:
+    cmd: tail -f 'var/log/api server.log'
+  repl:
+    cmd: node
+    stop: {keys: ["<C-d>"]}
+  cache:
+    cmd: redis-server --port 6380
+    ready: {tcp: 6380, interval: 2s}
+    stop: {signal: SIGINT, group: false, timeout: 20s}
+  docs:
+    cmd: mkdocs serve
+    ready: {cmd: "curl -fsS http://localhost:8000", interval: 500ms}
+  assets:
+    cmd: ["npm", "run", "watch"]
+    cwd: web
+    ready: {file: dist/manifest.json}
+  report:
+    script: scripts/report.js
+load:
+  - file: services/worker.yaml
+    at: jobs
+defaults:
+  env:
+    RUST_LOG: info
+  stop: {timeout: 15s}
+on_idle: {command: down}
+kernel: npm

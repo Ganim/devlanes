@@ -1,0 +1,25 @@
+# A Postgres per lane and one shared Redis; needs Docker. psql and redis-cli run
+# inside the containers, so the host needs neither client.
+project: fixture-pg-redis
+
+infra:
+  compose: compose.yaml
+  # The shared project's name, so tests can reach Redis with docker compose -p.
+  project_name: devlanes-fixture-pg-redis
+  # Each lane runs its own Postgres in the Compose project fixture-pg-redis-lane<N>.
+  per_lane: [postgres]
+  # Once per lane, after its Postgres is healthy.
+  setup:
+    schema: docker compose -p "$DEVLANES_COMPOSE_LANE_PROJECT" exec -T postgres psql -U postgres -d app -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS notes (body text NOT NULL)"
+
+services:
+  api:
+    # fixture-server must be on the PATH of the shell that runs devlanes start:
+    # cargo build -p devlanes-testing --bin fixture-server, then add target/debug
+    # to PATH (the e2e harness does both). See fixtures/README.md.
+    run: [fixture-server, --log-line, api-ready]
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/app
+      # One Redis database per lane in the shared server.
+      REDIS_URL: redis://127.0.0.1:${{ infra.redis.port }}/${{ lane.index }}
+    ready: { http: { path: /healthz } }

@@ -136,6 +136,10 @@ pub struct AllocationRequest {
     pub fixed_start: Option<u16>,
     pub names: BTreeSet<PortName>,
     pub reserved: BTreeSet<u16>,
+    /// Ports used outside this machine's records, such as a connected box's
+    /// mirrored ports. A new pool block never covers them; a kept block or a fixed
+    /// start ignores them, because local lanes win over mirrors.
+    pub avoid: BTreeSet<u16>,
 }
 
 /// Stable names include removed services until GC. `previous` signals a port change.

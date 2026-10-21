@@ -12,7 +12,8 @@ mod words;
 use devlanes_proto::{Event, LeftProcess, Method, events};
 use serde_json::Value;
 
-pub(crate) use words::error_message;
+pub(crate) use lanes::display_url;
+pub(crate) use words::{EXAMPLE_CONFIG, error_message, has_wording};
 
 use crate::{OutputMode, Runtime};
 
@@ -136,6 +137,8 @@ fn palette_sgr(color: &str) -> Option<&'static str> {
 pub(crate) fn plural(count: usize, word: &str) -> String {
     if count == 1 {
         format!("1 {word}")
+    } else if word.ends_with('s') {
+        format!("{count} {word}es")
     } else {
         format!("{count} {word}s")
     }
@@ -210,6 +213,10 @@ pub(crate) fn event(method: Method, event: &Event, cx: &Ctx<'_>) -> Vec<String> 
                 cx.warning(&format!("{lane}: {line}"))
             }]
         }
+        devlanes_proto::remote::WARNING_EVENT => vec![cx.warning(&words::remote_warning(
+            &text(&event.data, "code"),
+            &event.data,
+        ))],
         _ => vec![other::event_line(event)],
     }
 }

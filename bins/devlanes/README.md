@@ -19,6 +19,8 @@ devlanes daemon install             # launchd agent or systemd user unit
 
 Run `devlanes` with no arguments on a terminal to open the TUI; elsewhere it prints `status`. Add `--json` to any command for machine-readable output. Closing the TUI, or pressing Ctrl-C during `start`, `logs -f` or `wait`, leaves everything running.
 
+On a terminal, `start`, `restart`, `lane resume` and `lane new --start` run inside the TUI, like mprocs: the request goes out first, and the TUI opens on the lane once the daemon has accepted it, so a refused start (no config, unknown unit) is a normal CLI error. The TUI follows the start's own events and exits 0 when it was ready, 1 when it failed, and 130 when the user quits before the result. `--no-ui`, `DEVLANES_NO_UI=1` or `tui.open_on_start: false` keep the text output; `start --attach` forces the TUI past the last two. Agent, JSON, plain, CI and piped output never open it. `with`, `wait`, `run` and `stop` stay text.
+
 `devlanes with` starts the lane, waits until it is ready, runs the command with the lane's env and `DEVLANES_PUBLIC_URL_<SERVICE>` variables, stops what it started and exits with the command's code.
 
 Configuration examples and design notes are in `docs/` at the repository root. The Claude Code and Codex plugin, with the agent skill, is in `agent-plugin/`.
@@ -39,9 +41,24 @@ Project settings live in each repository's `devlanes.yaml`; `docs/examples/user-
 
 ## Behaviour
 
-Any command auto-spawns the daemon (`devlanes daemon run`, a hidden subcommand) when none is running. Inside an agent sandbox the CLI refuses to auto-spawn; start the daemon from a normal shell or install it once with `devlanes daemon install`. `devlanes daemon stop`, `devlanes daemon restart` and `devlanes daemon reset-state` are the only commands that stop all managed processes, and they ask first; `reset-state` also empties `state.db`.
+Any command except `devlanes daemon status`, `daemon stop` and `daemon reset-state` auto-spawns the daemon (`devlanes daemon run`, a hidden subcommand) when none is running; `daemon status` reports it as not running and exits 1. The daemon inherits only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `TERM`, `XDG_*`, `DOCKER_*`, `SSH_AUTH_SOCK`, the proxy variables, `DEVLANES_*` and CI markers from that shell. Services and tasks still get the environment of the shell that sent each `start`, `run` or `exec`, and Docker Compose gets the daemon's Docker-related variables plus `infra.env` and the primary worktree's `.env`. Inside an agent sandbox the CLI refuses to auto-spawn; start the daemon from a normal shell or install it once with `devlanes daemon install`. `devlanes daemon stop`, `devlanes daemon restart` and `devlanes daemon reset-state` are the only commands that stop all managed processes, and they ask first; `reset-state` also empties `state.db`.
 
-Everything lives under `~/.devlanes`, or `DEVLANES_HOME` when set: `state.db`, `config.yaml`, `logs/` (including `daemon.log`), `ca/` and `run/daemon.sock`. When the socket path is too long for macOS, it moves to a short temporary directory.
+Everything lives under `~/.devlanes`, or `DEVLANES_HOME` when set: `state.db`, `config.yaml`, `logs/` (including `daemon.log`), `ca/` and `run/daemon.sock`. When the socket path is too long for macOS, it moves to a short temporary directory. devlanes refuses a home that other users can read or write, so create it with `mkdir -m 700 ~/.devlanes` when you add `config.yaml` before the first run.
+
+## Diagnostics
+
+`-v` (or `DEVLANES_VERBOSE=1`) prints timestamped debug lines on stderr: the output mode and why it was chosen, the home, config and socket paths, connecting to or spawning the daemon and how long that took, the versions exchanged, each request with its duration, and why the exit code is what it is. The daemon adds its own lines for that request, marked `daemon +<ms>`: lane resolution, config reads, port allocation, the Docker Compose commands it runs and their output, start gate waits, readiness probes and each spawn with its program, working directory and environment variable names. The run ends with a table of timings per request and start phase. `-vv` (or `DEVLANES_VERBOSE=2`) adds trace detail and span durations. stdout is untouched, so `--json -v` still prints parseable JSON. Environment and secret values never appear, only variable names. `-v` keeps `start` out of the TUI so the lines stay visible.
+
+The daemon writes its own log to `~/.devlanes/logs/daemon.log` (rotated at 10 MiB to `daemon.log.1`). `DEVLANES_LOG` sets its level with `RUST_LOG` syntax, such as `DEVLANES_LOG=debug` or `DEVLANES_LOG=info,devlanes_daemon=trace`; the default is `info`. The variable is read when the daemon starts, so restart it with `devlanes daemon restart` after changing it. `devlanes daemon logs` (`-f` to follow, `--tail N`) prints the file.
+
+`devlanes debug bundle` writes a `.tar.gz` for bug reports and prints its path: client and daemon versions, `doctor`, `config check` and `status` as JSON, and the end of `daemon.log`. `devlanes debug bundle -- start api` also runs `devlanes -vv start api` and adds its output. Values of variables named like tokens, keys or passwords, passwords in URLs, `env` maps and the home directory are replaced before anything is written. It never starts a daemon. `--to PATH` chooses the file; by default it goes to the temporary directory.
+
+```sh
+devlanes -v start                   # what the client and daemon did, with timings
+devlanes --json -vv start 2>trace.txt
+DEVLANES_LOG=debug devlanes daemon restart
+devlanes debug bundle -- start api
+```
 
 ## Release notices
 

@@ -1,0 +1,9 @@
+{
+  "name": "acme",
+  "private": true,
+  "scripts": {
+    "dev": "run-p dev:**",
+    "dev:server": "node --watch server.js",
+    "dev:client:app": "vite"
+  }
+}

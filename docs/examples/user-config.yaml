@@ -1,4 +1,6 @@
 # Per-user settings, normally at ~/.devlanes/config.yaml.
+# devlanes refuses a home other users can read: if you create ~/.devlanes
+# yourself, use `mkdir -m 700 ~/.devlanes` (or `chmod 700 ~/.devlanes`).
 
 # How lane hostnames resolve on this machine.
 hostnames:
@@ -62,3 +64,7 @@ terminal:
 # print the upgrade command when it is newer. false (or DEVLANES_NO_UPDATE_CHECK=1) turns it off.
 updates:
   check: true
+# On a terminal, start, restart, lane resume and lane new --start run inside the TUI.
+# false prints them as text instead, like --no-ui or DEVLANES_NO_UI=1.
+tui:
+  open_on_start: true

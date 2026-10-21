@@ -50,9 +50,13 @@ async fn two_services_with_pty_runner() {
             assert!(tokio::net::TcpStream::connect(("127.0.0.1", *port)).await.is_ok());
         }
         engine.shutdown().await.expect("shutdown");
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The listening socket can outlive the reaped process by a moment.
         for port in ports {
-            assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err(), "port {port} still open");
+            let closed = crate::eventually(Duration::from_secs(5), || async move {
+                tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err().then_some(())
+            })
+            .await;
+            assert!(closed.is_some(), "port {port} still open");
         }
     })
     .await

@@ -83,12 +83,60 @@ fn with_runs_the_command_and_stops_the_daemon_it_spawned() -> Result<()> {
     Ok(())
 }
 
+/// A service that never becomes ready: the command never runs, `with` exits 1, and
+/// on GitHub Actions the failure is an `::error` annotation naming the unit with its
+/// log lines. The auto-spawned daemon is stopped afterwards.
+#[test]
+fn with_never_ready_service_skips_the_command() -> Result<()> {
+    let yaml = format!(
+        "{}  stuck:\n    run: [fixture-server, --log-line, stuck-booting]\n    ready: {{ log: never-printed, timeout: 3s }}\n",
+        devlanes_e2e::fixture_yaml("two-services")?
+    );
+    let lab = Lab::with_config(&yaml, BUDGET)?;
+    let marker = lab.home().join("command-ran");
+    let script = format!("touch '{}'", marker.display());
+    let mut command = lab.command(lab.repo(), &["with", "--", "sh", "-c", &script])?;
+    // CI detection picks plain output only without an explicit mode.
+    command
+        .env_remove("DEVLANES_OUTPUT")
+        .env("GITHUB_ACTIONS", "true");
+    let output = lab.run(command, Duration::from_secs(90))?;
+    output.expect_code(1)?;
+    assert!(!marker.exists(), "the command ran: {output}");
+    let annotations: Vec<&str> = output
+        .stdout
+        .lines()
+        .filter(|line| line.starts_with("::error "))
+        .collect();
+    let stuck = annotations
+        .iter()
+        .find(|line| line.starts_with("::error title=stuck"));
+    assert!(
+        stuck.is_some_and(|line| line.contains("stuck-booting")),
+        "expected an annotation for stuck with its log lines: {output}"
+    );
+    assert!(
+        annotations
+            .iter()
+            .all(|line| line.starts_with("::error title=stuck")),
+        "only stuck failed: {output}"
+    );
+    lab.eventually(
+        "the auto-spawned daemon to stop",
+        Duration::from_secs(15),
+        || Ok((!lab.daemon_running()).then_some(())),
+    )?;
+    Ok(())
+}
+
 /// With a running daemon: the command's exit code 3 is kept, logs are written, the lane
 /// is stopped and the daemon `with` did not spawn keeps running.
 #[test]
 fn with_keeps_the_exit_code_and_stops_the_lane() -> Result<()> {
     let lab = Lab::new("two-services", BUDGET)?;
-    lab.json(lab.repo(), &["daemon", "status", "--json"])?;
+    // Any command but `daemon status` starts the daemon.
+    lab.json(lab.repo(), &["status"])?;
+    assert!(lab.daemon_running(), "status starts the daemon");
     let logs = lab.home().join("artifacts-fail");
     let output = with(&lab, &logs, &format!("{CURL_API} && exit 3"))?;
     output.expect_code(3)?;

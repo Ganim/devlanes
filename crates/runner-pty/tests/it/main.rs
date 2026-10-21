@@ -28,32 +28,98 @@ async fn bounded<F: Future>(future: F) -> F::Output {
         .expect("test exceeded its time limit")
 }
 
-/// SIGKILLs the unit's session and any extra PIDs on drop, verified by start time.
+/// SIGKILLs everything a test started on drop: each unit's session (also after its
+/// leader was reaped), its tracked set, registered extra PIDs and their
+/// descendants. Every signal is verified by start time.
 #[derive(Default)]
-struct Cleanup(Vec<ProcessIdentity>);
+struct Cleanup {
+    units: Vec<Arc<PtyUnit>>,
+    extra: Vec<ProcessIdentity>,
+}
 
 impl Cleanup {
-    /// Tracks a unit's leader; its session members are found again at drop time.
-    fn unit(&mut self, unit: &PtyUnit) {
-        self.0.push(unit.identity());
+    /// Tracks a unit; its session and tracked set are swept at drop time.
+    fn unit(&mut self, unit: &Arc<PtyUnit>) {
+        self.units.push(Arc::clone(unit));
     }
 
     /// Tracks a process outside the unit's session.
     fn pid(&mut self, pid: u32) {
         if let Ok(Some(identity)) = devlanes_sys::identity(pid) {
-            self.0.push(identity);
+            self.extra.push(identity);
         }
+    }
+
+    /// Live processes to kill in `snapshot`: verified known processes, the sessions
+    /// they anchor, and descendants of either (by parent PID and start order).
+    fn targets(&self, snapshot: &[devlanes_sys::ProcessInfo]) -> Vec<ProcessIdentity> {
+        let mut known = self.extra.clone();
+        for unit in &self.units {
+            known.push(unit.identity());
+            known.extend(unit.tracked());
+            if let Some(report) = unit.exit_report() {
+                known.extend(
+                    report
+                        .escaped
+                        .iter()
+                        .map(devlanes_sys::ProcessInfo::identity),
+                );
+                known.extend(
+                    report
+                        .left_running
+                        .iter()
+                        .map(devlanes_sys::ProcessInfo::identity),
+                );
+            }
+        }
+        let mut found: BTreeMap<u32, devlanes_sys::ProcessInfo> = BTreeMap::new();
+        for process in snapshot {
+            if known
+                .iter()
+                .any(|k| k.pid == process.pid && k.start_time == process.start_time)
+            {
+                found.insert(process.pid, process.clone());
+            }
+        }
+        for unit in &self.units {
+            for process in devlanes_sys::session_members_known(snapshot, &unit.identity(), &known) {
+                found.insert(process.pid, process);
+            }
+        }
+        loop {
+            let before = found.len();
+            for process in snapshot {
+                let parent = found.get(&process.ppid);
+                if parent.is_some_and(|p| process.start_time >= p.start_time) {
+                    found.entry(process.pid).or_insert_with(|| process.clone());
+                }
+            }
+            if found.len() == before {
+                break;
+            }
+        }
+        found
+            .values()
+            .filter(|p| !p.zombie && p.pid != std::process::id())
+            .map(devlanes_sys::ProcessInfo::identity)
+            .collect()
     }
 }
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let snapshot = devlanes_sys::processes().unwrap_or_default();
-        for identity in &self.0 {
-            for process in devlanes_sys::session_members(&snapshot, identity) {
-                let _ = devlanes_sys::signal_verified(&process.identity(), Signal::KILL);
+        // Repeat briefly: a dying parent can fork once more between scan and kill.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let snapshot = devlanes_sys::processes().unwrap_or_default();
+            let targets = self.targets(&snapshot);
+            if targets.is_empty() {
+                return;
             }
-            let _ = devlanes_sys::signal_verified(identity, Signal::KILL);
+            for identity in &targets {
+                let _ = devlanes_sys::signal_verified(identity, Signal::KILL);
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 }

@@ -124,7 +124,9 @@ fn runtime_socket(runtime: &Path, home: &Path) -> Option<PathBuf> {
     (socket.as_os_str().as_bytes().len() < 104).then_some(socket)
 }
 
-/// Refuses shared or symlinked state directories instead of changing their ownership or mode.
+/// Creates a missing state directory private and refuses a symlinked one, a
+/// non-directory or another user's directory. An own directory that others can
+/// read passes: the daemon tightens it to 0700 when it starts and logs that once.
 fn private_directory(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => {}
@@ -137,10 +139,7 @@ fn private_directory(path: &Path) -> Result<()> {
         Err(error) => return Err(error.into()),
     }
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir()
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-    {
+    if !metadata.is_dir() || metadata.uid() != rustix::process::geteuid().as_raw() {
         return Err(Error::UnsafeDirectory(path.to_owned()));
     }
     Ok(())

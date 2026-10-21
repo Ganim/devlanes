@@ -37,7 +37,9 @@ use crate::{
     Error, Options,
     api::{AttachEvent, AttachInput, DaemonApi},
     app::{App, Effect, Msg},
-    input, ui,
+    input,
+    start::{StartExit, StartFrame, StartHandoff},
+    ui,
 };
 
 /// One frame at ~60 Hz; bursts of output within a frame are drawn once.
@@ -147,9 +149,60 @@ pub async fn drive<B, E>(
     terminal: &mut Terminal<B>,
     api: Arc<dyn DaemonApi>,
     options: &Options,
-    mut events: E,
+    events: E,
     clipboard: Box<dyn Write + Send>,
 ) -> Result<(), Error>
+where
+    B: Backend,
+    B::Error: Send + Sync + 'static,
+    E: Stream<Item = io::Result<TermEvent>> + Unpin,
+{
+    run_loop(terminal, api, options, events, clipboard, None)
+        .await
+        .map(drop)
+}
+
+/// [`drive`] for a start sent before the TUI opened (`devlanes start` on a
+/// terminal): the TUI follows it and says how it stood when the user quit.
+pub async fn drive_start<B, E>(
+    terminal: &mut Terminal<B>,
+    api: Arc<dyn DaemonApi>,
+    options: &Options,
+    events: E,
+    clipboard: Box<dyn Write + Send>,
+    start: StartHandoff,
+) -> Result<StartExit, Error>
+where
+    B: Backend,
+    B::Error: Send + Sync + 'static,
+    E: Stream<Item = io::Result<TermEvent>> + Unpin,
+{
+    let app = run_loop(terminal, api, options, events, clipboard, Some(start)).await?;
+    Ok(app.start_exit().unwrap_or(StartExit::Pending))
+}
+
+/// The next frame of the start, if there is one; a finished stream is dropped
+/// and never resolves again, so the loop's other branches carry on.
+async fn next_start(start: &mut Option<mpsc::Receiver<StartFrame>>) -> StartFrame {
+    if let Some(stream) = start.as_mut()
+        && let Some(frame) = stream.recv().await
+    {
+        return frame;
+    }
+    *start = None;
+    std::future::pending().await
+}
+
+/// The event loop behind [`drive`] and [`drive_start`]; returns the app as it
+/// was when the user quit.
+async fn run_loop<B, E>(
+    terminal: &mut Terminal<B>,
+    api: Arc<dyn DaemonApi>,
+    options: &Options,
+    mut events: E,
+    clipboard: Box<dyn Write + Send>,
+    start: Option<StartHandoff>,
+) -> Result<App, Error>
 where
     B: Backend,
     B::Error: Send + Sync + 'static,
@@ -164,7 +217,17 @@ where
     }
     executor.execute(Effect::LoadNotices);
     if !executor.flush(&mut app) {
-        return Ok(());
+        return Ok(app);
+    }
+    let mut start_stream = None;
+    if let Some(start) = start {
+        app.open_start(start.label);
+        for frame in start.frames {
+            if !executor.apply(&mut app, Msg::Start(frame)) {
+                return Ok(app);
+            }
+        }
+        start_stream = Some(start.stream);
     }
     let panicked = PANICKED.get_or_init(Notify::new);
     let mut tick = interval(Duration::from_secs(1));
@@ -184,9 +247,10 @@ where
             event = events.next() => match event {
                 Some(Ok(event)) => terminal_msg(event),
                 Some(Err(error)) => return Err(error.into()),
-                None => return Ok(()),
+                None => return Ok(app),
             },
             msg = receiver.recv() => msg,
+            frame = next_start(&mut start_stream) => Some(Msg::Start(frame)),
             _ = tick.tick() => Some(Msg::Tick),
             _ = sleep_until(next_frame), if dirty => None,
             // The panic hook already restored the terminal; a UI drawing over
@@ -199,7 +263,7 @@ where
         dirty = true;
         let ticked = matches!(msg, Msg::Tick);
         if !executor.apply(&mut app, msg) {
-            return Ok(());
+            return Ok(app);
         }
         // Drain what is already queued so a burst of output costs one frame,
         // but stop after a while so a flood cannot hold the screen still.
@@ -208,7 +272,7 @@ where
                 break;
             };
             if !executor.apply(&mut app, msg) {
-                return Ok(());
+                return Ok(app);
             }
         }
         executor.show_progress(app.start_progress(), ticked);

@@ -1,0 +1,11 @@
+{
+  "procs": {
+    "web": ["npx", "vite", "--port", "5173"],
+    "api": {
+      "shell": "node server.js",
+      "cwd": "api",
+      "env": { "API_URL": "http://localhost:5173/api" },
+      "stop": "hard-kill"
+    }
+  }
+}

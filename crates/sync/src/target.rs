@@ -46,6 +46,11 @@ impl ContentHash {
         let bytes = hex::decode(text).ok()?;
         Some(Self(bytes.try_into().ok()?))
     }
+
+    /// A value no file hashes to in practice, for contents nobody could read.
+    pub(crate) fn unknown() -> Self {
+        Self([0; 32])
+    }
 }
 
 impl fmt::Debug for ContentHash {
@@ -204,16 +209,16 @@ impl LocalTarget {
 /// Hashes of a destination's files with the metadata they were computed for.
 #[derive(Debug, Clone, Default)]
 pub struct HashCache {
-    entries: BTreeMap<RelPath, CachedHash>,
+    pub(crate) entries: BTreeMap<RelPath, CachedHash>,
 }
 
 /// One cached hash.
 #[derive(Debug, Clone)]
-struct CachedHash {
-    size: u64,
-    mode: u32,
-    mtime: SystemTime,
-    hash: ContentHash,
+pub(crate) struct CachedHash {
+    pub(crate) size: u64,
+    pub(crate) mode: u32,
+    pub(crate) mtime: SystemTime,
+    pub(crate) hash: ContentHash,
 }
 
 impl HashCache {

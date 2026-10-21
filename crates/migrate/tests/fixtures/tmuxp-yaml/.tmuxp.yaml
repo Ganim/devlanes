@@ -1,0 +1,26 @@
+session_name: acme
+start_directory: ./
+before_script: ./bootstrap.sh
+shell_command_before:
+  - source .venv/bin/activate
+environment:
+  DJANGO_SETTINGS_MODULE: acme.settings.dev
+windows:
+  - window_name: backend
+    layout: main-horizontal
+    environment:
+      DEBUG: "1"
+    panes:
+      - shell_command:
+          - cmd: python manage.py runserver 127.0.0.1:8000
+      - shell_command: celery -A acme worker
+        start_directory: worker
+      - nvim
+  - window_name: frontend
+    start_directory: frontend
+    panes:
+      - npm run dev
+  - window_name: misc
+    panes:
+      - null
+      - htop

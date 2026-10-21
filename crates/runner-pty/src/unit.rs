@@ -645,6 +645,17 @@ impl PtyUnit {
         self.inner.identity
     }
 
+    /// Identities in the tracked set as of the last snapshot, without scanning.
+    /// Blocking-safe and cheap; callers that persist them can later sweep the
+    /// session with [`devlanes_sys::session_members_known`] even after the leader
+    /// is gone.
+    pub fn tracked(&self) -> Vec<ProcessIdentity> {
+        lock(&self.inner.tracker)
+            .processes()
+            .map(ProcessInfo::identity)
+            .collect()
+    }
+
     /// Reports whether the unit runs in a PTY rather than pipes.
     pub fn is_pty(&self) -> bool {
         self.inner.pty

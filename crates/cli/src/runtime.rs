@@ -44,6 +44,10 @@ pub struct Signals {
     pub force_color: bool,
     pub ci: Option<CiKind>,
     pub summary_path: Option<PathBuf>,
+    /// `DEVLANES_NO_UI` is set: starts print CLI output instead of opening the TUI.
+    pub no_ui: bool,
+    /// `DEVLANES_VERBOSE`: 1 or 2, like `-v` and `-vv`.
+    pub env_verbose: u8,
 }
 
 impl Signals {
@@ -69,6 +73,11 @@ impl Signals {
             force_color: std::env::var("CLICOLOR_FORCE").is_ok_and(|v| !v.is_empty() && v != "0"),
             ci: None,
             summary_path: None,
+            no_ui: std::env::var("DEVLANES_NO_UI").is_ok_and(|v| !matches!(v.as_str(), "" | "0")),
+            env_verbose: std::env::var("DEVLANES_VERBOSE")
+                .ok()
+                .and_then(|v| v.trim().parse::<u8>().ok())
+                .unwrap_or(0),
         }
         .with_ci_env(|key| std::env::var(key).ok())
     }
@@ -98,6 +107,11 @@ pub struct Runtime {
     pub summary_path: Option<PathBuf>,
     /// CI log-group state shared by every reporter of this invocation.
     pub ci_state: crate::CiShared,
+    /// `DEVLANES_NO_UI` turned off the TUI that starts open by default.
+    pub no_ui: bool,
+    /// Diagnostics on stderr: 0 none, 1 debug, 2 trace (`-v`, `-vv`,
+    /// `DEVLANES_VERBOSE`). Independent of the output mode.
+    pub verbose: u8,
 }
 
 impl Runtime {
@@ -141,7 +155,15 @@ impl Runtime {
             ci: signals.ci,
             summary_path: signals.summary_path,
             ci_state: crate::CiShared::default(),
+            no_ui: signals.no_ui,
+            verbose: cli.verbose.max(signals.env_verbose).min(2),
         })
+    }
+
+    /// Whether a start can run inside the TUI: human output with stdin and
+    /// stdout on a terminal, outside CI. Agent, JSON and plain output never can.
+    pub fn can_open_ui(&self) -> bool {
+        self.mode == OutputMode::Human && self.stdout_tty && self.stdin_tty && self.ci.is_none()
     }
 
     /// A required confirmation fails with usage status when prompting is unavailable.

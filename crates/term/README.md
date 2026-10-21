@@ -39,6 +39,7 @@ fn draw(tty: bool, tracker: &StartTracker) -> std::io::Result<()> {
 - `progress_support` decides whether to draw the bar from the setting, the TTY and the environment.
 - `ProgressBar` writes it and clears it on drop, including while a panic unwinds.
 - `StartTracker` turns lane events into progress: ready services over the units the start's `services:started` event plans, newest `start_id` per lane. `command()` reads the events a start request streams; `viewer()` reads `subscribe` and `status` for the TUI.
+- `phase_detail` words a phase's `progress` event (`waiting for postgres (healthy 1 of 2)`, `migrate (2 of 3)`); the CLI's phase lines and the TUI header both use it.
 
 ## Progress bar
 

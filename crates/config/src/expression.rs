@@ -51,6 +51,14 @@ fn environment() -> Result<Environment<'static>, ConfigError> {
     Ok(env)
 }
 
+/// A MiniJinja error without its `(in <string>:1)` suffix, which names no real file.
+fn describe(error: &minijinja::Error) -> String {
+    match error.detail() {
+        Some(detail) => format!("{}: {detail}", error.kind()),
+        None => error.kind().to_string(),
+    }
+}
+
 /// Extract expression bodies without confusing braces inside quoted strings.
 fn parts(text: &str) -> Result<Vec<(usize, usize, &str)>, ConfigError> {
     let mut parts = Vec::new();
@@ -189,10 +197,10 @@ pub fn evaluate(text: &str, context: &ExpressionContext) -> Result<Value, Config
     if chunks.len() == 1 && chunks[0].0 == 0 && chunks[0].1 == text.len() {
         let expression = env
             .compile_expression(chunks[0].2)
-            .map_err(|e| ConfigError::plain(format!("invalid expression: {e}")))?;
+            .map_err(|e| ConfigError::plain(format!("invalid expression: {}", describe(&e))))?;
         let value = expression
             .eval(&context)
-            .map_err(|e| ConfigError::plain(format!("expression failed: {e}")))?;
+            .map_err(|e| ConfigError::plain(format!("expression failed: {}", describe(&e))))?;
         if value.is_undefined() {
             return Err(ConfigError::plain(
                 "expression resolved to an undefined value",
@@ -202,7 +210,7 @@ pub fn evaluate(text: &str, context: &ExpressionContext) -> Result<Value, Config
     }
     env.render_str(text, context)
         .map(Value::String)
-        .map_err(|e| ConfigError::plain(format!("expression failed: {e}")))
+        .map_err(|e| ConfigError::plain(format!("expression failed: {}", describe(&e))))
 }
 
 /// Offsets added to `lane.port` in literal sums such as `lane.port + 5`, `lane['port'] + 5`
@@ -247,13 +255,13 @@ pub fn references(text: &str) -> Result<BTreeSet<String>, ConfigError> {
     for (_, _, body) in parts(text)? {
         let expression = env
             .compile_expression(body)
-            .map_err(|e| ConfigError::plain(format!("invalid expression: {e}")))?;
+            .map_err(|e| ConfigError::plain(format!("invalid expression: {}", describe(&e))))?;
         references.extend(expression.undeclared_variables(true));
         let (normalized, original_keys) = normalize_static_subscripts(body);
         if normalized != body {
             let expression = env
                 .compile_expression(&normalized)
-                .map_err(|e| ConfigError::plain(format!("invalid expression: {e}")))?;
+                .map_err(|e| ConfigError::plain(format!("invalid expression: {}", describe(&e))))?;
             for reference in expression.undeclared_variables(true) {
                 let original = reference
                     .split('.')

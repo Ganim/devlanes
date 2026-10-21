@@ -311,10 +311,11 @@ pub fn startup_code(reason: &str) -> Option<(String, String)> {
     valid.then(|| (code.to_ascii_lowercase(), message.trim().to_owned()))
 }
 
-/// A state directory devlanes refuses: `{message, reason: "unsafe_directory", path,
-/// problem, mode?, fix?}`. `problem` is `mode` (group or others have access),
-/// `owner`, `symlink`, `not_a_directory` or `unreadable`; only `mode` has a
-/// `fix` (`chmod 700 <path>`), since the others need a person to decide.
+/// `unsafe_home` (exit 4): a state directory devlanes refuses, `{message, path,
+/// problem, mode?, owner?, fix?}`. `problem` is `symlink`, `owner` (another
+/// user's), `not_a_directory`, `unreadable`, or `mode` when tightening an own
+/// directory to 0700 failed; only `mode` has a `fix` (`chmod 700 <path>`), since
+/// the others need a person to decide. `owner` is the owning uid.
 pub fn unsafe_directory(path: &Path) -> RpcError {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let metadata = std::fs::symlink_metadata(path).ok();
@@ -326,19 +327,21 @@ pub fn unsafe_directory(path: &Path) -> RpcError {
         Some(_) => "mode",
     };
     let mut data = json!({
-        "message": format!("unsafe daemon directory: {}", path.display()),
-        "reason": "unsafe_directory",
+        "message": format!("unsafe devlanes home: {}", path.display()),
         "path": path,
         "problem": problem,
     });
-    if let Some(meta) = metadata.filter(|_| problem == "mode") {
+    if let Some(meta) = &metadata {
         data["mode"] = json!(format!("{:o}", meta.permissions().mode() & 0o7777));
+        data["owner"] = json!(meta.uid());
+    }
+    if problem == "mode" {
         data["fix"] = json!(format!(
             "chmod 700 {}",
             devlanes_cli::shell_quote(&path.display().to_string())
         ));
     }
-    RpcError::new("daemon_unreachable", data, 4)
+    RpcError::new("unsafe_home", data, 4)
 }
 
 #[async_trait]
@@ -409,6 +412,7 @@ impl WithDriver for ClientDriver {
                     Frame::Control(Control::Response(response)) if response.id == id => {
                         return match response.result {
                             Outcome::Ok { data } => {
+                                let raw = data.clone();
                                 let result: StartResult =
                                     serde_json::from_value(data).map_err(|error| {
                                         RpcError::new(
@@ -432,6 +436,7 @@ impl WithDriver for ClientDriver {
                                             log_tail: failure.log_tail,
                                         })
                                         .collect(),
+                                    result: raw,
                                 })
                             }
                             Outcome::Error { error } => {
@@ -882,17 +887,18 @@ mod tests {
     }
 
     #[test]
-    /// A home that group or others can read carries `chmod 700 <dir>` as its fix;
-    /// a symlinked one gets no command, since chmod would not make it safe.
+    /// `unsafe_home` carries path, mode and owner; an own home whose tightening
+    /// failed carries `chmod 700 <dir>` as its fix, a symlinked one no command,
+    /// since chmod would not make it safe.
     fn unsafe_directory_names_the_fix() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().join("my home");
         std::fs::create_dir(&home).expect("home");
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         let error = rpc_error(ClientError::UnsafeDirectory(home.clone()));
-        assert_eq!(error.code, "daemon_unreachable");
-        assert_eq!(error.exit_code, 4);
-        assert_eq!(error.data["reason"], "unsafe_directory");
+        assert_eq!((error.code.as_str(), error.exit_code), ("unsafe_home", 4));
+        assert_eq!(error.data["path"], json!(home));
+        assert_eq!(error.data["owner"], rustix::process::geteuid().as_raw());
         assert_eq!(error.data["problem"], "mode");
         assert_eq!(error.data["mode"], "755");
         assert_eq!(error.data["fix"], format!("chmod 700 '{}'", home.display()));

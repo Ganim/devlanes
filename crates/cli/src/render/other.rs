@@ -210,15 +210,18 @@ fn joined(value: &Value, key: &str) -> String {
 /// What a task runs: its script, its steps, or its own command.
 fn task_runs(task: &Value) -> String {
     let mut runs = if let Some(script) = task.get("run_script").filter(|s| s.is_object()) {
-        format!("{}#{}", text(script, "source"), text(script, "name"))
+        format!("script {}#{}", text(script, "source"), text(script, "name"))
     } else if !list(task, "steps").is_empty() {
-        format!("steps {}", joined(task, "steps"))
+        format!("tasks {} in order", joined(task, "steps"))
     } else {
-        "run".into()
+        "its `run` command".into()
     };
-    for flag in ["confirm", "interactive"] {
+    for (flag, note) in [
+        ("confirm", "asks first"),
+        ("interactive", "needs a terminal"),
+    ] {
         if task.get(flag).and_then(Value::as_bool) == Some(true) {
-            runs.push_str(&format!(" ({flag})"));
+            runs.push_str(&format!(" ({note})"));
         }
     }
     runs
@@ -513,6 +516,21 @@ pub(super) fn phase_line(data: &Value, cx: &Ctx<'_>) -> Option<String> {
     let phase = text(data, "phase");
     let reason = data.get("reason").and_then(reason_text);
     match text(data, "state").as_str() {
+        // Human output only: the binary replaces the line when the phase ends
+        // (or erases it when the phase had nothing to do).
+        "started" if cx.human() => {
+            let units: Vec<String> = list(data, "units").iter().map(display_value).collect();
+            let what = match phase.as_str() {
+                "infra" => ": starting containers, waiting until they are healthy".to_owned(),
+                "setup" => ": running infra.setup".to_owned(),
+                "services" if !units.is_empty() => format!(": starting {}", units.join(", ")),
+                _ => String::new(),
+            };
+            Some(cx.paint(&format!("… {phase}{what}"), "2"))
+        }
+        // What the phase waits on now; replaces the line above the same way.
+        "progress" if cx.human() => devlanes_term::phase_detail(data)
+            .map(|detail| cx.paint(&format!("… {phase}: {}", clean(&detail)), "2")),
         "done" if matches!(phase.as_str(), "tasks" | "services" | "after-services") => None,
         "done" => Some(format!("{} {phase}", cx.mark(Outcome::Ok))),
         "failed" => Some(format!(
@@ -526,7 +544,10 @@ pub(super) fn phase_line(data: &Value, cx: &Ctx<'_>) -> Option<String> {
                 .and_then(|r| r.get("code"))
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            (!code.starts_with("no_")).then(|| cx.skipped(&phase, reason.as_deref()))
+            // Phases with nothing to do, and the lane-level phases a start into a
+            // running lane never repeats, are not news.
+            (!code.starts_with("no_") && code != "lane_running")
+                .then(|| cx.skipped(&phase, reason.as_deref()))
         }
         _ => None,
     }
@@ -815,6 +836,28 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
             Outcome::Ok,
             format!("CA at {}", display_value(&ca["path"])),
         ));
+        // `[{store, state, reason?}]`, added by the CLI from this user's stores.
+        for entry in list(ca, "trust") {
+            let store = text(entry, "store");
+            checks.push(match text(entry, "state").as_str() {
+                "trusted" => Check::new("tls", Outcome::Ok, format!("CA trusted by {store}")),
+                "untrusted" => {
+                    Check::new("tls", Outcome::Fail, format!("CA not trusted by {store}"))
+                        .fix("devlanes certs trust")
+                }
+                _ => Check::new(
+                    "tls",
+                    Outcome::Skip,
+                    match entry.get("reason").and_then(Value::as_str) {
+                        Some(reason) => format!(
+                            "cannot tell whether {store} trusts the CA: {}",
+                            clean(reason)
+                        ),
+                        None => format!("cannot tell whether {store} trusts the CA"),
+                    },
+                ),
+            });
+        }
         // A CA from before name constraints stays until the user recreates it.
         if let Some(hint) = ca.get("hint").and_then(Value::as_str) {
             let check = Check::new("tls", Outcome::Skip, hint);
@@ -905,9 +948,9 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
         "daemon",
         Outcome::Ok,
         format!(
-            "{} projects loaded, {} event subscribers",
-            display_value(&data["projects"]),
-            display_value(&data["subscribers"])
+            "{} loaded, {}",
+            count(data, "projects", "project"),
+            count(data, "subscribers", "event subscriber")
         ),
     ));
     if let Some(release) = data.get("release").filter(|r| r.is_object()) {
@@ -1006,10 +1049,11 @@ fn release_checks(release: &Value) -> Vec<Check> {
     let mut checks = vec![Check::new(
         "release",
         Outcome::Ok,
-        format!(
-            "devlanes {version} ({build}), installed with {}",
-            text(release, "install_method")
-        ),
+        // `a standalone binary in DIR` and `a source checkout` describe the binary.
+        match text(release, "install_method") {
+            how if how.starts_with("a ") => format!("devlanes {version} ({build}), {how}"),
+            how => format!("devlanes {version} ({build}), installed with {how}"),
+        },
     )];
     let daemon = text(release, "daemon_version");
     if !daemon.is_empty() && daemon != version {
@@ -1185,8 +1229,11 @@ pub(super) fn daemon_status(data: &Value) -> Vec<String> {
     if let Some(uptime) = data.get("uptime_ms").and_then(Value::as_u64) {
         line.push_str(&format!(", up {}", duration(uptime)));
     }
-    if let Some(processes) = int(data, "managed_processes") {
-        line.push_str(&format!(", {processes} managed processes"));
+    if data.get("managed_processes").is_some_and(Value::is_u64) {
+        line.push_str(&format!(
+            ", {}",
+            count(data, "managed_processes", "managed process")
+        ));
     }
     let mut lines = vec![line];
     if data.get("socket").is_some() {
@@ -1198,8 +1245,19 @@ pub(super) fn daemon_status(data: &Value) -> Vec<String> {
 /// `daemon stop`.
 pub(super) fn daemon_shutdown(data: &Value) -> Vec<String> {
     match int(data, "processes") {
-        Some(processes) => vec![format!("stopping the daemon and {processes} processes")],
-        None => vec!["stopping the daemon".into()],
+        Some(0) | None => vec!["stopping the daemon".into()],
+        Some(_) => vec![format!(
+            "stopping the daemon and {}",
+            count(data, "processes", "process")
+        )],
+    }
+}
+
+/// `1 project`, `3 projects` from an integer field; `? projects` when absent.
+fn count(data: &Value, key: &str, word: &str) -> String {
+    match data.get(key).and_then(Value::as_u64) {
+        Some(n) => plural(usize::try_from(n).unwrap_or(usize::MAX), word),
+        None => plural(2, word).replacen('2', "?", 1),
     }
 }
 

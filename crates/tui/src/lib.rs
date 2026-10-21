@@ -10,6 +10,7 @@ pub mod input;
 pub mod logfile;
 mod runtime;
 pub mod screen;
+pub mod start;
 pub mod text;
 pub mod ui;
 pub mod words;
@@ -22,7 +23,7 @@ pub use api::{
 };
 pub use devlanes_client::Paths;
 pub use devlanes_term::TerminalLauncher;
-pub use runtime::{TerminalGuard, drive, terminal_command};
+pub use runtime::{TerminalGuard, drive, drive_start, terminal_command};
 
 /// Failures that end the TUI before or while it runs.
 #[derive(Debug, thiserror::Error)]
@@ -110,6 +111,35 @@ pub async fn run_with(paths: Paths, options: Options) -> Result<(), Error> {
         &options,
         events,
         Box::new(std::io::stdout()),
+    )
+    .await;
+    drop(guard);
+    result
+}
+
+/// Opens the TUI on a start the daemon already accepted (see [`start`]) and
+/// follows it until the user quits. Quitting never stops it.
+pub async fn run_start(
+    paths: Paths,
+    options: Options,
+    start: start::StartHandoff,
+) -> Result<start::StartExit, Error> {
+    if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
+        return Err(Error::NotATerminal);
+    }
+    let api: Arc<dyn DaemonApi> = ClientApi::connect(paths).await?;
+    let guard = TerminalGuard::enter()?;
+    let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+    let mut terminal = ratatui::Terminal::new(backend)?;
+    terminal.clear()?;
+    let events = crossterm::event::EventStream::new();
+    let result = drive_start(
+        &mut terminal,
+        api,
+        &options,
+        events,
+        Box::new(std::io::stdout()),
+        start,
     )
     .await;
     drop(guard);

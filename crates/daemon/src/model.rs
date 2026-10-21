@@ -87,6 +87,16 @@ pub(crate) struct ServiceInfo {
     pub color: String,
 }
 
+/// One `infra.hosts` route to a container's published host port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InfraRoute {
+    pub host: String,
+    pub container: String,
+    pub port: u16,
+    pub fallback: bool,
+    pub host_header_upstream: bool,
+}
+
 /// Synchronous layout of a lane, available while it is idle.
 #[derive(Debug, Clone)]
 pub(crate) struct LaneView {
@@ -98,8 +108,8 @@ pub(crate) struct LaneView {
     pub block: (u16, u16),
     pub services: Vec<ServiceInfo>,
     pub routes: Vec<RouteSpec>,
-    /// Routes to containers from `infra.hosts`: `(host, container, port)`.
-    pub infra_routes: Vec<(String, String, u16)>,
+    /// Routes to containers from `infra.hosts`.
+    pub infra_routes: Vec<InfraRoute>,
     pub lane_env: EnvMap,
     pub svc: Value,
 }
@@ -127,6 +137,8 @@ pub(crate) struct UnitRec {
     pub color: Option<String>,
     /// The runner's handle, for what the run left behind once it ended.
     pub managed: Arc<dyn crate::integrations::ManagedUnit>,
+    /// `services.<name>.sync` entries mirrored while this run lasts.
+    pub syncs: Vec<crate::local_sync::LocalSync>,
 }
 
 impl UnitRec {
@@ -197,10 +209,10 @@ pub(crate) struct LaneSt {
     pub phase_reasons: BTreeMap<String, RpcError>,
     /// Units left running by a previous daemon, by unit name.
     pub orphans: BTreeMap<String, Orphan>,
-    /// The token of the start holding `op`; stop, clean and reset fire it before
-    /// they wait for the lock. Each start installs a fresh one, so a firing never
-    /// reaches a start that begins later.
-    pub start_cancel: Option<CancellationToken>,
+    /// The start (or restart) running on this lane, while it runs. Stops reach it
+    /// here instead of waiting for `op`, which it holds. Each start installs its
+    /// own, so nothing done to one reaches a start that begins later.
+    pub start: Option<Arc<StartCtl>>,
     /// Spawns in flight ([`SpawnGuard`]). A stop waits until none is left before
     /// it picks its targets, so no unit appears after it looked.
     pub spawning: usize,
@@ -213,6 +225,21 @@ pub(crate) struct LaneSt {
     /// `host_conflict` warnings from the latest route snapshot: hostnames of this
     /// lane another lane routes.
     pub host_conflicts: Vec<devlanes_proto::LaneWarning>,
+    /// A block or view refresh waits for the operation holding `op` (normally a
+    /// start between taking it and its last spawn); a task holding `op` next
+    /// runs it.
+    pub refresh_pending: bool,
+    /// Held shared by `exec` and `run` (they take no `op`, so a start never waits
+    /// for a task) and exclusively by `lane clean` and `daemon reset-state` while
+    /// they release the lane, so no ad-hoc unit appears in a lane whose records
+    /// are going away.
+    pub adhoc_gate: Arc<tokio::sync::RwLock<()>>,
+    /// Parent of the tokens of this lane's `run`s; a clean or reset fires it.
+    pub adhoc_cancel: Option<CancellationToken>,
+    /// Set while a clean or reset waits for or holds `adhoc_gate`.
+    pub closing: bool,
+    /// The config files as of the last reload; `None` before the first one.
+    pub config_stamp: Option<crate::registry::ConfigStamp>,
 }
 
 impl LaneSt {
@@ -249,11 +276,16 @@ impl LaneSt {
             moves_to: None,
             phase_reasons: BTreeMap::new(),
             orphans: BTreeMap::new(),
-            start_cancel: None,
+            start: None,
             spawning: 0,
             spawned: Arc::new(Notify::new()),
             ports_pending: false,
             host_conflicts: Vec::new(),
+            refresh_pending: false,
+            adhoc_gate: Arc::new(tokio::sync::RwLock::new(())),
+            adhoc_cancel: None,
+            closing: false,
+            config_stamp: None,
         }
     }
 
@@ -398,8 +430,24 @@ impl LaneRt {
     /// Interrupts the start running on this lane, if any. Called before waiting
     /// for `op`, which that start holds.
     pub(crate) fn cancel_start(&self) {
-        if let Some(token) = &self.st().start_cancel {
-            token.cancel();
+        if let Some(start) = &self.st().start {
+            start.cancel.cancel();
+        }
+    }
+
+    /// The start running on this lane, if any.
+    pub(crate) fn running_start(&self) -> Option<Arc<StartCtl>> {
+        self.st().start.clone()
+    }
+
+    /// Installs a start's control for as long as the returned slot lives. Called
+    /// right after the start took `op`.
+    pub(crate) fn begin_start(self: &Arc<Self>, shutdown: &CancellationToken) -> StartSlot {
+        let ctl = Arc::new(StartCtl::new(shutdown));
+        self.st().start = Some(ctl.clone());
+        StartSlot {
+            lane: self.clone(),
+            ctl,
         }
     }
 
@@ -407,6 +455,50 @@ impl LaneRt {
     pub(crate) fn spawn_guard(self: &Arc<Self>) -> SpawnGuard {
         self.st().spawning += 1;
         SpawnGuard(self.clone())
+    }
+
+    /// For `exec` and `run`: waits out a clean or reset of this lane, then holds
+    /// the ad-hoc gate shared. The token fires when a clean or reset of the lane
+    /// begins, or with `shutdown`.
+    pub(crate) async fn enter_adhoc(
+        &self,
+        shutdown: &CancellationToken,
+    ) -> (tokio::sync::OwnedRwLockReadGuard<()>, CancellationToken) {
+        loop {
+            let gate = self.st().adhoc_gate.clone();
+            let guard = gate.read_owned().await;
+            {
+                let mut st = self.st();
+                if !st.closing {
+                    let parent = st
+                        .adhoc_cancel
+                        .get_or_insert_with(|| shutdown.child_token());
+                    return (guard, parent.child_token());
+                }
+            }
+            // A closer marked the lane but has not queued for the gate yet; once it
+            // has, the next read waits for it to finish.
+            drop(guard);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// For `lane clean` and `daemon reset-state`, which hold `op`: interrupts the
+    /// lane's runs, then waits until no `exec` or `run` holds the ad-hoc gate.
+    /// The lane opens again when the returned value drops.
+    pub(crate) async fn close_adhoc(self: &Arc<Self>) -> AdhocClosed {
+        let gate = {
+            let mut st = self.st();
+            st.closing = true;
+            if let Some(token) = st.adhoc_cancel.take() {
+                token.cancel();
+            }
+            st.adhoc_gate.clone()
+        };
+        AdhocClosed {
+            lane: self.clone(),
+            _guard: gate.write_owned().await,
+        }
     }
 
     /// Waits until no spawn is in flight on this lane.
@@ -422,6 +514,19 @@ impl LaneRt {
             }
             notified.await;
         }
+    }
+}
+
+/// A lane closed to `exec` and `run` ([`LaneRt::close_adhoc`]).
+pub(crate) struct AdhocClosed {
+    lane: Arc<LaneRt>,
+    _guard: tokio::sync::OwnedRwLockWriteGuard<()>,
+}
+
+impl Drop for AdhocClosed {
+    /// Lets `exec` and `run` in again.
+    fn drop(&mut self) {
+        self.lane.st().closing = false;
     }
 }
 
@@ -441,6 +546,113 @@ impl Drop for SpawnGuard {
     }
 }
 
+/// What a `stop` or `restart` of single units can do to the start (or restart)
+/// running on their lane without waiting for its `op`.
+pub(crate) struct StartCtl {
+    /// Ends the start as `start_cancelled`: a whole-lane stop, clean, reset or
+    /// shutdown fires it, and so does a stop of the task the start runs.
+    pub cancel: CancellationToken,
+    /// Fires once the start spawns no more services: its services phase is over
+    /// or the start ended.
+    pub services_done: CancellationToken,
+    /// Units a stop (`"stop"`) or restart (`"restart"`) took out of the start:
+    /// it neither spawns nor waits for them and reports them as stopped.
+    withdrawn: Mutex<BTreeMap<String, &'static str>>,
+    /// Task units the start runs right now (hook tasks, their steps, setup
+    /// entries), counted.
+    tasks: Mutex<BTreeMap<String, usize>>,
+}
+
+impl StartCtl {
+    /// A control whose token fires with `parent`.
+    pub(crate) fn new(parent: &CancellationToken) -> Self {
+        Self {
+            cancel: parent.child_token(),
+            services_done: CancellationToken::new(),
+            withdrawn: Mutex::new(BTreeMap::new()),
+            tasks: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Takes `units` out of the start on behalf of `by`.
+    pub(crate) fn withdraw(&self, units: &[String], by: &'static str) {
+        let mut withdrawn = lock(&self.withdrawn);
+        for unit in units {
+            withdrawn.entry(unit.clone()).or_insert(by);
+        }
+    }
+
+    /// Who took `unit` out of the start, if anybody did.
+    pub(crate) fn withdrawn_by(&self, unit: &str) -> Option<&'static str> {
+        lock(&self.withdrawn).get(unit).copied()
+    }
+
+    /// Every withdrawn unit and who withdrew it.
+    pub(crate) fn withdrawn(&self) -> BTreeMap<String, &'static str> {
+        lock(&self.withdrawn).clone()
+    }
+
+    /// Marks task units as running in this start until the guard drops.
+    pub(crate) fn running_tasks(self: &Arc<Self>, units: Vec<String>) -> TaskGuard {
+        let mut tasks = lock(&self.tasks);
+        for unit in &units {
+            *tasks.entry(unit.clone()).or_default() += 1;
+        }
+        TaskGuard {
+            ctl: self.clone(),
+            units,
+        }
+    }
+
+    /// Whether the start runs a task unit named `unit` right now.
+    pub(crate) fn runs_task(&self, unit: &str) -> bool {
+        lock(&self.tasks).contains_key(unit)
+    }
+}
+
+/// Task units a start runs, until dropped ([`StartCtl::running_tasks`]).
+pub(crate) struct TaskGuard {
+    ctl: Arc<StartCtl>,
+    units: Vec<String>,
+}
+
+impl Drop for TaskGuard {
+    /// Uncounts the units.
+    fn drop(&mut self) {
+        let mut tasks = lock(&self.ctl.tasks);
+        for unit in &self.units {
+            if let Some(count) = tasks.get_mut(unit) {
+                *count -= 1;
+                if *count == 0 {
+                    tasks.remove(unit);
+                }
+            }
+        }
+    }
+}
+
+/// A start's control installed on its lane ([`LaneRt::begin_start`]).
+pub(crate) struct StartSlot {
+    lane: Arc<LaneRt>,
+    pub ctl: Arc<StartCtl>,
+}
+
+impl Drop for StartSlot {
+    /// Uninstalls the control, unless a later start replaced it, and releases
+    /// restarts waiting for the services phase.
+    fn drop(&mut self) {
+        self.ctl.services_done.cancel();
+        let mut st = self.lane.st();
+        if st
+            .start
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &self.ctl))
+        {
+            st.start = None;
+        }
+    }
+}
+
 /// Mutable state of a project.
 pub(crate) struct ProjectSt {
     pub name: String,
@@ -450,6 +662,9 @@ pub(crate) struct ProjectSt {
     /// Environment of the last request that carried one, for auto-started worktrees.
     pub last_env: Option<Arc<EnvMap>>,
     pub lanes: BTreeMap<WorktreeId, Arc<LaneRt>>,
+    /// Names `project:` had before a rename in this daemon's lifetime, so a
+    /// reference with an old name can point at the new one.
+    pub former_names: Vec<String>,
 }
 
 /// A project: worktrees sharing a git common directory (or one non-git root).
@@ -672,7 +887,7 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
         apply_phase_reason(lane, summary);
     }
     let missing =
-        (!lane.present).then(|| RpcError::new("worktree_missing", json!({"path": lane.path}), 1));
+        (!lane.present).then(|| RpcError::new("worktree_missing", json!({"path": lane.path}), 3));
     let reason = missing
         .or_else(|| lane.unassigned.clone())
         .or_else(|| match &lane.config {

@@ -52,6 +52,20 @@ pub async fn resolve_lane<E: Extensions>(
     input: ResolveInput<'_, E>,
 ) -> Result<ResolvedLane, ResolveError> {
     let config = input.config;
+    let mut lane = plan_lane(input)
+        .await
+        .map_err(|error| error.locate(config))?;
+    for error in lane.errors.values_mut() {
+        *error = error.clone().locate(config);
+    }
+    Ok(lane)
+}
+
+/// [`resolve_lane`] before errors get their source location.
+async fn plan_lane<E: Extensions>(
+    input: ResolveInput<'_, E>,
+) -> Result<ResolvedLane, ResolveError> {
+    let config = input.config;
     let requested: Vec<&str> = input
         .profile
         .into_iter()
@@ -928,6 +942,72 @@ fn shell_line(run: &Run, context: &ExpressionContext, path: &str) -> Result<Stri
             Ok(words.join(" "))
         }
     }
+}
+
+/// Converts `infra.containers.<name>.ready` (`path` is that key). `None` for
+/// `started`, which `up` already waits for. Port names stay unresolved: the
+/// container's host ports are allocated with its infra. An http-specific
+/// timeout wins over the check-level one.
+pub fn container_ready(
+    config: &ReadyConfig,
+    cwd: &Path,
+    context: &ExpressionContext,
+    path: &str,
+) -> Result<Option<crate::ContainerReady>, ResolveError> {
+    use crate::ContainerCheck;
+    let ReadyConfig::Check(check) = config else {
+        return Ok(None);
+    };
+    let mut timeout = duration(check.timeout.as_ref(), context, path)?;
+    let port_name = |name: &str| (name != "default").then(|| name.to_owned());
+    let spec = if let Some(tcp) = &check.tcp {
+        ContainerCheck::Tcp {
+            port: match tcp {
+                TcpReady::Port(name) => port_name(name),
+                TcpReady::Enabled(_) => None,
+            },
+        }
+    } else if let Some(http) = &check.http {
+        if let Some(own) = duration(http.timeout.as_ref(), context, path)? {
+            timeout = Some(own);
+        }
+        let route = match &http.path {
+            Some(value) => value
+                .evaluate(context)
+                .map_err(|e| ResolveError::expression(path, e))?,
+            None => "/".to_owned(),
+        };
+        let status = match &http.status {
+            Some(value) => Some(
+                value
+                    .evaluate(context)
+                    .map_err(|e| ResolveError::expression(path, e))?,
+            ),
+            None => None,
+        };
+        ContainerCheck::Http {
+            port: None,
+            path: route,
+            status,
+        }
+    } else if let Some(log) = &check.log {
+        ContainerCheck::Log {
+            pattern: log
+                .evaluate(context)
+                .map_err(|e| ResolveError::expression(path, e))?,
+        }
+    } else if let Some(cmd) = &check.cmd {
+        ContainerCheck::Cmd {
+            shell: shell_line(cmd, context, path)?,
+            cwd: cwd.to_path_buf(),
+        }
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(crate::ContainerReady {
+        check: spec,
+        timeout: timeout.unwrap_or(DEFAULT_READY_TIMEOUT),
+    }))
 }
 
 /// Converts the effective `ready` config. An http-specific timeout wins over the

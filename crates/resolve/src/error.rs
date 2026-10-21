@@ -57,12 +57,43 @@ impl ResolveError {
         }
     }
 
+    /// Appends ` (file:line:col)` of the config field the error names, when the config
+    /// was parsed from YAML, so runtime failures point at the expression.
+    pub(crate) fn locate<E: devlanes_config::Extensions>(
+        self,
+        config: &devlanes_config::ProjectConfig<E>,
+    ) -> Self {
+        match self {
+            Self::Expression { path, message } => {
+                let message = located(config, &path, message);
+                Self::Expression { path, message }
+            }
+            Self::Invalid { path, message } => {
+                let message = located(config, &path, message);
+                Self::Invalid { path, message }
+            }
+            other => other,
+        }
+    }
+
     /// Builds an [`ResolveError::Invalid`] for `path`.
     pub(crate) fn invalid(path: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Invalid {
             path: path.into(),
             message: message.into(),
         }
+    }
+}
+
+/// `message (file:line:col)` when `path` names a field in the config's YAML.
+fn located<E: devlanes_config::Extensions>(
+    config: &devlanes_config::ProjectConfig<E>,
+    path: &str,
+    message: String,
+) -> String {
+    match config.sources.position(path) {
+        Some(at) => format!("{message} ({}:{}:{})", at.file, at.line, at.column),
+        None => message,
     }
 }
 

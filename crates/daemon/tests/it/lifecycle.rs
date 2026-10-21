@@ -164,8 +164,13 @@ async fn stop_interrupts_a_hung_start() {
         )
         .expect("result");
         assert!(started.ready, "{started:?}");
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(alive(&lane(&h, &main).await), ["web"]);
+        // The interrupted start's token must not reach this one: web stays up.
+        let settled = eventually(Duration::from_secs(5), || async {
+            let summary = lane(&h, &main).await;
+            (summary.state == "running").then(|| alive(&summary))
+        })
+        .await;
+        assert_eq!(settled, Some(vec!["web".to_owned()]));
         h.close().await;
     })
     .await
@@ -205,6 +210,181 @@ async fn run_timeout_stops_the_task_and_closes_its_run() {
             .await
             .expect("no active run blocks the clean");
         assert_eq!(cleaned["lane"], "slow@0");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+/// A lane whose `lane clean` task takes a while, and a long task.
+const CLEANING: &str = r#"project: tidy
+tasks:
+  tidy: { run: "nap 800", when: lane.clean }
+  slow: { run: sleep }
+services:
+  web: { run: sleep, ready: started }
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+/// An `exec` sent while `lane clean` runs its tasks waits for the clean and is
+/// refused on the released lane instead of leaving an untracked unit; a
+/// foreground `run` is interrupted by the clean without reading as a timeout.
+async fn clean_closes_the_lane_to_exec_and_run() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CLEANING);
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        let (_run_session, _run_frames, running) = spawn_call(
+            &h,
+            Method::Run,
+            json!({"task": "slow", "timeout_ms": 60_000}),
+            cx(&main),
+        );
+        let slow = eventually(Duration::from_secs(5), || async {
+            alive(&lane(&h, &main).await)
+                .contains(&"slow".to_owned())
+                .then_some(())
+        })
+        .await;
+        assert!(slow.is_some(), "the task runs");
+
+        let yes = Context {
+            yes: true,
+            ..cx(&main)
+        };
+        let (_session, _frames, cleaning) = spawn_call(&h, Method::LaneClean, json!({}), yes);
+        let hook = eventually(Duration::from_secs(5), || async {
+            h.runner
+                .journal
+                .entries()
+                .contains(&"nap 800".to_owned())
+                .then_some(())
+        })
+        .await;
+        assert!(hook.is_some(), "the clean task runs");
+        let exec = h
+            .call(
+                Method::Exec,
+                json!({"name": "tool", "command": ["sleep"]}),
+                cx(&main),
+            )
+            .await
+            .expect_err("the lane is released by the time exec may spawn");
+        assert_eq!(exec.code, "unassigned", "{exec:?}");
+        let cleaned = cleaning.await.expect("join").expect("clean");
+        assert_eq!(cleaned["lane"], "tidy@0");
+
+        let ran = running.await.expect("join").expect("run answers");
+        assert_eq!(ran["state"], "failed", "{ran}");
+        assert_eq!(ran["exit_code"], Value::Null);
+        assert_eq!(h.engine.managed_processes(), 0);
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// `run --env` applies to that run only, and each run streams only its own
+/// output, not what earlier runs of the task wrote.
+async fn run_env_is_per_run_and_streams_only_its_output() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config = "project: envy\ntasks:\n  show: { run: \"printenv K\" }\nservices:\n  web: { run: sleep, ready: started }\n";
+        let main = repo(&tmp.path, "r", config);
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        let run = |env: Value| {
+            let h = &h;
+            let main = main.clone();
+            async move {
+                let (session, mut frames) = h.session();
+                h.call_on(Method::Run, json!({"task": "show", "env": env}), cx(&main), &session)
+                    .await
+                    .expect("run");
+                drain_events(&mut frames)
+                    .into_iter()
+                    .filter(|e| e.event == events::LOG)
+                    .filter_map(|e| e.data["line"]["text"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(run(json!({"K": "V"})).await, ["V"]);
+        let plain = run(json!({})).await;
+        assert!(!plain.contains(&"V".to_owned()), "{plain:?}");
+        assert_eq!(run(json!({"K": "W"})).await, ["W"]);
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// With no config poller running, `start` and `run` right after an edit use
+/// the edited file.
+async fn requests_after_an_edit_use_the_new_config() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config = "project: edit\nservices:\n  web: { run: sleep, ready: started }\n";
+        let main = repo(&tmp.path, "r", config);
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        std::fs::write(
+            main.join("devlanes.yaml"),
+            "project: edit\ntasks:\n  hello: { run: \"echo hi\" }\nservices:\n  web: { run: sleep, ready: started }\n  api: { run: sleep, ready: started }\n",
+        )
+        .expect("edit");
+        let started: StartResult = serde_json::from_value(
+            h.call(Method::Start, json!({}), cx(&main))
+                .await
+                .expect("start after the edit"),
+        )
+        .expect("result");
+        assert!(started.started.contains(&"edit@0:api".to_owned()), "{started:?}");
+        let ran = h
+            .call(Method::Run, json!({"task": "hello"}), cx(&main))
+            .await
+            .expect("the new task runs");
+        assert_eq!(ran["exit_code"], 0);
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A `ready: started` service that exits non-zero just after its spawn fails
+/// the start with its log tail instead of reading as ready.
+async fn an_early_exit_fails_the_start() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config =
+            "project: early\nservices:\n  web: { run: \"echo bad flag; nap 150; exit 2\" }\n";
+        let main = repo(&tmp.path, "r", config);
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        let started: StartResult = serde_json::from_value(
+            h.call(Method::Start, json!({}), cx(&main))
+                .await
+                .expect("start answers"),
+        )
+        .expect("result");
+        assert!(!started.ready, "{started:?}");
+        let failure = started
+            .failures
+            .iter()
+            .find(|f| f.unit == "web")
+            .expect("web failed");
+        assert!(
+            failure.log_tail.iter().any(|line| line == "bad flag"),
+            "{failure:?}"
+        );
         h.close().await;
     })
     .await
@@ -523,7 +703,17 @@ async fn the_gate_serves_starts_by_arrival() {
             json!({"profiles": ["slow"], "timeout_ms": 10_000}),
             cx(&main),
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // The first start took its arrival before its tasks; once its task runs,
+        // the second one arrives after it.
+        let pausing = eventually(Duration::from_secs(5), || async {
+            h.runner
+                .journal
+                .entries()
+                .contains(&"nap 800".to_owned())
+                .then_some(())
+        })
+        .await;
+        assert!(pausing.is_some(), "the first start runs its task");
         let (_s2, _f2, second) =
             spawn_call(&h, Method::Start, json!({"timeout_ms": 10_000}), cx(&other));
         let both = eventually(Duration::from_secs(5), || async {

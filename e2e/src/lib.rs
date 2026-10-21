@@ -253,8 +253,8 @@ pub struct Lab {
     worktrees: tempfile::TempDir,
     slot: PortSlot,
     deadline: Instant,
-    /// Compose project the guard removes; also passes the Docker client settings through.
-    compose_project: Option<String>,
+    /// Compose projects the guard removes; any also passes the Docker client settings through.
+    compose_projects: Vec<String>,
     owned: Mutex<Vec<Owned>>,
 }
 
@@ -268,9 +268,17 @@ impl Lab {
     /// A lab for Docker tests: the guard also runs `docker compose -p <compose_project>
     /// down --volumes` in the primary worktree.
     pub fn docker(fixture: &str, compose_project: &str, budget: Duration) -> Result<Self> {
+        Self::docker_projects(fixture, &[compose_project], budget)
+    }
+
+    /// Like [`Lab::docker`] for several Compose projects (a shared one and the
+    /// `<project>-lane<N>` ones). They are removed before the test too, so leftovers of
+    /// a run that died cannot leak data into this one.
+    pub fn docker_projects(fixture: &str, projects: &[&str], budget: Duration) -> Result<Self> {
         let source = fixture_dir(fixture);
         let mut lab = Self::create(budget, |repo| copy_dir(&source, repo))?;
-        lab.compose_project = Some(compose_project.to_owned());
+        lab.compose_projects = projects.iter().map(|&p| p.to_owned()).collect();
+        lab.compose_down();
         Ok(lab)
     }
 
@@ -278,6 +286,13 @@ impl Lab {
     pub fn with_config(yaml: &str, budget: Duration) -> Result<Self> {
         Self::create(budget, |repo| {
             fs::write(repo.join("devlanes.yaml"), yaml).map_err(Error::from)
+        })
+    }
+
+    /// A lab whose repository has a commit but no `devlanes.yaml`.
+    pub fn without_config(budget: Duration) -> Result<Self> {
+        Self::create(budget, |repo| {
+            fs::write(repo.join("README.md"), "no devlanes config here\n").map_err(Error::from)
         })
     }
 
@@ -323,7 +338,7 @@ impl Lab {
             worktrees,
             slot,
             deadline,
-            compose_project: None,
+            compose_projects: Vec::new(),
             owned: Mutex::new(Vec::new()),
         })
     }
@@ -341,6 +356,11 @@ impl Lab {
     /// The HTTPS port the proxy is configured to bind.
     pub fn https_port(&self) -> u16 {
         self.slot.base + 90
+    }
+
+    /// The directory that holds linked worktrees; tests may create or move worktrees in it.
+    pub fn worktrees_dir(&self) -> &Path {
+        self.worktrees.path()
     }
 
     /// Adds a linked worktree on a new branch, outside the primary worktree.
@@ -386,11 +406,23 @@ impl Lab {
             .env("DEVLANES_AGENT", "0")
             .env("DEVLANES_OUTPUT", "json")
             .env("DEVLANES_LOG", "debug");
-        if self.compose_project.is_some() {
+        if !self.compose_projects.is_empty() {
             self.docker_env(&mut command);
         }
         command.current_dir(cwd).args(args).stdin(Stdio::null());
         Ok(command)
+    }
+
+    /// Runs `docker <args>` in the primary worktree with the outer shell's Docker
+    /// client settings, bounded by [`COMMAND_TIMEOUT`] and the test deadline.
+    pub fn docker_cli(&self, args: &[&str]) -> Result<Output> {
+        let mut command = Command::new("docker");
+        self.docker_env(&mut command);
+        command
+            .current_dir(self.repo())
+            .args(args)
+            .stdin(Stdio::null());
+        self.run(command, COMMAND_TIMEOUT)
     }
 
     /// Docker reads its context from `$HOME/.docker`, which the isolated `HOME` hides.
@@ -563,7 +595,23 @@ impl Lab {
         if thread::panicking() || std::env::var_os("DEVLANES_E2E_DUMP").is_some() {
             self.dump_daemon_log();
         }
-        if let Some(project) = &self.compose_project {
+        self.compose_down();
+        let owned = self
+            .owned
+            .lock()
+            .map(|owned| owned.iter().map(|o| (o.pid, o.started.clone())).collect())
+            .unwrap_or_else(|_| Vec::new());
+        for (pid, started) in owned {
+            if start_time(pid).as_deref() == Some(started.as_str()) {
+                kill_tree(pid);
+            }
+        }
+        reap_fixture_listeners(self.slot.base, self.slot.base + SLOT_SIZE - 1);
+    }
+
+    /// Removes the lab's Compose projects with their volumes.
+    fn compose_down(&self) {
+        for project in &self.compose_projects {
             let mut down = Command::new("docker");
             self.docker_env(&mut down);
             down.current_dir(self.repo())
@@ -579,17 +627,6 @@ impl Lab {
                 .stdin(Stdio::null());
             let _ = run_bounded(down, Duration::from_secs(120));
         }
-        let owned = self
-            .owned
-            .lock()
-            .map(|owned| owned.iter().map(|o| (o.pid, o.started.clone())).collect())
-            .unwrap_or_else(|_| Vec::new());
-        for (pid, started) in owned {
-            if start_time(pid).as_deref() == Some(started.as_str()) {
-                kill_tree(pid);
-            }
-        }
-        reap_fixture_listeners(self.slot.base, self.slot.base + SLOT_SIZE - 1);
     }
 
     /// Prints the end of the daemon log, which disappears with the home.

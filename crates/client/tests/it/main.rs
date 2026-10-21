@@ -230,17 +230,15 @@ fn long_paths_remain_isolated_and_read_only() -> TestResult {
     Ok(())
 }
 
-/// Existing shared directories cannot silently become trusted daemon state.
+/// A symlinked home cannot silently become trusted daemon state; an own home
+/// others can read passes, for the daemon to tighten.
 #[test]
-fn prepare_rejects_shared_and_symlinked_homes() -> TestResult {
+fn prepare_rejects_symlinked_homes() -> TestResult {
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("shared");
     std::fs::create_dir(&home)?;
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755))?;
-    assert!(matches!(
-        Paths::new(&home)?.prepare(),
-        Err(Error::UnsafeDirectory(_))
-    ));
+    Paths::new(&home)?.prepare()?;
     let link = temp.path().join("link");
     std::os::unix::fs::symlink(temp.path(), &link)?;
     assert!(matches!(

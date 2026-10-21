@@ -1,0 +1,73 @@
+version: "0.5"
+is_strict: true
+environment:
+  - "LOG_LEVEL=debug"
+  - "DATA_DIR=${HOME}/.acme"
+processes:
+  db:
+    command: "postgres -D .data/db"
+    ready_log_line: "ready to accept connections"
+    shutdown:
+      signal: 2
+      timeout_seconds: 20
+  migrate:
+    command: "./scripts/migrate.sh"
+    depends_on:
+      db:
+        condition: process_log_ready
+  api:
+    command: "go run ./cmd/api --port 8080"
+    working_dir: ./services/api
+    environment:
+      - "DB_URL=postgres://localhost:5432/acme"
+      - "UPSTREAM=${UPSTREAM_URL^^}"
+    depends_on:
+      migrate:
+        condition: process_completed_successfully
+      db:
+        condition: process_healthy
+    readiness_probe:
+      http_get:
+        host: 127.0.0.1
+        scheme: http
+        path: "/health"
+        port: 8080
+      initial_delay_seconds: 2
+      period_seconds: 5
+    liveness_probe:
+      exec:
+        command: "pgrep acme-api"
+    availability:
+      restart: on_failure
+      backoff_seconds: 2
+    namespace: backend
+  web:
+    command: "npm run dev -- --port 5173"
+    working_dir: web
+    environment:
+      API_URL: "http://localhost:8080"
+    readiness_probe:
+      exec:
+        command: "curl -fsS http://localhost:5173"
+    namespace: [frontend, default]
+    replicas: 2
+  worker:
+    command: "echo started $$HOSTNAME && ./worker"
+    env_file: .env.worker
+    disabled: true
+    shutdown:
+      command: "./worker --drain"
+  e2e:
+    command: "npx playwright test"
+    availability:
+      exit_on_end: true
+    depends_on:
+      web:
+        condition: process_healthy
+  shell:
+    command: "psql acme"
+    is_foreground: true
+  nginx:
+    command: "docker run -d --rm --name acme_nginx nginx"
+    is_daemon: true
+    log_location: ./nginx.log

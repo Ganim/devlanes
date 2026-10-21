@@ -1,0 +1,19 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 1)
+acme@0 · main
+  ✗  bg  acme@0:bg is still running from a previous daemon (pid 4242); start does not take it over
+
+stop: devlanes stop bg --lane acme@0
+--- plain (exit 1)
+acme@0 · main
+  failed  bg  acme@0:bg is still running from a previous daemon (pid 4242); start does not take it over
+
+stop: devlanes stop bg --lane acme@0
+--- agent (exit 1)
+acme@0 (main): not ready, 1 failed
+failed bg
+  acme@0:bg is still running from a previous daemon (pid 4242); start does not take it over
+  stop: devlanes stop bg --lane acme@0

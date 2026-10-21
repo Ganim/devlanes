@@ -11,6 +11,7 @@ Commands:
   errors  List failed units, crash counts, recent error lines and port conflicts
   events  Print the daemon's event stream: lane, unit, task and port events
   top     Show CPU and memory per lane and unit
+  bundle  Write a redacted archive to attach to a bug report and print its path
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -50,3 +51,6 @@ Global options:
 
       --budget <BYTES>
           Cap agent-mode output at this many bytes [default: 16384, minimum: 256]
+
+  -v, --verbose...
+          Print timestamped diagnostics of the client and daemon to stderr; -vv for more [env: DEVLANES_VERBOSE=1|2]

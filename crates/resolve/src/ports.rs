@@ -66,7 +66,7 @@ pub fn port_needs<E: Extensions>(
 ) -> Result<PortNeeds, ResolveError> {
     let mut needs = PortNeeds::default();
     for (name, service) in &config.services {
-        match port_override(name, service)? {
+        match port_override(name, service).map_err(|error| error.locate(config))? {
             PortOverride::Literal(port) => {
                 needs.literal_ports.insert(name.clone(), port);
             }

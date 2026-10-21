@@ -237,7 +237,7 @@ mod tests {
         let test = Suffixes::new(Some("test")).expect("test tld");
         let accepted = [
             "a.localhost",
-            "crm.clickmax-2.localhost",
+            "crm.acme-2.localhost",
             "x1.y-2.z3.localhost",
             "0.localhost",
             "api.acme.test",

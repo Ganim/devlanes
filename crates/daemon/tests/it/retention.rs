@@ -19,6 +19,8 @@ async fn state_retention_follows_history_retention() {
         let home = tmp.path.join("home");
         let mut user = devlanes_config::UserConfig::default();
         user.history.retention = devlanes_config::ConfigDuration(Duration::from_secs(86_400));
+        // A run with younger log segments stays; the worker's output must age out too.
+        user.logs.retention.days = 1;
         user.state.max_size = devlanes_config::ByteSize(64 << 20);
         let h = harness(
             &home,

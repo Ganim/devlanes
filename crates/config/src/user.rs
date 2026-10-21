@@ -42,6 +42,27 @@ pub struct UserConfig {
     pub terminal: Option<TerminalConfig>,
     /// Whether the daemon looks for new devlanes releases.
     pub updates: UpdatesConfig,
+    /// How commands use the terminal UI.
+    pub tui: TuiConfig,
+}
+
+/// Terminal UI behaviour of the CLI.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(extend("examples" = [{"open_on_start":false}]))]
+pub struct TuiConfig {
+    /// Run `start`, `restart`, `lane resume` and `lane new --start` inside the TUI when typed at a terminal; defaults to true. false prints them as text, like `--no-ui` or DEVLANES_NO_UI=1.
+    #[schemars(extend("examples" = [true,false]))]
+    pub open_on_start: bool,
+}
+
+impl Default for TuiConfig {
+    /// Starts open the TUI unless turned off.
+    fn default() -> Self {
+        Self {
+            open_on_start: true,
+        }
+    }
 }
 
 /// Release checks: the daemon reads the latest release's version once a day and
@@ -599,6 +620,110 @@ pub fn load_user(path: impl AsRef<Path>) -> Result<UserConfig, ConfigError> {
     let path = path.as_ref();
     let source = std::fs::read_to_string(path).map_err(|e| ConfigError::io(path, e))?;
     parse_user_named(&path.display().to_string(), &source)
+}
+
+/// Like [`load_user`], but a problem drops only the key it is about: an unknown
+/// key or an invalid value is left out (its default applies) and comes back as a
+/// located error, and every valid key is kept. Only a file that cannot be read
+/// or is not YAML at all yields the defaults with that one error.
+pub fn load_user_lenient(path: impl AsRef<Path>) -> (UserConfig, Vec<ConfigError>) {
+    let path = path.as_ref();
+    match std::fs::read_to_string(path) {
+        Ok(source) => parse_user_lenient(&path.display().to_string(), &source),
+        Err(error) => (UserConfig::default(), vec![ConfigError::io(path, error)]),
+    }
+}
+
+/// Keys dropped before giving up and using the defaults for everything.
+const LENIENT_ATTEMPTS: usize = 64;
+
+/// [`load_user_lenient`] over text; `file` names it in locations.
+pub fn parse_user_lenient(file: &str, source: &str) -> (UserConfig, Vec<ConfigError>) {
+    let mut value: serde_json::Value = match crate::loader::parse_yaml(file, source) {
+        Ok(value) => value,
+        Err(error) => return (UserConfig::default(), vec![error]),
+    };
+    // An empty file is YAML null; it means "all defaults".
+    if value.is_null() {
+        value = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let mut issues = Vec::new();
+    for _ in 0..LENIENT_ATTEMPTS {
+        let (path, message) = match serde_path_to_error::deserialize::<_, UserConfig>(&value) {
+            Ok(mut config) => match config.validate() {
+                Ok(()) => {
+                    config.ignore_deferred_trust();
+                    return (config, issues);
+                }
+                Err(error) => match error.message.split_once(": ") {
+                    Some((path, message)) => (path.to_owned(), message.to_owned()),
+                    None => (String::new(), error.message),
+                },
+            },
+            Err(error) => {
+                let message = error.inner().to_string();
+                let mut path = error.path().to_string();
+                // An unknown key is reported at its parent; name the key itself.
+                if let Some((_, rest)) = message.split_once("unknown field `")
+                    && let Some((key, _)) = rest.split_once('`')
+                    && !path.ends_with(key)
+                {
+                    path = if path == "." || path.is_empty() {
+                        key.to_owned()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                }
+                (path, message)
+            }
+        };
+        if path.is_empty() || path == "." || !drop_key(&mut value, &path) {
+            break;
+        }
+        issues.push(crate::loader::locate(
+            ConfigError::plain(format!("{path}: {message}; the default applies")),
+            file,
+            source,
+            None,
+        ));
+    }
+    issues.push(ConfigError::plain(
+        "config.yaml: too many problems to keep any setting; every default applies",
+    ));
+    (UserConfig::default(), issues)
+}
+
+/// Removes the key at the dotted `path` from `value`. When the key is absent
+/// (a validation error about a value that must exist), the nearest present
+/// ancestor goes instead, so its section falls back to defaults. False when
+/// nothing could be removed.
+fn drop_key(value: &mut serde_json::Value, path: &str) -> bool {
+    let segments: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
+    for depth in (1..=segments.len()).rev() {
+        let (parents, last) = segments[..depth].split_at(depth - 1);
+        let pointer: String = parents
+            .iter()
+            .map(|segment| format!("/{}", segment.replace('~', "~0").replace('/', "~1")))
+            .collect();
+        let Some(node) = value.pointer_mut(&pointer) else {
+            continue;
+        };
+        let removed = match node {
+            serde_json::Value::Object(map) => map.remove(last[0]).is_some(),
+            serde_json::Value::Array(items) => match last[0].parse::<usize>() {
+                Ok(index) if index < items.len() => {
+                    items.remove(index);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if removed {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse, validate with errors located at their field, then drop deferred settings.

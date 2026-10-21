@@ -47,6 +47,12 @@ Examples:
   devlanes logs api -f --timeout 30s
   devlanes logs --all --since start";
 
+const MIGRATE_AFTER: &str = "\
+Examples:
+  devlanes migrate --dry-run           print what would be written
+  devlanes migrate --from overmind     only the Procfile setup
+  devlanes migrate --force             replace an existing devlanes.yaml";
+
 const WITH_AFTER: &str = "\
 Examples:
   devlanes with -- pnpm test
@@ -92,6 +98,9 @@ pub struct Cli {
     /// Cap agent-mode output at this many bytes [default: 16384, minimum: 256]
     #[arg(long, global = true, value_parser = parse_budget, value_name = "BYTES", help_heading = GLOBAL)]
     pub budget: Option<usize>,
+    /// Print timestamped diagnostics of the client and daemon to stderr; -vv for more [env: DEVLANES_VERBOSE=1|2]
+    #[arg(short, long, global = true, action = clap::ArgAction::Count, help_heading = GLOBAL)]
+    pub verbose: u8,
 }
 
 /// Commands resolve references in the daemon, including branch names and globs.
@@ -128,9 +137,9 @@ terminal the output defaults to the last 100 lines within the output budget.",
 Exits 0 when ready, 1 when it failed (with the reason and log tail) and 124\n\
 when --timeout passes first [default: 180s].")]
     Wait {
-        /// Unit ([lane:]unit) or lane ([project@]lane) to wait for
+        /// Unit ([lane:]unit) or lane ([project@]lane) to wait for [default: pick from a list]
         #[arg(value_name = "TARGET")]
-        target: String,
+        target: Option<String>,
     },
     /// Start the lane, run a command against it, then stop what was started
     #[command(
@@ -160,9 +169,9 @@ The daemon owns the process: logs, stop, attach and status work on it by its\n\
     Exec(ExecArgs),
     /// Attach this terminal to a unit's terminal; C-a d detaches
     Attach {
-        /// Unit to attach to ([lane:]unit)
+        /// Unit to attach to ([lane:]unit) [default: pick from a list]
         #[arg(value_name = "UNIT")]
-        unit: String,
+        unit: Option<String>,
     },
     /// Open the TUI; closing it never stops anything
     Ui,
@@ -196,6 +205,19 @@ The daemon owns the process: logs, stop, attach and status work on it by its\n\
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Convert mprocs, dekit, Procfile, pm2 and similar setups into devlanes.yaml
+    #[command(
+        long_about = "Write devlanes.yaml from an existing process-manager setup.\n\n\
+Looks in the repository root (or the current directory outside Git) for mprocs,\n\
+dekit, process-compose, Procfile (foreman, overmind, hivemind, honcho), pm2,\n\
+tmuxinator, tmuxp, package.json scripts that run concurrently or npm-run-all,\n\
+and mise tasks. Several setups are merged when their names do not clash. The\n\
+result is checked like devlanes config check before it is written; what could\n\
+not be carried over is printed and left as comments in the file. Runs without\n\
+the daemon.",
+        after_help = MIGRATE_AFTER
+    )]
+    Migrate(MigrateArgs),
     /// Trust the devlanes CA and install the /etc/hosts helper
     Certs {
         #[command(subcommand)]
@@ -250,9 +272,12 @@ pub struct StartArgs {
     /// Start the units of this profile from devlanes.yaml; repeat to combine profiles (later ones win on env)
     #[arg(long = "profile", value_name = "PROFILE")]
     pub profiles: Vec<String>,
-    /// Open the TUI once the lane is up
-    #[arg(long)]
+    /// Run the start in the TUI even when DEVLANES_NO_UI or tui.open_on_start turn that off [default on a terminal]
+    #[arg(long, conflicts_with = "no_ui")]
     pub attach: bool,
+    /// Print the start as text instead of running it in the TUI
+    #[arg(long)]
+    pub no_ui: bool,
     /// Start every selected service immediately, bypassing the machine-wide start gate for this run
     #[arg(long)]
     pub all_at_once: bool,
@@ -295,12 +320,15 @@ pub struct WithArgs {
 
 #[derive(Debug, Args)]
 pub struct RestartArgs {
-    /// Units to restart ([lane:]unit, globs, +tag)
-    #[arg(required = true, value_name = "UNIT")]
+    /// Units to restart ([lane:]unit, globs, +tag) [default: pick from a list]
+    #[arg(value_name = "UNIT")]
     pub units: Vec<String>,
     /// Start every selected service immediately, bypassing the machine-wide start gate for this run
     #[arg(long)]
     pub all_at_once: bool,
+    /// Print the restart as text instead of running it in the TUI
+    #[arg(long)]
+    pub no_ui: bool,
 }
 
 #[derive(Debug, Args)]
@@ -319,8 +347,8 @@ pub struct StatusArgs {
 
 #[derive(Debug, Args)]
 pub struct LogArgs {
-    /// Units to read ([lane:]unit, globs, +tag)
-    #[arg(required_unless_present_any = ["mine", "all"], value_name = "UNIT")]
+    /// Units to read ([lane:]unit, globs, +tag) [default: pick from a list]
+    #[arg(value_name = "UNIT")]
     pub units: Vec<String>,
     /// Read every unit of the lane, grouped by unit
     #[arg(long, conflicts_with_all = ["units", "mine"])]
@@ -356,12 +384,8 @@ pub struct LogArgs {
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Task to run, as named under tasks: in devlanes.yaml
-    #[arg(
-        required_unless_present = "list",
-        conflicts_with = "list",
-        value_name = "TASK"
-    )]
+    /// Task to run, as named under tasks: in devlanes.yaml [default: pick from a list]
+    #[arg(conflicts_with = "list", value_name = "TASK")]
     pub task: Option<String>,
     /// List the tasks and the script sources they use
     #[arg(long)]
@@ -388,9 +412,9 @@ pub struct ExecArgs {
 pub enum DebugCommand {
     /// Explain why a unit is not running or not ready, with a fix for each reason
     Why {
-        /// Unit to explain ([lane:]unit)
+        /// Unit to explain ([lane:]unit) [default: pick from a list]
         #[arg(value_name = "UNIT")]
-        unit: String,
+        unit: Option<String>,
     },
     /// List failed units, crash counts, recent error lines and port conflicts
     Errors {
@@ -406,6 +430,27 @@ pub enum DebugCommand {
     },
     /// Show CPU and memory per lane and unit
     Top,
+    /// Write a redacted archive to attach to a bug report and print its path
+    #[command(
+        long_about = "Write a redacted archive to attach to a bug report and print its path.\n\n\
+The archive holds the client and daemon versions, doctor, config check and status\n\
+as JSON, the last lines of the daemon's log and, with -- ARGS, the output of\n\
+devlanes -vv ARGS. Values of secret-looking variables, URL passwords and the home\n\
+directory are replaced before anything is written; read the files before sending\n\
+them anyway.",
+        after_help = "Examples:\n  devlanes debug bundle\n  devlanes debug bundle --to bug.tar.gz -- start api"
+    )]
+    Bundle {
+        /// Write the archive here [default: devlanes-debug-<time>.tar.gz in the temporary directory]
+        #[arg(long, value_name = "PATH")]
+        to: Option<PathBuf>,
+        /// Lines of the daemon's log to include
+        #[arg(long, value_name = "N", default_value_t = 500)]
+        log_lines: usize,
+        /// devlanes arguments to run again with -vv and include, such as: -- start api
+        #[arg(last = true, value_name = "ARGS")]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -437,15 +482,15 @@ pub enum EnvCommand {
 pub enum UrlCommand {
     /// Print a service's URL, for scripts
     Print {
-        /// Service whose URL to print ([lane:]unit)
+        /// Service whose URL to print ([lane:]unit) [default: pick from a list]
         #[arg(value_name = "UNIT")]
-        unit: String,
+        unit: Option<String>,
     },
     /// Open a service's URL in the browser; agent mode only prints it
     Open {
-        /// Service to open ([lane:]unit)
+        /// Service to open ([lane:]unit) [default: pick from a list]
         #[arg(value_name = "UNIT")]
-        unit: String,
+        unit: Option<String>,
     },
     /// List routed hostnames with their lane, unit, port and state
     Ls,
@@ -523,13 +568,16 @@ pub enum LaneCommand {
         /// Start the new lane right away
         #[arg(long)]
         start: bool,
+        /// With --start, print the start as text instead of running it in the TUI
+        #[arg(long, requires = "start")]
+        no_ui: bool,
     },
     /// Stop a lane, run its clean tasks and teardown, and free its ports (needs --yes)
     Clean {
         // Own id: `lane` would collide with the global `--lane`.
-        /// Lane to clean ([project@]lane)
+        /// Lane to clean ([project@]lane) [default: pick from a list]
         #[arg(id = "clean_lane", value_name = "LANE")]
-        lane: String,
+        lane: Option<String>,
     },
     /// Clean lanes whose worktrees are gone and drop unused port offsets (needs --yes)
     Gc,
@@ -544,6 +592,9 @@ for every lane whose last request was start."
         /// Start every selected service immediately, bypassing the machine-wide start gate for this run
         #[arg(long)]
         all_at_once: bool,
+        /// Print the starts as text instead of running them in the TUI
+        #[arg(long)]
+        no_ui: bool,
     },
 }
 
@@ -562,9 +613,56 @@ pub enum ConfigCommand {
     Check,
 }
 
+/// Names `--from` accepts; `devlanes-migrate` owns the list and a binary test keeps the
+/// two equal.
+pub const MIGRATE_SOURCES: [&str; 16] = [
+    "auto",
+    "mprocs",
+    "dekit",
+    "process-compose",
+    "procfile",
+    "pm2",
+    "tmuxinator",
+    "tmuxp",
+    "package-json",
+    "mise",
+    "foreman",
+    "overmind",
+    "hivemind",
+    "honcho",
+    "concurrently",
+    "npm-run-all",
+];
+
+#[derive(Debug, Args)]
+pub struct MigrateArgs {
+    /// Setup to convert; aliases name the tool (overmind is procfile) [default: auto, every setup found]
+    #[arg(long, value_name = "SOURCE", value_parser = clap::builder::PossibleValuesParser::new(MIGRATE_SOURCES))]
+    pub from: Option<String>,
+    /// Print the generated YAML instead of writing it
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Replace an existing devlanes.yaml
+    #[arg(long)]
+    pub force: bool,
+    /// Write to this file instead of devlanes.yaml next to the setup
+    #[arg(long, value_name = "PATH")]
+    pub to: Option<PathBuf>,
+}
+
+/// `devlanes migrate`, resolved: the flags and the directory it ran in.
+#[derive(Debug, Clone)]
+pub struct MigratePlan {
+    pub from: Option<String>,
+    pub dry_run: bool,
+    pub force: bool,
+    pub to: Option<PathBuf>,
+    pub cwd: PathBuf,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum DaemonCommand {
-    /// Show the daemon's version, pid, uptime and managed process count
+    /// Show the daemon's version, pid, uptime and managed process count; never starts it
     Status,
     /// Stop the daemon and every process it manages
     Stop,
@@ -599,6 +697,13 @@ pub enum Action {
     },
     Rpc(Request),
     RpcThenUi(Request),
+    /// A start that runs inside the TUI: the request is sent first, and the TUI
+    /// opens once the daemon accepted it. `forced` (`start --attach`) overrides
+    /// `tui.open_on_start: false` in the user config.
+    StartUi {
+        request: Request,
+        forced: bool,
+    },
     Attach(Request),
     Open(Request),
     ExportEnv(Request),
@@ -626,6 +731,21 @@ pub enum Action {
     Completions(clap_complete::Shell),
     Tunnel,
     Askpass(Option<String>),
+    /// `devlanes migrate`; handled in the client without the daemon.
+    Migrate(MigratePlan),
+    /// `devlanes debug bundle`: never spawns a daemon.
+    DebugBundle {
+        to: Option<PathBuf>,
+        log_lines: usize,
+        args: Vec<String>,
+        context: Context,
+    },
+    /// The command lacks an argument the daemon can list choices for; `context`
+    /// says where to look (cwd, `--lane`, `--project`).
+    Choose {
+        choice: crate::Choice,
+        context: Context,
+    },
 }
 
 /// Client interruption policy never implicitly stops services.
@@ -671,7 +791,11 @@ impl Cli {
             lane: self.lane.clone(),
             yes: self.yes,
             env: None,
+            verbose: runtime.verbose,
         };
+        if let Some(choice) = self.missing_choice() {
+            return Ok(Action::Choose { choice, context });
+        }
         let timeout_ms = self
             .timeout
             .map(|v| u64::try_from(v.as_millis()).unwrap_or(u64::MAX));
@@ -807,6 +931,18 @@ impl Cli {
                     (Method::Subscribe, json!({"follow": follow}))
                 }
                 DebugCommand::Top => (Method::Metrics, json!({})),
+                DebugCommand::Bundle {
+                    to,
+                    log_lines,
+                    args,
+                } => {
+                    return Ok(Action::DebugBundle {
+                        to: to.clone(),
+                        log_lines: *log_lines,
+                        args: args.clone(),
+                        context,
+                    });
+                }
             },
             Some(Command::Run(args)) if args.list => (Method::TaskList, json!({})),
             Some(Command::Run(args)) => (
@@ -840,17 +976,17 @@ impl Cli {
                 }
             },
             Some(Command::Lane { command }) => match command {
-                LaneCommand::Resume { all_at_once } => (
+                LaneCommand::Resume { all_at_once, .. } => (
                     Method::Resume,
                     json!({"timeout_ms": timeout_ms, "all_at_once": all_at_once, "events": start_events}),
                 ),
                 LaneCommand::Ls => (Method::LaneList, json!({})),
-                LaneCommand::New { branch, start } => (
+                LaneCommand::New { branch, start, .. } => (
                     Method::LaneNew,
                     json!({"branch": branch, "start": start, "events": *start && start_events}),
                 ),
                 LaneCommand::Clean { lane } => {
-                    context.lane = Some(lane.clone());
+                    context.lane.clone_from(lane);
                     (Method::LaneClean, json!({"lane": lane}))
                 }
                 LaneCommand::Gc => (Method::LaneGc, json!({})),
@@ -865,6 +1001,15 @@ impl Cli {
             ),
             Some(Command::Config { .. }) => (Method::ConfigCheck, json!({})),
             Some(Command::Doctor) => (Method::Doctor, json!({})),
+            Some(Command::Migrate(args)) => {
+                return Ok(Action::Migrate(MigratePlan {
+                    from: args.from.clone(),
+                    dry_run: args.dry_run,
+                    force: args.force,
+                    to: args.to.clone(),
+                    cwd: context.cwd.clone(),
+                }));
+            }
             Some(Command::Certs { command }) => match command {
                 CertsCommand::Trust { hosts, resolver } => {
                     return Ok(Action::Trust {
@@ -937,6 +1082,9 @@ impl Cli {
                 request,
                 logs_dir: args.logs_dir.clone().unwrap_or_default(),
             },
+            _ if let Some(forced) = self.start_in_ui(runtime) => {
+                Action::StartUi { request, forced }
+            }
             // Agents get the start result only; the TUI needs a person at a terminal.
             Some(Command::Start(args)) if args.attach && runtime.mode != OutputMode::Agent => {
                 Action::RpcThenUi(request)
@@ -946,7 +1094,14 @@ impl Cli {
             {
                 return Err(Error::Usage(format!(
                     "agent attach needs a terminal; read the output with {}",
-                    crate::Hint::command(["logs", unit.as_str(), "-f", "--timeout", "30s"]).0
+                    crate::Hint::command([
+                        "logs",
+                        unit.as_deref().unwrap_or_default(),
+                        "-f",
+                        "--timeout",
+                        "30s"
+                    ])
+                    .0
                 )));
             }
             Some(Command::Attach { .. }) => Action::Attach(request),
@@ -960,6 +1115,70 @@ impl Cli {
                 command: EnvCommand::Shell { .. },
             }) => Action::Shell(request),
             _ => Action::Rpc(request),
+        })
+    }
+
+    /// Whether this start runs inside the TUI, like mprocs: `start`, `restart`,
+    /// `lane resume` and `lane new --start` on a terminal in human output,
+    /// outside CI, without `--no-ui`, `DEVLANES_NO_UI` or `-v`. `Some(true)` when
+    /// `start --attach` asked for it, which also overrides `DEVLANES_NO_UI` and
+    /// `tui.open_on_start: false`; the caller applies that config setting.
+    pub fn start_in_ui(&self, runtime: &Runtime) -> Option<bool> {
+        let (no_ui, forced) = match &self.command {
+            Some(Command::Start(args)) => (args.no_ui, args.attach),
+            Some(Command::Restart(args)) => (args.no_ui, false),
+            Some(Command::Lane {
+                command: LaneCommand::Resume { no_ui, .. },
+            }) => (*no_ui, false),
+            Some(Command::Lane {
+                command:
+                    LaneCommand::New {
+                        start: true, no_ui, ..
+                    },
+            }) => (*no_ui, false),
+            _ => return None,
+        };
+        // Verbose diagnostics go to stderr, which the TUI's screen would hide.
+        (runtime.can_open_ui() && runtime.verbose == 0 && !no_ui && (forced || !runtime.no_ui))
+            .then_some(forced)
+    }
+
+    /// The choice to offer when the command lacks the argument it needs, `None`
+    /// when it has it (or needs none). `logs --mine`/`--all`, `run --list` and
+    /// commands with a default (stop, env) never ask.
+    pub fn missing_choice(&self) -> Option<crate::Choice> {
+        use crate::ChoiceKind as K;
+        let (command, kind, multi): (Vec<&'static str>, K, bool) = match &self.command {
+            Some(Command::Url {
+                command: UrlCommand::Print { unit: None },
+            }) => (vec!["url", "print"], K::Url, false),
+            Some(Command::Url {
+                command: UrlCommand::Open { unit: None },
+            }) => (vec!["url", "open"], K::Url, false),
+            Some(Command::Attach { unit: None }) => (vec!["attach"], K::Running, false),
+            Some(Command::Wait { target: None }) => (vec!["wait"], K::Target, false),
+            Some(Command::Debug {
+                command: DebugCommand::Why { unit: None },
+            }) => (vec!["debug", "why"], K::Unit, false),
+            Some(Command::Restart(args)) if args.units.is_empty() => {
+                (vec!["restart"], K::Unit, true)
+            }
+            Some(Command::Logs(args)) if args.units.is_empty() && !args.mine && !args.all => {
+                (vec!["logs"], K::Unit, true)
+            }
+            Some(Command::Run(args)) if args.task.is_none() && !args.list => {
+                (vec!["run"], K::Task, false)
+            }
+            Some(Command::Lane {
+                command: LaneCommand::Clean { lane: None },
+            }) => (vec!["lane", "clean"], K::Lane, false),
+            _ => return None,
+        };
+        Some(crate::Choice {
+            about: about(&command),
+            command,
+            kind,
+            multi,
         })
     }
 
@@ -996,6 +1215,72 @@ impl Cli {
             || matches!(&self.command, Some(Command::Logs(args)) if args.follow)
             || matches!(&self.command, Some(Command::Status(args)) if args.watch)
     }
+}
+
+/// The subcommand path named by `args` (the command line without the program),
+/// skipping flags and their values: `["url", "open"]` for `--lane x url open`.
+pub fn command_path(args: &[String]) -> Vec<String> {
+    let mut command = <Cli as clap::CommandFactory>::command();
+    let mut path = Vec::new();
+    let mut args = args.iter().peekable();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        if let Some(flag) = arg.strip_prefix("--") {
+            // A long flag that takes a value consumes the next word.
+            let takes_value = !flag.contains('=')
+                && command
+                    .get_arguments()
+                    .chain(<Cli as clap::CommandFactory>::command().get_arguments())
+                    .any(|a| a.get_long() == Some(flag) && a.get_action().takes_values());
+            if takes_value {
+                args.next();
+            }
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        match command.find_subcommand(arg) {
+            Some(sub) => {
+                path.push(arg.clone());
+                command = sub.clone();
+            }
+            None => break,
+        }
+    }
+    path
+}
+
+/// A clap usage error with the command's description after it, so a typo still
+/// says what the command does: `<clap's message>\n\nurl open: Open a service's URL...`.
+pub fn usage_error(message: &str, args: &[String]) -> String {
+    let path = command_path(args);
+    let names: Vec<&str> = path.iter().map(String::as_str).collect();
+    let about = about(&names);
+    let mut text = message.trim_end().to_owned();
+    if !path.is_empty() && !about.is_empty() {
+        text.push_str(&format!("\n\ndevlanes {}: {about}\n", names.join(" ")));
+    } else {
+        text.push('\n');
+    }
+    text
+}
+
+/// The one-line description of the subcommand at `path` (`["url", "open"]`).
+pub fn about(path: &[&str]) -> String {
+    let mut command = <Cli as clap::CommandFactory>::command();
+    for name in path {
+        match command.find_subcommand(name) {
+            Some(sub) => command = sub.clone(),
+            None => return String::new(),
+        }
+    }
+    command
+        .get_about()
+        .map(ToString::to_string)
+        .unwrap_or_default()
 }
 
 /// Validates assignment names before building an explicit override map.

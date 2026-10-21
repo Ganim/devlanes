@@ -1,0 +1,56 @@
+---
+source: crates/cli/tests/it/choose.rs
+expression: asks
+---
+[
+    (
+        "url open",
+        Url,
+        false,
+    ),
+    (
+        "url print",
+        Url,
+        false,
+    ),
+    (
+        "attach",
+        Running,
+        false,
+    ),
+    (
+        "wait",
+        Target,
+        false,
+    ),
+    (
+        "debug why",
+        Unit,
+        false,
+    ),
+    (
+        "restart",
+        Unit,
+        true,
+    ),
+    (
+        "logs",
+        Unit,
+        true,
+    ),
+    (
+        "logs",
+        Unit,
+        true,
+    ),
+    (
+        "run",
+        Task,
+        false,
+    ),
+    (
+        "lane clean",
+        Lane,
+        false,
+    ),
+]

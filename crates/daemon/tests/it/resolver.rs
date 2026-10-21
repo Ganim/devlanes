@@ -214,6 +214,47 @@ async fn finished_runs_record_log_segments() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+/// `doctor` checks `config.yaml` on disk at every call: an edit after startup
+/// shows up located, without a restart; `daemon status` reports what startup
+/// applied.
+async fn doctor_checks_the_user_config_on_disk() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let home = tmp.path.join("home");
+        let h = harness(&home, Setup::default()).await;
+        let section = |doctor: &serde_json::Value| doctor["user_config"].clone();
+        let doctor = h
+            .call(Method::Doctor, json!({}), cx(&main))
+            .await
+            .expect("doctor");
+        assert_eq!(section(&doctor)["valid"], true);
+        std::fs::write(home.join("config.yaml"), "proxy:\n  http_prot: 8080\n").expect("edit");
+        let doctor = h
+            .call(Method::Doctor, json!({}), cx(&main))
+            .await
+            .expect("doctor");
+        let user = section(&doctor);
+        assert_eq!(user["valid"], false, "{user}");
+        assert_eq!(user["errors"][0]["line"], 2, "{user}");
+        assert!(
+            user["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("proxy.http_prot")),
+            "{user}"
+        );
+        let status = h
+            .call(Method::DaemonStatus, json!({}), cx(&main))
+            .await
+            .expect("status");
+        assert_eq!(status["user_config"]["errors"], json!([]));
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 /// `doctor` lists the user config's warnings (a deferred trust target here).
 async fn doctor_shows_user_config_warnings() {
     tokio::time::timeout(LIMIT, async {

@@ -62,14 +62,17 @@ impl DescendantTracker {
             }
             _ => false,
         };
-        // Once the leader is gone its session ID can be handed to an unrelated new
-        // session, so only members seen while the leader existed are trusted; later
-        // ones still join through a tracked parent.
-        if (root_present || self.root_held) && self.root.sid != 0 {
+        // Once the leader is gone its session ID could name an unrelated session, so
+        // new members are adopted only while the session is provably still ours: the
+        // leader is listed or unreaped, or a process we already track is in it.
+        let known: Vec<ProcessIdentity> =
+            self.tracked.values().map(ProcessInfo::identity).collect();
+        if root_present || self.root_held || session_anchored(snapshot, &self.root, &known) {
             for process in snapshot {
                 // A member older than the leader, or a different process holding the
                 // leader's PID, belongs to a session that merely reuses the ID.
-                if process.sid == Some(self.root.sid)
+                if self.root.sid != 0
+                    && process.sid == Some(self.root.sid)
                     && process.pid != self.root.pid
                     && process.start_time >= self.root.start_time
                 {
@@ -113,9 +116,33 @@ impl DescendantTracker {
 
 /// Selects the leader and live members of its session from a snapshot.
 ///
-/// For start-up reconciliation of a crashed daemon's units: members must have started
-/// no earlier than the leader, which rejects most sessions on a recycled PID.
+/// For start-up reconciliation of a crashed daemon's units. Members count only
+/// while the snapshot still holds the leader with its recorded start time: once
+/// the leader is gone its PID, and so its session ID, can belong to an unrelated
+/// session, which must never be swept. Members must also have started no earlier
+/// than the leader.
 pub fn session_members(snapshot: &[ProcessInfo], leader: &ProcessIdentity) -> Vec<ProcessInfo> {
+    session_members_known(snapshot, leader, &[])
+}
+
+/// Like [`session_members`], but the session is also trusted after its leader is
+/// gone if one of `known` (identities the caller recorded as members of this
+/// session, such as a supervisor's tracked set) is still in it.
+///
+/// That is sound because neither Linux nor macOS hands out a PID while it is still
+/// in use as a session ID, so a session that still has one of our members cannot
+/// have been replaced by a stranger's session with the same ID.
+pub fn session_members_known(
+    snapshot: &[ProcessInfo],
+    leader: &ProcessIdentity,
+    known: &[ProcessIdentity],
+) -> Vec<ProcessInfo> {
+    let leader_present = snapshot
+        .iter()
+        .any(|p| p.pid == leader.pid && p.start_time == leader.start_time);
+    if !leader_present && !session_anchored(snapshot, leader, known) {
+        return Vec::new();
+    }
     snapshot
         .iter()
         .filter(|p| !p.zombie)
@@ -128,6 +155,23 @@ pub fn session_members(snapshot: &[ProcessInfo], leader: &ProcessIdentity) -> Ve
         })
         .cloned()
         .collect()
+}
+
+/// True when a `known` member, matched by PID and start time, is still listed in
+/// the leader's session. Such a member keeps the session ID from being reused.
+fn session_anchored(
+    snapshot: &[ProcessInfo],
+    leader: &ProcessIdentity,
+    known: &[ProcessIdentity],
+) -> bool {
+    leader.sid != 0
+        && snapshot.iter().any(|p| {
+            p.sid == Some(leader.sid)
+                && p.start_time >= leader.start_time
+                && known
+                    .iter()
+                    .any(|k| k.pid == p.pid && k.start_time == p.start_time)
+        })
 }
 
 #[cfg(test)]
@@ -193,20 +237,26 @@ mod tests {
         assert_eq!(pids(&tracker), [100]);
     }
 
-    /// After the leader is gone, a process carrying the old session ID is not adopted
-    /// unless a tracked parent forked it.
+    /// After the leader is gone, session members are still adopted while a tracked
+    /// member keeps the session alive (its ID cannot be reused then), including
+    /// orphans whose parent was never seen. Once none remains, a process carrying
+    /// the old session ID belongs to someone else.
     #[test]
-    fn no_session_adoption_without_root() {
+    fn session_adoption_after_root_needs_a_tracked_member() {
         let mut tracker = DescendantTracker::new(root());
         tracker.update(&[proc(100, 1, 100, 10), proc(101, 100, 100, 11)]);
+        // 200 was forked and orphaned between snapshots.
         tracker.update(&[proc(101, 1, 100, 11), proc(200, 1, 100, 20)]);
-        assert_eq!(pids(&tracker), [101]);
-        tracker.update(&[proc(101, 1, 100, 11), proc(102, 101, 100, 21)]);
-        assert_eq!(pids(&tracker), [101, 102]);
+        assert_eq!(pids(&tracker), [101, 200]);
+        // Every member is gone; the ID now names a stranger's session.
+        tracker.update(&[proc(300, 1, 100, 30)]);
+        assert!(pids(&tracker).is_empty());
+        tracker.update(&[proc(300, 1, 100, 30), proc(301, 1, 100, 31)]);
+        assert!(pids(&tracker).is_empty());
         // An unreaped root keeps its session trustworthy even when not listed.
         tracker.hold_root(true);
-        tracker.update(&[proc(101, 1, 100, 11), proc(300, 1, 100, 30)]);
-        assert_eq!(pids(&tracker), [101, 300]);
+        tracker.update(&[proc(301, 1, 100, 31)]);
+        assert_eq!(pids(&tracker), [301]);
     }
 
     /// A recycled root PID is never adopted, and zombies are excluded from live members.
@@ -240,10 +290,50 @@ mod tests {
             start_time: 1,
             ..root()
         };
-        let found: Vec<u32> = session_members(&snapshot, &stale)
+        assert!(session_members(&snapshot, &stale).is_empty());
+    }
+
+    /// A dead leader's session ID reused by an unrelated, newer session selects
+    /// nothing, although its processes started after the recorded leader.
+    #[test]
+    fn reused_session_of_a_dead_leader_is_not_swept() {
+        let snapshot = [
+            proc(1, 0, 1, 0),
+            proc(100, 1, 100, 50),
+            proc(101, 100, 100, 51),
+        ];
+        assert!(session_members(&snapshot, &root()).is_empty());
+        let without_leader = [proc(1, 0, 1, 0), proc(101, 1, 100, 51)];
+        assert!(session_members(&without_leader, &root()).is_empty());
+        // Known identities from an earlier session holder do not anchor a reuse.
+        let earlier = ProcessIdentity {
+            pid: 101,
+            sid: 100,
+            start_time: 11,
+        };
+        assert!(session_members_known(&without_leader, &root(), &[earlier]).is_empty());
+    }
+
+    /// A supervisor that recorded a member can still sweep the session after the
+    /// leader is reaped, including members it never saw.
+    #[test]
+    fn known_member_anchors_a_leaderless_session() {
+        let member = ProcessIdentity {
+            pid: 101,
+            sid: 100,
+            start_time: 11,
+        };
+        let snapshot = [
+            proc(1, 0, 1, 0),
+            proc(101, 1, 100, 11),
+            proc(102, 1, 100, 12),
+            proc(103, 1, 100, 9),
+        ];
+        let found: Vec<u32> = session_members_known(&snapshot, &root(), &[member])
             .iter()
             .map(|p| p.pid)
             .collect();
         assert_eq!(found, [101, 102]);
+        assert!(session_members(&snapshot, &root()).is_empty());
     }
 }

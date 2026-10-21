@@ -1,12 +1,16 @@
 //! End-to-end tests: every test drives the real `devlanes` binary in its own [`Lab`].
 
 mod cli;
+mod diagnostics;
 // Docker test names must start with `docker_` including the module path, for the CI filter.
 mod docker_full;
+mod docker_pg_redis;
 mod lanes;
 mod lifecycle;
 mod proxy;
+mod tasks;
 mod with;
+mod worktrees;
 
 use std::time::Duration;
 

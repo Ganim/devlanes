@@ -838,6 +838,37 @@ async fn identity_cycles_are_rejected() {
     );
 }
 
+#[tokio::test]
+/// Expressions that fail only at runtime name the YAML line and column they came from.
+async fn runtime_expression_errors_are_located() {
+    let config = parse(
+        "project: demo\nservices:\n  api:\n    run: a\n    hosts: [\"${{ env.SUB }}.acme.localhost\"]\n  web:\n    run: b\n    env:\n      TOKEN: \"${{ env.TOKEN }}\"\n",
+    );
+    let facts = facts("demo", 1, None);
+    let (block, offsets) = allocation(&config, 21_000, &[]);
+    let error = lane_layout(&ResolveInput::new(&config, &facts, block, &offsets))
+        .expect_err("missing env in a host");
+    assert!(
+        error.to_string().ends_with("(devlanes.yaml:5:12)"),
+        "{error}"
+    );
+
+    let config = parse(
+        "project: demo\nservices:\n  web:\n    run: b\n    env:\n      TOKEN: \"${{ env.TOKEN }}\"\n",
+    );
+    let (block, offsets) = allocation(&config, 21_000, &[]);
+    let lane = resolve_lane(ResolveInput::new(&config, &facts, block, &offsets))
+        .await
+        .expect("lane-level resolution");
+    let error = lane
+        .check_services(["web"])
+        .expect_err("missing env in a unit");
+    assert!(
+        error.to_string().ends_with("(devlanes.yaml:6:14)"),
+        "{error}"
+    );
+}
+
 #[test]
 /// Evaluated hosts follow DNS rules: an underscore from a lane var fails at the
 /// service's `hosts`, and case and a trailing dot are normalised before routes
@@ -854,7 +885,7 @@ fn evaluated_hosts_are_checked_and_normalised() {
         error,
         ResolveError::Invalid {
             path: "services.api.hosts".into(),
-            message: "`api_v2.acme.localhost`: `_` is not allowed in a hostname; use letters, digits and hyphens".into(),
+            message: "`api_v2.acme.localhost`: `_` is not allowed in a hostname; use letters, digits and hyphens (devlanes.yaml:5:25)".into(),
         }
     );
 

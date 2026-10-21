@@ -185,6 +185,7 @@ impl<'a> StartView<'a> {
             .units
             .iter()
             .filter(|unit| unit.kind.is_empty() || unit.kind == "service")
+            .filter(|unit| unit.autostart || !matches!(unit.state.as_str(), "idle" | "stopped"))
             .collect();
         let ready = result
             .units
@@ -204,10 +205,12 @@ impl<'a> StartView<'a> {
                 failed.push((unit.name.as_str(), None, Some(unit)));
             }
         }
+        // A unit `with` reports as timed out is listed once, as a failure.
         let pending = result
             .units
             .iter()
             .filter(|unit| matches!(unit.state.as_str(), "starting" | "queued"))
+            .filter(|unit| !failed.iter().any(|(name, _, _)| *name == unit.name))
             .collect();
         Self {
             services,
@@ -274,7 +277,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
             Some(branch) => format!("{lane} ({}): ", clean(branch)),
             None => format!("{lane}: "),
         };
-        if view.services.is_empty() && view.failed.is_empty() {
+        if view.services.is_empty() {
             header.push_str(if result.ready { "ready" } else { "not ready" });
         } else {
             header.push_str(&format!(
@@ -301,17 +304,21 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
             }
             lines.push(line);
             if let Some(reason) = failure_reason(*failure, *unit) {
-                lines.push(format!("  {}", words::error_message(reason).0));
+                lines.push(format!("  {}", row_reason(reason)));
             }
             if let Some(failure) = failure {
-                let tail: Vec<Value> = failure
-                    .log_tail
-                    .iter()
+                let tail: Vec<Value> = own_lines(&failure.log_tail)
                     .map(|line| Value::String(line.clone()))
                     .collect();
                 lines.extend(tail_lines(&tail));
             }
-            lines.push(format!("  more: {}", Hint::logs(&lane, name, 200).0));
+            lines.push(
+                match (refusal_hint(*failure, *unit), spawn_fix(*failure, *unit)) {
+                    (Some(hint), _) => format!("  stop: {}", hint.0),
+                    (None, Some(hint)) => format!("  hint: {}", hint.0),
+                    (None, None) => format!("  more: {}", Hint::logs(&lane, name, 200).0),
+                },
+            );
         }
         for unit in &view.pending {
             let label = state_label(unit);
@@ -342,13 +349,24 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
         }
         lines.extend(start_leftovers(result, ""));
         lines.extend(start_warnings(result, cx));
+        // The next step for a timeout: why the first unit still waits.
+        if result.timed_out
+            && let Some(unit) = view.pending.first()
+        {
+            lines.push(format!(
+                "next: {}",
+                Hint::command(["debug", "why", &format!("{lane}:{}", clean(&unit.name))]).0
+            ));
+        }
         return lines;
     }
     lines.push(match &result.branch {
         Some(branch) => format!("{lane} · {}", clean(branch)),
         None => lane.clone(),
     });
-    if !view.services.is_empty() || !view.failed.is_empty() {
+    // A start that ran no service (its units were refused) has no services
+    // line: "0 of 0 ready" says nothing.
+    if !view.services.is_empty() {
         let outcome = if view.failed.is_empty() && result.ready {
             Outcome::Ok
         } else {
@@ -368,11 +386,12 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
         let mut detail = match failure_exit(*failure, *unit) {
             Some(code) => format!("exited {code}"),
             None => failure_reason(*failure, *unit)
-                .map(|reason| words::error_message(reason).0)
+                .map(row_reason)
                 .unwrap_or_else(|| "failed".into()),
         };
         // The last line that is not a stack frame usually names the error.
-        let tail = failure.map_or(&[][..], |failure| failure.log_tail.as_slice());
+        let tail: Vec<&String> =
+            own_lines(failure.map_or(&[][..], |f| f.log_tail.as_slice())).collect();
         if let Some(line) = tail
             .iter()
             .rev()
@@ -396,11 +415,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
         rows.push(vec![
             cx.mark(Outcome::Ok),
             clean(&unit.name),
-            unit.urls
-                .iter()
-                .map(|url| clean(url))
-                .collect::<Vec<_>>()
-                .join(" "),
+            display_url(&unit.urls).map_or_else(String::new, |url| clean(url)),
         ]);
     }
     lines.extend(table(&rows, "  "));
@@ -428,11 +443,48 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
         lines.push(cx.skipped(&clean(task), cause.as_deref()));
     }
     lines.extend(start_leftovers(result, "  "));
-    if let Some((name, _, _)) = view.failed.first() {
+    if let Some((name, failure, unit)) = view.failed.first() {
         lines.push(String::new());
-        lines.push(format!("logs: {}", Hint::logs(&lane, name, 200).0));
+        lines.push(
+            match (refusal_hint(*failure, *unit), spawn_fix(*failure, *unit)) {
+                (Some(hint), _) => format!("stop: {}", hint.0),
+                (None, Some(hint)) => format!("hint: {}", hint.0),
+                (None, None) => format!("logs: {}", Hint::logs(&lane, name, 200).0),
+            },
+        );
     }
     lines
+}
+
+/// A failure reason on its unit's row or under its `failed` line, where the unit
+/// is already named.
+fn row_reason(reason: &RpcError) -> String {
+    if reason.code == "spawn_failed" && reason.data.get("unit").is_some() {
+        format!("could not start: {}", words::spawn_cause(&reason.data))
+    } else {
+        words::error_message(reason).0
+    }
+}
+
+/// The unit's own lines of a failure tail, without the `[devlanes]` notes
+/// that repeat the failure's reason.
+fn own_lines(tail: &[String]) -> impl Iterator<Item = &String> {
+    tail.iter().filter(|line| !line.starts_with("[devlanes] "))
+}
+
+/// The fix for a unit whose program could not be run (see [`words::spawn_hint`]).
+fn spawn_fix(failure: Option<&UnitFailureData>, unit: Option<&UnitSummary>) -> Option<Hint> {
+    failure_reason(failure, unit)
+        .filter(|reason| reason.code == "spawn_failed")
+        .and_then(|reason| words::spawn_hint(&reason.data))
+}
+
+/// The command for a unit the start refused rather than ran: a previous
+/// daemon's orphan has no new logs, it needs stopping first.
+fn refusal_hint(failure: Option<&UnitFailureData>, unit: Option<&UnitSummary>) -> Option<Hint> {
+    failure_reason(failure, unit)
+        .filter(|reason| reason.code == "unit_orphaned")
+        .and_then(|reason| words::error_message(reason).1)
 }
 
 /// `<unit>: left running: ...` notes for the start's tasks and setup commands.
@@ -517,6 +569,8 @@ fn services(lane: &LaneSummary) -> Vec<&UnitSummary> {
     lane.units
         .iter()
         .filter(|unit| unit.kind.is_empty() || unit.kind == "service")
+        // A service that only starts when named counts once it runs.
+        .filter(|unit| unit.autostart || !matches!(unit.state.as_str(), "idle" | "stopped"))
         .collect()
 }
 
@@ -573,22 +627,57 @@ fn lane_warning_lines(lane: &LaneSummary, cx: &Ctx<'_>) -> Vec<String> {
         .collect()
 }
 
-/// The scheme any listed unit URL uses; the proxy serves every lane the same way.
-fn scheme(lanes: &[LaneSummary]) -> Option<String> {
+/// Whether `url` goes straight to a port on this machine (`http://127.0.0.1:20101`)
+/// rather than through the proxy by hostname.
+fn loopback(url: &str) -> bool {
+    let authority = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    matches!(host, "127.0.0.1" | "::1" | "localhost" | "0.0.0.0")
+}
+
+/// The URL to show for a unit: its first proxied (hostname) URL, else its first.
+pub(crate) fn display_url(urls: &[String]) -> Option<&String> {
+    urls.iter().find(|url| !loopback(url)).or(urls.first())
+}
+
+/// `scheme://` and `:port` of the first proxied unit URL of `lanes` (the proxy
+/// serves every lane on the same listener), for lane URLs.
+fn proxy_origin(lanes: &[LaneSummary]) -> Option<(String, String)> {
     lanes
         .iter()
         .flat_map(|lane| lane.units.iter())
         .flat_map(|unit| unit.urls.iter())
-        // Internal URLs point straight at the service port, not at the proxy.
-        .filter(|url| !url.contains("://127.0.0.1"))
-        .find_map(|url| url.split_once("://").map(|(scheme, _)| scheme.to_owned()))
+        .filter(|url| !loopback(url))
+        .find_map(|url| {
+            let (scheme, rest) = url.split_once("://")?;
+            let authority = rest.split('/').next().unwrap_or_default();
+            let port = authority
+                .rsplit_once(':')
+                .filter(|(host, port)| {
+                    !host.ends_with(']') || port.bytes().all(|b| b.is_ascii_digit())
+                })
+                .filter(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+                .map(|(_, port)| format!(":{port}"))
+                .unwrap_or_default();
+            Some((scheme.to_owned(), port))
+        })
 }
 
-/// The lane's base URL from its domain; the bare domain when no URL shows the scheme.
-fn lane_url(lane: &LaneSummary, scheme: Option<&str>) -> String {
-    match (&lane.domain, scheme) {
+/// The lane's base URL from its domain, with the scheme and port the proxy
+/// serves units on (`https://acme-2.localhost:8443`); the bare domain when no
+/// unit URL shows them.
+fn lane_url(lane: &LaneSummary, origin: Option<&(String, String)>) -> String {
+    match (&lane.domain, origin) {
         (None, _) => "–".into(),
-        (Some(domain), Some(scheme)) => format!("{scheme}://{}", clean(domain)),
+        (Some(domain), Some((scheme, port))) => format!("{scheme}://{}{port}", clean(domain)),
         (Some(domain), None) => clean(domain),
     }
 }
@@ -628,7 +717,11 @@ pub(super) fn status(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         if items.iter().any(|item| item.get("name").is_some()) {
             return units(data, cx);
         }
-        return vec!["no lanes; run devlanes start in a project worktree".into()];
+        // A start without devlanes.yaml fails, so name the file and an example too.
+        return vec![format!(
+            "no lanes; run devlanes start in a repository that has a devlanes.yaml (a minimal one: {})",
+            words::EXAMPLE_CONFIG
+        )];
     }
     let single = lanes.len() == 1;
     let mut lines = Vec::new();
@@ -646,7 +739,7 @@ pub(super) fn status(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         }
         return lines;
     }
-    let scheme = scheme(&lanes);
+    let origin = proxy_origin(&lanes);
     let mut project: Option<&str> = None;
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut notes: Vec<Vec<String>> = Vec::new();
@@ -699,7 +792,13 @@ pub(super) fn status(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             cpu.map_or("–".into(), percent),
             memory.map_or("–".into(), bytes),
             if lane.index.is_some() {
-                lane_url(lane, scheme.as_deref())
+                // The lane's own units first: their URLs carry the port it is served on.
+                lane_url(
+                    lane,
+                    proxy_origin(std::slice::from_ref(lane))
+                        .as_ref()
+                        .or(origin.as_ref()),
+                )
             } else {
                 "–".into()
             },
@@ -793,7 +892,7 @@ fn unit_table(lane: &LaneSummary, cx: &Ctx<'_>) -> Vec<String> {
             },
             unit.cpu_percent.map_or("–".into(), percent),
             unit.memory_bytes.map_or("–".into(), bytes),
-            unit.urls.first().map_or(String::new(), |url| clean(url)),
+            display_url(&unit.urls).map_or_else(String::new, |url| clean(url)),
         ]);
         if let Some(reason) = &unit.reason {
             extra.push(format!(

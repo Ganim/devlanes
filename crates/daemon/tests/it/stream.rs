@@ -1,8 +1,8 @@
 //! Lane events on the request that caused them (`"events": true`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
-use devlanes_proto::{Event, Method, StartResult, events};
+use devlanes_proto::{ContainerPhase, Event, Method, PhaseContainer, StartResult, events};
 use serde_json::{Value, json};
 
 use crate::{LIMIT, Setup, cx, drain_events, harness, repo, temp, worktree};
@@ -86,6 +86,7 @@ async fn a_start_streams_its_events_before_the_response() {
                 "setup:started",
                 "setup:skipped",
                 "tasks:started",
+                "tasks:progress",
                 "tasks:done",
                 "services:started",
                 "services:done",
@@ -252,6 +253,113 @@ async fn wait_streams_its_unit() {
             .filter_map(|e| e.data["unit"]["name"].as_str())
             .collect();
         assert_eq!(names, ["web"], "{streamed:?}");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+const STEPS: &str = r#"project: steps
+infra:
+  containers:
+    db: { image: "postgres:16", ports: { pg: 5432 }, per_lane: true }
+  setup:
+    database: "echo setup-db"
+    vhost: "echo setup-vhost"
+tasks:
+  build: { run: "echo task-build", when: lane.create }
+  migrate: { run: "echo task-migrate", when: lane.start }
+services:
+  api:
+    run: sleep
+"#;
+
+/// The `progress` events of `phase`.
+fn progress<'a>(events: &'a [Event], phase: &str) -> Vec<&'a Value> {
+    events
+        .iter()
+        .filter(|e| {
+            e.event == events::PHASE && e.data["phase"] == phase && e.data["state"] == "progress"
+        })
+        .map(|e| &e.data)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// While infra comes up, each change in its containers is one `progress` event
+/// (repeats are not); setup and tasks report the step that runs and its place.
+async fn running_phases_report_their_detail() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", STEPS);
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                infra: true,
+                ..Setup::default()
+            },
+        )
+        .await;
+        let db = |state: ContainerPhase, health: Option<&str>| {
+            vec![PhaseContainer {
+                name: "db".into(),
+                state,
+                health: health.map(str::to_owned),
+            }]
+        };
+        *h.infra.progress.lock().expect("script") = VecDeque::from([
+            db(ContainerPhase::Creating, None),
+            db(ContainerPhase::WaitingHealthy, Some("starting")),
+            db(ContainerPhase::WaitingHealthy, Some("starting")),
+            db(ContainerPhase::Healthy, Some("healthy")),
+        ]);
+        let (session, mut frames) = h.session();
+        let value = h
+            .call_on(Method::Start, json!({"events": true}), cx(&main), &session)
+            .await
+            .expect("start");
+        let result: StartResult = serde_json::from_value(value).expect("result");
+        assert!(result.ready, "{result:?}");
+        let streamed = drain_events(&mut frames);
+
+        let infra: Vec<Value> = progress(&streamed, "infra")
+            .iter()
+            .map(|data| data["containers"][0]["state"].clone())
+            .collect();
+        assert_eq!(
+            infra,
+            [
+                json!("creating"),
+                json!("waiting_healthy"),
+                json!("healthy")
+            ]
+        );
+        assert!(
+            progress(&streamed, "infra")
+                .iter()
+                .all(|data| data["start_id"] == json!(result.start_id)),
+        );
+
+        let setup: Vec<(u64, u64)> = progress(&streamed, "setup")
+            .iter()
+            .map(|data| {
+                let step = &data["step"];
+                (
+                    step["index"].as_u64().unwrap_or_default(),
+                    step["count"].as_u64().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(setup, [(1, 2), (2, 2)], "{streamed:?}");
+
+        let tasks: Vec<String> = progress(&streamed, "tasks")
+            .iter()
+            .map(|data| {
+                let step = &data["step"];
+                format!("{} {}/{}", step["name"], step["index"], step["count"])
+            })
+            .collect();
+        assert_eq!(tasks, [r#""build" 1/2"#, r#""migrate" 2/2"#]);
         h.close().await;
     })
     .await

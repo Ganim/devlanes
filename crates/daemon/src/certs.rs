@@ -59,7 +59,7 @@ impl Inner {
             .chain(
                 view.infra_routes
                     .iter()
-                    .map(|(host, container, _)| (host.as_str(), container.as_str())),
+                    .map(|route| (route.host.as_str(), route.container.as_str())),
             );
         let mut seen = std::collections::BTreeSet::new();
         hosts

@@ -8,16 +8,19 @@ mod attach;
 pub mod bus;
 mod certs;
 mod control;
+pub mod diagnostics;
 mod dns;
 mod engine;
 pub mod hosts;
 mod input;
 pub mod integrations;
 mod lifecycle;
+mod local_sync;
 mod maintenance;
 mod model;
 mod orphans;
 mod pacing;
+mod phase_progress;
 mod platforms;
 pub mod process;
 mod query;
@@ -29,6 +32,7 @@ mod resolve;
 mod routes;
 mod sampler;
 pub mod secrets;
+mod spawn_error;
 mod stream;
 pub mod units;
 pub mod update;
@@ -54,6 +58,7 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// Startup failures leave the current daemon and its processes untouched.
 #[derive(Debug, thiserror::Error)]
@@ -350,8 +355,11 @@ pub fn lock_singleton(home: &Path) -> Result<File, Error> {
     }
 }
 
-/// Existing directories must already be private rather than being silently repurposed.
+/// Creates `path` private, or tightens an existing directory of this user to
+/// 0700. A symlink, a non-directory or another user's directory is refused: it
+/// may not be ours to change.
 fn secure_directory(path: &Path) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt;
     match std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -362,13 +370,84 @@ fn secure_directory(path: &Path) -> Result<(), Error> {
         Err(error) => return Err(error.into()),
     }
     let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_dir()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-    {
+    if !metadata.is_dir() || metadata.uid() != rustix::process::getuid().as_raw() {
         return Err(Error::UnsafeDirectory(path.into()));
     }
+    if metadata.mode() & 0o077 != 0 {
+        let mode = metadata.mode() & 0o7777;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        tracing::warn!(path = %path.display(), mode = format!("{mode:o}"), "tightened a devlanes directory to 0700");
+    }
     Ok(())
+}
+
+/// A request's tap and the task forwarding its records to the client.
+type RequestTap = (diagnostics::TapGuard, tokio::task::JoinHandle<()>);
+
+/// The span every request runs in, and its diagnostics tap when the client
+/// asked for one. Another protocol's client gets no tap: it may not know the
+/// event.
+fn request_span(
+    request: &Request,
+    compatible: bool,
+    session: &Session,
+) -> (tracing::Span, Option<RequestTap>) {
+    let verbose = request.context.verbose;
+    // Registered before the span exists: the tap filter only passes spans while
+    // a tap is active.
+    let tap = (compatible && verbose > 0).then(|| diagnostics::register(verbose));
+    let method = serde_json::to_value(request.method)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let span = tracing::info_span!(
+        target: "devlanes_daemon::request",
+        "request",
+        id = request.id,
+        method = %method,
+        session = session.id,
+        tap = tracing::field::Empty,
+    );
+    let tap = tap.map(|(guard, mut receiver)| {
+        span.record("tap", guard.id());
+        let session = session.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(data) = receiver.recv().await {
+                let event = Event {
+                    seq: 0,
+                    event: devlanes_proto::events::DIAGNOSTIC.into(),
+                    data,
+                };
+                if session.event(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+        (guard, forwarder)
+    });
+    tracing::debug!(parent: &span, verbose, "request received");
+    (span, tap)
+}
+
+/// Closes a request's tap and lets its records reach the client before the
+/// response, reporting records a slow client lost.
+async fn finish_tap(
+    guard: diagnostics::TapGuard,
+    forwarder: tokio::task::JoinHandle<()>,
+    session: &Session,
+) {
+    // Unregistering drops the sender; the forwarder ends once it drained.
+    let dropped = guard.finish();
+    let _ = tokio::time::timeout(Duration::from_secs(5), forwarder).await;
+    if dropped > 0 {
+        let _ = session
+            .event(Event {
+                seq: 0,
+                event: devlanes_proto::events::DIAGNOSTIC.into(),
+                data: json!({"kind": "dropped", "count": dropped}),
+            })
+            .await;
+    }
 }
 
 /// One bounded outgoing queue prevents slow terminals from consuming unbounded memory.
@@ -459,7 +538,9 @@ async fn serve_client(
                             tokio::spawn(async move {
                                 let id = request.id;
                                 let stop = request.method == Method::DaemonShutdown;
-                                let result = match request.method {
+                                let (span, tap) = request_span(&request, compatible, &session);
+                                let begun = Instant::now();
+                                let result = async { match request.method {
                                     Method::DaemonStatus => {
                                         let mut status = json!({
                                             "version": env!("CARGO_PKG_VERSION"),
@@ -489,7 +570,17 @@ async fn serve_client(
                                     Method::DaemonShutdown => Ok(json!({"stopping": true, "processes": handler.managed_processes()})),
                                     _ if !compatible => Err(mismatch),
                                     _ => handler.handle(request, session.clone()).await,
-                                };
+                                } }.instrument(span.clone()).await;
+                                tracing::debug!(
+                                    parent: &span,
+                                    elapsed_ms = begun.elapsed().as_millis() as u64,
+                                    error = result.as_ref().err().map(|error| error.code.as_str()),
+                                    "answered"
+                                );
+                                drop(span);
+                                if let Some((guard, forwarder)) = tap {
+                                    finish_tap(guard, forwarder, &session).await;
+                                }
                                 let accepted = result.is_ok();
                                 let outcome = match result {
                                     Ok(data) => Outcome::Ok { data },
@@ -532,6 +623,19 @@ mod tests {
             Server::bind(options).await,
             Err(Error::AlreadyRunning)
         ));
+        Ok(())
+    }
+
+    #[test]
+    /// An existing directory of this user that others can read is made private.
+    fn tightens_an_open_home() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home)?;
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755))?;
+        secure_directory(&home)?;
+        assert_eq!(std::fs::metadata(&home)?.mode() & 0o7777, 0o700);
         Ok(())
     }
 

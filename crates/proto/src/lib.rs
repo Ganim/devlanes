@@ -81,6 +81,16 @@ pub struct Context {
     pub lane: Option<String>,
     #[serde(default)]
     pub yes: bool,
+    /// Ask the daemon for its diagnostics of this request as
+    /// [`events::DIAGNOSTIC`] events: 1 debug, 2 trace, 0 none. Older daemons
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub verbose: u8,
+}
+
+/// Leaves `verbose: 0` out of the wire form.
+fn is_zero(value: &u8) -> bool {
+    *value == 0
 }
 
 /// Stable method names allow clients to distinguish unsupported operations.
@@ -574,6 +584,46 @@ pub struct RunParams {
     pub terminal: bool,
 }
 
+/// One infra container on a `lane.phase` `progress` event of the infra phase.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PhaseContainer {
+    /// The compose service or `infra.containers` name.
+    pub name: String,
+    pub state: ContainerPhase,
+    /// Docker's health or state word when it says more than `state`
+    /// (`starting`, `unhealthy`, `exited (1)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<String>,
+}
+
+/// Where an infra container is on its way up.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerPhase {
+    /// Not created yet, or created and not started.
+    Creating,
+    /// Started, or restarting, with nothing known about its health yet.
+    Starting,
+    /// Running while its healthcheck has not passed yet.
+    WaitingHealthy,
+    /// Healthy, or running without a healthcheck.
+    Healthy,
+    /// Unhealthy or exited.
+    Failed,
+    /// A state from a newer daemon.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The entry or task running in a setup or tasks phase, on its `progress` events.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PhaseStep {
+    pub name: String,
+    /// 1-based place among the phase's `count` steps.
+    pub index: usize,
+    pub count: usize,
+}
+
 /// Final `start`/`restart`/`resume` result, after every started unit is ready or failed
 /// (or the timeout passed). Ownership fields let `devlanes with` stop only what it started.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -695,11 +745,23 @@ pub mod remote {
         pub size: u64,
         /// Permission bits.
         pub mode: u32,
-        /// Lowercase hex SHA-256 of the contents.
+        /// Lowercase hex SHA-256 of the contents; empty when the client could not
+        /// read the file, so the box resends or deletes it.
         pub hash: String,
         /// Modification time on the client, kept for its own hash cache.
         #[serde(default)]
         pub mtime_ms: Option<u64>,
+    }
+
+    /// Files a client sends per manifest batch on a `follow` stream.
+    pub const MANIFEST_BATCH: usize = 2_000;
+
+    /// One batch of the client's manifest, sent as sync input after a `follow`
+    /// request. The client ends its manifest with the transport's end-of-input
+    /// marker; the box sends files only after it.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct ManifestBatch {
+        pub files: Vec<SyncFile>,
     }
 
     /// Sync subscription request. The box looks entries up itself and never takes
@@ -709,13 +771,12 @@ pub mod remote {
     pub enum SyncRequest {
         /// Answered with one `entries` manifest, then the stream ends.
         List,
-        /// Streams one entry: what differs from `have`, then changes.
+        /// Streams one entry: the client sends [`ManifestBatch`]es and an end
+        /// marker, then the box sends what differs and later changes.
         Follow {
             lane: String,
             unit: String,
             index: usize,
-            #[serde(default)]
-            have: Vec<SyncFile>,
         },
     }
 
@@ -727,9 +788,9 @@ pub mod remote {
         Entries { entries: Vec<SyncEntry> },
         /// Precedes the chunks of one file.
         File { path: String, mode: u32, size: u64 },
-        /// The initial pass finished; these are every file the destination should
-        /// hold, so anything else there is stale.
-        Ready { files: Vec<String> },
+        /// The initial pass finished: the destination matches the source, files the
+        /// source lacks included (they arrived as deletions).
+        Ready,
     }
 
     /// A tunnel registered with its box daemon while it serves a client.
@@ -751,9 +812,12 @@ pub mod events {
     pub const LANE_REMOVED: &str = "lane.removed";
     /// `{unit: UnitSummary}` on every unit state transition.
     pub const UNIT_CHANGED: &str = "unit.changed";
-    /// `{lane, phase, state: started|done|failed|skipped, reason?, start_id?, units?}`
-    /// for start pipeline progress. `start_id` tells concurrent starts of one lane
-    /// apart; `services:started` lists in `units` the units this start spawns.
+    /// `{lane, phase, state: started|progress|done|failed|skipped, reason?, start_id?,
+    /// units?, containers?, step?}` for start pipeline progress. `start_id` tells
+    /// concurrent starts of one lane apart; `services:started` lists in `units` the
+    /// units this start spawns. `progress` comes while a phase runs, each time its
+    /// detail changes: [`super::PhaseContainer`]s during infra, the running
+    /// [`super::PhaseStep`] during setup and tasks.
     pub const PHASE: &str = "lane.phase";
     /// `{lane, task, state, exit_code?}` for task runs.
     pub const TASK: &str = "task";
@@ -773,6 +837,16 @@ pub mod events {
     /// Otherwise the stream rejected input (`unknown_stream`, ...) and the rest of
     /// its input is dropped.
     pub const INPUT_DROPPED: &str = "input.dropped";
+    /// The daemon's own diagnostics for a request whose context set `verbose`,
+    /// sent only on that request, before its response:
+    /// `{level, target, message, fields, spans, elapsed_ms}` for a log record,
+    /// or `{kind: "span", name, fields, spans, elapsed_ms, duration_ms}` when a
+    /// span of the request closes. `level` is `error` ... `trace`; `spans` names
+    /// the enclosing spans, outermost first, as `name{field=value ...}`;
+    /// `elapsed_ms` counts from the request's arrival. Fields never hold
+    /// environment or secret values. `{kind: "dropped", count}` reports records
+    /// lost to a slow client.
+    pub const DIAGNOSTIC: &str = "diagnostic";
 }
 
 #[cfg(test)]

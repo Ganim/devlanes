@@ -29,6 +29,11 @@ pub async fn dispatch(cli: &Cli, runtime: &Runtime, action: Action) -> u8 {
                 .or_else(|| legacy_state_hint(&error))
                 .or_else(|| fix_hint(&error));
             let rendered = runtime.reporter().error(&error, hint.as_ref());
+            tracing::debug!(
+                code = %error.code,
+                exit_code = rendered.exit_code,
+                "exit code: the command failed before a result"
+            );
             emit(&rendered);
             rendered.exit_code
         }
@@ -67,13 +72,26 @@ fn legacy_state_hint(error: &RpcError) -> Option<Hint> {
 
 /// Paths are resolved per invocation so `DEVLANES_HOME` isolates tests completely.
 fn paths() -> Result<Paths, RpcError> {
-    Paths::discover().map_err(|error| {
+    let paths = Paths::discover().map_err(|error| {
         RpcError::new(
             "daemon_unreachable",
             json!({"message": error.to_string()}),
             4,
         )
-    })
+    })?;
+    tracing::debug!(
+        home = %paths.home.display(),
+        home_from = if std::env::var_os("DEVLANES_HOME").is_some_and(|v| !v.is_empty()) {
+            "DEVLANES_HOME"
+        } else {
+            "$HOME/.devlanes"
+        },
+        user_config = %paths.home.join("config.yaml").display(),
+        socket = %paths.socket.display(),
+        daemon_log = %paths.logs.join("daemon.log").display(),
+        "paths"
+    );
+    Ok(paths)
 }
 
 /// Connects, spawning the daemon unless this is a read-only probe of a stopped daemon.
@@ -93,6 +111,44 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
             ui().await
         }
         Action::Ui => ui().await,
+        Action::StartUi { request, forced } => {
+            let paths = paths()?;
+            if !forced && !crate::start_ui::open_on_start(&paths) {
+                return rpc(cli, runtime, request).await;
+            }
+            let client = connect(&paths).await?;
+            crate::start_ui::run(runtime, &paths, client, request.clone(), |error| {
+                hint_for(error, &request)
+            })
+            .await
+        }
+        Action::Choose { choice, context } => {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            match crate::choose::choose(runtime, &paths()?, &choice, &context, &args).await? {
+                crate::choose::Chosen::Exit(code) => Ok(code),
+                // The same command with the picked values, parsed like typed ones.
+                crate::choose::Chosen::Values(values) => {
+                    let completed = devlanes_cli::completed_args(&args, &values);
+                    let cli = <Cli as devlanes_cli::clap::Parser>::try_parse_from(
+                        std::iter::once("devlanes".to_owned()).chain(completed),
+                    )
+                    .map_err(|error| {
+                        RpcError::new("usage", json!({"message": error.to_string()}), 2)
+                    })?;
+                    let action = cli.action(runtime).map_err(|error| {
+                        RpcError::new("usage", json!({"message": error.to_string()}), 2)
+                    })?;
+                    if matches!(action, Action::Choose { .. }) {
+                        return Err(RpcError::new(
+                            "usage",
+                            json!({"message": "the chosen value did not complete the command"}),
+                            2,
+                        ));
+                    }
+                    Box::pin(run(&cli, runtime, action)).await
+                }
+            }
+        }
         // The daemon's codes (not_found, terminal_required, ...) keep their wording
         // and exit status; only local terminal failures become attach_failed.
         Action::Attach(request) => {
@@ -226,7 +282,7 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
                 Err(error) => return Err(rpc_error(error)),
             }
             let mut client = connect(&paths).await?;
-            let data = client
+            let mut data = client
                 .request(
                     Method::DaemonStatus,
                     json!({}),
@@ -234,9 +290,18 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
                 )
                 .await
                 .map_err(rpc_error)?;
+            if data.is_object() {
+                data["running"] = json!(true);
+            }
             render_result(runtime, Method::DaemonStatus, &data, None)
         }
         Action::DaemonLogs { follow, tail } => daemon_logs(follow, tail.unwrap_or(100)).await,
+        Action::DebugBundle {
+            to,
+            log_lines,
+            args,
+            context,
+        } => crate::bundle::run(runtime, to, log_lines, args, context).await,
         Action::DaemonInstall => crate::daemon::install(runtime).await,
         Action::DaemonUninstall => crate::daemon::uninstall(runtime).await,
         Action::DaemonRun => Err(RpcError::new(
@@ -348,8 +413,8 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
             }
             Err(error) => return Err(rpc_error(error)),
         },
-        // `daemon status` also answers on any protocol; with no daemon it starts one,
-        // like every other command.
+        // `daemon status` answers on any protocol and never starts a daemon: it
+        // reports what runs, and "not running" (exit 1) when nothing does.
         Method::DaemonStatus => match Client::connect_any(&paths).await {
             Ok(client) => {
                 if let Some(note) = version_note(&client.peer) {
@@ -360,7 +425,11 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                 }
                 client
             }
-            Err(error) if error.is_not_running() => connect(&paths).await?,
+            Err(error) if error.is_not_running() => {
+                let rendered = daemon_not_running(runtime, &paths);
+                emit(&rendered);
+                return Ok(rendered.exit_code);
+            }
             Err(error) => return Err(rpc_error(error)),
         },
         _ => connect(&paths).await?,
@@ -383,6 +452,9 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
         .await
         .map_err(rpc_error)?;
     let reporter = runtime.reporter();
+    // `… infra` lines that turn into `✓ infra` when the phase ends.
+    let mut phases = devlanes_cli::PhaseLines::new(runtime);
+    let mut events: u64 = 0;
     // Followed logs and a foreground task's output share one output budget; the
     // reserve keeps room for the summary printed after the stream.
     let mut log_stream = streamed_output(&request).map(|more| {
@@ -401,20 +473,33 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                     answer_prompt(&mut client, &event).await?;
                 }
                 Frame::Control(Control::Event(event)) => {
+                    events += 1;
+                    tracing::trace!(event = %event.event, seq = event.seq, "event received");
                     progress.event(&event);
                     let rendered = match log_stream.as_mut() {
                         Some(stream) => stream.event(&event),
                         None => reporter.event(method, &event),
                     };
-                    if let Ok(rendered) = rendered {
+                    if let Ok(mut rendered) = rendered {
+                        phases.rewrite(&event, &mut rendered.stdout);
                         emit(&rendered);
                     }
                 }
                 Frame::Control(Control::Response(response)) if response.id == id => {
+                    tracing::debug!(events, "events received before the response");
                     return match response.result {
                         Outcome::Ok { mut data } => {
                             if method == Method::Doctor {
                                 crate::notices::annotate_doctor(&mut client, &mut data).await;
+                                // Trust stores belong to this user and machine, so the
+                                // CLI checks them, not the daemon.
+                                if data.get("ca").is_some_and(Value::is_object) {
+                                    data["ca"]["trust"] = crate::local::trust_report().await;
+                                }
+                            }
+                            // The counterpart of the not-running answer's `false`.
+                            if method == Method::DaemonStatus && data.is_object() {
+                                data["running"] = json!(true);
                             }
                             // The budget hid the end of a failed task's output: show its tail.
                             if let Some(stream) = &log_stream
@@ -444,6 +529,11 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                         Outcome::Error { error } => {
                             let rendered =
                                 reporter.error(&error, hint_for(&error, &request).as_ref());
+                            tracing::debug!(
+                                code = %error.code,
+                                exit_code = rendered.exit_code,
+                                "exit code: the daemon's error"
+                            );
                             emit(&rendered);
                             Ok(rendered.exit_code)
                         }
@@ -529,6 +619,27 @@ async fn interrupted(
         });
     }
     Ok(DETACHED)
+}
+
+/// `daemon status` when no daemon answers: said so in the mode's form, exit 1.
+/// Nothing is started; the socket and home say where devlanes looked.
+fn daemon_not_running(runtime: &Runtime, paths: &Paths) -> Rendered {
+    let socket = paths.socket.display().to_string();
+    let stdout = match runtime.mode {
+        devlanes_cli::OutputMode::Json => format!(
+            "{}\n",
+            json!({"running": false, "socket": socket, "home": paths.home})
+        ),
+        devlanes_cli::OutputMode::Agent => format!("stopped daemon socket={socket}\n"),
+        _ => format!(
+            "daemon is not running (socket {socket}); devlanes start or devlanes daemon restart starts it\n"
+        ),
+    };
+    Rendered {
+        stdout,
+        exit_code: 1,
+        ..Rendered::default()
+    }
 }
 
 /// A note when the daemon runs another version or protocol than this client.
@@ -720,6 +831,22 @@ fn render_result(
     let rendered = runtime.reporter().result(&report).map_err(|error| {
         RpcError::new("render_failed", json!({"message": error.to_string()}), 1)
     })?;
+    // Read before the macro, which brings tracing's own `Value` into scope.
+    let ready = data.get("ready").and_then(Value::as_bool);
+    let timed_out = data.get("timed_out").and_then(Value::as_bool);
+    let failures = data.get("failures").and_then(Value::as_array).map(Vec::len);
+    let state = data.get("state").and_then(Value::as_str);
+    let result_exit_code = data.get("exit_code").and_then(Value::as_i64);
+    tracing::debug!(
+        method = %devlanes_client::method_name(method),
+        exit_code = rendered.exit_code,
+        ready,
+        timed_out,
+        failures,
+        state,
+        result_exit_code,
+        "exit code: from the result"
+    );
     emit(&rendered);
     Ok(rendered.exit_code)
 }
@@ -750,6 +877,12 @@ fn streamed_output(request: &Request) -> Option<Option<Hint>> {
 fn scoped_logs(request: &Request, args: &[&str]) -> Hint {
     let mut all: Vec<&str> = vec!["logs"];
     all.extend_from_slice(args);
+    scoped(request, &all)
+}
+
+/// `devlanes ARGS` with the user's `--lane` and `--project`.
+fn scoped(request: &Request, args: &[&str]) -> Hint {
+    let mut all: Vec<&str> = args.to_vec();
     if let Some(lane) = &request.context.lane {
         all.extend(["--lane", lane.as_str()]);
     }
@@ -789,6 +922,31 @@ fn hint_for(error: &RpcError, request: &Request) -> Option<Hint> {
             })
         }
         "confirmation_required" => confirmation_hint(error),
+        // What this command accepts, rather than every lane.
+        "not_found" => match request.method {
+            Method::Run => Some(Hint::command(["run", "--list"])),
+            Method::Logs
+            | Method::Env
+            | Method::Why
+            | Method::Url
+            | Method::Attach
+            | Method::Wait
+            | Method::Stop
+            | Method::Restart => Some(scoped(request, &["status"])),
+            _ => None,
+        },
+        // `config check` is the command that just failed; point at the file instead.
+        "config_error" if request.method == Method::ConfigCheck => {
+            let file = error
+                .data
+                .get("file")
+                .and_then(Value::as_str)
+                .unwrap_or("devlanes.yaml");
+            Some(Hint(match error.data.get("line").and_then(Value::as_u64) {
+                Some(line) => format!("edit {file} at line {line}, then run this again"),
+                None => format!("edit {file}, then run this again"),
+            }))
+        }
         // The same logs, fewer lines: one unit when several were asked for.
         "response_too_large" if request.method == Method::Logs => request
             .params
@@ -873,6 +1031,33 @@ mod tests {
         Runtime::resolve(&cli, devlanes_cli::Signals::default()).expect("runtime")
     }
 
+    /// Without a daemon, `daemon status` says so in each mode and exits 1.
+    #[test]
+    fn daemon_not_running_in_every_mode() {
+        let paths = Paths::new("/home/u/.devlanes").expect("paths");
+        let socket = paths.socket.display().to_string();
+        let mode = |name: &str| {
+            let cli = Cli::parse_from(["devlanes", "--output", name]);
+            Runtime::resolve(&cli, devlanes_cli::Signals::default()).expect("runtime")
+        };
+        let json = daemon_not_running(&mode("json"), &paths);
+        assert_eq!(json.exit_code, 1);
+        let value: Value = serde_json::from_str(&json.stdout).expect("json");
+        assert_eq!(value["running"], false);
+        assert_eq!(value["socket"], socket);
+        assert_eq!(value["home"], "/home/u/.devlanes");
+        assert_eq!(
+            daemon_not_running(&mode("plain"), &paths).stdout,
+            format!(
+                "daemon is not running (socket {socket}); devlanes start or devlanes daemon restart starts it\n"
+            )
+        );
+        assert_eq!(
+            daemon_not_running(&mode("agent"), &paths).stdout,
+            format!("stopped daemon socket={socket}\n")
+        );
+    }
+
     /// The restart wait ends once the old daemon's pid is gone.
     #[tokio::test]
     async fn restart_waits_for_the_old_pid() {
@@ -921,7 +1106,17 @@ mod tests {
         assert_eq!(refused.code, "confirmation_required");
         assert_eq!(refused.data["flag"], "--yes");
         assert!(paths.db.exists(), "nothing moved without --yes");
-        assert_eq!(reset_state_offline(&runtime(), &paths, true).await, Ok(0));
+        // A process another test forks in the same moment shares the lock file's
+        // description until it execs, so the lock can look taken for that instant.
+        let mut moved = reset_state_offline(&runtime(), &paths, true).await;
+        for _ in 0..50 {
+            if !matches!(&moved, Err(error) if error.code == "daemon_running") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            moved = reset_state_offline(&runtime(), &paths, true).await;
+        }
+        assert_eq!(moved, Ok(0));
         assert!(!paths.db.exists(), "moved aside");
     }
 
@@ -943,6 +1138,34 @@ mod tests {
                 .map(|hint| hint.0)
                 .as_deref(),
             Some("devlanes logs api --tail 500 --lane feat/x --project acme")
+        );
+        // A unit that does not exist points at what lists units; a task at run --list.
+        let missing = RpcError::new("not_found", json!({"reference": "apu"}), 3);
+        assert_eq!(
+            hint_for(&missing, &request).map(|hint| hint.0).as_deref(),
+            Some("devlanes status --lane feat/x --project acme")
+        );
+        let run = Request {
+            method: Method::Run,
+            ..request.clone()
+        };
+        assert_eq!(
+            hint_for(&missing, &run).map(|hint| hint.0).as_deref(),
+            Some("devlanes run --list")
+        );
+        // A config error found by `config check` points at the file, not at itself.
+        let check = Request {
+            method: Method::ConfigCheck,
+            ..request.clone()
+        };
+        let invalid = RpcError::new(
+            "config_error",
+            json!({"file": "devlanes.yaml", "line": 4, "message": "unknown field"}),
+            1,
+        );
+        assert_eq!(
+            hint_for(&invalid, &check).map(|hint| hint.0).as_deref(),
+            Some("edit devlanes.yaml at line 4, then run this again")
         );
         // An oversized logs answer points at a shorter read of the first unit.
         let too_large = RpcError::new("response_too_large", json!({}), 1);

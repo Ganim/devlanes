@@ -25,7 +25,7 @@ async fn lanes(cwd: &Path) -> Result<(), Error> {
 
 ## API
 
-- `find_config`: the nearest `devlanes.yaml` in `cwd` or its ancestors.
+- `find_config`, `search_config`: the nearest `devlanes.yaml` in `cwd` or its ancestors, never above the repository root; `search_config` also says where a fruitless search stopped.
 - `discover`: the repository's common directory, root, primary branch and worktrees; `None` outside Git.
 - `list` and `parse_porcelain`: the worktree list from `git worktree list --porcelain -z`.
 - `add`: `git worktree add` for a new or existing branch, after `git check-ref-format` accepts its name.

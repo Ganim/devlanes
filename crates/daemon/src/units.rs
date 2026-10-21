@@ -431,6 +431,13 @@ impl UnitHost {
         self.inner.unit.subjects().await.unwrap_or_default()
     }
 
+    /// True once this run's log is finished. Its reader snapshot then misses
+    /// lines written later by another writer of the directory, such as the note
+    /// of a failed respawn.
+    pub fn log_closed(&self) -> bool {
+        *self.inner.log_done.borrow()
+    }
+
     /// Queries this unit's logs off the executor.
     pub async fn logs(&self, query: LogQuery) -> Result<Page<LogLine>, RpcError> {
         let (synced, applied) = tokio::sync::oneshot::channel();
@@ -479,7 +486,8 @@ impl UnitHost {
         .unwrap_or_default()
     }
 
-    /// The last lines, ANSI stripped, for failure reports.
+    /// The last lines of this run, ANSI stripped, for failure reports and `log`
+    /// ready checks. Earlier runs share the log directory and are left out.
     pub async fn tail(&self, lines: usize) -> Vec<String> {
         let query = LogQuery {
             tail: Some(lines),
@@ -488,8 +496,29 @@ impl UnitHost {
         };
         self.logs(query)
             .await
-            .map(|page| page.items.into_iter().map(|line| line.text).collect())
+            .map(|page| {
+                page.items
+                    .into_iter()
+                    .filter(|line| self.of_this_run(line))
+                    .map(|line| line.text)
+                    .collect()
+            })
             .unwrap_or_default()
+    }
+
+    /// True when `line` was written by this run, not an earlier one of the unit.
+    pub fn of_this_run(&self, line: &LogLine) -> bool {
+        line.seq >= self.inner.first_seq
+    }
+
+    /// A forward cursor that starts at this run's first line, so a follower
+    /// skips the output of earlier runs.
+    pub fn run_cursor(&self) -> Option<String> {
+        let last_before = self.inner.first_seq.checked_sub(1)?;
+        Some(format!(
+            "{}#{last_before}",
+            self.inner.info.name.replace('#', "_")
+        ))
     }
 
     /// Subscribes to raw output (for `log` ready checks and followers).
@@ -695,6 +724,26 @@ pub async fn query_log_dir(
     })
     .await
     .map_err(|error| internal("log_task_failed", error))?
+}
+
+/// Appends `line` (a devlanes note such as a spawn failure) to the log of a unit
+/// that has no running writer, so `logs` and failure tails show it. Fails while
+/// another writer keeps the directory past the usual close delay.
+pub async fn append_note(
+    dir: PathBuf,
+    unit: &str,
+    line: &str,
+    retention: LogRetention,
+) -> Result<(), RpcError> {
+    let mut log = open_log(dir, unit.replace('#', "_"), retention.options()).await?;
+    let bytes = format!("{line}\n").into_bytes();
+    tokio::task::spawn_blocking(move || {
+        let now = now_ms();
+        log.ingest(&bytes, now).and_then(|()| log.finish(now))
+    })
+    .await
+    .map_err(|error| internal("log_task_failed", error))?
+    .map_err(|error| internal("log_write_failed", error))
 }
 
 /// Opens a run's log on a blocking thread. Right after a restart the previous run may

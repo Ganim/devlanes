@@ -1,0 +1,17 @@
+# Compose stack named by devlanes.yaml; config checks only need the file to exist.
+services:
+  postgres:
+    image: postgres:17
+    ports: ["${ACME_DB_PORT:-15432}:5432"]
+  redis:
+    image: redis:7
+    ports: ["${ACME_REDIS_PORT:-16379}:6379"]
+  rabbitmq:
+    image: rabbitmq:4
+    ports: ["5672"]
+  object-store:
+    image: minio/minio
+    command: server /data
+    ports: ["9000"]
+  proxy:
+    image: caddy:2

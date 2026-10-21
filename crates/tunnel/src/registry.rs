@@ -236,6 +236,9 @@ mod tests {
                 {"name": "admin", "lane": "app@1", "state": "ready", "pid": 2, "exit_code": null,
                  "ports": {"default": 4101}, "urls": [], "actor": {"kind": "human"},
                  "reason": null, "kind": "service", "hidden": true},
+                {"name": "worker", "lane": "app@1", "state": "stopped", "pid": null, "exit_code": null,
+                 "ports": {"default": 4103}, "urls": [], "actor": {"kind": "human"},
+                 "reason": null, "kind": "service"},
                 {"name": "migrate", "lane": "app@1", "state": "exited", "pid": null, "exit_code": 0,
                  "ports": {}, "urls": [], "actor": {"kind": "human"}, "reason": null, "kind": "task"}
             ],
@@ -251,7 +254,7 @@ mod tests {
         let registry = build(status, &hosts);
         assert_eq!(registry.lanes().count(), 1);
         let units: Vec<_> = registry.units().collect();
-        assert_eq!(units.len(), 3, "task skipped: {units:?}");
+        assert_eq!(units.len(), 4, "task skipped: {units:?}");
         let web = units
             .iter()
             .find(|u| u.key.name == "web")
@@ -259,6 +262,16 @@ mod tests {
         assert_eq!(web.hosts.len(), 1);
         assert_eq!(web.hosts[0].host_header, HostHeader::Upstream);
         let mirrored: Vec<u16> = registry.mirrored_ports().keys().copied().collect();
-        assert_eq!(mirrored, [4100, 4102], "hidden admin is not mirrored");
+        assert_eq!(
+            mirrored,
+            [4100, 4102],
+            "hidden admin and stopped worker are not mirrored"
+        );
+        let advertised: Vec<u16> = registry.advertised_ports().into_iter().collect();
+        assert_eq!(
+            advertised,
+            [4100, 4102, 4103],
+            "the idle worker's port is kept free"
+        );
     }
 }

@@ -75,6 +75,107 @@ fn unknown_references_are_rejected() {
     .expect("Compose services are checked against the resolved model later");
 }
 
+/// Attributes are checked against what the runtime context defines, with a suggestion.
+#[test]
+fn unknown_attributes_are_rejected() {
+    for (source, needle, expected) in [
+        (
+            "project: demo\nservices:\n  api:\n    run: server\n    hosts: [\"${{ lane.domian }}\"]\n",
+            "domian",
+            "services.api.hosts.0: `lane.domian` is not defined; did you mean `lane.domain`?",
+        ),
+        (
+            "project: demo\nlanes:\n  vars: { db_name: x }\nglobal_env:\n  DB: '${{ lane.db_nmae }}'\n",
+            "db_nmae",
+            "`lane.db_nmae` is not defined; did you mean `lane.db_name`?",
+        ),
+        (
+            "project: demo\nglobal_env:\n  P: '${{ project.primary_pth }}'\n",
+            "primary_pth",
+            "did you mean `project.primary_path`?",
+        ),
+        (
+            "project: demo\nservices:\n  api: { run: server }\n  web:\n    run: server\n    env: { API: '${{ svc.api.pubilc_url }}' }\n",
+            "pubilc_url",
+            "`svc.api.pubilc_url` is not defined; did you mean `svc.api.public_url`?",
+        ),
+        (
+            "project: demo\nservices:\n  api:\n    run: 'server ${{ self.prot }}'\n",
+            "self.prot",
+            "did you mean `self.port`?",
+        ),
+        (
+            "project: demo\nservices:\n  api:\n    run: 'server ${{ replica.idx }}'\n",
+            "replica.idx",
+            "`replica.idx` is not defined",
+        ),
+        (
+            "project: demo\nservices:\n  api: { run: server }\n  web:\n    run: server\n    env: { API: '${{ svc.apl.url }}' }\n",
+            "svc.apl",
+            "unknown service reference `apl`; did you mean `api`?",
+        ),
+        (
+            "project: demo\ninfra:\n  containers:\n    cache: { image: redis, ports: { main: 6379 } }\nglobal_env:\n  R: '${{ infra.cache.ports.mian }}'\n",
+            "mian",
+            "did you mean `infra.cache.ports.main`?",
+        ),
+        (
+            "project: demo\nglobal_env:\n  X: '${{ lnae.name }}'\n",
+            "lnae",
+            "unknown expression context `lnae`; did you mean `lane`?",
+        ),
+    ] {
+        let error = parse_project(source, None).expect_err(source);
+        assert!(error.message.contains(expected), "{}", error.message);
+        let line = source
+            .lines()
+            .position(|l| l.contains(needle))
+            .expect("needle")
+            + 1;
+        assert_eq!(error.location.line, line, "{}", error.message);
+    }
+    parse_project(
+        "project: demo\nlanes:\n  matrix:\n    - { db-name: a }\n    - { db-name: b, extra: c }\nservices:\n  api:\n    run: 'server ${{ lane.db_name }} ${{ lane[''db-name''] }} ${{ lane.label }} ${{ lane.path }} ${{ replica.count }}'\n    hosts: ['${{ lane.domain }}']\n    env: { A: '${{ self.ports.debug }}', B: '${{ lanes.main.svc.api.public_url }}', C: '${{ env.ANY }}', D: '${{ projects.other.svc.x.url | default(\"\") }}' }\n",
+        None,
+    )
+    .expect("known attributes");
+}
+
+/// `svc.my-api` is a subtraction in expressions; the error names the escape.
+#[test]
+fn dashed_names_explain_the_subtraction() {
+    let message = error(
+        "project: demo\nservices:\n  my-api: { run: server }\n  web:\n    run: server\n    env: { API: '${{ svc.my-api.url }}' }\n",
+    );
+    assert!(
+        message.contains(
+            "`svc.my-api.url` reads as `svc.my - api.url`; write `svc['my-api'].url` or `svc.my_api.url`"
+        ),
+        "{message}"
+    );
+}
+
+/// A literal `PORT` must be a port number.
+#[test]
+fn literal_port_must_be_a_port() {
+    for value in ["abc", "0", "70000", "true"] {
+        let source = format!(
+            "project: demo\nservices:\n  api:\n    run: server\n    env: {{ PORT: {value} }}\n"
+        );
+        let message = error(&source);
+        assert!(
+            message.starts_with("services.api.env.PORT: must be a port number"),
+            "{value}: {message}"
+        );
+    }
+    for value in ["3000", "'3000'", "\"${{ lane.port + 1 }}\""] {
+        let source = format!(
+            "project: demo\nservices:\n  api:\n    run: server\n    env: {{ PORT: {value} }}\n"
+        );
+        parse_project(&source, None).unwrap_or_else(|e| panic!("{value}: {}", e.message));
+    }
+}
+
 /// Fixed blocks count registered preset ports and bracketed `lane['port']` offsets.
 #[test]
 fn block_size_counts_preset_ports_and_offsets() {

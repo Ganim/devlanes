@@ -11,8 +11,8 @@ use devlanes_transport::{
     Backoff, BoxServices, DialTarget, LaneInfo, LaneKey, Link, LinkState, LoopbackDialer,
     OpenError, PortInfo, Registry, RegistryEvent, RegistrySnapshot, RejectReason, RpcCallError,
     RpcError, RpcHandler, RpcInput, RpcReplyStream, ServeOptions, Session, SessionEnd,
-    SessionOptions, SharedRegistry, SyncError, SyncFeed, SyncMessage, SyncSource, Timing, UnitInfo,
-    UnitKey, UnitKind, serve,
+    SessionOptions, SharedRegistry, SyncError, SyncFeed, SyncInput, SyncInputEvent, SyncMessage,
+    SyncSource, Timing, UnitInfo, UnitKey, UnitKind, serve,
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -126,7 +126,22 @@ struct TestSync;
 
 #[async_trait]
 impl SyncSource for TestSync {
-    async fn subscribe(&self, request: Value) -> Result<SyncFeed, SyncError> {
+    async fn subscribe(&self, request: Value, mut input: SyncInput) -> Result<SyncFeed, SyncError> {
+        if request["folder"] == "echo" {
+            // Collects the client's input up to its end marker, then reports it.
+            let feed = async_stream_once(async move {
+                let mut values = Vec::new();
+                loop {
+                    match input.recv().await {
+                        Some(SyncInputEvent::Value(value)) => values.push(value),
+                        Some(SyncInputEvent::End) => break,
+                        None => return Err(SyncError::new("client left without ending input")),
+                    }
+                }
+                Ok(SyncMessage::Manifest(Value::Array(values)))
+            });
+            return Ok(feed);
+        }
         if request["folder"] != "ext" {
             return Err(SyncError::new("unknown folder"));
         }
@@ -144,6 +159,13 @@ impl SyncSource for TestSync {
         ];
         Ok(futures_util::stream::iter(messages).boxed())
     }
+}
+
+/// A feed of the one item `future` yields.
+fn async_stream_once(
+    future: impl Future<Output = Result<SyncMessage, SyncError>> + Send + 'static,
+) -> SyncFeed {
+    futures_util::stream::once(future).boxed()
 }
 
 /// A box accepting every memory link with the test services.
@@ -415,6 +437,20 @@ async fn sync_subscription_carries_manifest_chunks_and_deletions() -> TestResult
 
         let mut refused = session.subscribe_sync(json!({"folder": "other"})).await?;
         assert!(matches!(refused.next().await, Some(Err(_))));
+
+        // Client input reaches the source in order, and the end marker is explicit.
+        let mut echo = session.subscribe_sync(json!({"folder": "echo"})).await?;
+        for batch in 0..20 {
+            echo.send(json!({"batch": batch})).await?;
+        }
+        echo.finish_input().await?;
+        match echo.next().await {
+            Some(Ok(SyncMessage::Manifest(Value::Array(values)))) => {
+                assert_eq!(values.len(), 20);
+                assert_eq!(values[19], json!({"batch": 19}));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
         Ok(())
     })
     .await

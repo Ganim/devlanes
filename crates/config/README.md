@@ -23,7 +23,8 @@ Use `load_project(path)` for a file or directory. It also reads the sibling `dev
 ## API
 
 - `ProjectConfig` and `UserConfig`: separate typed project and machine settings.
-- `check(path)`: load and validate a project, returning warnings or a `ConfigError`.
+- `check(path)`: load and validate a project, returning warnings or a `ConfigError`. `check_compose_files` runs its `infra.compose` file check alone, for a config parsed from text.
+- `load_user_lenient`: load `config.yaml` keeping every valid key; each unknown or invalid key falls back to its default and comes back as a located error.
 - `evaluate_typed`, `evaluate_env`, and `resolve_lane_vars`: resolve expressions using a caller-supplied `ExpressionContext`.
 - `validate_with_presets`: pass opaque preset option objects to registered integration parsers.
 - `project_schema_with_presets`: generate a project schema with integration-owned option schemas; `project_schema()` omits registration.
@@ -36,7 +37,7 @@ Local overrides merge before `extends` resolution, and both follow one rule: map
 
 `${{ env.X }}` reads the supplied outer environment, including inside an env override map. Lane variables can reference other lane variables; cycles are rejected. Write `${{ '${{' }}` for a literal `${{`. Parsing does not read the process environment or run integration commands.
 
-`validate_with_preset_ports` also counts each registered preset's named ports against a fixed `lanes.block_size`. `UserConfig::warnings()` lists settings that loading ignored, such as mobile trust targets.
+`validate_with_preset_ports` also counts each registered preset's named ports against a fixed `lanes.block_size`; `validate_with_registry` takes the registered preset names as well, so an unknown `preset:` gets the closest name. `ConfigSources::position(path)` gives the YAML location of a field path for errors found after loading. `UserConfig::warnings()` lists settings that loading ignored, such as mobile trust targets.
 
 ## Schema
 

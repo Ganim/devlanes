@@ -11,6 +11,7 @@ mod hosts;
 mod lanes;
 mod leftovers;
 mod lifecycle;
+mod local_sync;
 mod orphans;
 mod pacing;
 mod profiles;
@@ -19,6 +20,7 @@ mod remote;
 mod resolver;
 mod retention;
 mod server;
+mod stop_in_start;
 mod stream;
 mod update;
 mod urls;
@@ -145,6 +147,8 @@ pub struct Setup {
     pub ca_permitted: Option<Vec<String>>,
     /// Metrics collectors; none keeps the sampler off.
     pub metrics: Vec<Arc<dyn devlanes_metrics::MetricsSource>>,
+    /// Port holder lookups; none identifies no holder.
+    pub ports: Option<Arc<dyn devlanes_daemon::integrations::PortInspector>>,
 }
 
 /// Opens an engine over `home` (reusing its state.db when present).
@@ -163,6 +167,9 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
     }
     integ.ca_permitted = setup.ca_permitted;
     integ.metrics = setup.metrics;
+    if let Some(ports) = setup.ports {
+        integ.ports = ports;
+    }
     std::fs::create_dir_all(home).expect("home");
     let store = Store::open(home.join("state.db")).await.expect("store");
     let mut options = EngineOptions::new(home, home.join("d.sock"));
@@ -195,11 +202,22 @@ pub fn client_env() -> BTreeMap<String, String> {
     ])
 }
 
-/// Request context for `cwd`, with env and a human actor.
+/// Request context for `cwd`, with env and a human actor. Inside a test's
+/// [`temp`] directory, `HOME` is that directory's `user-home`, so whatever a
+/// unit or a `~` path writes there (a service's `sync` folder) goes away with
+/// the test.
 pub fn cx(cwd: &Path) -> Context {
+    let mut env = client_env();
+    if let Some(root) = cwd.ancestors().find(|dir| {
+        dir.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("dle-"))
+    }) {
+        env.insert("HOME".into(), root.join("user-home").display().to_string());
+    }
     Context {
         cwd: cwd.to_path_buf(),
-        env: Some(client_env()),
+        env: Some(env),
         actor: Actor::default(),
         ..Context::default()
     }

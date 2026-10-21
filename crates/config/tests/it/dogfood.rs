@@ -27,7 +27,7 @@ fn dogfood_fixtures_pass_config_check() {
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(report.project, project);
         assert!(
-            report.warnings.iter().all(|w| w.path == "infra.compose"),
+            report.warnings.is_empty(),
             "{name}: unexpected warnings {:?}",
             report.warnings
         );

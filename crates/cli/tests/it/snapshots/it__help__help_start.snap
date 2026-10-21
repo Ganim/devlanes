@@ -20,7 +20,10 @@ Options:
           Start the units of this profile from devlanes.yaml; repeat to combine profiles (later ones win on env)
 
       --attach
-          Open the TUI once the lane is up
+          Run the start in the TUI even when DEVLANES_NO_UI or tui.open_on_start turn that off [default on a terminal]
+
+      --no-ui
+          Print the start as text instead of running it in the TUI
 
       --all-at-once
           Start every selected service immediately, bypassing the machine-wide start gate for this run
@@ -61,6 +64,9 @@ Global options:
 
       --budget <BYTES>
           Cap agent-mode output at this many bytes [default: 16384, minimum: 256]
+
+  -v, --verbose...
+          Print timestamped diagnostics of the client and daemon to stderr; -vv for more [env: DEVLANES_VERBOSE=1|2]
 
 Examples:
   devlanes start                       the whole lane of this worktree

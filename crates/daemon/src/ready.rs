@@ -96,6 +96,16 @@ where
         return;
     }
     let deadline = Instant::now() + limit;
+    tracing::debug!(
+        unit = %host.info().name,
+        check = describe(&check),
+        port = match &check {
+            Readiness::Tcp { port } | Readiness::Http { port, .. } => Some(*port),
+            _ => None,
+        },
+        timeout_ms = limit.as_millis() as u64,
+        "readiness check"
+    );
     let probe = probe_until_ready(host, &check, deadline);
     let exited = host.wait_exit();
     tokio::select! {
@@ -290,17 +300,115 @@ fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
     0
 }
 
+/// Waits for `infra.containers.<name>.ready` once the container is up. `ports`
+/// maps its port names to published host ports in declaration order; `env` runs
+/// a `cmd` probe; `logs` reads the container's last lines for a `log` probe.
+/// Fails with `config_error` for an unknown port name or pattern, and with
+/// `container_not_ready` when the check does not pass within its timeout.
+pub(crate) async fn container_ready<F, Fut>(
+    name: &str,
+    ready: &devlanes_resolve::ContainerReady,
+    ports: &[(String, u16)],
+    env: &BTreeMap<String, String>,
+    logs: F,
+) -> Result<(), RpcError>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Vec<String>>,
+{
+    use devlanes_resolve::ContainerCheck;
+    let path = format!("infra.containers.{name}.ready");
+    let host_port = |wanted: &Option<String>| {
+        let found = match wanted {
+            Some(wanted) => ports.iter().find(|(port, _)| port == wanted),
+            None => ports.first(),
+        };
+        found.map(|(_, port)| *port).ok_or_else(|| {
+            RpcError::new(
+                "config_error",
+                json!({
+                    "path": path,
+                    "message": match wanted {
+                        Some(wanted) => format!("the container has no port named `{wanted}`"),
+                        None => "a tcp or http check needs a container port".to_owned(),
+                    },
+                }),
+                1,
+            )
+        })
+    };
+    let deadline = Instant::now() + ready.timeout;
+    tracing::debug!(
+        container = name,
+        timeout_ms = ready.timeout.as_millis() as u64,
+        "waiting until the container is ready"
+    );
+    let (kind, passed) = match &ready.check {
+        ContainerCheck::Tcp { port } => {
+            let port = host_port(port)?;
+            ("tcp", poll(deadline, || tcp_open(port)).await)
+        }
+        ContainerCheck::Http { port, path, status } => {
+            let port = host_port(port)?;
+            let probe = || http_ok(port, path, *status);
+            ("http", poll(deadline, probe).await)
+        }
+        ContainerCheck::Log { pattern } => {
+            let regex = regex::Regex::new(pattern).map_err(|error| {
+                RpcError::new(
+                    "config_error",
+                    json!({"path": path, "pattern": pattern, "message": error.to_string()}),
+                    1,
+                )
+            })?;
+            let regex = &regex;
+            let logs = &logs;
+            let probe = || async move { logs().await.iter().any(|line| regex.is_match(line)) };
+            ("log", poll(deadline, probe).await)
+        }
+        ContainerCheck::Cmd { shell, cwd } => {
+            let probe = || cmd_succeeds(shell, cwd, env, deadline);
+            ("cmd", poll(deadline, probe).await)
+        }
+    };
+    passed.map_err(|()| {
+        RpcError::new(
+            "container_not_ready",
+            json!({
+                "container": name,
+                "check": kind,
+                "timeout_ms": ready.timeout.as_millis(),
+            }),
+            1,
+        )
+    })
+}
+
 /// Retries a probe until it succeeds or the deadline passes.
 async fn poll<F, Fut>(deadline: Instant, mut probe: F) -> Result<(), ()>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
+    let started = Instant::now();
+    let mut attempts: u32 = 0;
     loop {
+        attempts += 1;
         if probe().await {
+            tracing::debug!(
+                attempts,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "probe passed"
+            );
             return Ok(());
         }
+        tracing::trace!(attempts, "probe not passing yet");
         if Instant::now() + POLL >= deadline {
+            tracing::debug!(
+                attempts,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "probe timed out"
+            );
             return Err(());
         }
         sleep(POLL).await;

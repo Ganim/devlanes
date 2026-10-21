@@ -6,6 +6,7 @@ mod fake;
 mod orphans;
 mod progress;
 mod release;
+mod start;
 mod units;
 
 use std::{sync::Arc, time::Duration};
@@ -924,6 +925,94 @@ async fn stale_attach_output_is_ignored() -> TestResult {
 
 // ---- full loop -----------------------------------------------------------------
 
+/// A [`TestBackend`] the test can read while `drive` owns the terminal, so a
+/// script waits for a drawn frame instead of guessing how long drawing takes.
+#[derive(Clone)]
+struct SharedBackend(Arc<std::sync::Mutex<TestBackend>>);
+
+impl SharedBackend {
+    /// A `width` x `height` backend.
+    fn new(width: u16, height: u16) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(TestBackend::new(
+            width, height,
+        ))))
+    }
+
+    /// The backend, whatever a panicking holder left behind.
+    fn lock(&self) -> std::sync::MutexGuard<'_, TestBackend> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The last drawn screen as text.
+    fn screen(&self) -> String {
+        self.lock().to_string()
+    }
+
+    /// Waits up to 4 s until the drawn screen contains `text`.
+    async fn wait_for(&self, text: &str) {
+        for _ in 0..400 {
+            if self.screen().contains(text) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+impl ratatui::backend::Backend for SharedBackend {
+    type Error = <TestBackend as ratatui::backend::Backend>::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+    {
+        self.lock().draw(content)
+    }
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        self.lock().hide_cursor()
+    }
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        self.lock().show_cursor()
+    }
+    fn get_cursor_position(&mut self) -> Result<ratatui::layout::Position, Self::Error> {
+        self.lock().get_cursor_position()
+    }
+    fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+        &mut self,
+        position: P,
+    ) -> Result<(), Self::Error> {
+        self.lock().set_cursor_position(position)
+    }
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        self.lock().clear()
+    }
+    fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> Result<(), Self::Error> {
+        self.lock().clear_region(clear_type)
+    }
+    fn size(&self) -> Result<ratatui::layout::Size, Self::Error> {
+        self.lock().size()
+    }
+    fn window_size(&mut self) -> Result<ratatui::backend::WindowSize, Self::Error> {
+        self.lock().window_size()
+    }
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.lock().flush()
+    }
+}
+
+/// Polls `api`'s call log until `done` holds, for at most 4 s (the test's own
+/// timeout reports a hang).
+async fn wait_for_calls(api: &FakeApi, done: impl Fn(&[String]) -> bool) {
+    for _ in 0..400 {
+        if done(&api.calls()) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
     let api = Arc::new(FakeApi::with_lanes(mixed_lanes()));
@@ -931,10 +1020,12 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
     let events = Box::pin(stream::unfold(keys_rx, |mut rx| async move {
         rx.recv().await.map(|event| (event, rx))
     }));
-    let mut terminal = Terminal::new(TestBackend::new(100, 24))?;
+    let backend = SharedBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend.clone())?;
     let driver_api: Arc<dyn DaemonApi> = api.clone();
     let script = {
         let api = Arc::clone(&api);
+        let backend = backend.clone();
         async move {
             // Wait for the subscription, then ask the TUI to resync.
             for _ in 0..100 {
@@ -943,15 +1034,22 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Each key waits for the effect of the step before it, not a fixed delay.
+            wait_for_calls(&api, |calls| {
+                calls.iter().filter(|c| *c == "status").count() >= 2
+            })
+            .await;
             let press = |c| {
                 Ok(TermEvent::Key(KeyEvent::new(
                     KeyCode::Char(c),
                     KeyModifiers::NONE,
                 )))
             };
+            backend.wait_for("@0 main").await;
             keys_tx.send(press('j')).await.ok();
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Quit only once the attached pane is on screen: `q` ends the loop
+            // without another frame.
+            backend.wait_for("acme@0:api · ready").await;
             keys_tx.send(press('q')).await.ok();
         }
     };
@@ -983,6 +1081,6 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
             .any(|c| c.starts_with("Stop") || c.starts_with("Restart")),
         "quitting must not stop anything: {calls:?}"
     );
-    insta::assert_snapshot!("drive_after_resync", terminal.backend());
+    insta::assert_snapshot!("drive_after_resync", *backend.lock());
     Ok(())
 }

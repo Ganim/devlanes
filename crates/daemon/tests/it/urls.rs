@@ -107,6 +107,58 @@ async fn public_urls_use_the_bound_https_port() {
     .expect("timeout");
 }
 
+/// An HTTP listener that fell back to 8080 because `requested` was taken.
+struct FellBack(u16);
+
+impl RouteSink for FellBack {
+    fn publish(&self, _: Vec<RouteEntry>) {}
+
+    fn status(&self) -> Value {
+        json!({"http": {"bound": true, "port": 8080, "requested_port": self.0, "fallback_reason": "in use"}})
+    }
+}
+
+/// Names this test process as the holder of every port.
+struct HeldByMe;
+
+#[async_trait::async_trait]
+impl devlanes_daemon::integrations::PortInspector for HeldByMe {
+    async fn holder(&self, _: u16) -> Option<u32> {
+        Some(std::process::id())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// `doctor` names the process holding a proxy port the listener fell back from.
+async fn doctor_names_the_holder_of_a_taken_proxy_port() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                routes: Some(Arc::new(FellBack(80))),
+                ports: Some(Arc::new(HeldByMe)),
+                ..Setup::default()
+            },
+        )
+        .await;
+        let doctor = h
+            .call(Method::Doctor, json!({}), cx(&main))
+            .await
+            .expect("doctor");
+        let holder = &doctor["proxy"]["http"]["requested_holder"];
+        assert_eq!(holder["pid"], std::process::id(), "{doctor}");
+        assert!(
+            holder["command"].as_str().is_some_and(|c| !c.is_empty()),
+            "{holder}"
+        );
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 /// A routed host outside the devlanes CA's names keeps its route but is named in
 /// the start result, `doctor` and `config check` with a name under the lane's

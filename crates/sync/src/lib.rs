@@ -10,11 +10,13 @@
 //! Empty directories are not synced; directories exist on the target only to
 //! hold files.
 
+mod held;
 mod ignore;
 mod path;
 mod syncer;
 mod target;
 
+pub use held::{HeldFile, HeldWalk};
 pub use ignore::IgnoreRules;
 pub use path::RelPath;
 pub use syncer::{SyncHandle, SyncIssue, SyncOptions, SyncState, SyncStatus, Syncer};

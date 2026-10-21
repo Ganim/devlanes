@@ -25,10 +25,11 @@ DEVLANES_E2E_BIN_DIR="$PWD/target/debug" cargo nextest run --profile e2e
 
 ## API
 
-- `Lab::new(fixture, budget)`, `Lab::with_config(yaml, budget)`, `Lab::docker(fixture, compose_project, budget)`: an isolated environment with a committed copy of the fixture.
+- `Lab::new(fixture, budget)`, `Lab::with_config(yaml, budget)`, `Lab::without_config(budget)`: an isolated environment with a committed copy of the fixture, a given `devlanes.yaml`, or none.
+- `Lab::docker(fixture, compose_project, budget)`, `Lab::docker_projects(fixture, projects, budget)`: the same for Docker tests, plus `Lab::docker_cli(args)` to run `docker` with the outer shell's client settings.
 - `Lab::devlanes(cwd, args)` and `Lab::json(cwd, args)`: run one CLI command, bounded by 60 s and the test's budget.
 - `Lab::command` plus `Lab::run` or `Lab::spawn`: the same command with a custom environment, or left running.
-- `Lab::add_worktree(branch)`, `Lab::lanes(cwd)`, `Lab::eventually(what, timeout, probe)`, `Lab::daemon_pid()`.
+- `Lab::add_worktree(branch)`, `Lab::worktrees_dir()`, `Lab::lanes(cwd)`, `Lab::eventually(what, timeout, probe)`, `Lab::daemon_pid()`.
 
 ## Isolation
 
@@ -36,7 +37,7 @@ Each lab has a short `DEVLANES_HOME` under `/tmp` (the socket path must fit), a 
 
 Labs lock one of 60 slots of 100 ports, starting at 26000, through files in `/tmp/devlanes-e2e-ports-<uid>`. The slot holds the lane port pool and the proxy's HTTP and HTTPS ports, written to `$DEVLANES_HOME/config.yaml`, so parallel tests and a developer's own daemon never compete for 443 or 8443.
 
-Dropping a lab runs `devlanes daemon stop --yes`, then sends SIGKILL to every PID the test saw in JSON output whose start time still matches. Docker labs also run `docker compose -p <project> down --volumes`.
+Dropping a lab runs `devlanes daemon stop --yes`, then sends SIGKILL to every PID the test saw in JSON output whose start time still matches. Docker labs also run `docker compose -p <project> down --volumes` for each of their Compose projects, before the test as well, so a run that died cannot leave data behind.
 
 ## License
 

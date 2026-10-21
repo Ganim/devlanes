@@ -3,6 +3,7 @@ mod dogfood;
 mod artifacts;
 mod diagnostics;
 mod merging;
+mod reference_docs;
 mod references;
 mod retention;
 mod schema_docs;
@@ -622,11 +623,8 @@ fn schema_parser_type_agreement() {
 fn compose_reference_validation() {
     let config = parse_project("project: demo\ninfra:\n  compose: compose.yaml\n  hidden: [postgres]\n  hosts: { postgres: [db.localhost] }\n",None).expect("requires resolved model");
     assert!(
-        validate(&config)
-            .expect("report")
-            .warnings
-            .iter()
-            .any(|w| w.path == "infra.compose")
+        validate(&config).expect("report").warnings.is_empty(),
+        "unresolved Compose names are not a warning"
     );
     assert!(validate_with_compose_services(&config, &Default::default()).is_err());
     let names = ["postgres".to_owned()].into_iter().collect();
@@ -799,7 +797,7 @@ fn opaque_preset_options_and_registry_validation() {
         validate_with_presets(&custom, &registered_validator)
             .expect_err("unknown registry entry")
             .message
-            .contains("services.api.custom")
+            .starts_with("services.api.preset: unregistered preset `custom`")
     );
     let invalid = parse_project(
         "project: demo\nservices:\n  api: { preset: vite, run: server, vite: { unknown: true } }\n",

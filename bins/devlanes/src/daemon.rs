@@ -142,26 +142,39 @@ fn watch_signals(shutdown: CancellationToken) {
     });
 }
 
-/// The daemon never prints to stdout; everything goes to `logs/daemon.log`.
+/// The daemon never prints to stdout; everything goes to `logs/daemon.log`, at
+/// the level `DEVLANES_LOG` sets (RUST_LOG syntax, default `info`). Requests
+/// from `-v` clients also get their own records through the diagnostics layer,
+/// whatever `DEVLANES_LOG` says.
 fn init_logging(paths: &Paths) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
     let path = paths.logs.join("daemon.log");
     if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > LOG_ROTATE_BYTES) {
         let _ = std::fs::rename(&path, paths.logs.join("daemon.log.1"));
     }
-    let file = std::fs::OpenOptions::new()
+    let opened = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
-        .ok()?;
-    let (writer, guard) = tracing_appender::non_blocking(file);
-    let filter = tracing_subscriber::EnvFilter::try_from_env("DEVLANES_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(writer)
-        .with_ansi(false)
-        .init();
-    Some(guard)
+        .open(&path);
+    // Without the file, verbose clients still get their diagnostics.
+    let (file, guard) = match opened {
+        Ok(file) => {
+            let (writer, guard) = tracing_appender::non_blocking(file);
+            let filter = tracing_subscriber::EnvFilter::try_from_env("DEVLANES_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_ansi(false)
+                .with_filter(filter);
+            (Some(layer), Some(guard))
+        }
+        Err(_) => (None, None),
+    };
+    let _ = tracing_subscriber::registry()
+        .with(file)
+        .with(devlanes_daemon::diagnostics::layer())
+        .try_init();
+    guard
 }
 
 /// Opens the TUI client.

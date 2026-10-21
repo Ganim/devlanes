@@ -273,6 +273,56 @@ async fn initial_copy_reuses_matching_files_and_prunes_stale_ones() {
 }
 
 #[tokio::test]
+async fn offered_held_files_replace_the_target_manifest() {
+    let d = dirs();
+    write(&d.src.join("same.txt"), "same");
+    write(&d.src.join("dir/changed.txt"), "new");
+    write(&d.src.join("added.txt"), "added");
+    write(&d.dst.join("same.txt"), "same");
+    write(&d.dst.join("dir/changed.txt"), "old");
+    write(&d.dst.join("stale.txt"), "stale");
+    write(&d.dst.join("dir/also-stale/x.txt"), "stale");
+    write(&d.dst.join("local.map"), "user file under an ignored name");
+    let inode = fs::metadata(d.dst.join("same.txt")).expect("meta").ino();
+    // The source mtimes must be settled, or the pass rehashes (correctly, but
+    // then this test would not show that matches are skipped without reading).
+    let settled = std::time::SystemTime::now() - Duration::from_secs(60);
+    for name in ["same.txt", "dir/changed.txt", "added.txt"] {
+        fs::File::options()
+            .write(true)
+            .open(d.src.join(name))
+            .and_then(|file| file.set_modified(settled))
+            .expect("mtime");
+    }
+
+    // A remote client walks its destination in small batches.
+    let mut syncer = syncer(&d, &["*.map"]);
+    let mut walk = LocalTarget::new(&d.dst).held(Default::default(), 2);
+    let mut batches = 0;
+    while let Some(batch) = walk.next().await {
+        assert!(batch.len() <= 2);
+        batches += 1;
+        syncer.offer_held(batch).await.expect("offer");
+    }
+    assert_eq!(batches, 3);
+    let status = syncer.sync_once().await.expect("sync");
+    assert_eq!((status.written, status.removed), (2, 2), "{status:?}");
+    assert_eq!(
+        fs::metadata(d.dst.join("same.txt")).expect("meta").ino(),
+        inode,
+        "identical file not rewritten"
+    );
+    assert_eq!(read(&d.dst.join("dir/changed.txt")).as_deref(), Some("new"));
+    assert_eq!(read(&d.dst.join("added.txt")).as_deref(), Some("added"));
+    assert!(!d.dst.join("stale.txt").exists());
+    assert!(!d.dst.join("dir/also-stale").exists());
+    assert!(
+        d.dst.join("local.map").exists(),
+        "ignored target files are left alone"
+    );
+}
+
+#[tokio::test]
 async fn waits_for_a_late_source_and_follows_replacement() {
     let temp = tempfile::tempdir().expect("tempdir");
     let src = temp.path().join("out/chrome-mv3");

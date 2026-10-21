@@ -5,29 +5,29 @@ expression: text
 --- human (exit 0)
 acme@2 · feat/billing
 ✓ services  5 of 5 ready
-  ✓  api     https://api.acme-2.localhost
-  ✓  web     https://web.acme-2.localhost
-  ✓  admin   https://admin.acme-2.localhost
-  ✓  mailer  https://mailer.acme-2.localhost
-  …1 more ready (devlanes status acme@2)
+  ✓  api     https://api.acme-2.localhost:8443
+  ✓  web     https://web.acme-2.localhost:8443
+  ✓  admin   https://admin.acme-2.localhost:8443
+  ✓  worker  http://127.0.0.1:20106
+  ✓  mailer  https://mailer.acme-2.localhost:8443
 ! api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
 ! this lane's units peak at 8.0 GiB together, more than the 4.0 GiB available; starts may wait for memory
 --- plain (exit 0)
 acme@2 · feat/billing
 ok services  5 of 5 ready
-  ok  api     https://api.acme-2.localhost
-  ok  web     https://web.acme-2.localhost
-  ok  admin   https://admin.acme-2.localhost
-  ok  mailer  https://mailer.acme-2.localhost
-  +1 more ready (devlanes status acme@2)
+  ok  api     https://api.acme-2.localhost:8443
+  ok  web     https://web.acme-2.localhost:8443
+  ok  admin   https://admin.acme-2.localhost:8443
+  ok  worker  http://127.0.0.1:20106
+  ok  mailer  https://mailer.acme-2.localhost:8443
 warn api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
 warn this lane's units peak at 8.0 GiB together, more than the 4.0 GiB available; starts may wait for memory
 --- agent (exit 0)
 acme@2 (feat/billing): 5/5 ready
-ready api https://api.acme-2.localhost
-ready web https://web.acme-2.localhost
-ready admin https://admin.acme-2.localhost
-ready mailer https://mailer.acme-2.localhost
-ready +1 (devlanes status acme@2)
+ready api http://127.0.0.1:20103 https://api.acme-2.localhost:8443
+ready web http://127.0.0.1:20103 https://web.acme-2.localhost:8443
+ready admin http://127.0.0.1:20105 https://admin.acme-2.localhost:8443
+ready worker http://127.0.0.1:20106
+ready mailer http://127.0.0.1:20106 https://mailer.acme-2.localhost:8443
 warn api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
 warn this lane's units peak at 8.0 GiB together, more than the 4.0 GiB available; starts may wait for memory

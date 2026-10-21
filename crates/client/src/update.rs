@@ -102,6 +102,26 @@ impl InstallMethod {
         }
     }
 
+    /// How doctor names the install: [`Self::label`], except that a binary outside
+    /// install.sh's default directory (`~/.local/bin` under `home`) is named by its
+    /// directory, since nothing says install.sh put it there.
+    pub fn describe(&self, home: Option<&Path>) -> String {
+        match self {
+            Self::Script(dir) => {
+                let default = home.map(|home| home.join(".local/bin"));
+                let default = default
+                    .as_deref()
+                    .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()));
+                if default.as_deref() == Some(dir.as_path()) {
+                    "install.sh".into()
+                } else {
+                    format!("a standalone binary in {}", dir.display())
+                }
+            }
+            other => other.label().into(),
+        }
+    }
+
     /// The command that installs `version` the same way.
     pub fn upgrade_command(&self, version: &str) -> String {
         match self {
@@ -311,6 +331,21 @@ mod tests {
             InstallMethod::detect(Path::new("/opt/tools/devlanes"), None, false),
             InstallMethod::Script(PathBuf::from("/opt/tools"))
         );
+    }
+
+    /// Only install.sh's default directory is named install.sh.
+    #[test]
+    fn standalone_binaries_are_named_by_directory() {
+        let home = Path::new("/nonexistent-home");
+        assert_eq!(
+            InstallMethod::Script(home.join(".local/bin")).describe(Some(home)),
+            "install.sh"
+        );
+        assert_eq!(
+            InstallMethod::Script(PathBuf::from("/opt/tools")).describe(Some(home)),
+            "a standalone binary in /opt/tools"
+        );
+        assert_eq!(InstallMethod::Homebrew.describe(Some(home)), "Homebrew");
     }
 
     #[test]

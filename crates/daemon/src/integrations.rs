@@ -204,6 +204,9 @@ pub struct ContainerDecl {
     pub ports: Vec<(String, u16)>,
     pub per_lane: bool,
     pub env: BTreeMap<String, String>,
+    /// Checked by the daemon after `up`; the infra phase waits for it.
+    #[serde(skip)]
+    pub ready: Option<devlanes_resolve::ContainerReady>,
 }
 
 /// Everything an infra provider needs for one lane, with expressions evaluated.
@@ -319,6 +322,18 @@ pub trait InfraProvider: Send + Sync {
         spec: &InfraSpec,
         container: &str,
     ) -> Result<Option<String>, InfraError>;
+    /// The last `tail` log lines of the plain container `container`, for `ready: {log}`.
+    async fn container_logs(
+        &self,
+        _spec: &InfraSpec,
+        _container: &str,
+        _tail: usize,
+    ) -> Result<Vec<String>, InfraError> {
+        Err(InfraError::new(
+            "not_supported_yet",
+            "this infra provider cannot read container logs",
+        ))
+    }
     /// Lists labelled containers after a daemon restart. Never stops anything.
     async fn adopt(&self, projects: &[String]) -> Result<Value, InfraError>;
     /// Docker reachability and Compose version for `doctor`.
@@ -326,6 +341,11 @@ pub trait InfraProvider: Send + Sync {
     /// Container events; `None` when the provider has no event source.
     fn events(&self) -> Option<broadcast::Receiver<InfraEvent>> {
         None
+    }
+    /// Each container `up` brings up for `spec`, as it is now. Polled while `up`
+    /// runs, alongside it, for start progress; empty when the provider cannot tell.
+    async fn progress(&self, _spec: &InfraSpec) -> Vec<devlanes_proto::PhaseContainer> {
+        Vec::new()
     }
 }
 
@@ -471,7 +491,8 @@ pub trait ProcessTable: Send + Sync {
     /// True when the PID still belongs to the recorded process (same start time).
     async fn alive(&self, identity: ProcessIdentity) -> bool;
     /// Terminates the recorded leader and its session members, escalating to
-    /// SIGKILL after `grace`. Only processes whose identity matches are signalled.
+    /// SIGKILL after `grace`. Only processes whose identity matches are signalled,
+    /// and the session is swept only while the leader itself still verifies.
     async fn terminate(&self, identity: ProcessIdentity, grace: Duration);
 }
 
@@ -491,6 +512,8 @@ impl ProcessTable for SysProcesses {
     async fn terminate(&self, identity: ProcessIdentity, grace: Duration) {
         let signal_all = move |signal: devlanes_sys::Signal| {
             let snapshot = devlanes_sys::processes().unwrap_or_default();
+            // Empty unless the leader itself still verifies: a dead leader's session
+            // ID may name someone else's session, so then only `identity` is tried.
             let mut targets = devlanes_sys::session_members(&snapshot, &identity);
             targets.retain(|p| p.pid != identity.pid);
             let mut alive = 0;

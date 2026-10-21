@@ -23,20 +23,30 @@ fn runtime(mode: OutputMode) -> Runtime {
     .expect("runtime")
 }
 
-/// A unit summary as the daemon sends it.
+/// A unit summary in the shape a real daemon sends (captured from `start --json`
+/// of the `two-services` fixture): the loopback URL first, then the proxied one
+/// with the HTTPS listener's port; units without hosts have only the first.
 fn unit(name: &str, state: &str) -> Value {
+    let port = 20100 + name.len() as u16;
+    let mut urls = vec![json!(format!("http://127.0.0.1:{port}"))];
+    if name != "worker" {
+        urls.push(json!(format!("https://{name}.acme-2.localhost:8443")));
+    }
     json!({
-        "name": name, "lane": "acme@2", "state": state, "pid": 4100,
+        "name": name, "lane": "acme@2", "state": state,
+        "pid": if state == "idle" { Value::Null } else { json!(4100) },
         "exit_code": if state == "failed" { json!(1) } else { Value::Null },
-        "ports": if state == "ready" { json!({"http": 20101}) } else { json!({}) },
-        "urls": if state == "ready" && name != "worker" {
-            json!([format!("https://{name}.acme-2.localhost")])
+        "ports": {"default": port},
+        "urls": urls,
+        "actor": {"kind": "human"},
+        "reason": if state == "failed" {
+            json!({"code": "exited", "data": {"code": 1, "signal": null}, "exit_code": 1})
         } else {
-            json!([])
+            Value::Null
         },
-        "actor": {"kind": "human"}, "reason": null, "kind": "service",
-        "autostart": true, "hidden": false, "tags": [],
-        "started_at_ms": 1_700_000_000_000_u64,
+        "kind": "service",
+        "autostart": true, "hidden": false, "tags": [], "color": "blue",
+        "started_at_ms": if state == "idle" { Value::Null } else { json!(1_700_000_000_000_u64) },
         "cpu_percent": if state == "ready" { json!(4.5) } else { Value::Null },
         "memory_bytes": if state == "ready" { json!(150_000_000) } else { Value::Null },
     })
@@ -122,6 +132,20 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
     vec![
         ("start", Method::Start, start_result()),
         ("start_queued", Method::Start, start_queued),
+        // `start bg` while bg is a previous daemon's orphan: refused, nothing ran.
+        (
+            "start_refused_orphan",
+            Method::Start,
+            json!({
+                "lane": "acme@0", "branch": "main", "started": [], "already_running": [],
+                "whole_lane": false, "ready": false, "timed_out": false, "skipped_tasks": [],
+                "failures": [{"lane": "acme@0", "unit": "bg", "exit_code": null, "log_tail": [],
+                    "reason": {"code": "unit_orphaned", "exit_code": 1, "data": {
+                        "unit": "bg", "lane": "acme@0", "pid": 4242, "started_at_ms": 1, "orphaned_since_ms": 2,
+                        "command": "devlanes stop bg --lane acme@0"}}}],
+                "units": [],
+            }),
+        ),
         ("start_warnings", Method::Start, {
             let mut ready = start_result();
             ready["ready"] = json!(true);
@@ -463,6 +487,8 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
                 },
                 "ca": {"present": true, "kind": "devlanes", "path": "/home/u/.devlanes/ca/ca.pem", "trusted": "unknown",
                        "name_constrained": false,
+                       "trust": [{"store": "system", "state": "untrusted"},
+                                 {"store": "firefox", "state": "unknown", "reason": "certutil is not installed"}],
                        "hint": "the devlanes CA has no name constraints (it predates them), so a leaked key could sign certificates for any site",
                        "fix": "devlanes certs untrust && rm -r /home/u/.devlanes/ca && devlanes certs trust && devlanes daemon restart"},
                 "route_warnings": [{"code": "host_rejected", "data": {"lane": "acme@2", "unit": "web", "host": "web_app.localhost",
@@ -709,6 +735,7 @@ fn agent_status_lines_start_with_a_stable_lowercase_word() {
         "created",
         "cleaned",
         "warn",
+        "next:",
     ];
     for (name, method, data) in fixtures() {
         if !matches!(
@@ -966,6 +993,48 @@ fn daemon_errors_are_worded_with_hints() {
             4,
         ),
         RpcError::new("start_cancelled", json!({"lane": "acme@2"}), 1),
+        RpcError::new(
+            "no_config",
+            json!({"path": "/work/acme/src", "searched_to": "/work/acme"}),
+            3,
+        ),
+        RpcError::new(
+            "unknown_profile",
+            json!({"profile": "e2r", "candidates": ["dev", "e2e", "full"]}),
+            2,
+        ),
+        RpcError::new(
+            "unknown_profile",
+            json!({"profile": "staging", "candidates": ["dev", "e2e"]}),
+            2,
+        ),
+        RpcError::new("port_error", json!({"unit": "api", "port": "metrics"}), 1),
+        RpcError::new(
+            "unit_running",
+            json!({"lane": "acme@2", "unit": "probe"}),
+            1,
+        ),
+        RpcError::new("worktree_missing", json!({"path": "/work/gone"}), 3),
+        RpcError::new(
+            "phase_failed",
+            json!({"lane": "acme@2", "phase": "setup", "error": {"code": "task_failed", "data": {"task": "migrate", "exit_code": 2}}}),
+            1,
+        ),
+        RpcError::new(
+            "start_failed",
+            json!({"lane": "acme@2", "units": ["acme@2:api"]}),
+            1,
+        ),
+        RpcError::new(
+            "unsafe_home",
+            json!({"path": "/home/u/.devlanes", "problem": "mode", "mode": "755"}),
+            4,
+        ),
+        RpcError::new(
+            "spawn_failed",
+            json!({"program": "missing-cmd", "message": "No such file or directory (os error 2)"}),
+            127,
+        ),
         RpcError::new(
             "lane_running",
             json!({"lane": "acme@2", "units": ["api", "worker"]}),

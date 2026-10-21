@@ -1,8 +1,10 @@
-//! Docker stats for a lane's infra containers reach `status` and `metrics`.
+//! Infra containers: Docker stats reach `status` and `metrics`, `ready` checks
+//! gate the infra phase, and `infra.hosts` routes reach the proxy.
 
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use devlanes_daemon::integrations::{RouteEntry, RouteSink};
 use devlanes_metrics::{Error, MetricsSource, Sample, SampleRequest, Subject, unix_ms};
 use devlanes_proto::{LaneSummary, Method, Page};
 use serde_json::{Value, json};
@@ -53,6 +55,166 @@ impl MetricsSource for FakeDocker {
             })
             .collect())
     }
+}
+
+/// Keeps the last published route snapshot.
+#[derive(Default)]
+struct Recorded(Mutex<Vec<RouteEntry>>);
+
+impl RouteSink for Recorded {
+    fn publish(&self, routes: Vec<RouteEntry>) {
+        if let Ok(mut last) = self.0.lock() {
+            *last = routes;
+        }
+    }
+}
+
+/// A lane whose `db` container (fake infra: published as `5432`) has `ready`.
+fn ready_config(ready: &str) -> String {
+    format!(
+        "project: demo\ninfra:\n  containers:\n    db: {{ image: \"postgres:16\", ports: {{ \"5432\": 5432 }}, per_lane: true, ready: {ready} }}\nservices:\n  api: {{ run: sleep, ready: started }}\n"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A container's `ready` gates the infra phase: a passing `cmd` or `log` check
+/// lets services start, a failing one fails the start with
+/// `container_not_ready` before any service spawns.
+async fn container_ready_gates_the_infra_phase() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        for (name, ready, passes) in [
+            ("cmd-ok", r#"{ cmd: "true" }"#, true),
+            ("cmd-fails", r#"{ cmd: "false", timeout: 1s }"#, false),
+            ("log", r#"{ log: "ready to accept", timeout: 5s }"#, true),
+            (
+                "log-missing",
+                r#"{ log: "never printed", timeout: 1s }"#,
+                false,
+            ),
+        ] {
+            let main = repo(&tmp.path, name, &ready_config(ready));
+            let h = harness(
+                &tmp.path.join(format!("home-{name}")),
+                Setup {
+                    infra: true,
+                    ..Setup::default()
+                },
+            )
+            .await;
+            *h.infra.logs.lock().expect("logs") =
+                vec!["database system is ready to accept connections".into()];
+            let started = h.call(Method::Start, json!({}), cx(&main)).await;
+            if passes {
+                let started = started.expect("start");
+                assert_eq!(started["ready"], true, "{name}: {started}");
+            } else {
+                let error = started.expect_err(name);
+                assert_eq!(error.code, "container_not_ready", "{name}: {error:?}");
+                assert_eq!(error.data["container"], "db");
+                assert!(
+                    h.runner.journal.entries().is_empty(),
+                    "{name}: no service spawned"
+                );
+            }
+            h.call(Method::Stop, json!({}), cx(&main))
+                .await
+                .expect("stop");
+            h.close().await;
+        }
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A missing `infra.compose` file fails `start` with the located
+/// `config_error` that `config check` reports, before the infra provider runs.
+async fn a_missing_compose_file_fails_the_start_before_docker() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config = "project: demo\ninfra:\n  compose: missing.yml\nservices:\n  api: { run: sleep, ready: started }\n";
+        let main = repo(&tmp.path, "r", config);
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                infra: true,
+                ..Setup::default()
+            },
+        )
+        .await;
+        let check = h
+            .call(Method::ConfigCheck, json!({}), cx(&main))
+            .await
+            .expect_err("config check");
+        let error = h
+            .call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect_err("start");
+        assert_eq!(error.code, "config_error", "{error:?}");
+        assert_eq!(error.data["message"], check.data["message"], "{error:?}");
+        assert_eq!(error.data["line"], 3, "{error:?}");
+        assert!(h.infra.calls.entries().is_empty(), "docker was not reached");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// `infra.hosts` object entries route to the named published port with their
+/// `fallback` and `host_header`, like service hosts.
+async fn infra_host_objects_keep_port_fallback_and_host_header() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config = r#"project: demo
+infra:
+  containers:
+    db: { image: "postgres:16", ports: { "5432": 5432 }, per_lane: true }
+  hosts:
+    db:
+      - "db.${{ lane.domain }}"
+      - { host: "*.db.${{ lane.domain }}", port: "5432", fallback: true, host_header: upstream }
+services:
+  api: { run: sleep, ready: started }
+"#;
+        let main = repo(&tmp.path, "r", config);
+        let routes = Arc::new(Recorded::default());
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                infra: true,
+                routes: Some(routes.clone()),
+                ..Setup::default()
+            },
+        )
+        .await;
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        let published = routes.0.lock().expect("routes").clone();
+        let plain = published
+            .iter()
+            .find(|r| r.host == "db.demo.localhost")
+            .expect("plain route");
+        assert!(!plain.fallback && !plain.host_header_upstream);
+        let wildcard = published
+            .iter()
+            .find(|r| r.host == "*.db.demo.localhost")
+            .expect("object route");
+        assert!(
+            wildcard.fallback && wildcard.host_header_upstream,
+            "{wildcard:?}"
+        );
+        assert_eq!(wildcard.port, plain.port);
+        assert_eq!(wildcard.unit, "db");
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
 }
 
 #[tokio::test(flavor = "multi_thread")]

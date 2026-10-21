@@ -44,7 +44,7 @@ mod os;
 pub mod macos;
 
 pub use rlimit::{NofileLimit, child_nofile_limit, raise_nofile_limit};
-pub use tree::{DescendantTracker, session_members};
+pub use tree::{DescendantTracker, session_members, session_members_known};
 
 /// Failures reading process tables or invoking diagnostic tools.
 #[derive(Debug, thiserror::Error)]

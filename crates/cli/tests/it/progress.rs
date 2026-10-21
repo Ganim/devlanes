@@ -101,7 +101,8 @@ fn starting_commands_follow_progress_and_others_do_not() {
 fn built(args: &[&str], runtime: &Runtime) -> Request {
     let cli = Cli::parse_from(args);
     match cli.action_with(runtime, "/work/acme-1".into(), Default::default) {
-        Ok(Action::Rpc(request)) => request,
+        // On a terminal, starts run in the TUI with the same request.
+        Ok(Action::Rpc(request) | Action::StartUi { request, .. }) => request,
         _ => panic!("{args:?} builds no request"),
     }
 }
@@ -170,10 +171,82 @@ fn a_start_prints_its_phase_lines_in_human_mode() {
         ("lane.phase", phase("services", "done")),
     ];
     // The services line is the result's; task phases speak through their tasks.
+    // Phases also print as they begin; `PhaseLines` replaces those lines on a
+    // terminal and drops them elsewhere (see the diagnostics tests).
     assert_eq!(
         shown(Method::Start, &start),
-        "\u{2713} infra\n! setup skipped\n\u{2713} migrate\n"
+        "\u{2026} infra: starting containers, waiting until they are healthy\n\u{2713} infra\n\
+! setup skipped\n\u{2026} tasks\n\u{2713} migrate\n\u{2026} services: starting api\n"
     );
     // `wait` streams the same events for the bar and prints none of them.
     assert_eq!(shown(Method::Wait, &start), "");
+}
+
+/// What a start prints for `events` in `runtime`, with phase lines rewritten
+/// as the binary does.
+fn rewritten(runtime: &Runtime, events: &[Value]) -> String {
+    let reporter = runtime.reporter();
+    let mut lines = PhaseLines::new(runtime);
+    let mut out = String::new();
+    for data in events {
+        let event = Event {
+            seq: 1,
+            event: "lane.phase".into(),
+            data: data.clone(),
+        };
+        let mut stdout = reporter.event(Method::Start, &event).expect("event").stdout;
+        lines.rewrite(&event, &mut stdout);
+        out.push_str(&stdout);
+    }
+    out
+}
+
+#[test]
+fn phase_detail_replaces_the_running_line() {
+    let event = |phase: &str, state: &str, detail: Value| {
+        let mut data = json!({"lane": "acme@1", "phase": phase, "state": state, "start_id": 4});
+        if let (Some(data), Value::Object(detail)) = (data.as_object_mut(), detail) {
+            data.extend(detail);
+        }
+        data
+    };
+    let containers = |postgres: &str| {
+        json!({"containers": [
+            {"name": "redis", "state": "healthy"},
+            {"name": "postgres", "state": postgres, "health": "starting"},
+        ]})
+    };
+    let events = [
+        event("infra", "started", json!({})),
+        event("infra", "progress", containers("creating")),
+        event("infra", "progress", containers("waiting_healthy")),
+        event("infra", "done", json!({})),
+        event("setup", "started", json!({})),
+        event(
+            "setup",
+            "progress",
+            json!({"step": {"name": "database", "index": 1, "count": 2}}),
+        ),
+        // Nothing this client can say: the line stays.
+        event("setup", "progress", json!({"step": "a newer shape"})),
+        event("setup", "done", json!({})),
+    ];
+    let erase = "\x1b[1A\x1b[2K";
+    assert_eq!(
+        rewritten(&runtime(&["devlanes"], true, false), &events),
+        format!(
+            "\u{2026} infra: starting containers, waiting until they are healthy\n\
+{erase}\u{2026} infra: creating postgres (healthy 1 of 2)\n\
+{erase}\u{2026} infra: waiting for postgres (healthy 1 of 2)\n\
+{erase}\u{2713} infra\n\
+\u{2026} setup: running infra.setup\n\
+{erase}\u{2026} setup: database (1 of 2)\n\
+{erase}\u{2713} setup\n"
+        )
+    );
+    // Piped output prints outcomes only.
+    assert_eq!(
+        rewritten(&runtime(&["devlanes"], false, false), &events),
+        "ok infra\nok setup\n"
+    );
 }

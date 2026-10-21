@@ -12,6 +12,8 @@ use devlanes_proto::{
     RpcError, RunParams, Selection, UnitSummary, events,
 };
 use devlanes_term::{Progress, StartTracker};
+
+pub use crate::start::{StartExit, StartFrame, StartRun};
 use ratatui::layout::Rect;
 use serde_json::Value;
 
@@ -282,6 +284,8 @@ pub enum Msg {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
+    /// A frame of the start this TUI was opened for (`devlanes start`).
+    Start(StartFrame),
     /// Outer terminal size.
     Resize(u16, u16),
     /// One second passed.
@@ -523,6 +527,8 @@ pub struct App {
     starts: StartTracker,
     /// Ticks a failed start has been shown red.
     start_error_ticks: u8,
+    /// The start this TUI was opened for (`devlanes start` on a terminal).
+    pub start_run: Option<StartRun>,
 }
 
 /// Ticks (seconds) a failed start stays red in the tab's progress bar.
@@ -561,7 +567,109 @@ impl App {
             reconnect_pending: false,
             starts: StartTracker::viewer(),
             start_error_ticks: 0,
+            start_run: None,
         }
+    }
+
+    /// Follows a start sent before the TUI opened; its frames arrive as
+    /// [`Msg::Start`].
+    pub fn open_start(&mut self, label: String) {
+        self.start_run = Some(StartRun::new(label));
+    }
+
+    /// How the start stands, for the exit status; `None` without one.
+    pub fn start_exit(&self) -> Option<StartExit> {
+        let run = self.start_run.as_ref()?;
+        Some(match &run.outcome {
+            None => StartExit::Pending,
+            Some(outcome) if outcome.ok => StartExit::Ready,
+            Some(_) => StartExit::Failed,
+        })
+    }
+
+    /// The header line for the start: its phase while it runs, then its result.
+    /// `Some((line, Some(ok)))` once it ended.
+    pub fn start_line(&self) -> Option<(String, Option<bool>)> {
+        let run = self.start_run.as_ref()?;
+        Some(match &run.outcome {
+            Some(outcome) => (outcome.line.clone(), Some(outcome.ok)),
+            None => (run.running_line(&self.lanes), None),
+        })
+    }
+
+    /// Applies one frame of the start: events move the phase line, the result
+    /// reports failures on their units and keeps the lane in view.
+    fn start_frame(&mut self, frame: StartFrame, effects: &mut Vec<Effect>) {
+        let Some(run) = self.start_run.as_mut() else {
+            return;
+        };
+        match frame {
+            StartFrame::Event(event) => {
+                if let Some(lane) = run.event(&event) {
+                    // Its phase failure is reported once, by the result.
+                    self.pending_begin(&lane);
+                }
+                self.focus_start(effects);
+            }
+            StartFrame::Done(result) => {
+                let (failures, error) = run.finish(&result);
+                let (label, lanes) = (run.label.clone(), run.lanes.clone());
+                for lane in &lanes {
+                    self.pending_end(lane);
+                }
+                if let Some(error) = error {
+                    let what = match lanes.first() {
+                        Some(lane) => format!("{label} {lane}"),
+                        None => label.clone(),
+                    };
+                    let target = lanes.first().cloned().map(Target::Lane);
+                    self.report(&what, target, words::api(&error));
+                }
+                let verb = if label == "restart" {
+                    "restart"
+                } else {
+                    "start"
+                };
+                for failure in &failures {
+                    let target = Target::Unit {
+                        lane: failure.lane.clone(),
+                        unit: failure.unit.clone(),
+                    };
+                    let what = format!("{verb} {}", unit_ref(&failure.lane, &failure.unit));
+                    self.report(&what, Some(target), failure_words(failure));
+                }
+                // Untouched since the TUI focused the lane: show the first failure.
+                if let (Some(failure), Some(lane)) = (failures.first(), lanes.first())
+                    && self.selected == Some(Selected::Lane(lane.clone()))
+                    && failure.lane == *lane
+                {
+                    self.selected = Some(Selected::Unit {
+                        lane: failure.lane.clone(),
+                        unit: failure.unit.clone(),
+                    });
+                    self.after_change(effects);
+                }
+                self.focus_start(effects);
+                effects.push(Effect::Refresh);
+            }
+        }
+    }
+
+    /// Selects and expands the start's first lane once it is listed, once.
+    fn focus_start(&mut self, effects: &mut Vec<Effect>) {
+        let Some(run) = self.start_run.as_mut() else {
+            return;
+        };
+        let Some(lane) = run.lanes.first().cloned() else {
+            return;
+        };
+        if run.focused || !self.lanes.iter().any(|l| l.reference == lane) {
+            return;
+        }
+        run.focused = true;
+        self.expanded.insert(lane.clone(), true);
+        self.selected = Some(Selected::Lane(lane));
+        self.after_change(effects);
     }
 
     /// The tab's progress bar: every lane starting now, together. The selected
@@ -575,7 +683,7 @@ impl App {
     fn track_starts(&mut self, msg: &Msg) {
         match msg {
             Msg::Status(Ok(lanes)) => self.starts.seed(lanes),
-            Msg::Event(event) => self.starts.event(event),
+            Msg::Event(event) | Msg::Start(StartFrame::Event(event)) => self.starts.event(event),
             Msg::Tick if matches!(self.starts.progress(), Progress::Error(_)) => {
                 self.start_error_ticks += 1;
                 if self.start_error_ticks >= START_ERROR_TICKS {
@@ -612,8 +720,10 @@ impl App {
                 self.lanes = lanes;
                 sort_lanes(&mut self.lanes);
                 self.after_change(&mut effects);
+                self.focus_start(&mut effects);
             }
             Msg::Status(Err(error)) => self.api_error("status", None, error, &mut effects),
+            Msg::Start(frame) => self.start_frame(frame, &mut effects),
             Msg::Subscribed(Ok(())) => {
                 let reconnected = matches!(self.connection, Connection::Reconnecting { .. });
                 self.connection = Connection::Online;
@@ -2548,7 +2658,6 @@ impl App {
         }
     }
 
-    /// Shows a short status message in the header; errors go through [`App::report`].
     /// The release notice for the header and its key: the daemon runs another
     /// version than this TUI, or a newer release is out. `None` once dismissed.
     pub fn release_badge(&self) -> Option<(String, String)> {
@@ -2589,6 +2698,7 @@ impl App {
         true
     }
 
+    /// Shows a short status message in the header; errors go through [`App::report`].
     pub fn set_notice(&mut self, notice: String) {
         self.notice = Some(Notice {
             text: text::clean(&notice),
@@ -2663,6 +2773,23 @@ impl App {
 /// `acme@2` + `api` gives `acme@2:api`, the unit reference the daemon resolves.
 pub fn unit_ref(lane: &str, unit: &str) -> String {
     format!("{lane}:{unit}")
+}
+
+/// A service that failed during a start: its reason (or exit code) and the
+/// last lines of its log, for the details pane.
+fn failure_words(failure: &devlanes_proto::UnitFailureData) -> Worded {
+    let mut worded = match (&failure.reason, failure.exit_code) {
+        (Some(reason), _) => words::rpc(reason),
+        (None, Some(code)) => Worded::local(&format!("exited with code {code}")),
+        (None, None) => Worded::local("did not become ready"),
+    };
+    worded
+        .detail
+        .extend(failure.log_tail.iter().map(|line| text::clean(line)));
+    worded
+        .hint
+        .get_or_insert_with(|| format!("devlanes logs {}", unit_ref(&failure.lane, &failure.unit)));
+    worded
 }
 
 /// States with a live process behind them, or one about to start. Orphans

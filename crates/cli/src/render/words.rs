@@ -38,6 +38,53 @@ fn logs_hint(data: &Value) -> Option<Hint> {
     })
 }
 
+/// Why a unit's process did not start, from `spawn_failed` data `{program,
+/// reason?, path_searched?, cwd?, errno?, message}`. Daemons before `reason`
+/// existed send only `message`.
+pub(crate) fn spawn_cause(data: &Value) -> String {
+    let program = text(data, "program");
+    match text(data, "reason").as_str() {
+        "not_found" if program.contains('/') => format!("{program}: no such file"),
+        "not_found" => format!("{program}: command not found on PATH"),
+        "not_executable" => format!("{program} is not executable"),
+        "cwd_missing" => format!("working directory {} does not exist", text(data, "cwd")),
+        _ => {
+            let mut cause = text(data, "message");
+            if !program.is_empty() {
+                cause = format!("{program}: {cause}");
+            }
+            if let Some(errno) = data.get("errno").and_then(Value::as_str) {
+                cause.push_str(&format!(" ({errno})"));
+            }
+            cause
+        }
+    }
+}
+
+/// The fix for a spawn the program, not the unit, broke: the lane's PATH for a
+/// program not found there, `chmod +x` for one that cannot run.
+pub(crate) fn spawn_hint(data: &Value) -> Option<Hint> {
+    let unit = text(data, "unit");
+    let lane = text(data, "lane");
+    match text(data, "reason").as_str() {
+        "not_found" if !text(data, "program").contains('/') && !unit.is_empty() => {
+            let mut args = vec!["env", "show", unit.as_str()];
+            if !lane.is_empty() {
+                args.extend(["--lane", lane.as_str()]);
+            }
+            Some(Hint(format!(
+                "check the lane's PATH: {}",
+                Hint::command(args).0
+            )))
+        }
+        "not_executable" => data
+            .get("resolved")
+            .and_then(Value::as_str)
+            .map(|path| Hint(format!("chmod +x {}", crate::shell_quote(path)))),
+        _ => None,
+    }
+}
+
 /// Candidate list for `not_found` and `ambiguous`.
 fn candidates(data: &Value) -> String {
     let names: Vec<String> = list(data, "candidates").iter().map(display_value).collect();
@@ -104,14 +151,22 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
         }
     };
     match error.code.as_str() {
-        "not_found" => (
-            format!(
-                "{} not found; candidates: {}",
-                reference(),
-                candidates(data)
-            ),
-            Some(Hint::command(["lane", "ls"])),
-        ),
+        // The caller replaces the hint with one that lists what this command accepts.
+        "not_found" => {
+            let options = list(data, "candidates");
+            let name = reference();
+            // A typo of a listed name is the likeliest meaning.
+            let mut message = format!("{name} not found");
+            if let Some(guess) = did_you_mean(name.rsplit(':').next().unwrap_or(&name), options) {
+                message.push_str(&format!("; did you mean {}?", super::clean(guess)));
+            }
+            match options.len() {
+                0 => {}
+                1..=12 => message.push_str(&format!("; options: {}", candidates(data))),
+                n => message.push_str(&format!("; {n} options")),
+            }
+            (message, Some(Hint::command(["lane", "ls"])))
+        }
         "ambiguous" => (
             format!(
                 "{} matches several lanes: {}",
@@ -138,8 +193,19 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             } else if let Some(running) = data.get("lanes_running").and_then(Value::as_array) {
                 let names: Vec<String> = running.iter().map(display_value).collect();
                 format!("shared infra serves running lanes {}", names.join(", "))
+            } else if let Some(lanes) = data
+                .get("lanes")
+                .and_then(Value::as_array)
+                .filter(|lanes| !lanes.is_empty())
+            {
+                // `lane gc`: the lanes whose worktree is gone.
+                let names: Vec<String> = lanes.iter().map(display_value).collect();
+                format!("this removes lanes {} and their data", names.join(", "))
             } else if let Some(processes) = int(data, "processes") {
-                format!("this stops {processes} running processes")
+                match processes {
+                    1 => "this stops 1 running process".into(),
+                    n => format!("this stops {n} running processes"),
+                }
             } else if !text(data, "lane").is_empty() {
                 format!("this removes lane {} and its data", text(data, "lane"))
             } else {
@@ -231,10 +297,7 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             format!("invalid config: {}", config_location(data)),
             Some(Hint::command(["config", "check"])),
         ),
-        "no_config" => (
-            "no devlanes.yaml in this worktree".into(),
-            Some(Hint::command(["config", "check"])),
-        ),
+        "no_config" => no_config(data),
         "units_required" => (
             "name at least one unit".into(),
             Some(match data.get("lane").and_then(Value::as_str) {
@@ -242,15 +305,30 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
                 None => Hint::command(["status"]),
             }),
         ),
-        "unit_failed" | "ready_timeout" | "spawn_failed" => (
+        // `with -- COMMAND` could not start the command (127, like a shell).
+        "spawn_failed" if data.get("program").is_some() && data.get("unit").is_none() => (
+            format!(
+                "cannot run {}: {}",
+                field(data, "program"),
+                text(data, "message")
+            ),
+            None,
+        ),
+        // The unit alone: start summaries list it under its lane already.
+        "spawn_failed" => (
+            format!(
+                "{} could not start: {}",
+                text(data, "unit"),
+                spawn_cause(data)
+            ),
+            spawn_hint(data).or_else(|| logs_hint(data)),
+        ),
+        "unit_failed" | "ready_timeout" => (
             match error.code.as_str() {
                 "unit_failed" => format!("{} failed", target(data)),
-                "ready_timeout" => format!("{} did not become ready in time", target(data)),
-                _ => format!(
-                    "{} could not start: {}",
-                    target(data),
-                    text(data, "message")
-                ),
+                // Without a target it sits on the unit's own row.
+                "ready_timeout" if target(data).is_empty() => "did not become ready in time".into(),
+                _ => format!("{} did not become ready in time", target(data)),
             },
             logs_hint(data),
         ),
@@ -359,8 +437,12 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
                         ),
                     },
                 },
-                (!unit.is_empty() && !lane.is_empty())
-                    .then(|| Hint::command(["stop", unit.as_str(), "--lane", lane.as_str()])),
+                // The daemon's `command` is the exact stop for this orphan.
+                match data.get("command").and_then(Value::as_str) {
+                    Some(command) => Some(Hint(super::clean(command))),
+                    None => (!unit.is_empty() && !lane.is_empty())
+                        .then(|| Hint::command(["stop", unit.as_str(), "--lane", lane.as_str()])),
+                },
             )
         }
         "interrupted" => (
@@ -412,17 +494,474 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
                 .unwrap_or_else(|| error.code.replace('_', " ")),
             Some(Hint::command(["certs", "trust", "--hosts"])),
         ),
-        _ => (
-            match data.get("message").and_then(Value::as_str) {
-                Some(message) => {
-                    format!("{}: {}", super::clean(&error.code), super::clean(message))
+        code => more_errors(code, data).unwrap_or_else(|| {
+            (
+                match data.get("message").and_then(Value::as_str) {
+                    Some(message) => {
+                        format!("{}: {}", super::clean(code), super::clean(message))
+                    }
+                    None if data.is_null() || *data == json!({}) => super::clean(code),
+                    None => format!("{}: {}", super::clean(code), compact_fields(data)),
+                },
+                None,
+            )
+        }),
+    }
+}
+
+/// Where to find a minimal `devlanes.yaml` to start from.
+pub(crate) const EXAMPLE_CONFIG: &str =
+    "https://github.com/devlanes-run/devlanes/blob/main/docs/examples/minimal.yaml";
+
+/// `no_config` (`{path, searched_to}`; older daemons send `{lane}`): where the
+/// search looked, and an example to create the file from. Never `config check`,
+/// which fails the same way.
+fn no_config(data: &Value) -> (String, Option<Hint>) {
+    let path = text(data, "path");
+    let root = text(data, "searched_to");
+    let message = match (path.is_empty(), root.is_empty()) {
+        (false, false) => {
+            format!("no devlanes.yaml in {path} or its parents (searched up to {root})")
+        }
+        (false, true) => format!("no devlanes.yaml in {path} or its parents"),
+        _ if !text(data, "lane").is_empty() => {
+            format!("lane {} has no devlanes.yaml", text(data, "lane"))
+        }
+        _ => "no devlanes.yaml in this directory or its parents".into(),
+    };
+    let place = if root.is_empty() {
+        "the repository root".to_owned()
+    } else {
+        root
+    };
+    (
+        message,
+        Some(Hint(format!(
+            "create devlanes.yaml in {place}; a minimal one: {EXAMPLE_CONFIG}"
+        ))),
+    )
+}
+
+/// The closest of `candidates` to `name` by edit distance, when it is close enough
+/// to be a typo (at most a third of the name's length, and at least 1).
+fn did_you_mean<'a>(name: &str, candidates: &'a [Value]) -> Option<&'a str> {
+    let limit = (name.chars().count() / 3).max(1);
+    candidates
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|candidate| (edit_distance(name, candidate), candidate))
+        .filter(|(distance, _)| *distance <= limit)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, candidate)| candidate)
+}
+
+/// Levenshtein distance over characters.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, left) in a.chars().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, right) in b.iter().enumerate() {
+            let cost = usize::from(left != *right);
+            current.push(
+                (previous[j] + cost)
+                    .min(previous[j + 1] + 1)
+                    .min(current[j] + 1),
+            );
+        }
+        previous = current;
+    }
+    previous[b.len()]
+}
+
+/// Lane and unit codes beyond the common ones in [`error_message`]; `None` for a
+/// code without wording. Every code the daemon sends has an arm here or there
+/// (`tests/it/codes.rs` checks the daemon's sources).
+fn more_errors(code: &str, data: &Value) -> Option<(String, Option<Hint>)> {
+    let lane = text(data, "lane");
+    let message = data
+        .get("message")
+        .and_then(Value::as_str)
+        .map(super::clean);
+    let with_message = |text: String| match &message {
+        Some(message) => format!("{text}: {message}"),
+        None => text,
+    };
+    let names = |key: &str| -> String {
+        list(data, key)
+            .iter()
+            .map(display_value)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Some(match code {
+        "port_error" => {
+            let unit = target(data);
+            let line = match data.get("port").filter(|port| !port.is_null()) {
+                Some(port) => format!(
+                    "{unit} needs port {}, which this lane's port block lacks since the config changed",
+                    display_value(port)
+                ),
+                None => with_message(format!("ports for {unit} could not be assigned")),
+            };
+            // The holder named by the data is what to stop.
+            let hint = match (int(data, "pid"), text(data, "holder_lane")) {
+                (Some(pid), _) => Some(Hint(format!("stop process {pid}, then retry"))),
+                (None, holder) if !holder.is_empty() => {
+                    Some(Hint::command(["stop", "--lane", holder.as_str()]))
                 }
-                None if data.is_null() || *data == json!({}) => super::clean(&error.code),
-                None => format!("{}: {}", super::clean(&error.code), compact_fields(data)),
+                _ if !lane.is_empty() => Some(Hint::command(["stop", "--lane", lane.as_str()])),
+                _ => Some(Hint::command(["debug", "errors"])),
+            };
+            (line, hint)
+        }
+        "unit_running" => {
+            let unit = target(data);
+            (
+                format!("{unit} is already running; stop it first, or restart it"),
+                Some(Hint::command(["restart", unit.as_str()])),
+            )
+        }
+        "unknown_profile" => {
+            let profile = text(data, "profile");
+            let options = list(data, "candidates");
+            match did_you_mean(&profile, options) {
+                Some(guess) => (
+                    format!(
+                        "no profile {profile}; did you mean {}?",
+                        super::clean(guess)
+                    ),
+                    Some(Hint::command(["start", "--profile", guess])),
+                ),
+                None => (
+                    format!("no profile {profile}; profiles: {}", candidates(data)),
+                    None,
+                ),
+            }
+        }
+        "worktree_missing" => (
+            format!("the worktree {} no longer exists", field(data, "path")),
+            Some(Hint::command(["lane", "gc"])),
+        ),
+        "task_failed" => {
+            let task = text(data, "task");
+            (
+                match int(data, "exit_code") {
+                    Some(code) => format!("task {task} failed with exit code {code}"),
+                    None => format!("task {task} failed"),
+                },
+                (!task.is_empty()).then(|| {
+                    if lane.is_empty() {
+                        Hint::command(["logs", task.as_str(), "--tail", "200"])
+                    } else {
+                        Hint::logs(&lane, &task, 200)
+                    }
+                }),
+            )
+        }
+        "setup_failed" => (
+            format!("infra setup failed: {}", names("entries")),
+            Some(Hint::command(["debug", "errors"])),
+        ),
+        "service_failed" => {
+            let units = names("units");
+            let first = list(data, "units")
+                .first()
+                .map(display_value)
+                .unwrap_or_default();
+            (
+                if units.is_empty() {
+                    "a service failed".into()
+                } else {
+                    format!("{units} failed")
+                },
+                (!first.is_empty()).then(|| {
+                    if lane.is_empty() {
+                        Hint::command(["logs", first.as_str(), "--tail", "200"])
+                    } else {
+                        Hint::logs(&lane, &first, 200)
+                    }
+                }),
+            )
+        }
+        "phase_failed" => {
+            let inner = data
+                .get("error")
+                .and_then(|inner| {
+                    // The inner error's hints need the lane the phase ran in.
+                    let mut inner_data = inner.get("data").cloned().unwrap_or(json!({}));
+                    if let Some(map) = inner_data.as_object_mut()
+                        && !lane.is_empty()
+                    {
+                        map.entry("lane").or_insert_with(|| json!(lane));
+                    }
+                    Some(RpcError::new(inner.get("code")?.as_str()?, inner_data, 1))
+                })
+                .map(|inner| error_message(&inner));
+            let phase = field(data, "phase");
+            match inner {
+                Some((why, hint)) => (format!("the {phase} phase failed: {why}"), hint),
+                None => (format!("the {phase} phase failed"), None),
+            }
+        }
+        "start_failed" => {
+            let units = names("units");
+            (
+                if units.is_empty() {
+                    format!("{} did not become ready", field(data, "lane"))
+                } else {
+                    format!("{} did not become ready: {units}", field(data, "lane"))
+                },
+                (!lane.is_empty()).then(|| Hint::command(["status", lane.as_str()])),
+            )
+        }
+        "pool_exhausted" => (
+            format!(
+                "the port pool has no free block of {} ports for another lane",
+                field(data, "block_size")
+            ),
+            Some(Hint::command(["lane", "gc"])),
+        ),
+        "block_too_small" => (
+            format!(
+                "the lane's port block of {} ports cannot hold every port the config asks for; raise lanes.block_size in devlanes.yaml",
+                field(data, "block_size")
+            ),
+            None,
+        ),
+        "port_block_conflict" => (
+            "another lane took the same port block at the same moment; retry".into(),
+            None,
+        ),
+        "port_allocation_failed" => (
+            with_message("ports could not be allocated".into()),
+            Some(Hint::command(["doctor"])),
+        ),
+        "mixed_lanes" => (
+            format!(
+                "{} belong to different lanes; name units of one lane per command",
+                names("units")
+            ),
+            None,
+        ),
+        "not_running" => {
+            let unit = target(data);
+            (
+                format!("{unit} is not running"),
+                Some(Hint::command(["start", unit.as_str()])),
+            )
+        }
+        "stop_timeout" => (
+            format!(
+                "{} did not report its exit after the stop; its process may still run",
+                target(data)
+            ),
+            Some(Hint::command(["status"])),
+        ),
+        "host_not_connected" => {
+            let host = text(data, "host");
+            (
+                format!("not connected to {host}"),
+                Some(Hint::command(["remote", "connect", host.as_str()])),
+            )
+        }
+        "remote_failed" => (
+            with_message(format!("remote {}", field(data, "host"))),
+            Some(Hint::command(["remote", "ls"])),
+        ),
+        "secrets_failed" => (
+            with_message(match data.get("profile").and_then(Value::as_str) {
+                Some(profile) => format!("secrets for fnox profile {profile} could not be read"),
+                None => "secrets could not be read".into(),
+            }),
+            Some(Hint::command(["secrets", "unlock"])),
+        ),
+        "script_error" => (
+            match data.get("file").and_then(Value::as_str) {
+                Some(file) => format!(
+                    "{}: no script runner knows {}",
+                    target(data),
+                    super::clean(file)
+                ),
+                None => with_message(format!("{}: run_script", target(data))),
             },
             None,
         ),
+        "contributor_failed" => (
+            with_message(format!(
+                "{} platform setup for {}",
+                field(data, "contributor"),
+                target(data)
+            )),
+            None,
+        ),
+        "launch_check_failed" => (with_message("the start was refused".into()), None),
+        "prepared_file_outside_lane" => (
+            format!(
+                "a prepared file would be written outside the lane's worktree: {}",
+                field(data, "path")
+            ),
+            None,
+        ),
+        "active_runs" => (
+            message.unwrap_or_else(|| "runs are still recorded as running".into()),
+            Some(Hint::command(["stop"])),
+        ),
+        "state_conflict" => (
+            message.unwrap_or_else(|| "state.db already has a conflicting record".into()),
+            Some(Hint::command(["status"])),
+        ),
+        "state_corrupt" => (
+            message.unwrap_or_else(|| "state.db holds an unreadable value".into()),
+            Some(Hint::command(["daemon", "reset-state", "--yes"])),
+        ),
+        "state_error" => (
+            with_message("the state database failed".into()),
+            Some(Hint::command(["daemon", "logs"])),
+        ),
+        "log_unavailable" => ("the unit's log cannot be read now; retry".into(), None),
+        "unknown_stream" => ("the attached terminal is gone; attach again".into(), None),
+        "bad_request" => (
+            with_message("the daemon could not read the request".into()),
+            Some(Hint::command(["daemon", "status"])),
+        ),
+        "no_url" => (
+            match target(data) {
+                unit if !unit.is_empty() => format!("{unit} has no URL"),
+                _ => "this unit has no URL".into(),
+            },
+            Some(Hint::command(["url", "ls"])),
+        ),
+        "unsafe_home" => unsafe_home(data),
+        // `{container, check, timeout_ms}`: an infra container's ready check.
+        "container_not_ready" => (
+            format!(
+                "container {} did not pass its {} check within {}",
+                field(data, "container"),
+                field(data, "check"),
+                data.get("timeout_ms")
+                    .and_then(Value::as_u64)
+                    .map_or_else(|| "its timeout".into(), super::duration)
+            ),
+            Some(Hint::command(["infra", "status"])),
+        ),
+        // A unit a `stop` or `restart` (`by`) took out of a running start.
+        "cancelled_by_stop" => (
+            format!(
+                "taken out of the start by devlanes {}",
+                match text(data, "by").as_str() {
+                    "restart" => "restart",
+                    _ => "stop",
+                }
+            ),
+            None,
+        ),
+        "unassigned" => (
+            match data.get("reason").and_then(Value::as_str) {
+                Some("pool_exhausted") => format!(
+                    "{} has no ports: the port pool is full",
+                    field(data, "lane")
+                ),
+                Some("lanes_max") => format!(
+                    "{} has no ports: lanes.max {} is reached",
+                    field(data, "lane"),
+                    field(data, "max")
+                ),
+                _ => format!("{} has no ports assigned", field(data, "lane")),
+            },
+            Some(Hint::command(["lane", "gc"])),
+        ),
+        "port_mirrored" => {
+            let host = text(data, "host");
+            (
+                format!(
+                    "port {} is mirrored from {host} for {}",
+                    field(data, "port"),
+                    field(data, "unit")
+                ),
+                Some(Hint::command(["remote", "disconnect", host.as_str()])),
+            )
+        }
+        // Start phase skips (`! infra skipped: …`); `no_*` ones are not printed.
+        "already_done" => ("already done".into(), None),
+        "setup_only" => ("only setup was asked for".into(), None),
+        "not_resolved" => ("the config could not be resolved".into(), None),
+        "profile_disables_infra" => ("the selected profiles turn infra off".into(), None),
+        "timed_out" => ("the start timed out".into(), None),
+        "cancelled" => ("cancelled".into(), None),
+        "no_infra" => ("no infra configured".into(), None),
+        "no_setup" => ("no setup commands".into(), None),
+        "no_tasks" => ("no tasks for this phase".into(), None),
+        "no_services" => ("no services selected".into(), None),
+        _ => return None,
+    })
+}
+
+/// A `remote.warning` event (`{host, code, lane?, hosts?, port?}`) as one line.
+pub(crate) fn remote_warning(code: &str, data: &Value) -> String {
+    let host = field(data, "host");
+    let hosts = list(data, "hosts")
+        .iter()
+        .map(display_value)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match code {
+        "lane_skipped" => format!(
+            "{host}: lane {} is not mirrored; this machine already serves {hosts}",
+            field(data, "lane")
+        ),
+        "hosts_skipped" => format!(
+            "{host}: {hosts} are not mirrored; they are outside the hostnames this machine routes"
+        ),
+        "port_in_use" => format!(
+            "{host}: port {} is busy here, so it is not mirrored",
+            field(data, "port")
+        ),
+        other => match data.get("message").and_then(Value::as_str) {
+            Some(message) => format!("{host}: {}", super::clean(message)),
+            None => format!("{host}: {}", super::clean(other).replace('_', " ")),
+        },
     }
+}
+
+/// Whether `code` has its own wording as an error, lane warning or remote
+/// warning, rather than the generic `code: message` fallback.
+pub(crate) fn has_wording(code: &str) -> bool {
+    const PROBE: &str = "zz-probe";
+    let data = json!({"message": PROBE});
+    let (error, _) = error_message(&RpcError::new(code, data.clone(), 1));
+    let fallback = format!("{code}: {PROBE}");
+    error != fallback
+        || lane_warning(code, &data) != PROBE
+        || remote_warning(code, &data) != format!("unknown: {PROBE}")
+}
+
+/// `unsafe_home` (`{path, problem, owner?, mode?, fix?}`): the daemon refuses a
+/// state directory others could write; `mode` problems get `chmod 700`.
+fn unsafe_home(data: &Value) -> (String, Option<Hint>) {
+    let path = field(data, "path");
+    let why = match text(data, "problem").as_str() {
+        "mode" => match data.get("mode").filter(|mode| !mode.is_null()) {
+            Some(mode) => format!("mode {} lets other users in", display_value(mode)),
+            None => "other users can access it".into(),
+        },
+        "owner" => match data.get("owner").filter(|owner| !owner.is_null()) {
+            Some(owner) => format!("it is owned by {}, not you", display_value(owner)),
+            None => "another user owns it".into(),
+        },
+        "symlink" => "it is a symlink".into(),
+        "not_a_directory" => "it is not a directory".into(),
+        _ => text(data, "message"),
+    };
+    let fix = data
+        .get("fix")
+        .and_then(Value::as_str)
+        .map(|fix| Hint(super::clean(fix)))
+        .or_else(|| {
+            (text(data, "problem") == "mode")
+                .then(|| Hint(format!("chmod 700 {}", crate::shell_quote(&path))))
+        });
+    (format!("devlanes refuses its home {path}: {why}"), fix)
 }
 
 /// A daemon of another protocol: what runs, and what restarting it costs.
@@ -631,8 +1170,8 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
             Some(Hint::command(["config", "check"])),
         ),
         "spawn_failed" => (
-            format!("could not start: {}", text(data, "message")),
-            Some(Hint::logs(lane, unit, 200)),
+            format!("could not start: {}", spawn_cause(data)),
+            Some(spawn_hint(data).unwrap_or_else(|| Hint::logs(lane, unit, 200))),
         ),
         "helper_missing" | "sudo_denied" | "helper_outdated" | "helper_version_mismatch" => {
             let hosts: Vec<String> = list(data, "hosts").iter().map(display_value).collect();

@@ -130,7 +130,7 @@ impl Inner {
                 if repository.is_some() {
                     let _ = engine.relist(&project).await;
                 }
-                engine.watch_project(&project, repository);
+                engine.watch_project(&project, repository).await;
             }
         });
         tokio::spawn(self.clone().sampler_loop());

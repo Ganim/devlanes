@@ -11,7 +11,7 @@ mod mirror;
 mod sync;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -47,6 +47,8 @@ use crate::{
 const CONNECT_WAIT: Duration = Duration::from_secs(150);
 /// Unanswered ssh prompts are cancelled after this long.
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a local spawn waits for box mirrors to release its ports.
+const RELEASE_WAIT: Duration = Duration::from_secs(3);
 
 /// Stream ids for prompts start far above the engine's own attach ids, so both
 /// can share one client connection.
@@ -70,6 +72,17 @@ impl Remotes {
         self.all()
             .iter()
             .flat_map(|conn| lock(&conn.view).routes.clone())
+            .collect()
+    }
+
+    /// Ports of every live box's non-hidden units, idle ones included, which new
+    /// local port blocks keep clear of: both machines allocate from the same
+    /// default pool, so their first lanes would otherwise share numbers.
+    pub(crate) fn advertised_ports(&self) -> BTreeSet<u16> {
+        self.all()
+            .iter()
+            .filter(|conn| !conn.ended())
+            .flat_map(|conn| conn.registry.current().advertised_ports())
             .collect()
     }
 
@@ -176,6 +189,8 @@ pub(crate) struct HostConn {
     cancel: CancellationToken,
     board: Arc<PromptBoard>,
     view: Mutex<mirror::View>,
+    /// Makes the mirror reconcile now, for a local spawn waiting on a port.
+    wake: tokio::sync::Notify,
     /// Waited for on close, so this host's listeners are gone afterwards.
     mirror_task: Mutex<Option<JoinHandle<()>>>,
     /// Sync status by `lane:unit#index`.
@@ -341,6 +356,23 @@ fn now_ms() -> u64 {
 /// `host_not_connected`: `disconnect` named a box without a `connect`.
 fn not_connected(host: &str) -> RpcError {
     RpcError::new("host_not_connected", json!({"host": host}), 4)
+}
+
+/// `port_mirrored`: a local service needs a port that the mirror of box `host`
+/// holds for its unit `unit` (`project@lane:unit`).
+fn port_mirrored(host: &str, port: u16, unit: &str) -> RpcError {
+    RpcError::new(
+        "port_mirrored",
+        json!({
+            "port": port,
+            "host": host,
+            "unit": unit,
+            "message": format!(
+                "port {port} is mirrored from box {host} for {unit}; stop {unit} on the box or run `devlanes remote disconnect {host}`"
+            ),
+        }),
+        1,
+    )
 }
 
 /// `remote_failed`: the link failed.
@@ -515,6 +547,7 @@ impl Inner {
             cancel: CancellationToken::new(),
             board,
             view: Mutex::new(mirror::View::default()),
+            wake: tokio::sync::Notify::new(),
             mirror_task: Mutex::new(None),
             syncs: Mutex::new(BTreeMap::new()),
             hashes: Mutex::new(HashMap::new()),
@@ -649,7 +682,8 @@ impl Inner {
     }
 
     /// `sync.status`: sync entries of lanes with running services (what a tunnel may
-    /// stream), plus the state of syncs this machine receives from boxes.
+    /// stream; `kind: local` with the local copy's state under `local`), plus the
+    /// state of syncs this machine receives from boxes (`kind: remote`).
     pub(crate) async fn sync_status_method(self: &Arc<Self>) -> Result<Value, RpcError> {
         let mut items = Vec::new();
         for (project, lane) in self.all_lanes() {
@@ -669,7 +703,7 @@ impl Inner {
             };
             for service in resolved.services.values() {
                 for (index, spec) in service.sync.iter().enumerate() {
-                    items.push(SyncEntry {
+                    let entry = SyncEntry {
                         lane: reference.clone(),
                         project: project.name(),
                         unit: service.unit.clone(),
@@ -681,7 +715,13 @@ impl Inner {
                             .map(|leaf| leaf.to_string_lossy().into_owned())
                             .unwrap_or_else(|| "sync".into()),
                         ignore: spec.ignore.clone(),
-                    });
+                    };
+                    // Tunnels read the entry fields; `kind` and `local` are extra.
+                    let mut item = serde_json::to_value(entry).unwrap_or_default();
+                    item["kind"] = json!("local");
+                    item["local"] =
+                        crate::local_sync::status(&lane, &service.unit, index).unwrap_or_default();
+                    items.push(item);
                 }
             }
         }
@@ -690,6 +730,12 @@ impl Inner {
             .all()
             .iter()
             .flat_map(|conn| lock(&conn.syncs).values().cloned().collect::<Vec<_>>())
+            .map(|mut status| {
+                if let Some(fields) = status.as_object_mut() {
+                    fields.insert("kind".into(), json!("remote"));
+                }
+                status
+            })
             .collect();
         Ok(json!({
             "items": items,
@@ -697,6 +743,32 @@ impl Inner {
             "truncated": false,
             "next_cursor": null,
         }))
+    }
+
+    /// Makes sure no box mirror holds one of `ports` before a local service binds
+    /// them. A mirror gives up ports inside a local block (local lanes win), so
+    /// this wakes the mirrors and waits up to [`RELEASE_WAIT`]; a port still held
+    /// then, such as a literal `PORT` the box also uses, fails with `port_mirrored`.
+    pub(crate) async fn release_for_local(&self, ports: &BTreeSet<u16>) -> Result<(), RpcError> {
+        let deadline = tokio::time::Instant::now() + RELEASE_WAIT;
+        loop {
+            let held = self.remote.all().into_iter().find_map(|conn| {
+                let found = lock(&conn.view)
+                    .bound
+                    .iter()
+                    .find(|(port, _)| ports.contains(*port))
+                    .map(|(port, unit)| (*port, unit.clone()));
+                found.map(|(port, unit)| (conn, port, unit))
+            });
+            let Some((conn, port, unit)) = held else {
+                return Ok(());
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return Err(port_mirrored(&conn.name, port, &unit));
+            }
+            conn.wake.notify_one();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Closes every box connection; called on daemon shutdown so ssh masters exit.

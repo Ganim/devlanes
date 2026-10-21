@@ -149,6 +149,7 @@ jobs:
             "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
           jq -e '.artifacts | length == 4' dist/release-manifest.json
           cp crates/config/schema.json crates/config/user-schema.json dist/
+          cp install.sh dist/
       # Verify with: gh attestation verify devlanes-VERSION-TARGET.tar.gz --repo devlanes-run/devlanes
       - name: Attest build provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -165,7 +166,7 @@ jobs:
           if-no-files-found: error
       - name: Upload to a draft release
         run: |
-          set -- dist/*.tar.gz dist/SHA256SUMS dist/release-manifest.json dist/schema.json dist/user-schema.json
+          set -- dist/*.tar.gz dist/SHA256SUMS dist/release-manifest.json dist/schema.json dist/user-schema.json dist/install.sh
           if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then
             # A rerun may refill a draft, but published assets are never replaced.
             if [ "$draft" != true ]; then
@@ -191,6 +192,20 @@ jobs:
     steps:
       - name: Publish the release
         run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+
+  website:
+    needs: [release, publish]
+    if: needs.release.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refresh website release files
+        env:
+          # Fine-grained token scoped to website with Contents write permission.
+          GH_TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
+        run: |
+          gh api --method POST repos/devlanes-run/website/dispatches \
+            -f event_type=devlanes-release
 
   homebrew-verify:
     needs: [release, publish]

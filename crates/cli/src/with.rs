@@ -43,6 +43,10 @@ pub struct WithOwnership {
 pub struct WithStart {
     pub ready: bool,
     pub failures: Vec<UnitFailure>,
+    /// The daemon's start result as sent (a `StartResult`), rendered after the
+    /// phases; `null` when the driver has none.
+    #[serde(default)]
+    pub result: Value,
 }
 
 /// Peaks must come from run history, never from the latest instantaneous sample.
@@ -138,12 +142,20 @@ pub async fn run_with<D: WithDriver + ?Sized>(
         .await;
     let ownership = driver.ownership();
     let mut failures = Vec::new();
+    let mut start_result = Value::Null;
     match start {
         Ok(start) if start.ready && start.failures.is_empty() => {
-            // A terminal start result closes any still-open CI phase before test output
-            // begins. JSON has no phases, and the empty object would be a stray NDJSON line.
-            if runtime.mode != crate::OutputMode::Json
-                && let Ok(rendered) = reporter.result(&Report::new(Method::Start, &json!({})))
+            // The start result (units and URLs) also closes any still-open CI phase
+            // before test output begins. Without one, JSON prints nothing here: an
+            // empty object would be a stray NDJSON line.
+            let shown = if start.result.is_null() {
+                json!({})
+            } else {
+                start.result
+            };
+            if (runtime.mode != crate::OutputMode::Json
+                || !shown.as_object().is_some_and(|o| o.is_empty()))
+                && let Ok(rendered) = reporter.result(&Report::new(Method::Start, &shown))
             {
                 emit(rendered);
             }
@@ -168,12 +180,24 @@ pub async fn run_with<D: WithDriver + ?Sized>(
         }
         Ok(start) => {
             failures = start.failures;
+            // Units still starting or queued when the start gave up failed too: CI
+            // needs their logs and an annotation as much as a crashed unit's.
+            for unit in not_ready(&start.result) {
+                if !failures.iter().any(|failure| failure.unit == unit.unit) {
+                    failures.push(unit);
+                }
+            }
             if failures.is_empty() {
                 emit(reporter.error(
-                    &RpcError::new("start_failed", json!({"lane": ownership.lane}), 1),
+                    &RpcError::new(
+                        "start_failed",
+                        json!({"lane": ownership.lane, "units": ownership.units}),
+                        1,
+                    ),
                     None,
                 ));
             }
+            start_result = start.result;
         }
         // SIGINT/SIGTERM during the start: 130/143 once the teardown is done.
         Err(error) if error.code == "interrupted" => {
@@ -224,19 +248,36 @@ pub async fn run_with<D: WithDriver + ?Sized>(
                 .collect();
         }
     }
-    // Only failures need a page; without them it would be a stray empty items line.
+    // The start result with every failure and its tail: one annotation each in
+    // CI. Only failures need a page; without them it would be a stray line.
     if !failures.is_empty() {
-        let failure_data = json!({"items": failures.iter().map(|f| json!({
-            "name": f.unit, "lane": f.lane, "state": "failed", "exit_code": f.exit_code,
-            "pid": null, "ports": {}, "urls": [], "actor": {"kind":"human"}, "reason": null,
-            "log_tail": f.log_tail,
-        })).collect::<Vec<_>>(), "truncated": false, "next_cursor": null});
-        if let Ok(rendered) = reporter.result(&Report::new(Method::Start, &failure_data)) {
+        let data = if start_result.get("ready").is_some() {
+            with_failures(start_result, &failures)
+        } else {
+            json!({"items": failures.iter().map(|f| json!({
+                "name": f.unit, "lane": f.lane, "state": "failed", "exit_code": f.exit_code,
+                "pid": null, "ports": {}, "urls": [], "actor": {"kind":"human"}, "reason": null,
+                "log_tail": f.log_tail,
+            })).collect::<Vec<_>>(), "truncated": false, "next_cursor": null})
+        };
+        if let Ok(rendered) = reporter.result(&Report::new(Method::Start, &data)) {
             emit(rendered);
         }
     }
+    // Artifacts and the summary cover what this invocation started, not every
+    // unit that already ran in the lane.
+    let owned = |unit: &str| {
+        ownership.units.iter().any(|owned| {
+            owned == unit || owned.rsplit_once(':').is_some_and(|(_, name)| name == unit)
+        })
+    };
     if let Some(directory) = &plan.logs_dir {
-        match write_log_artifacts(directory, &logs).await {
+        let owned_logs: Vec<UnitLogs> = logs
+            .iter()
+            .filter(|unit| owned(&unit.unit))
+            .cloned()
+            .collect();
+        match write_log_artifacts(directory, &owned_logs).await {
             Ok(files) => result.log_files = files,
             Err(error) => record_io(&mut result, emit, error),
         }
@@ -260,6 +301,7 @@ pub async fn run_with<D: WithDriver + ?Sized>(
             }
         }
     };
+    peaks.retain(|peak| owned(&peak.unit));
     for unit in &ownership.units {
         if !peaks
             .iter()
@@ -317,6 +359,75 @@ pub async fn run_with<D: WithDriver + ?Sized>(
             emit(reporter.error(&error, None));
         }
     }
+    result
+}
+
+/// Services of a start result still `starting` or `queued` when it ended without
+/// being ready (its timeout passed), as failures without an exit code.
+fn not_ready(result: &Value) -> Vec<UnitFailure> {
+    if result.get("ready").and_then(Value::as_bool) != Some(false) {
+        return Vec::new();
+    }
+    let lane = result
+        .get("lane")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    result
+        .get("units")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|unit| {
+            matches!(
+                unit.get("state").and_then(Value::as_str),
+                Some("starting" | "queued")
+            )
+        })
+        .filter_map(|unit| {
+            Some(UnitFailure {
+                lane: unit
+                    .get("lane")
+                    .and_then(Value::as_str)
+                    .unwrap_or(lane)
+                    .to_owned(),
+                unit: unit.get("name")?.as_str()?.to_owned(),
+                exit_code: None,
+                log_tail: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// `result` (a start result) with `failures` in its `failures` list: tails filled
+/// in, units that timed out added with a `ready_timeout` reason.
+fn with_failures(mut result: Value, failures: &[UnitFailure]) -> Value {
+    let mut listed: Vec<Value> = result
+        .get("failures")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for failure in failures {
+        let known = listed
+            .iter_mut()
+            .find(|entry| entry.get("unit").and_then(Value::as_str) == Some(&failure.unit));
+        match known {
+            Some(entry) => {
+                let empty = entry
+                    .get("log_tail")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty);
+                if empty {
+                    entry["log_tail"] = json!(failure.log_tail);
+                }
+            }
+            None => listed.push(json!({
+                "lane": failure.lane, "unit": failure.unit, "exit_code": failure.exit_code,
+                "log_tail": failure.log_tail,
+                "reason": {"code": "ready_timeout", "data": {}, "exit_code": 1},
+            })),
+        }
+    }
+    result["failures"] = Value::Array(listed);
     result
 }
 

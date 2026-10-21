@@ -56,6 +56,7 @@ devlanes-tui = { path = "../../crates/tui" }
 devlanes-core = { path = "../../crates/core" }
 devlanes-env-direnv = { path = "../../crates/env-direnv" }
 devlanes-env-mise = { path = "../../crates/env-mise" }
+devlanes-migrate = { path = "../../crates/migrate" }
 devlanes-infra-compose = { path = "../../crates/infra-compose" }
 devlanes-infra-docker = { path = "../../crates/infra-docker" }
 # Same version as devlanes-infra-docker; named only to read Docker's HTTP error status.
@@ -97,6 +98,7 @@ bytes.workspace = true
 crossterm = "0.29"
 rustix = { version = "1", features = ["process", "termios"] }
 serde_json.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-appender = "0.2"

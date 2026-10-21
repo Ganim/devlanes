@@ -45,10 +45,10 @@ fn preferred_terminal(paths: &Paths) -> Option<String> {
     value.as_str().map(str::to_owned)
 }
 
-/// Opens the TUI; closing it never stops anything.
-pub async fn ui(paths: &Paths) -> Result<u8, RpcError> {
+/// The TUI's launchers, terminal app and progress bar from the user config.
+pub fn tui_options(paths: &Paths) -> devlanes_tui::Options {
     use std::io::IsTerminal;
-    let options = devlanes_tui::Options {
+    devlanes_tui::Options {
         launchers: launchers(),
         terminal: preferred_terminal(paths),
         // The TUI is always human output; it still needs a terminal that draws the bar.
@@ -56,16 +56,25 @@ pub async fn ui(paths: &Paths) -> Result<u8, RpcError> {
             crate::progress::configured_mode(paths),
             std::io::stdout().is_terminal(),
         ),
-    };
-    devlanes_tui::run_with(paths.clone(), options)
+    }
+}
+
+/// A TUI failure as a CLI error.
+pub fn tui_error(error: devlanes_tui::Error) -> RpcError {
+    match error {
+        devlanes_tui::Error::NotATerminal => {
+            RpcError::new("not_a_terminal", json!({"hint": "devlanes status"}), 2)
+        }
+        other => RpcError::new("tui_failed", json!({"message": other.to_string()}), 1),
+    }
+}
+
+/// Opens the TUI; closing it never stops anything.
+pub async fn ui(paths: &Paths) -> Result<u8, RpcError> {
+    devlanes_tui::run_with(paths.clone(), tui_options(paths))
         .await
         .map(|()| 0)
-        .map_err(|error| match error {
-            devlanes_tui::Error::NotATerminal => {
-                RpcError::new("not_a_terminal", json!({"hint": "devlanes status"}), 2)
-            }
-            other => RpcError::new("tui_failed", json!({"message": other.to_string()}), 1),
-        })
+        .map_err(tui_error)
 }
 
 /// Builds the daemon engine with every concrete integration. Integrations that
@@ -79,7 +88,7 @@ pub async fn engine(
         Ok(limit) => tracing::info!(?limit, "raised the open-file limit"),
         Err(error) => tracing::warn!(%error, "cannot raise the open-file limit"),
     }
-    let (user, user_config_error) = load_user_config(&paths.home).await;
+    let (user, user_config_errors) = load_user_config(&paths.home).await;
     let (hosts_policy, hosts_tld) = devlanes_daemon::hosts::user_policy(&user);
     // The probe can wait on upstream DNS, so it runs while the store, CA and proxy start.
     let hosts_probe = (hosts_policy.user_mode() != devlanes_resolver_hosts::HostsFileMode::Never)
@@ -125,7 +134,7 @@ pub async fn engine(
     options.db_path = paths.db.clone();
     options.logs = paths.logs.clone();
     options.user = user;
-    options.user_config_error = user_config_error;
+    options.user_config_errors = user_config_errors;
     let engine: Arc<dyn Handler> = Arc::new(Engine::new(options, store, integ, shutdown));
     Ok(engine)
 }
@@ -181,26 +190,28 @@ async fn hosts_file(
 }
 
 /// `~/.devlanes/config.yaml`, or defaults when absent or invalid (logged).
-async fn load_user_config(home: &Path) -> (devlanes_config::UserConfig, Option<Value>) {
+async fn load_user_config(home: &Path) -> (devlanes_config::UserConfig, Vec<Value>) {
     let path = home.join("config.yaml");
     tokio::task::spawn_blocking(move || {
         if !path.exists() {
-            return (devlanes_config::UserConfig::default(), None);
+            return (devlanes_config::UserConfig::default(), Vec::new());
         }
-        match devlanes_config::load_user(&path) {
-            Ok(config) => (config, None),
-            // Defaults keep the daemon usable; doctor shows why they apply.
-            Err(error) => {
-                tracing::warn!(error = %error.message, "invalid user config; using defaults");
-                let located = json!({
+        // A bad key falls back to its default alone; `daemon status` and doctor
+        // list what was left out.
+        let (config, errors) = devlanes_config::load_user_lenient(&path);
+        let located: Vec<Value> = errors
+            .iter()
+            .map(|error| {
+                tracing::warn!(error = %error.message, "user config setting ignored");
+                json!({
                     "message": error.message,
                     "file": error.location.file,
                     "line": error.location.line,
                     "column": error.location.column,
-                });
-                (devlanes_config::UserConfig::default(), Some(located))
-            }
-        }
+                })
+            })
+            .collect();
+        (config, located)
     })
     .await
     .unwrap_or_default()
@@ -547,7 +558,7 @@ async fn proxy(
             Ok(tls) => {
                 status.insert(
                     "https".into(),
-                    json!({"bound": true, "port": listeners.port, "fallback_reason": listeners.fallback_reason}),
+                    json!({"bound": true, "port": listeners.port, "requested_port": user.proxy.https_port, "fallback_reason": listeners.fallback_reason}),
                 );
                 for listener in listeners.listeners() {
                     let (proxy, tls, shutdown) = (proxy.clone(), tls.clone(), shutdown.clone());
@@ -570,7 +581,7 @@ async fn proxy(
         Ok(listeners) => {
             status.insert(
                 "http".into(),
-                json!({"bound": true, "port": listeners.port, "fallback_reason": listeners.fallback_reason}),
+                json!({"bound": true, "port": listeners.port, "requested_port": user.proxy.http_port, "fallback_reason": listeners.fallback_reason}),
             );
             for listener in listeners.listeners() {
                 let (proxy, shutdown) = (proxy.clone(), shutdown.clone());
@@ -932,6 +943,33 @@ struct ContainerInfra {
     watched: Mutex<BTreeSet<String>>,
 }
 
+/// The daemon variables the `docker` CLI needs: where to find binaries and its
+/// config, which engine to talk to, locale and proxies. A daemon started by hand
+/// may carry a full shell environment; none of the rest reaches Compose.
+fn compose_base_env(vars: impl Iterator<Item = (String, String)>) -> BTreeMap<String, String> {
+    const NAMES: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "TMPDIR",
+        "LANG",
+        "TZ",
+        "SSH_AUTH_SOCK",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    ];
+    const PREFIXES: &[&str] = &["LC_", "XDG_", "DOCKER_"];
+    vars.filter(|(name, _)| {
+        NAMES.contains(&name.as_str()) || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+    })
+    .collect()
+}
+
 /// Compose failures; a missing `docker` binary means Docker is unavailable.
 fn compose_error(error: devlanes_infra_compose::Error) -> InfraError {
     match &error {
@@ -1016,8 +1054,16 @@ impl ContainerInfra {
                 None
             }
         };
+        // Compose interpolates `${VAR}` from its environment, so it gets only what
+        // the docker CLI needs from the daemon's; each project adds `infra.env`
+        // and its `.env` file (plan 7.1).
+        let cli = devlanes_infra_compose::ComposeCli::new().with_base_env(compose_base_env(
+            std::env::vars_os().filter_map(|(name, value)| {
+                Some((name.into_string().ok()?, value.into_string().ok()?))
+            }),
+        ));
         Self {
-            compose: devlanes_infra_compose::Compose::default(),
+            compose: devlanes_infra_compose::Compose::new(cli),
             docker,
             events: broadcast::channel(256).0,
             watched: Mutex::new(BTreeSet::new()),
@@ -1485,6 +1531,46 @@ impl InfraProvider for ContainerInfra {
         Ok(Value::Object(report))
     }
 
+    /// The last `tail` stdout and stderr lines of a plain container.
+    async fn container_logs(
+        &self,
+        spec: &InfraSpec,
+        container: &str,
+        tail: usize,
+    ) -> Result<Vec<String>, InfraError> {
+        use futures_util::StreamExt;
+        let docker = self.docker()?;
+        let declared = spec
+            .containers
+            .iter()
+            .find(|c| c.name == container)
+            .ok_or_else(|| {
+                InfraError::new("not_found", format!("no container named {container}"))
+            })?;
+        let scope = if declared.per_lane {
+            devlanes_infra_docker::Scope::Lane(spec.lane)
+        } else {
+            devlanes_infra_docker::Scope::Shared
+        };
+        let name = devlanes_infra_docker::container_name(&spec.project, container, scope);
+        let options = bollard::query_parameters::LogsOptionsBuilder::new()
+            .stdout(true)
+            .stderr(true)
+            .tail(&tail.to_string())
+            .build();
+        let mut stream = docker.client().logs(&name, Some(options));
+        let mut text = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                docker_error(&format!("logs of container {name}"))(
+                    devlanes_infra_docker::Error::Docker(error),
+                )
+            })?;
+            text.push_str(&String::from_utf8_lossy(&chunk.into_bytes()));
+        }
+        Ok(text.lines().map(str::to_owned).collect())
+    }
+
     /// `StartedAt` of a plain container or a shared/per-lane compose service.
     async fn container_started_at(
         &self,
@@ -1576,6 +1662,89 @@ impl InfraProvider for ContainerInfra {
     fn events(&self) -> Option<broadcast::Receiver<InfraEvent>> {
         Some(self.events.subscribe())
     }
+
+    /// Shared and per-lane compose services from `docker compose ps`, then plain
+    /// containers from the engine's list. A source that cannot answer adds nothing.
+    async fn progress(&self, spec: &InfraSpec) -> Vec<devlanes_proto::PhaseContainer> {
+        let mut progress = Vec::new();
+        if !spec.compose_files.is_empty()
+            && let Ok(shared) = self.compose.shared_status(&Self::shared(spec)).await
+        {
+            progress.extend(shared.health.iter().map(compose_progress));
+        }
+        if Self::has_lane_services(spec)
+            && let Ok(lane) = self.compose.lane_status(&Self::lane(spec)).await
+        {
+            progress.extend(lane.health.iter().map(compose_progress));
+        }
+        if !spec.containers.is_empty()
+            && let Some(docker) = &self.docker
+            && let Ok(managed) = docker.list_managed(&spec.project).await
+        {
+            for container in &spec.containers {
+                let scope = if container.per_lane {
+                    devlanes_infra_docker::Scope::Lane(spec.lane)
+                } else {
+                    devlanes_infra_docker::Scope::Shared
+                };
+                let health = managed
+                    .iter()
+                    .find(|m| m.key.as_deref() == Some(&container.name) && m.scope == Some(scope))
+                    .map_or(devlanes_infra_docker::Health::Missing, |m| m.health.clone());
+                progress.push(docker_progress(&container.name, &health));
+            }
+        }
+        progress
+    }
+}
+
+/// A compose service's health as start progress.
+fn compose_progress(
+    (name, health): (&String, &devlanes_infra_compose::Health),
+) -> devlanes_proto::PhaseContainer {
+    use devlanes_infra_compose::Health;
+    use devlanes_proto::ContainerPhase;
+    let (state, health) = match health {
+        // `up --wait` takes a running service without a healthcheck as up.
+        Health::Running => (ContainerPhase::Healthy, None),
+        Health::Starting => (ContainerPhase::WaitingHealthy, Some("starting".to_owned())),
+        Health::Healthy => (ContainerPhase::Healthy, Some("healthy".to_owned())),
+        Health::Unhealthy => (ContainerPhase::Failed, Some("unhealthy".to_owned())),
+        Health::Exited { code } => (ContainerPhase::Failed, Some(format!("exited ({code})"))),
+        Health::Other { state } if state == "created" => (ContainerPhase::Creating, None),
+        Health::Other { state } => (ContainerPhase::Starting, Some(state.clone())),
+        Health::Missing => (ContainerPhase::Creating, None),
+    };
+    devlanes_proto::PhaseContainer {
+        name: name.clone(),
+        state,
+        health,
+    }
+}
+
+/// A plain container's health as start progress, in the same words as compose's.
+fn docker_progress(
+    name: &str,
+    health: &devlanes_infra_docker::Health,
+) -> devlanes_proto::PhaseContainer {
+    use devlanes_infra_docker::Health;
+    use devlanes_proto::ContainerPhase;
+    let (state, health) = match health {
+        Health::Running => (ContainerPhase::Healthy, None),
+        Health::Starting => (ContainerPhase::WaitingHealthy, Some("starting".to_owned())),
+        Health::Healthy => (ContainerPhase::Healthy, Some("healthy".to_owned())),
+        Health::Unhealthy => (ContainerPhase::Failed, Some("unhealthy".to_owned())),
+        // The engine's container list carries no exit code.
+        Health::Exited { .. } => (ContainerPhase::Failed, Some("exited".to_owned())),
+        Health::Other { state } if state == "created" => (ContainerPhase::Creating, None),
+        Health::Other { state } => (ContainerPhase::Starting, Some(state.clone())),
+        Health::Missing => (ContainerPhase::Creating, None),
+    };
+    devlanes_proto::PhaseContainer {
+        name: name.to_owned(),
+        state,
+        health,
+    }
 }
 
 #[cfg(test)]
@@ -1621,6 +1790,27 @@ mod tests {
         );
         assert_eq!(data["status"], "HTTP 404");
         assert_eq!(data["stderr"], "No such image: postgres:16");
+    }
+
+    #[test]
+    /// Compose sees the docker CLI's variables and none of the shell's others.
+    fn compose_base_env_keeps_docker_variables_only() {
+        let vars = [
+            ("PATH", "/usr/bin"),
+            ("HOME", "/home/acme"),
+            ("DOCKER_HOST", "unix:///var/run/docker.sock"),
+            ("DOCKER_CONFIG", "/home/acme/.docker"),
+            ("LC_ALL", "C"),
+            ("POSTGRES_PASSWORD", "secret"),
+            ("COMPOSE_PROJECT_NAME", "other"),
+            ("GITHUB_TOKEN", "secret"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        let kept: Vec<String> = compose_base_env(vars.into_iter()).into_keys().collect();
+        assert_eq!(
+            kept,
+            ["DOCKER_CONFIG", "DOCKER_HOST", "HOME", "LC_ALL", "PATH"]
+        );
     }
 
     /// A route entry of `lane:unit` for `host`.
@@ -1834,19 +2024,20 @@ mod tests {
     }
 
     #[tokio::test]
-    /// An invalid user config falls back to defaults but keeps the located error
-    /// for `doctor`; a missing file is no error.
+    /// A bad user config key falls back to its default alone and keeps the
+    /// located error for `daemon status` and `doctor`; a missing file is no error.
     async fn invalid_user_config_is_kept_for_doctor() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (_, error) = load_user_config(tmp.path()).await;
-        assert!(error.is_none(), "no file, no error");
+        let (_, errors) = load_user_config(tmp.path()).await;
+        assert!(errors.is_empty(), "no file, no error");
         std::fs::write(
             tmp.path().join("config.yaml"),
-            "proxy:\n  http_port: [not, a, port]\n",
+            "proxy:\n  http_port: [not, a, port]\n  https_port: 9443\n",
         )
         .expect("config");
-        let (user, error) = load_user_config(tmp.path()).await;
-        let error = error.expect("error kept");
+        let (user, errors) = load_user_config(tmp.path()).await;
+        assert_eq!(user.proxy.https_port, 9443, "the valid key stays");
+        let error = errors.first().expect("error kept");
         assert!(!error["message"].as_str().unwrap_or_default().is_empty());
         assert_eq!(error["line"], 2, "{error}");
         assert!(

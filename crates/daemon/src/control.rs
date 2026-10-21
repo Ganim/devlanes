@@ -107,6 +107,7 @@ impl Inner {
         let arrival = self.arrive();
         let selection: Selection = params(value)?;
         let ((project, lane), selectors) = self.selection_lane(&selection.units, context).await?;
+        self.fresh_config(&project, &lane).await;
         let start_id = self.new_start_id();
         let stream = selection
             .events
@@ -185,6 +186,7 @@ impl Inner {
             return Err(RpcError::new("units_required", json!({}), 2));
         }
         let ((project, lane), selectors) = self.lane_for_units(&selection.units, context).await?;
+        self.fresh_config(&project, &lane).await;
         let start_id = self.new_start_id();
         let stream = selection
             .events
@@ -288,10 +290,9 @@ impl Inner {
     ) -> Result<Value, RpcError> {
         let arrival = self.arrive();
         let args: LaneNewParams = required(value)?;
-        let project = self
-            .project_for_cwd(&context.cwd)
-            .await?
-            .ok_or_else(|| RpcError::new("not_found", json!({"reference": context.cwd}), 3))?;
+        let Some(project) = self.project_for_cwd(&context.cwd).await? else {
+            return Err(crate::engine::no_config(&context.cwd).await);
+        };
         if !project.git {
             return Err(RpcError::new(
                 "not_a_git_project",
@@ -391,14 +392,26 @@ impl Inner {
         self.clean_lane(&project, &lane, Some(&context.actor)).await
     }
 
-    /// `lane.gc` (requires `yes`): cleans lanes whose worktrees are gone and drops
-    /// port offsets no config uses any more.
+    /// `lane.gc`: cleans lanes whose worktrees are gone and drops port offsets no
+    /// config uses any more. Needs `yes` only when there are lanes to clean; the
+    /// confirmation lists them under `lanes`.
     pub(crate) async fn lane_gc(self: &Arc<Self>, context: &Context) -> Result<Value, RpcError> {
-        if !context.yes {
-            return Err(confirmation(json!({"flag": "--yes"})));
-        }
         if let Some(project) = self.project_for_cwd(&context.cwd).await? {
             let _ = self.relist(&project).await;
+        }
+        if !context.yes {
+            let lanes: Vec<String> = self
+                .all_lanes()
+                .iter()
+                .filter_map(|(project, lane)| {
+                    let st = lane.st();
+                    let running = st.any_running() || st.busy.is_some();
+                    (!st.present && !running).then(|| st.reference(&project.name()))
+                })
+                .collect();
+            if !lanes.is_empty() {
+                return Err(confirmation(json!({"flag": "--yes", "lanes": lanes})));
+            }
         }
         let mut cleaned = Vec::new();
         let mut kept_running = Vec::new();
@@ -419,6 +432,10 @@ impl Inner {
             // watcher); a lane that runs something is never collected.
             if running {
                 kept_running.push(reference);
+                continue;
+            }
+            // Gone only after the check above: it was not confirmed.
+            if !context.yes {
                 continue;
             }
             if assigned {
@@ -577,8 +594,13 @@ impl Inner {
             literal_port: None,
             preset: None,
             color: None,
+            sync: Vec::new(),
         };
+        // Held until the unit is recorded, so a clean or reset that begins meanwhile
+        // waits and then stops it, or refuses it once the lane is released.
+        let (adhoc, _) = lane.enter_adhoc(&self.shutdown).await;
         let (host, _) = self.spawn_unit(&project, &lane, request).await?;
+        drop(adhoc);
         host.set_state(crate::units::UnitState::Ready);
         let st = lane.st();
         let summary = st
@@ -599,15 +621,14 @@ impl Inner {
         let args: RunArgs = required(value)?;
         let run = args.run;
         let (project, lane) = self.target_lane(context).await?;
+        self.fresh_config(&project, &lane).await;
         let reference = lane.st().reference(&project.name());
         if let Some(env) = carries_env(context) {
             lane.st().env = Some(env.clone());
             project.st().last_env = Some(env);
         }
-        if !run.env.is_empty() {
-            lane.st().overrides = run.env.clone();
-        }
-        let resolved = self.resolve_full(&project, &lane).await?;
+        // `--env` applies to this run only; the lane keeps its own overrides.
+        let resolved = self.resolve_overridden(&project, &lane, &run.env).await?;
         if let Some(error) = resolved.errors.get(&format!("tasks.{}", run.task)) {
             return Err(crate::resolve::resolve_error(error));
         }
@@ -640,9 +661,11 @@ impl Inner {
             let name = run.task.clone();
             let (task_project, task_lane) = (project.clone(), lane.clone());
             let resolved = resolved.clone();
-            // Ends with the daemon; `stop` of the task's unit ends it otherwise.
-            let cancel = self.shutdown.child_token();
+            // Ends with the daemon or a clean or reset of the lane; `stop` of the
+            // task's unit ends it otherwise.
+            let (adhoc, cancel) = lane.enter_adhoc(&self.shutdown).await;
             tokio::spawn(async move {
+                let _adhoc = adhoc;
                 let _ = engine
                     .run_task(
                         &task_project,
@@ -680,12 +703,15 @@ impl Inner {
             }));
         }
         // The limit fires the task's token, so `run_task` itself stops the unit,
-        // finishes the row and emits the closing event before it returns.
-        let cancel = self.shutdown.child_token();
+        // finishes the row and emits the closing event before it returns. A clean
+        // or reset of the lane fires it too, then waits for `adhoc` to drop.
+        let (adhoc, cancel) = lane.enter_adhoc(&self.shutdown).await;
+        let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let timer = args.timeout_ms.map(|ms| {
-            let cancel = cancel.clone();
+            let (cancel, expired) = (cancel.clone(), expired.clone());
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(ms)).await;
+                expired.store(true, std::sync::atomic::Ordering::SeqCst);
                 cancel.cancel();
             })
         });
@@ -702,13 +728,15 @@ impl Inner {
                 0,
             )
             .await;
+        drop(adhoc);
         if let Some(timer) = timer {
             timer.abort();
         }
-        // Only the timer fires this token, unless the daemon is shutting down; a
-        // task that succeeded just as it fired still succeeded.
+        // A clean, reset or shutdown that fired the token is no timeout, and a task
+        // that succeeded just as the limit fired still succeeded.
         let succeeded = matches!(&outcome, Ok(outcome) if outcome.code == Some(0));
-        if cancel.is_cancelled() && !self.shutdown.is_cancelled() && !succeeded {
+        let expired = expired.load(std::sync::atomic::Ordering::SeqCst);
+        if expired && !self.shutdown.is_cancelled() && !succeeded {
             return Err(RpcError::new("timeout", json!({"task": run.task}), 124));
         }
         let outcome = outcome?;
@@ -851,6 +879,12 @@ impl Inner {
         // unit after the stop and before the records it would need are gone.
         let lanes = self.all_lanes();
         let _ops = self.lock_lanes(&lanes).await;
+        // `exec` and `run` take no `op`: interrupt runs and wait for spawns in
+        // flight, so the stop below sees every unit.
+        let mut closed = Vec::with_capacity(lanes.len());
+        for (_, lane) in &lanes {
+            closed.push(lane.close_adhoc().await);
+        }
         let stopped = Self::stop_lanes_locked(&lanes).await;
         // The reset would erase the only record of orphans (of known and unknown
         // lanes) and their escaped descendants, so they are terminated first.
@@ -907,7 +941,7 @@ impl Inner {
             st.infra_containers = up.containers.clone();
             st.setup_env = up.setup_env.clone();
         }
-        self.refresh_views(&project).await;
+        self.refresh_views_held(&project, &lane).await;
         Ok(
             json!({"lane": lane.st().reference(&project.name()), "infra": up.report, "endpoints": up.namespace}),
         )
@@ -954,10 +988,16 @@ impl Inner {
         self: &Arc<Self>,
         context: &Context,
     ) -> Result<Value, RpcError> {
-        let file = devlanes_git::find_config(&context.cwd)
+        let Some(file) = devlanes_git::find_config(&context.cwd)
             .await
             .map_err(|error| internal("io", error))?
-            .ok_or_else(|| RpcError::new("not_found", json!({"reference": context.cwd}), 3))?;
+        else {
+            return Err(crate::engine::no_config(&context.cwd).await);
+        };
+        // The lane's warnings below come from its loaded config; bring it up to date.
+        if let Ok((project, lane)) = self.target_lane(context).await {
+            self.fresh_config(&project, &lane).await;
+        }
         let checks = self.config_checks();
         let known = crate::platforms::known(&self.integ.contributors);
         let path = file.clone();

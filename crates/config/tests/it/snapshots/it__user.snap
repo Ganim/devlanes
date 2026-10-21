@@ -55,5 +55,8 @@ expression: user
   },
   "updates": {
     "check": true
+  },
+  "tui": {
+    "open_on_start": true
   }
 }

@@ -347,6 +347,8 @@ async fn help_lists_clean_and_the_daemon_tab() -> TestResult {
         "daemon tab: restart / stop the daemon",
         "daemon tab: lane gc",
         "shift+tab is reserved for focus",
+        "hide the release or version notice",
+        "next tab, or lanes / monitor / daemon",
     ] {
         assert!(text.contains(expected), "missing {expected:?}:\n{text}");
     }

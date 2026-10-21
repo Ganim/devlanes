@@ -41,7 +41,8 @@ pub use session::{
 };
 pub use splice::{HALF_CLOSE_IDLE, splice};
 pub use sync::{
-    NoSync, SyncError, SyncFeed, SyncMessage, SyncSource, SyncStreamError, SyncSubscription,
+    NoSync, SyncError, SyncFeed, SyncInput, SyncInputEvent, SyncMessage, SyncSource,
+    SyncStreamError, SyncSubscription,
 };
 pub use transport::{BoxDuplex, BoxError, Duplex, Joined, Transport, TransportError, stdio};
 pub use wire::{DialTarget, PROTOCOL_VERSION, Prefixed, RejectReason, WireError};

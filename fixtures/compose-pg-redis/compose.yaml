@@ -1,0 +1,28 @@
+# Postgres runs once per lane (infra.per_lane in devlanes.yaml); Redis is shared by
+# every lane. Host ports: Redis gets one from Docker, each lane's Postgres one from
+# its lane block.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+    ports: ["127.0.0.1::5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1::6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+volumes:
+  pgdata:
+  redisdata:

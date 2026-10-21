@@ -184,9 +184,10 @@ async fn ssh_mirrors_a_port_and_syncs_a_file() -> TestResult {
             "lane": entry["lane"],
             "unit": entry["unit"],
             "index": entry["index"],
-            "have": [],
         });
         let mut feed = session.subscribe_sync(follow).await?;
+        // An empty destination: no manifest batches, just the end marker.
+        feed.finish_input().await?;
         let mut contents = Vec::new();
         while let Some(message) = feed.next().await {
             match message? {

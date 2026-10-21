@@ -61,6 +61,50 @@ fn did_you_mean_outside_services() {
     assert_eq!(error.location.line, 2);
 }
 
+/// The lenient user load drops only the keys with problems: an unknown key, a
+/// value of the wrong type and a value validation refuses each become a located
+/// error, and every other key keeps its value.
+#[test]
+fn lenient_user_config_keeps_valid_keys() {
+    let source = "proxy:\n  htps_port: 8443\n  http_port: 8081\nstate:\n  max_size: 0B\nterminal: kitty\nports:\n  range: [not, a, range]\n";
+    let (config, issues) = parse_user_lenient("config.yaml", source);
+    assert_eq!(config.proxy.http_port, 8081);
+    assert!(matches!(
+        config.terminal.as_ref().and_then(TerminalConfig::app),
+        Some(Terminal::Kitty)
+    ));
+    assert_eq!(
+        config.state.max_size.0,
+        UserConfig::default().state.max_size.0
+    );
+    let found: Vec<(String, usize)> = issues
+        .iter()
+        .map(|issue| {
+            let path = issue
+                .message
+                .split_once(':')
+                .map(|(p, _)| p)
+                .unwrap_or_default();
+            (path.to_owned(), issue.location.line)
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("proxy.htps_port".to_owned(), 2),
+            ("ports.range".to_owned(), 8),
+            ("state.max_size".to_owned(), 5),
+        ],
+        "{issues:?}"
+    );
+    let (defaults, issues) = parse_user_lenient("config.yaml", "proxy: [unclosed\n");
+    assert_eq!(
+        defaults.proxy.http_port,
+        UserConfig::default().proxy.http_port
+    );
+    assert_eq!(issues.len(), 1);
+}
+
 /// `terminal` is the app name alone or a mapping with the progress setting.
 #[test]
 fn terminal_takes_a_name_or_a_mapping() {
@@ -357,4 +401,93 @@ fn local_only_service_without_run() {
     assert_eq!(error.location.file, "devlanes.local.yaml");
     // Positions are recorded for values, so a block mapping points at its first key.
     assert_eq!(error.location.line, 3);
+}
+
+/// The diagnostic carries the location once; messages do not repeat it.
+#[test]
+fn messages_do_not_repeat_the_location() {
+    for source in [
+        "project: demo\nservices:\n  api:\n    run: server\n    stop: { timeout: 10fortnights }\n",
+        "project: demo\nlanes:\n  block_size: banana\n",
+        "project: demo\nservics: {}\n",
+        "project: demo\nservices: [\n",
+    ] {
+        let error = parse_project(source, None).expect_err(source);
+        assert!(!error.message.contains(" at line "), "{}", error.message);
+        assert!(error.location.line > 1, "{}", error.message);
+    }
+}
+
+/// Unknown template and preset names suggest the closest declared one at the right field.
+#[test]
+fn template_and_preset_names_suggest() {
+    assert_project_error(
+        "project: demo\ntemplates:\n  base: { platform: node }\nservices:\n  api:\n    extends: bsae\n    run: server\n",
+        "extends",
+        "unknown template `bsae`; did you mean `base`?",
+    );
+    let error = parse_project_with::<super::TestExtensions>(
+        "project: demo\nservices:\n  api:\n    run: server\n    preset: custm\n",
+        None,
+    )
+    .expect_err("typed registry");
+    assert!(
+        error
+            .message
+            .starts_with("services.api.preset: unknown preset `custm`; did you mean `custom`?"),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.location.line, 5);
+    let source = "project: demo\nservices:\n  api:\n    run: server\n    preset: vitee\n";
+    let config = parse_project(source, None).expect("opaque presets load");
+    let reject = |name: &str, _: Option<&serde_json::Value>| -> Result<(), String> {
+        Err(format!("unknown preset `{name}`"))
+    };
+    let error = validate_with_registry(&config, &["vite", "next"], &reject, &|_| Vec::new())
+        .expect_err("registry names");
+    assert!(
+        error
+            .message
+            .starts_with("services.api.preset: unknown preset `vitee`; did you mean `vite`?"),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.location.line, 5);
+    let error = validate_with_presets(&config, &reject).expect_err("validator only");
+    assert!(
+        error
+            .message
+            .starts_with("services.api.preset: unknown preset `vitee`"),
+        "{}",
+        error.message
+    );
+}
+
+/// `config check` reports a missing Compose file with its path and stays quiet otherwise.
+#[test]
+fn missing_compose_file_is_an_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("devlanes.yaml"),
+        "project: demo\ninfra:\n  compose: [compose.yaml, compose.dev.yaml]\nservices:\n  api: { run: server }\n",
+    )
+    .expect("config");
+    std::fs::write(dir.path().join("compose.yaml"), "services: {}\n").expect("compose");
+    let error = check(dir.path()).expect_err("second file missing");
+    assert!(
+        error
+            .message
+            .starts_with("infra.compose.1: Compose file not found: "),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.ends_with("compose.dev.yaml"),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.location.line, 3);
+    std::fs::write(dir.path().join("compose.dev.yaml"), "services: {}\n").expect("compose");
+    assert!(check(dir.path()).expect("both present").warnings.is_empty());
 }

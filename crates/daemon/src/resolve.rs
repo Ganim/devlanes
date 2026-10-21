@@ -91,7 +91,20 @@ impl Inner {
         lane: &Arc<LaneRt>,
         fallback: Option<Arc<EnvMap>>,
     ) -> Result<Arc<ResolvedLane>, RpcError> {
-        self.resolve_planned(project, lane, fallback, None).await
+        self.resolve_planned(project, lane, fallback, None, None)
+            .await
+    }
+
+    /// Like [`Self::resolve_full`] with `extra` layered over the lane's overrides,
+    /// for one `run --env` that must not change the lane's later plans.
+    pub(crate) async fn resolve_overridden(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        lane: &Arc<LaneRt>,
+        extra: &EnvMap,
+    ) -> Result<Arc<ResolvedLane>, RpcError> {
+        self.resolve_planned(project, lane, None, None, Some(extra))
+            .await
     }
 
     /// Like [`Self::resolve_full`], against `config` instead of the lane's current
@@ -102,20 +115,22 @@ impl Inner {
         lane: &Arc<LaneRt>,
         config: Arc<devlanes_config::ProjectConfig>,
     ) -> Result<Arc<ResolvedLane>, RpcError> {
-        self.resolve_planned(project, lane, None, Some(config))
+        self.resolve_planned(project, lane, None, Some(config), None)
             .await
     }
 
-    /// Shared body of the resolve methods; `config` overrides the lane's.
+    /// Shared body of the resolve methods; `config` overrides the lane's, `extra`
+    /// is layered over the lane's overrides.
     async fn resolve_planned(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
         lane: &Arc<LaneRt>,
         fallback: Option<Arc<EnvMap>>,
         config: Option<Arc<devlanes_config::ProjectConfig>>,
+        extra: Option<&EnvMap>,
     ) -> Result<Arc<ResolvedLane>, RpcError> {
         let reference = lane.st().reference(&project.name());
-        let (config, allocation, env, overrides, profiles, infra_ns, index) = {
+        let (config, allocation, env, mut overrides, profiles, infra_ns, index) = {
             let st = lane.st();
             let config = match (config, &st.config) {
                 (Some(config), _) => config,
@@ -147,6 +162,9 @@ impl Inner {
                 st.index(),
             )
         };
+        if let Some(extra) = extra {
+            overrides.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
         let facts = self.facts(project, lane)?;
         let (lane_dir, primary_dir) = self.config_dirs(project, lane);
         let dotenv = read_dotenv(lane_dir, primary_dir).await;
@@ -331,6 +349,19 @@ impl Inner {
                 })?;
                 env.insert(key.clone(), value.to_string());
             }
+            let ready = match &container.ready {
+                Some(ready) => {
+                    let cwd = if per_lane { &lane_dir } else { &primary_dir };
+                    devlanes_resolve::container_ready(
+                        ready,
+                        cwd,
+                        &context,
+                        &format!("{path}.ready"),
+                    )
+                    .map_err(|error| resolve_error(&error))?
+                }
+                None => None,
+            };
             containers.push(ContainerDecl {
                 name: name.clone(),
                 image,
@@ -339,6 +370,7 @@ impl Inner {
                 ports,
                 per_lane,
                 env,
+                ready,
             });
         }
         let project_name = match &infra.project_name {

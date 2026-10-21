@@ -25,4 +25,4 @@ expression: screen(&render(&app)?)
 "│2026-10-21T09:14:02.990Z ERROR devlanes_daemon::lifecycle: compose failed     │"
 "│lane=acme@1                                                                   │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
-" j/k scroll log  R restart  S stop  X lane gc  tab lanes  q quit                "
+" j/k scroll log  R restart  S stop  X lane gc  tab lanes  ? help  q quit        "

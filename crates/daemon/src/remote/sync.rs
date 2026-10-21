@@ -11,9 +11,11 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use devlanes_proto::remote::{MAX_SYNC_FILE, SyncEntry, SyncFile, SyncManifest, SyncRequest};
-use devlanes_sync::{HashCache, IgnoreRules, LocalTarget, PartialFile, RelPath, SyncTarget};
-use devlanes_transport::{Session as BoxSession, SyncMessage};
+use devlanes_proto::remote::{
+    MANIFEST_BATCH, MAX_SYNC_FILE, ManifestBatch, SyncEntry, SyncFile, SyncManifest, SyncRequest,
+};
+use devlanes_sync::{HeldFile, LocalTarget, PartialFile, RelPath, SyncTarget};
+use devlanes_transport::{Session as BoxSession, SyncMessage, SyncSubscription};
 use serde_json::json;
 use tokio::{task::JoinHandle, time::Instant};
 
@@ -29,10 +31,6 @@ const MAX_FOLLOWED: usize = 16;
 /// First and longest wait before a failed subscription is retried.
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(60);
-
-/// Files listed in a subscription's manifest; past this the request would near the
-/// transport's frame limit, so the box sends everything instead.
-const MAX_MANIFEST_FILES: usize = 20_000;
 
 /// A followed entry and when to retry it after a failure.
 struct Followed {
@@ -51,6 +49,7 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>, session: BoxSe
     let mut registry = conn.registry.subscribe();
     let mut followed: BTreeMap<String, Followed> = BTreeMap::new();
     let mut entries: Vec<SyncEntry> = Vec::new();
+    let mut refused: BTreeMap<String, String> = BTreeMap::new();
     let mut relist = true;
     loop {
         if relist {
@@ -61,6 +60,16 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>, session: BoxSe
             relist = false;
             // An entry whose stream ended cleanly starts again if it is still listed.
             followed.retain(|_, state| state.failed != Some(false));
+            refused = duplicate_leaves(&entries);
+            for entry in entries
+                .iter()
+                .filter(|entry| refused.contains_key(&key(entry)))
+            {
+                let key = key(entry);
+                let mut status = Status::new(entry, &PathBuf::new());
+                status.fail(refused[&key].clone());
+                status.publish(&conn, &key);
+            }
         }
         for state in followed.values_mut() {
             if state.failed.is_none() && state.task.is_finished() {
@@ -74,7 +83,7 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>, session: BoxSe
         }
         let keys: BTreeSet<String> = entries.iter().map(key).collect();
         followed.retain(|key, entry| {
-            let keep = keys.contains(key);
+            let keep = keys.contains(key) && !refused.contains_key(key);
             if !keep {
                 entry.task.abort();
             }
@@ -82,7 +91,10 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>, session: BoxSe
         });
         lock(&conn.syncs).retain(|key, _| keys.contains(key));
         let now = Instant::now();
-        for (position, entry) in entries.iter().enumerate() {
+        let accepted = entries
+            .iter()
+            .filter(|entry| !refused.contains_key(&key(entry)));
+        for (position, entry) in accepted.enumerate() {
             let key = key(entry);
             if position >= MAX_FOLLOWED {
                 let mut status = Status::new(entry, &PathBuf::new());
@@ -162,6 +174,40 @@ fn key(entry: &SyncEntry) -> String {
     format!("{}:{}#{}", entry.lane, entry.unit, entry.index)
 }
 
+/// Entries refused because another entry of the same lane has the same folder
+/// name, by status key, with the message to show. The destination is
+/// `<host>/<project>/<lane>/<leaf>`, so such entries would write into one folder
+/// and prune each other's files. Replicas count as separate entries: a replicated
+/// service syncs only when one replica has the entry or each names its folder
+/// differently.
+fn duplicate_leaves(entries: &[SyncEntry]) -> BTreeMap<String, String> {
+    let mut groups: BTreeMap<(&str, &str, &str), Vec<&SyncEntry>> = BTreeMap::new();
+    for entry in entries {
+        groups
+            .entry((&entry.project, &entry.lane, &entry.leaf))
+            .or_default()
+            .push(entry);
+    }
+    let mut refused = BTreeMap::new();
+    for ((_, _, leaf), group) in groups {
+        if group.len() < 2 {
+            continue;
+        }
+        let sources: Vec<String> = group
+            .iter()
+            .map(|entry| format!("{}:{} ({})", entry.lane, entry.unit, entry.from.display()))
+            .collect();
+        let message = format!(
+            "not synced: {} sync folders with the same name `{leaf}` into one destination; rename one of them on the box",
+            sources.join(", ")
+        );
+        for entry in group {
+            refused.insert(key(entry), message.clone());
+        }
+    }
+    refused
+}
+
 /// Lists the box's entries over a `list` sync subscription.
 async fn list(session: &BoxSession) -> Result<Vec<SyncEntry>, String> {
     let request = serde_json::to_value(SyncRequest::List).map_err(|e| e.to_string())?;
@@ -179,25 +225,53 @@ async fn list(session: &BoxSession) -> Result<Vec<SyncEntry>, String> {
     Err("the box sent no sync entries".into())
 }
 
-/// What this machine holds for an entry, from the cached hashes.
-fn have_files(cache: &HashCache) -> Vec<SyncFile> {
-    let manifest = cache.manifest();
-    if manifest.len() > MAX_MANIFEST_FILES {
-        return Vec::new();
+/// A destination file as a manifest entry; an unknown hash travels as empty.
+fn sync_file(file: HeldFile) -> SyncFile {
+    SyncFile {
+        mtime_ms: file
+            .mtime
+            .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+            .and_then(|age| u64::try_from(age.as_millis()).ok()),
+        path: file.path.as_str().to_owned(),
+        size: file.size,
+        mode: file.mode,
+        hash: file.hash.map(|hash| hash.to_hex()).unwrap_or_default(),
     }
-    manifest
-        .into_iter()
-        .map(|(rel, entry)| SyncFile {
-            mtime_ms: cache
-                .mtime(&rel)
-                .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
-                .and_then(|age| u64::try_from(age.as_millis()).ok()),
-            path: rel.as_str().to_owned(),
-            size: entry.size,
-            mode: entry.mode,
-            hash: entry.hash.to_hex(),
-        })
-        .collect()
+}
+
+/// Sends the destination's manifest in batches while walking it, then the end
+/// marker. Hashes come from the host's cache while size, mode and mtime match, and
+/// the updated cache goes back to the host, also when the send stops early.
+async fn send_manifest(
+    conn: &HostConn,
+    key: &str,
+    target: &LocalTarget,
+    subscription: &mut SyncSubscription,
+    status: &mut Status,
+) -> Result<(), String> {
+    let cached = lock(&conn.hashes).remove(key).unwrap_or_default();
+    let mut walk = target.held(cached, MANIFEST_BATCH);
+    let mut sent: Result<(), String> = Ok(());
+    while let Some(batch) = walk.next().await {
+        let count = batch.len() as u64;
+        let batch = ManifestBatch {
+            files: batch.into_iter().map(sync_file).collect(),
+        };
+        let delivered = match serde_json::to_value(&batch) {
+            Ok(value) => subscription.send(value).await.map_err(|e| e.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(error) = delivered {
+            sent = Err(error);
+            break;
+        }
+        status.compared += count;
+        status.publish(conn, key);
+    }
+    let cache = walk.finish().await;
+    lock(&conn.hashes).insert(key.to_owned(), cache);
+    sent?;
+    subscription.finish_input().await.map_err(|e| e.to_string())
 }
 
 /// One entry's subscription: applies files until the stream ends. Returns true
@@ -215,18 +289,12 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
     };
     let mut status = Status::new(&entry, &destination);
     status.publish(&conn, &key);
+    let _interrupted = Interrupted {
+        conn: conn.clone(),
+        key: key.clone(),
+    };
     let target = match LocalTarget::owned(&destination).await {
         Ok(target) => target,
-        Err(error) => {
-            status.fail(error.to_string());
-            status.publish(&conn, &key);
-            return true;
-        }
-    };
-    // Hashes are reused while size and mtime match, so reconnects stay cheap.
-    let cached = lock(&conn.hashes).remove(&key).unwrap_or_default();
-    let cache = match target.manifest_cached(cached).await {
-        Ok(cache) => cache,
         Err(error) => {
             status.fail(error.to_string());
             status.publish(&conn, &key);
@@ -237,9 +305,7 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
         lane: entry.lane.clone(),
         unit: entry.unit.clone(),
         index: entry.index,
-        have: have_files(&cache),
     };
-    lock(&conn.hashes).insert(key.clone(), cache);
     let subscription = match serde_json::to_value(&request) {
         Ok(request) => session.subscribe_sync(request).await,
         Err(error) => {
@@ -256,7 +322,16 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
             return true;
         }
     };
-    let rules = IgnoreRules::new(&entry.ignore).unwrap_or_else(|_| IgnoreRules::none());
+    // The box compares batch by batch and sends nothing before the end marker. A
+    // send that fails mid-manifest is retried as a whole on a new subscription.
+    status.state = "comparing";
+    status.publish(&conn, &key);
+    if let Err(error) = send_manifest(&conn, &key, &target, &mut subscription, &mut status).await {
+        status.fail(format!("sending the manifest: {error}"));
+        status.publish(&conn, &key);
+        return true;
+    }
+    status.state = "syncing";
     let mut incoming: Option<Incoming> = None;
     // The file whose chunks are being skipped, so one bad file is one issue.
     let mut rejected: Option<String> = None;
@@ -287,10 +362,7 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
                         }
                     }
                 }
-                Ok(SyncManifest::Ready { files }) => {
-                    status.pruned += prune(&target, &rules, &files).await;
-                    status.state = "watching";
-                }
+                Ok(SyncManifest::Ready) => status.state = "watching",
                 Ok(SyncManifest::Entries { .. }) => {}
                 Err(error) => status.issue(format!("unreadable manifest: {error}")),
             },
@@ -331,8 +403,10 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
                 }
             }
             Ok(SyncMessage::Delete { path }) => match RelPath::new(path) {
+                // Deletions of the initial pass remove what the source lacks.
                 Ok(rel) => match target.remove(&rel).await {
-                    Ok(()) => status.removed += 1,
+                    Ok(()) if status.state == "watching" => status.removed += 1,
+                    Ok(()) => status.pruned += 1,
                     Err(error) => status.issue(error.to_string()),
                 },
                 Err(error) => status.issue(error.to_string()),
@@ -352,30 +426,32 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
     failed
 }
 
+/// Marks a sync whose task was aborted (the session ended) as interrupted, so
+/// its status does not stay at `comparing` or `syncing` until the next session.
+struct Interrupted {
+    conn: Arc<HostConn>,
+    key: String,
+}
+
+impl Drop for Interrupted {
+    /// Rewrites an in-progress state; a finished task already published its own.
+    fn drop(&mut self) {
+        if let Some(status) = lock(&self.conn.syncs).get_mut(&self.key)
+            && matches!(
+                status["state"].as_str(),
+                Some("comparing" | "syncing" | "watching")
+            )
+        {
+            status["state"] = json!("interrupted");
+        }
+    }
+}
+
 /// A file being received into a temp file.
 struct Incoming {
     path: String,
     size: u64,
     file: PartialFile,
-}
-
-/// Removes destination files the box's initial pass did not leave there, keeping
-/// ignored ones, which belong to this machine. Lists names only; nothing is hashed.
-async fn prune(target: &LocalTarget, rules: &IgnoreRules, files: &[String]) -> u64 {
-    let keep: BTreeSet<&str> = files.iter().map(String::as_str).collect();
-    let Ok(present) = target.files().await else {
-        return 0;
-    };
-    let mut removed = 0;
-    for rel in present {
-        if keep.contains(rel.as_str()) || rules.is_ignored(&rel) {
-            continue;
-        }
-        if target.remove(&rel).await.is_ok() {
-            removed += 1;
-        }
-    }
-    removed
 }
 
 /// Per-entry status shown by `remote ls` and `remote sync`.
@@ -389,6 +465,8 @@ struct Status {
     written: u64,
     removed: u64,
     pruned: u64,
+    /// Manifest entries sent to the box in this subscription.
+    compared: u64,
     errors: Vec<String>,
     error: Option<String>,
     updated_ms: u64,
@@ -407,6 +485,7 @@ impl Status {
             written: 0,
             removed: 0,
             pruned: 0,
+            compared: 0,
             errors: Vec::new(),
             error: None,
             updated_ms: now_ms(),
@@ -441,10 +520,68 @@ impl Status {
             "written": self.written,
             "removed": self.removed,
             "pruned": self.pruned,
+            "compared": self.compared,
             "errors": self.errors,
             "error": self.error,
             "updated_ms": self.updated_ms,
         });
         lock(&conn.syncs).insert(key.to_owned(), value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(lane: &str, unit: &str, from: &str) -> SyncEntry {
+        let from = PathBuf::from(from);
+        SyncEntry {
+            lane: lane.into(),
+            project: "app".into(),
+            unit: unit.into(),
+            index: 0,
+            leaf: from
+                .file_name()
+                .map(|leaf| leaf.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            from,
+            ignore: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn duplicate_leaves_in_a_lane_are_refused() {
+        let entries = [
+            entry("app@0", "web", "/box/web/dist"),
+            entry("app@0", "admin", "/box/admin/dist"),
+            SyncEntry {
+                index: 1,
+                ..entry("app@0", "web", "/box/web/ext")
+            },
+            entry("app@1", "web", "/box/w1/dist"),
+            // Replicas syncing the same folder name collide too.
+            entry("app@2", "web-1", "/box/w/dist"),
+            entry("app@2", "web-2", "/box/w/dist"),
+            // A replicated service where only one replica syncs is fine.
+            entry("app@3", "web-1", "/box/w/dist"),
+        ];
+        let refused = duplicate_leaves(&entries);
+        let keys: Vec<&str> = refused.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "app@0:admin#0",
+                "app@0:web#0",
+                "app@2:web-1#0",
+                "app@2:web-2#0"
+            ]
+        );
+        let message = &refused["app@0:web#0"];
+        assert!(
+            message.contains("app@0:web (/box/web/dist)")
+                && message.contains("app@0:admin (/box/admin/dist)")
+                && message.contains("`dist`"),
+            "{message}"
+        );
     }
 }
