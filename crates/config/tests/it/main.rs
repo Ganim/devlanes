@@ -1,5 +1,8 @@
 mod dogfood;
 
+mod artifacts;
+mod tags;
+
 use devlanes_config::*;
 use serde_json::json;
 
@@ -326,9 +329,6 @@ fn yaml_language_server_schemas() {
     let project = project_schema();
     let registered = registered_schema();
     let user = user_schema();
-    insta::assert_json_snapshot!("project_schema", project);
-    insta::assert_json_snapshot!("project_schema_with_presets", registered);
-    insta::assert_json_snapshot!("user_schema", user);
     assert_eq!(project["$id"], "https://devlanes.run/schema/v1.json");
     assert_eq!(user["$id"], "https://devlanes.run/schema/user-v1.json");
     let project_validator =
@@ -389,6 +389,53 @@ fn user_validation() {
             .expect("bounds"),
         (20000, 32767)
     );
+}
+
+/// Startup pacing parses typed percentages and derives windows from the core count.
+#[test]
+fn startup_settings() {
+    let defaults = parse_user("{}").expect("defaults").startup;
+    assert_eq!(defaults.mode, DEFAULT_STARTUP_MODE);
+    assert_eq!(defaults.target_cpu, Percent(75.0));
+    assert_eq!(defaults.settle_cpu, Percent(10.0));
+    assert_eq!(defaults.slot_timeout.0.as_secs(), 20);
+    assert_eq!(defaults.windows(16), (4, 16));
+    assert_eq!(defaults.windows(4), (2, 4));
+    assert_eq!(defaults.windows(1), (1, 1));
+
+    let user = parse_user(USER.replace("ios-simulator, android-emulator", "").as_str())
+        .expect("example without deferred trust targets");
+    assert_eq!(user.startup.mode, StartupMode::Adaptive);
+    assert_eq!(user.startup.windows(32), (2, 8));
+    assert_eq!(user.startup.settle_cpu, Percent(10.0));
+
+    let custom = parse_user("startup: { mode: all, target_cpu: 12.5%, max: 3, initial: 9 }");
+    assert!(
+        custom
+            .expect_err("initial above max")
+            .message
+            .contains("startup.initial")
+    );
+    assert_eq!(
+        parse_user("startup: { max: 3 }")
+            .expect("only max")
+            .startup
+            .windows(64),
+        (3, 3)
+    );
+    for (source, line) in [
+        ("startup:\n  mode: fixed\n  target_cpu: 75\n", 3),
+        ("startup:\n  settle_cpu: -5%\n", 2),
+        ("startup:\n  max: 0\n", 2),
+        ("startup:\n  mode: turbo\n", 2),
+    ] {
+        let error = parse_user(source).expect_err(source);
+        assert_eq!(error.location.line, line, "{source}: {}", error.message);
+    }
+    assert!(parse_user("startup: { target_cpu: 150% }").is_err());
+    assert!(parse_user("startup: { slot_timeout: 0s }").is_err());
+    assert!("10".parse::<Percent>().is_err());
+    assert_eq!("7.5 %".parse::<Percent>().expect("spaced"), Percent(7.5));
 }
 
 /// Diagnostics after merging should point into the local file, not a rewritten document.

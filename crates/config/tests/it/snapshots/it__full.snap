@@ -4,6 +4,16 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
 ---
 {
   "project": "acme",
+  "tags": {
+    "api": {
+      "color": "cyan",
+      "description": "HTTP APIs"
+    },
+    "worker": {
+      "color": "bright-magenta",
+      "description": null
+    }
+  },
   "templates": {
     "fastify-api": {
       "platform": "node",

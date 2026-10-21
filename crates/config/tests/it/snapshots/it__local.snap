@@ -1,9 +1,10 @@
 ---
 source: crates/config/tests/it/main.rs
-expression: "parse_project(base,Some(LOCAL)).expect(\"local with matching base\")"
+expression: "parse_project(base, Some(LOCAL)).expect(\"local with matching base\")"
 ---
 {
   "project": "acme",
+  "tags": {},
   "templates": {
     "fastify-api": {
       "platform": "node"

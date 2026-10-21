@@ -11,6 +11,9 @@ pub type Env = IndexMap<String, Templated<Scalar>>;
 pub struct ProjectConfig<E: Extensions = BuiltinExtensions> {
     /// Project identity shared by every worktree; lowercase letters, digits, dots, underscores, and dashes.
     pub project: String,
+    /// Tag settings. Units are colored by their first tag; colors are inferred from common tag names (api, web, worker, db, ...) when not set here.
+    #[serde(default)]
+    pub tags: IndexMap<String, crate::TagConfig>,
     /// Reusable service settings, inherited with extends after local overrides are merged.
     #[serde(default)]
     pub templates: IndexMap<String, ServiceConfig<E>>,

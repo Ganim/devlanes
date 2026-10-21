@@ -36,5 +36,13 @@ expression: user
   "metrics": {
     "retention": "2592000000ms"
   },
+  "startup": {
+    "mode": "adaptive",
+    "initial": 2,
+    "max": 8,
+    "target_cpu": "75%",
+    "settle_cpu": "10%",
+    "slot_timeout": "20000ms"
+  },
   "terminal": "ghostty"
 }

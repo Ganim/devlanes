@@ -1,9 +1,10 @@
 ---
-source: "../tests/it/main.rs"
+source: crates/config/tests/it/main.rs
 expression: config
 ---
 {
   "project": "acme-desktop",
+  "tags": {},
   "templates": {
     "worker": {
       "platform": "node",

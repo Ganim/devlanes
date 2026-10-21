@@ -4,6 +4,7 @@ expression: config
 ---
 {
   "project": "acme-desktop",
+  "tags": {},
   "templates": {
     "worker": {
       "platform": "node",

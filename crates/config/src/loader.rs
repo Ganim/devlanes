@@ -12,6 +12,8 @@ use std::{collections::HashSet, path::Path};
 #[serde(deny_unknown_fields, bound = "E: Extensions")]
 struct PartialProject<E: Extensions> {
     project: Option<Spanned<String>>,
+    #[serde(default)]
+    tags: IndexMap<String, crate::TagConfig>,
     lanes: Option<Spanned<LanesConfig>>,
     infra: Option<Spanned<InfraConfig>>,
     fnox: Option<Spanned<FnoxConfig>>,
@@ -194,6 +196,9 @@ impl<E: Extensions> PartialProject<E> {
         );
         merge_map(&mut self.services, overlay.services, PartialService::merge);
         merge_map(&mut self.tasks, overlay.tasks, merge_task);
+        merge_map(&mut self.tags, overlay.tags, |base, overlay| {
+            replace!(base, overlay, color, description);
+        });
         merge_map(
             &mut self.profiles,
             overlay.profiles,
@@ -245,6 +250,7 @@ impl<E: Extensions> PartialProject<E> {
             services,
             tasks: self.tasks,
             profiles: self.profiles,
+            tags: self.tags,
         })
     }
 }

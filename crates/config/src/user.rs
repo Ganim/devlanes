@@ -1,7 +1,7 @@
-use crate::{ByteSize, ConfigDuration, ConfigError, HostsFile, Templated};
+use crate::{ByteSize, ConfigDuration, ConfigError, HostsFile, Percent, Templated};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{num::NonZeroU32, path::Path};
 
 /// Per-user machine settings, separate from project configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -19,8 +19,103 @@ pub struct UserConfig {
     pub logs: LogsConfig,
     /// Retention for monitor aggregates.
     pub metrics: MetricsConfig,
+    /// How many services start at once, across all lanes and projects.
+    pub startup: StartupConfig,
     /// Terminal application used by open-in-terminal actions.
     pub terminal: Option<Terminal>,
+}
+
+/// The startup mode used when `startup.mode` is absent. `fixed` ships as the
+/// default until a measured comparison shows `adaptive` reaching ready sooner
+/// than `all`; switching the default is a change to this constant only.
+pub const DEFAULT_STARTUP_MODE: StartupMode = StartupMode::Fixed;
+
+/// How the start gate sizes its window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StartupMode {
+    /// Grow the window while CPU and memory allow, shrink it under pressure.
+    Adaptive,
+    /// Always `max` starts at a time.
+    Fixed,
+    /// No pacing: every service starts at once.
+    All,
+}
+
+impl Default for StartupMode {
+    /// [`DEFAULT_STARTUP_MODE`].
+    fn default() -> Self {
+        DEFAULT_STARTUP_MODE
+    }
+}
+
+/// Startup pacing. Machine settings, so they live in user config only.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct StartupConfig {
+    /// `adaptive`, `fixed` or `all`; default `fixed`.
+    pub mode: StartupMode,
+    /// Adaptive starting window; default CPU cores / 4, at least 2, at most `max`.
+    pub initial: Option<NonZeroU32>,
+    /// Largest window (the fixed window in `fixed` mode); default CPU cores.
+    pub max: Option<NonZeroU32>,
+    /// Adaptive mode grows the window while system CPU stays below this; default 75%.
+    pub target_cpu: Percent,
+    /// A `ready: started` service has finished starting once its process tree
+    /// stays below this share of one core for 2 s; default 10%.
+    pub settle_cpu: Percent,
+    /// A start slot is given back after this even if the service is not ready,
+    /// so services waiting on each other cannot block the queue; default 20s.
+    pub slot_timeout: ConfigDuration,
+}
+
+impl Default for StartupConfig {
+    /// The documented defaults; window sizes follow the CPU count at runtime.
+    fn default() -> Self {
+        Self {
+            mode: StartupMode::default(),
+            initial: None,
+            max: None,
+            target_cpu: Percent(75.0),
+            settle_cpu: Percent(10.0),
+            slot_timeout: ConfigDuration(std::time::Duration::from_secs(20)),
+        }
+    }
+}
+
+impl StartupConfig {
+    /// Effective `(initial, max)` windows for a machine with `cores` CPUs: `max`
+    /// defaults to the core count, `initial` to a quarter of it (at least 2),
+    /// and `initial` never exceeds `max`.
+    pub fn windows(&self, cores: usize) -> (usize, usize) {
+        let cores = cores.max(1);
+        let to_usize = |value: NonZeroU32| usize::try_from(value.get()).unwrap_or(usize::MAX);
+        let max = self.max.map_or(cores, to_usize);
+        let initial = self.initial.map_or((cores / 4).max(2), to_usize);
+        (initial.min(max), max)
+    }
+
+    /// Reject ranges the parser cannot express.
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.target_cpu.0 <= 0.0 || self.target_cpu.0 > 100.0 {
+            return Err(ConfigError::plain(
+                "startup.target_cpu must be above 0% and at most 100%",
+            ));
+        }
+        if self.slot_timeout.0.is_zero() {
+            return Err(ConfigError::plain(
+                "startup.slot_timeout must be longer than 0s",
+            ));
+        }
+        if let (Some(initial), Some(max)) = (self.initial, self.max)
+            && initial > max
+        {
+            return Err(ConfigError::plain(
+                "startup.initial must not be larger than startup.max",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -219,6 +314,7 @@ impl UserConfig {
                 "hostnames.tld is required for the resolver strategy",
             ));
         }
+        self.startup.validate()?;
         Ok(())
     }
 }

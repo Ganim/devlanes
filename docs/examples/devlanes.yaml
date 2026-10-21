@@ -5,6 +5,11 @@
 # Project name shared by every worktree of this repository.
 project: acme
 
+# Optional color overrides; a unit uses its first tag. Other tag names remain valid.
+tags:
+  api: { color: cyan, description: HTTP APIs }
+  worker: { color: bright-magenta }
+
 # Reusable service settings; a service inherits one with extends.
 templates:
   fastify-api:
@@ -66,7 +71,7 @@ infra:
   # HTTPS hostnames the proxy routes to a container's published port.
   hosts:
     s3mock: ["s3.${{ lane.domain }}"]
-  # Containers whose ports are not mirrored to machines connected with devlanes connect.
+  # Containers whose ports are not mirrored to machines connected with devlanes remote connect.
   hidden: [postgres]
   # Plain Docker containers, run without a Compose file.
   containers:
@@ -205,7 +210,7 @@ services:
     # A literal PORT is the same in every lane.
     env: { PORT: 3998 }
     hosts: ["sms-stub.${{ lane.domain }}"]
-    # Not mirrored to machines connected with devlanes connect.
+    # Not mirrored to machines connected with devlanes remote connect.
     hidden: true
     # Starts only when named explicitly.
     autostart: false

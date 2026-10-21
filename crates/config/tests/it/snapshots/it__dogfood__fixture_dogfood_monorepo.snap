@@ -4,6 +4,7 @@ expression: config
 ---
 {
   "project": "acme",
+  "tags": {},
   "templates": {
     "fastify-api": {
       "platform": "node",

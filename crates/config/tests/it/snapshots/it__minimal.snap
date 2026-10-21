@@ -1,9 +1,10 @@
 ---
 source: crates/config/tests/it/main.rs
-expression: "parse_project(MINIMAL,None).expect(\"minimal reference\")"
+expression: "parse_project(MINIMAL, None).expect(\"minimal reference\")"
 ---
 {
   "project": "myapp",
+  "tags": {},
   "templates": {},
   "lanes": {
     "primary": null,

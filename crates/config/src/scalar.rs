@@ -111,6 +111,45 @@ impl<'de> Deserialize<'de> for ConfigDuration {
     }
 }
 
+/// A percentage with a `%` suffix, such as `75%` or `12.5%`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, JsonSchema)]
+#[serde(into = "String")]
+#[schemars(with = "String")]
+pub struct Percent(pub f64);
+
+impl FromStr for Percent {
+    type Err = String;
+    /// Parse a finite, non-negative number followed by `%`.
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        input
+            .trim()
+            .strip_suffix('%')
+            .and_then(|number| number.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(Self)
+            .ok_or_else(|| {
+                format!("invalid percentage `{input}`; expected a number with %, such as 75%")
+            })
+    }
+}
+
+impl From<Percent> for String {
+    /// Serialize with the `%` suffix the parser expects.
+    fn from(value: Percent) -> Self {
+        format!("{}%", value.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Percent {
+    /// Parse a percentage string; bare numbers are rejected because `75` could
+    /// mean a ratio or a percentage.
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// A byte count with decimal or binary size units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(into = "String")]
