@@ -1,7 +1,8 @@
 //! Node.js launch contributors.
 //!
-//! - [`NodeContributor`] (`platform: node`): trusts the devlanes CA through
-//!   `NODE_EXTRA_CA_CERTS` and forces color, since output often goes through pipes.
+//! - [`NodeContributor`] (`platform: node`, or detected from `package.json`):
+//!   trusts the devlanes CA through `NODE_EXTRA_CA_CERTS` and forces color, since
+//!   output often goes through pipes.
 //!   Node needs no unbuffering switch: `process.stdout` writes are not held back
 //!   in a userspace buffer.
 //! - [`CloudflareContributor`]: when the lane worktree contains a Wrangler config,
@@ -16,11 +17,29 @@ use std::{
 use async_trait::async_trait;
 use devlanes_core::{
     Error,
-    contrib::{CA_CERT_ENV, ContribCx, Contributor, LaunchDraft},
+    contrib::{
+        CA_CERT_ENV, ContribCx, Contributor, DETECT_MANIFEST, DETECT_SCRIPT_SOURCE, DetectCx,
+        LaunchDraft,
+    },
 };
 
 /// Platform name matched against `platform:` (explicit or inferred).
 pub const PLATFORM: &str = "node";
+
+/// Manifest that makes a directory a Node project.
+pub const MANIFEST: &str = "package.json";
+
+/// Returns whether the unit's `run_script` source is named `file`.
+fn script_file_is(cx: &DetectCx<'_>, file: &str) -> bool {
+    cx.script
+        .and_then(|s| s.source.file_name())
+        .is_some_and(|name| name == file)
+}
+
+/// Non-blocking existence check; unreadable paths count as absent.
+async fn exists(path: &Path) -> bool {
+    tokio::fs::try_exists(path).await.unwrap_or(false)
+}
 
 /// Wrangler's dev registry variable (see `devlanes-preset-wrangler`).
 pub const REGISTRY_ENV: &str = "WRANGLER_REGISTRY_PATH";
@@ -51,6 +70,20 @@ impl Contributor for NodeContributor {
 
     fn priority(&self) -> i32 {
         50
+    }
+
+    fn platform(&self) -> Option<&'static str> {
+        Some(PLATFORM)
+    }
+
+    /// Claims `package.json` scripts and working directories with a `package.json`.
+    async fn detect(&self, cx: &DetectCx<'_>) -> Option<u8> {
+        if script_file_is(cx, MANIFEST) {
+            return Some(DETECT_SCRIPT_SOURCE);
+        }
+        exists(&cx.cwd.join(MANIFEST))
+            .await
+            .then_some(DETECT_MANIFEST)
     }
 
     /// Sets `NODE_EXTRA_CA_CERTS` from the CA and `FORCE_COLOR=1` unless the

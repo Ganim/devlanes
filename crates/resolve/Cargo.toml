@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-resolve"
+description = "Lane resolution for devlanes: ports, hostnames, environments and launch plans"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +18,11 @@ tokio = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 async-trait.workspace = true
+devlanes-platform-bun = { path = "../platform-bun" }
+devlanes-platform-deno = { path = "../platform-deno" }
+devlanes-platform-node = { path = "../platform-node" }
+devlanes-platform-python = { path = "../platform-python" }
+devlanes-platform-rust = { path = "../platform-rust" }
 insta = { version = "1", features = ["json"] }
 serde_json.workspace = true
 tempfile.workspace = true

@@ -13,8 +13,8 @@ use devlanes_config::{
 use devlanes_core::{
     StopPolicy,
     contrib::{
-        ContribCx, ContribMemo, Contributor, DraftCommand, LaunchDraft, ScriptInfo, ScriptPlan,
-        ScriptRequest, ScriptRunner, SecretEnv, SecretsError, SecretsRequest, UnitKind,
+        ContribCx, ContribMemo, Contributor, DetectCx, DraftCommand, LaunchDraft, ScriptInfo,
+        ScriptPlan, ScriptRequest, ScriptRunner, SecretEnv, SecretsError, SecretsRequest, UnitKind,
     },
     env::{EnvLayer, assemble},
 };
@@ -568,7 +568,16 @@ impl<E: Extensions> Planner<'_, '_, E> {
             .map_or_else(|| cwd.clone(), |s| s.cwd.clone());
         let platform = match spec.platform {
             Some(platform) => Some(platform.to_owned()),
-            None => infer_platform(script.as_ref(), &base_cwd).await,
+            None => {
+                let detect = DetectCx {
+                    kind: spec.kind,
+                    name: spec.name,
+                    lane_path,
+                    cwd: &base_cwd,
+                    script: script.as_ref(),
+                };
+                detect_platform(&self.contributors, &detect).await
+            }
         };
         let no_ports = BTreeMap::new();
         let cx = ContribCx {
@@ -794,26 +803,36 @@ impl<E: Extensions> Planner<'_, '_, E> {
     }
 }
 
-/// Infers the platform from the script source or files in the working directory.
-async fn infer_platform(script: Option<&ScriptInfo>, cwd: &Path) -> Option<String> {
-    let by_file = |name: &str| match name {
-        "package.json" => Some("node"),
-        "pyproject.toml" | "requirements.txt" => Some("python"),
-        _ => None,
-    };
-    if let Some(found) = script
-        .and_then(|s| s.source.file_name())
-        .and_then(|n| n.to_str())
-        .and_then(by_file)
-    {
-        return Some(found.to_owned());
-    }
-    for file in ["package.json", "pyproject.toml", "requirements.txt"] {
-        if tokio::fs::try_exists(cwd.join(file)).await.unwrap_or(false) {
-            return by_file(file).map(str::to_owned);
+/// Asks every platform contributor to claim a unit without `platform` and keeps
+/// the highest confidence. Ties go to the higher priority, then the smaller id,
+/// so the result does not depend on registration order. Explicit `platform:`
+/// values skip detection entirely.
+pub async fn detect_platform(
+    contributors: &[Arc<dyn Contributor>],
+    cx: &DetectCx<'_>,
+) -> Option<String> {
+    let mut best: Option<(u8, i32, &'static str, &'static str)> = None;
+    for contributor in contributors {
+        let Some(platform) = contributor.platform() else {
+            continue;
+        };
+        let Some(confidence) = contributor.detect(cx).await else {
+            continue;
+        };
+        let claim = (
+            confidence,
+            contributor.priority(),
+            contributor.id(),
+            platform,
+        );
+        let wins = best.is_none_or(|(c, p, id, _)| {
+            (claim.0, claim.1) > (c, p) || ((claim.0, claim.1) == (c, p) && claim.2 < id)
+        });
+        if wins {
+            best = Some(claim);
         }
     }
-    None
+    best.map(|(_, _, _, platform)| platform.to_owned())
 }
 
 /// Evaluates an env map and renders values as strings.

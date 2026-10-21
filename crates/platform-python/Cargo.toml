@@ -1,5 +1,6 @@
 [package]
 name = "devlanes-platform-python"
+description = "Python launch contributor for devlanes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,9 +10,10 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 devlanes-core = { path = "../core" }
+tokio.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

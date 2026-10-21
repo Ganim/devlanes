@@ -11,8 +11,9 @@ use devlanes_config::ProjectConfig;
 use devlanes_core::{
     Error,
     contrib::{
-        ContribCx, Contributor, LaunchDraft, ScriptPlan, ScriptRequest, ScriptRunner, SecretEnv,
-        SecretsError, SecretsProvider, SecretsRequest, ServiceView,
+        ContribCx, Contributor, DETECT_MANIFEST, DETECT_SCRIPT_SOURCE, DetectCx, LaunchDraft,
+        ScriptPlan, ScriptRequest, ScriptRunner, SecretEnv, SecretsError, SecretsProvider,
+        SecretsRequest, ServiceView,
     },
     ports::{PortBlock, PortName, allocate_offsets, block_size},
 };
@@ -85,6 +86,19 @@ pub struct FakeContributor {
     pub preset_ports: Option<(&'static str, &'static str)>,
     /// Append `--port <self.port>` for services with this preset.
     pub port_flag_for: Option<&'static str>,
+    /// Platform claimed through detection.
+    pub platform: Option<&'static str>,
+    /// Detection rules, checked in order; the first match gives the confidence.
+    pub probes: Vec<(Probe, u8)>,
+}
+
+/// One detection rule of a [`FakeContributor`].
+#[derive(Debug, Clone, Copy)]
+pub enum Probe {
+    /// The `run_script` source has this file name.
+    Script(&'static str),
+    /// The working directory contains this file.
+    Cwd(&'static str),
 }
 
 impl FakeContributor {
@@ -96,7 +110,32 @@ impl FakeContributor {
             env,
             preset_ports: None,
             port_flag_for: None,
+            platform: None,
+            probes: Vec::new(),
         }
+    }
+
+    /// Contributor that also claims `platform` with `probes`.
+    pub fn platform(
+        id: &'static str,
+        priority: i32,
+        platform: &'static str,
+        probes: Vec<(Probe, u8)>,
+    ) -> Self {
+        Self {
+            platform: Some(platform),
+            probes,
+            ..Self::env(id, priority, Vec::new())
+        }
+    }
+
+    /// Detection the real node contributor uses: `package.json` as script source
+    /// or in the working directory.
+    pub fn node_detection() -> Vec<(Probe, u8)> {
+        vec![
+            (Probe::Script("package.json"), DETECT_SCRIPT_SOURCE),
+            (Probe::Cwd("package.json"), DETECT_MANIFEST),
+        ]
     }
 }
 
@@ -115,6 +154,28 @@ impl Contributor for FakeContributor {
             Some((preset, port)) if service.preset == Some(preset) => vec![port.to_owned()],
             _ => Vec::new(),
         }
+    }
+
+    fn platform(&self) -> Option<&'static str> {
+        self.platform
+    }
+
+    async fn detect(&self, cx: &DetectCx<'_>) -> Option<u8> {
+        for (probe, confidence) in &self.probes {
+            let hit = match probe {
+                Probe::Script(file) => cx
+                    .script
+                    .and_then(|s| s.source.file_name())
+                    .is_some_and(|name| name == *file),
+                Probe::Cwd(file) => tokio::fs::try_exists(cx.cwd.join(file))
+                    .await
+                    .unwrap_or(false),
+            };
+            if hit {
+                return Some(*confidence);
+            }
+        }
+        None
     }
 
     async fn apply(&self, draft: &mut LaunchDraft, cx: &ContribCx<'_>) -> Result<(), Error> {

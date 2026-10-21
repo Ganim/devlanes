@@ -10,12 +10,13 @@ use std::{
 
 use devlanes_config::{HostConfig, Templated};
 use devlanes_core::{
-    contrib::{Contributor, ScriptRunner, SecretsProvider},
+    contrib::{Contributor, DetectCx, ScriptRunner, SecretsProvider, UnitKind},
     env::EnvLayer,
     ports::{PortBlock, PortName},
 };
 use devlanes_resolve::{
-    ReadySpec, ResolveError, ResolveInput, lane_layout, port_needs, resolve_lane, select,
+    ReadySpec, ResolveError, ResolveInput, detect_platform, lane_layout, port_needs, resolve_lane,
+    select,
 };
 use serde_json::json;
 use support::*;
@@ -424,11 +425,9 @@ services:
     );
     let facts = facts("demo", 1, None);
     let flags: Arc<dyn Contributor> = Arc::new(FakeContributor {
-        id: "vite",
-        priority: 100,
-        env: vec![],
         preset_ports: Some(("vite", "hmr")),
         port_flag_for: Some("vite"),
+        ..FakeContributor::env("vite", 100, vec![])
     });
     let contributors = [flags];
     let (block, offsets) = allocation(&config, 21_000, &contributors);
@@ -574,14 +573,183 @@ async fn platform_inference() {
     );
     let facts = devlanes_resolve::LaneFacts::new("demo", dir.path(), 0, dir.path(), None);
     let (block, offsets) = allocation(&config, 21_000, &[]);
-    let lane = resolve_lane(ResolveInput::new(&config, &facts, block, &offsets))
-        .await
-        .expect("resolves");
+    let contributors: [Arc<dyn Contributor>; 2] = [
+        Arc::new(devlanes_platform_python::PythonContributor),
+        Arc::new(devlanes_platform_node::NodeContributor),
+    ];
+    let mut input = ResolveInput::new(&config, &facts, block, &offsets);
+    input.contributors = &contributors;
+    let lane = resolve_lane(input).await.expect("resolves");
     let platform = |unit: &str| lane.services[unit].launch.platform.clone();
     assert_eq!(platform("web").as_deref(), Some("node"));
     assert_eq!(platform("ml").as_deref(), Some("python"));
     assert_eq!(platform("bare"), None);
     assert_eq!(platform("forced").as_deref(), Some("python"));
+
+    // Without platform contributors nothing is inferred: resolve has no built-in rules.
+    let lane = resolve_lane(ResolveInput::new(&config, &facts, block, &offsets))
+        .await
+        .expect("resolves");
+    assert_eq!(lane.services["web"].launch.platform, None);
+    assert_eq!(
+        lane.services["forced"].launch.platform.as_deref(),
+        Some("python")
+    );
+}
+
+#[tokio::test]
+/// Highest confidence wins; ties go to higher priority, then the smaller id,
+/// whatever the registration order.
+async fn detection_precedence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("marker"), "").expect("write");
+    let fake = |id, priority, platform, confidence| -> Arc<dyn Contributor> {
+        Arc::new(FakeContributor::platform(
+            id,
+            priority,
+            platform,
+            vec![(Probe::Cwd("marker"), confidence)],
+        ))
+    };
+    let cx = DetectCx {
+        kind: UnitKind::Service,
+        name: "api",
+        lane_path: dir.path(),
+        cwd: dir.path(),
+        script: None,
+    };
+    let pick = |list: Vec<Arc<dyn Contributor>>| async move {
+        let forward = detect_platform(&list, &cx).await;
+        let reversed: Vec<_> = list.into_iter().rev().collect();
+        assert_eq!(
+            forward,
+            detect_platform(&reversed, &cx).await,
+            "order-independent"
+        );
+        forward
+    };
+    let confidence = pick(vec![
+        fake("a-low", 90, "low", 60),
+        fake("b-high", 10, "high", 70),
+    ])
+    .await;
+    assert_eq!(confidence.as_deref(), Some("high"));
+    let priority = pick(vec![
+        fake("a", 50, "first", 60),
+        fake("b", 60, "second", 60),
+    ])
+    .await;
+    assert_eq!(priority.as_deref(), Some("second"));
+    let id = pick(vec![fake("zeta", 50, "z", 60), fake("alpha", 50, "a", 60)]).await;
+    assert_eq!(id.as_deref(), Some("a"));
+    let env_only: Arc<dyn Contributor> = Arc::new(FakeContributor::env("env", 99, vec![]));
+    assert_eq!(pick(vec![env_only]).await, None);
+
+    // An explicit platform skips detection even when a contributor claims the unit.
+    let config = parse(
+        "project: demo\nservices:\n  api: { run: dev, platform: rust }\n  free: { run: dev }\n",
+    );
+    let facts = devlanes_resolve::LaneFacts::new("demo", dir.path(), 0, dir.path(), None);
+    let (block, offsets) = allocation(&config, 21_000, &[]);
+    let contributors = [fake("claims", 50, "node", 99)];
+    let mut input = ResolveInput::new(&config, &facts, block, &offsets);
+    input.contributors = &contributors;
+    let lane = resolve_lane(input).await.expect("resolves");
+    assert_eq!(
+        lane.services["api"].launch.platform.as_deref(),
+        Some("rust")
+    );
+    assert_eq!(
+        lane.services["free"].launch.platform.as_deref(),
+        Some("node")
+    );
+}
+
+#[tokio::test]
+/// The real platform crates together: bun beats node only with a bun marker,
+/// deno beats node with a deno config, rust yields to node in mixed directories,
+/// and `platform: bun|deno|rust` parse as explicit values.
+async fn platform_crates_together() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let write = |path: &str, contents: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, contents).expect("write");
+    };
+    write("plain/package.json", "{}");
+    write("bunlock/package.json", "{}");
+    write("bunlock/bun.lock", "");
+    write("pinned/package.json", r#"{"packageManager":"bun@1.3.2"}"#);
+    write("denoapp/package.json", "{}");
+    write("denoapp/deno.json", "{}");
+    write("crate/Cargo.toml", "[package]\n");
+    write("mixed/package.json", "{}");
+    write("mixed/Cargo.toml", "[package]\n");
+    let config = parse(
+        r#"
+project: demo
+services:
+  plain: { run: dev, cwd: plain }
+  bunlock: { run: dev, cwd: bunlock }
+  bunscript: { run_script: bunlock/package.json#dev }
+  nodescript: { run_script: plain/package.json#dev }
+  pinned: { run: dev, cwd: pinned }
+  denoapp: { run: dev, cwd: denoapp }
+  crate: { run: cargo run, cwd: crate }
+  mixed: { run: dev, cwd: mixed }
+  forced-node: { run: dev, cwd: bunlock, platform: node }
+  forced-bun: { run: dev, platform: bun }
+  forced-deno: { run: dev, platform: deno }
+"#,
+    );
+    let facts = devlanes_resolve::LaneFacts::new("demo", root, 0, root, None);
+    let contributors: [Arc<dyn Contributor>; 5] = [
+        Arc::new(devlanes_platform_rust::RustContributor),
+        Arc::new(devlanes_platform_deno::DenoContributor),
+        Arc::new(devlanes_platform_bun::BunContributor),
+        Arc::new(devlanes_platform_python::PythonContributor),
+        Arc::new(devlanes_platform_node::NodeContributor),
+    ];
+    let (block, offsets) = allocation(&config, 21_000, &contributors);
+    let runners: [Arc<dyn ScriptRunner>; 1] = [Arc::new(FakeRunner::new())];
+    let mut input = ResolveInput::new(&config, &facts, block, &offsets);
+    input.contributors = &contributors;
+    input.script_runners = &runners;
+    let lane = resolve_lane(input).await.expect("resolves");
+    assert!(lane.errors.is_empty(), "{:?}", lane.errors);
+    let platform = |unit: &str| {
+        lane.services[unit]
+            .launch
+            .platform
+            .clone()
+            .unwrap_or_default()
+    };
+    for (unit, expected) in [
+        ("plain", "node"),
+        ("bunlock", "bun"),
+        ("bunscript", "bun"),
+        ("nodescript", "node"),
+        ("pinned", "bun"),
+        ("denoapp", "deno"),
+        ("crate", "rust"),
+        ("mixed", "node"),
+        ("forced-node", "node"),
+        ("forced-bun", "bun"),
+        ("forced-deno", "deno"),
+    ] {
+        assert_eq!(platform(unit), expected, "{unit}");
+    }
+    // Only the winning platform's contributor sets its variables.
+    let bun = &lane.services["bunlock"].launch.env;
+    assert_eq!(bun.values["FORCE_COLOR"], "1");
+    assert!(!bun.values.contains_key("DENO_NO_UPDATE_CHECK"));
+    let deno = &lane.services["denoapp"].launch.env;
+    assert_eq!(deno.values["DENO_NO_UPDATE_CHECK"], "1");
+    assert_eq!(
+        lane.services["crate"].launch.env.values["CARGO_TERM_COLOR"],
+        "always"
+    );
 }
 
 #[tokio::test]
@@ -589,11 +757,10 @@ async fn platform_inference() {
 async fn snapshot_minimal() {
     let config = parse(MINIMAL);
     let facts = facts("myapp", 1, Some("feature/login"));
-    let node: Arc<dyn Contributor> = Arc::new(FakeContributor::env(
-        "fake-node",
-        50,
-        vec![("FORCE_COLOR", "1")],
-    ));
+    let node: Arc<dyn Contributor> = Arc::new(FakeContributor {
+        env: vec![("FORCE_COLOR", "1")],
+        ..FakeContributor::platform("fake-node", 50, "node", FakeContributor::node_detection())
+    });
     let contributors = [node];
     let (block, offsets) = allocation(&config, 21_000, &contributors);
     let runners: [Arc<dyn ScriptRunner>; 1] = [Arc::new(FakeRunner::new())];
@@ -624,11 +791,10 @@ async fn snapshot_reference() {
         10,
         vec![("PATH", "/mise/bin:/usr/bin:/bin")],
     ));
-    let node: Arc<dyn Contributor> = Arc::new(FakeContributor::env(
-        "fake-node",
-        50,
-        vec![("FORCE_COLOR", "1")],
-    ));
+    let node: Arc<dyn Contributor> = Arc::new(FakeContributor {
+        env: vec![("FORCE_COLOR", "1")],
+        ..FakeContributor::platform("fake-node", 50, "node", FakeContributor::node_detection())
+    });
     // Preset options are opaque to config, so the inspector port comes from the
     // wrangler contributor, as it does with the real WranglerPreset.
     let wrangler: Arc<dyn Contributor> = Arc::new(FakeContributor {

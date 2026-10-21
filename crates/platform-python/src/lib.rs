@@ -1,4 +1,5 @@
-//! Python launch contributor (`platform: python`).
+//! Python launch contributor (`platform: python`, or detected from
+//! `pyproject.toml` or `requirements.txt`).
 //!
 //! Python block-buffers stdout when it is a pipe, so logs of `pty: false`
 //! services would arrive late without `PYTHONUNBUFFERED`. `ssl`, `requests` and
@@ -8,11 +9,22 @@
 use async_trait::async_trait;
 use devlanes_core::{
     Error,
-    contrib::{CA_BUNDLE_ENV, ContribCx, Contributor, LaunchDraft},
+    contrib::{
+        CA_BUNDLE_ENV, ContribCx, Contributor, DETECT_MANIFEST, DETECT_SCRIPT_SOURCE, DetectCx,
+        LaunchDraft,
+    },
 };
 
 /// Platform name matched against `platform:` (explicit or inferred).
 pub const PLATFORM: &str = "python";
+
+/// Files that make a directory a Python project.
+pub const MANIFESTS: &[&str] = &["pyproject.toml", "requirements.txt"];
+
+/// Claim for a manifest in the working directory. Below node's, so a directory
+/// with both `package.json` and `pyproject.toml` stays node, as it was before
+/// detection moved into contributors.
+const CWD_CONFIDENCE: u8 = DETECT_MANIFEST - 10;
 
 /// Contributor for `platform: python` units.
 #[derive(Debug, Default, Clone, Copy)]
@@ -26,6 +38,28 @@ impl Contributor for PythonContributor {
 
     fn priority(&self) -> i32 {
         50
+    }
+
+    fn platform(&self) -> Option<&'static str> {
+        Some(PLATFORM)
+    }
+
+    /// Claims `pyproject.toml`/`requirements.txt` script sources and working
+    /// directories that contain either file.
+    async fn detect(&self, cx: &DetectCx<'_>) -> Option<u8> {
+        let source = cx.script.and_then(|s| s.source.file_name());
+        if source.is_some_and(|name| MANIFESTS.iter().any(|m| name == *m)) {
+            return Some(DETECT_SCRIPT_SOURCE);
+        }
+        for manifest in MANIFESTS {
+            if tokio::fs::try_exists(cx.cwd.join(manifest))
+                .await
+                .unwrap_or(false)
+            {
+                return Some(CWD_CONFIDENCE);
+            }
+        }
+        None
     }
 
     /// Sets `PYTHONUNBUFFERED=1` and, when the CA provides a bundle,
@@ -49,7 +83,7 @@ impl Contributor for PythonContributor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devlanes_core::contrib::{ContribMemo, DraftCommand, UnitKind};
+    use devlanes_core::contrib::{ContribMemo, DraftCommand, ScriptInfo, UnitKind};
     use std::{
         collections::{BTreeMap, BTreeSet},
         path::{Path, PathBuf},
@@ -108,5 +142,45 @@ mod tests {
         let without_ca = run("python", &BTreeMap::new()).await;
         assert!(!without_ca.contains_key("SSL_CERT_FILE"));
         assert!(run("node", &ca).await.is_empty());
+    }
+
+    /// Detection context for a unit running in `dir`.
+    fn detect_cx<'a>(dir: &'a Path, script: Option<&'a ScriptInfo>) -> DetectCx<'a> {
+        DetectCx {
+            kind: UnitKind::Service,
+            name: "ml",
+            lane_path: dir,
+            cwd: dir,
+            script,
+        }
+    }
+
+    #[tokio::test]
+    /// Script sources claim strongly; a manifest in the cwd claims below node.
+    async fn detection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            PythonContributor.detect(&detect_cx(dir.path(), None)).await,
+            None
+        );
+        std::fs::write(dir.path().join("requirements.txt"), "").expect("write");
+        assert_eq!(
+            PythonContributor.detect(&detect_cx(dir.path(), None)).await,
+            Some(CWD_CONFIDENCE)
+        );
+        const { assert!(CWD_CONFIDENCE < DETECT_MANIFEST) };
+        let script = ScriptInfo {
+            source: dir.path().join("pyproject.toml"),
+            name: "dev".into(),
+            body: None,
+            cwd: dir.path().to_path_buf(),
+            runner: "fake",
+        };
+        assert_eq!(
+            PythonContributor
+                .detect(&detect_cx(dir.path(), Some(&script)))
+                .await,
+            Some(DETECT_SCRIPT_SOURCE)
+        );
     }
 }

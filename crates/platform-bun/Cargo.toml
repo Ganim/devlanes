@@ -1,0 +1,20 @@
+[package]
+name = "devlanes-platform-bun"
+description = "Bun launch contributor for devlanes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+devlanes-core = { path = "../core" }
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

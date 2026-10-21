@@ -124,6 +124,32 @@ pub struct ContribCx<'a> {
     pub memo: &'a ContribMemo,
 }
 
+/// Confidence for a claim based on the `run_script` source file, such as a
+/// `package.json` script for node. See [`Contributor::detect`].
+pub const DETECT_SCRIPT_SOURCE: u8 = 90;
+
+/// Confidence for a claim based on the platform's manifest in the unit's
+/// working directory, such as `package.json` for node.
+pub const DETECT_MANIFEST: u8 = 60;
+
+/// Added to a base confidence by a platform that refines another platform's
+/// manifest: a bun lockfile next to a `package.json` beats plain node.
+pub const DETECT_REFINE: u8 = 5;
+
+/// Files a platform contributor may inspect when a unit omits `platform`.
+#[derive(Debug, Clone, Copy)]
+pub struct DetectCx<'a> {
+    pub kind: UnitKind,
+    /// Service, task or infra entry name as written in the config.
+    pub name: &'a str,
+    /// Lane worktree root; detection must not look above it.
+    pub lane_path: &'a Path,
+    /// Directory the unit runs in (the script's directory for `run_script`).
+    pub cwd: &'a Path,
+    /// The `run_script` source, when the unit uses one.
+    pub script: Option<&'a ScriptInfo>,
+}
+
 /// Cache for work that is per lane rather than per unit, such as `mise env`.
 /// It lives for one lane resolution, so config edits apply at the next start.
 #[derive(Default)]
@@ -162,6 +188,20 @@ pub trait Contributor: Send + Sync {
     /// so they exist in `self.ports` (wrangler's `inspector`, for example).
     fn required_ports(&self, _service: &ServiceView<'_>) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Platform name this contributor provides (`node`, `python`, ...). Only
+    /// contributors that return one are asked to [`Self::detect`].
+    fn platform(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Claims a unit whose config omits `platform`, with a confidence. Resolution
+    /// picks the highest claim; ties go to the higher [`Self::priority`], then the
+    /// smaller [`Self::id`]. Use [`DETECT_SCRIPT_SOURCE`], [`DETECT_MANIFEST`] and
+    /// [`DETECT_REFINE`] so claims from different crates compare sensibly.
+    async fn detect(&self, _cx: &DetectCx<'_>) -> Option<u8> {
+        None
     }
 
     /// Edits the draft. Errors fail the unit's launch; use `draft.notes` for

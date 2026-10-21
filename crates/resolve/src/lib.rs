@@ -26,7 +26,7 @@ pub use error::ResolveError;
 pub use facts::{LaneFacts, branch_label, lane_name};
 pub use layout::{fixed_block_start, lane_layout};
 pub use model::*;
-pub use plan::resolve_lane;
+pub use plan::{detect_platform, resolve_lane};
 pub use ports::{PortNeeds, port_needs, port_unit, reserved_offsets};
 pub use select::{Selection, select};
 pub use util::{public_url_env_key, shell_quote};

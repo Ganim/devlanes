@@ -2,11 +2,12 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use devlanes_core::contrib::{
-    CA_CERT_ENV, ContribCx, ContribMemo, Contributor, DraftCommand, LaunchDraft, UnitKind,
+    CA_CERT_ENV, ContribCx, ContribMemo, Contributor, DETECT_MANIFEST, DETECT_SCRIPT_SOURCE,
+    DetectCx, DraftCommand, LaunchDraft, ScriptInfo, UnitKind,
 };
 use devlanes_platform_node::{CloudflareContributor, NodeContributor, REGISTRY_ENV};
 
@@ -68,6 +69,41 @@ fn draft() -> LaunchDraft {
         files: Vec::new(),
         notes: Vec::new(),
     }
+}
+
+#[tokio::test]
+/// `package.json` claims: strongly as a script source, at manifest level in the cwd.
+async fn node_detection() {
+    /// Detection context for a task running in `dir`.
+    fn cx<'a>(dir: &'a Path, script: Option<&'a ScriptInfo>) -> DetectCx<'a> {
+        DetectCx {
+            kind: UnitKind::Task,
+            name: "build",
+            lane_path: dir,
+            cwd: dir,
+            script,
+        }
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert_eq!(NodeContributor.detect(&cx(dir.path(), None)).await, None);
+    std::fs::write(dir.path().join("package.json"), "{}").expect("write");
+    assert_eq!(
+        NodeContributor.detect(&cx(dir.path(), None)).await,
+        Some(DETECT_MANIFEST)
+    );
+    let script = ScriptInfo {
+        source: dir.path().join("web/package.json"),
+        name: "dev".into(),
+        body: None,
+        cwd: dir.path().join("web"),
+        runner: "npm",
+    };
+    assert_eq!(
+        NodeContributor.detect(&cx(dir.path(), Some(&script))).await,
+        Some(DETECT_SCRIPT_SOURCE)
+    );
+    assert_eq!(NodeContributor.platform(), Some("node"));
+    assert_eq!(CloudflareContributor.platform(), None);
 }
 
 #[tokio::test]
