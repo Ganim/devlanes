@@ -33,12 +33,13 @@ The composition root registers `Arc::new(PythonScripts)` as a script runner. `pl
 ```yaml
 services:
   api:
+    # Runs the serve script of pyproject.toml with uv or poetry.
     run_script: pyproject.toml#serve
 ```
 
 With `serve = "acme.server:main"` under `[project.scripts]` and a `uv.lock`, this runs `uv run serve`; with a `poetry.lock` instead it runs `poetry run serve`.
 
-## Tool selection
+## Behaviour
 
 Scripts come from `[project.scripts]` or `[tool.poetry.scripts]`. uv is used when a `uv.lock` exists between the project and the worktree root, or the project has a `[tool.uv]` table; poetry when `poetry.lock` sits next to `pyproject.toml`. uv wins when both apply, with a note, and neither is an error that suggests `uv lock` or `poetry lock`.
 

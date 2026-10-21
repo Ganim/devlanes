@@ -27,23 +27,23 @@ async fn load(client_env: &BTreeMap<String, String>) {
 ## Config example
 
 ```yaml
+# fnox profile whose secrets every task and service gets; default: fnox's default profile.
 fnox:
-  profile: dev                  # project profile; default: fnox's default profile
+  profile: dev
 services:
   api:
-    run: pnpm dev               # gets the `dev` profile's secrets
+    run: pnpm dev
   admin-api:
     run: pnpm -F admin dev
-    fnox: { profile: admin-api }   # this service uses its own profile instead
+    # This service's own profile instead of the project's.
+    fnox: { profile: admin-api }
 ```
 
 Each unit gets the variables in fnox's `set`, at the secrets layer: above the client env and contributors, below `DEVLANES_*`, `global_env` and service `env`. Names in fnox's `remove` are dropped from the client environment. When a provider needs a sign-in, the start fails and asks for `devlanes unlock`, which runs fnox in the user's terminal.
 
-## Requirements
+## Behaviour
 
 Requires fnox 1.39 or later, the first release with `fnox env --json`. Older versions fail with an error that names the required version.
-
-## Behaviour
 
 - Runs `fnox [--profile P] env --json --non-interactive` in the lane worktree with the client environment, and returns `set`, `remove` and `files` from the document.
 - Without an fnox config file in the worktree, it returns nothing unless the project config names fnox (`explicit`).

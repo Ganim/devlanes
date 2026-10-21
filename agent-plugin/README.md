@@ -11,7 +11,9 @@ Instructions that teach coding agents to run dev services through the devlanes C
 
 `devlanes agent-guide` prints the same short form, from `AGENT_GUIDE` in `crates/cli/src/lib.rs`. When the skill changes, update `AGENT_GUIDE` and `codex/AGENTS.md` with it.
 
-## Claude Code
+## Usage
+
+### Claude Code
 
 Install from the repository's marketplace:
 
@@ -34,7 +36,7 @@ The plugin adds the `devlanes` skill and the hook. The hook runs before every Ba
 
 Commands that call `devlanes` pass. The block message tells Claude to use `devlanes start` or `devlanes exec --name NAME -- COMMAND`. The script uses `jq` when it is installed and falls back to matching the raw JSON input. To turn the hook off, set `DEVLANES_BLOCK_BACKGROUND=0` in Claude Code's environment, for example under `env` in `~/.claude/settings.json`.
 
-## Skills CLI
+### Skills CLI
 
 ```sh
 npx skills add devlanes-run/devlanes --skill devlanes
@@ -48,7 +50,7 @@ The skill is not in one of the directories the skills CLI scans first (`skills/`
 npx skills add https://github.com/devlanes-run/devlanes/tree/main/agent-plugin/skills/devlanes
 ```
 
-## Codex
+### Codex
 
 Install the skill into `.agents/skills/`, where Codex reads skills:
 
@@ -58,7 +60,7 @@ npx skills add devlanes-run/devlanes --skill devlanes -a codex
 
 Or copy `codex/AGENTS.md` into the repository's `AGENTS.md`, or into `~/.codex/AGENTS.md` for every repository.
 
-## Daemon and sandboxes
+## Behaviour
 
 The CLI starts the daemon on first use, except inside a sandbox. It treats the process as sandboxed when `CODEX_SANDBOX` or `APP_SANDBOX_CONTAINER_ID` is set, or when it cannot bind a test Unix socket next to the daemon socket. It then fails with `auto-spawn refused in sandbox` instead of starting a daemon whose processes the sandbox would confine.
 
@@ -71,3 +73,7 @@ devlanes daemon install
 It writes a per-user service (`~/Library/LaunchAgents/run.devlanes.daemon.plist` on macOS, `~/.config/systemd/user/devlanes.service` on Linux) that starts the daemon now and at every login. `devlanes daemon uninstall` removes it.
 
 A sandboxed CLI still has to connect to the daemon's Unix socket. Whether the Codex sandbox allows that connection has not been tested yet. If it does not, approve running `devlanes` commands outside the sandbox.
+
+## License
+
+Apache-2.0

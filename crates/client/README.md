@@ -32,10 +32,10 @@ Auto-spawn is refused when sandbox markers are present or the socket-bind probe 
 - `begin_request`, `next_frame`, and `send_bytes` support events and raw terminal traffic.
 - `Client::peer` exposes the daemon hello; `Client::spawned` records whether this connection started the daemon.
 
+## Behaviour
+
 Do not mix `request` with outstanding `begin_request` calls on the same connection.
 Protocol mismatch returns the peer's version and managed-process count without stopping it.
-
-## Socket paths
 
 The home is `DEVLANES_HOME` or `~/.devlanes`; persistent paths stay there.
 The default socket is `run/daemon.sock`. On Linux, an absolute, non-symlink

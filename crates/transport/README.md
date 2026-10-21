@@ -59,6 +59,22 @@ Publish changes with `registry.publish(event)`. A daemon that only has full snap
 - `serve` with `BoxServices`: `RegistrySource`, `RpcHandler`, `Dialer`, `SyncSource`.
 - `memory::memory_transport`: in-process transport with freeze and sever controls for tests.
 
+## Config example
+
+```yaml
+# devlanes.yaml on the box
+services:
+  admin:
+    run: ./admin-server
+    # Not mirrored to machines connected with devlanes connect.
+    hidden: true
+infra:
+  # Containers whose ports are not mirrored either.
+  hidden: [postgres]
+```
+
+A client running `devlanes connect <box>` binds every other service and container port locally under the same number; the box refuses streams to `admin`'s and `postgres`'s ports.
+
 ## Behaviour
 
 Only the client opens streams. The box dials only ports advertised by non-hidden units in its registry and rejects everything else. Each forwarded request gets its own stream, and dropping the call cancels it on the box. Pings run every 10 s and a session dies after 20 s without a pong. On reconnect, the box's snapshot replaces the client's registry; until then the client keeps the last known state. Both ends must speak the same `PROTOCOL_VERSION`, and a mismatch is a permanent error.

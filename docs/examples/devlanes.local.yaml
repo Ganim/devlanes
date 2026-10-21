@@ -1,11 +1,14 @@
+# Personal overrides merged over devlanes.yaml: maps merge by key, lists and scalars replace.
 # Requires a base that defines admin-web. The reference base does not.
 lanes:
   max: 3
 global_env:
   LOG_LEVEL: debug
 services:
+  # Changes one setting of a service the base defines.
   admin-web:
     autostart: false
+  # A service only this machine runs.
   scratch-api:
     extends: fastify-api
     run: node scratch/server.mjs

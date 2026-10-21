@@ -1,8 +1,12 @@
+# Project name shared by every worktree of this repository.
 project: fixture-many
+# Reusable service settings; each service below inherits them with extends.
 templates:
   native:
     run: [fixture-server]
+    # Ready once the service's port accepts a TCP connection.
     ready: { tcp: true }
+# Identical long-running processes, each with its own allocated port.
 services:
   service-01: { extends: native }
   service-02: { extends: native }

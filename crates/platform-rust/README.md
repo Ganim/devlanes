@@ -32,7 +32,7 @@ Rust units get:
 
 `RUST_LOG` is never set. `native-tls` on macOS reads the keychain, which `devlanes trust` covers. Programs that only use `webpki-roots` ignore every variable and do not trust the devlanes CA.
 
-## Detection
+## Behaviour
 
 Without `platform`, Rust claims a unit whose `run_script` source is `Cargo.toml`, or whose working directory contains one. The claim sits below node's, so a directory with both `Cargo.toml` and `package.json` stays node.
 

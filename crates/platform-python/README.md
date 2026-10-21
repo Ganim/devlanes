@@ -30,7 +30,7 @@ Python units get:
 - `PYTHONUNBUFFERED=1`: Python buffers stdout on pipes, so `pty: false` logs would otherwise arrive late.
 - `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`: the combined bundle of system roots plus the devlanes root. `ssl`, `requests` and `httpx` replace their roots with this file, so it must include the system roots.
 
-## Detection
+## Behaviour
 
 Without `platform`, a unit is claimed when its `run_script` source is `pyproject.toml` or `requirements.txt`, or its working directory contains either file. A directory with both a `package.json` and a Python manifest stays node.
 

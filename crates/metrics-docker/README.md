@@ -28,7 +28,7 @@ let vm = source.vm_info().await?; // CPUs and memory of the engine host
 - `cpu_percent_unix`, `memory_usage_no_cache`, `reading`: the docker CLI math on bollard's stats types, usable without an engine.
 - `DockerVmInfo`: name, OS, server version, CPUs, total memory and running containers from `docker info`.
 
-## Numbers
+## Behaviour
 
 CPU and memory match `docker stats`: they port `calculateCPUPercentUnix` and `calculateMemUsageUnixNoCache` from the docker CLI's [`stats_helpers.go`](https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go). CPU is `(container usage delta / system usage delta) * online CPUs * 100`. Memory is usage minus `inactive_file` (`total_inactive_file` on cgroup v1).
 

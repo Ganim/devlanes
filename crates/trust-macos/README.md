@@ -21,7 +21,7 @@ async fn trust_login_keychain(ca_pem: &str) -> Result<(), TrustError> {
 - `KeychainStore`: one keychain plus user trust settings. Tests pass a throwaway keychain.
 - `KEYCHAIN_ID`: shared by `system` and `chrome`, so the CLI installs into the keychain once.
 
-## Commands
+## Behaviour
 
 All commands run `/usr/bin/security` directly:
 

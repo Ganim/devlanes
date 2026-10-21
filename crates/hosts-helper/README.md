@@ -1,6 +1,6 @@
-# devlanes-hosts
+# devlanes-hosts-helper
 
-`devlanes-hosts` is a small program that runs as root and keeps one block of
+This package builds `devlanes-hosts`, a small program that runs as root and keeps one block of
 lines in `/etc/hosts` in sync with the hostnames devlanes routes. It exists for
 programs that cannot resolve `*.localhost` names on their own. The daemon only
 calls it when a project needs names written, or when the helper is installed and
@@ -36,22 +36,24 @@ daemon as root or asking for a password on every route change. The helper is the
 smallest root-owned piece that can do the write: the daemon runs it through
 `sudo -n` with a rule that allows this one program and nothing else.
 
-## Activation rules
+## Config example
 
-Two settings decide whether a project's names are written.
+A user setting and a project setting decide whether a project's names are written.
 
 In `~/.devlanes/config.yaml`:
 
 ```yaml
 hostnames:
-  hosts_file: auto    # auto | never | always. default: auto
+  # auto, never or always; default: auto.
+  hosts_file: auto
 ```
 
 In a project's `devlanes.yaml`:
 
 ```yaml
 lanes:
-  hosts_file: always  # default: the user's setting
+  # Default: the user's setting.
+  hosts_file: always
 ```
 
 - `never` in the user config turns the feature off for every project. A
@@ -245,7 +247,9 @@ directly and never read `/etc/hosts`.
 devlanes untrust --hosts
 ```
 
-This clears the block, then removes the rule and the helper. If the helper is
+This clears the block, removes the rule and the helper, then removes the devlanes
+CA from the trust stores, undoing `devlanes trust --hosts`. Add `--keep-ca` to
+remove only the helper. If the helper is
 already gone, the block cannot be cleared that way; delete the lines between
 the markers by hand. To remove everything manually:
 

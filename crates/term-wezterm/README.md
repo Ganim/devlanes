@@ -12,6 +12,15 @@ use devlanes_term_wezterm::Wezterm;
 Wezterm.launch(&request)?;
 ```
 
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml: open units from the TUI's O key in WezTerm.
+terminal: wezterm
+```
+
+## Behaviour
+
 It runs `wezterm start --cwd <cwd> -- <command>`, through `open -na WezTerm.app --args` on macOS. `wezterm start` has no title flag, so the request's title is ignored.
 
 ## License

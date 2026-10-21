@@ -24,13 +24,11 @@ async fn main() -> Result<(), devlanes_tui::Error> {
 
 `run_with` connects first, spawning the daemon if needed, and returns `Error::NotATerminal` without a TTY. `run(paths)` is the same with no terminal launchers.
 
-## Keys
-
 | key | does |
 |---|---|
 | `j`/`k`, arrows | move |
 | `enter`, `h`/`l` | expand or collapse a lane |
-| `C-a` | switch between the list and the unit's terminal |
+| `shift+tab` | switch between the list and the unit's terminal |
 | `s` / `x` / `r` | start / stop / restart the selected unit or lane |
 | `t` | run a task (asks first) |
 | `p` | start the lane with a profile |
@@ -38,11 +36,12 @@ async fn main() -> Result<(), devlanes_tui::Error> {
 | `pgup`/`pgdn`, wheel | scroll; older lines load from the daemon's logs |
 | `c` | copy mode; `y` copies through OSC 52 |
 | `o` / `O` | open the unit's URL / open the unit in a new terminal |
-| `tab` | lanes or monitor |
+| `e` | recent errors with their full text |
+| `tab` | lanes or monitor (from the list) |
 | `?` | all keys |
 | `q` | quit |
 
-In terminal focus every key except `C-a` goes to the unit, encoded for its current vt100 modes.
+In terminal focus every key except `shift+tab` goes to the unit, encoded for its current vt100 modes. Tab and `C-a` reach the unit, so shell completion and a tmux prefix work; shift+tab is reserved for focus and apps in the pane don't receive it.
 
 ## API
 
@@ -51,9 +50,20 @@ In terminal focus every key except `C-a` goes to the unit, encoded for its curre
 - `drive` runs the event loop on any ratatui backend with any event stream.
 - `app::App::update` turns messages into effects without I/O; `ui::render` draws an `App`.
 
-## Notes
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml: terminal app the O key opens a unit in.
+terminal: kitty
+```
+
+`O` then opens a kitty window in the lane's worktree, attached to the selected unit. Without `terminal:`, the TUI uses Terminal.app.
+
+## Behaviour
 
 Quitting closes connections only. Units, tasks and containers keep running in the daemon.
+
+A failed action marks its row (`! start failed`) and shows the worded daemon error in the details pane until the unit or lane recovers. The header shows errors for a few seconds; `e` keeps the recent ones.
 
 Only the selected unit is parsed client-side. tui-term 0.3 depends on vt100 0.16, so it renders through a newtype over vt100 0.18 (`screen::ScreenView`).
 

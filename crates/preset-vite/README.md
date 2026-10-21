@@ -4,17 +4,6 @@
 
 ## Usage
 
-```yaml
-services:
-  web:
-    preset: vite
-    run_script: apps/web/package.json#dev
-    vite:
-      args: [--mode, staging]   # optional, appended after the preset's flags
-```
-
-The preset adds `--port <self.port> --strictPort --host 127.0.0.1`. `--strictPort` makes Vite exit instead of moving to another port, which would break the proxy route. With `run_script` the script runner places the flags (after `--` for npm); a plain `run` gets them appended, with `--` first when it is `npm run ...`.
-
 ```rust
 use devlanes_preset_vite::{ViteOptions, contribution};
 
@@ -28,6 +17,22 @@ assert_eq!(added.args, ["--port", "20012", "--strictPort", "--host", "127.0.0.1"
 - `ViteOptions`: the `vite:` options; unknown keys are rejected. `merge` applies overlays.
 - `parse_options` and `options_schema`: evaluated JSON to options, and the JSON Schema for config.
 - `contribution`: the flags for a port, without a launch draft.
+
+## Config example
+
+```yaml
+services:
+  web:
+    # Adds Vite's port and host flags to the command.
+    preset: vite
+    run_script: apps/web/package.json#dev
+    # Options for the vite preset.
+    vite:
+      # Appended after the preset's flags.
+      args: [--mode, staging]
+```
+
+The preset adds `--port <self.port> --strictPort --host 127.0.0.1`. `--strictPort` makes Vite exit instead of moving to another port, which would break the proxy route. With `run_script` the script runner places the flags (after `--` for npm); a plain `run` gets them appended, with `--` first when it is `npm run ...`.
 
 ## License
 

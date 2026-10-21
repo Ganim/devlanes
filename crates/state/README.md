@@ -32,7 +32,7 @@ async fn register_project(db: &Path, root: &Path) -> Result<Store, Error> {
 - `TaskRunInput` and `SetupRecord`: task history and per-lane setup completion.
 - `LogSegmentInput`, `RollupRow`, and `RunSummaryRow`: log metadata and metrics history.
 
-## Persistence
+## Behaviour
 
 Only the daemon opens the database. Client environments and secret-provider values stay in memory; log bodies are stored separately from their database metadata.
 

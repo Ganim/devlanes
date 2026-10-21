@@ -24,11 +24,24 @@ let samples = source.sample(&request).await?; // one Subject::Process sample per
 
 `MacosSource::sample_blocking` does the same on the calling thread.
 
-## Membership
+`MacosPressure` is the start gate's `PressureSource`:
+
+```rust
+use devlanes_core::gate::PressureSource;
+use devlanes_metrics_macos::MacosPressure;
+
+let pressure = MacosPressure::new();
+let sample = pressure.sample().await?; // cpu_percent is None on the first call
+let available = pressure.available_memory().await?;
+```
+
+## Pressure
+
+System CPU is the busy share of all cores between two calls, from `host_statistics(HOST_CPU_LOAD_INFO)` tick counters. The memory level is `kern.memorystatus_vm_pressure_level` (1 normal, 2 warn, 4 critical). Available memory is `kern.memorystatus_level` percent of `hw.memsize`.
+
+## Behaviour
 
 A process belongs to a unit when it is in one of the unit's sessions, is a tracked process whose start time still matches, or descends from either by parent PID. Only processes owned by the daemon's user are read. A tracked PID with a different start time was reused and is skipped. Start times use the same token as `devlanes-sys`.
-
-## Memory and CPU
 
 Memory is `phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V6)`, the number Activity Monitor shows. RSS is reported too, but it drops sharply once idle pages are compressed. CPU times are mach ticks converted with `mach_timebase_info`. A process seen for the first time reports its lifetime average.
 

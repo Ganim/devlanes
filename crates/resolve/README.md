@@ -42,11 +42,9 @@ In the daemon the block and offsets come from `devlanes-state`, and `ResolveInpu
 - `fixed_block_start`: block start from `lanes.vars.port` or a matrix row.
 - `detect_platform`: the platform for a unit without `platform:`, from contributor claims (highest confidence, then higher priority, then smaller id). resolve has no built-in file rules.
 
-## Environment layers
+## Behaviour
 
-Lowest first: client env, contributors, secrets, `DEVLANES_*`/`PORT`/`HOST` and CA variables, `global_env`, the unit's `env`, the profile's `env`, `--env`. Each value keeps its layer for `env --explain`. `.env` files only feed `${{ env.X }}`, which reads the client env, then secrets, then `.env`.
-
-## Failures
+Environment layers, lowest first: client env, contributors, secrets, `DEVLANES_*`/`PORT`/`HOST` and CA variables, `global_env`, the unit's `env`, the profile's `env`, `--env`. Each value keeps its layer for `env --explain`. `.env` files only feed `${{ env.X }}`, which reads the client env, then secrets, then `.env`.
 
 A unit that fails to plan, including one whose fnox profile is locked, is recorded in `ResolvedLane::errors` and does not fail the lane. Call `check_services` for the selection before spawning. `Launch`'s `Debug` output lists env keys and layers only.
 

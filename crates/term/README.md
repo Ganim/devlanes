@@ -25,6 +25,15 @@ fn open(launcher: &dyn TerminalLauncher) -> Result<(), devlanes_term::LaunchErro
 - `Invocation::run` starts the helper with null stdio and reaps long-lived terminal processes on a background thread.
 - `shell_quote`, `shell_join` and `applescript_string` quote commands for terminals that take shell text.
 
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml: terminal app the TUI's O key opens a unit in.
+terminal: wezterm
+```
+
+The value is one of `ghostty`, `iterm2`, `kitty`, `wezterm` or `terminal`, and picks the launcher whose `name` matches. Without it the TUI uses `terminal` (Terminal.app).
+
 ## License
 
 Apache-2.0

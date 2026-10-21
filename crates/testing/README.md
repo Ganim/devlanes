@@ -36,7 +36,7 @@ HTTP paths return the request path, headers and PID as JSON. `/ws` echoes text/b
 - `--spawn-grandchild` creates a child and grandchild; `--setsid-grandchild` creates that tree with the grandchild in its own session.
 - `--exit-after <duration>` accepts values such as `500ms` or `10s` and is inherited by descendants.
 
-## Resource lifetime
+## Behaviour
 
 Helpers perform blocking work; `TestRepo` requires Git on PATH and disables global Git configuration and hooks. `TestHome::configure` sets home variables on a command without changing the caller's environment. Temporary directories are removed on drop, so stop owned processes first.
 

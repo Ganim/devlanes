@@ -1,6 +1,6 @@
 # devlanes-resolver-dns
 
-The embedded DNS server behind the `resolver` hostname strategy, plus the OS files that send one TLD to it. The daemon runs the server; the CLI writes the generated file with sudo.
+The embedded DNS server behind the `resolver` hostname strategy, plus the OS files that send one TLD to it. The daemon is meant to run the server and the CLI to write the generated file with sudo; `bins/devlanes` does not register this crate yet.
 
 ## Usage
 
@@ -28,7 +28,20 @@ async fn serve_test_tld(shutdown: CancellationToken) -> Result<(), DnsError> {
 - `systemd_resolver`: a `dns-delegate.d` file on systemd 258 and later, a `resolved.conf.d` drop-in on 246 to 257, and `DnsError::SystemdTooOld` below that.
 - `ResolverFile`: the target path, the contents and the command to run after writing it.
 
-## Answers
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml
+hostnames:
+  # Serve lane hostnames from the embedded DNS server instead of *.localhost.
+  resolver: resolver
+  # TLD sent to that server; required with the resolver strategy.
+  tld: test
+```
+
+The default lane domain stays under `.localhost`; a project uses the TLD by setting `lanes.vars.domain`, such as `acme-${{ lane.index }}.test`. Until the server is wired in, the daemon only passes the TLD to the `/etc/hosts` helper, which may then write names under it.
+
+## Behaviour
 
 Only names under the configured TLD are answered: A with `127.0.0.1`, AAAA with `::1`, and empty NOERROR for other record types. Every other name gets REFUSED.
 

@@ -35,18 +35,17 @@ The composition root registers `Arc::new(NpmScripts)` as a script runner. `plan`
 ```yaml
 services:
   api:
+    # Runs the dev script of apps/api/package.json with the project's package manager.
     run_script: apps/api/package.json#dev
 ```
 
 With `"packageManager": "pnpm@10.4.1"` this runs `pnpm run dev` in `apps/api`; with npm it is `npm run dev`, and preset flags follow a `--`.
 
-## Package manager selection
+## Behaviour
 
 `packageManager` (corepack's field, such as `"pnpm@10.4.1"`) decides. npm's `devEngines.packageManager` is read too, as an object or an array whose first supported entry wins. The lookup starts at the script's `package.json` and stops at the workspace root: the first directory with `pnpm-workspace.yaml`, a `workspaces` field or a lockfile, else the lane worktree.
 
 Without a field, the nearest lockfile decides (`pnpm-lock.yaml`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `bun.lock`, `bun.lockb`) and the plan carries a note asking for the field. A lockfile that contradicts the field is also a note; the field wins. Yarn 2+ is recognised by version, the `__metadata:` lockfile header or `.yarnrc.yml`, and a Plug'n'Play install without `.pnp.cjs` gets a note.
-
-## Argument forwarding
 
 Only npm needs `--` before script arguments. pnpm, yarn 2+ and bun pass a `--` through literally, which makes Vite and similar CLIs ignore the flags after it; yarn 1 drops it with a deprecation warning. All four get the arguments right after the script name.
 

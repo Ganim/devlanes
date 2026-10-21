@@ -31,12 +31,13 @@ The composition root registers `Arc::new(CargoBins)` as a script runner. `plan` 
 ```yaml
 services:
   api:
+    # Runs the server binary with cargo run.
     run_script: Cargo.toml#server
 ```
 
 At a virtual workspace root this runs `cargo run -p <member> --bin server` for the member that builds `server`; at a member's own `Cargo.toml` it runs `cargo run --bin server` in that directory.
 
-## Notes
+## Behaviour
 
 Binaries follow Cargo's target auto-discovery, including `autobins = false`. Workspace members are found from `members` patterns (`*` and `?` within a segment), minus `exclude`. A binary built by more than one member is an error that asks for the member's manifest. The manifest's directory is the working directory, so no `--manifest-path` is passed.
 

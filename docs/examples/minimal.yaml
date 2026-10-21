@@ -1,23 +1,35 @@
 # Shared Postgres, a database per lane, an API and a web app.
+
+# Project name shared by every worktree of this repository.
 project: myapp
 infra:
+  # Containers from this Compose file are shared by every lane.
   compose: docker-compose.yml
+  # Commands run once per lane after its containers are healthy.
   setup:
     database: docker compose exec -T postgres createdb -U postgres myapp_${{ lane.name }}
+  # Commands run when a lane is cleaned.
   teardown:
     database: docker compose exec -T postgres dropdb -U postgres --if-exists myapp_${{ lane.name }}
+# Variables for every task and service; infra.postgres.port is the host port Postgres is published on.
 global_env:
   DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/myapp_${{ lane.name }}
 tasks:
   migrate:
+    # Runs a script from package.json with the project's package manager.
     run_script: api/package.json#migrate
+    # Run on every devlanes start, before services.
     when: lane.start
+# Long-running processes, started together after infra and setup.
 services:
   api:
     run_script: api/package.json#dev
+    # HTTPS hostnames routed by the proxy; lane.domain is myapp.localhost or myapp-<N>.localhost.
     hosts: ["api.${{ lane.domain }}"]
   web:
+    # Adds Vite's port and host flags to the command.
     preset: vite
     run_script: web/package.json#dev
+    # Extra variables for this service; public_url is the API's https:// address in this lane.
     env: { VITE_API_URL: "${{ svc.api.public_url }}" }
     hosts: ["${{ lane.domain }}"]

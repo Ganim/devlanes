@@ -63,6 +63,23 @@ In the daemon, host ports come from the persisted offsets (`PortRequest::key()` 
 - `render_override`: the per-lane override file as text, for tests and diagnostics.
 - `setup_env`: `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE`, `COMPOSE_PROFILES` and `DEVLANES_COMPOSE_LANE_PROJECT` for setup and teardown entries.
 
+## Config example
+
+```yaml
+infra:
+  # Compose file, or list of files; its services are shared by every lane.
+  compose: docker-compose.yml
+  # Compose services devlanes never starts.
+  exclude: [caddy]
+  # Compose services started once per lane instead of shared.
+  per_lane: [mailpit]
+  # Commands run once per lane after its containers are healthy.
+  setup:
+    database: docker compose exec -T postgres createdb -U postgres acme_${{ lane.name }}
+```
+
+Postgres runs once in the primary worktree's Compose project, and each lane gets its own `acme-lane<N>` project with a `mailpit` on ports from that lane's block. `docker compose exec` in setup reaches the shared project through the variables from `setup_env`.
+
 ## Behaviour
 
 Per-lane services need Compose 2.24.4 or later. The generated override uses `!override` for ports and `!reset` for `container_name`; `lane_up` fails with an upgrade message on older releases.

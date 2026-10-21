@@ -34,7 +34,7 @@ The runner needs a tokio runtime with the IO, time and signal drivers enabled.
 - `ExitReport`: exit outcome, stop details, processes swept after the leader exited, and processes that survived SIGKILL.
 - `StderrMode`: separate or merged stderr for pipe units.
 
-## Behaviour to know
+## Behaviour
 
 Each unit leads its own session, with the PTY as its controlling terminal. Pipe units also call `setsid` and get `/dev/null` as stdin. The environment is exactly `LaunchSpec::env`, with nothing inherited from the daemon.
 

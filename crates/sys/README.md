@@ -28,7 +28,7 @@ All functions block. Call them from `spawn_blocking` in async code.
 - `listening_tcp`: TCP listeners of a set of PIDs, for diagnostics only.
 - `raise_nofile_limit`, `child_nofile_limit`: raise the daemon's open-file limit and keep the original for children.
 
-## Platform notes
+## Behaviour
 
 Start times are clock ticks since boot on Linux and microseconds since the epoch on macOS. Only compare them on the machine that recorded them. Identity checks ignore the session ID, because a process can move to a new session after it was recorded.
 

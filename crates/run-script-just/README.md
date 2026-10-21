@@ -28,7 +28,20 @@ The composition root registers `Arc::new(JustRecipes)` as a script runner. `plan
 - `parse` and `Recipes::check`: the recipe check on its own, following `alias` lines.
 - `handles`: accepts `justfile`, `.justfile` and `*.just`.
 
-## Arguments
+## Config example
+
+```yaml
+services:
+  web:
+    # Runs the dev recipe of the justfile with just.
+    run_script: justfile#dev
+    # Adds Vite's port and host flags, which need a variadic last parameter on the recipe.
+    preset: vite
+```
+
+With `dev *ARGS:` in the justfile this runs `just dev --port <port> --strictPort --host 127.0.0.1` next to the justfile.
+
+## Behaviour
 
 Extra arguments go right after the recipe name without `--`, because just passes a `--` through as a literal argument. They need a variadic last parameter (`*ARGS` or `+ARGS`); otherwise `plan` fails and suggests one. Recipes with required positional parameters fail too, since `run_script` has no way to fill them.
 

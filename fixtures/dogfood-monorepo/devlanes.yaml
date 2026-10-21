@@ -3,16 +3,21 @@
 # Config-check fixture modelled on a large pnpm monorepo: Fastify APIs, Vite SPAs,
 # Vite apps with the Cloudflare plugin, wrangler workers and queue consumers, sharing one
 # compose stack. Names are neutral; the shapes match a real dogfood config.
+
+# Project name shared by every worktree of this repository.
 project: acme
 
+# Reusable service settings; a service inherits one with extends.
 templates:
   fastify-api:
     platform: node
     tags: [api]
+    # Ready once GET /-/health on the service's port answers.
     ready: { http: { path: /-/health } }
 
   wrangler-worker:
     platform: node
+    # Adds wrangler's port and inspector-port flags to the command.
     preset: wrangler
     tags: [worker]
     ready: { http: { path: /-/health, timeout: 90s } }
@@ -22,10 +27,14 @@ templates:
     preset: vite
     tags: [web]
 
+# Each Git worktree is a lane with its own ports, hostnames and data.
 lanes:
+  # Branch whose worktree is lane 0.
   primary: trunk
+  # Also write hostnames to /etc/hosts, for workerd, which cannot resolve *.localhost.
   hosts_file: always
   max: 20
+  # Values computed per lane and read as lane.<name>; lane.index is 0 for the primary worktree.
   vars:
     pages_domain: ${{ 'pages' if lane.index == 0 else 'pages-' ~ lane.index }}.localhost
     members_domain: ${{ 'members' if lane.index == 0 else 'members-' ~ lane.index }}.localhost
@@ -35,21 +44,29 @@ lanes:
     vhost: ${{ 'acme' if lane.index == 0 else 'acme_' ~ lane.name }}
     bucket_suffix: ${{ '-dev' if lane.index == 0 else '-' ~ lane.name }}
 
+# Containers, and the commands that prepare and remove each lane's data in them.
 infra:
+  # Its services are shared by every lane.
   compose: docker-compose.yml
   project_name: monorepo
+  # Compose services devlanes never starts.
   exclude: [proxy]
+  # Variables for Compose file interpolation only; processes do not see them.
   env:
     ACME_DB_PORT: 15432
     ACME_REDIS_PORT: 16379
+  # HTTPS hostnames the proxy routes to a container's published port.
   hosts:
     object-store: ["s3.${{ lane.domain }}"]
+  # Containers whose ports are not mirrored to machines connected with devlanes connect.
   hidden: [postgres, redis, rabbitmq]
+  # Commands run once per lane after its containers are healthy.
   setup:
     vhost:
       run: |
         docker compose exec -T rabbitmq rabbitmqctl add_vhost ${{ lane.vhost }} || true
         docker compose exec -T rabbitmq rabbitmqctl set_permissions -p ${{ lane.vhost }} acme '.*' '.*' '.*'
+      # Run again whenever this container restarts.
       container: rabbitmq
     buckets:
       run: |
@@ -58,20 +75,25 @@ infra:
           curl -fsS -o /dev/null -X PUT "http://127.0.0.1:${{ infra.object_store.port }}/acme-$bucket${{ lane.bucket_suffix }}" || true
         done
       container: object-store
+  # Commands run when a lane is cleaned.
   teardown:
     database: docker compose exec -T postgres dropdb -U postgres --if-exists --force ${{ lane.db_name }}
     redis: docker compose exec -T redis redis-cli -n ${{ lane.redis_db }} FLUSHDB
     vhost:
       run: docker compose exec -T rabbitmq rabbitmqctl delete_vhost ${{ lane.vhost }}
+      # Count a failure as done.
       ignore_errors: true
 
+# Variables for every task and service of the lane.
 global_env:
+  # Path of the primary worktree, for files that only exist there.
   DOTENV_ROOT: ${{ project.primary_path }}
   ACME_DOMAIN: ${{ lane.domain }}
   ACME_PAGES_PUBLIC_DOMAIN: ${{ lane.pages_domain }}
   ACME_MEMBERS_PUBLIC_DOMAIN: ${{ lane.members_domain }}
   ACME_SHORT_LINK_DOMAIN: link.${{ lane.domain }}
   ACME_SMS_WORKER_BASE_URL: https://sms-worker.${{ lane.domain }}
+  # Host port of the postgres Compose service.
   ACME_DB_PORT: ${{ infra.postgres.port }}
   ACME_DB_DATABASE: ${{ lane.db_name }}
   ACME_REDIS_URL: redis://127.0.0.1:${{ infra.redis.port }}/${{ lane.redis_db }}
@@ -79,13 +101,18 @@ global_env:
   ACME_S3_PROJECTS: acme-projects${{ lane.bucket_suffix }}
   ACME_S3_AVATARS: acme-avatars${{ lane.bucket_suffix }}
 
+# One-shot commands, run on demand with devlanes run or at a lane event.
 tasks:
   install:
     run: pnpm install --frozen-lockfile
+    # Run when the lane is first set up.
     when: lane.create
   build-deps:
+    # Runs a script from package.json with the project's package manager.
     run_script: package.json#build-deps
+    # Run on every devlanes start.
     when: lane.start
+    # Run automatically only when one of these profiles is active.
     profiles: [default, servers, everything, stage-web]
   migrate:
     run_script: models/package.json#db-deploy
@@ -98,6 +125,7 @@ tasks:
   seed:
     run_script: tools/seed/package.json#start
     when: lane.create
+    # Wait until the selected services are ready.
     after: services
     profiles: [default, everything]
     timeout: 15m
@@ -105,23 +133,30 @@ tasks:
     run_script: tools/seed/package.json#start:large
     timeout: 1h
   paid-plans:
+    # A list runs the program directly, without a shell.
     run: [docker, compose, exec, -T, postgres, psql, -U, postgres, -d, "${{ lane.db_name }}", -c, 'UPDATE billing."Plans" SET free = false;']
     env:
       COMPOSE_PROJECT_NAME: monorepo
       COMPOSE_FILE: ${{ project.primary_path }}/docker-compose.yml
   db-reset:
     run_script: models/package.json#db-reset
+    # Asked before running; noninteractive callers must pass --yes.
     confirm: Drops and recreates ${{ lane.db_name }}
   reset:
+    # Run these tasks and infra commands in order.
     steps: [db-reset, infra.teardown.redis]
     confirm: Resets ${{ lane.db_name }} and flushes Redis DB ${{ lane.redis_db }}
 
+# Long-running processes, started together after infra and setup.
 services:
   core-api:
     extends: fastify-api
     run_script: servers/core/package.json#dev
+    # Extra variables for this service; self.port is the port devlanes allocated to it.
     env: { ACME_CORE_PORT: "${{ self.port }}" }
+    # HTTPS hostnames routed by the proxy.
     hosts: ["core.${{ lane.domain }}"]
+    # Labels that profiles select with +tag.
     tags: [api, essential]
 
   crm-api:
@@ -146,6 +181,7 @@ services:
   messaging-worker:
     platform: node
     run_script: servers/messaging-worker/package.json#dev
+    # Ready once this line appears in the output.
     ready: { log: Connected to Redis }
     tags: [queue]
 
@@ -172,6 +208,7 @@ services:
     run_script: pages/admin/package.json#dev
     env:
       ACME_ADMIN_PORT: ${{ self.port }}
+      # Naming a port under self.ports allocates one more port for the service.
       ACME_ADMIN_INSPECTOR_PORT: ${{ self.ports.inspector }}
     hosts: ["admin.${{ lane.domain }}"]
     tags: [web, stage-web]
@@ -188,6 +225,7 @@ services:
     env: { ACME_API_GATEWAY_PORT: "${{ self.port }}" }
     hosts:
       - api.${{ lane.domain }}
+      # Wildcard used only when no other hostname matches.
       - host: "*.${{ lane.domain }}"
         fallback: true
     tags: [worker, essential]
@@ -197,6 +235,7 @@ services:
     run_script: workers/pages/package.json#dev
     env:
       ACME_PAGES_WORKER_PORT: ${{ self.port }}
+      # Port of another service in this lane; the dash in its name becomes an underscore.
       ACME_PAGES_SERVER_PORT: ${{ svc.pages_server.port }}
     hosts:
       - pages.${{ lane.domain }}
@@ -211,6 +250,7 @@ services:
     run_script: workers/mcp/package.json#dev
     env: { ACME_MCP_PORT: "${{ self.port }}" }
     hosts: ["mcp.${{ lane.domain }}"]
+    # Ready as soon as the process starts.
     ready: started
 
   sms-worker:
@@ -225,21 +265,26 @@ services:
     env: { ACME_SMS_STUB_PORT: "${{ self.port }}" }
     hosts: ["sms-stub.${{ lane.domain }}"]
     ready: { http: { path: /health } }
+    # Starts only when named explicitly.
     autostart: false
     tags: [stub]
 
+# Which services devlanes start --profile X starts; default applies when no profile is given.
 profiles:
   default: [+essential]
   servers: [+api, +queue]
   everything:
+    # Globs skip autostart: false services.
     include: ["*"]
     exclude: [+stub]
   stage-web:
     include: [+stage-web]
+    # Skip containers and infra setup.
     infra: false
     env:
       ACME_USE_STAGE_APIS: "1"
   e2e:
     include: [+api, +queue, +web, api-gateway, pages-worker, mcp-worker]
     exclude: [docs]
+    # Services using run_script ...#dev run ...#start instead.
     run_scripts: { dev: start }

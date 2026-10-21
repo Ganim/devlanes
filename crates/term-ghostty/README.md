@@ -12,6 +12,15 @@ use devlanes_term_ghostty::Ghostty;
 Ghostty.launch(&request)?;
 ```
 
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml: open units from the TUI's O key in Ghostty.
+terminal: ghostty
+```
+
+## Behaviour
+
 On macOS it runs `open -na Ghostty.app --args --working-directory=<cwd> --title=<title> -e <command>`, because Ghostty's CLI binary cannot open windows there. On Linux it runs `ghostty` with the same arguments.
 
 ## License

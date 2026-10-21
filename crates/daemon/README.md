@@ -33,20 +33,19 @@ async fn serve(home: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 - `Server` / `Options`: socket, lock, peer check, framing and per-connection sessions.
 - `Handler` / `Session`: the request, input and shutdown contract a server drives; `Session::local` serves in-process clients and tests.
 - `Engine` / `EngineOptions`: the `Handler` that runs projects, lanes, tasks, units, logs, attach and metrics.
-- `integrations::Integrations`: everything injected. Its traits are `UnitRunner`/`ManagedUnit`, `InfraProvider`, `RouteSink`, `PortInspector`, `ProcessTable`, `LaunchCheck` and `RemoteConnector`; `Integrations::with_runner` fills the rest with no-op providers.
+- `integrations::Integrations`: everything injected. Its traits are `UnitRunner`/`ManagedUnit`, `InfraProvider`, `RouteSink`, `PortInspector`, `ProcessTable`, `LaunchCheck`, `RemoteConnector` and `RemotePrompter`; `Integrations::with_runner` fills the rest with no-op providers. `start_gate` and `pressure` take the core `StartGate` and `PressureSource`; without a gate every service spawns at once.
 - `units::UnitHost`: one running unit with its output pump, screen snapshot, log writer and state watch.
 - `process::install_panic_hook`: routes panics into `daemon.log`.
 
-## Layout
-
-Lane discovery and port blocks are in `registry.rs`, the start pipeline and stop/restart/clean in `lifecycle.rs`, method handlers in `control.rs` and `query.rs`, startup reconciliation in `reconcile.rs`. Integration tests with fake runner, infra and process table are in `tests/it/`.
-
-## Rules
+## Behaviour
 
 - The daemon is a headless API: results are structured data with machine codes and data (`not_found`, `needs_env`, `port_in_use`); wording, hints and output modes belong to the clients.
 - Processes stop only on an explicit request: `stop`, `lane clean`, `daemon stop` or reset-state. A failed unit stays failed; nothing restarts it. Daemon shutdown stops units and leaves containers running.
 - Client environments, `unlock` values and secret-provider output stay in memory. After a daemon restart, lanes that should run report `needs_env` until a `start` or `resume` from a shell.
 - At startup, unfinished `unit_runs` are killed only when the recorded PID still has the recorded start time; containers are re-adopted by label and never stopped.
+- Every service start, replicas and restarts included, waits for a slot from the start gate (`pacing.rs`). Waiting units are `queued` in `status` and `why`; `stop` withdraws them, and `Selection.all_at_once` skips the gate for one request. A start whose timeout passes while units are still queued returns `timed_out`, and those units start when their slot comes. A `lane.warning` event reports when the units being started usually peak above the available memory.
+
+Lane discovery and port blocks are in `registry.rs`, the start pipeline and stop/restart/clean in `lifecycle.rs`, method handlers in `control.rs` and `query.rs`, startup reconciliation in `reconcile.rs`. Integration tests with fake runner, infra and process table are in `tests/it/`.
 
 ## License
 

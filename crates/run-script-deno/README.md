@@ -31,12 +31,13 @@ The composition root registers `Arc::new(DenoTasks)` as a script runner. `plan` 
 ```yaml
 services:
   api:
+    # Runs the dev task of deno.json with deno task.
     run_script: deno.json#dev
 ```
 
 This runs `deno task dev` next to `deno.json`, with preset flags appended as `deno task dev --port <port>`.
 
-## Notes
+## Behaviour
 
 Arguments follow the task name without `--`: Deno appends them to the task command and keeps a `--` as a literal argument. `deno.jsonc` files may contain comments and trailing commas. When a directory holds both files, Deno reads `deno.json`, so a `deno.jsonc` source gets `--config deno.jsonc`.
 

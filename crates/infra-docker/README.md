@@ -58,6 +58,24 @@ async fn start_cerbos() -> Result<(), Error> {
 - `HealthEvent` / `map_event`: Docker container events mapped to lifecycle changes.
 - `resolve_volume`, `container_name`, `container_labels`: the naming and labelling rules as pure functions.
 
+## Config example
+
+```yaml
+infra:
+  # Plain Docker containers, run without a Compose file.
+  containers:
+    cerbos:
+      image: ghcr.io/cerbos/cerbos:0.40.0
+      command: [server, --config=/policies/config.yaml]
+      volumes: ["./infra/cerbos:/policies:ro"]
+      # Container ports by name; the host side is read as infra.cerbos.ports.http.
+      ports: { http: 3592, grpc: 3593 }
+      # One container per lane instead of one shared by all lanes.
+      per_lane: true
+```
+
+Each lane gets a `devlanes-acme-lane<N>-cerbos` container with both ports published on 127.0.0.1 from the lane's port block, and `./infra/cerbos` resolved against that lane's worktree.
+
 ## Behaviour
 
 Containers are named `devlanes-<project>[-lane<N>]-<name>` and labelled `dev.devlanes.*`. Host ports bind to 127.0.0.1 and must lie inside the given block.

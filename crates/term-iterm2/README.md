@@ -12,6 +12,15 @@ use devlanes_term_iterm2::Iterm2;
 Iterm2.launch(&request)?;
 ```
 
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml: open units from the TUI's O key in iTerm2.
+terminal: iterm2
+```
+
+## Behaviour
+
 It runs `osascript`, opens a window with the default profile, sets the session name to the title and types `cd <cwd> && <command>` into the login shell.
 
 ## License

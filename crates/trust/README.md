@@ -25,7 +25,18 @@ async fn trust(store: &dyn TrustStore, ca_pem: &str) -> Result<TrustStatus, Trus
 - `nss::NssStore`: Firefox profiles or a shared NSS database, changed through `certutil`.
 - `TrustError`: typed failures, including `Unsupported`, `ToolMissing { hint }` and `InteractionRequired`.
 
-## Notes
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml
+tls:
+  # Stores that devlanes trust installs the CA into and devlanes untrust removes it from.
+  trust: [system, firefox, chrome]
+```
+
+Without `tls.trust`, `devlanes trust` uses only the `system` store.
+
+## Behaviour
 
 Trust changes run in the CLI process because they prompt for a password. The daemon never calls a `TrustStore`.
 

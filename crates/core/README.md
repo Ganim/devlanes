@@ -32,8 +32,10 @@ fn main() -> Result<(), AllocationError> {
 - `env::assemble`: environment precedence with source-layer attribution.
 - `Runner` and `Unit`: process launch, terminal I/O, stopping, exit waiting, and tracked process identities.
 - `contrib::{Contributor, SecretsProvider, ScriptRunner}`: launch customization, secret lookup, and script command rendering.
+- `gate::{StartGate, PressureSource}`: startup pacing slots and queue snapshots, and system CPU and memory pressure readings.
+- `clock::{Clock, TokioClock, ManualClock}`: monotonic time for schedulers, with a manual clock for tests.
 
-## Allocation ownership
+## Behaviour
 
 Allocation functions perform no socket probing or persistence. The caller supplies current occupancy and persists the result atomically; `devlanes-state` handles that for the daemon.
 

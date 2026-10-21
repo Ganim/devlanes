@@ -1,22 +1,48 @@
 # Per-user settings, normally at ~/.devlanes/config.yaml.
 # This source example includes unsupported trust targets; see README.md.
+
+# How lane hostnames resolve on this machine.
 hostnames:
+  # localhost uses *.localhost names, which most resolvers answer with loopback.
   resolver: localhost
+  # Write exact hostnames to /etc/hosts: auto only when the system resolver fails a probe.
   hosts_file: auto
   # Custom TLD alternative: resolver: resolver, tld: test.
   # Public DNS resolution is outside v1.
+# Machine-wide pool that every lane's port block comes from.
 ports:
   range: 20000-32767
 tls:
+  # Certificate authority: devlanes keeps its own under ~/.devlanes/ca; mkcert reuses mkcert's.
   ca: devlanes
+  # Stores that devlanes trust installs the CA into.
   # ios-simulator and android-emulator are rejected in v1.
   trust: [system, firefox, ios-simulator, android-emulator]
+# Ports the HTTPS proxy listens on; lan: true also accepts other machines.
 proxy:
   https_port: 443
   http_port: 80
   lan: false
+# How many services start at once, across all lanes and projects.
+startup:
+  # adaptive: grow and shrink with CPU and memory pressure. fixed (default): always
+  # `max` at a time. all: everything at once.
+  mode: adaptive
+  # Default: CPU cores / 4, at least 2.
+  initial: 2
+  # Default: CPU cores.
+  max: 8
+  # Grow the window while system CPU stays below this.
+  target_cpu: 75%
+  # A `ready: started` service is done starting once it stays below this share of one core for 2s.
+  settle_cpu: 10%
+  # Give the slot back after this even if the service isn't ready.
+  slot_timeout: 20s
+# Service output kept on disk, by age and total size.
 logs:
   retention: { days: 7, max_size: 5GiB }
+# How long CPU and memory history is kept.
 metrics:
   retention: 30d
+# Terminal app the TUI's O key opens a unit in: ghostty, iterm2, kitty, wezterm or terminal.
 terminal: ghostty

@@ -29,7 +29,7 @@ Bun units get:
 - `NODE_EXTRA_CA_CERTS`: the devlanes root certificate. Bun reads it since 1.1.22, for the runtime and `bun install`.
 - `FORCE_COLOR=1`, unless the shell sets `FORCE_COLOR` or `NO_COLOR`. Bun lets `FORCE_COLOR` override `NO_COLOR`, so a shell `NO_COLOR` is respected by not setting it.
 
-## Detection
+## Behaviour
 
 Without `platform`, Bun claims a unit only when the nearest package-manager decision, walking from the working directory up to the lane root, is Bun:
 

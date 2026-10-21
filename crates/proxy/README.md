@@ -28,7 +28,20 @@ async fn serve(shutdown: CancellationToken) -> Result<(), Box<dyn std::error::Er
 - `Proxy::tls_config` and `serve_tls` use a shared CA with HTTP/1.1 and HTTP/2 ALPN.
 - `RouteState` supplies idle, starting, failed and reconnecting status pages.
 
-## Connections
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml: ports the proxy listens on.
+proxy:
+  https_port: 443
+  http_port: 80
+  # Also accept connections from other machines on the network.
+  lan: false
+```
+
+The daemon binds these ports on both address families. When a port is denied or taken it falls back to 8443 for HTTPS and 8080 for HTTP and reports why in `devlanes doctor`.
+
+## Behaviour
 
 Host is preserved unless a route selects `HostHeader::Upstream`. `Upstream::Local` tries IPv4 loopback before IPv6. WebSockets and SSE stream without an idle timeout.
 

@@ -33,6 +33,22 @@ async fn sync_extension(worktree: &Path, to: &Path) -> Result<SyncHandle, SyncEr
 - `LocalTarget`: writes a temp file and renames it into place. It never writes or deletes through a symlinked directory.
 - `IgnoreRules`: a pattern without `/` matches at any depth, and a pattern with `/` is anchored at the source root.
 
+## Config example
+
+```yaml
+services:
+  extension:
+    run_script: apps/extension/package.json#dev
+    # Folders copied to a stable path, locally or on a machine connected with devlanes connect.
+    sync:
+      - from: apps/extension/.output/chrome-mv3
+        # Destination; defaults to ~/devlanes/sync/<project>/<lane>/<folder>.
+        # to: ~/extensions/acme
+        ignore: ["*.map"]
+```
+
+While the service runs, the build output is mirrored to a path that stays the same across rebuilds, so a browser can keep it loaded unpacked. A relative `to` is resolved against the lane's worktree.
+
 ## Behaviour
 
 The first pass deletes destination files that are missing from the source. Files matching `ignore` are left alone on both sides.

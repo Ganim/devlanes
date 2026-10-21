@@ -28,9 +28,9 @@ The caller executes the returned action and writes the reporter's separate stdou
 - `run_with` / `WithDriver`: start a lane, run a foreground command, collect artifacts, and clean up owned resources.
 - `CiProvider`: phase groups, failure annotations, and step-summary appends.
 
-## Output selection
+## Behaviour
 
-The first matching setting wins: `--output`, `--json`, `DEVLANES_OUTPUT`, agent detection, CI detection, then terminal detection.
+Output mode: the first matching setting wins: `--output`, `--json`, `DEVLANES_OUTPUT`, agent detection, CI detection, then terminal detection.
 `DEVLANES_AGENT=0` disables agent detection. CI defaults to plain output and disables prompts.
 
 ## License

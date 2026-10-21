@@ -56,6 +56,24 @@ let warnings = install::uninstall(&SystemExecutor, &SystemFs).await?;
 - `install`: `install`, `uninstall`, and the plain-data `install_plan` and `uninstall_plan` with the exact argv.
 - `Executor` and `FsProbe`: injectable command runner and `lstat`; the `fake` feature adds `FakeExecutor` and `FakeFs` for argv tests.
 
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml
+hostnames:
+  # Write exact hostnames to /etc/hosts: auto only when the system resolver fails a probe.
+  hosts_file: auto
+```
+
+```yaml
+# devlanes.yaml
+lanes:
+  # This project always needs the file, for workerd, which cannot resolve *.localhost.
+  hosts_file: always
+```
+
+With both, the project's routed names are written on every route change, even where `*.localhost` resolves; another project on the same machine is written only when the probe fails.
+
 ## Behaviour
 
 - `never` in the user config wins over every project hint. Otherwise a project's `lanes.hosts_file` replaces the user's mode, and `auto` writes names only when the probe fails.

@@ -12,6 +12,15 @@ use devlanes_term_terminal_app::TerminalApp;
 TerminalApp.launch(&request)?;
 ```
 
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml: open units from the TUI's O key in Terminal.app, also the default.
+terminal: terminal
+```
+
+## Behaviour
+
 It runs `osascript` with `do script "cd <cwd> && <command>"` and sets the window's custom title.
 
 ## License

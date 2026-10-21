@@ -38,7 +38,17 @@ let summary = runs.finish(UnitRunId(1), 120_000); // p50/p95/peak for the run
 - `RunTracker`, `RunSummary`: per-run p50, p95 and peak of footprint and CPU.
 - `baseline`: median of the p95 values of a unit's recent runs (last 10 runs of at least 2 minutes by default).
 
-## Units
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml: how long CPU and memory history is kept.
+metrics:
+  retention: 30d
+```
+
+The daemon deletes one-minute roll-ups older than this once a day; finished unit and task runs are kept for 30 days regardless.
+
+## Behaviour
 
 CPU is a percentage of one core, so two busy cores read 200. `footprint_bytes` is the memory number to show: `phys_footprint` on macOS, PSS on Linux, and the docker CLI's cache-free usage for containers. RSS is kept for detail views.
 

@@ -31,7 +31,17 @@ Timestamps are receive times in Unix milliseconds. During capture, call
 `flush_partial(now_ms, false)` every 200 ms to expose incomplete lines.
 Use `ingest_stream` for separate stdout and stderr streams.
 
-## Storage and queries
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml: service output kept on disk, by age and total size.
+logs:
+  retention: { days: 7, max_size: 5GiB }
+```
+
+The config crate parses this setting, but the daemon does not pass it on yet: each run directory uses the `LogOptions` defaults of 7 days and 512 MiB.
+
+## Behaviour
 
 The API blocks on disk I/O and compression. Use a dedicated thread or
 `spawn_blocking`, with one writer per run directory.

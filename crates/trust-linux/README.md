@@ -22,7 +22,7 @@ async fn trust_system(ca_pem: &str) -> Result<(), TrustError> {
 - `CaStoreLayout`: Fedora, Debian, Arch and openSUSE anchor directories, detected in that order.
 - `SystemStore`: an anchor file plus the distribution's refresh command.
 
-## Commands
+## Behaviour
 
 The system store runs, through sudo unless already root:
 

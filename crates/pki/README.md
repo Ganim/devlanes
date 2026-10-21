@@ -26,7 +26,18 @@ CA loading performs blocking filesystem I/O. Run it on a blocking thread when ca
 - `combined_bundle` appends the root to caller-supplied PEM roots without writing a file.
 - `CertificatePolicy::lookup` supplies authorized SANs and a route generation for cache invalidation.
 
-## Keys and authorization
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml
+tls:
+  # devlanes keeps its own CA under ~/.devlanes/ca; mkcert reuses mkcert's CAROOT.
+  ca: mkcert
+```
+
+With `mkcert`, `devlanes trust` installs mkcert's root through `CertificateAuthority::from_mkcert`. The daemon still loads or creates its own CA under `~/.devlanes/ca` for the proxy, so the setting does not change which root signs leaf certificates yet.
+
+## Behaviour
 
 New CA directories use mode `0700`; key files use `0600`. Loading rejects incomplete or mismatched certificate/key pairs. This crate does not modify system trust stores.
 

@@ -31,7 +31,7 @@ Deno units get:
 - `DENO_NO_UPDATE_CHECK=1`, so service starts do not print upgrade notices.
 - `FORCE_COLOR=1` (honoured since Deno 2.2.4), unless the shell sets `FORCE_COLOR` or `NO_COLOR`.
 
-## Detection
+## Behaviour
 
 Without `platform`, Deno claims a unit whose `run_script` source is `deno.json` or `deno.jsonc`, or whose working directory contains one, above node's claim on a `package.json` there. A Deno config in a parent directory inside the lane gives a weaker claim that a `package.json` in the working directory beats.
 
