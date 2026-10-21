@@ -1,0 +1,20 @@
+[package]
+name = "devlanes-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+devlanes-ipc = { path = "../ipc" }
+devlanes-proto = { path = "../proto" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tempfile.workspace = true
+rustix = { version = "1", features = ["process"] }
+
+[lints]
+workspace = true
