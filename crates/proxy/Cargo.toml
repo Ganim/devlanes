@@ -1,0 +1,29 @@
+[package]
+name = "devlanes-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+devlanes-pki = { path = "../pki" }
+arc-swap = "1"
+bytes.workspace = true
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio.workspace = true
+tokio-util.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+socket2 = "0.6"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio-tungstenite = "0.28"
+futures-util.workspace = true
+
+[lints]
+workspace = true

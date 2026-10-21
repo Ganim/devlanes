@@ -1,0 +1,22 @@
+[package]
+name = "devlanes-pki"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rcgen = { version = "0.14", features = ["x509-parser", "zeroize"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+thiserror.workspace = true
+time = "0.3"
+x509-parser = "0.18"
+tempfile.workspace = true
+fs2 = "0.4"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
