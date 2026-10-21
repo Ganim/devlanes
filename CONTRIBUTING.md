@@ -125,13 +125,13 @@ dl disconnect mybox
 
 ## End-to-end tests
 
-`e2e/` runs the real `devlanes` binary against the projects in `fixtures/`. Without `DEVLANES_E2E_BIN_DIR`, each test process builds `devlanes` and `fixture-server` with cargo first; set it to skip that:
+`e2e/` runs the real `devlanes` binary against the projects in `fixtures/`. The default nextest profile skips it (`.config/nextest.toml`); the `e2e` profile runs only it. Without `DEVLANES_E2E_BIN_DIR`, each test process builds `devlanes` and `fixture-server` with cargo first; set it to skip that:
 
 ```sh
 cargo build -p devlanes -p devlanes-testing
 export DEVLANES_E2E_BIN_DIR="$PWD/target/debug"
-cargo nextest run -p devlanes-e2e
-cargo nextest run -p devlanes-e2e --run-ignored only -E 'test(/^docker_/)'   # needs Docker
+cargo nextest run --profile e2e
+cargo nextest run --profile e2e --run-ignored only -E 'test(/^docker_/)'   # needs Docker
 ```
 
 `e2e/README.md` covers isolation, port slots and debugging.

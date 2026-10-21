@@ -7,11 +7,14 @@ use devlanes_e2e::{Lab, Output, Result, lane, listening};
 
 use crate::{BUDGET, need, units_in};
 
-/// Curls the API through the proxy using only what `with` puts in the environment, plus
-/// the lab's proxy port (public URLs carry no port).
-const CURL_API: &str = r#"host="${DEVLANES_PUBLIC_URL_API#https://}"
+/// Curls the API's public URL through the proxy with the CA that `with` exports. The URL
+/// must carry the lab's proxy port, which is not 443.
+const CURL_API: &str = r#"url="$DEVLANES_PUBLIC_URL_API"
+case "$url" in *":$E2E_HTTPS_PORT") ;; *) echo "public URL without the proxy port: $url" >&2; exit 90 ;; esac
+host="${url#https://}"
+host="${host%%:*}"
 curl -fsS --max-time 10 --cacert "$DEVLANES_CA_CERT" \
-  --resolve "$host:$E2E_HTTPS_PORT:127.0.0.1" "https://$host:$E2E_HTTPS_PORT/healthz""#;
+  --resolve "$host:$E2E_HTTPS_PORT:127.0.0.1" "$url/healthz""#;
 
 /// Runs `devlanes with --logs-dir <dir> -- sh -c <script>` in the primary worktree.
 fn with(lab: &Lab, logs: &Path, script: &str) -> Result<Output> {

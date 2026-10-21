@@ -1,0 +1,7 @@
+# devlanes-e2e drives the real binary and builds it on first use; it runs only with
+# `--profile e2e`, so the workspace run never starts nested cargo builds.
+[profile.default]
+default-filter = 'not package(devlanes-e2e)'
+
+[profile.e2e]
+default-filter = 'package(devlanes-e2e)'

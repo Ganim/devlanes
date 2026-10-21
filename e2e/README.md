@@ -5,20 +5,22 @@ End-to-end tests that run the real `devlanes` binary as separate processes again
 ## Usage
 
 ```sh
-cargo nextest run -p devlanes-e2e                                           # hermetic tests
-cargo nextest run -p devlanes-e2e --run-ignored only -E 'test(/^docker_/)'  # needs Docker
-DEVLANES_E2E_DUMP=1 cargo nextest run -p devlanes-e2e --no-capture -E 'test(with_)'
+cargo nextest run --profile e2e                                           # hermetic tests
+cargo nextest run --profile e2e --run-ignored only -E 'test(/^docker_/)'  # needs Docker
+DEVLANES_E2E_DUMP=1 cargo nextest run --profile e2e --no-capture -E 'test(with_)'
 ```
+
+The default nextest profile in `.config/nextest.toml` leaves this crate out, so `cargo nextest run --workspace` never builds the binaries from inside a test.
 
 `DEVLANES_E2E_DUMP=1` prints the end of each test's daemon log on teardown. A test that panics (a failed `assert!`) prints it without the variable; one that returns an error does not.
 
 ## Binaries
 
-Tests need `devlanes` and `fixture-server`. When `DEVLANES_E2E_BIN_DIR` is set, they are taken from that directory. Otherwise the first test of each test process runs `cargo build -p devlanes -p devlanes-testing` into `$CARGO_TARGET_DIR` (relative paths are taken from the workspace root) or `target`, and uses its `debug` directory. Under nextest every test is its own process, so CI builds once and sets the variable:
+Tests need `devlanes` and `fixture-server`. When `DEVLANES_E2E_BIN_DIR` is set, they are taken from that directory. Otherwise the first test of each test process runs `cargo build -p devlanes -p devlanes-testing` into `$CARGO_TARGET_DIR` (relative paths are taken from the workspace root) or `target`, and uses its `debug` directory. The build time does not count against a test's budget. Under nextest every test is its own process, so CI builds once and sets the variable:
 
 ```sh
 cargo build -p devlanes -p devlanes-testing
-DEVLANES_E2E_BIN_DIR="$PWD/target/debug" cargo nextest run -p devlanes-e2e
+DEVLANES_E2E_BIN_DIR="$PWD/target/debug" cargo nextest run --profile e2e
 ```
 
 ## API

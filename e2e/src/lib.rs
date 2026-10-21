@@ -293,8 +293,10 @@ impl Lab {
 
     /// Builds the home, user config and committed repository; `budget` bounds the whole test.
     fn create(budget: Duration, populate: impl FnOnce(&Path) -> Result<()>) -> Result<Self> {
-        let deadline = Instant::now() + budget;
+        // The first lab of a test process may build the binaries; that must not count
+        // against the test's budget.
         bin_dir()?;
+        let deadline = Instant::now() + budget;
         let slot = PortSlot::acquire()?;
         let home = TestHome::new()?;
         let base = slot.base;

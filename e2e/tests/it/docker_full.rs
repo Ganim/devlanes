@@ -12,9 +12,11 @@ const COMPOSE_PROJECT: &str = "devlanes-fixture-full";
 
 /// Curls the API through the proxy, saves `status --json` and counts seeded rows.
 const CHECK: &str = r#"set -e
-host="${DEVLANES_PUBLIC_URL_API#https://}"
+url="$DEVLANES_PUBLIC_URL_API"
+host="${url#https://}"
+host="${host%%:*}"
 curl -fsS --max-time 10 --cacert "$DEVLANES_CA_CERT" \
-  --resolve "$host:$E2E_HTTPS_PORT:127.0.0.1" "https://$host:$E2E_HTTPS_PORT/healthz"
+  --resolve "$host:$E2E_HTTPS_PORT:127.0.0.1" "$url/healthz"
 devlanes status --json > "$E2E_STATUS"
 docker compose -p devlanes-fixture-full exec -T postgres \
   psql -U postgres -d full_0 -tAc "SELECT count(*) FROM items" > "$E2E_ROWS""#;
