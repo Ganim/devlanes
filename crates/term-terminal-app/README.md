@@ -5,11 +5,12 @@
 ## Usage
 
 ```rust
-use devlanes_term::TerminalLauncher;
+use devlanes_term::{LaunchError, LaunchRequest, TerminalLauncher};
 use devlanes_term_terminal_app::TerminalApp;
 
-// `request` is a `devlanes_term::LaunchRequest`.
-TerminalApp.launch(&request)?;
+fn open(request: &LaunchRequest) -> Result<(), LaunchError> {
+    TerminalApp.launch(request)
+}
 ```
 
 ## Config example
@@ -21,7 +22,7 @@ terminal: terminal
 
 ## Behaviour
 
-It runs `osascript` with `do script "cd <cwd> && <command>"` and sets the window's custom title.
+It runs `osascript` with `do script "sh -c 'cd <cwd> && exec <command>'"` and sets the window's custom title.
 
 ## License
 

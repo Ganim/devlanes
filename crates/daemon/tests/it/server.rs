@@ -154,3 +154,127 @@ async fn server_survives_connection_churn() {
     .await
     .expect("timeout");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+/// Input to a unit that never reads queues per stream: the same connection keeps
+/// getting responses, a full queue drops its oldest input with an `input.dropped`
+/// event, and other streams still deliver in order.
+async fn a_unit_that_never_reads_does_not_stall_the_connection() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config =
+            "project: deaf\nservices:\n  deaf: { run: \"deaf; sleep\" }\n  echo: { run: sleep }\n";
+        let main = repo(&tmp.path, "r", config);
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        let options = Options {
+            home: tmp.path.join("srv"),
+            socket: tmp.path.join("srv/run/d.sock"),
+        };
+        let socket = options.socket.clone();
+        let server = Server::bind(options).await.expect("bind");
+        let token = server.shutdown_token();
+        let handler: Arc<dyn Handler> = Arc::new(h.engine.clone());
+        let running = tokio::spawn(server.run(handler, || Ok(())));
+
+        let mut connection = client(&socket).await;
+        let mut streams = Vec::new();
+        for (id, unit) in [(1, "deaf"), (2, "echo")] {
+            let Outcome::Ok { data } = request(
+                &mut connection,
+                id,
+                Method::Attach,
+                json!({"unit": unit, "interactive": true, "columns": 80, "rows": 24}),
+                cx(&main),
+            )
+            .await
+            else {
+                panic!("attach {unit}");
+            };
+            streams.push(data["stream_id"].as_u64().expect("stream id"));
+        }
+        let (deaf, echo) = (streams[0], streams[1]);
+        // This client writes without reading; a real one reads concurrently. Take
+        // the attach snapshots first, so the daemon has nothing left to send it.
+        while let Ok(frame) =
+            tokio::time::timeout(Duration::from_millis(300), connection.recv()).await
+        {
+            frame.expect("recv");
+        }
+        // Well past the queue's bounds (frames and bytes).
+        let chunk = bytes::Bytes::from(vec![b'x'; 1024]);
+        for _ in 0..2048 {
+            connection
+                .send(Frame::Bytes {
+                    stream_id: deaf,
+                    data: chunk.clone(),
+                })
+                .await
+                .expect("input");
+        }
+        for word in ["first", "second"] {
+            connection
+                .send(Frame::Bytes {
+                    stream_id: echo,
+                    data: bytes::Bytes::from(word),
+                })
+                .await
+                .expect("input");
+        }
+
+        connection
+            .send(Frame::Control(Control::Request(Request {
+                id: 9,
+                method: Method::DaemonStatus,
+                params: json!({}),
+                context: Context::default(),
+            })))
+            .await
+            .expect("send");
+        let mut answered = false;
+        let mut warned = None;
+        let mut echoed = String::new();
+        let deadline = tokio::time::Instant::now() + ANSWER;
+        while !(answered && warned.is_some() && echoed.contains("second")) {
+            let frame = tokio::time::timeout_at(deadline, connection.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("answered {answered}, warned {warned:?}, echoed {echoed:?}")
+                })
+                .expect("recv");
+            match frame {
+                Frame::Control(Control::Response(response)) if response.id == 9 => {
+                    assert!(matches!(response.result, Outcome::Ok { .. }));
+                    answered = true;
+                }
+                Frame::Control(Control::Event(event))
+                    if event.event == devlanes_proto::events::INPUT_DROPPED =>
+                {
+                    warned = Some(event.data);
+                }
+                Frame::Bytes { stream_id, data } if stream_id == echo => {
+                    echoed.push_str(&String::from_utf8_lossy(&data));
+                }
+                _ => {}
+            }
+        }
+        let warned = warned.expect("warning");
+        assert_eq!(warned["stream_id"], deaf);
+        assert_eq!(warned["code"], "input_overflow");
+        assert!(warned["dropped_bytes"].as_u64().is_some_and(|b| b > 0));
+        let first = echoed.find("first").expect("first echoed");
+        assert!(first < echoed.find("second").expect("second"), "{echoed}");
+
+        drop(connection);
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        token.cancel();
+        running.await.expect("join").expect("clean shutdown");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}

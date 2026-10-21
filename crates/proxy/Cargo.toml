@@ -25,6 +25,7 @@ socket2 = "0.6"
 tempfile.workspace = true
 tokio-tungstenite = "0.28"
 futures-util.workspace = true
+rustix = { version = "1", features = ["process"] }
 
 [lints]
 workspace = true

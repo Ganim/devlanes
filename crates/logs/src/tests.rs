@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
-use crate::{Error, Frame, Framer, LogOptions, MAX_LINE_BYTES, RawRing, UnitLog, extract_level};
+use crate::{Error, Frame, Framer, LogOptions, LogReader, MAX_LINE_BYTES, UnitLog, extract_level};
 use devlanes_proto::LogQuery;
-use std::{fs, io::Write};
+use std::{fs, io::Write, path::Path};
 
 /// Small segments exercise real compression and indexes without large fixtures.
 fn store(options: LogOptions) -> (tempfile::TempDir, UnitLog) {
@@ -102,20 +102,6 @@ fn long_lines_cap_without_corrupting_unicode_or_adding_empty_lines() {
         &mut frames,
     );
     assert_eq!(frames.len(), 1);
-}
-
-#[test]
-/// Replay storage retains only the newest exact bytes, including unframed data.
-fn raw_ring_evicts_by_bytes() {
-    let mut ring = RawRing::new(5);
-    ring.push(b"123");
-    ring.push(b"4567");
-    assert_eq!(ring.snapshot(), b"34567");
-    ring.push(b"abcdefghij");
-    assert_eq!(ring.snapshot(), b"fghij");
-    let mut disabled = RawRing::new(0);
-    disabled.push(b"abc");
-    assert!(disabled.snapshot().is_empty());
 }
 
 #[test]
@@ -388,7 +374,7 @@ fn size_retention_removes_metadata_and_compressed_files() {
     log.ingest(b"one long line\ntwo long line\nthree long line\n", 1)
         .unwrap();
     assert_eq!(log.segments().len(), 1);
-    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    assert_eq!(listing(directory.path()), ["00000000000000000003.log"]);
     assert_eq!(log.query(&LogQuery::default()).unwrap().items[0].seq, 3);
 }
 
@@ -425,8 +411,8 @@ fn interrupted_compression_uses_plain_source_and_rebuilds_metadata() {
 }
 
 #[test]
-/// Corruption is reported instead of silently skipping an interior record.
-fn corrupt_closed_segment_is_rejected() {
+/// A damaged closed segment is moved aside so the unit can still start and log.
+fn corrupt_closed_segment_is_quarantined() {
     let options = LogOptions {
         compress: false,
         ..Default::default()
@@ -436,11 +422,46 @@ fn corrupt_closed_segment_is_rejected() {
     log.finish(2).unwrap();
     let path = log.segments()[0].path.clone();
     drop(log);
-    fs::write(path, b"1\t1\t0\t-\tunterminated").unwrap();
-    assert!(matches!(
-        UnitLog::open(directory.path(), "api", options),
-        Err(Error::Corrupt(_))
-    ));
+    fs::write(&path, b"1\t1\t0\t-\tunterminated").unwrap();
+    let mut log = UnitLog::open(directory.path(), "api", options).unwrap();
+    assert!(!path.exists());
+    assert_eq!(
+        listing(directory.path()),
+        [
+            "00000000000000000001.log.corrupt",
+            "00000000000000000001.meta.json.corrupt",
+            "00000000000000000002.log",
+        ]
+    );
+    log.ingest(b"after\n", 3).unwrap();
+    let page = log.query(&LogQuery::default()).unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|l| (l.seq, l.text.as_str()))
+            .collect::<Vec<_>>(),
+        [(2, "after")]
+    );
+}
+
+#[test]
+/// A torn interior record in the previous run's tail quarantines only that segment.
+fn corrupt_tail_is_quarantined_and_history_kept() {
+    let options = LogOptions {
+        segment_bytes: 30,
+        ..Default::default()
+    };
+    let (directory, mut log) = store(options.clone());
+    log.ingest(b"one long line\ntwo long line\n", 1).unwrap();
+    log.flush().unwrap();
+    let tail = log.segments().last().unwrap().path.clone();
+    drop(log);
+    fs::write(&tail, b"2\t1\t0\t-\tok\nbroken\n").unwrap();
+    let mut log = UnitLog::open(directory.path(), "api", options).unwrap();
+    assert!(Path::new(&format!("{}.corrupt", tail.display())).exists());
+    log.ingest(b"three\n", 2).unwrap();
+    let page = log.query(&LogQuery::default()).unwrap();
+    assert_eq!(page.items.iter().map(|l| l.seq).collect::<Vec<_>>(), [1, 3]);
 }
 
 #[test]
@@ -465,4 +486,242 @@ fn since_pruning_uses_timestamp_extrema_and_cross_run_sequence_seed() {
     assert_eq!(log.next_sequence(), 102);
     assert_eq!(log.segments()[0].min_timestamp_ms, 100);
     assert_eq!(log.segments()[0].max_timestamp_ms, 1000);
+}
+
+/// Visible directory entries, sorted; the writer's lock file is hidden.
+fn listing(directory: &Path) -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Names and contents, to prove a read left the directory untouched.
+fn contents(directory: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut entries: Vec<_> = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (
+                entry.file_name().into_string().unwrap(),
+                fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect();
+    entries.sort();
+    entries
+}
+
+/// Several compressed segments, each spanning more than one 256-record index block.
+fn history(directory: &Path, lines: u64) -> UnitLog {
+    let options = LogOptions {
+        segment_bytes: 16 * 1024,
+        ..Default::default()
+    };
+    let mut log = UnitLog::open(directory, "api", options).unwrap();
+    for i in 1..=lines {
+        log.ingest(format!("line {i}\n").as_bytes(), i).unwrap();
+    }
+    assert!(log.segments().iter().filter(|m| m.compressed).count() >= 3);
+    assert!(log.segments()[0].index.len() >= 2);
+    log
+}
+
+fn seqs(log: &mut UnitLog, query: &LogQuery) -> Vec<u64> {
+    log.query(query)
+        .unwrap()
+        .items
+        .iter()
+        .map(|l| l.seq)
+        .collect()
+}
+
+#[test]
+/// Opening trusts closed segments' metadata instead of decompressing them, and
+/// removes temporaries an interrupted compression or metadata write left behind.
+fn open_loads_closed_metadata_without_decoding() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = history(directory.path(), 3000);
+    let closed = log.segments()[0].clone();
+    let rebuilt = directory
+        .path()
+        .join(format!("{:020}.meta.json", log.segments()[1].first_seq));
+    drop(log);
+    // Same length, so the metadata stays valid; decoding would fail.
+    fs::write(&closed.path, vec![0; closed.bytes as usize]).unwrap();
+    // A crash between compression and the metadata write costs one scan.
+    fs::remove_file(&rebuilt).unwrap();
+    let zst_tmp = directory.path().join("00000000000000000001.log.zst.tmp");
+    let json_tmp = directory.path().join("00000000000000000001.meta.json.tmp");
+    fs::write(&zst_tmp, b"partial").unwrap();
+    fs::write(&json_tmp, b"{").unwrap();
+    let log = UnitLog::open(directory.path(), "api", LogOptions::default()).unwrap();
+    assert_eq!(log.segments()[0].path, closed.path);
+    assert_eq!(log.next_sequence(), 3001);
+    assert!(rebuilt.exists());
+    assert!(!zst_tmp.exists() && !json_tmp.exists());
+}
+
+#[test]
+/// Tail pages walk newest first and stop when full; continuation covers everything
+/// once, and grep context matches the forward scan.
+fn tail_walks_newest_first_across_compressed_blocks() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut log = history(directory.path(), 3000);
+    let mut query = LogQuery {
+        tail: Some(100),
+        ..Default::default()
+    };
+    let mut seen = Vec::new();
+    loop {
+        let page = log.query(&query).unwrap();
+        assert!(page.items.windows(2).all(|w| w[0].seq + 1 == w[1].seq));
+        seen.splice(0..0, page.items.iter().map(|l| l.seq));
+        query.cursor = page.next_cursor;
+        if query.cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen, (1..=3000).collect::<Vec<_>>());
+
+    let grep = LogQuery {
+        grep: Some("line (7|1500|2999)$".into()),
+        context_lines: 2,
+        ..Default::default()
+    };
+    let forward = seqs(&mut log, &grep);
+    assert_eq!(
+        forward,
+        [
+            5, 6, 7, 8, 9, 1498, 1499, 1500, 1501, 1502, 2997, 2998, 2999, 3000
+        ]
+    );
+    let tail = LogQuery {
+        tail: Some(1000),
+        ..grep
+    };
+    assert_eq!(seqs(&mut log, &tail), forward);
+
+    // The oldest segment is unreadable now; a tail never reaches it.
+    let oldest = log.segments()[0].clone();
+    fs::write(&oldest.path, vec![0; oldest.bytes as usize]).unwrap();
+    let tail = LogQuery {
+        tail: Some(10),
+        ..Default::default()
+    };
+    assert_eq!(seqs(&mut log, &tail), (2991..=3000).collect::<Vec<_>>());
+    assert!(log.query(&LogQuery::default()).is_err());
+}
+
+#[test]
+/// A reader snapshot is independent of the writer: later writes stay invisible, a
+/// rotated active segment is read from its compressed file, and removed segments
+/// are skipped.
+fn reader_snapshot_survives_writes_rotation_and_retention() {
+    let (_directory, mut log) = store(LogOptions::default());
+    log.ingest(b"one\n", 1).unwrap();
+    let reader = log.reader();
+    log.ingest(b"two\n", 2).unwrap();
+    log.finish(3).unwrap();
+    assert!(log.segments()[0].compressed);
+    let page = reader.query(&LogQuery::default()).unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>(),
+        ["one"]
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut log = history(directory.path(), 3000);
+    let reader = log.reader();
+    let segments = log.segments();
+    fs::remove_file(&segments[0].path).unwrap();
+    let page = reader.query(&LogQuery::default()).unwrap();
+    assert_eq!(page.items[0].seq, segments[1].first_seq);
+}
+
+#[test]
+/// One writer per directory; a read-only reader creates nothing, recovers nothing
+/// and ignores a crashed writer's torn record.
+fn writer_lock_and_read_only_reader() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing");
+    let reader = LogReader::open(&missing, "api").unwrap();
+    assert!(reader.query(&LogQuery::default()).unwrap().items.is_empty());
+    assert!(!missing.exists());
+
+    let run = directory.path().join("run");
+    let options = LogOptions {
+        segment_bytes: 30,
+        ..Default::default()
+    };
+    let mut log = UnitLog::open(&run, "api", options.clone()).unwrap();
+    assert!(matches!(
+        UnitLog::open(&run, "api", options.clone()),
+        Err(Error::Locked)
+    ));
+    log.ingest(b"one long line\ntwo long line\n", 1).unwrap();
+    log.flush().unwrap();
+    let tail = log.segments().last().unwrap().path.clone();
+    drop(log);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&tail)
+        .unwrap()
+        .write_all(b"3\t2\t")
+        .unwrap();
+    let before = contents(&run);
+    let reader = LogReader::open(&run, "api").unwrap();
+    assert_eq!(reader.segments().len(), 2);
+    let page = reader.query(&LogQuery::default()).unwrap();
+    assert_eq!(page.items.iter().map(|l| l.seq).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(contents(&run), before);
+
+    // `finish` releases the lock while the value is still alive.
+    let mut log = UnitLog::open(&run, "api", options.clone()).unwrap();
+    log.finish(3).unwrap();
+    let again = UnitLog::open(&run, "api", options).unwrap();
+    assert_eq!(again.next_sequence(), 3);
+}
+
+#[test]
+/// The idle tick makes buffered records visible to independent readers.
+fn flush_partial_flushes_the_file_buffer() {
+    let (directory, mut log) = store(LogOptions::default());
+    log.ingest(b"buffered\n", 1).unwrap();
+    let read = || {
+        LogReader::open(directory.path(), "api")
+            .unwrap()
+            .query(&LogQuery::default())
+            .unwrap()
+            .items
+            .len()
+    };
+    assert_eq!(read(), 0);
+    log.flush_partial(2, false).unwrap();
+    assert_eq!(read(), 1);
+}
+
+#[test]
+/// A live unit's share of the global budget removes oldest data first, and a zero
+/// budget closes the active segment so it can go too.
+fn trim_to_enforces_a_byte_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut log = history(directory.path(), 3000);
+    let total = log.disk_bytes();
+    let oldest = log.segments()[0].path.clone();
+    let left = log.trim_to(total / 2).unwrap();
+    assert!(left <= total / 2);
+    assert_eq!(left, log.disk_bytes());
+    assert!(!oldest.exists());
+    assert_eq!(log.trim_to(0).unwrap(), 0);
+    assert_eq!(log.segments().len(), 1);
+    assert_eq!(listing(directory.path()), ["00000000000000003001.log"]);
+    log.ingest(b"after\n", 4000).unwrap();
+    assert_eq!(seqs(&mut log, &LogQuery::default()), [3001]);
 }

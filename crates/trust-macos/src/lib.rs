@@ -8,6 +8,7 @@
 //! Firefox 120 and later also imports user-added keychain roots, and the `firefox`
 //! target additionally writes each profile's NSS database when `certutil` exists.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -30,6 +31,9 @@ const SECURITY_HINT: &str = "it ships with macOS; check that /usr/bin/security e
 /// `errSecItemNotFound`, returned by `find-certificate` when nothing matches.
 const ITEM_NOT_FOUND: i32 = 44;
 
+/// Common name `devlanes-pki` gives its CA, which macOS uses as the keychain label.
+pub const DEVLANES_CA_LABEL: &str = "devlanes local development CA";
+
 /// Store id shared by `system` and `chrome`, which both use the login keychain.
 pub const KEYCHAIN_ID: &str = "macos-login-keychain";
 
@@ -40,6 +44,7 @@ pub const FIREFOX_ID: &str = "nss-firefox";
 pub struct MacosTrust {
     executor: Arc<dyn CommandExecutor>,
     home: PathBuf,
+    label: Option<String>,
 }
 
 impl MacosTrust {
@@ -48,7 +53,16 @@ impl MacosTrust {
         Self {
             executor,
             home: home.into(),
+            label: None,
         }
+    }
+
+    /// Keychain stores also remove certificates labelled `label` on uninstall; see
+    /// [`KeychainStore::with_label`]. Pass [`DEVLANES_CA_LABEL`] for devlanes' own CA.
+    #[must_use]
+    pub fn with_ca_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 
     /// Real commands and `$HOME`.
@@ -65,11 +79,14 @@ impl MacosTrust {
     /// The store for `target`; mobile targets are [`TrustError::Unsupported`].
     pub fn store(&self, target: TrustTarget) -> Result<Box<dyn TrustStore>, TrustError> {
         match target {
-            TrustTarget::System | TrustTarget::Chrome => Ok(Box::new(KeychainStore::new(
-                self.executor.clone(),
-                login_keychain(&self.home),
-                target,
-            ))),
+            TrustTarget::System | TrustTarget::Chrome => {
+                let store =
+                    KeychainStore::new(self.executor.clone(), login_keychain(&self.home), target);
+                Ok(Box::new(match &self.label {
+                    Some(label) => store.with_label(label),
+                    None => store,
+                }))
+            }
             TrustTarget::Firefox => Ok(Box::new(NssStore::new(
                 self.executor.clone(),
                 TrustTarget::Firefox,
@@ -125,6 +142,7 @@ pub struct KeychainStore {
     executor: Arc<dyn CommandExecutor>,
     keychain: PathBuf,
     target: TrustTarget,
+    label: Option<String>,
 }
 
 impl KeychainStore {
@@ -138,6 +156,7 @@ impl KeychainStore {
             executor,
             keychain: keychain.into(),
             target,
+            label: None,
         }
     }
 
@@ -151,23 +170,42 @@ impl KeychainStore {
         run(self.executor.as_ref(), command, SECURITY_HINT).await
     }
 
+    /// Also removes, on uninstall, every certificate in the keychain whose label
+    /// contains `label` (for example older devlanes CAs left by a regenerated
+    /// `$DEVLANES_HOME/ca`). Leave unset for CAs devlanes does not own, such as mkcert's.
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// SHA-1 hashes of the keychain's certificates, optionally only those whose
+    /// label contains `label`; `Err` carries the reason the keychain was unreadable.
+    async fn hashes(&self, label: Option<&str>) -> Result<Result<Vec<String>, String>, TrustError> {
+        let mut find = CommandLine::new(SECURITY).args(["find-certificate", "-a"]);
+        if let Some(label) = label {
+            find = find.arg("-c").arg(label);
+        }
+        let find = find.arg("-Z").arg(path_arg(&self.keychain)?);
+        let output = self.security(&find).await?;
+        Ok(match output.code {
+            Some(0) => Ok(sha1_hashes(&output.stdout)),
+            Some(ITEM_NOT_FOUND) => Ok(Vec::new()),
+            _ => Err(format!(
+                "{}: {}",
+                self.keychain.display(),
+                output.stderr.trim()
+            )),
+        })
+    }
+
     /// Checks presence by SHA-1, then trust by evaluating the CA as its own chain.
     async fn state(&self, ca: &CaCertificate) -> Result<KeychainState, TrustError> {
-        let keychain = path_arg(&self.keychain)?;
-        let find = CommandLine::new(SECURITY)
-            .args(["find-certificate", "-a", "-Z"])
-            .arg(keychain);
-        let output = self.security(&find).await?;
-        let present = match output.code {
-            Some(0) => has_sha1(&output.stdout, &ca.sha1_hex()),
-            Some(ITEM_NOT_FOUND) => false,
-            _ => {
-                return Ok(KeychainState::Unknown(format!(
-                    "{}: {}",
-                    self.keychain.display(),
-                    output.stderr.trim()
-                )));
-            }
+        let present = match self.hashes(None).await? {
+            Ok(hashes) => hashes
+                .iter()
+                .any(|hash| hash.eq_ignore_ascii_case(&ca.sha1_hex())),
+            Err(reason) => return Ok(KeychainState::Unknown(reason)),
         };
         if !present {
             return Ok(KeychainState::Absent);
@@ -244,28 +282,55 @@ impl TrustStore for KeychainStore {
         Ok(())
     }
 
-    /// `security delete-certificate -Z <sha1> -t <keychain>`; `-t` also drops the
-    /// user trust settings, so nothing stays trusted after the certificate is gone.
+    /// `security delete-certificate -Z <sha1> -t <keychain>` for the CA and, with a
+    /// label, every other certificate whose label contains it (found with
+    /// `find-certificate -a -c <label> -Z`). `-t` also drops the user trust
+    /// settings, so nothing stays trusted after the certificate is gone.
     async fn uninstall(&self, ca: &CaCertificate) -> Result<(), TrustError> {
-        if self.state(ca).await? == KeychainState::Absent {
-            return Ok(());
+        let mut doomed = BTreeSet::new();
+        match self.hashes(None).await? {
+            Ok(hashes)
+                if hashes
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(&ca.sha1_hex())) =>
+            {
+                doomed.insert(ca.sha1_hex());
+            }
+            Ok(_) => {}
+            // Let delete-certificate report the real problem.
+            Err(_) => {
+                doomed.insert(ca.sha1_hex());
+            }
         }
-        let command = CommandLine::new(SECURITY)
-            .args(["delete-certificate", "-Z"])
-            .arg(ca.sha1_hex())
-            .arg("-t")
-            .arg(path_arg(&self.keychain)?);
-        let output = self.change(&command).await?;
-        // Deleted between the probe and now: the goal is reached.
-        if output.success()
-            || output
-                .stderr
-                .contains("Unable to delete certificate matching")
-        {
-            Ok(())
-        } else {
-            output.into_checked(&command).map(drop)
+        if let Some(label) = &self.label {
+            match self.hashes(Some(label)).await? {
+                Ok(hashes) => doomed.extend(hashes.into_iter().map(|h| h.to_ascii_uppercase())),
+                Err(reason) => {
+                    return Err(TrustError::CommandFailed {
+                        command: format!("{SECURITY} find-certificate -a -c '{label}' -Z"),
+                        code: None,
+                        stderr: reason,
+                    });
+                }
+            }
         }
+        for hash in doomed {
+            let command = CommandLine::new(SECURITY)
+                .args(["delete-certificate", "-Z"])
+                .arg(hash)
+                .arg("-t")
+                .arg(path_arg(&self.keychain)?);
+            let output = self.change(&command).await?;
+            // Deleted between the probe and now: the goal is reached.
+            if !output.success()
+                && !output
+                    .stderr
+                    .contains("Unable to delete certificate matching")
+            {
+                output.into_checked(&command)?;
+            }
+        }
+        Ok(())
     }
 
     /// Installed only when the CA is in the keychain and evaluates as trusted.
@@ -278,12 +343,14 @@ impl TrustStore for KeychainStore {
     }
 }
 
-/// Whether `find-certificate -Z` output lists `sha1`.
-fn has_sha1(stdout: &str, sha1: &str) -> bool {
+/// SHA-1 hashes listed by `find-certificate -Z`.
+fn sha1_hashes(stdout: &str) -> Vec<String> {
     stdout
         .lines()
         .filter_map(|line| line.trim().strip_prefix("SHA-1 hash:"))
-        .any(|hash| hash.trim().eq_ignore_ascii_case(sha1))
+        .map(|hash| hash.trim().to_owned())
+        .filter(|hash| hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        .collect()
 }
 
 /// Explains failures caused by the authorization dialog.

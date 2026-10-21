@@ -32,6 +32,29 @@ fn state_label(unit: &UnitSummary) -> String {
     }
 }
 
+/// Whether a previous daemon left `unit` running; this daemon does not supervise it.
+fn orphaned(unit: &UnitSummary) -> bool {
+    unit.state == devlanes_proto::ORPHANED
+}
+
+/// `left running by a previous daemon (pid N); stop it: devlanes stop api --lane acme@2`.
+fn orphan_note(unit: &UnitSummary) -> String {
+    let pid = unit
+        .pid
+        .map(|pid| format!(" (pid {pid})"))
+        .unwrap_or_default();
+    format!(
+        "left running by a previous daemon{pid}; stop it: {}",
+        Hint::command([
+            "stop",
+            clean(&unit.name).as_str(),
+            "--lane",
+            clean(&unit.lane).as_str()
+        ])
+        .0
+    )
+}
+
 /// Agent line for one unit: `state lane:unit exit=N urls ports actor=`.
 pub(crate) fn unit_line(unit: &UnitSummary, cx: &Ctx<'_>) -> String {
     let mut line = format!(
@@ -47,6 +70,11 @@ pub(crate) fn unit_line(unit: &UnitSummary, cx: &Ctx<'_>) -> String {
     }
     if let Some(code) = unit.exit_code {
         line.push_str(&format!(" exit={code}"));
+    }
+    if orphaned(unit)
+        && let Some(pid) = unit.pid
+    {
+        line.push_str(&format!(" pid={pid}"));
     }
     for url in &unit.urls {
         line.push(' ');
@@ -66,6 +94,9 @@ fn unit_block(unit: &UnitSummary, tail: &[Value], cx: &Ctx<'_>) -> Vec<String> {
     let mut lines = vec![unit_line(unit, cx)];
     if let Some(reason) = &unit.reason {
         lines.push(format!("  {}", words::error_message(reason).0));
+    }
+    if orphaned(unit) {
+        lines.push(format!("  {}", orphan_note(unit)));
     }
     if unit.state == "failed" {
         lines.extend(tail_lines(tail));
@@ -441,6 +472,10 @@ pub(super) fn stop(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             if let Some(code) = unit.exit_code.filter(|code| *code != 0) {
                 line.push_str(&format!(" exit={code}"));
             }
+            // A stopped orphan keeps `orphaned_since_ms`.
+            if unit.orphaned_since_ms.is_some() {
+                line.push_str(" (left running by a previous daemon)");
+            }
             line
         })
         .collect()
@@ -707,6 +742,10 @@ fn unit_table(lane: &LaneSummary, cx: &Ctx<'_>) -> Vec<String> {
                 words::error_message(reason).0
             ));
         }
+        if orphaned(unit) {
+            let note = format!("{}: {}", clean(&unit.name), orphan_note(unit));
+            extra.push(format!("  {}", cx.state_text(&unit.state, &note)));
+        }
     }
     let mut lines = table(&rows, "  ");
     lines.extend(extra);
@@ -864,6 +903,16 @@ pub(super) fn wait(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             }
             .0
         )),
+        // Never ready: nothing supervises it, so its readiness cannot be checked.
+        "orphaned" if !unit.is_empty() => {
+            let pid = int(data, "pid")
+                .map(|pid| format!(" (pid {pid})"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "  left running by a previous daemon{pid} and not supervised; stop it, then start it: {}",
+                Hint::command(["stop", unit.as_str(), "--lane", lane.as_str()]).0
+            ));
+        }
         _ => {}
     }
     lines

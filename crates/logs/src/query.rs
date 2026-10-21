@@ -1,5 +1,7 @@
 use std::{
     collections::VecDeque,
+    fs::File,
+    io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -8,9 +10,9 @@ use grep_regex::RegexMatcher;
 use grep_searcher::{Searcher, sinks::UTF8};
 
 use crate::{
-    Error, Result, UnitLog,
+    Error, LogReader, Result, SegmentMetadata, UnitLog,
     level::rank,
-    storage::{open_reader_at, read_record},
+    storage::{read_record, skip},
 };
 
 const MAX_QUERY_BYTES: usize = 4 * 1024 * 1024;
@@ -18,12 +20,25 @@ const MAX_QUERY_LINES: usize = 10_000;
 const MAX_CONTEXT: usize = 1_000;
 
 impl UnitLog {
+    /// Queries a fresh [`UnitLog::reader`] snapshot. Callers sharing the log behind a
+    /// lock should take the snapshot under it and query after releasing it.
+    pub fn query(&mut self, query: &LogQuery) -> Result<Page<LogLine>> {
+        self.reader().query(query)
+    }
+
+    /// Deterministic-time variant of [`UnitLog::query`].
+    pub fn query_at(&mut self, query: &LogQuery, now_ms: u64) -> Result<Page<LogLine>> {
+        self.reader().query_at(query, now_ms)
+    }
+}
+
+impl LogReader {
     /// Returns bounded structured data; presentation shaping belongs to the client.
     /// `max_bytes` counts serialized LogLine bytes plus one separator per item.
     /// Cursors `unit#seq` page forward; returned `before:unit#seq` cursors page back.
     /// Tail pages are chronological, and their next cursor retrieves older records.
     /// Long records are UTF-8-safely clipped only if a single record exceeds the budget.
-    pub fn query(&mut self, query: &LogQuery) -> Result<Page<LogLine>> {
+    pub fn query(&self, query: &LogQuery) -> Result<Page<LogLine>> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| Error::Query(e.to_string()))?
@@ -34,7 +49,7 @@ impl UnitLog {
 
     /// Caller time makes relative `since` durations deterministic in tests and replay.
     /// `since` accepts Unix milliseconds, RFC3339, or an integer followed by ms/s/m/h/d.
-    pub fn query_at(&mut self, query: &LogQuery, now_ms: u64) -> Result<Page<LogLine>> {
+    pub fn query_at(&self, query: &LogQuery, now_ms: u64) -> Result<Page<LogLine>> {
         if query.context_lines > MAX_CONTEXT {
             return Err(Error::Query("context exceeds 1000 lines".into()));
         }
@@ -79,7 +94,7 @@ impl UnitLog {
             lower = anchor.saturating_sub(query.context_lines as u64);
             upper = anchor.saturating_add(query.context_lines as u64);
         }
-        let mut page = PageBuilder::new(
+        let page = PageBuilder::new(
             query.max_bytes.unwrap_or(1024 * 1024).min(MAX_QUERY_BYTES),
             query.tail.unwrap_or(1000).min(MAX_QUERY_LINES),
             backwards,
@@ -99,79 +114,50 @@ impl UnitLog {
         if !query.units.is_empty() && !query.units.contains(&self.unit) {
             return Ok(Page::complete(Vec::new()));
         }
-        self.flush()?;
-        let mut searcher = Searcher::new();
-        let mut pending = VecDeque::<LogLine>::new();
-        let mut trailing = 0usize;
-        let context = if query.around.is_some() {
-            0
-        } else {
-            query.context_lines
+        let mut scan = Scan {
+            page,
+            searcher: Searcher::new(),
+            matcher,
+            min_level,
+            since,
+            lower,
+            upper,
+            context: if query.around.is_some() {
+                0
+            } else {
+                query.context_lines
+            },
+            pending: VecDeque::new(),
+            trailing: 0,
         };
-        'segments: for segment in &self.segments {
-            if segment.records == 0
-                || segment.last_seq < lower
-                || segment.first_seq > upper
-                || since.is_some_and(|s| segment.max_timestamp_ms < s)
-            {
-                continue;
-            }
-            let offset = segment
-                .index
-                .iter()
-                .rev()
-                .find(|entry| entry.seq <= lower)
-                .map_or(0, |entry| entry.offset);
-            let mut reader = open_reader_at(&segment.path, segment.compressed, offset)?;
-            while let Some((line, _)) = read_record(reader.as_mut(), &self.unit, false)? {
-                if line.seq < lower
-                    || line.seq > upper
-                    || since.is_some_and(|s| line.timestamp_ms < s)
-                {
-                    continue;
-                }
-                let level_matches = min_level.is_none_or(|minimum| {
-                    line.level
-                        .as_deref()
-                        .and_then(rank)
-                        .is_some_and(|level| level >= minimum)
-                });
-                let mut matches = level_matches;
-                if matches && let Some(matcher) = &matcher {
-                    matches = false;
-                    searcher.search_slice(
-                        matcher,
-                        line.text.as_bytes(),
-                        UTF8(|_, _| {
-                            matches = true;
-                            Ok(false)
-                        }),
-                    )?;
-                }
-                if matches {
-                    while let Some(previous) = pending.pop_front() {
-                        if !page.push(previous)? {
-                            break 'segments;
-                        }
-                    }
-                    if !page.push(line)? {
-                        break 'segments;
-                    }
-                    trailing = context;
-                } else if trailing > 0 {
-                    if !page.push(line)? {
-                        break 'segments;
-                    }
-                    trailing -= 1;
-                } else if context > 0 {
-                    pending.push_back(line);
-                    if pending.len() > context {
-                        pending.pop_front();
-                    }
-                }
+        let candidates = self.segments.iter().filter(|segment| {
+            segment.records > 0
+                && segment.last_seq >= lower
+                && segment.first_seq <= upper
+                && since.is_none_or(|s| segment.max_timestamp_ms >= s)
+        });
+        // Tail pages walk newest first and stop once full, so their cost follows the
+        // page size rather than the amount of retained history.
+        let ordered: Vec<_> = if backwards {
+            candidates.rev().collect()
+        } else {
+            candidates.collect()
+        };
+        for segment in ordered {
+            let more = if backwards {
+                scan_backward(segment, &self.unit, &mut scan)
+            } else {
+                scan_forward(segment, &self.unit, &mut scan)
+            };
+            match more {
+                Ok(true) => {}
+                Ok(false) => break,
+                // Retention removed it after the snapshot; older or newer data remains.
+                Err(Error::Io(error)) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
         }
-        Ok(page.finish(&self.unit))
+        Ok(scan.page.finish(&self.unit))
     }
 
     /// Cursor identity includes the unit so accidental cross-unit paging fails loudly.
@@ -188,6 +174,175 @@ impl UnitLog {
     }
 }
 
+/// Filter and context state shared by both scan directions.
+struct Scan {
+    page: PageBuilder,
+    searcher: Searcher,
+    matcher: Option<RegexMatcher>,
+    min_level: Option<u8>,
+    since: Option<u64>,
+    lower: u64,
+    upper: u64,
+    context: usize,
+    /// Non-matching neighbours seen just before the next match, in scan order.
+    pending: VecDeque<LogLine>,
+    trailing: usize,
+}
+
+impl Scan {
+    /// Feeds one record in scan order. Context is symmetric, so a backward scan
+    /// selects the same lines as a forward one. False means the page is full.
+    fn visit(&mut self, line: LogLine) -> Result<bool> {
+        if line.seq < self.lower
+            || line.seq > self.upper
+            || self.since.is_some_and(|s| line.timestamp_ms < s)
+        {
+            return Ok(true);
+        }
+        let mut matches = self.min_level.is_none_or(|minimum| {
+            line.level
+                .as_deref()
+                .and_then(rank)
+                .is_some_and(|level| level >= minimum)
+        });
+        if matches && let Some(matcher) = &self.matcher {
+            matches = false;
+            self.searcher.search_slice(
+                matcher,
+                line.text.as_bytes(),
+                UTF8(|_, _| {
+                    matches = true;
+                    Ok(false)
+                }),
+            )?;
+        }
+        if matches {
+            while let Some(previous) = self.pending.pop_front() {
+                if !self.page.push(previous)? {
+                    return Ok(false);
+                }
+            }
+            if !self.page.push(line)? {
+                return Ok(false);
+            }
+            self.trailing = self.context;
+        } else if self.trailing > 0 {
+            if !self.page.push(line)? {
+                return Ok(false);
+            }
+            self.trailing -= 1;
+        } else if self.context > 0 {
+            self.pending.push_back(line);
+            if self.pending.len() > self.context {
+                self.pending.pop_front();
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Opens a snapshot's segment. An active segment the writer has since rotated is
+/// read from its compressed successor, whose uncompressed offsets are identical.
+fn open_segment(segment: &SegmentMetadata) -> Result<(File, bool)> {
+    match File::open(&segment.path) {
+        Ok(file) => Ok((file, segment.compressed)),
+        Err(error) if error.kind() == ErrorKind::NotFound && !segment.compressed => {
+            Ok((File::open(segment.path.with_extension("log.zst"))?, true))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Streams from the index entry at or before `lower` to the snapshot's end.
+fn scan_forward(segment: &SegmentMetadata, unit: &str, scan: &mut Scan) -> Result<bool> {
+    let start = segment
+        .index
+        .iter()
+        .rev()
+        .find(|entry| entry.seq <= scan.lower)
+        .map_or(0, |entry| entry.offset);
+    let length = segment.uncompressed_bytes.saturating_sub(start);
+    let (mut file, compressed) = open_segment(segment)?;
+    // Bounded by the snapshot, so records appended after it stay invisible.
+    let mut reader: Box<dyn BufRead> = if compressed {
+        let mut decoder = BufReader::new(zstd::stream::read::Decoder::new(file)?);
+        skip(&mut decoder, start)?;
+        Box::new(decoder.take(length))
+    } else {
+        file.seek(SeekFrom::Start(start))?;
+        Box::new(BufReader::new(file.take(length)))
+    };
+    while let Some((line, _)) = read_record(reader.as_mut(), unit, !segment.closed)? {
+        if line.seq > scan.upper {
+            return Ok(false);
+        }
+        if !scan.visit(line)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Reads index blocks (256 records each) newest first. Plain files seek per block;
+/// a zstd stream cannot, so the needed range is decompressed once, at most one segment.
+fn scan_backward(segment: &SegmentMetadata, unit: &str, scan: &mut Scan) -> Result<bool> {
+    let blocks: Vec<(u64, u64)> = segment
+        .index
+        .iter()
+        .enumerate()
+        .filter_map(|(i, entry)| {
+            let next = segment.index.get(i + 1);
+            let last_seq = next.map_or(segment.last_seq, |n| n.seq.saturating_sub(1));
+            let end = next.map_or(segment.uncompressed_bytes, |n| n.offset);
+            (entry.seq <= scan.upper && last_seq >= scan.lower).then_some((entry.offset, end))
+        })
+        .collect();
+    let (Some(&(low, _)), Some(&(_, high))) = (blocks.first(), blocks.last()) else {
+        return Ok(true);
+    };
+    let (file, compressed) = open_segment(segment)?;
+    let decompressed = if compressed {
+        let mut decoder = zstd::stream::read::Decoder::new(&file)?;
+        skip(&mut decoder, low)?;
+        let mut bytes = Vec::new();
+        decoder
+            .take(high.saturating_sub(low))
+            .read_to_end(&mut bytes)?;
+        Some(bytes)
+    } else {
+        None
+    };
+    for &(start, end) in blocks.iter().rev() {
+        let mut lines = Vec::new();
+        let mut reader: Box<dyn BufRead + '_> =
+            match &decompressed {
+                Some(bytes) => {
+                    let block = usize::try_from(start.saturating_sub(low))
+                        .ok()
+                        .zip(usize::try_from(end.saturating_sub(low)).ok())
+                        .and_then(|(a, b)| bytes.get(a..b));
+                    Box::new(block.ok_or_else(|| {
+                        Error::Corrupt("index offset exceeds segment length".into())
+                    })?)
+                }
+                None => {
+                    let mut handle = &file;
+                    handle.seek(SeekFrom::Start(start))?;
+                    Box::new(BufReader::new(handle.take(end.saturating_sub(start))))
+                }
+            };
+        while let Some((line, _)) = read_record(reader.as_mut(), unit, !segment.closed)? {
+            lines.push(line);
+        }
+        for line in lines.into_iter().rev() {
+            if !scan.visit(line)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 struct PageBuilder {
     items: VecDeque<LogLine>,
     bytes: usize,
@@ -199,7 +354,7 @@ struct PageBuilder {
 }
 
 impl PageBuilder {
-    /// Tail queries retain a byte-bounded suffix instead of collecting the entire run.
+    /// Backward pages are filled newest first and kept chronological.
     fn new(max_bytes: usize, max_lines: usize, backwards: bool) -> Self {
         Self {
             items: VecDeque::new(),
@@ -212,11 +367,10 @@ impl PageBuilder {
         }
     }
 
-    /// False stops a forward scan once another matching record proves truncation.
+    /// False stops the scan once another matching record proves truncation.
     fn push(&mut self, mut line: LogLine) -> Result<bool> {
         let mut size = encoded_size(&line)?;
-        if !self.backwards
-            && !self.items.is_empty()
+        if !self.items.is_empty()
             && (self.items.len() == self.max_lines || self.bytes + size > self.max_bytes)
         {
             self.omitted = true;
@@ -227,18 +381,12 @@ impl PageBuilder {
             size = encoded_size(&line)?;
             self.clipped = true;
         }
-        if self.backwards {
-            while !self.items.is_empty()
-                && (self.items.len() >= self.max_lines || self.bytes + size > self.max_bytes)
-            {
-                if let Some(removed) = self.items.pop_front() {
-                    self.bytes -= encoded_size(&removed)?;
-                    self.omitted = true;
-                }
-            }
-        }
         self.bytes += size;
-        self.items.push_back(line);
+        if self.backwards {
+            self.items.push_front(line);
+        } else {
+            self.items.push_back(line);
+        }
         Ok(true)
     }
 

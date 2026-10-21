@@ -4,19 +4,13 @@
 //! `kern.memorystatus_level` (percent of RAM free) times `hw.memsize`.
 
 use std::{
-    ffi::{CStr, c_void},
     io,
     sync::{Arc, Mutex, PoisonError},
 };
 
 use async_trait::async_trait;
 use devlanes_core::gate::{MemoryPressure, PressureSample, PressureSource};
-
-unsafe extern "C" {
-    /// `<mach/mach_init.h>`; the host port. libc deprecates its binding, so the
-    /// symbol is declared here like `mach_absolute_time` in `ffi`.
-    fn mach_host_self() -> libc::mach_port_t;
-}
+use devlanes_sys::macos::{HostPort, sysctl};
 
 /// Cumulative CPU ticks of all cores: user, system, idle, nice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,79 +47,26 @@ pub(crate) fn available_bytes(memsize: u64, level_percent: i32) -> Option<u64> {
     Some(u64::try_from(u128::from(memsize) * u128::from(percent) / 100).unwrap_or(u64::MAX))
 }
 
-/// Reads one integer sysctl of type `T` by name.
-fn sysctl<T: Copy + Default>(name: &CStr) -> io::Result<T> {
-    let mut value = T::default();
-    let mut size = size_of::<T>();
-    // SAFETY: `name` is NUL-terminated; `value` is a writable `T` and `size` is
-    // its exact byte length, which the kernel checks before writing.
-    let status = unsafe {
-        libc::sysctlbyname(
-            name.as_ptr(),
-            (&raw mut value).cast::<c_void>(),
-            &raw mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if status != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if size != size_of::<T>() {
-        return Err(io::Error::other(format!(
-            "sysctl {} returned {size} bytes",
-            name.to_string_lossy()
-        )));
-    }
-    Ok(value)
-}
-
-/// Reads the host's cumulative CPU ticks.
-fn cpu_ticks(host: libc::mach_port_t) -> io::Result<CpuTicks> {
-    let mut info = libc::host_cpu_load_info {
-        cpu_ticks: [0; libc::CPU_STATE_MAX as usize],
-    };
-    let mut count: libc::mach_msg_type_number_t = libc::HOST_CPU_LOAD_INFO_COUNT;
-    // SAFETY: `info` is a writable `host_cpu_load_info`, and `count` holds its
-    // size in `integer_t` units as `host_statistics` requires.
-    let status = unsafe {
-        libc::host_statistics(
-            host,
-            libc::HOST_CPU_LOAD_INFO,
-            (&raw mut info).cast::<libc::integer_t>(),
-            &raw mut count,
-        )
-    };
-    if status != libc::KERN_SUCCESS {
-        return Err(io::Error::other(format!(
-            "host_statistics failed with {status}"
-        )));
-    }
-    Ok(CpuTicks(info.cpu_ticks))
-}
-
 /// Reads CPU load, the memory pressure level and available memory. Each call's
 /// CPU covers the time since the previous call; the first call has none.
 #[derive(Debug, Clone)]
 pub struct MacosPressure {
-    host: libc::mach_port_t,
+    host: HostPort,
     previous: Arc<Mutex<Option<CpuTicks>>>,
 }
 
 impl MacosPressure {
     /// Looks up the host port once; the send right lives as long as the daemon.
     pub fn new() -> Self {
-        // SAFETY: `mach_host_self` has no preconditions.
-        let host = unsafe { mach_host_self() };
         Self {
-            host,
+            host: HostPort::new(),
             previous: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Reads synchronously; a few microseconds of syscalls.
     pub fn sample_blocking(&self) -> io::Result<PressureSample> {
-        let ticks = cpu_ticks(self.host)?;
+        let ticks = CpuTicks(self.host.cpu_ticks()?);
         let cpu_percent = {
             let mut previous = self.previous.lock().unwrap_or_else(PoisonError::into_inner);
             let percent = previous

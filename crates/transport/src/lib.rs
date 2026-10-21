@@ -20,6 +20,7 @@ mod registry;
 mod rpc;
 mod server;
 mod session;
+mod splice;
 mod sync;
 mod transport;
 mod wire;
@@ -29,7 +30,7 @@ pub use reconnect::{Backoff, Link, LinkError, LinkState};
 pub use registry::{
     AuthorizedTarget, ClientRegistry, HostHeader, HostInfo, LaneInfo, LaneKey, PortInfo, Registry,
     RegistryEvent, RegistryFeed, RegistrySnapshot, RegistrySource, RegistryUpdate, SharedRegistry,
-    UnitInfo, UnitKey, UnitKind,
+    UnitInfo, UnitKey, UnitKind, serving,
 };
 pub use rpc::{
     RpcCall, RpcCallError, RpcError, RpcHandler, RpcInput, RpcReceiver, RpcReplyStream, RpcSender,
@@ -38,6 +39,7 @@ pub use server::{BoxServices, Dialer, LoopbackDialer, ServeError, ServeOptions, 
 pub use session::{
     DataStream, OpenError, Session, SessionEnd, SessionError, SessionOptions, Timing,
 };
+pub use splice::{HALF_CLOSE_IDLE, splice};
 pub use sync::{
     NoSync, SyncError, SyncFeed, SyncMessage, SyncSource, SyncStreamError, SyncSubscription,
 };

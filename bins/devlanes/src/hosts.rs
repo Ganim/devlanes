@@ -164,10 +164,13 @@ impl<E: Executor> Executor for NonInteractive<E> {
     }
 }
 
-/// `sudo X` becomes `sudo -n X`; other commands are unchanged.
+/// `sudo X` (or `/usr/bin/sudo X`) becomes `sudo -n X`; other commands are unchanged.
 fn non_interactive(command: &CommandSpec) -> CommandSpec {
     let mut command = command.clone();
-    if command.program == "sudo" && command.args.first().map(String::as_str) != Some("-n") {
+    let sudo = Path::new(&command.program)
+        .file_name()
+        .is_some_and(|name| name == "sudo");
+    if sudo && command.args.first().map(String::as_str) != Some("-n") {
         command.args.insert(0, "-n".into());
     }
     command
@@ -284,5 +287,10 @@ mod tests {
         assert_eq!(non_interactive(&already), already);
         let plain = CommandSpec::new("/usr/bin/id").arg("-un");
         assert_eq!(non_interactive(&plain), plain);
+        let absolute = CommandSpec::new("/usr/bin/sudo").args(["/bin/rm", "-f", "x"]);
+        assert_eq!(
+            non_interactive(&absolute).to_string(),
+            "/usr/bin/sudo -n /bin/rm -f x"
+        );
     }
 }

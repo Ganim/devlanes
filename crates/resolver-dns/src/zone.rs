@@ -4,6 +4,12 @@ use crate::DnsError;
 /// stale entry survives after the user switches resolver strategy.
 const DEFAULT_TTL: u32 = 60;
 
+/// Special-use zones a TLD may equal or sit under, matching the hosts helper's list
+/// (`devlanes_hosts_helper::RESERVED_SUFFIXES`) minus `localhost`, which only allows
+/// subdomains. `test` is reserved by RFC 6761, `home.arpa` by RFC 8375 and
+/// `internal` by ICANN for private use, so none can name a public site.
+pub const RESERVED_ZONES: &[&str] = &["test", "internal", "home.arpa"];
+
 /// The TLD the server is authoritative for, with the answer TTL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Zone {
@@ -15,8 +21,11 @@ pub struct Zone {
 impl Zone {
     /// Validates `tld` (for example `test` or `dev.internal`).
     ///
-    /// One trailing dot is accepted and case is folded. `local` and `localhost` are
-    /// refused because routing them here would break mDNS or loopback resolution.
+    /// One trailing dot is accepted and case is folded. The zone must be `test`,
+    /// `internal` or `home.arpa`, a domain under one of them, or a domain under
+    /// `localhost`: the same special-use names the hosts helper accepts. Any other
+    /// name could belong to a real site, and the OS resolver file would send every
+    /// user's lookups for it to loopback.
     pub fn new(tld: &str) -> Result<Self, DnsError> {
         let invalid = |reason| DnsError::InvalidTld {
             tld: tld.to_owned(),
@@ -52,8 +61,20 @@ impl Zone {
         {
             return Err(invalid("the last label cannot be numeric"));
         }
-        if name == "local" || name == "localhost" {
-            return Err(invalid("it is reserved for mDNS or loopback"));
+        let under = |suffix: &str| {
+            name.strip_suffix(suffix)
+                .is_some_and(|rest| rest.ends_with('.'))
+        };
+        let reserved = RESERVED_ZONES
+            .iter()
+            .any(|suffix| name == *suffix || under(suffix))
+            // `localhost` itself already resolves to loopback without any resolver file.
+            || under("localhost");
+        if !reserved {
+            return Err(invalid(
+                "the TLD must be test, internal or home.arpa, a domain under one of them, \
+                 or a domain under localhost",
+            ));
         }
         Ok(Self {
             name,
@@ -111,6 +132,29 @@ mod tests {
             Zone::new("dev.internal").expect("valid").name(),
             "dev.internal"
         );
+        for good in [
+            "internal",
+            "home.arpa",
+            "lab.home.arpa",
+            "a.b.test",
+            "dev.localhost",
+        ] {
+            assert_eq!(Zone::new(good).expect("reserved").name(), good);
+        }
+        for public in [
+            "example",
+            "com",
+            "dev",
+            "lan",
+            "contest",
+            "test.com",
+            "xhome.arpa",
+        ] {
+            assert!(
+                matches!(Zone::new(public), Err(DnsError::InvalidTld { reason, .. }) if reason.contains("home.arpa")),
+                "{public:?} is not a special-use name"
+            );
+        }
         for bad in [
             "",
             ".",
@@ -132,7 +176,7 @@ mod tests {
     fn matches_apex_and_subdomains_only() {
         let zone = Zone::new("test").expect("zone");
         assert!(zone.contains("test"));
-        assert!(zone.contains("crm.clickmax-2.TEST."));
+        assert!(zone.contains("api.acme-2.TEST."));
         assert!(!zone.contains("contest"));
         assert!(!zone.contains("test.com"));
         let deep = Zone::new("dev.internal").expect("zone");

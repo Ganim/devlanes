@@ -12,6 +12,8 @@ publish.workspace = true
 async-trait.workspace = true
 devlanes-core = { path = "../core" }
 devlanes-metrics = { path = "../metrics" }
+devlanes-sys = { path = "../sys" }
+# Only for the `CPU_STATE_*` index constants; all calls go through devlanes-sys.
 libc = "0.2"
 tokio.workspace = true
 

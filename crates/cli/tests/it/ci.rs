@@ -9,7 +9,7 @@ use devlanes_cli::*;
 use devlanes_proto::{
     Actor, ActorKind, Event, LogLine, Method, Request, RpcError, Selection, events,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// Injects only test markers; never mutates the test runner's environment.
 fn ci_runtime(cli: &Cli, vars: &[(&str, &str)]) -> Runtime {
@@ -244,6 +244,71 @@ fn phase_groups_and_failed_unit_annotation() {
     "#);
 }
 
+/// `failures` carries the log tails and the tasks that are not units.
+#[test]
+fn start_failures_merge_with_units_and_annotate_tasks() {
+    let cli = Cli::parse_from(["devlanes", "start"]);
+    let runtime = ci_runtime(&cli, &[("GITHUB_ACTIONS", "true")]);
+    let data = json!({
+        "lane": "acme@0", "ready": false, "timed_out": false,
+        "failures": [
+            {"lane": "acme@0", "unit": "api", "exit_code": 1, "log_tail": ["missing config"]},
+            {"lane": "acme@0", "unit": "seed", "exit_code": 2, "log_tail": ["seed failed"]},
+        ],
+        "units": [
+            {"name": "api", "lane": "acme@0", "state": "failed", "exit_code": 1},
+            {"name": "web", "lane": "acme@0", "state": "failed", "exit_code": 3,
+             "log_tail": ["port taken"]},
+            {"name": "db", "lane": "acme@0", "state": "ready"},
+        ],
+    });
+    let stdout = runtime
+        .reporter()
+        .result(&Report::new(Method::Start, &data))
+        .expect("result")
+        .stdout;
+    let annotations: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("::error"))
+        .collect();
+    assert_eq!(
+        annotations,
+        [
+            "::error title=api exited 1::missing config",
+            "::error title=seed exited 2::seed failed",
+            "::error title=web exited 3::port taken",
+        ]
+    );
+}
+
+/// An error printed by another reporter of the same invocation closes the open group.
+#[test]
+fn errors_close_an_open_group() {
+    let cli = Cli::parse_from(["devlanes", "start"]);
+    let runtime = ci_runtime(&cli, &[("GITHUB_ACTIONS", "true")]);
+    let opened = runtime
+        .reporter()
+        .event(
+            Method::Start,
+            &Event {
+                seq: 1,
+                event: events::PHASE.into(),
+                data: json!({"lane":"acme@0","phase":"services","state":"started"}),
+            },
+        )
+        .expect("event");
+    assert_eq!(opened.stdout, "::group::services\n");
+    let error = runtime
+        .reporter()
+        .error(&RpcError::new("connection_lost", json!({}), 4), None);
+    assert_eq!(error.stdout, "::endgroup::\n");
+    assert_eq!(error.exit_code, 4);
+    let again = runtime
+        .reporter()
+        .error(&RpcError::new("connection_lost", json!({}), 4), None);
+    assert_eq!(again.stdout, "", "the group closes once");
+}
+
 #[test]
 fn with_stop_and_all_logs_parse() {
     let cli = Cli::parse_from([
@@ -308,6 +373,10 @@ struct FakeDriver {
     command_exit: CommandExit,
     spawned: bool,
     whole_lane: bool,
+    /// The start ends with this error (after recording ownership) instead.
+    start_failure: Option<RpcError>,
+    /// The command cannot be spawned.
+    missing_command: bool,
 }
 
 impl Default for FakeDriver {
@@ -321,6 +390,8 @@ impl Default for FakeDriver {
             command_exit: CommandExit::Code(0),
             spawned: true,
             whole_lane: false,
+            start_failure: None,
+            missing_command: false,
         }
     }
 }
@@ -342,6 +413,9 @@ impl WithDriver for FakeDriver {
         });
         if self.start_error {
             return Err(RpcError::new("connection_lost", json!({}), 4));
+        }
+        if let Some(error) = self.start_failure.clone() {
+            return Err(error);
         }
         Ok(WithStart {
             ready: self.ready,
@@ -408,7 +482,7 @@ impl WithDriver for FakeDriver {
         }])
     }
     /// Selective cleanup must not expand to a whole-lane stop.
-    async fn stop(&mut self, lane: &str, selection: Selection) -> Result<(), RpcError> {
+    async fn stop(&mut self, lane: &str, selection: Selection) -> Result<Value, RpcError> {
         assert_eq!(lane, "acme@0");
         assert_eq!(
             selection.units,
@@ -422,7 +496,11 @@ impl WithDriver for FakeDriver {
         if self.stop_error {
             Err(RpcError::new("stop_failed", json!({}), 1))
         } else {
-            Ok(())
+            Ok(
+                json!({"items": [{"lane": "acme@0", "state": "idle", "units": [
+                    {"name": "api", "lane": "acme@0", "state": "stopped", "exit_code": 143}
+                ]}]}),
+            )
         }
     }
     /// Tests require daemon teardown even when unit teardown failed.
@@ -444,6 +522,13 @@ impl WithDriver for FakeDriver {
         assert_eq!(env["CLIENT"], "kept");
         assert_eq!(env["SSL_CERT_FILE"], "/ca.pem");
         assert_eq!(env["DEVLANES_PUBLIC_URL_API"], "https://api.acme.localhost");
+        if self.missing_command {
+            return Err(RpcError::new(
+                "spawn_failed",
+                json!({"program": "tests"}),
+                127,
+            ));
+        }
         Ok(self.command_exit)
     }
 }
@@ -540,6 +625,8 @@ async fn with_json_prints_no_empty_object() {
     assert_eq!(outcome.exit_code, 0);
     let lines: Vec<&str> = output.lines().collect();
     assert!(!lines.contains(&"{}"), "{output}");
+    // Without failures there is no failure page either.
+    assert!(!output.contains("\"items\":[]"), "{output}");
     for line in &lines {
         // Every line of the NDJSON stream is a JSON document (the summary table aside).
         if line.starts_with('{') {
@@ -610,6 +697,43 @@ async fn with_keep_existing_daemon_signals_and_cleanup_errors() {
     }
 }
 
+/// A signal during the start still stops what it started and exits 128 + n; a
+/// command that does not exist exits 127 like a shell.
+#[tokio::test]
+async fn with_interrupted_start_and_missing_command() {
+    for (signal, code) in [("SIGINT", 130), ("SIGTERM", 143)] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (plan, runtime) = plan(temp.path(), false);
+        let mut driver = FakeDriver {
+            start_failure: Some(RpcError::new(
+                "interrupted",
+                json!({"signal": signal}),
+                code,
+            )),
+            ..FakeDriver::default()
+        };
+        let outcome = run_with(&plan, &runtime, &mut driver, &mut |_| {}).await;
+        assert_eq!(outcome.exit_code, code);
+        assert_eq!(
+            driver.calls,
+            ["start", "logs", "metrics", "stop", "daemon.stop"]
+        );
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (plan, runtime) = plan(temp.path(), false);
+    let mut driver = FakeDriver {
+        missing_command: true,
+        ..FakeDriver::default()
+    };
+    let outcome = run_with(&plan, &runtime, &mut driver, &mut |_| {}).await;
+    assert_eq!(outcome.exit_code, 127);
+    assert!(
+        driver
+            .calls
+            .ends_with(&["stop".into(), "daemon.stop".into()])
+    );
+}
+
 #[tokio::test]
 async fn artifact_names_are_safe_and_collision_free() {
     assert_ne!(log_filename("api/web"), log_filename("api_web"));
@@ -673,6 +797,7 @@ async fn stop_artifacts_and_summary_do_not_stop_daemon() {
     let cli = Cli::parse_from(["devlanes", "stop"]);
     let runtime = ci_runtime(&cli, &[("CI", "true")]);
     let mut driver = FakeDriver::default();
+    let mut output = String::new();
     let outcome = stop_with_logs(
         "acme@0",
         Selection {
@@ -682,10 +807,12 @@ async fn stop_artifacts_and_summary_do_not_stop_daemon() {
         temp.path(),
         &runtime,
         &mut driver,
-        &mut |_| {},
+        &mut |rendered| output.push_str(&rendered.stdout),
     )
     .await;
+    // A normal stop keeps the unit's 143 without failing; the stopped unit is listed.
     assert_eq!(outcome.exit_code, 0);
+    assert!(output.contains("api"), "{output}");
     assert_eq!(outcome.log_files.len(), 1);
     assert_eq!(driver.calls, ["logs", "metrics", "stop"]);
 }

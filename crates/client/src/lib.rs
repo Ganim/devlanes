@@ -31,7 +31,7 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Ipc(#[from] devlanes_ipc::Error),
-    #[error("daemon RPC failed: {0:?}")]
+    #[error("the daemon answered {} (exit {})", .0.code, .0.exit_code)]
     Rpc(RpcError),
     #[error("daemon v{version} (build {build_id}) runs {managed_processes} processes with protocol {protocol}; run devlanes daemon restart", version = .peer.version, build_id = .peer.build_id, managed_processes = .peer.managed_processes, protocol = .peer.protocol)]
     Incompatible { peer: Hello },
@@ -61,6 +61,29 @@ pub enum Error {
     Join(#[from] tokio::task::JoinError),
 }
 
+impl Error {
+    /// Whether this connect error means no daemon listens: the socket is missing or
+    /// refuses connections. Anything else (timeout, wrong peer, protocol) means one
+    /// runs and must not be treated as stopped.
+    pub fn is_not_running(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(error) if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+        )
+    }
+
+    /// Whether a sandbox, not a missing daemon, blocked the connection.
+    pub fn is_permission(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+        )
+    }
+}
+
 /// One client serializes requests; use begin_request/next_frame for streaming consumers.
 pub struct Client {
     connection: Connection<UnixStream>,
@@ -76,6 +99,23 @@ pub struct Client {
 impl Client {
     /// Connects without creating state or spawning, as required by shell completions.
     pub async fn connect(paths: &Paths) -> Result<Self> {
+        Self::handshake(paths, true).await
+    }
+
+    /// Like [`Client::connect`], but keeps the connection when the daemon speaks
+    /// another protocol; check [`Client::compatible`]. Only for the frozen methods
+    /// every daemon answers on any protocol: `daemon.shutdown` and `daemon.status`.
+    pub async fn connect_any(paths: &Paths) -> Result<Self> {
+        Self::handshake(paths, false).await
+    }
+
+    /// Whether the daemon speaks this client's protocol.
+    pub fn compatible(&self) -> bool {
+        self.peer.protocol == PROTOCOL_VERSION
+    }
+
+    /// Hello exchange; `strict` rejects another protocol with [`Error::Incompatible`].
+    async fn handshake(paths: &Paths, strict: bool) -> Result<Self> {
         timeout(CONNECT_TIMEOUT, async {
             let stream = UnixStream::connect(&paths.socket).await?;
             if stream.peer_cred()?.uid() != rustix::process::geteuid().as_raw() {
@@ -88,7 +128,7 @@ impl Client {
             let Frame::Control(Control::Hello(peer)) = connection.recv().await? else {
                 return Err(Error::UnexpectedFrame("hello"));
             };
-            if peer.protocol != PROTOCOL_VERSION {
+            if strict && peer.protocol != PROTOCOL_VERSION {
                 return Err(Error::Incompatible { peer });
             }
             Ok(Self {
@@ -106,13 +146,21 @@ impl Client {
 
     /// Starts the current executable only when the socket is absent or refuses connections.
     pub async fn connect_or_spawn(paths: &Paths) -> Result<Self> {
+        Self::connect_or_spawn_without(paths, &[]).await
+    }
+
+    /// Like [`Client::connect_or_spawn`], with `remove_env` dropped from a spawned
+    /// daemon's environment, such as the SSH variables of a tunnel's login session.
+    pub async fn connect_or_spawn_without(paths: &Paths, remove_env: &[&str]) -> Result<Self> {
         match Self::connect(paths).await {
             Ok(client) => return Ok(client),
-            Err(Error::Io(error))
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                ) => {}
+            Err(error) if error.is_not_running() => {}
+            // EPERM/EACCES on a socket that exists: a sandbox forbids the connection.
+            Err(error) if error.is_permission() => {
+                return Err(Error::Sandbox(
+                    "connecting to the daemon socket is not permitted",
+                ));
+            }
             Err(error) => return Err(error),
         }
         if let Some(reason) = sandbox_reason() {
@@ -123,8 +171,19 @@ impl Client {
             owned_paths.prepare()?;
             probe_socket(&owned_paths)
         })
-        .await??;
-        let mut child = Command::new(std::env::current_exe()?)
+        .await?
+        .map_err(|error| {
+            if error.is_permission() {
+                Error::Sandbox("creating the daemon directory is not permitted")
+            } else {
+                error
+            }
+        })?;
+        let mut command = Command::new(std::env::current_exe()?);
+        for name in remove_env {
+            command.env_remove(name);
+        }
+        let mut child = command
             .args(["daemon", "run"])
             .env("DEVLANES_HOME", &paths.home)
             .env("DEVLANES_READY_FD", "1")
@@ -154,9 +213,16 @@ impl Client {
         .await
         .map_err(|_| Error::Timeout)??;
         if message != b"ready\n" && message != b"already-running\n" {
-            return Err(Error::Startup(
-                String::from_utf8_lossy(&message).trim().to_owned(),
-            ));
+            let reason = String::from_utf8_lossy(&message).trim().to_owned();
+            // A daemon that died before writing a reason left it in its own log.
+            return Err(Error::Startup(if reason.is_empty() {
+                format!(
+                    "the daemon exited without a reason; see {}",
+                    paths.logs.join("daemon.log").display()
+                )
+            } else {
+                reason
+            }));
         }
         // Losing the race to another client's daemon means this invocation did not spawn it.
         let spawned = message == b"ready\n";
@@ -166,11 +232,7 @@ impl Client {
                     client.spawned = spawned;
                     return Ok(client);
                 }
-                Err(Error::Io(error))
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                    ) => {}
+                Err(error) if error.is_not_running() => {}
                 Err(error) => return Err(error),
             }
             if Instant::now() >= deadline {
@@ -201,6 +263,8 @@ impl Client {
                 Frame::Control(Control::Hello(_) | Control::Request(_)) => {
                     return Err(Error::UnexpectedFrame("response or event"));
                 }
+                // A newer daemon's frame type: nothing here can use it.
+                Frame::Control(Control::Unknown) => {}
                 frame => {
                     let size = frame_size(&frame)?;
                     if self.pending.len() >= MAX_PENDING_FRAMES
@@ -241,7 +305,12 @@ impl Client {
             self.pending_bytes -= frame_size(&frame)?;
             return Ok(frame);
         }
-        Ok(self.connection.recv().await?)
+        loop {
+            match self.connection.recv().await? {
+                Frame::Control(Control::Unknown) => {}
+                frame => return Ok(frame),
+            }
+        }
     }
 
     /// Sends terminal input without UTF-8 conversion after an attach response supplies its id.

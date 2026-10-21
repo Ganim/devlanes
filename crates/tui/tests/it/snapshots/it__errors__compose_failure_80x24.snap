@@ -25,4 +25,4 @@ expression: screen(&buffer)
 "│                              ││          -with-a-long-directory-name/.devlane│"
 "│                              ││… e shows the full error                      │"
 "└──────────────────────────────┘└──────────────────────────────────────────────┘"
-" j/k move  e errors  s start  x stop  r restart  t task  shift+tab terminal     "
+" j/k move  e errors  s start  x stop  r restart  t task  ? help  q quit         "

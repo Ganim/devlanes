@@ -21,8 +21,25 @@ async fn maintain(db: &Path) -> Result<PruneReport, Error> {
 - `Store`: cloneable async handle for registry, lifecycle, history, and remote-host queries.
 - `AllocationRequest` and `Store::allocate`: transactional block allocation with stable project-wide offsets.
 - `UnitRunInput` and `Store::active_unit_runs`: persisted process identities for reconciliation.
+- `Lane::profiles` and `Store::set_lane_desired_profiles`: ordered profile selections; `Lane::profile` contains the first entry for compatibility.
 - `RetentionPolicy` and `PruneReport`: age limits, a database size budget, and measured cleanup results.
 - `Store::prune_at`: retention with an explicit Unix-millisecond clock.
+
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml
+state:
+  # Budget for state.db plus its WAL and shared-memory files.
+  max_size: 512MiB
+history:
+  # Finished unit and task runs older than this are pruned.
+  retention: 30d
+  # Remote hosts that have not connected for this long are forgotten.
+  remote_hosts_retention: 90d
+```
+
+The daemon builds its `RetentionPolicy` from these settings, `metrics.retention` and `logs.retention.days`.
 
 ## Behaviour
 

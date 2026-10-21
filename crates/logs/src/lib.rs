@@ -1,10 +1,13 @@
-//! Synchronous, single-writer per-run log storage.
+//! Synchronous, single-writer per-unit log storage.
 //!
 //! A daemon must own each [`UnitLog`] on a writer thread or call it through
-//! `spawn_blocking`; ingestion, queries, compression and retention perform disk I/O.
-//! Use one stream identifier per stdout/stderr/PTY byte stream. The daemon persists
-//! [`SegmentMetadata`] and the next sequence number across runs; this crate has no
-//! database dependency. Cross-run retention is the daemon's responsibility.
+//! `spawn_blocking`; opening, ingestion, queries, compression and retention perform
+//! disk I/O. A lock file keeps a second writer out of a directory. [`LogReader`]
+//! snapshots query without holding the writer, and [`LogReader::open`] reads a
+//! directory without modifying it. Use one stream identifier per stdout/stderr/PTY
+//! byte stream. The daemon persists [`SegmentMetadata`] and the next sequence number
+//! across runs; this crate has no database dependency. Cross-directory retention is
+//! the daemon's responsibility; [`UnitLog::trim_to`] applies it to a live writer.
 //!
 //! ```
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,9 +28,9 @@ mod level;
 mod query;
 mod storage;
 
-pub use framing::{Frame, Framer, MAX_LINE_BYTES, PARTIAL_FLUSH_MS, RawRing};
+pub use framing::{Frame, Framer, MAX_LINE_BYTES, PARTIAL_FLUSH_MS};
 pub use level::extract_level;
-pub use storage::{IndexEntry, LogOptions, SegmentMetadata, UnitLog};
+pub use storage::{IndexEntry, LogOptions, LogReader, SegmentMetadata, UnitLog};
 
 /// Expected failures are suitable for conversion into daemon RPC errors.
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +49,9 @@ pub enum Error {
     SequenceExhausted,
     #[error("log writer failed previously; reopen the run to recover")]
     WriterFailed,
+    /// Another writer holds the directory, usually a previous run still closing it.
+    #[error("log directory is in use by another writer")]
+    Locked,
 }
 
 /// Library operations never hide filesystem or query validation failures.

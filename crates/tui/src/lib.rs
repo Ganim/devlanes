@@ -22,7 +22,7 @@ pub use api::{
 };
 pub use devlanes_client::Paths;
 pub use devlanes_term::TerminalLauncher;
-pub use runtime::{TerminalGuard, drive};
+pub use runtime::{TerminalGuard, drive, terminal_command};
 
 /// Failures that end the TUI before or while it runs.
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +33,9 @@ pub enum Error {
     Client(#[from] devlanes_client::Error),
     #[error("terminal I/O: {0}")]
     Io(#[from] std::io::Error),
+    /// A background task panicked; its message is already on stderr.
+    #[error("the terminal UI stopped after an internal error; units keep running")]
+    Panicked,
 }
 
 /// Integrations supplied by the composition root.
@@ -45,27 +48,37 @@ pub struct Options {
 }
 
 impl Options {
-    /// The launcher for `terminal`, falling back to one named `terminal` (Terminal.app).
-    fn launcher(&self) -> Result<Arc<dyn TerminalLauncher>, String> {
-        let wanted = self.terminal.as_deref().unwrap_or("terminal");
-        if let Some(launcher) = self
-            .launchers
-            .iter()
-            .find(|launcher| launcher.name().eq_ignore_ascii_case(wanted))
-        {
-            return Ok(Arc::clone(launcher));
-        }
+    /// The configured launcher; without one, Terminal.app where it exists, else
+    /// the first registered launcher that is installed. Checks the filesystem,
+    /// so the runtime calls it from a blocking task.
+    fn pick_launcher(&self) -> Result<Arc<dyn TerminalLauncher>, String> {
         if self.launchers.is_empty() {
             return Err("no terminal launchers are available in this build".into());
         }
         let names: Vec<&str> = self.launchers.iter().map(|l| l.name()).collect();
-        Err(match &self.terminal {
-            Some(name) => format!("unknown terminal {name}; use one of {}", names.join(", ")),
-            None => format!(
-                "set terminal in the user config to one of {}",
-                names.join(", ")
-            ),
-        })
+        if let Some(wanted) = &self.terminal {
+            return self
+                .launchers
+                .iter()
+                .find(|launcher| launcher.name().eq_ignore_ascii_case(wanted))
+                .cloned()
+                .ok_or_else(|| {
+                    format!("unknown terminal {wanted}; use one of {}", names.join(", "))
+                });
+        }
+        let preferred = self
+            .launchers
+            .iter()
+            .find(|launcher| launcher.name() == "terminal" && launcher.available());
+        preferred
+            .or_else(|| self.launchers.iter().find(|launcher| launcher.available()))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "no terminal app found; set terminal in the user config to one of {}",
+                    names.join(", ")
+                )
+            })
     }
 }
 
@@ -98,4 +111,55 @@ pub async fn run_with(paths: Paths, options: Options) -> Result<(), Error> {
     .await;
     drop(guard);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devlanes_term::{Invocation, LaunchError, LaunchRequest};
+
+    /// A launcher that is installed or not, by construction.
+    struct Fake(&'static str, bool);
+
+    impl TerminalLauncher for Fake {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn invocation(&self, _: &LaunchRequest) -> Result<Invocation, LaunchError> {
+            Err(LaunchError::EmptyCommand)
+        }
+        fn available(&self) -> bool {
+            self.1
+        }
+    }
+
+    fn options(terminal: Option<&str>, launchers: &[(&'static str, bool)]) -> Options {
+        Options {
+            launchers: launchers
+                .iter()
+                .map(|(name, there)| Arc::new(Fake(name, *there)) as Arc<dyn TerminalLauncher>)
+                .collect(),
+            terminal: terminal.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn default_launcher_is_terminal_app_else_the_first_installed() {
+        let picked = |o: Options| o.pick_launcher().map(|l| l.name());
+        // macOS: Terminal.app is always there and wins over other installed apps.
+        let mac = [("iterm2", true), ("kitty", true), ("terminal", true)];
+        assert_eq!(picked(options(None, &mac)), Ok("terminal"));
+        // Linux: Terminal.app and iTerm2 are absent; the first installed one wins.
+        let linux = [
+            ("iterm2", false),
+            ("ghostty", false),
+            ("kitty", true),
+            ("terminal", false),
+        ];
+        assert_eq!(picked(options(None, &linux)), Ok("kitty"));
+        // A configured terminal is used as named, installed or not.
+        assert_eq!(picked(options(Some("Ghostty"), &linux)), Ok("ghostty"));
+        assert!(picked(options(Some("xterm"), &linux)).is_err());
+        assert!(picked(options(None, &[("terminal", false)])).is_err());
+    }
 }

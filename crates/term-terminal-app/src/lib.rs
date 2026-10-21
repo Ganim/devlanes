@@ -43,6 +43,11 @@ impl TerminalLauncher for TerminalApp {
             terminal: "Terminal.app",
         })
     }
+
+    /// Part of macOS, absent everywhere else.
+    fn available(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
 }
 
 #[cfg(test)]
@@ -64,7 +69,7 @@ mod tests {
         assert_eq!(invocation.program, "osascript");
         assert!(
             invocation.args[1]
-                .contains("do script \"cd /work/acme && devlanes attach acme@2:api\"")
+                .contains("do script \"sh -c 'cd /work/acme && exec devlanes attach acme@2:api'\"")
         );
         assert!(!invocation.args[1].contains("custom title"));
         Ok(())

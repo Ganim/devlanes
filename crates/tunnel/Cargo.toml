@@ -12,10 +12,10 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
-base64.workspace = true
 bytes.workspace = true
 devlanes-client = { path = "../client" }
 devlanes-ipc = { path = "../ipc" }
+rustix = { version = "1", features = ["process"] }
 devlanes-proto = { path = "../proto" }
 devlanes-sync = { path = "../sync" }
 devlanes-transport = { path = "../transport" }

@@ -4,7 +4,7 @@ FROM debian:bookworm-slim
 
 # Password `*` disables password login without marking the account locked, which sshd refuses.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssh-server \
+ && apt-get install -y --no-install-recommends openssh-server socat git \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --shell /bin/sh devlanes \
  && usermod -p '*' devlanes \

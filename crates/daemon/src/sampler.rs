@@ -37,6 +37,9 @@ pub(crate) struct MetricsState {
     pub tracked: HashMap<UnitRunId, String>,
     /// Latest `(cpu, memory)` per `(lane reference, unit)`.
     pub latest: BTreeMap<(String, String), (f64, u64)>,
+    /// Latest unit CPU with its time and run, so the start gate's settle rule
+    /// only counts new readings of the run it is watching.
+    pub cpu_readings: BTreeMap<(String, String), CpuReading>,
     /// Series key per `(lane reference, unit)` for history lookups.
     pub subjects: BTreeMap<(String, String), Subject>,
     pub interest_until: Option<Instant>,
@@ -49,6 +52,16 @@ struct MetricsParams {
     peaks: bool,
 }
 
+/// One unit CPU reading.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CpuReading {
+    pub cpu_percent: f64,
+    /// Unix milliseconds when the sample was taken.
+    pub at_ms: u64,
+    /// Leader PID of the run the sample belongs to.
+    pub pid: Option<u32>,
+}
+
 /// One unit to sample with its lane.
 struct Target {
     lane: Arc<LaneRt>,
@@ -56,6 +69,8 @@ struct Target {
     name: String,
     run: Option<UnitRunId>,
     key: UnitKey,
+    /// Leader PID when the target was collected; a restart changes it.
+    pid: Option<u32>,
 }
 
 impl Inner {
@@ -122,6 +137,7 @@ impl Inner {
                     name,
                     run,
                     key,
+                    pid: identity.map(|identity| identity.pid),
                 });
             }
         }
@@ -178,6 +194,14 @@ impl Inner {
                 state.latest.insert(
                     (target.reference.clone(), target.name.clone()),
                     (sample.cpu_percent, sample.footprint_bytes),
+                );
+                state.cpu_readings.insert(
+                    (target.reference.clone(), target.name.clone()),
+                    CpuReading {
+                        cpu_percent: sample.cpu_percent,
+                        at_ms: now,
+                        pid: target.pid,
+                    },
                 );
                 let mut st = target.lane.st();
                 let peak = st.peaks.entry(target.name.clone()).or_insert((None, None));

@@ -762,6 +762,14 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
             Outcome::Ok,
             format!("CA at {}", display_value(&ca["path"])),
         ));
+        // A CA from before name constraints stays until the user recreates it.
+        if let Some(hint) = ca.get("hint").and_then(Value::as_str) {
+            let check = Check::new("tls", Outcome::Skip, hint);
+            checks.push(match ca.get("fix").and_then(Value::as_str) {
+                Some(fix) => check.fix(fix),
+                None => check,
+            });
+        }
     } else if ca.is_object() {
         checks.push(
             Check::new(

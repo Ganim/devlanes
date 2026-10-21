@@ -25,4 +25,4 @@ expression: terminal.backend()
 "│                                      ││                                                          │"
 "│                                      ││                                                          │"
 "└──────────────────────────────────────┘└──────────────────────────────────────────────────────────┘"
-" j/k move  s start  x stop  r restart  t task  shift+tab terminal  z zoom  o url  O open  c copy    "
+" j/k move  s start  x stop  r restart  t task  shift+tab terminal  z zoom  o url  ? help  q quit    "

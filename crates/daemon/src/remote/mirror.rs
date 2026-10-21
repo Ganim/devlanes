@@ -40,6 +40,43 @@ pub(super) struct View {
     pub routes: Vec<RouteEntry>,
     pub ports: Vec<Value>,
     pub skipped: Vec<Value>,
+    /// Box hostnames outside the names this machine routes (`.localhost` or the
+    /// configured TLD).
+    pub refused_hosts: Vec<Value>,
+}
+
+impl View {
+    /// Messages for ports that could not be mirrored.
+    pub(super) fn warnings(&self) -> Vec<String> {
+        self.ports
+            .iter()
+            .filter_map(|port| port.get("conflicts").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|conflict| conflict.get("message").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// The link's state as the mirror sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Connected,
+    /// Down but retrying: listeners stay, routes show "reconnecting".
+    Down,
+    /// Given up: nothing stays mirrored.
+    Over,
+}
+
+impl Phase {
+    /// Classifies a link state.
+    fn of(state: &LinkState) -> Self {
+        match state {
+            LinkState::Connected(_) => Self::Connected,
+            LinkState::Failed { .. } | LinkState::Stopped => Self::Over,
+            _ => Self::Down,
+        }
+    }
 }
 
 /// One accept loop; aborted when the listener is no longer wanted.
@@ -105,8 +142,14 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>) {
     loop {
         let Some(inner) = engine.upgrade() else { break };
         let current = registry.borrow_and_update().clone();
-        let connected = matches!(&*state.borrow_and_update(), LinkState::Connected(_));
-        mirror.reconcile(&inner, &current, connected).await;
+        let phase = Phase::of(&state.borrow_and_update());
+        if phase == Phase::Over {
+            mirror.clear(&inner);
+        } else {
+            mirror
+                .reconcile(&inner, &current, phase == Phase::Connected)
+                .await;
+        }
         drop(inner);
         // Local lanes matter because their hostnames win over the box's.
         let wake = async {
@@ -138,6 +181,22 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>) {
 }
 
 impl Mirror {
+    /// Unbinds everything and drops the host's routes, once the link gave up.
+    fn clear(&mut self, engine: &Arc<Inner>) {
+        self.ports.clear();
+        self.relays.clear();
+        self.skipped.clear();
+        let had_routes = {
+            let mut view = lock(&self.conn.view);
+            let had = !view.routes.is_empty();
+            *view = View::default();
+            had
+        };
+        if had_routes {
+            engine.publish_routes();
+        }
+    }
+
     /// Binds new ports, drops stale ones, retries conflicts and republishes routes.
     async fn reconcile(&mut self, engine: &Arc<Inner>, registry: &Registry, connected: bool) {
         let local_hosts: BTreeSet<String> = engine
@@ -145,6 +204,7 @@ impl Mirror {
             .into_iter()
             .map(|route| route.host)
             .collect();
+        let suffixes = route_suffixes(engine);
         let visible: Vec<&UnitInfo> = registry.units().filter(|unit| !unit.hidden).collect();
 
         // A box lane whose hostname this machine already serves is skipped whole:
@@ -214,18 +274,33 @@ impl Mirror {
                     // No IPv6 loopback on this machine: nothing to mirror there.
                     Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {}
                     Err(error) => {
-                        let pid = if error.kind() == std::io::ErrorKind::AddrInUse {
+                        let in_use = error.kind() == std::io::ErrorKind::AddrInUse;
+                        let pid = if in_use {
                             engine.integ.ports.holder(*port).await
                         } else {
                             None
                         };
+                        let message = if in_use {
+                            let holder = match pid {
+                                Some(pid) => format!("{} (pid {pid})", process_name(pid).await),
+                                None => "another process".to_owned(),
+                            };
+                            format!(
+                                "port {port} is in use on this machine by {holder}; not mirrored"
+                            )
+                        } else {
+                            format!(
+                                "port {port} cannot be bound on {address}: {error}; not mirrored"
+                            )
+                        };
                         if !mirror.conflicts.contains_key(&address) {
-                            tracing::warn!(host = %self.conn.name, port, %address, ?pid, %error, "cannot mirror port");
+                            tracing::warn!(host = %self.conn.name, %message, "cannot mirror port");
                             engine.bus.emit(
                                 wire::WARNING_EVENT,
                                 json!({
                                     "host": self.conn.name,
                                     "code": "port_in_use",
+                                    "message": message,
                                     "port": port,
                                     "address": address,
                                     "pid": pid,
@@ -236,7 +311,7 @@ impl Mirror {
                         }
                         mirror.conflicts.insert(
                             address,
-                            json!({"address": address, "pid": pid, "error": error.to_string()}),
+                            json!({"address": address, "pid": pid, "message": message}),
                         );
                     }
                 }
@@ -247,12 +322,23 @@ impl Mirror {
         // does not hold there gets a relay on an ephemeral port instead.
         let mut routes = Vec::new();
         let mut relayed = BTreeSet::new();
+        let mut refused_hosts = Vec::new();
         for unit in &mirrored {
             let lane = registry
                 .lanes()
                 .find(|lane| lane.key == unit.key.lane)
                 .cloned();
             for host in &unit.hosts {
+                // The local CA signs whatever the routes name, so a box may only
+                // claim names this machine already routes to itself.
+                if !routable(&host.host, &suffixes) {
+                    refused_hosts.push(json!({
+                        "host": host.host,
+                        "lane": lane_ref(&unit.key.lane),
+                        "unit": unit.key.name,
+                    }));
+                    continue;
+                }
                 let owned = self.ports.get(&host.port).is_some_and(PortMirror::owns_v4);
                 let local_port = if owned {
                     host.port
@@ -271,7 +357,7 @@ impl Mirror {
                     host_header_upstream: host.host_header == HostHeader::Upstream,
                     status: route_status(&unit.state, connected),
                     start_hint: format!(
-                        "devlanes --host {} start --lane {reference}",
+                        "Start it on {}: devlanes start --lane {reference}",
                         self.conn.name
                     ),
                     project: unit.key.lane.project.clone(),
@@ -280,10 +366,18 @@ impl Mirror {
                     certificate_names: lane
                         .as_ref()
                         .and_then(|lane| lane.domain.clone())
+                        .filter(|domain| routable(domain, &suffixes))
                         .into_iter()
                         .collect(),
                 });
             }
+        }
+        if !refused_hosts.is_empty() && lock(&self.conn.view).refused_hosts != refused_hosts {
+            tracing::warn!(host = %self.conn.name, ?refused_hosts, "box hostnames outside the local suffixes skipped");
+            engine.bus.emit(
+                wire::WARNING_EVENT,
+                json!({"host": self.conn.name, "code": "hosts_skipped", "hosts": refused_hosts}),
+            );
         }
         self.relays.retain(|port, _| relayed.contains(port));
 
@@ -308,6 +402,7 @@ impl Mirror {
                 .iter()
                 .map(|(lane, hosts)| json!({"lane": lane_ref(lane), "hosts": hosts}))
                 .collect(),
+            refused_hosts,
         };
         let routes_changed = {
             let mut current = lock(&self.conn.view);
@@ -360,14 +455,49 @@ fn route_status(state: &str, connected: bool) -> RouteStatus {
     }
 }
 
-/// Binds without `SO_REUSEADDR`: on macOS that option would let this listener
-/// shadow another process bound to the wildcard address instead of reporting it.
+/// Name suffixes the box may route here: `localhost` and the configured TLD.
+///
+/// The TLD only counts once it passes the special-use check, so a box can never
+/// get public names routed (and certificates minted) on this machine.
+fn route_suffixes(engine: &Inner) -> Vec<String> {
+    let mut suffixes = vec!["localhost".to_owned()];
+    suffixes.extend(engine.resolver_zone().map(|zone| zone.name().to_owned()));
+    suffixes
+}
+
+/// Whether `host` (possibly `*.`-prefixed) is one of the suffixes or below one.
+fn routable(host: &str, suffixes: &[String]) -> bool {
+    let host = host.trim_start_matches("*.").trim_end_matches('.');
+    let host = host.to_ascii_lowercase();
+    suffixes
+        .iter()
+        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+}
+
+/// The process name for `pid`, for port conflict messages.
+async fn process_name(pid: u32) -> String {
+    tokio::task::spawn_blocking(move || {
+        devlanes_sys::processes()
+            .ok()?
+            .into_iter()
+            .find(|process| process.pid == pid)
+            .map(|process| process.name)
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "an unknown process".to_owned())
+}
+
+/// Binds a mirror listener. `SO_REUSEADDR` only on Linux, where it merely skips
+/// `TIME_WAIT` on rebinds: on macOS it would let this listener shadow another
+/// process bound to the wildcard address instead of reporting the conflict.
 fn bind(address: IpAddr, port: u16) -> std::io::Result<TcpListener> {
     let socket = match address {
         IpAddr::V4(_) => TcpSocket::new_v4()?,
         IpAddr::V6(_) => TcpSocket::new_v6()?,
     };
-    socket.set_reuseaddr(false)?;
+    socket.set_reuseaddr(cfg!(target_os = "linux"))?;
     socket.bind(SocketAddr::new(address, port))?;
     socket.listen(1024)
 }
@@ -389,7 +519,7 @@ async fn accept_loop(listener: TcpListener, port: u16, conn: Arc<HostConn>) {
 }
 
 /// One local connection to box port `port`.
-async fn splice(mut stream: TcpStream, port: u16, conn: Arc<HostConn>) {
+async fn splice(stream: TcpStream, port: u16, conn: Arc<HostConn>) {
     let session = match conn.session() {
         Some(session) => session,
         None => match conn.session_within(HOLD).await {
@@ -398,8 +528,11 @@ async fn splice(mut stream: TcpStream, port: u16, conn: Arc<HostConn>) {
         },
     };
     match session.open(DialTarget::Port { port }).await {
-        Ok(mut remote) => {
-            if let Err(error) = tokio::io::copy_bidirectional(&mut stream, &mut remote).await {
+        Ok(remote) => {
+            let spliced =
+                devlanes_transport::splice(stream, remote, devlanes_transport::HALF_CLOSE_IDLE)
+                    .await;
+            if let Err(error) = spliced {
                 tracing::debug!(%error, port, "mirrored connection ended");
             }
         }

@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use devlanes_proto::{Event, LogLine, LogQuery, Method, Request, RpcError, Selection};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{Rendered, Report, Runtime, UnitFailure};
 
@@ -80,7 +80,7 @@ impl CommandExit {
 #[async_trait]
 pub trait WithDriver: Send {
     /// Streams phases, waits for readiness, and records ownership even when returning Err.
-    /// Retain request context so subsequent lane queries use the same host/project.
+    /// Retain request context so subsequent lane queries use the same project.
     async fn start(
         &mut self,
         request: &Request,
@@ -94,8 +94,8 @@ pub trait WithDriver: Send {
     async fn logs(&mut self, lane: &str, query: LaneLogQuery) -> Result<Vec<UnitLogs>, RpcError>;
     /// Returns per-unit peaks for the current lane start; absent samples remain None.
     async fn metrics(&mut self, lane: &str) -> Result<Vec<ResourcePeak>, RpcError>;
-    /// Stops only this selection in the specified canonical lane.
-    async fn stop(&mut self, lane: &str, selection: Selection) -> Result<(), RpcError>;
+    /// Stops only this selection in the specified canonical lane; returns the stop result.
+    async fn stop(&mut self, lane: &str, selection: Selection) -> Result<Value, RpcError>;
     /// Called only when ownership reports an auto-spawned daemon.
     async fn stop_daemon_if_spawned(&mut self) -> Result<(), RpcError>;
     /// Inherit stdio, forward Ctrl-C to the child first, await exit, and report its signal/code.
@@ -156,7 +156,11 @@ pub async fn run_with<D: WithDriver + ?Sized>(
                         .await
                     {
                         Ok(status) => result.exit_code = status.code(),
-                        Err(error) => emit(reporter.error(&error, None)),
+                        // 127 when the command does not exist, like a shell.
+                        Err(error) => {
+                            result.exit_code = error.exit_code;
+                            emit(reporter.error(&error, None));
+                        }
                     }
                 }
                 Err(error) => emit(reporter.error(&error, None)),
@@ -170,6 +174,11 @@ pub async fn run_with<D: WithDriver + ?Sized>(
                     None,
                 ));
             }
+        }
+        // SIGINT/SIGTERM during the start: 130/143 once the teardown is done.
+        Err(error) if error.code == "interrupted" => {
+            result.exit_code = error.exit_code;
+            emit(reporter.error(&error, None));
         }
         Err(error) => emit(reporter.error(&error, None)),
     }
@@ -215,13 +224,16 @@ pub async fn run_with<D: WithDriver + ?Sized>(
                 .collect();
         }
     }
-    let failure_data = json!({"items": failures.iter().map(|f| json!({
-        "name": f.unit, "lane": f.lane, "state": "failed", "exit_code": f.exit_code,
-        "pid": null, "ports": {}, "urls": [], "actor": {"kind":"human"}, "reason": null,
-        "log_tail": f.log_tail,
-    })).collect::<Vec<_>>(), "truncated": false, "next_cursor": null});
-    if let Ok(rendered) = reporter.result(&Report::new(Method::Start, &failure_data)) {
-        emit(rendered);
+    // Only failures need a page; without them it would be a stray empty items line.
+    if !failures.is_empty() {
+        let failure_data = json!({"items": failures.iter().map(|f| json!({
+            "name": f.unit, "lane": f.lane, "state": "failed", "exit_code": f.exit_code,
+            "pid": null, "ports": {}, "urls": [], "actor": {"kind":"human"}, "reason": null,
+            "log_tail": f.log_tail,
+        })).collect::<Vec<_>>(), "truncated": false, "next_cursor": null});
+        if let Ok(rendered) = reporter.result(&Report::new(Method::Start, &failure_data)) {
+            emit(rendered);
+        }
     }
     if let Some(directory) = &plan.logs_dir {
         match write_log_artifacts(directory, &logs).await {
@@ -265,6 +277,8 @@ pub async fn run_with<D: WithDriver + ?Sized>(
             "{}\n",
             json!({"event":"with.summary", "exit_code":result.exit_code,"items":peaks})
         )
+    } else if runtime.quiet {
+        String::new()
     } else {
         summary.clone()
     };
@@ -370,10 +384,19 @@ pub async fn stop_with_logs<D: WithDriver + ?Sized>(
     {
         record_io(&mut outcome, emit, error);
     }
-    if let Err(error) = driver.stop(lane, selection).await {
-        outcome.exit_code = error.exit_code;
-        outcome.cleanup_errors.push(error.code.clone());
-        emit(reporter.error(&error, None));
+    match driver.stop(lane, selection).await {
+        // The stopped units, as plain `devlanes stop` prints them, in every mode.
+        Ok(data) => {
+            if let Ok(rendered) = reporter.result(&Report::new(Method::Stop, &data)) {
+                outcome.exit_code = rendered.exit_code;
+                emit(rendered);
+            }
+        }
+        Err(error) => {
+            outcome.exit_code = error.exit_code;
+            outcome.cleanup_errors.push(error.code.clone());
+            emit(reporter.error(&error, None));
+        }
     }
     if outcome.exit_code == 0 && !outcome.cleanup_errors.is_empty() {
         outcome.exit_code = 1;

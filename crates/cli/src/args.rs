@@ -77,9 +77,6 @@ pub struct Cli {
     /// Use this lane ([project@]lane) instead of the current worktree's
     #[arg(long, global = true, value_name = "LANE", help_heading = GLOBAL)]
     pub lane: Option<String>,
-    /// Run the command on a connected box (see devlanes remote connect)
-    #[arg(long, global = true, value_name = "HOST", help_heading = GLOBAL)]
-    pub host: Option<String>,
     /// Confirm actions that would ask first; needed when no terminal can prompt
     #[arg(long, global = true, help_heading = GLOBAL)]
     pub yes: bool,
@@ -491,13 +488,16 @@ pub enum SecretsCommand {
 pub enum RemoteCommand {
     /// Connect to a box over SSH and mirror its lanes, ports and hostnames here
     Connect {
-        // Own ids: `host` would collide with the global `--host`.
         /// SSH destination, as in ~/.ssh/config
         #[arg(id = "connect_host", value_name = "HOST")]
         host: String,
         /// Return once connected instead of staying attached for prompts
         #[arg(long)]
         background: bool,
+        /// If devlanes is missing on the box, install this machine's release there
+        /// (HTTPS download, checksum verified, never replaces an existing binary)
+        #[arg(long)]
+        install: bool,
     },
     /// Disconnect from a box and remove its mirrored ports and hostnames
     Disconnect {
@@ -669,7 +669,6 @@ impl Cli {
             actor: runtime.actor.clone(),
             project: self.project.clone(),
             lane: self.lane.clone(),
-            host: self.host.clone(),
             yes: self.yes,
             env: None,
         };
@@ -738,6 +737,12 @@ impl Cli {
                 selection(&args.units, &self.env, &[], false, args.all_at_once)?,
             ),
             Some(Command::Status(args)) => {
+                if runtime.mode == OutputMode::Agent && args.watch && self.timeout.is_none() {
+                    return Err(Error::Usage(
+                        "agent status --watch requires --timeout (for example --timeout 30s)"
+                            .into(),
+                    ));
+                }
                 if args.lane.is_some() {
                     context.lane.clone_from(&args.lane);
                 }
@@ -780,7 +785,15 @@ impl Cli {
             Some(Command::Debug { command }) => match command {
                 DebugCommand::Why { unit } => (Method::Why, json!({"unit": unit})),
                 DebugCommand::Errors { since } => (Method::Errors, json!({"since": since})),
-                DebugCommand::Events { follow } => (Method::Subscribe, json!({"follow": follow})),
+                DebugCommand::Events { follow } => {
+                    if runtime.mode == OutputMode::Agent && *follow && self.timeout.is_none() {
+                        return Err(Error::Usage(
+                            "agent debug events --follow requires --timeout (for example --timeout 30s)"
+                                .into(),
+                        ));
+                    }
+                    (Method::Subscribe, json!({"follow": follow}))
+                }
                 DebugCommand::Top => (Method::Metrics, json!({})),
             },
             Some(Command::Run(args)) if args.list => (Method::TaskList, json!({})),
@@ -877,9 +890,13 @@ impl Cli {
                 DaemonCommand::Run => return Ok(Action::DaemonRun),
             },
             Some(Command::Remote { command }) => match command {
-                RemoteCommand::Connect { host, background } => (
+                RemoteCommand::Connect {
+                    host,
+                    background,
+                    install,
+                } => (
                     Method::Connect,
-                    json!({"host": host, "background": background}),
+                    json!({"host": host, "background": background, "install": install}),
                 ),
                 RemoteCommand::Disconnect { host } => (Method::Disconnect, json!({"host": host})),
                 RemoteCommand::Ls => (Method::HostList, json!({})),
@@ -907,7 +924,18 @@ impl Cli {
                 request,
                 logs_dir: args.logs_dir.clone().unwrap_or_default(),
             },
-            Some(Command::Start(args)) if args.attach => Action::RpcThenUi(request),
+            // Agents get the start result only; the TUI needs a person at a terminal.
+            Some(Command::Start(args)) if args.attach && runtime.mode != OutputMode::Agent => {
+                Action::RpcThenUi(request)
+            }
+            Some(Command::Attach { unit })
+                if runtime.mode == OutputMode::Agent && !runtime.stdin_tty =>
+            {
+                return Err(Error::Usage(format!(
+                    "agent attach needs a terminal; read the output with {}",
+                    crate::Hint::command(["logs", unit.as_str(), "-f", "--timeout", "30s"]).0
+                )));
+            }
             Some(Command::Attach { .. }) => Action::Attach(request),
             Some(Command::Url {
                 command: UrlCommand::Open { .. },

@@ -79,7 +79,12 @@ pub struct LaneInput {
     pub index: u32,
     pub name: String,
     pub desired_state: DesiredState,
+    /// Compatibility input used when `profiles` is empty. Accepts a plain name
+    /// or the JSON-array encoding used by older daemons.
     pub profile: Option<String>,
+    /// Ordered selection. Nonempty values take precedence over `profile`.
+    /// To clear the selection, supply an empty vector and `profile: None`.
+    pub profiles: Vec<String>,
 }
 
 /// Lane state retained until an explicit clean/delete operation.
@@ -91,7 +96,11 @@ pub struct Lane {
     pub index: u32,
     pub name: String,
     pub desired_state: DesiredState,
+    /// First entry of `profiles`, retained for single-profile callers.
     pub profile: Option<String>,
+    /// Ordered selection, including every profile needed for resume.
+    #[serde(default)]
+    pub profiles: Vec<String>,
     pub created_at: i64,
     pub cleaned_at: Option<i64>,
 }

@@ -303,6 +303,42 @@ async fn registered_port_is_dialed() -> TestResult {
 }
 
 #[tokio::test]
+async fn stopping_a_unit_closes_its_streams_and_refuses_new_ones() -> TestResult {
+    bounded(async {
+        let (port, _echo) = echo_server().await?;
+        let test_box = start_box(snapshot(vec![unit("api", port, false)]));
+        let session = Session::connect(&test_box.transport, session_options()).await?;
+        let mut stream = session.open(DialTarget::Port { port }).await?;
+        stream.write_all(b"before").await?;
+        let mut buf = [0u8; 6];
+        stream.read_exact(&mut buf).await?;
+        let mut stopped = unit("api", port, false);
+        stopped.state = "stopped".into();
+        test_box
+            .registry
+            .publish(RegistryEvent::UnitUpserted { unit: stopped });
+        // The open stream ends: reads reach EOF (or fail) instead of hanging.
+        let mut rest = Vec::new();
+        let ended =
+            tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut rest)).await;
+        assert!(ended.is_ok(), "stream to a stopped unit stays open");
+        let refused = session.open(DialTarget::Port { port }).await;
+        assert!(
+            matches!(
+                refused,
+                Err(OpenError::Rejected {
+                    reason: RejectReason::NotRunning,
+                    ..
+                })
+            ),
+            "{refused:?}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn unregistered_and_hidden_ports_are_rejected() -> TestResult {
     bounded(async {
         let (port, _echo) = echo_server().await?;

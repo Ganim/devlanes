@@ -99,7 +99,8 @@ pub enum RouteError {
     InvalidUpstream(String),
 }
 
-/// Immutable, validated table. Exact routes win, then the longest wildcard.
+/// Immutable, validated table. Fallback routes, exact ones included, apply only when no
+/// other route matches; within each group an exact route beats the longest wildcard.
 #[derive(Clone, Debug, Default)]
 pub struct RouteTable {
     routes: Vec<Route>,
@@ -142,6 +143,7 @@ impl RouteTable {
                 }
             }
         }
+        // Matches the config contract that a fallback host is used only when nothing else matches.
         routes.sort_by_key(|route| {
             (
                 route.fallback,

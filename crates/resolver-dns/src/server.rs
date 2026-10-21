@@ -23,6 +23,9 @@ const MAX_TCP_CONNECTIONS: usize = 64;
 /// Closes TCP connections that send nothing, so stuck clients cannot hold permits.
 const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Pause after a failed TCP accept, typically EMFILE.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
 /// Attempts to find a free port for both UDP and TCP when binding port 0.
 const EPHEMERAL_ATTEMPTS: usize = 16;
 
@@ -126,7 +129,15 @@ impl DnsServer {
                             drop(permit);
                         });
                     }
-                    Err(error) => tracing::debug!(%error, "dns tcp accept failed"),
+                    Err(error) => {
+                        tracing::debug!(%error, "dns tcp accept failed");
+                        // EMFILE/ENFILE keep failing until a descriptor frees up; without
+                        // a pause this arm would spin and starve the UDP side.
+                        tokio::select! {
+                            () = shutdown.cancelled() => break,
+                            () = tokio::time::sleep(ACCEPT_BACKOFF) => {}
+                        }
+                    }
                 },
                 // Reap finished connections so the set does not grow without bound.
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
@@ -158,6 +169,9 @@ async fn serve_tcp(mut stream: TcpStream, zone: &Zone) -> io::Result<()> {
         let mut framed = Vec::with_capacity(response.len() + 2);
         framed.extend_from_slice(&response_len.to_be_bytes());
         framed.extend_from_slice(&response);
-        stream.write_all(&framed).await?;
+        // A client that stops reading must not pin the task and its permit forever.
+        tokio::time::timeout(TCP_IDLE_TIMEOUT, stream.write_all(&framed))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "dns client stopped reading"))??;
     }
 }

@@ -515,45 +515,6 @@ async fn stop_mine_filters_by_actor() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-/// Reconciliation kills a crashed daemon's unit only when its identity matches,
-/// and marks every unfinished run ended.
-async fn reconcile_kills_verified_orphans() {
-    tokio::time::timeout(LIMIT, async {
-        let tmp = temp();
-        let main = repo(&tmp.path, "r", BASIC);
-        let home = tmp.path.join("home");
-        let first = harness(&home, Setup::default()).await;
-        let result = start(&first, cx(&main), json!({"units": ["worker"]})).await;
-        let pid = result.units[0].pid.expect("pid");
-        // Simulate a crash: the units "survive" but the daemon forgets them.
-        drop(first);
-        let processes = crate::FakeProcesses::default();
-        processes.alive.lock().expect("lock").insert(pid);
-        let second = harness(
-            &home,
-            Setup {
-                processes: Some(processes.clone()),
-                ..Setup::default()
-            },
-        )
-        .await;
-        assert_eq!(*processes.killed.lock().expect("lock"), [pid]);
-        let lane = &status(&second, cx(&main), json!({})).await[0];
-        assert!(
-            lane.needs_env,
-            "desired running without an env needs a start from a shell"
-        );
-        let store = devlanes_state::Store::open(home.join("state.db"))
-            .await
-            .expect("store");
-        assert!(store.active_unit_runs().await.expect("runs").is_empty());
-        second.close().await;
-    })
-    .await
-    .expect("timeout");
-}
-
-#[tokio::test(flavor = "multi_thread")]
 /// Lane references resolve by number and branch; misses and ambiguity list candidates.
 async fn lane_references_and_candidates() {
     tokio::time::timeout(LIMIT, async {

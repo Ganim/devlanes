@@ -70,6 +70,30 @@ if [ ! -s "$work/known_hosts" ]; then
   exit 1
 fi
 
+if [ "$bin" != skip ]; then
+  # A running lane on the box for the mirroring test: a TCP echo service and a
+  # synced folder. `devlanes start` also starts the box daemon the tunnel uses.
+  docker exec -u devlanes -e HOME=/home/devlanes "$container" sh -c '
+    set -eu
+    mkdir -p ~/app/ext
+    printf "hello from the box\n" > ~/app/ext/hello.txt
+    cat > ~/app/devlanes.yaml <<EOF
+project: boxapp
+services:
+  echo:
+    run: socat TCP-LISTEN:\${{ self.port }},bind=127.0.0.1,fork,reuseaddr EXEC:cat
+    sync:
+      - from: ext
+EOF
+    cd ~/app
+    git init -q -b main
+    git -c user.name=e2e -c user.email=e2e@example.invalid add -A
+    git -c user.name=e2e -c user.email=e2e@example.invalid commit -qm box
+    devlanes start --timeout 60s >/dev/null
+  '
+  export DEVLANES_TEST_SSH_LANE=1
+fi
+
 export DEVLANES_TEST_SSH_DEST=devlanes@127.0.0.1
 export DEVLANES_TEST_SSH_PORT=$port
 export DEVLANES_TEST_SSH_KEY=$work/id_ed25519

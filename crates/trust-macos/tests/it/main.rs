@@ -8,7 +8,9 @@ use devlanes_trust::{
     CaCertificate, CommandLine, CommandOutput, TrustError, TrustStatus, TrustStore as _,
     TrustTarget,
 };
-use devlanes_trust_macos::{FIREFOX_ID, KEYCHAIN_ID, KeychainStore, MacosTrust, SECURITY};
+use devlanes_trust_macos::{
+    DEVLANES_CA_LABEL, FIREFOX_ID, KEYCHAIN_ID, KeychainStore, MacosTrust, SECURITY,
+};
 
 fn ca() -> CaCertificate {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -153,6 +155,61 @@ async fn uninstall_deletes_by_sha1_with_trust_settings() {
             "-t",
             "/k.keychain-db"
         ]
+    );
+}
+
+#[tokio::test]
+async fn uninstall_with_label_also_removes_older_devlanes_cas() {
+    let ca = ca();
+    let sha1 = ca.sha1_hex();
+    let old = "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD";
+    let ours = sha1.clone();
+    let executor = Arc::new(FakeExecutor::new(move |command| {
+        Ok(match subcommand(command) {
+            "find-certificate" if command.args.iter().any(|a| a == "-c") => {
+                CommandOutput::ok(format!("SHA-1 hash: {ours}\nSHA-1 hash: {old}\n"))
+            }
+            "find-certificate" => CommandOutput::ok(listing(&ours)),
+            "delete-certificate" => CommandOutput::ok(""),
+            other => panic!("unexpected {other}"),
+        })
+    }));
+    let store = MacosTrust::new(executor.clone(), "/Users/me")
+        .with_ca_label(DEVLANES_CA_LABEL)
+        .store(TrustTarget::System)
+        .expect("store");
+    store.uninstall(&ca).await.expect("uninstall");
+    let keychain = "/Users/me/Library/Keychains/login.keychain-db";
+    let argvs = executor.argvs();
+    assert_eq!(
+        argvs[1],
+        [
+            SECURITY,
+            "find-certificate",
+            "-a",
+            "-c",
+            DEVLANES_CA_LABEL,
+            "-Z",
+            keychain
+        ]
+    );
+    let deleted: Vec<&str> = argvs
+        .iter()
+        .filter(|argv| argv[1] == "delete-certificate")
+        .map(|argv| argv[3].as_str())
+        .collect();
+    let mut expected = vec![old, sha1.as_str()];
+    expected.sort_unstable();
+    assert_eq!(deleted, expected, "each hash deleted once");
+}
+
+#[test]
+fn label_matches_the_devlanes_ca_common_name() {
+    let der = ca().der().to_vec();
+    assert!(
+        der.windows(DEVLANES_CA_LABEL.len())
+            .any(|window| window == DEVLANES_CA_LABEL.as_bytes()),
+        "devlanes-pki's CA subject must carry {DEVLANES_CA_LABEL:?}"
     );
 }
 

@@ -4,16 +4,25 @@
 //! the CLI handles; the daemon never touches these files.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{DnsError, Zone};
 
-/// systemd release that added `*.dns-delegate` files, which route a domain to a
-/// server without making it a fallback for every other lookup.
+/// systemd release that added `*.dns-delegate` files, the only Linux form devlanes
+/// writes. Older releases can only add the server to the global DNS scope, which
+/// would hand every lookup on the machine to whoever holds the port while the
+/// daemon is down.
 pub const DNS_DELEGATE_MIN_SYSTEMD: u32 = 258;
 
-/// systemd release whose `DNS=` accepts `address:port`.
-pub const PORT_SYNTAX_MIN_SYSTEMD: u32 = 246;
+/// First line of every generated file. The CLI only overwrites or deletes a file
+/// that starts with it, so files from Valet, puma-dev or the admin stay untouched.
+pub const MANAGED_MARKER: &str = "# Managed by devlanes";
+
+/// Directory of macOS per-domain resolver files.
+const MACOS_DIR: &str = "/etc/resolver";
+
+/// Directory of systemd-resolved DNS delegates.
+const DELEGATE_DIR: &str = "/etc/systemd/dns-delegate.d";
 
 /// A root-owned file to write, plus what makes the OS pick it up.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +32,8 @@ pub struct ResolverFile {
     /// Full file contents.
     pub contents: String,
     /// Command to run as root after writing or removing the file; `None` when the
-    /// OS watches the directory itself.
+    /// OS watches the directory itself. The program is a bare name; the caller
+    /// resolves it to an absolute path.
     pub activate: Option<Vec<String>>,
 }
 
@@ -33,9 +43,9 @@ pub struct ResolverFile {
 /// `nslookup` bypass this file; use `dscacheutil -q host -a name <host>` to check.
 pub fn macos_resolver(zone: &Zone, server: SocketAddr) -> ResolverFile {
     ResolverFile {
-        path: PathBuf::from("/etc/resolver").join(zone.name()),
+        path: PathBuf::from(MACOS_DIR).join(zone.name()),
         contents: format!(
-            "# Managed by devlanes: sends *.{tld} lookups to the devlanes DNS server.\n\
+            "{MANAGED_MARKER}: sends *.{tld} lookups to the devlanes DNS server.\n\
              nameserver {ip}\n\
              port {port}\n",
             tld = zone.name(),
@@ -46,13 +56,12 @@ pub fn macos_resolver(zone: &Zone, server: SocketAddr) -> ResolverFile {
     }
 }
 
-/// A systemd-resolved DNS delegate (systemd 258+), the preferred Linux form.
+/// A systemd-resolved DNS delegate (systemd 258+).
 pub fn systemd_dns_delegate(zone: &Zone, server: SocketAddr) -> ResolverFile {
     ResolverFile {
-        path: PathBuf::from("/etc/systemd/dns-delegate.d")
-            .join(format!("devlanes-{}.dns-delegate", zone.name())),
+        path: PathBuf::from(DELEGATE_DIR).join(format!("devlanes-{}.dns-delegate", zone.name())),
         contents: format!(
-            "# Managed by devlanes: sends *.{tld} lookups to the devlanes DNS server.\n\
+            "{MANAGED_MARKER}: sends *.{tld} lookups to the devlanes DNS server.\n\
              [Delegate]\n\
              DNS={server}\n\
              Domains=~{tld}\n",
@@ -62,28 +71,8 @@ pub fn systemd_dns_delegate(zone: &Zone, server: SocketAddr) -> ResolverFile {
     }
 }
 
-/// A `resolved.conf.d` drop-in for systemd 246 to 257.
-///
-/// These versions have no delegates, so the server joins the global DNS scope. The
-/// `~tld` routing domain sends the TLD only here, but resolved also queries the
-/// global scope in parallel with link servers for names no domain matches. The
-/// server refuses those quickly, so lookups still succeed through the link servers.
-pub fn systemd_resolved_dropin(zone: &Zone, server: SocketAddr) -> ResolverFile {
-    ResolverFile {
-        path: PathBuf::from("/etc/systemd/resolved.conf.d")
-            .join(format!("devlanes-{}.conf", zone.name())),
-        contents: format!(
-            "# Managed by devlanes: sends *.{tld} lookups to the devlanes DNS server.\n\
-             [Resolve]\n\
-             DNS={server}\n\
-             Domains=~{tld}\n",
-            tld = zone.name(),
-        ),
-        activate: Some(restart_resolved()),
-    }
-}
-
-/// Picks the systemd-resolved form for `systemd_version`.
+/// The systemd-resolved file for `systemd_version`: a DNS delegate, or
+/// [`DnsError::SystemdTooOld`] before systemd 258.
 pub fn systemd_resolver(
     zone: &Zone,
     server: SocketAddr,
@@ -91,8 +80,6 @@ pub fn systemd_resolver(
 ) -> Result<ResolverFile, DnsError> {
     if systemd_version >= DNS_DELEGATE_MIN_SYSTEMD {
         Ok(systemd_dns_delegate(zone, server))
-    } else if systemd_version >= PORT_SYNTAX_MIN_SYSTEMD {
-        Ok(systemd_resolved_dropin(zone, server))
     } else {
         Err(DnsError::SystemdTooOld {
             version: systemd_version,
@@ -100,8 +87,40 @@ pub fn systemd_resolver(
     }
 }
 
-/// Restart re-reads delegates and drop-ins on every supported version; `reload`
-/// only covers newer releases.
+/// Whether `contents` is a file this crate generated (its first line is [`MANAGED_MARKER`]).
+pub fn is_managed(contents: &str) -> bool {
+    contents
+        .lines()
+        .next()
+        .is_some_and(|line| line.starts_with(MANAGED_MARKER))
+}
+
+/// The file at `path` as this crate would have generated it, minus contents, or
+/// `None` when no generator writes there.
+///
+/// The CLI records installed paths in a user-writable file; this check keeps a
+/// tampered record from naming anything but a devlanes resolver file.
+pub fn generated_file(path: &Path) -> Option<ResolverFile> {
+    let parent = path.parent()?.to_str()?;
+    let name = path.file_name()?.to_str()?;
+    let (zone, activate) = match parent {
+        MACOS_DIR => (name, None),
+        DELEGATE_DIR => (
+            name.strip_prefix("devlanes-")?
+                .strip_suffix(".dns-delegate")?,
+            Some(restart_resolved()),
+        ),
+        _ => return None,
+    };
+    // Comparing names rejects aliases such as `TEST` that Zone::new would fold.
+    (Zone::new(zone).ok()?.name() == zone).then(|| ResolverFile {
+        path: path.to_owned(),
+        contents: String::new(),
+        activate,
+    })
+}
+
+/// Restart re-reads delegates on every supported version.
 fn restart_resolved() -> Vec<String> {
     ["systemctl", "restart", "systemd-resolved"]
         .map(str::to_owned)
@@ -124,10 +143,11 @@ mod tests {
              nameserver 127.0.0.1\nport 15353\n"
         );
         assert_eq!(file.activate, None);
+        assert!(is_managed(&file.contents));
     }
 
     #[test]
-    fn systemd_files_by_version() {
+    fn systemd_needs_dns_delegates() {
         let zone = Zone::new("dev.internal").expect("zone");
         let server = default_listen();
         let delegate = systemd_resolver(&zone, server, 258).expect("delegate");
@@ -150,23 +170,46 @@ mod tests {
                 ][..]
             )
         );
+        assert!(is_managed(&delegate.contents));
 
-        let dropin = systemd_resolver(&zone, server, 255).expect("drop-in");
-        assert_eq!(
-            dropin.path,
-            PathBuf::from("/etc/systemd/resolved.conf.d/devlanes-dev.internal.conf")
-        );
-        assert!(
-            dropin
-                .contents
-                .ends_with("[Resolve]\nDNS=127.0.0.1:15353\nDomains=~dev.internal\n")
-        );
-
-        assert!(matches!(
-            systemd_resolver(&zone, server, 245),
-            Err(DnsError::SystemdTooOld { version: 245 })
-        ));
+        // A global resolved.conf.d server would answer every lookup on the machine.
+        for old in [257, 255, 246, 245] {
+            let error = systemd_resolver(&zone, server, old).expect_err("too old");
+            assert!(matches!(error, DnsError::SystemdTooOld { version } if version == old));
+            assert!(error.to_string().contains("258"), "{error}");
+        }
         let v6 = systemd_dns_delegate(&zone, "[::1]:5300".parse().expect("addr"));
         assert!(v6.contents.contains("DNS=[::1]:5300\n"));
+    }
+
+    #[test]
+    fn managed_marker_is_the_first_line() {
+        assert!(!is_managed("nameserver 127.0.0.1\nport 20560\n"));
+        assert!(!is_managed(
+            "# Generated by puma-dev\n# Managed by devlanes\n"
+        ));
+        assert!(!is_managed(""));
+    }
+
+    #[test]
+    fn generated_paths_only() {
+        let macos = generated_file(Path::new("/etc/resolver/test")).expect("macos");
+        assert_eq!(macos.activate, None);
+        let delegate = generated_file(Path::new(
+            "/etc/systemd/dns-delegate.d/devlanes-dev.internal.dns-delegate",
+        ))
+        .expect("delegate");
+        assert!(delegate.activate.is_some());
+        for other in [
+            "/etc/passwd",
+            "/etc/resolver/example",
+            "/etc/resolver/TEST",
+            "/etc/resolver/../passwd",
+            "/etc/systemd/dns-delegate.d/other-test.dns-delegate",
+            "/etc/systemd/resolved.conf.d/devlanes-test.conf",
+            "etc/resolver/test",
+        ] {
+            assert!(generated_file(Path::new(other)).is_none(), "{other}");
+        }
     }
 }

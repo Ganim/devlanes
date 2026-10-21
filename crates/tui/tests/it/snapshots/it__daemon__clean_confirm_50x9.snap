@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/it/daemon.rs
+expression: text
+---
+" ┌ confirm ─────────────────────────────────────┐ "
+"┌│clean acme@0?                                 │┐"
+"││it stops the lane's units, runs its           ││"
+"││lane.clean tasks and infra teardown, removes  ││"
+"││…                                             ││"
+"││type acme@0 and press enter                   ││"
+"││> acme@0▏                                     ││"
+"└│esc cancels                                   │┘"
+" └──────────────────────────────────────────────┘ "

@@ -20,7 +20,8 @@ async fn trust(store: &dyn TrustStore, ca_pem: &str) -> Result<TrustStatus, Trus
 - `TrustStore`: `install`, `uninstall` and `status` for one store. Repeating an install or removing an absent CA succeeds without changes.
 - `TrustTarget`: the `tls.trust` names (`system`, `firefox`, `chrome`, `ios-simulator`, `android-emulator`).
 - `TrustStatus`: `Installed`, `Missing` or `Unknown { reason }`.
-- `CaCertificate`: the public CA plus the name stores file it under. It keeps only the first certificate of the PEM, so a key in the input never reaches a store.
+- `CaCertificate`: the public CA plus the name stores file it under. It keeps only the first certificate of the PEM, so a key in the input never reaches a store. `is_name_constrained` tells an older, unconstrained devlanes CA apart.
+- `find_system_program`: absolute path of a root-run tool from the system directories, never `PATH`.
 - `CommandExecutor` and `SystemExecutor`: every external command goes through this trait. The `fake` feature adds `fake::FakeExecutor`, which records argv for tests.
 - `nss::NssStore`: Firefox profiles or a shared NSS database, changed through `certutil`.
 - `TrustError`: typed failures, including `Unsupported`, `ToolMissing { hint }` and `InteractionRequired`.

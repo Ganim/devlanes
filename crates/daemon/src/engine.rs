@@ -264,10 +264,6 @@ impl Inner {
         request: Request,
         session: Session,
     ) -> Result<Value, RpcError> {
-        // `--host <box>`: the box's daemon answers, whatever the method.
-        if crate::remote::forwards(&request) {
-            return self.forward(request, &session).await;
-        }
         let Request {
             method,
             params,
@@ -305,7 +301,7 @@ impl Inner {
                 json!({"message": "input travels as binary frames on an attach stream"}),
                 2,
             )),
-            Method::Resize => self.remote_resize(params, &session).await,
+            Method::Resize => self.resize_method(params, &session).await,
             Method::InfraUp => self.infra_up_method(&context).await,
             Method::InfraDown => self.infra_down_method(&context).await,
             Method::InfraStatus => self.infra_status_method(&context).await,
@@ -322,6 +318,8 @@ impl Inner {
             Method::HostList => self.host_list().await,
             Method::Unlock => self.unlock_method(params, &context).await,
             Method::HostsRetry => self.hosts_retry().await,
+            // A newer client's method: answer instead of dropping the connection.
+            Method::Unknown => Err(RpcError::new("unknown_method", json!({}), 2)),
         }
     }
 

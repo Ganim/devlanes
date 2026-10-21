@@ -13,4 +13,4 @@ expression: draw(&app)?.backend()
 "│                              ││                                              │"
 "│                              ││                                              │"
 "└──────────────────────────────┘└──────────────────────────────────────────────┘"
-" j/k move  s start  x stop  r restart  t task  shift+tab terminal  z zoom       "
+" j/k move  s start  x stop  r restart  t task  ? help  q quit                   "

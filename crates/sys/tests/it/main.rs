@@ -123,6 +123,42 @@ fn listening_ports_of_pid_set() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// A child holding a pipe's write end or a PTY slave is found by its open file;
+/// unrelated processes are not.
+#[test]
+fn holders_of_pipes_and_terminals() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::fd::AsFd;
+
+    let (reader, writer) = std::io::pipe()?;
+    let master =
+        rustix::pty::openpt(rustix::pty::OpenptFlags::RDWR | rustix::pty::OpenptFlags::NOCTTY)?;
+    rustix::pty::grantpt(&master)?;
+    rustix::pty::unlockpt(&master)?;
+    let name = rustix::pty::ptsname(&master, Vec::new())?;
+    let slave = rustix::fs::open(
+        name.as_c_str(),
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY,
+        rustix::fs::Mode::empty(),
+    )?;
+    let pipe = devlanes_sys::open_file(reader.as_fd())?;
+    let tty = devlanes_sys::open_file(slave.as_fd())?;
+    assert!(matches!(pipe, devlanes_sys::OpenFile::Pipe(_)));
+    assert!(matches!(tty, devlanes_sys::OpenFile::Device(_)));
+
+    let holder = Reaped(
+        Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::from(std::fs::File::from(slave)))
+            .stdout(writer)
+            .spawn()?,
+    );
+    let bystander = sleeper();
+    let pids = [holder.0.id(), bystander.0.id()];
+    assert_eq!(devlanes_sys::holders(pipe, &pids)?, [holder.0.id()]);
+    assert_eq!(devlanes_sys::holders(tty, &pids)?, [holder.0.id()]);
+    Ok(())
+}
+
 /// Raising records the original limit for children and never lowers the soft limit.
 #[test]
 fn nofile_raise_records_original() -> Result<(), devlanes_sys::Error> {

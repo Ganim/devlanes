@@ -7,23 +7,79 @@ use devlanes_cli::{
     CommandExit, LaneLogQuery, ResourcePeak, UnitFailure, UnitLogs, WithDriver, WithOwnership,
     WithStart,
 };
-use devlanes_client::{Client, Error as ClientError};
+use devlanes_client::{Client, Error as ClientError, Paths};
 use devlanes_ipc::Frame;
 use devlanes_proto::{
-    Context, Control, Event, Method, Outcome, Request, RpcError, Selection, StartResult, UnitPeak,
+    Context, Control, Event, LaneSummary, LogLine, LogQuery, Method, Outcome, Page, Request,
+    RpcError, Selection, StartResult, UnitPeak,
 };
 use serde_json::{Value, json};
+use tokio::{
+    signal::unix::{SignalKind, signal},
+    sync::mpsc,
+};
+
+/// Byte budget of the first `logs --all` page per unit; small, so one response for
+/// many units stays far below the frame limit. Longer logs continue per unit.
+const FIRST_PAGE_BYTES: usize = 64 * 1024;
+/// Byte budget of each follow-up page of one unit.
+const PAGE_BYTES: usize = 1024 * 1024;
+
+/// A signal that asks `with` to stop: SIGINT (Ctrl-C) or SIGTERM (CI cancellation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    Interrupt,
+    Terminate,
+}
+
+impl Stop {
+    /// The signal number, for the `128 + n` exit status.
+    fn number(self) -> u8 {
+        match self {
+            Self::Interrupt => 2,
+            Self::Terminate => 15,
+        }
+    }
+}
+
+/// SIGINT and SIGTERM handlers for `with`. Installing them before connecting means
+/// neither signal kills the client before it has stopped what it started.
+pub struct Signals(mpsc::UnboundedReceiver<Stop>);
+
+impl Signals {
+    /// Replaces the default dispositions for the rest of the process.
+    pub fn install() -> std::io::Result<Self> {
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let received = tokio::select! {
+                    Some(()) = interrupt.recv() => Stop::Interrupt,
+                    Some(()) = terminate.recv() => Stop::Terminate,
+                    else => break,
+                };
+                if sender.send(received).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Self(receiver))
+    }
+}
 
 /// Keeps one connection and the invocation context for every follow-up query.
 pub struct ClientDriver {
     client: Client,
     context: Context,
+    paths: Paths,
     ownership: WithOwnership,
+    signals: Option<Signals>,
 }
 
 impl ClientDriver {
     /// Records whether this connection spawned the daemon before anything else happens.
-    pub fn new(client: Client, context: Context) -> Self {
+    pub fn new(client: Client, context: Context, paths: Paths) -> Self {
         let ownership = WithOwnership {
             daemon_spawned: client.spawned,
             ..WithOwnership::default()
@@ -31,7 +87,68 @@ impl ClientDriver {
         Self {
             client,
             context,
+            paths,
             ownership,
+            signals: None,
+        }
+    }
+
+    /// Lets SIGINT/SIGTERM cancel the start and reach the test command.
+    pub fn with_signals(mut self, signals: Signals) -> Self {
+        self.signals = Some(signals);
+        self
+    }
+
+    /// A signal that arrived since the last check, without waiting.
+    fn pending_signal(&mut self) -> Option<Stop> {
+        self.signals.as_mut()?.0.try_recv().ok()
+    }
+
+    /// Lane summaries in the scope of `context`; the start's ownership comes from
+    /// comparing a snapshot before the start with one after an interrupt.
+    async fn lanes(&mut self, context: &Context) -> Option<Vec<LaneSummary>> {
+        let data = self
+            .client
+            .request(Method::Status, json!({}), context.clone())
+            .await
+            .ok()?;
+        serde_json::from_value::<Page<LaneSummary>>(data)
+            .ok()
+            .map(|page| page.items)
+    }
+
+    /// One unit's lines after `cursor`, page by page until the daemon has no more.
+    async fn rest_of_unit(
+        &mut self,
+        lane: &str,
+        unit: &str,
+        since: Option<String>,
+        mut cursor: String,
+    ) -> Result<Vec<LogLine>, RpcError> {
+        let mut lines = Vec::new();
+        loop {
+            let query = LogQuery {
+                units: vec![format!("{lane}:{unit}")],
+                since: since.clone(),
+                cursor: Some(cursor),
+                max_bytes: Some(PAGE_BYTES),
+                ..LogQuery::default()
+            };
+            let params = serde_json::to_value(&query).map_err(|error| {
+                RpcError::new("bad_request", json!({"message": error.to_string()}), 1)
+            })?;
+            let context = self.lane_context(lane);
+            let data = self.call(Method::Logs, params, context).await?;
+            let page: Page<LogLine> = serde_json::from_value(data).map_err(|error| {
+                RpcError::new("bad_response", json!({"message": error.to_string()}), 1)
+            })?;
+            let next = page.next_cursor.filter(|_| page.truncated);
+            let progressed = !page.items.is_empty();
+            lines.extend(page.items);
+            match next {
+                Some(next) if progressed => cursor = next,
+                _ => return Ok(lines),
+            }
         }
     }
 
@@ -51,23 +168,155 @@ impl ClientDriver {
         params: Value,
         context: Context,
     ) -> Result<Value, RpcError> {
-        self.client
-            .request(method, params, context)
+        match self
+            .client
+            .request(method, params.clone(), context.clone())
             .await
-            .map_err(rpc_error)
+        {
+            Ok(data) => Ok(data),
+            // Teardown must still happen after the connection broke (a frame over
+            // the limit closes it, for one): reconnect once, never spawning a daemon.
+            Err(error)
+                if !matches!(error, ClientError::Rpc(_))
+                    && matches!(method, Method::Stop | Method::DaemonShutdown) =>
+            {
+                self.client = Client::connect(&self.paths).await.map_err(rpc_error)?;
+                self.client
+                    .request(method, params, context)
+                    .await
+                    .map_err(rpc_error)
+            }
+            Err(error) => Err(rpc_error(error)),
+        }
     }
+}
+
+/// The lane and units an interrupted start owns, from lane snapshots taken before
+/// the start and after the interrupt: units active now that were not active before.
+/// A lane that was idle (or did not exist) before belongs to the start as a whole.
+/// `lane` comes from the request or the start's events; otherwise the lane whose
+/// worktree contains `cwd`.
+pub fn interrupted_ownership(
+    before: &[LaneSummary],
+    after: &[LaneSummary],
+    lane: Option<&str>,
+    cwd: &Path,
+) -> Option<WithOwnership> {
+    let current = match lane {
+        Some(lane) => after
+            .iter()
+            .find(|summary| summary.reference == lane || summary.branch.as_deref() == Some(lane)),
+        None => after
+            .iter()
+            .filter(|summary| cwd.starts_with(&summary.path))
+            .max_by_key(|summary| summary.path.as_os_str().len()),
+    }?;
+    let previous = before
+        .iter()
+        .find(|summary| summary.reference == current.reference);
+    // Not running: nothing this start may stop. `orphaned` units belong to nobody here.
+    let active = |state: &str| !matches!(state, "idle" | "stopped" | "exited" | "unassigned");
+    let units = current
+        .units
+        .iter()
+        .filter(|unit| active(&unit.state) && unit.state != "orphaned")
+        .filter(|unit| {
+            !previous.is_some_and(|lane| {
+                lane.units
+                    .iter()
+                    .any(|old| old.name == unit.name && active(&old.state) && old.state != "failed")
+            })
+        })
+        .map(|unit| format!("{}:{}", current.reference, unit.name))
+        .collect();
+    Some(WithOwnership {
+        lane: current.reference.clone(),
+        units,
+        whole_lane: previous.is_none_or(|lane| lane.state == "idle"),
+        daemon_spawned: false,
+    })
+}
+
+/// The start error for a signal; `with` exits `128 + n` after its teardown.
+fn interrupted(stop: Stop) -> RpcError {
+    RpcError::new(
+        "interrupted",
+        json!({"signal": if stop == Stop::Interrupt { "SIGINT" } else { "SIGTERM" }}),
+        128 + stop.number(),
+    )
+}
+
+/// Whether this process is in the terminal's foreground process group, so a Ctrl-C
+/// on the terminal already reached the child (it shares the group).
+fn terminal_foreground() -> bool {
+    rustix::termios::tcgetpgrp(std::io::stdin())
+        .is_ok_and(|group| group == rustix::process::getpgrp())
 }
 
 /// Transport errors become exit code 4 (daemon unreachable), RPC errors keep their own.
 pub fn rpc_error(error: ClientError) -> RpcError {
     match error {
         ClientError::Rpc(error) => error,
+        ClientError::UnsafeDirectory(path) => unsafe_directory(&path),
+        // A daemon that refused to start reports `CODE: message`; keep the code.
+        ClientError::Startup(reason) if startup_code(&reason).is_some() => {
+            let (code, message) = startup_code(&reason).unwrap_or_default();
+            RpcError::new(
+                "daemon_unreachable",
+                json!({"message": message, "reason": code}),
+                4,
+            )
+        }
+        ClientError::Sandbox(reason) => {
+            RpcError::new("daemon_sandboxed", json!({"message": reason}), 4)
+        }
         other => RpcError::new(
             "daemon_unreachable",
             json!({"message": other.to_string()}),
             4,
         ),
     }
+}
+
+/// Splits a daemon startup reason `STATE_LEGACY_SCHEMA: ...` into a lowercase
+/// code (`state_legacy_schema`) and the message; `None` without such a prefix.
+pub fn startup_code(reason: &str) -> Option<(String, String)> {
+    let (code, message) = reason.split_once(':')?;
+    let valid = !code.is_empty()
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    valid.then(|| (code.to_ascii_lowercase(), message.trim().to_owned()))
+}
+
+/// A state directory devlanes refuses: `{message, reason: "unsafe_directory", path,
+/// problem, mode?, fix?}`. `problem` is `mode` (group or others have access),
+/// `owner`, `symlink`, `not_a_directory` or `unreadable`; only `mode` has a
+/// `fix` (`chmod 700 <path>`), since the others need a person to decide.
+pub fn unsafe_directory(path: &Path) -> RpcError {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let metadata = std::fs::symlink_metadata(path).ok();
+    let problem = match &metadata {
+        None => "unreadable",
+        Some(meta) if meta.file_type().is_symlink() => "symlink",
+        Some(meta) if !meta.is_dir() => "not_a_directory",
+        Some(meta) if meta.uid() != rustix::process::geteuid().as_raw() => "owner",
+        Some(_) => "mode",
+    };
+    let mut data = json!({
+        "message": format!("unsafe daemon directory: {}", path.display()),
+        "reason": "unsafe_directory",
+        "path": path,
+        "problem": problem,
+    });
+    if let Some(meta) = metadata.filter(|_| problem == "mode") {
+        data["mode"] = json!(format!("{:o}", meta.permissions().mode() & 0o7777));
+        data["fix"] = json!(format!(
+            "chmod 700 {}",
+            devlanes_cli::shell_quote(&path.display().to_string())
+        ));
+    }
+    RpcError::new("daemon_unreachable", data, 4)
 }
 
 #[async_trait]
@@ -78,6 +327,14 @@ impl WithDriver for ClientDriver {
         request: &Request,
         events: &mut (dyn FnMut(Event) + Send),
     ) -> Result<WithStart, RpcError> {
+        if let Some(stop) = self.pending_signal() {
+            return Err(interrupted(stop));
+        }
+        // Only needed to work out ownership if a signal cuts the start short.
+        let before = match self.signals {
+            Some(_) => self.lanes(&request.context).await,
+            None => None,
+        };
         let id = self
             .client
             .begin_request(
@@ -87,9 +344,42 @@ impl WithDriver for ClientDriver {
             )
             .await
             .map_err(rpc_error)?;
+        let mut lane = request.context.lane.clone();
         loop {
-            match self.client.next_frame().await.map_err(rpc_error)? {
-                Frame::Control(Control::Event(event)) => events(event),
+            let frame = match self.signals.as_mut() {
+                Some(signals) => tokio::select! {
+                    frame = self.client.next_frame() => frame,
+                    Some(stop) = signals.0.recv() => {
+                        // The daemon keeps starting after a client leaves, so the units
+                        // this start brought up so far are stopped by the teardown.
+                        if let Some(before) = &before {
+                            let after = self.lanes(&request.context).await.unwrap_or_default();
+                            if let Some(owned) = interrupted_ownership(
+                                before,
+                                &after,
+                                lane.as_deref(),
+                                &request.context.cwd,
+                            ) {
+                                self.ownership = WithOwnership {
+                                    daemon_spawned: self.ownership.daemon_spawned,
+                                    ..owned
+                                };
+                            }
+                        }
+                        return Err(interrupted(stop));
+                    }
+                },
+                None => self.client.next_frame().await,
+            };
+            match frame.map_err(rpc_error)? {
+                Frame::Control(Control::Event(event)) => {
+                    if lane.is_none()
+                        && let Some(name) = event.data.get("lane").and_then(Value::as_str)
+                    {
+                        lane = Some(name.to_owned());
+                    }
+                    events(event)
+                }
                 Frame::Control(Control::Response(response)) if response.id == id => {
                     return match response.result {
                         Outcome::Ok { data } => {
@@ -156,16 +446,51 @@ impl WithDriver for ClientDriver {
         })
     }
 
-    /// All lines of every unit since the lane's current start.
-    async fn logs(&mut self, lane: &str, query: LaneLogQuery) -> Result<Vec<UnitLogs>, RpcError> {
+    /// All lines of every unit since the lane's current start: a small first page of
+    /// every unit, then each truncated unit continues page by page with its cursor.
+    async fn logs(
+        &mut self,
+        lane: &str,
+        mut query: LaneLogQuery,
+    ) -> Result<Vec<UnitLogs>, RpcError> {
+        let bad = |error: serde_json::Error| {
+            RpcError::new("bad_response", json!({"message": error.to_string()}), 1)
+        };
+        let since = query.query.since.clone();
+        query.query.max_bytes = Some(FIRST_PAGE_BYTES);
         let context = self.lane_context(lane);
         let params = serde_json::to_value(&query).map_err(|error| {
             RpcError::new("bad_request", json!({"message": error.to_string()}), 1)
         })?;
         let data = self.call(Method::Logs, params, context).await?;
-        serde_json::from_value(data.get("units").cloned().unwrap_or_else(|| json!([]))).map_err(
-            |error| RpcError::new("bad_response", json!({"message": error.to_string()}), 1),
-        )
+        // `{lane, units: [{unit, lines, truncated}]}`.
+        let first = data
+            .get("units")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut units = Vec::with_capacity(first.len());
+        for page in first {
+            let unit = page
+                .get("unit")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let mut lines: Vec<LogLine> =
+                serde_json::from_value(page.get("lines").cloned().unwrap_or_else(|| json!([])))
+                    .map_err(bad)?;
+            let truncated = page.get("truncated").and_then(Value::as_bool) == Some(true);
+            // Forward cursors are `unit#seq` and exclude that line.
+            if truncated && let Some(last) = lines.last() {
+                let cursor = format!("{unit}#{}", last.seq);
+                let rest = self
+                    .rest_of_unit(lane, &unit, since.clone(), cursor)
+                    .await?;
+                lines.extend(rest);
+            }
+            units.push(UnitLogs { unit, lines });
+        }
+        Ok(units)
     }
 
     /// Peaks from run history for the summary table.
@@ -190,12 +515,12 @@ impl WithDriver for ClientDriver {
     }
 
     /// Stops exactly the selection in that lane.
-    async fn stop(&mut self, lane: &str, selection: Selection) -> Result<(), RpcError> {
+    async fn stop(&mut self, lane: &str, selection: Selection) -> Result<Value, RpcError> {
         let context = self.lane_context(lane);
         let params = serde_json::to_value(selection).map_err(|error| {
             RpcError::new("bad_request", json!({"message": error.to_string()}), 1)
         })?;
-        self.call(Method::Stop, params, context).await.map(drop)
+        self.call(Method::Stop, params, context).await
     }
 
     /// Only reached when this invocation spawned the daemon.
@@ -209,13 +534,18 @@ impl WithDriver for ClientDriver {
             .map(drop)
     }
 
-    /// Runs the test command in the foreground; the first Ctrl-C goes to the command only.
+    /// Runs the test command in the foreground; Ctrl-C and SIGTERM go to the command,
+    /// and teardown follows its exit.
     async fn spawn_command(
         &mut self,
         argv: &[String],
         env: &BTreeMap<String, String>,
         cwd: &Path,
     ) -> Result<CommandExit, RpcError> {
+        // A signal while the lane env was fetched: skip the command, go to teardown.
+        if let Some(stop) = self.pending_signal() {
+            return Ok(CommandExit::Signal(stop.number()));
+        }
         let Some((program, args)) = argv.split_first() else {
             return Err(RpcError::new(
                 "usage",
@@ -236,8 +566,22 @@ impl WithDriver for ClientDriver {
                     127,
                 )
             })?;
-        let pid = child.id();
+        let pid = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .and_then(rustix::process::Pid::from_raw);
+        let forward = |signal| {
+            if let Some(pid) = pid {
+                let _ = rustix::process::kill_process(pid, signal);
+            }
+        };
         loop {
+            let received = async {
+                match self.signals.as_mut() {
+                    Some(signals) => signals.0.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 status = child.wait() => {
                     let status = status.map_err(|error| RpcError::new("wait_failed", json!({"message": error.to_string()}), 1))?;
@@ -248,14 +592,264 @@ impl WithDriver for ClientDriver {
                         (None, None) => CommandExit::Code(1),
                     });
                 }
-                // The child shares our process group, so the terminal already delivered SIGINT;
-                // forwarding covers non-terminal senders (CI cancellation sends to us only).
-                _ = tokio::signal::ctrl_c() => {
-                    if let Some(pid) = pid.and_then(|pid| i32::try_from(pid).ok()).and_then(rustix::process::Pid::from_raw) {
-                        let _ = rustix::process::kill_process(pid, rustix::process::Signal::INT);
+                Some(stop) = received => match stop {
+                    // In the terminal's foreground group the child got the terminal's
+                    // SIGINT already; a second one would hit it twice.
+                    Stop::Interrupt if terminal_foreground() => {}
+                    Stop::Interrupt => forward(rustix::process::Signal::INT),
+                    // A terminal never sends SIGTERM; CI cancellation sends it to us only.
+                    Stop::Terminate => forward(rustix::process::Signal::TERM),
+                },
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A lane summary with `(unit, state)` pairs.
+    fn lane(state: &str, units: &[(&str, &str)]) -> LaneSummary {
+        LaneSummary {
+            reference: "acme@2".into(),
+            branch: Some("feat/billing".into()),
+            path: "/work/acme-2".into(),
+            state: state.into(),
+            units: units
+                .iter()
+                .map(|(name, state)| devlanes_proto::UnitSummary {
+                    name: (*name).into(),
+                    lane: "acme@2".into(),
+                    state: (*state).into(),
+                    ..devlanes_proto::UnitSummary::default()
+                })
+                .collect(),
+            ..LaneSummary::default()
+        }
+    }
+
+    /// An interrupted start owns what became active since the snapshot, never what
+    /// ran before or what a previous daemon left running.
+    #[test]
+    fn interrupted_start_owns_only_what_it_started() {
+        let before = [lane(
+            "running",
+            &[
+                ("db", "ready"),
+                ("api", "stopped"),
+                ("old", "orphaned"),
+                ("web", "failed"),
+            ],
+        )];
+        let after = [lane(
+            "starting",
+            &[
+                ("db", "ready"),
+                ("api", "starting"),
+                ("old", "orphaned"),
+                ("web", "queued"),
+                ("seed", "idle"),
+            ],
+        )];
+        let cwd = Path::new("/work/acme-2/src");
+        let owned = interrupted_ownership(&before, &after, None, cwd).expect("lane");
+        assert_eq!(owned.lane, "acme@2");
+        assert_eq!(owned.units, ["acme@2:api", "acme@2:web"]);
+        assert!(!owned.whole_lane);
+        let by_branch =
+            interrupted_ownership(&before, &after, Some("feat/billing"), Path::new("/"));
+        assert_eq!(by_branch.map(|owned| owned.lane).as_deref(), Some("acme@2"));
+        // An idle lane, or one that did not exist yet, belongs to the start as a whole.
+        let idle = [lane("idle", &[("db", "idle")])];
+        assert!(interrupted_ownership(&idle, &after, None, cwd).is_some_and(|o| o.whole_lane));
+        assert!(interrupted_ownership(&[], &after, None, cwd).is_some_and(|o| o.whole_lane));
+        assert!(interrupted_ownership(&before, &after, None, Path::new("/elsewhere")).is_none());
+    }
+
+    /// A fake daemon on `paths.socket`: answers hello, then hands every request of
+    /// each accepted connection to `answer`; `None` drops that connection.
+    fn fake_daemon(
+        paths: &Paths,
+        connections: usize,
+        answer: impl Fn(&Request) -> Option<Value> + Send + 'static,
+    ) -> std::io::Result<tokio::task::JoinHandle<Vec<Request>>> {
+        let listener = tokio::net::UnixListener::bind(&paths.socket)?;
+        Ok(tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..connections {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut connection = devlanes_ipc::Connection::new(stream);
+                if connection.recv().await.is_err() {
+                    break;
+                }
+                let hello = Control::Hello(devlanes_proto::Hello::current(0));
+                if connection.send(Frame::Control(hello)).await.is_err() {
+                    break;
+                }
+                while let Ok(Frame::Control(Control::Request(request))) = connection.recv().await {
+                    let reply = answer(&request);
+                    seen.push(request.clone());
+                    let Some(data) = reply else { break };
+                    let response = devlanes_proto::Response {
+                        id: request.id,
+                        result: Outcome::Ok { data },
+                    };
+                    if connection
+                        .send(Frame::Control(Control::Response(response)))
+                        .await
+                        .is_err()
+                    {
+                        break;
                     }
                 }
             }
-        }
+            seen
+        }))
+    }
+
+    /// Paths with the socket inside `home`, away from the runner's XDG_RUNTIME_DIR.
+    fn test_paths(home: &Path) -> Paths {
+        let mut paths = Paths::new(home).expect("paths");
+        paths.socket = paths.run.join("daemon.sock");
+        paths.prepare().expect("prepare");
+        paths
+    }
+
+    /// One log line of `unit`.
+    fn line(unit: &str, seq: u64) -> Value {
+        json!({"unit": unit, "seq": seq, "timestamp_ms": seq, "text": format!("line {seq}"), "level": null})
+    }
+
+    /// `with --logs-dir` gets every line: a truncated unit continues page by page
+    /// with its cursor until the daemon has no more.
+    #[tokio::test]
+    async fn logs_page_each_truncated_unit_to_the_end() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let paths = test_paths(&temp.path().join("h"));
+            let daemon = fake_daemon(&paths, 1, |request| {
+                let cursor = request.params.get("cursor").and_then(Value::as_str);
+                Some(match cursor {
+                    None => json!({"lane": "acme@0", "units": [
+                        {"unit": "api", "lines": [line("api", 1)], "truncated": true},
+                        {"unit": "web", "lines": [line("web", 1)], "truncated": false},
+                    ]}),
+                    Some("api#1") => json!({"items": [line("api", 2)], "truncated": true, "next_cursor": "api#2"}),
+                    Some(_) => json!({"items": [line("api", 3)], "truncated": false, "next_cursor": null}),
+                })
+            })
+            .expect("bind");
+            let client = Client::connect(&paths).await.expect("connect");
+            let mut driver = ClientDriver::new(client, Context::default(), paths.clone());
+            let query = LaneLogQuery {
+                all: true,
+                query: LogQuery {
+                    since: Some("start".into()),
+                    ..LogQuery::default()
+                },
+            };
+            let logs = driver.logs("acme@0", query).await.expect("logs");
+            let seqs = |unit: &str| -> Vec<u64> {
+                logs.iter()
+                    .find(|logs| logs.unit == unit)
+                    .map(|logs| logs.lines.iter().map(|line| line.seq).collect())
+                    .unwrap_or_default()
+            };
+            assert_eq!(seqs("api"), [1, 2, 3]);
+            assert_eq!(seqs("web"), [1]);
+            drop(driver);
+            let requests = daemon.await.expect("daemon");
+            assert_eq!(requests.len(), 3);
+            assert_eq!(requests[0].params["max_bytes"], FIRST_PAGE_BYTES);
+            assert_eq!(requests[1].params["units"], json!(["acme@0:api"]));
+            assert_eq!(requests[1].params["since"], "start");
+            assert_eq!(requests[2].params["cursor"], "api#2");
+        })
+        .await
+        .expect("in time");
+    }
+
+    /// A connection that broke (say, on an oversized frame) does not cost the
+    /// teardown: stop reconnects once, without spawning a daemon.
+    #[tokio::test]
+    async fn stop_reconnects_after_a_broken_connection() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let paths = test_paths(&temp.path().join("h"));
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = calls.clone();
+            let daemon = fake_daemon(&paths, 2, move |_| {
+                // The first request kills the connection; the retry is answered.
+                (counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0)
+                    .then(|| json!({"items": []}))
+            })
+            .expect("bind");
+            let client = Client::connect(&paths).await.expect("connect");
+            let mut driver = ClientDriver::new(client, Context::default(), paths.clone());
+            let selection = Selection {
+                units: vec!["acme@0:api".into()],
+                ..Selection::default()
+            };
+            driver
+                .stop("acme@0", selection)
+                .await
+                .expect("stop after reconnect");
+            drop(driver);
+            let requests = daemon.await.expect("daemon");
+            assert_eq!(requests.len(), 2);
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.method == Method::Stop)
+            );
+        })
+        .await
+        .expect("in time");
+    }
+
+    /// Startup reasons keep their code, so hints match it instead of the wording.
+    #[test]
+    fn startup_reasons_keep_their_code() {
+        assert_eq!(
+            startup_code("STATE_LEGACY_SCHEMA: state.db has a pre-release schema"),
+            Some((
+                "state_legacy_schema".into(),
+                "state.db has a pre-release schema".into()
+            ))
+        );
+        assert_eq!(startup_code("could not bind: address in use"), None);
+        assert_eq!(startup_code("no colon"), None);
+        let error = rpc_error(ClientError::Startup("STATE_LEGACY_SCHEMA: old".into()));
+        assert_eq!(
+            (error.code.as_str(), error.data["reason"].as_str()),
+            ("daemon_unreachable", Some("state_legacy_schema"))
+        );
+    }
+
+    #[test]
+    /// A home that group or others can read carries `chmod 700 <dir>` as its fix;
+    /// a symlinked one gets no command, since chmod would not make it safe.
+    fn unsafe_directory_names_the_fix() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("my home");
+        std::fs::create_dir(&home).expect("home");
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let error = rpc_error(ClientError::UnsafeDirectory(home.clone()));
+        assert_eq!(error.code, "daemon_unreachable");
+        assert_eq!(error.exit_code, 4);
+        assert_eq!(error.data["reason"], "unsafe_directory");
+        assert_eq!(error.data["problem"], "mode");
+        assert_eq!(error.data["mode"], "755");
+        assert_eq!(error.data["fix"], format!("chmod 700 '{}'", home.display()));
+
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&home, &link).expect("symlink");
+        let error = rpc_error(ClientError::UnsafeDirectory(link));
+        assert_eq!(error.data["problem"], "symlink");
+        assert!(error.data.get("fix").is_none());
     }
 }

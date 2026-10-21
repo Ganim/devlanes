@@ -246,11 +246,12 @@ impl Registry {
 
     /// Decides whether the box may dial `target`.
     ///
-    /// Only ports advertised by a non-hidden unit pass, so a connected client
-    /// cannot use the box as a pivot to arbitrary local services.
+    /// Only ports advertised by a non-hidden unit that is running pass, so a
+    /// connected client cannot use the box as a pivot to arbitrary local services,
+    /// nor reach whatever took over the port of a stopped unit.
     pub fn authorize(&self, target: &DialTarget) -> Result<AuthorizedTarget, RejectReason> {
         let DialTarget::Port { port } = *target;
-        let mut hidden_match = false;
+        let mut refusal = RejectReason::NotRegistered;
         for unit in self.units.values() {
             let advertises = unit.ports.iter().any(|p| p.port == port)
                 || unit.hosts.iter().any(|h| h.port == port);
@@ -258,7 +259,13 @@ impl Registry {
                 continue;
             }
             if unit.hidden {
-                hidden_match = true;
+                refusal = RejectReason::Hidden;
+                continue;
+            }
+            if !serving(&unit.state) {
+                if refusal == RejectReason::NotRegistered {
+                    refusal = RejectReason::NotRunning;
+                }
                 continue;
             }
             return Ok(AuthorizedTarget {
@@ -266,12 +273,14 @@ impl Registry {
                 unit: unit.key.clone(),
             });
         }
-        Err(if hidden_match {
-            RejectReason::Hidden
-        } else {
-            RejectReason::NotRegistered
-        })
+        Err(refusal)
     }
+}
+
+/// Unit states whose ports may be dialed: services that started or are starting
+/// (their port may already answer) and running containers.
+pub fn serving(state: &str) -> bool {
+    matches!(state, "ready" | "starting" | "running")
 }
 
 /// A target that passed [`Registry::authorize`]; only this crate constructs it.
@@ -488,6 +497,16 @@ mod tests {
             Err(RejectReason::NotRegistered)
         );
         assert_eq!(registry.mirrored_ports().len(), 1);
+        let mut stopped = unit("api", 20002, false);
+        stopped.state = "stopped".into();
+        let registry = Registry::from_snapshot(RegistrySnapshot {
+            lanes: Vec::new(),
+            units: vec![stopped],
+        });
+        assert_eq!(
+            registry.authorize(&DialTarget::Port { port: 20002 }),
+            Err(RejectReason::NotRunning)
+        );
     }
 
     #[test]

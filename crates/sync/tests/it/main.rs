@@ -46,6 +46,7 @@ fn options(ignore: &[&str]) -> SyncOptions {
     SyncOptions {
         ignore: ignore.iter().map(|pattern| (*pattern).to_owned()).collect(),
         debounce: Duration::from_millis(30),
+        ..SyncOptions::default()
     }
 }
 
@@ -74,6 +75,26 @@ fn syncer(dirs: &Dirs, ignore: &[&str]) -> Syncer {
         options(ignore),
     )
     .expect("syncer")
+}
+
+#[tokio::test]
+async fn files_over_the_limit_are_reported_and_skipped() {
+    let d = dirs();
+    write(&d.src.join("small.txt"), "ok");
+    write(&d.src.join("big.bin"), &"x".repeat(64));
+    let limited = SyncOptions {
+        max_file: Some(16),
+        ..options(&[])
+    };
+    let status = Syncer::new(&d.src, Arc::new(LocalTarget::new(&d.dst)), limited)
+        .expect("syncer")
+        .sync_once()
+        .await
+        .expect("sync");
+    assert_eq!(read(&d.dst.join("small.txt")).as_deref(), Some("ok"));
+    assert!(!d.dst.join("big.bin").exists());
+    assert_eq!(status.errors.len(), 1, "{:?}", status.errors);
+    assert!(status.errors[0].message.contains("over the sync limit"));
 }
 
 #[tokio::test]

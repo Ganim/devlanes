@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::ExitStatus;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
@@ -22,14 +22,23 @@ use crate::bootstrap::{
     RemoteProbe,
 };
 
-/// macOS `sun_path` holds 104 bytes including the terminator; leave margin for ssh's suffixes.
-const MAX_CONTROL_PATH: usize = 100;
+/// macOS `sun_path` holds 104 bytes including the terminator, and ssh binds the
+/// master at the control path plus `.` and 16 random characters before renaming it.
+const MAX_CONTROL_PATH: usize = 104 - 1 - 17;
+
+/// How long an idle master outlives its last session. Finite, so a master left
+/// behind by a daemon that died exits on its own; long enough that a restarted
+/// daemon reconnects through it without new prompts.
+const CONTROL_PERSIST: &str = "ControlPersist=600";
 
 /// Bytes of remote stderr kept for error messages.
 const STDERR_TAIL: usize = 4096;
 
-/// Distinguishes masters started by one process.
-static NEXT_MASTER: AtomicU64 = AtomicU64::new(0);
+/// Distinguishes askpass relays started by one process.
+static NEXT_ASKPASS: AtomicU64 = AtomicU64::new(0);
+
+/// Set once this process cleared masters left by older devlanes versions.
+static LEGACY_SWEPT: AtomicBool = AtomicBool::new(false);
 
 /// Settings for [`SshTransport`].
 #[derive(Clone)]
@@ -50,6 +59,11 @@ pub struct SshOptions {
     pub askpass: Option<AskpassConfig>,
     /// Releases the client may install on a box that lacks devlanes.
     pub manifest: Option<ReleaseManifest>,
+    /// HTTPS URL of the release manifest, fetched when a box lacks devlanes and
+    /// no `manifest` was given.
+    pub manifest_url: Option<String>,
+    /// Release version the fetched manifest must describe: the client's own.
+    pub release_version: String,
     /// Whether a missing binary is reported or installed.
     pub bootstrap: BootstrapPolicy,
 }
@@ -66,6 +80,8 @@ impl SshOptions {
             ssh_options: Vec::new(),
             askpass: None,
             manifest: None,
+            manifest_url: None,
+            release_version: env!("CARGO_PKG_VERSION").to_owned(),
             bootstrap: BootstrapPolicy::Report,
         }
     }
@@ -177,6 +193,9 @@ pub struct SshTransport {
     destination: String,
     options: SshOptions,
     master: Mutex<Option<Master>>,
+    /// Set after the first tunnel opened: from then on a failing DNS lookup is a
+    /// network blip (sleep, Wi-Fi change), not a misspelt host.
+    connected: AtomicBool,
 }
 
 impl SshTransport {
@@ -186,6 +205,7 @@ impl SshTransport {
             destination: destination.into(),
             options,
             master: Mutex::new(None),
+            connected: AtomicBool::new(false),
         }
     }
 
@@ -237,21 +257,44 @@ impl SshTransport {
 
     /// Opens the tunnel, starting or reusing the master and bootstrapping if allowed.
     async fn open(&self) -> Result<SshStream, SshError> {
+        let stream = self.open_tunnel().await?;
+        self.connected.store(true, Ordering::Relaxed);
+        Ok(stream)
+    }
+
+    /// The release manifest: the configured one, else the one at `manifest_url`.
+    async fn manifest(&self) -> Result<Option<ReleaseManifest>, ManifestError> {
+        if let Some(manifest) = &self.options.manifest {
+            return Ok(Some(manifest.clone()));
+        }
+        match &self.options.manifest_url {
+            Some(url) => bootstrap::fetch_manifest(url, &self.options.release_version)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// [`SshTransport::open`] without the bookkeeping.
+    async fn open_tunnel(&self) -> Result<SshStream, SshError> {
         let mut guard = self.master.lock().await;
         let master = self.ensure_master(&mut guard).await?;
         let probe = self.ensure_probe(master).await?.clone();
         if let Some(program) = probe.program {
             return spawn_tunnel(master.session.clone(), &program).await;
         }
+        let (manifest, manifest_error) = match self.manifest().await {
+            Ok(manifest) => (manifest, None),
+            Err(error) => (None, Some(error.0)),
+        };
         let plan = BootstrapPlan {
             destination: self.destination.clone(),
-            artifact: self
-                .options
-                .manifest
+            artifact: manifest
                 .as_ref()
                 .and_then(|m| m.select(&probe.platform))
                 .cloned(),
             platform: probe.platform,
+            manifest_error,
         };
         if self.options.bootstrap == BootstrapPolicy::Report || plan.artifact.is_none() {
             return Err(SshError::BootstrapRequired(Box::new(plan)));
@@ -281,7 +324,11 @@ impl SshTransport {
         };
         if !alive {
             *slot = None;
-            *slot = Some(self.launch_master().await?);
+            let master = match self.resume_master().await {
+                Some(master) => master,
+                None => self.launch_master().await?,
+            };
+            *slot = Some(master);
         }
         slot.as_mut()
             .ok_or_else(|| SshError::Io(io::Error::other("master slot empty after launch")))
@@ -309,17 +356,53 @@ impl SshTransport {
             .ok_or_else(|| SshError::Probe(String::new()))
     }
 
+    /// The control socket and log of this destination's master.
+    ///
+    /// The name is stable for a destination and its options, so a restarted
+    /// daemon finds a master that is still persisting and reuses it.
+    fn control_paths(&self) -> (PathBuf, PathBuf) {
+        let mut key = self.destination.clone();
+        for option in &self.options.ssh_options {
+            key.push('\0');
+            key.push_str(option);
+        }
+        let name = format!("m-{:016x}", fnv1a(key.as_bytes()));
+        (
+            self.options.control_dir.join(&name),
+            self.options.control_dir.join(format!("{name}.log")),
+        )
+    }
+
+    /// A master left by an earlier daemon for this destination, if it still answers.
+    async fn resume_master(&self) -> Option<Master> {
+        let (ctl, log) = self.control_paths();
+        if !tokio::fs::try_exists(&ctl).await.unwrap_or(false) {
+            return None;
+        }
+        let session = Session::resume(
+            ctl.clone().into_boxed_path(),
+            Some(log.clone().into_boxed_path()),
+        );
+        if session.check().await.is_err() {
+            // A dead socket blocks a new master at the same path.
+            let _ = tokio::fs::remove_file(&ctl).await;
+            return None;
+        }
+        Some(Master {
+            session: Arc::new(session),
+            ctl,
+            log,
+            ssh_program: self.options.ssh_program.clone(),
+            probe: None,
+        })
+    }
+
     /// Starts `ssh -M -f -N` with askpass routing and resumes it as an openssh session.
     ///
     /// openssh's own builder forces `BatchMode=yes` and cannot set the master's
     /// environment, which would rule out askpass, so the master is launched here.
     async fn launch_master(&self) -> Result<Master, SshError> {
-        let id = format!(
-            "{}-{}",
-            std::process::id(),
-            NEXT_MASTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let ctl = self.options.control_dir.join(format!("m-{id}"));
+        let (ctl, log) = self.control_paths();
         if ctl.as_os_str().len() > MAX_CONTROL_PATH {
             return Err(SshError::ControlPathTooLong(ctl));
         }
@@ -327,8 +410,14 @@ impl SshTransport {
         tokio::task::spawn_blocking(move || private_dir(&dir))
             .await
             .map_err(io::Error::other)??;
-        let name = format!("m-{id}");
-        let log = self.options.control_dir.join(format!("{name}.log"));
+        if !LEGACY_SWEPT.swap(true, Ordering::Relaxed) {
+            sweep_legacy_masters(&self.options.control_dir, &self.options.ssh_program).await;
+        }
+        let id = format!(
+            "{}-{}",
+            std::process::id(),
+            NEXT_ASKPASS.fetch_add(1, Ordering::Relaxed)
+        );
         let mut command = tokio::process::Command::new(&self.options.ssh_program);
         command
             .stdin(std::process::Stdio::null())
@@ -340,7 +429,7 @@ impl SshTransport {
             .arg("-S")
             .arg(&ctl)
             .args(["-M", "-f", "-N"])
-            .args(["-o", "ControlPersist=yes"])
+            .args(["-o", CONTROL_PERSIST])
             .args(["-o", "ServerAliveInterval=15"])
             .args(["-o", "ServerAliveCountMax=3"])
             .arg("-o")
@@ -387,7 +476,8 @@ impl SshTransport {
             })
             .await
             .map_err(io::Error::other)?;
-            return Err(master_error(&self.destination, status, &text));
+            let first = !self.connected.load(Ordering::Relaxed);
+            return Err(master_error(&self.destination, status, &text, first));
         }
         let session = Session::resume(
             ctl.clone().into_boxed_path(),
@@ -418,20 +508,70 @@ fn private_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Classifies a failed master launch from ssh's log.
-fn master_error(destination: &str, status: ExitStatus, log: &str) -> SshError {
+///
+/// A name that does not resolve is permanent only before the first successful
+/// connection (a typo); afterwards it is a network change that will pass.
+fn master_error(destination: &str, status: ExitStatus, log: &str, first: bool) -> SshError {
     // These need new credentials or known_hosts changes, not time.
-    const PERMANENT: [&str; 4] = [
+    const PERMANENT: [&str; 3] = [
         "Permission denied",
         "Host key verification failed",
         "REMOTE HOST IDENTIFICATION HAS CHANGED",
-        "Could not resolve hostname",
     ];
     let log = log.trim();
+    let permanent = PERMANENT.iter().any(|needle| log.contains(needle))
+        || (first && log.contains("Could not resolve hostname"));
     SshError::Master {
         destination: destination.to_owned(),
         status: status.to_string(),
-        permanent: PERMANENT.iter().any(|needle| log.contains(needle)),
+        permanent,
         log: tail(log.as_bytes()),
+    }
+}
+
+/// 64-bit FNV-1a: stable across builds, unlike the std hasher.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// Asks masters named by older devlanes versions (`m-<pid>-<n>`, persisting
+/// forever) to exit, and removes their logs. Stable `m-<hash>` masters are left
+/// for reuse; they expire after [`CONTROL_PERSIST`].
+async fn sweep_legacy_masters(dir: &Path, ssh_program: &Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix("m-") else {
+            continue;
+        };
+        let legacy = rest
+            .trim_end_matches(".log")
+            .split_once('-')
+            .is_some_and(|(pid, n)| {
+                pid.bytes().all(|b| b.is_ascii_digit()) && n.bytes().all(|b| b.is_ascii_digit())
+            });
+        if !legacy {
+            continue;
+        }
+        if name.ends_with(".log") {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+            continue;
+        }
+        let _ = tokio::process::Command::new(ssh_program)
+            .arg("-S")
+            .arg(entry.path())
+            .args(["-O", "exit", "--", "none"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .status()
+            .await;
+        let _ = tokio::fs::remove_file(entry.path()).await;
     }
 }
 
@@ -660,9 +800,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dns_failures_are_permanent_only_before_the_first_connection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir()?;
+            let mut options = SshOptions::new(dir.path());
+            options.ssh_program = fake_ssh(
+                dir.path(),
+                "ssh: Could not resolve hostname box: nodename nor servname provided",
+            )?;
+            let transport = SshTransport::new("box", options);
+            let Err(first) = transport.connect().await else {
+                panic!("fake ssh unexpectedly connected");
+            };
+            assert!(first.is_permanent(), "a typo should stop the link");
+            // After a tunnel once opened, the same failure is a network change.
+            transport.connected.store(true, Ordering::Relaxed);
+            let Err(later) = transport.connect().await else {
+                panic!("fake ssh unexpectedly connected");
+            };
+            assert!(
+                !later.is_permanent(),
+                "a reconnect after DNS loss must keep retrying"
+            );
+            Ok(())
+        })
+        .await?
+    }
+
+    #[test]
+    fn control_paths_are_stable_and_short() {
+        let options = SshOptions::new("/tmp/h");
+        let one = SshTransport::new("box", options.clone()).control_paths();
+        let again = SshTransport::new("box", options.clone()).control_paths();
+        let other = SshTransport::new("other", options).control_paths();
+        assert_eq!(one, again, "a restarted daemon finds the same master");
+        assert_ne!(one.0, other.0);
+        let name = one.0.file_name().map(|n| n.to_string_lossy().into_owned());
+        assert_eq!(name.map(|n| n.len()), Some(18), "m- plus 16 hex digits");
+    }
+
+    #[tokio::test]
+    async fn legacy_masters_are_swept_and_stable_ones_kept()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let exits = dir.path().join("exits");
+        let fake = dir.path().join("fake-ssh");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\necho \"$2\" >> '{}'\nexit 0\n", exits.display()),
+        )?;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))?;
+        let control = dir.path().join("ssh");
+        std::fs::create_dir(&control)?;
+        for name in ["m-123-0", "m-123-0.log", "m-0123456789abcdef", "a-1-0.sock"] {
+            std::fs::write(control.join(name), b"")?;
+        }
+        sweep_legacy_masters(&control, &fake).await;
+        assert!(!control.join("m-123-0").exists());
+        assert!(!control.join("m-123-0.log").exists());
+        assert!(
+            control.join("m-0123456789abcdef").exists(),
+            "reusable master kept"
+        );
+        let asked = std::fs::read_to_string(&exits)?;
+        assert!(
+            asked.contains("m-123-0"),
+            "legacy master asked to exit: {asked}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn long_control_paths_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
-        let deep = dir.path().join("x".repeat(120));
+        let deep = dir.path().join("x".repeat(80));
         let transport = SshTransport::new("box", SshOptions::new(deep));
         let result = transport.launch_master().await;
         assert!(matches!(result, Err(SshError::ControlPathTooLong(_))));

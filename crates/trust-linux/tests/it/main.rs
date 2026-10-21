@@ -10,6 +10,12 @@ use devlanes_trust_linux::{
     CHROMIUM_ID, CaStoreLayout, FIREFOX_ID, LinuxTrust, Privilege, SYSTEM_ID, SystemStore,
 };
 
+const SUDO: &str = "/usr/bin/sudo";
+const INSTALL: &str = "/usr/bin/install";
+const RM: &str = "/bin/rm";
+const UPDATE_CERTIFICATES: &str = "/usr/sbin/update-ca-certificates";
+const UPDATE_TRUST: &str = "/usr/bin/update-ca-trust";
+
 fn ca() -> CaCertificate {
     let dir = tempfile::tempdir().expect("tempdir");
     let ca = devlanes_pki::CertificateAuthority::load_or_create(&dir.path().join("ca"))
@@ -24,23 +30,25 @@ fn sysroot(layout: CaStoreLayout) -> tempfile::TempDir {
     root
 }
 
-/// Executor that performs `install` and `rm` on the tempdir sysroot like root would.
+/// Executor with `install` and `rm` in the system directories plus `programs`, which
+/// performs them on the tempdir sysroot like root would.
 fn acting_executor(programs: &[&str]) -> Arc<FakeExecutor> {
     Arc::new(
         FakeExecutor::new(|command| {
             let argv = command.argv();
-            let start = usize::from(argv[0] == "sudo") + usize::from(argv.get(1) == Some(&"-n"));
+            let start = usize::from(argv[0] == SUDO) + usize::from(argv.get(1) == Some(&"-n"));
             match argv[start..] {
-                ["install", "-m", "0644", from, to] => {
+                [INSTALL, "-m", "0644", from, to] => {
                     std::fs::copy(from, to)?;
                 }
-                ["rm", "-f", path] => {
+                [RM, "-f", path] => {
                     std::fs::remove_file(path)?;
                 }
                 _ => {}
             }
             Ok(CommandOutput::ok(""))
         })
+        .with_programs(&[INSTALL, RM])
         .with_programs(programs),
     )
 }
@@ -48,7 +56,7 @@ fn acting_executor(programs: &[&str]) -> Arc<FakeExecutor> {
 #[tokio::test]
 async fn debian_install_copies_anchor_and_refreshes_with_sudo_n() {
     let root = sysroot(CaStoreLayout::Debian);
-    let executor = acting_executor(&["sudo", "update-ca-certificates"]);
+    let executor = acting_executor(&[SUDO, UPDATE_CERTIFICATES]);
     let store = SystemStore::new(
         executor.clone(),
         root.path(),
@@ -67,9 +75,9 @@ async fn debian_install_copies_anchor_and_refreshes_with_sudo_n() {
     let anchor_arg = anchor.display().to_string();
     let argvs = executor.argvs();
     assert_eq!(argvs.len(), 2);
-    assert_eq!(argvs[0][..5], ["sudo", "-n", "install", "-m", "0644"]);
+    assert_eq!(argvs[0][..5], [SUDO, "-n", INSTALL, "-m", "0644"]);
     assert_eq!(argvs[0][6], anchor_arg);
-    assert_eq!(argvs[1], ["sudo", "-n", "update-ca-certificates"]);
+    assert_eq!(argvs[1], [SUDO, "-n", UPDATE_CERTIFICATES]);
     assert_eq!(std::fs::read_to_string(&anchor).expect("anchor"), ca.pem());
     assert_eq!(
         store.status(&ca).await.expect("status"),
@@ -81,8 +89,8 @@ async fn debian_install_copies_anchor_and_refreshes_with_sudo_n() {
 
     store.uninstall(&ca).await.expect("uninstall");
     let argvs = executor.argvs();
-    assert_eq!(argvs[2], ["sudo", "-n", "rm", "-f", anchor_arg.as_str()]);
-    assert_eq!(argvs[3], ["sudo", "-n", "update-ca-certificates"]);
+    assert_eq!(argvs[2], [SUDO, "-n", RM, "-f", anchor_arg.as_str()]);
+    assert_eq!(argvs[3], [SUDO, "-n", UPDATE_CERTIFICATES]);
     assert_eq!(
         store.status(&ca).await.expect("status"),
         TrustStatus::Missing
@@ -94,7 +102,7 @@ async fn debian_install_copies_anchor_and_refreshes_with_sudo_n() {
 #[tokio::test]
 async fn fedora_uses_update_ca_trust_and_interactive_sudo() {
     let root = sysroot(CaStoreLayout::Fedora);
-    let executor = acting_executor(&["sudo", "update-ca-trust"]);
+    let executor = acting_executor(&[SUDO, UPDATE_TRUST]);
     let store = SystemStore::new(
         executor.clone(),
         root.path(),
@@ -102,20 +110,44 @@ async fn fedora_uses_update_ca_trust_and_interactive_sudo() {
     );
     store.install(&ca()).await.expect("install");
     let argvs = executor.argvs();
-    assert_eq!(argvs[0][..4], ["sudo", "install", "-m", "0644"]);
+    assert_eq!(argvs[0][..4], [SUDO, INSTALL, "-m", "0644"]);
     assert!(argvs[0][5].ends_with("etc/pki/ca-trust/source/anchors/devlanes-test-ca.pem"));
-    assert_eq!(argvs[1], ["sudo", "update-ca-trust", "extract"]);
+    assert_eq!(argvs[1], [SUDO, UPDATE_TRUST, "extract"]);
 }
 
 #[tokio::test]
 async fn root_runs_commands_directly() {
     let root = sysroot(CaStoreLayout::Arch);
-    let executor = acting_executor(&["update-ca-trust"]);
+    let executor = acting_executor(&[UPDATE_TRUST]);
     let store = SystemStore::new(executor.clone(), root.path(), Privilege::Root);
     store.install(&ca()).await.expect("install");
     let argvs = executor.argvs();
-    assert_eq!(argvs[0][..3], ["install", "-m", "0644"]);
-    assert_eq!(argvs[1], ["update-ca-trust", "extract"]);
+    assert_eq!(argvs[0][..3], [INSTALL, "-m", "0644"]);
+    assert_eq!(argvs[1], [UPDATE_TRUST, "extract"]);
+}
+
+#[tokio::test]
+async fn privileged_tools_never_come_from_path() {
+    let root = sysroot(CaStoreLayout::Debian);
+    // Bare names are what a hostile PATH entry would provide.
+    let executor = Arc::new(
+        FakeExecutor::new(|_| Ok(CommandOutput::ok(""))).with_programs(&[
+            "sudo",
+            "install",
+            "rm",
+            "update-ca-certificates",
+        ]),
+    );
+    let store = SystemStore::new(
+        executor.clone(),
+        root.path(),
+        Privilege::Sudo { interactive: true },
+    );
+    assert!(matches!(
+        store.install(&ca()).await,
+        Err(TrustError::ToolMissing { .. })
+    ));
+    assert!(executor.calls().is_empty());
 }
 
 #[tokio::test]
@@ -123,7 +155,7 @@ async fn sudo_without_password_needs_interaction() {
     let root = sysroot(CaStoreLayout::Debian);
     let executor = Arc::new(
         FakeExecutor::new(|_| Ok(CommandOutput::failed(1, "sudo: a password is required\n")))
-            .with_programs(&["sudo", "update-ca-certificates"]),
+            .with_programs(&[SUDO, INSTALL, RM, UPDATE_CERTIFICATES]),
     );
     let store = SystemStore::new(
         executor,
@@ -132,7 +164,8 @@ async fn sudo_without_password_needs_interaction() {
     );
     assert!(matches!(
         store.install(&ca()).await,
-        Err(TrustError::InteractionRequired { command, .. }) if command.starts_with("sudo -n install")
+        Err(TrustError::InteractionRequired { command, .. })
+            if command.starts_with(&format!("{SUDO} -n {INSTALL}"))
     ));
 }
 
@@ -143,18 +176,18 @@ async fn failed_refresh_removes_the_anchor() {
         FakeExecutor::new(|command| {
             let argv = command.argv();
             match argv[..] {
-                ["install", "-m", "0644", from, to] => {
+                [INSTALL, "-m", "0644", from, to] => {
                     std::fs::copy(from, to)?;
                     Ok(CommandOutput::ok(""))
                 }
-                ["rm", "-f", path] => {
+                [RM, "-f", path] => {
                     std::fs::remove_file(path)?;
                     Ok(CommandOutput::ok(""))
                 }
                 _ => Ok(CommandOutput::failed(2, "broken bundle")),
             }
         })
-        .with_programs(&["update-ca-certificates"]),
+        .with_programs(&[INSTALL, RM, UPDATE_CERTIFICATES]),
     );
     let store = SystemStore::new(executor, root.path(), Privilege::Root);
     let ca = ca();
@@ -172,7 +205,7 @@ async fn failed_refresh_removes_the_anchor() {
 async fn missing_tools_and_layouts_are_reported() {
     let ca = ca();
     let bare = tempfile::tempdir().expect("sysroot");
-    let executor = acting_executor(&["sudo", "update-ca-certificates"]);
+    let executor = acting_executor(&[SUDO, UPDATE_CERTIFICATES]);
     let store = SystemStore::new(executor.clone(), bare.path(), Privilege::Root);
     assert!(matches!(
         store.install(&ca).await,
@@ -184,13 +217,13 @@ async fn missing_tools_and_layouts_are_reported() {
     ));
 
     let root = sysroot(CaStoreLayout::Debian);
-    let no_refresh = SystemStore::new(acting_executor(&["sudo"]), root.path(), Privilege::Root);
+    let no_refresh = SystemStore::new(acting_executor(&[SUDO]), root.path(), Privilege::Root);
     assert!(matches!(
         no_refresh.install(&ca).await,
         Err(TrustError::ToolMissing { tool, .. }) if tool == "update-ca-certificates"
     ));
     let no_sudo = SystemStore::new(
-        acting_executor(&["update-ca-certificates"]),
+        acting_executor(&[UPDATE_CERTIFICATES]),
         root.path(),
         Privilege::Sudo { interactive: true },
     );
@@ -237,6 +270,9 @@ async fn chrome_uses_pki_nssdb_and_firefox_scans_profiles() {
         FakeExecutor::new(move |command| {
             seen.lock().expect("lock").push(command.args.join(" "));
             Ok(match command.args.first().map(String::as_str) {
+                Some("-L") if command.args.len() == 3 => {
+                    CommandOutput::ok("devlanes test CA                 C,,\n")
+                }
                 Some("-L") => CommandOutput::ok(pem.clone()),
                 _ => CommandOutput::ok(""),
             })

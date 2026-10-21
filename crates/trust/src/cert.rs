@@ -91,6 +91,18 @@ impl CaCertificate {
         }
     }
 
+    /// Whether the certificate carries an X.509 name constraints extension.
+    ///
+    /// Looks for the extension's OID (2.5.29.30) in the DER. The encoded OID tag and
+    /// length make an accidental match in a name or key practically impossible, and
+    /// this is only used to suggest recreating an older, unconstrained CA.
+    pub fn is_name_constrained(&self) -> bool {
+        const NAME_CONSTRAINTS_OID: [u8; 5] = [0x06, 0x03, 0x55, 0x1D, 0x1E];
+        self.der
+            .windows(NAME_CONSTRAINTS_OID.len())
+            .any(|window| window == NAME_CONSTRAINTS_OID)
+    }
+
     /// Whether any certificate in `pem` is this CA, compared by DER.
     pub fn matches_pem(&self, pem: &[u8]) -> bool {
         CertificateDer::pem_slice_iter(pem)
@@ -116,6 +128,20 @@ mod tests {
             ca
         );
         assert_eq!(ca.sha1_hex().len(), 40);
+    }
+
+    #[test]
+    fn detects_name_constraints() {
+        let constrained = CaCertificate::from_pem(&ca_pem(), "devlanes CA").expect("parse");
+        assert!(constrained.is_name_constrained());
+
+        // CAs created before devlanes constrained new roots, and mkcert's, look like this.
+        let key = rcgen::KeyPair::generate().expect("key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let plain = params.self_signed(&key).expect("self-signed");
+        let plain = CaCertificate::from_pem(&plain.pem(), "old CA").expect("parse");
+        assert!(!plain.is_name_constrained());
     }
 
     #[test]

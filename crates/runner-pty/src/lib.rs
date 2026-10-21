@@ -59,6 +59,19 @@ pub enum StderrMode {
     Merged,
 }
 
+/// What happens to processes still running after a unit's leader exits on its own.
+/// An explicit stop always kills every tracked process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExitSweep {
+    /// SIGKILL every tracked leftover; for services and ad-hoc commands.
+    #[default]
+    KillAll,
+    /// Kill leftovers inside the unit's session, but leave descendants that moved to
+    /// their own session running and list them in [`ExitReport::left_running`]. For
+    /// setup tasks that start daemons (`pg_ctl start`, `redis-server --daemonize yes`).
+    KeepDaemonized,
+}
+
 /// Spawns units in PTYs or pipes. Cheap to clone; holds only tuning values.
 #[derive(Debug, Clone)]
 pub struct PtyRunner {
@@ -67,10 +80,12 @@ pub struct PtyRunner {
     output_capacity: usize,
     drain_timeout: Duration,
     sweep_timeout: Duration,
+    exit_sweep: ExitSweep,
 }
 
 impl Default for PtyRunner {
-    /// Separate stderr, 500 ms descendant snapshots, 1024 buffered chunks per subscriber.
+    /// Separate stderr, 500 ms descendant snapshots, 1024 buffered chunks per
+    /// subscriber, leftovers killed after a natural exit.
     fn default() -> Self {
         Self {
             stderr: StderrMode::Separate,
@@ -78,11 +93,18 @@ impl Default for PtyRunner {
             output_capacity: 1024,
             drain_timeout: Duration::from_millis(500),
             sweep_timeout: Duration::from_secs(1),
+            exit_sweep: ExitSweep::KillAll,
         }
     }
 }
 
 impl PtyRunner {
+    /// Selects the natural-exit sweep for units spawned by this runner.
+    pub fn with_exit_sweep(mut self, sweep: ExitSweep) -> Self {
+        self.exit_sweep = sweep;
+        self
+    }
+
     /// Selects stderr handling for pipe-mode units.
     pub fn with_stderr(mut self, mode: StderrMode) -> Self {
         self.stderr = mode;
@@ -107,6 +129,10 @@ impl PtyRunner {
     /// Returns after the leader's identity was recorded. The environment is exactly
     /// `spec.env`; nothing is inherited from the daemon. `program` is resolved against
     /// the `PATH` in `spec.env`.
+    ///
+    /// Not cancellation safe: the fork runs on the blocking pool and finishes even if
+    /// this future is dropped, and a leader started that way is never supervised or
+    /// reaped. Await it to completion, or spawn it as its own task.
     pub async fn spawn_unit(&self, spec: LaunchSpec) -> Result<Arc<PtyUnit>, Error> {
         unit::spawn(self, spec).await
     }
@@ -114,7 +140,7 @@ impl PtyRunner {
 
 #[async_trait]
 impl Runner for PtyRunner {
-    /// Spawns through [`PtyRunner::spawn_unit`].
+    /// Spawns through [`PtyRunner::spawn_unit`], with the same cancellation caveat.
     async fn spawn(&self, spec: LaunchSpec) -> Result<Arc<dyn Unit>, Error> {
         Ok(self.spawn_unit(spec).await?)
     }

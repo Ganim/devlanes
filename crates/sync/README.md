@@ -29,7 +29,7 @@ async fn sync_extension(worktree: &Path, to: &Path) -> Result<SyncHandle, SyncEr
 - `Syncer`: `start` finishes the first copy before it returns when the source exists, then watches in a background task. `sync_once` runs a single pass.
 - `SyncHandle`: `status`, `subscribe` and `stop`. Dropping it stops the sync.
 - `SyncStatus`: state, last sync time, file and byte counts, and recent errors, for `devlanes remote sync`.
-- `SyncTarget`: `manifest`, `write_file` and `remove`. The remote mux target will implement it.
+- `SyncTarget`: `manifest`, `write_file` and `remove`. `LocalTarget` implements it here; `devlanes-tunnel` implements it over the SSH mux for connected boxes.
 - `LocalTarget`: writes a temp file and renames it into place. It never writes or deletes through a symlinked directory.
 - `IgnoreRules`: a pattern without `/` matches at any depth, and a pattern with `/` is anchored at the source root.
 

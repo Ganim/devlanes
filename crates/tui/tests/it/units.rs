@@ -304,12 +304,63 @@ async fn unchecking_everything_starts_the_default_profile() -> TestResult {
     else {
         return Err(format!("unexpected {effects:?}").into());
     };
-    assert!(selection.profiles.is_empty());
+    // Named explicitly: an empty list would make the daemon reuse the last profiles.
+    assert_eq!(selection.profiles, ["web"], "the is_default profile");
     assert_eq!(label, "start acme@0 with the default profile");
     // Esc cancels without starting anything.
     app.update(key(KeyCode::Char('p')));
     assert!(app.update(key(KeyCode::Esc)).is_empty());
     assert!(app.dialog.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn without_a_default_profile_nothing_checked_means_no_profile() -> TestResult {
+    let api = FakeApi::default();
+    let mut app = profiles_app(&api).await;
+    let mut items = crate::fake::profiles();
+    for item in &mut items {
+        item.is_default = false;
+    }
+    app.update(key(KeyCode::Char('p')));
+    app.update(Msg::Profiles {
+        lane: "acme@0".into(),
+        result: Ok(devlanes_tui::api::ProfileList {
+            lane: "acme@0".into(),
+            items,
+        }),
+    });
+    assert!(screen(&render(&app)?).contains("nothing checked starts the lane without a profile"));
+    // The lane last ran with web; uncheck it.
+    app.update(key(KeyCode::Char(' ')));
+    let effects = app.update(key(KeyCode::Enter));
+    let [
+        Effect::Control {
+            selection, label, ..
+        },
+    ] = effects.as_slice()
+    else {
+        return Err(format!("unexpected {effects:?}").into());
+    };
+    // `default` is accepted even when undefined and then means no profile.
+    assert_eq!(selection.profiles, ["default"]);
+    assert_eq!(label, "start acme@0 without a profile");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_config_without_profiles_starts_nothing() -> TestResult {
+    let api = FakeApi::default();
+    let mut app = profiles_app(&api).await;
+    app.update(key(KeyCode::Char('p')));
+    app.update(Msg::Profiles {
+        lane: "acme@0".into(),
+        result: Ok(devlanes_tui::api::ProfileList {
+            lane: "acme@0".into(),
+            items: Vec::new(),
+        }),
+    });
+    assert!(app.update(key(KeyCode::Enter)).is_empty());
     Ok(())
 }
 

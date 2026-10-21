@@ -256,6 +256,16 @@ pub fn rpc(error: &RpcError) -> Worded {
             None,
         ),
         "not_running" => (format!("{} is not running", target(data)), Vec::new(), None),
+        // Start refuses a unit a previous daemon left running; stopping it is the way out.
+        "unit_orphaned" => (
+            format!(
+                "{} is still running as pid {}, left by a previous daemon; x stops it",
+                target(data),
+                known(data, "pid")
+            ),
+            Vec::new(),
+            Some(field(data, "command")).filter(|command| !command.is_empty()),
+        ),
         "confirmation_required" => (
             "this needs confirmation; run it from the CLI with --yes".into(),
             vec![compact_fields(data)],

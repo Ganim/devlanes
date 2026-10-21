@@ -5,13 +5,17 @@
 //! - `DEVLANES_TEST_SSH_PORT`, `DEVLANES_TEST_SSH_KEY`, `DEVLANES_TEST_SSH_KNOWN_HOSTS`:
 //!   optional; a key also disables the agent so only that key is offered.
 //! - `DEVLANES_TEST_SSH_ALLOW_MISSING=1`: the box has no devlanes; the tunnel test skips.
+//! - `DEVLANES_TEST_SSH_LANE=1`: `run.sh` started a lane with an echo service and a
+//!   synced folder on the box; the mirroring test needs it.
 
 use std::path::Path;
 use std::time::Duration;
 
-use devlanes_transport::{Session, SessionOptions, Transport};
+use devlanes_transport::{
+    DialTarget, RpcCallError, Session, SessionOptions, SyncMessage, Transport,
+};
 use devlanes_transport_ssh::{SshOptions, SshTransport};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -117,11 +121,87 @@ async fn ssh_tunnel_session() -> TestResult {
         drop(raw);
         let session = Session::connect(&transport, SessionOptions::new("ssh-test")).await?;
         assert!(!session.server().is_empty());
-        // A forwarded request reaches the box's own daemon (spawned by the tunnel).
-        let forward = serde_json::json!({"method": "status", "params": {"all": true}});
-        let reply = session.request(forward).await?;
-        assert_eq!(reply["type"], "response", "{reply}");
-        assert_eq!(reply["outcome"]["status"], "ok", "{reply}");
+        // Remote is mirroring only: the box refuses daemon requests.
+        let request = serde_json::json!({"method": "daemon.shutdown", "params": {}});
+        match session.request(request).await {
+            Err(RpcCallError::Remote(error)) => {
+                assert_eq!(error.message, "not_supported", "{error:?}");
+            }
+            other => return Err(format!("the box answered a daemon request: {other:?}").into()),
+        }
+        session.close();
+        transport.close().await;
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+#[ignore = "needs ssh"]
+async fn ssh_mirrors_a_port_and_syncs_a_file() -> TestResult {
+    if env("DEVLANES_TEST_SSH_LANE").as_deref() != Some("1") {
+        eprintln!("skipping ssh_mirrors_a_port_and_syncs_a_file: no lane set up on the box");
+        return Ok(());
+    }
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let home = short_home()?;
+        let transport = transport(home.path());
+        let session = Session::connect(&transport, SessionOptions::new("ssh-test")).await?;
+        // The box's running echo service is in the registry with its port.
+        let mut registry = session.registry().subscribe();
+        let port = loop {
+            let found = registry
+                .borrow_and_update()
+                .units()
+                .find(|unit| unit.key.name == "echo" && unit.state == "ready" && !unit.hidden)
+                .and_then(|unit| unit.ports.first().map(|port| port.port));
+            if let Some(port) = found {
+                break port;
+            }
+            registry.changed().await?;
+        };
+        let mut stream = session.open(DialTarget::Port { port }).await?;
+        stream.write_all(b"over ssh\n").await?;
+        let mut echoed = [0u8; 9];
+        stream.read_exact(&mut echoed).await?;
+        assert_eq!(&echoed, b"over ssh\n");
+        drop(stream);
+
+        // One sync entry, followed from an empty destination.
+        let mut list = session
+            .subscribe_sync(serde_json::json!({"op": "list"}))
+            .await?;
+        let entries = match list.next().await {
+            Some(Ok(SyncMessage::Manifest(manifest))) => manifest["entries"].clone(),
+            other => return Err(format!("no sync list: {other:?}").into()),
+        };
+        let entry = entries
+            .as_array()
+            .and_then(|entries| entries.first())
+            .ok_or("the box lists no sync entry")?;
+        let follow = serde_json::json!({
+            "op": "follow",
+            "lane": entry["lane"],
+            "unit": entry["unit"],
+            "index": entry["index"],
+            "have": [],
+        });
+        let mut feed = session.subscribe_sync(follow).await?;
+        let mut contents = Vec::new();
+        while let Some(message) = feed.next().await {
+            match message? {
+                SyncMessage::Chunk {
+                    path, data, last, ..
+                } if path == "hello.txt" => {
+                    contents.extend_from_slice(&data);
+                    if last {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(contents, b"hello from the box\n");
         session.close();
         transport.close().await;
         Ok(())

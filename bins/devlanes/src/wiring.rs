@@ -16,8 +16,8 @@ use devlanes_core::{
 use devlanes_daemon::{
     Engine, EngineOptions, Handler,
     integrations::{
-        InfraError, InfraEvent, InfraPortNeed, InfraProvider, InfraSpec, InfraUp, Integrations,
-        LaunchCheck, ManagedUnit, PlannedUnit, PortInspector, PortScope, PresetEntry,
+        ConnectOptions, InfraError, InfraEvent, InfraPortNeed, InfraProvider, InfraSpec, InfraUp,
+        Integrations, LaunchCheck, ManagedUnit, PlannedUnit, PortInspector, PortScope, PresetEntry,
         RemoteConnector, RemotePrompt, RemotePrompter, RouteEntry, RouteSink, RouteStatus,
         SysProcesses, UnitRunner, unavailable,
     },
@@ -83,7 +83,9 @@ pub async fn engine(
             ))
         });
     let store = open_store(&paths.db).await?;
-    let (ca_env, ca_status, ca) = certificate_authority(&paths.home, user.tls.ca).await;
+    let ca_tld = crate::local::ca_tld(&user);
+    let (ca_env, ca_status, ca) =
+        certificate_authority(&paths.home, user.tls.ca, ca_tld.as_deref()).await;
     let routes = Arc::new(proxy(&user, ca, shutdown.clone()).await);
     let infra = Arc::new(ContainerInfra::new().await);
     let mut integ = Integrations::with_runner(Arc::new(PtyUnits(
@@ -359,8 +361,13 @@ type LoadedCa = (
 /// (created on first use), or mkcert's from `mkcert -CAROOT`. The combined bundle
 /// is written under `$DEVLANES_HOME/ca` either way, so contributors and the proxy
 /// use the same root.
-async fn certificate_authority(home: &Path, kind: devlanes_config::CaKind) -> LoadedCa {
-    certificate_authority_with(home, kind, Path::new("mkcert")).await
+/// A new devlanes CA is name-constrained to the special-use names plus `tld`.
+async fn certificate_authority(
+    home: &Path,
+    kind: devlanes_config::CaKind,
+    tld: Option<&str>,
+) -> LoadedCa {
+    certificate_authority_with(home, kind, Path::new("mkcert"), tld).await
 }
 
 /// [`certificate_authority`] with an explicit `mkcert` program (tests).
@@ -368,7 +375,9 @@ async fn certificate_authority_with(
     home: &Path,
     kind: devlanes_config::CaKind,
     mkcert: &Path,
+    tld: Option<&str>,
 ) -> LoadedCa {
+    let tld = tld.map(str::to_owned);
     let failed = |kind: &str, code: &str, message: String| -> LoadedCa {
         tracing::warn!(code, %message, "CA unavailable; HTTPS is off");
         (
@@ -386,16 +395,11 @@ async fn certificate_authority_with(
                 .output()
                 .await;
             match output {
-                Ok(output) if output.status.success() => Some(PathBuf::from(
-                    String::from_utf8_lossy(&output.stdout).trim(),
-                )),
-                Ok(output) => {
-                    return failed(
-                        "mkcert",
-                        "mkcert_failed",
-                        String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-                    );
-                }
+                // Exit status, emptiness and absoluteness are all checked there.
+                Ok(output) => match crate::local::mkcert_caroot(&output) {
+                    Ok(root) => Some(root),
+                    Err(message) => return failed("mkcert", "mkcert_failed", message),
+                },
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     return failed(
                         "mkcert",
@@ -421,7 +425,10 @@ async fn certificate_authority_with(
                 root.join("rootCA.pem"),
             ),
             None => (
-                devlanes_pki::CertificateAuthority::load_or_create(&directory)?,
+                devlanes_pki::CertificateAuthority::load_or_create_with_tld(
+                    &directory,
+                    tld.as_deref(),
+                )?,
                 directory.join("ca.pem"),
             ),
         };
@@ -453,12 +460,20 @@ async fn certificate_authority_with(
                 (CA_CERT_ENV.to_owned(), cert.display().to_string()),
                 (CA_BUNDLE_ENV.to_owned(), bundle.display().to_string()),
             ]);
+            let constrained = devlanes_trust::CaCertificate::from_pem(ca.certificate_pem(), "ca")
+                .ok()
+                .map(|c| c.is_name_constrained());
+            // Only devlanes' own CA can be recreated with constraints; mkcert's never has them.
+            let recreate = caroot.is_none() && constrained == Some(false);
             let status = json!({
                 "present": true,
                 "kind": kind_word,
                 "path": cert,
                 "caroot": caroot,
                 "trusted": "unknown",
+                "name_constrained": constrained,
+                "hint": recreate.then_some(crate::local::UNCONSTRAINED_CA),
+                "fix": recreate.then(|| crate::local::recreate_ca_command(home)),
             });
             (env, status, Some(Arc::new(ca)))
         }
@@ -505,7 +520,7 @@ async fn proxy(
                     "https".into(),
                     json!({"bound": true, "port": listeners.port, "fallback_reason": listeners.fallback_reason}),
                 );
-                for listener in [listeners.ipv4, listeners.ipv6] {
+                for listener in listeners.listeners() {
                     let (proxy, tls, shutdown) = (proxy.clone(), tls.clone(), shutdown.clone());
                     tokio::spawn(async move {
                         if let Err(error) = proxy.serve_tls(listener, tls, shutdown).await {
@@ -528,7 +543,7 @@ async fn proxy(
                 "http".into(),
                 json!({"bound": true, "port": listeners.port, "fallback_reason": listeners.fallback_reason}),
             );
-            for listener in [listeners.ipv4, listeners.ipv6] {
+            for listener in listeners.listeners() {
                 let (proxy, shutdown) = (proxy.clone(), shutdown.clone());
                 tokio::spawn(async move {
                     if let Err(error) = proxy.serve(listener, shutdown).await {
@@ -612,8 +627,21 @@ impl RemoteConnector for SshConnector {
         &self,
         host: &str,
         prompts: Arc<dyn RemotePrompter>,
+        connect: ConnectOptions,
     ) -> Result<Arc<dyn devlanes_transport::Transport>, RpcError> {
         let mut options = devlanes_transport_ssh::SshOptions::new(&self.home);
+        // A box without devlanes gets this client's own release, and only with
+        // `remote connect --install`; otherwise the plan is reported.
+        options.manifest_url = Some(format!(
+            "{}/releases/download/v{}/release-manifest.json",
+            env!("CARGO_PKG_REPOSITORY"),
+            env!("CARGO_PKG_VERSION")
+        ));
+        options.bootstrap = if connect.install {
+            devlanes_transport_ssh::BootstrapPolicy::Install
+        } else {
+            devlanes_transport_ssh::BootstrapPolicy::Report
+        };
         options.askpass = self
             .exe
             .clone()
@@ -624,11 +652,6 @@ impl RemoteConnector for SshConnector {
         Ok(Arc::new(devlanes_transport_ssh::SshTransport::new(
             host, options,
         )))
-    }
-
-    /// The daemon's `$HOME`, the user's home.
-    fn home(&self) -> Option<PathBuf> {
-        std::env::var_os("HOME").map(PathBuf::from)
     }
 }
 
@@ -662,6 +685,18 @@ impl UnitRunner for PtyUnits {
     /// Spawns in a PTY or pipes per the spec.
     async fn spawn(&self, spec: LaunchSpec) -> Result<Arc<dyn ManagedUnit>, devlanes_core::Error> {
         Ok(Arc::new(PtyManaged(self.0.spawn_unit(spec).await?)))
+    }
+
+    /// Tasks keep daemons they started in their own session running after they exit.
+    async fn spawn_task(
+        &self,
+        spec: LaunchSpec,
+    ) -> Result<Arc<dyn ManagedUnit>, devlanes_core::Error> {
+        let runner = self
+            .0
+            .clone()
+            .with_exit_sweep(devlanes_runner_pty::ExitSweep::KeepDaemonized);
+        Ok(Arc::new(PtyManaged(runner.spawn_unit(spec).await?)))
     }
 }
 
@@ -1456,7 +1491,8 @@ mod tests {
         let home = tmp.path().join("home");
 
         let (env, status, ca) =
-            certificate_authority_with(&home, devlanes_config::CaKind::Mkcert, &program).await;
+            certificate_authority_with(&home, devlanes_config::CaKind::Mkcert, &program, None)
+                .await;
         assert!(ca.is_some(), "{status}");
         assert_eq!(status["kind"], "mkcert");
         assert_eq!(
@@ -1478,6 +1514,24 @@ mod tests {
     }
 
     #[tokio::test]
+    /// A new devlanes CA is created with name constraints, so `doctor` has nothing to flag.
+    async fn new_devlanes_ca_is_name_constrained() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir(&home).expect("home");
+        let (_, status, ca) = certificate_authority_with(
+            &home,
+            devlanes_config::CaKind::Devlanes,
+            Path::new("mkcert"),
+            Some("dev.internal"),
+        )
+        .await;
+        assert!(ca.is_some(), "{status}");
+        assert_eq!(status["name_constrained"], true, "{status}");
+        assert!(status["hint"].is_null() && status["fix"].is_null());
+    }
+
+    #[tokio::test]
     /// A missing `mkcert` leaves HTTPS off with a `doctor` error naming the fix.
     async fn missing_mkcert_is_reported() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1485,6 +1539,7 @@ mod tests {
             tmp.path(),
             devlanes_config::CaKind::Mkcert,
             &tmp.path().join("no-such-mkcert"),
+            None,
         )
         .await;
         assert!(ca.is_none() && env.is_empty());
@@ -1501,9 +1556,26 @@ mod tests {
         std::fs::create_dir(&empty).expect("empty");
         let program = fake_mkcert(tmp.path(), &empty);
         let (_, status, ca) =
-            certificate_authority_with(tmp.path(), devlanes_config::CaKind::Mkcert, &program).await;
+            certificate_authority_with(tmp.path(), devlanes_config::CaKind::Mkcert, &program, None)
+                .await;
         assert!(ca.is_none());
         assert_eq!(status["error"], "ca_invalid");
+
+        // A relative CAROOT would resolve against the daemon's working directory.
+        let relative = tmp.path().join("relative");
+        std::fs::create_dir(&relative).expect("dir");
+        let program = fake_mkcert(&relative, Path::new("mkcert-root"));
+        let (_, status, ca) =
+            certificate_authority_with(tmp.path(), devlanes_config::CaKind::Mkcert, &program, None)
+                .await;
+        assert!(ca.is_none());
+        assert_eq!(status["error"], "mkcert_failed");
+        assert!(
+            status["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("relative")),
+            "{status}"
+        );
     }
 
     /// An empty one-page SQLite database whose header carries `user_version`.
@@ -1542,5 +1614,65 @@ mod tests {
         );
         assert!(first.len() < 127, "fits the readiness line");
         assert!(message.contains(&db.display().to_string()));
+    }
+
+    #[tokio::test]
+    /// The offline reset refuses while a daemon holds the lock, then moves the
+    /// legacy database and its sidecars aside (never deleting) so a fresh store opens.
+    async fn offline_reset_moves_a_legacy_database_aside() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            // The daemon lock only accepts a private home, like $DEVLANES_HOME.
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&home)
+                .expect("home");
+        }
+        let db = home.join("state.db");
+        let legacy = legacy_database(4);
+        std::fs::write(&db, &legacy).expect("db");
+        assert!(open_store(&db).await.is_err());
+        // Written after the failed open, which discards an invalid WAL.
+        std::fs::write(home.join("state.db-wal"), b"wal").expect("wal");
+        assert_eq!(crate::daemon::state_files(&db).len(), 2);
+
+        let daemon = devlanes_daemon::lock_singleton(&home).expect("daemon lock");
+        let refused = crate::daemon::move_state_aside(&home, &db, "20261021T150405Z")
+            .expect_err("a running daemon keeps its state");
+        assert_eq!(refused.code, "daemon_running");
+        assert!(db.exists(), "nothing moved");
+        drop(daemon);
+
+        let moved = crate::daemon::move_state_aside(&home, &db, "20261021T150405Z").expect("moved");
+        let aside = home.join("state.db.legacy-20261021T150405Z");
+        assert_eq!(
+            moved,
+            [
+                (db.clone(), aside.clone()),
+                (
+                    home.join("state.db-wal"),
+                    home.join("state.db.legacy-20261021T150405Z-wal")
+                ),
+            ]
+        );
+        assert_eq!(std::fs::read(&aside).expect("kept"), legacy);
+        assert!(crate::daemon::state_files(&db).is_empty());
+
+        // A second reset in the same second must not overwrite the first.
+        std::fs::write(&db, &legacy).expect("db again");
+        let clash = crate::daemon::move_state_aside(&home, &db, "20261021T150405Z")
+            .expect_err("target exists");
+        assert!(db.exists() && aside.exists());
+        assert!(
+            clash.data["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("already exists"))
+        );
+        std::fs::remove_file(&db).expect("cleanup");
+
+        let fresh = open_store(&db).await.expect("fresh store after the reset");
+        drop(fresh);
     }
 }

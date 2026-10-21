@@ -4,6 +4,7 @@
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
+    os::unix::fs::MetadataExt,
     path::Path,
 };
 
@@ -12,25 +13,37 @@ const FIRST_READ: u64 = 256 * 1024;
 /// Upper bound per read, so a burst of logging cannot stall the UI.
 const MAX_READ: u64 = 4 * 1024 * 1024;
 
+/// Where the last read stopped, and in which file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LogPosition {
+    pub offset: u64,
+    /// `(device, inode)`; a rotated log is a different file at the same path.
+    pub file: (u64, u64),
+}
+
 /// New complete lines since the last read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LogChunk {
     pub lines: Vec<String>,
     /// Where the next read starts; just past the last complete line.
-    pub offset: u64,
+    pub position: LogPosition,
     /// True when `lines` replace everything shown (first read, rotation).
     pub reset: bool,
 }
 
-/// Reads complete lines from `offset`; `0` reads the tail of the file. A file
-/// shorter than `offset` was rotated or truncated, so its tail is read again.
-pub fn read(path: &Path, offset: u64) -> io::Result<LogChunk> {
+/// Reads complete lines after `from`; the default position reads the tail of
+/// the file. A different file at the path, or one shorter than the offset,
+/// was rotated or truncated, so its tail is read again.
+pub fn read(path: &Path, from: LogPosition) -> io::Result<LogChunk> {
     let mut file = File::open(path)?;
-    let len = file.metadata()?.len();
-    let (mut start, mut reset) = if offset == 0 || len < offset {
-        (len.saturating_sub(FIRST_READ), true)
+    let metadata = file.metadata()?;
+    let len = metadata.len();
+    let identity = (metadata.dev(), metadata.ino());
+    let same_file = identity == from.file && from.offset > 0 && len >= from.offset;
+    let (mut start, mut reset) = if same_file {
+        (from.offset, false)
     } else {
-        (offset, false)
+        (len.saturating_sub(FIRST_READ), true)
     };
     if len - start > MAX_READ {
         start = len - MAX_READ;
@@ -52,7 +65,10 @@ pub fn read(path: &Path, offset: u64) -> io::Result<LogChunk> {
     }
     Ok(LogChunk {
         lines,
-        offset: start + u64::try_from(complete).unwrap_or(0),
+        position: LogPosition {
+            offset: start + u64::try_from(complete).unwrap_or(0),
+            file: identity,
+        },
         reset,
     })
 }
@@ -68,19 +84,34 @@ mod tests {
         let path = dir.path().join("daemon.log");
         let mut file = File::create(&path)?;
         write!(file, "one\ntwo\npart")?;
-        let first = read(&path, 0)?;
+        let first = read(&path, LogPosition::default())?;
         assert_eq!(first.lines, ["one", "two"]);
         assert!(first.reset);
         write!(file, "ial\nthree\n")?;
-        let next = read(&path, first.offset)?;
+        let next = read(&path, first.position)?;
         assert_eq!(next.lines, ["partial", "three"]);
         assert!(!next.reset);
-        // Rotation leaves a shorter file behind.
+        // Truncation in place leaves a shorter file behind.
         let mut file = File::create(&path)?;
         writeln!(file, "fresh")?;
-        let rotated = read(&path, next.offset)?;
-        assert_eq!(rotated.lines, ["fresh"]);
+        let truncated = read(&path, next.position)?;
+        assert_eq!(truncated.lines, ["fresh"]);
+        assert!(truncated.reset);
+        Ok(())
+    }
+
+    #[test]
+    fn a_rotated_file_that_grew_past_the_offset_is_read_from_its_tail() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("daemon.log");
+        std::fs::write(&path, "old 1\nold 2\n")?;
+        let first = read(&path, LogPosition::default())?;
+        // Rotation: the old file moves away and a new, longer one takes the path.
+        std::fs::rename(&path, dir.path().join("daemon.log.1"))?;
+        std::fs::write(&path, "new 1\nnew 2\nnew 3\nnew 4\n")?;
+        let rotated = read(&path, first.position)?;
         assert!(rotated.reset);
+        assert_eq!(rotated.lines, ["new 1", "new 2", "new 3", "new 4"]);
         Ok(())
     }
 }

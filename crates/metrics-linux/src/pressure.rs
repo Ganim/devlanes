@@ -28,14 +28,16 @@ pub struct CpuTimes {
 }
 
 impl CpuTimes {
-    /// Busy share of all CPUs between `earlier` and `self`, 0-100. `None` when
-    /// no time passed or the counters went backwards.
+    /// Busy share of all CPUs between `earlier` and `self`, 0-100. `None` only
+    /// when no time passed. The kernel's per-CPU `iowait` can go backwards
+    /// between reads, so the idle delta is clamped to `0..=total` rather than
+    /// turning the reading into `None` (which would freeze an adaptive window).
     pub fn busy_percent_since(&self, earlier: &Self) -> Option<f64> {
-        let total = self.total.checked_sub(earlier.total)?;
-        let idle = self.idle.checked_sub(earlier.idle)?;
-        if total == 0 || idle > total {
+        let total = self.total.saturating_sub(earlier.total);
+        if total == 0 {
             return None;
         }
+        let idle = self.idle.saturating_sub(earlier.idle).min(total);
         Some((total - idle) as f64 / total as f64 * 100.0)
     }
 }

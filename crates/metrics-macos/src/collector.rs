@@ -20,7 +20,7 @@ struct CpuReading {
 #[derive(Debug)]
 struct State {
     timebase: Timebase,
-    rusage_flavor: i32,
+    rusage_flavor: ffi::RusageFlavor,
     previous: HashMap<(u32, u64), CpuReading>,
 }
 
@@ -42,7 +42,7 @@ impl MacosSource {
         Ok(Self {
             state: Arc::new(Mutex::new(State {
                 timebase: Timebase::read()?,
-                rusage_flavor: ffi::PREFERRED_RUSAGE,
+                rusage_flavor: ffi::RusageFlavor::V6,
                 previous: HashMap::new(),
             })),
         })
@@ -111,7 +111,7 @@ fn collect(state: &mut State, units: &[UnitTarget]) -> Result<Vec<Sample>, Error
             Ok(usage) => usage,
             Err(()) => {
                 // macOS 13 and older reject v6; v4 carries every field read here.
-                state.rusage_flavor = ffi::RUSAGE_INFO_V4;
+                state.rusage_flavor = ffi::RusageFlavor::V4;
                 ffi::rusage(pid, state.rusage_flavor).ok().flatten()
             }
         };

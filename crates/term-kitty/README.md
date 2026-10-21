@@ -5,11 +5,12 @@
 ## Usage
 
 ```rust
-use devlanes_term::TerminalLauncher;
+use devlanes_term::{LaunchError, LaunchRequest, TerminalLauncher};
 use devlanes_term_kitty::Kitty;
 
-// `request` is a `devlanes_term::LaunchRequest`.
-Kitty.launch(&request)?;
+fn open(request: &LaunchRequest) -> Result<(), LaunchError> {
+    Kitty.launch(request)
+}
 ```
 
 ## Config example
@@ -21,7 +22,7 @@ terminal: kitty
 
 ## Behaviour
 
-It runs `kitty --single-instance --directory <cwd> --title <title> <command>`, through `open -na kitty.app --args` on macOS. `--single-instance` opens the window in a running kitty when there is one.
+It runs `kitty --directory <cwd> --title <title> <command>`, through `open -na kitty.app --args` on macOS. On Linux it adds `--single-instance`, which opens the window in a running kitty when there is one; `open -n` always starts a new process, so macOS goes without it.
 
 ## License
 

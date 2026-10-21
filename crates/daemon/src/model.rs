@@ -125,6 +125,20 @@ pub(crate) struct UnitRec {
     pub color: Option<String>,
 }
 
+/// A process a previous daemon started that still runs (identity verified at
+/// startup). Not supervised: no output, input or exit status, only liveness by
+/// identity, until a stop terminates it or it exits on its own.
+#[derive(Debug, Clone)]
+pub(crate) struct Orphan {
+    pub run_id: UnitRunId,
+    pub process: devlanes_core::ProcessIdentity,
+    /// When the previous daemon started it (Unix ms).
+    pub started_at_ms: u64,
+    /// When this daemon found it (Unix ms).
+    pub since_ms: u64,
+    pub actor: Actor,
+}
+
 /// Mutable state of one worktree lane.
 pub(crate) struct LaneSt {
     pub identity: String,
@@ -156,6 +170,8 @@ pub(crate) struct LaneSt {
     /// Why a selected unit did not start: a lane phase before services failed.
     /// Shown as the unit's `reason` until a start reaches the services phase.
     pub phase_reasons: BTreeMap<String, RpcError>,
+    /// Units left running by a previous daemon, by unit name.
+    pub orphans: BTreeMap<String, Orphan>,
 }
 
 impl LaneSt {
@@ -190,6 +206,7 @@ impl LaneSt {
             peaks: BTreeMap::new(),
             moves_to: None,
             phase_reasons: BTreeMap::new(),
+            orphans: BTreeMap::new(),
         }
     }
 
@@ -201,6 +218,30 @@ impl LaneSt {
     /// True while any unit's process has not exited.
     pub(crate) fn any_alive(&self) -> bool {
         self.units.values().any(|unit| unit.host.is_alive())
+    }
+
+    /// True while a supervised unit or a previous daemon's orphan runs here.
+    pub(crate) fn any_running(&self) -> bool {
+        self.any_alive() || !self.orphans.is_empty()
+    }
+
+    /// `unit_orphaned` when `name` is a previous daemon's process still running:
+    /// it names the pid and the command that stops it.
+    pub(crate) fn orphan_error(&self, project: &str, name: &str) -> Option<RpcError> {
+        let orphan = self.orphans.get(name)?;
+        let lane = self.reference(project);
+        Some(RpcError::new(
+            "unit_orphaned",
+            json!({
+                "unit": name,
+                "lane": lane,
+                "pid": orphan.process.pid,
+                "started_at_ms": orphan.started_at_ms,
+                "orphaned_since_ms": orphan.since_ms,
+                "command": format!("devlanes stop {name} --lane {lane}"),
+            }),
+            1,
+        ))
     }
 
     /// True while any service unit is alive.
@@ -235,38 +276,21 @@ impl LaneSt {
         if failed {
             return "failed";
         }
-        if self.any_alive() { "running" } else { "idle" }
+        if self.any_running() {
+            "running"
+        } else {
+            "idle"
+        }
     }
 
     /// Whether `start`/`resume` from a shell is needed before services can run.
     pub(crate) fn needs_env(&self) -> bool {
         self.env.is_none()
-            && !self.any_alive()
+            && !self.any_running()
             && self
                 .record
                 .as_ref()
                 .is_some_and(|lane| lane.desired_state == DesiredState::Running)
-    }
-}
-
-/// The lane's profiles for the single `lanes.profile` column: one name as is (what
-/// older daemons wrote), several as a JSON array.
-pub(crate) fn encode_profiles(names: &[String]) -> Option<String> {
-    match names {
-        [] => None,
-        [one] if !one.starts_with('[') => Some(one.clone()),
-        many => serde_json::to_string(many).ok(),
-    }
-}
-
-/// Reads what [`encode_profiles`] stored.
-pub(crate) fn decode_profiles(stored: Option<&str>) -> Vec<String> {
-    match stored {
-        None | Some("") => Vec::new(),
-        Some(text) => serde_json::from_str::<Vec<String>>(text)
-            .ok()
-            .filter(|_| text.starts_with('['))
-            .unwrap_or_else(|| vec![text.to_owned()]),
     }
 }
 
@@ -369,6 +393,18 @@ pub(crate) fn core_actor(actor: &Actor) -> devlanes_core::Actor {
     }
 }
 
+/// Converts a stored actor back to the proto type.
+pub(crate) fn proto_actor(actor: &devlanes_core::Actor) -> Actor {
+    Actor {
+        kind: match actor.kind {
+            devlanes_core::ActorKind::Human => ActorKind::Human,
+            devlanes_core::ActorKind::Agent => ActorKind::Agent,
+        },
+        agent_id: actor.agent_id.clone(),
+        session_id: actor.session_id.clone(),
+    }
+}
+
 /// True when `unit` was started by the caller's agent session (`--mine`).
 pub(crate) fn is_mine(owner: &Actor, caller: &Actor) -> bool {
     match (&owner.session_id, &caller.session_id) {
@@ -426,7 +462,44 @@ pub(crate) fn unit_summary(lane: &str, name: &str, unit: &UnitRec) -> UnitSummar
         cpu_percent: None,
         memory_bytes: None,
         color: unit.color.clone(),
+        orphaned_since_ms: None,
     }
+}
+
+/// Summary of a previous daemon's process: `orphaned`, with the configured
+/// service's ports and URLs when it is one.
+pub(crate) fn orphan_summary(
+    lane: &LaneSt,
+    reference: &str,
+    name: &str,
+    orphan: &Orphan,
+) -> UnitSummary {
+    let service = lane
+        .view
+        .as_ref()
+        .and_then(|view| view.services.iter().find(|s| s.unit == name));
+    let mut summary = match service {
+        Some(service) => idle_summary(reference, service),
+        None => {
+            let task = lane
+                .config
+                .loaded()
+                .is_some_and(|config| config.tasks.contains_key(name));
+            UnitSummary {
+                name: name.to_owned(),
+                lane: reference.to_owned(),
+                kind: if task { "task" } else { "exec" }.into(),
+                color: Some(derived_color(lane, name)),
+                ..UnitSummary::default()
+            }
+        }
+    };
+    summary.state = devlanes_proto::ORPHANED.into();
+    summary.pid = Some(orphan.process.pid);
+    summary.actor = orphan.actor.clone();
+    summary.started_at_ms = Some(orphan.started_at_ms);
+    summary.orphaned_since_ms = Some(orphan.since_ms);
+    summary
 }
 
 /// Summary of a configured service that has not run since the daemon started.
@@ -457,10 +530,21 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
     let mut units = Vec::new();
     if let Some(view) = &lane.view {
         for service in &view.services {
-            units.push(match lane.units.get(&service.unit) {
-                Some(unit) => unit_summary(&reference, &service.unit, unit),
-                None => idle_summary(&reference, service),
-            });
+            units.push(
+                match (
+                    lane.orphans.get(&service.unit),
+                    lane.units.get(&service.unit),
+                ) {
+                    (Some(orphan), _) => orphan_summary(lane, &reference, &service.unit, orphan),
+                    (None, Some(unit)) => unit_summary(&reference, &service.unit, unit),
+                    (None, None) => idle_summary(&reference, service),
+                },
+            );
+        }
+    }
+    for (name, orphan) in &lane.orphans {
+        if !units.iter().any(|summary| &summary.name == name) {
+            units.push(orphan_summary(lane, &reference, name, orphan));
         }
     }
     for (name, unit) in &lane.units {
@@ -481,7 +565,10 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
         })
         .or_else(|| lane.last_error.clone());
     let profiles = if lane.profiles.is_empty() {
-        decode_profiles(lane.record.as_ref().and_then(|r| r.profile.as_deref()))
+        lane.record
+            .as_ref()
+            .map(|r| r.profiles.clone())
+            .unwrap_or_default()
     } else {
         lane.profiles.clone()
     };
@@ -567,26 +654,4 @@ pub(crate) fn config_error(error: &devlanes_config::ConfigError) -> RpcError {
         }),
         1,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    /// One profile stays readable by older daemons; several round-trip as JSON.
-    fn profiles_round_trip_through_one_column() {
-        let names = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert_eq!(encode_profiles(&[]), None);
-        assert_eq!(encode_profiles(&names(&["dev"])).as_deref(), Some("dev"));
-        for list in [
-            vec![],
-            names(&["dev"]),
-            names(&["a", "b,c"]),
-            names(&["[x"]),
-        ] {
-            assert_eq!(decode_profiles(encode_profiles(&list).as_deref()), list);
-        }
-        assert_eq!(decode_profiles(Some("[broken")), names(&["[broken"]));
-    }
 }

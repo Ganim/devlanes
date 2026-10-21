@@ -12,7 +12,7 @@ use bytes::Bytes;
 use devlanes_core::{
     Error, LaunchSpec, OutputChunk, OutputStream, ProcessIdentity, StopPolicy, TerminalSize, Unit,
 };
-use devlanes_runner_pty::{PtyRunner, PtyUnit, StderrMode};
+use devlanes_runner_pty::{ExitSweep, PtyRunner, PtyUnit, StderrMode};
 use devlanes_sys::Signal;
 use tokio::sync::broadcast::{self, error::RecvError};
 
@@ -404,6 +404,139 @@ async fn leftovers_swept_after_leader_exit() -> Result<(), Error> {
         assert!(report.swept.iter().any(|p| p.pid == child), "{report:?}");
         assert!(report.escaped.is_empty());
         assert!(!alive(child));
+        Ok(())
+    })
+    .await
+}
+
+/// `sh -c script` where `$HELPER` re-runs this binary as [`helper_setsid_sleeper`].
+fn with_helper(script: &str, pty: bool) -> Result<LaunchSpec, Error> {
+    let mut launch = shell(script, pty);
+    let helper = std::env::current_exe()?;
+    launch
+        .env
+        .insert("HELPER".into(), helper.to_string_lossy().into_owned());
+    launch.env.insert(HELPER_ENV.into(), "1".into());
+    Ok(launch)
+}
+
+/// Starts the setsid helper in the background from `sh`.
+const START_HELPER: &str =
+    "\"$HELPER\" --exact helper_setsid_sleeper --ignored --nocapture --test-threads 1 &";
+
+/// A daemonized grandchild that was never seen in a snapshot keeps the output open
+/// after the leader exits: it is reported as escaped, the readers end and the
+/// terminal is released instead of leaking.
+#[tokio::test]
+async fn untracked_output_holder_is_reported_and_released() -> Result<(), Error> {
+    bounded(async {
+        for pty in [false, true] {
+            // Forked after the first snapshot and orphaned before the next one.
+            let script = format!("sleep 0.3; ( {START_HELPER} ); sleep 0.2; exit 0");
+            let unit = PtyRunner::default()
+                .with_track_interval(Duration::from_secs(60))
+                .spawn_unit(with_helper(&script, pty)?)
+                .await?;
+            let mut cleanup = Cleanup::default();
+            cleanup.unit(&unit);
+            let output = unit.output();
+            let report = unit.wait_report().await?;
+            let chunks = collect(output).await;
+            let seen: String = chunks
+                .iter()
+                .map(|c| String::from_utf8_lossy(&c.bytes).into_owned())
+                .collect();
+            let holder = number_after(&seen, "SETSID pid=");
+            cleanup.pid(holder);
+            assert!(alive(holder), "pty={pty}: holder should still run");
+            // macOS revokes a session's terminal when its leader exits, so there the
+            // holder loses the slave and the master reaches EOF on its own.
+            if !(pty && cfg!(target_os = "macos")) {
+                assert!(
+                    report.escaped.iter().any(|p| p.pid == holder),
+                    "pty={pty}: {report:?}"
+                );
+            }
+            if pty {
+                assert!(matches!(unit.size(), Err(Error::Exited)));
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Tasks may start daemons: with `KeepDaemonized`, a descendant that left the
+/// session survives the natural exit and is listed in `left_running`; the default
+/// sweep kills it.
+#[tokio::test]
+async fn daemonized_task_descendants_are_left_running() -> Result<(), Error> {
+    bounded(async {
+        for keep in [true, false] {
+            let sweep = if keep {
+                ExitSweep::KeepDaemonized
+            } else {
+                ExitSweep::KillAll
+            };
+            let script = format!("{START_HELPER} sleep 0.5; exit 0");
+            let unit = runner()
+                .with_exit_sweep(sweep)
+                .spawn_unit(with_helper(&script, false)?)
+                .await?;
+            let mut cleanup = Cleanup::default();
+            cleanup.unit(&unit);
+            let mut output = unit.output();
+            let daemon = number_after(&read_until(&mut output, "SETSID pid=").await, "SETSID pid=");
+            cleanup.pid(daemon);
+            let report = unit.wait_report().await?;
+            if keep {
+                assert!(alive(daemon), "daemon was killed");
+                assert!(
+                    report.left_running.iter().any(|p| p.pid == daemon),
+                    "{report:?}"
+                );
+                assert!(report.escaped.iter().all(|p| p.pid != daemon), "{report:?}");
+            } else {
+                assert!(!alive(daemon), "daemon survived");
+                assert!(report.swept.iter().any(|p| p.pid == daemon), "{report:?}");
+                assert!(report.left_running.is_empty());
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A stopped (SIGSTOP) unit still ends on the stop signal, because SIGCONT follows it.
+#[tokio::test]
+async fn stopped_unit_acts_on_stop_signal() -> Result<(), Error> {
+    bounded(async {
+        let unit = runner()
+            .spawn_unit(shell("echo ready; kill -STOP $$; sleep 30", false))
+            .await?;
+        let mut cleanup = Cleanup::default();
+        cleanup.unit(&unit);
+        let mut output = unit.output();
+        read_until(&mut output, "ready").await;
+        eventually(|| async {
+            std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &unit.identity().pid.to_string()])
+                .output()
+                .is_ok_and(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .trim_start()
+                        .starts_with('T')
+                })
+        })
+        .await;
+        let report = unit
+            .stop_with_report(StopPolicy {
+                signal: 15,
+                timeout: Duration::from_secs(5),
+            })
+            .await?;
+        assert_eq!(report.outcome.signal, Some(15), "{report:?}");
+        assert!(!report.stop.expect("stopped").escalated);
         Ok(())
     })
     .await

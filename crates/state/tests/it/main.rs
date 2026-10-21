@@ -1,6 +1,7 @@
 //! Real SQLite round-trips and allocation transaction regressions.
 
 mod lifecycle;
+mod profiles;
 mod retention;
 #[path = "../../src/schema.rs"]
 mod schema;
@@ -51,6 +52,7 @@ async fn lane(store: &Store, project: ProjectId, index: u32) -> Lane {
             name: format!("lane{index}"),
             desired_state: DesiredState::Stopped,
             profile: None,
+            profiles: Vec::new(),
         })
         .await
         .expect("lane")
@@ -471,7 +473,8 @@ async fn relational_constraints_and_lossless_paths() {
                 index: 1,
                 name: "wrong".into(),
                 desired_state: DesiredState::Stopped,
-                profile: None
+                profile: None,
+                profiles: Vec::new(),
             })
             .await
             .is_err()
@@ -563,6 +566,7 @@ async fn registry_updates_deletes_and_allocation_release() {
             name: "feature".into(),
             desired_state: DesiredState::Running,
             profile: Some("api".into()),
+            profiles: Vec::new(),
         })
         .await
         .expect("update lane");

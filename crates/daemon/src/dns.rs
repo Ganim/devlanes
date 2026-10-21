@@ -23,12 +23,21 @@ impl Inner {
             .filter(|tld| !tld.is_empty())
     }
 
+    /// The resolver TLD when it passes [`Zone::new`]'s special-use check; anything
+    /// else is reported by `doctor` (through `start_dns`) and otherwise ignored.
+    pub(crate) fn resolver_zone(&self) -> Option<Zone> {
+        self.resolver_tld().and_then(|tld| Zone::new(&tld).ok())
+    }
+
     /// Makes `<project>[-N].<tld>` the default `lane.domain` under the resolver
     /// strategy. An explicit `lanes.vars.domain` or a `matrix` keeps its own value.
+    /// An invalid TLD changes nothing, so the raw config value never reaches the
+    /// template expression.
     pub(crate) fn with_resolver_domain(&self, state: ConfigState) -> ConfigState {
-        let (ConfigState::Loaded(config), Some(tld)) = (&state, self.resolver_tld()) else {
+        let (ConfigState::Loaded(config), Some(zone)) = (&state, self.resolver_zone()) else {
             return state;
         };
+        let tld = zone.name();
         if config.lanes.matrix.is_some() || config.lanes.vars.contains_key("domain") {
             return state;
         }

@@ -52,6 +52,8 @@ impl Inner {
                         },
                         UnitState::Stopping | UnitState::Exited(_) => RouteStatus::Idle,
                     },
+                    // A previous daemon's process may still serve the port.
+                    None if st.orphans.contains_key(&route.unit) => RouteStatus::Ready,
                     None => RouteStatus::Idle,
                 };
                 routes.push(RouteEntry {

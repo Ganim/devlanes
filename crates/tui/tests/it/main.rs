@@ -3,6 +3,7 @@
 mod daemon;
 mod errors;
 mod fake;
+mod orphans;
 mod units;
 
 use std::{sync::Arc, time::Duration};
@@ -65,6 +66,30 @@ fn select_unit(app: &mut App, name: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// The generation and role of the attach in `effects`, if any.
+fn attach_in(effects: &[Effect]) -> Option<(u64, bool)> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::Attach {
+            generation,
+            interactive,
+            ..
+        } => Some((*generation, *interactive)),
+        _ => None,
+    })
+}
+
+/// Shift+Tab onto a watched unit: the stream reopens as interactive, and the
+/// terminal takes focus once that stream is open. Returns its generation.
+fn focus_terminal(app: &mut App, bytes: &[u8]) -> Option<u64> {
+    let effects = app.update(shift_tab());
+    let (generation, interactive) = attach_in(&effects)?;
+    assert!(interactive, "focus reopens the stream as interactive");
+    assert_eq!(app.focus, Focus::List, "focus waits for the stream");
+    feed(app, generation, bytes);
+    assert_eq!(app.focus, Focus::Terminal);
+    Some(generation)
 }
 
 /// Marks the attach stream open and feeds it terminal output.
@@ -155,16 +180,17 @@ async fn snapshot_monitor_tab() -> TestResult {
             unit: "api".into(),
             cpu_percent: Some(42.0),
             memory_bytes: Some(3 * 1024 * 1024 * 1024),
-            history: (0..30)
-                .map(|i| (i, (i % 10) as f64 * 10.0, (1000 + i * 40) << 20))
+            history: (0..200)
+                .map(|i| (i, (i % 10) as f64 * 10.0, (1000 + i * 4) << 20))
                 .collect(),
+            baseline_memory_bytes: Some(1500 << 20),
         },
         UnitMetrics {
             lane: "acme@0".into(),
             unit: "web".into(),
             cpu_percent: Some(3.0),
             memory_bytes: Some(900 * 1024 * 1024),
-            history: Vec::new(),
+            ..UnitMetrics::default()
         },
     ];
     let (mut app, _) = loaded(&api, 100, 20).await;
@@ -173,7 +199,23 @@ async fn snapshot_monitor_tab() -> TestResult {
     let effects = app.update(Msg::Tick);
     assert!(matches!(effects.as_slice(), [Effect::FetchMetrics]));
     app.update(Msg::Metrics(api.metrics().await));
-    insta::assert_snapshot!("monitor", draw(&app)?.backend());
+    // Row 0 is the lane total; the graph belongs to a unit.
+    app.update(key(KeyCode::Char('j')));
+    let terminal = draw(&app)?;
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("total"), "lane totals row");
+    assert!(text.contains("3.9G"), "3G + 900M summed: {text}");
+    assert!(
+        text.contains("baseline 1.5G"),
+        "baseline in the graph title"
+    );
+    insta::assert_snapshot!("monitor", terminal.backend());
     Ok(())
 }
 
@@ -209,14 +251,16 @@ async fn shift_tab_toggles_focus_only_with_a_unit() -> TestResult {
     assert!(app.notice.is_some());
     let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
     feed(&mut app, generation, b"$ ");
-    assert!(app.update(shift_tab()).is_empty());
-    assert_eq!(app.focus, Focus::Terminal);
+    focus_terminal(&mut app, b"$ ").ok_or("no interactive attach")?;
     // In terminal focus, list keys go to the unit instead.
     let effects = app.update(key(KeyCode::Char('q')));
     assert!(matches!(effects.as_slice(), [Effect::Input(bytes)] if bytes == b"q"));
     // Shift+Tab is consumed: it switches focus and sends nothing to the unit.
     assert!(app.update(shift_tab()).is_empty());
     assert_eq!(app.focus, Focus::List);
+    // The stream is interactive already, so focusing again needs no reattach.
+    assert!(app.update(shift_tab()).is_empty());
+    assert_eq!(app.focus, Focus::Terminal);
     Ok(())
 }
 
@@ -258,7 +302,7 @@ async fn tab_and_ctrl_a_reach_the_unit_in_terminal_focus() -> TestResult {
     assert_eq!(app.tab, Tab::Lanes);
     app.update(ctrl('a'));
     assert_eq!(app.focus, Focus::List, "C-a no longer switches focus");
-    app.update(shift_tab());
+    focus_terminal(&mut app, b"$ ").ok_or("no interactive attach")?;
     let effects = app.update(key(KeyCode::Tab));
     assert!(matches!(effects.as_slice(), [Effect::Input(b)] if b == b"\t"));
     assert_eq!(
@@ -356,7 +400,7 @@ async fn arrows_follow_application_cursor_mode() -> TestResult {
     let (mut app, _) = loaded(&api, 100, 24).await;
     let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
     feed(&mut app, generation, b"");
-    app.update(shift_tab());
+    let generation = focus_terminal(&mut app, b"").ok_or("no interactive attach")?;
     let effects = app.update(key(KeyCode::Up));
     assert!(matches!(effects.as_slice(), [Effect::Input(b)] if b == b"\x1b[A"));
     // The program switches to application cursor mode (as vim and less do).
@@ -384,7 +428,7 @@ async fn paste_respects_bracketed_mode_and_focus() -> TestResult {
         app.update(Msg::Paste("ls\n".into())).is_empty(),
         "list focus ignores paste"
     );
-    app.update(shift_tab());
+    focus_terminal(&mut app, b"\x1b[?2004h").ok_or("no interactive attach")?;
     let effects = app.update(Msg::Paste("ls\n".into()));
     assert!(matches!(effects.as_slice(), [Effect::Input(b)] if b == b"\x1b[200~ls\r\x1b[201~"));
     Ok(())
@@ -419,11 +463,18 @@ async fn task_runs_only_after_confirmation() -> TestResult {
         task: "migrate".into(),
         result: Ok(json!({"interactive": true})),
     });
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::Attach { unit, .. } if unit == "acme@0:migrate"))
-    );
+    let interactive = effects.iter().rev().find_map(|e| match e {
+        Effect::Attach {
+            generation,
+            unit,
+            interactive: true,
+            ..
+        } if unit == "acme@0:migrate" => Some(*generation),
+        _ => None,
+    });
+    let generation = interactive.ok_or_else(|| format!("no interactive attach: {effects:?}"))?;
+    assert_eq!(app.focus, Focus::List, "focus waits for the stream");
+    feed(&mut app, generation, b"");
     assert_eq!(app.focus, Focus::Terminal);
     Ok(())
 }
@@ -432,15 +483,115 @@ async fn task_runs_only_after_confirmation() -> TestResult {
 async fn zoom_resizes_the_pty() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 100, 24).await;
-    let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
-    feed(&mut app, generation, b"");
+    let mut browsing = Vec::new();
+    for _ in 0..20 {
+        if app.selected_unit().is_some_and(|u| u.name == "api") {
+            break;
+        }
+        browsing.extend(app.update(key(KeyCode::Char('j'))));
+    }
+    // Moving through the list only watches: no stream takes the PTY size.
+    let (generation, interactive) = attach_in(&browsing).ok_or("no attach")?;
+    assert!(!interactive, "browsing attaches as an observer");
+    assert!(
+        !browsing.iter().any(|e| matches!(
+            e,
+            Effect::Attach {
+                interactive: true,
+                ..
+            }
+        )),
+        "{browsing:?}"
+    );
+    let opened = |app: &mut App, generation| {
+        app.update(Msg::AttachOpened {
+            generation,
+            result: Ok(devlanes_proto::AttachResult {
+                stream_id: 1,
+                unit: String::new(),
+                lane: String::new(),
+            }),
+        })
+    };
+    assert!(
+        opened(&mut app, generation).is_empty(),
+        "observers never resize"
+    );
     let before = app.pane_size();
+    // Zooming means looking at this terminal: it reopens as interactive at the new size.
     let effects = app.update(key(KeyCode::Char('z')));
-    let [Effect::ResizePty { columns, rows }] = effects.as_slice() else {
+    let [
+        Effect::Detach,
+        Effect::Attach {
+            generation,
+            columns,
+            rows,
+            interactive: true,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
         return Err(format!("unexpected {effects:?}").into());
     };
     assert_eq!((*columns, *rows), (98, 20));
     assert!(*columns > before.0);
+    // Another viewer may have resized it meanwhile, so the size is sent again once open.
+    let effects = opened(&mut app, *generation);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::ResizePty {
+                columns: 98,
+                rows: 20
+            }]
+        ),
+        "{effects:?}"
+    );
+    // Unzooming resizes the interactive stream, then reopens it once resizing settles.
+    let effects = app.update(key(KeyCode::Char('z')));
+    let [
+        Effect::ResizePty { columns, .. },
+        Effect::SettleResize { token, .. },
+    ] = effects.as_slice()
+    else {
+        return Err(format!("unexpected {effects:?}").into());
+    };
+    assert_eq!(*columns, before.0);
+    let stale = app.update(Msg::ResizeSettled { token: token - 1 });
+    assert!(stale.is_empty(), "an older resize timer does nothing");
+    let effects = app.update(Msg::ResizeSettled { token: *token });
+    assert!(
+        matches!(
+            attach_in(&effects),
+            Some((g, true)) if g > *generation
+        ),
+        "{effects:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_pty_never_shrinks_below_the_minimum() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
+    feed(&mut app, generation, b"");
+    focus_terminal(&mut app, b"").ok_or("no interactive attach")?;
+    // The smallest window the layout still draws gives a tiny pane.
+    let effects = app.update(Msg::Resize(
+        devlanes_tui::app::MIN_WIDTH,
+        devlanes_tui::app::MIN_HEIGHT,
+    ));
+    for effect in &effects {
+        if let Effect::ResizePty { columns, rows } = effect {
+            assert!(
+                *columns >= devlanes_tui::app::MIN_PTY.0 && *rows >= devlanes_tui::app::MIN_PTY.1,
+                "{effects:?}"
+            );
+        }
+    }
+    let (columns, rows) = app.attach_size();
+    assert!(columns >= 20 && rows >= 5);
     Ok(())
 }
 
@@ -535,13 +686,14 @@ async fn disconnect_backs_off_and_resubscribes() -> TestResult {
     let (mut app, _) = loaded(&api, 100, 24).await;
     let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
     feed(&mut app, generation, b"");
-    app.update(Msg::AttachClosed { generation });
     let effects = app.update(Msg::EventsEnded(None));
     assert!(matches!(
         effects.as_slice(),
         [Effect::ScheduleReconnect { after_ms: 250 }]
     ));
     assert_eq!(app.connection, Connection::Reconnecting { attempt: 0 });
+    // While offline a closed stream waits for the reconnect.
+    assert!(app.update(Msg::AttachClosed { generation }).is_empty());
     // A second failure before the retry fires does not schedule another one.
     assert!(
         app.update(Msg::Status(Err(devlanes_tui::ApiError::Disconnected(
@@ -549,11 +701,9 @@ async fn disconnect_backs_off_and_resubscribes() -> TestResult {
         ))))
         .is_empty()
     );
+    // Status is queried only once the subscription is open.
     let effects = app.update(Msg::Reconnect);
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::Subscribe, Effect::Refresh]
-    ));
+    assert!(matches!(effects.as_slice(), [Effect::Subscribe]));
     let effects = app.update(Msg::Subscribed(Err(devlanes_tui::ApiError::Disconnected(
         "gone".into(),
     ))));
@@ -565,12 +715,188 @@ async fn disconnect_backs_off_and_resubscribes() -> TestResult {
     let effects = app.update(Msg::Subscribed(Ok(())));
     assert_eq!(app.connection, Connection::Online);
     assert!(
+        matches!(effects.first(), Some(Effect::Refresh)),
+        "{effects:?}"
+    );
+    assert!(
         effects
             .iter()
             .any(|e| matches!(e, Effect::Attach { unit, .. } if unit == "acme@0:api")),
         "the closed stream is reopened: {effects:?}"
     );
     Ok(())
+}
+
+/// A `unit.changed` event for `acme@0:<name>` in `state`.
+fn unit_changed(name: &str, state: &str) -> Msg {
+    Msg::Event(devlanes_proto::Event {
+        seq: 3,
+        event: events::UNIT_CHANGED.into(),
+        data: json!({ "unit": fake::unit("acme@0", name, state) }),
+    })
+}
+
+#[tokio::test]
+async fn a_restarted_or_exited_unit_is_reattached() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
+    feed(&mut app, generation, b"");
+    let generation = focus_terminal(&mut app, b"$ ").ok_or("no interactive attach")?;
+    // The daemon ends the stream while api is still listed as running: a restart.
+    let effects = app.update(Msg::AttachClosed { generation });
+    let (generation, interactive) = attach_in(&effects).ok_or("restart not reattached")?;
+    assert!(interactive, "the reopened stream keeps its role");
+    assert_eq!(app.focus, Focus::Terminal, "and the focus");
+    feed(&mut app, generation, b"$ ");
+    // An exit: the stream ends and the unit is no longer running.
+    app.update(unit_changed("api", "exited"));
+    let effects = app.update(Msg::AttachClosed { generation });
+    assert!(attach_in(&effects).is_none(), "{effects:?}");
+    // It runs again: the next unit.changed reopens it.
+    let effects = app.update(unit_changed("api", "starting"));
+    assert!(
+        matches!(attach_in(&effects), Some((_, true))),
+        "{effects:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failing_stream_is_not_reopened_in_a_loop() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
+    feed(&mut app, generation, b"");
+    app.update(Msg::StreamError {
+        generation,
+        error: devlanes_tui::ApiError::Decode("bad frame".into()),
+    });
+    let effects = app.update(Msg::AttachClosed { generation });
+    assert!(attach_in(&effects).is_none(), "{effects:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn keys_in_a_dead_terminal_never_reach_list_shortcuts() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
+    feed(&mut app, generation, b"");
+    let generation = focus_terminal(&mut app, b"$ ").ok_or("no interactive attach")?;
+    app.update(unit_changed("api", "exited"));
+    app.update(Msg::AttachClosed { generation });
+    assert_eq!(
+        app.focus,
+        Focus::Terminal,
+        "focus stays on the dead terminal"
+    );
+    // x stops, r restarts and q quits in the list; here they are dropped.
+    for code in ['x', 'r', 's', 'q'] {
+        let effects = app.update(key(KeyCode::Char(code)));
+        assert!(effects.is_empty(), "{code}: {effects:?}");
+    }
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("shift+tab returns to the list"))
+    );
+    app.update(shift_tab());
+    assert_eq!(app.focus, Focus::List);
+    Ok(())
+}
+
+#[tokio::test]
+async fn focus_needs_a_live_stream() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
+    // A unit without a terminal: the pane says why, and focus stays on the list.
+    app.update(Msg::AttachOpened {
+        generation,
+        result: Err(devlanes_tui::ApiError::Rpc(devlanes_proto::RpcError::new(
+            "not_running",
+            json!({}),
+            1,
+        ))),
+    });
+    assert!(app.update(shift_tab()).is_empty());
+    assert_eq!(app.focus, Focus::List);
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.starts_with("no terminal"))
+    );
+    // A stream that ended cleanly.
+    let generation = select_unit(&mut app, "web").ok_or("web not reachable")?;
+    feed(&mut app, generation, b"");
+    app.update(unit_changed("web", "exited"));
+    app.update(Msg::AttachClosed { generation });
+    assert!(app.update(shift_tab()).is_empty());
+    assert_eq!(app.focus, Focus::List);
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("reopens when the unit runs again"))
+    );
+    // Off the lanes tab there is no terminal to focus.
+    app.update(key(KeyCode::Tab));
+    app.update(shift_tab());
+    assert_eq!(app.focus, Focus::List);
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text == "the terminal is on the lanes tab")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_is_queried_after_the_subscription_opens() -> TestResult {
+    let mut app = App::new(100, 24);
+    assert!(matches!(app.start().as_slice(), [Effect::Subscribe]));
+    let effects = app.update(Msg::Subscribed(Ok(())));
+    assert!(
+        matches!(effects.as_slice(), [Effect::Refresh]),
+        "{effects:?}"
+    );
+    // A daemon that refuses subscriptions can still answer status.
+    let effects = app.update(Msg::Subscribed(Err(devlanes_tui::ApiError::Rpc(
+        devlanes_proto::RpcError::new("unknown_method", json!({}), 1),
+    ))));
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Refresh)),
+        "{effects:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn opened_terminals_carry_devlanes_home() {
+    let exe = std::path::Path::new("/opt/devlanes/bin/devlanes");
+    let home = std::path::Path::new("/Users/acme/my home/.devlanes");
+    assert_eq!(
+        devlanes_tui::terminal_command(exe, "/bin/zsh", Some(home), Some("acme@0:api")),
+        [
+            "env",
+            "DEVLANES_HOME=/Users/acme/my home/.devlanes",
+            "/opt/devlanes/bin/devlanes",
+            "attach",
+            "acme@0:api",
+        ]
+    );
+    assert_eq!(
+        devlanes_tui::terminal_command(exe, "/bin/zsh", Some(home), None),
+        [
+            "env",
+            "DEVLANES_HOME=/Users/acme/my home/.devlanes",
+            "/bin/zsh"
+        ]
+    );
+    assert_eq!(
+        devlanes_tui::terminal_command(exe, "/bin/zsh", None, None),
+        ["/bin/zsh"]
+    );
 }
 
 #[tokio::test]

@@ -18,12 +18,12 @@ mod wire;
 mod zone;
 
 pub use files::{
-    DNS_DELEGATE_MIN_SYSTEMD, PORT_SYNTAX_MIN_SYSTEMD, ResolverFile, macos_resolver,
-    systemd_dns_delegate, systemd_resolved_dropin, systemd_resolver,
+    DNS_DELEGATE_MIN_SYSTEMD, MANAGED_MARKER, ResolverFile, generated_file, is_managed,
+    macos_resolver, systemd_dns_delegate, systemd_resolver,
 };
 pub use server::{DEFAULT_PORT, DnsServer, default_listen};
 pub use wire::answer;
-pub use zone::Zone;
+pub use zone::{RESERVED_ZONES, Zone};
 
 use std::net::SocketAddr;
 
@@ -47,10 +47,11 @@ pub enum DnsError {
         #[source]
         source: std::io::Error,
     },
-    /// systemd-resolved is too old to take a DNS server with a port.
+    /// systemd-resolved has no DNS delegates, the only safe way to route one domain.
     #[error(
-        "systemd {version} cannot route a domain to a DNS server on a custom port; \
-         systemd {PORT_SYNTAX_MIN_SYSTEMD} or newer is required"
+        "the resolver strategy needs systemd {DNS_DELEGATE_MIN_SYSTEMD} or newer (found {version}): \
+         older systemd-resolved can only add the devlanes DNS server as a global server, which \
+         would answer every lookup on this machine; use hostnames.resolver: localhost instead"
     )]
     SystemdTooOld {
         /// Detected systemd version.

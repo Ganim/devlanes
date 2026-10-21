@@ -10,10 +10,20 @@ use tokio::net::TcpListener;
 #[derive(Debug)]
 pub struct BoundListeners {
     pub ipv4: TcpListener,
-    pub ipv6: TcpListener,
+    /// `None` when the host cannot bind IPv6 at all, for example with IPv6 disabled.
+    pub ipv6: Option<TcpListener>,
     pub port: u16,
     /// A human-readable diagnostic for CLI/doctor when the requested port was unavailable.
     pub fallback_reason: Option<String>,
+    /// Why the IPv6 listener is missing, for doctor output.
+    pub ipv6_error: Option<String>,
+}
+
+impl BoundListeners {
+    /// Every bound socket, for callers that serve each one through `Proxy`.
+    pub fn listeners(self) -> impl Iterator<Item = TcpListener> {
+        std::iter::once(self.ipv4).chain(self.ipv6)
+    }
 }
 
 /// Binds both families without privileges, falling back only for denied/occupied ports.
@@ -22,16 +32,20 @@ pub struct BoundListeners {
 /// `Proxy`, whose accept loop enforces the configured LAN policy. This must run inside
 /// a Tokio runtime. Port zero is supported for isolated tests.
 pub fn bind_listeners(port: u16, fallback_port: u16, lan: bool) -> io::Result<BoundListeners> {
-    match bind_pair(port, lan) {
+    bind_listeners_with(port, fallback_port, lan, bind)
+}
+
+/// `bind_listeners` with an injectable socket binder, so tests can simulate missing IPv6.
+fn bind_listeners_with(
+    port: u16,
+    fallback_port: u16,
+    lan: bool,
+    bind: impl Fn(SocketAddr) -> io::Result<TcpListener>,
+) -> io::Result<BoundListeners> {
+    match bind_pair(port, lan, &bind) {
         Ok(listeners) => Ok(listeners),
-        Err(error)
-            if port != fallback_port
-                && matches!(
-                    error.kind(),
-                    io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse
-                ) =>
-        {
-            let mut listeners = bind_pair(fallback_port, lan)?;
+        Err(error) if port != fallback_port && port_unavailable(&error) => {
+            let mut listeners = bind_pair(fallback_port, lan, &bind)?;
             let reason = format!(
                 "Could not bind port {port}: {error}; using {}. On Linux, configure CAP_NET_BIND_SERVICE or ip_unprivileged_port_start for low ports.",
                 listeners.port
@@ -44,8 +58,22 @@ pub fn bind_listeners(port: u16, fallback_port: u16, lan: bool) -> io::Result<Bo
     }
 }
 
+/// Errors that mean this port is taken or privileged, as opposed to the host lacking a family.
+fn port_unavailable(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse
+    )
+}
+
 /// A failed second bind drops the first socket before any fallback attempt.
-fn bind_pair(port: u16, lan: bool) -> io::Result<BoundListeners> {
+///
+/// IPv6 failures other than port errors leave the proxy IPv4-only instead of failing it.
+fn bind_pair(
+    port: u16,
+    lan: bool,
+    bind: &impl Fn(SocketAddr) -> io::Result<TcpListener>,
+) -> io::Result<BoundListeners> {
     let wildcard = lan || (cfg!(target_os = "macos") && port != 0 && port < 1024);
     let ipv4 = if wildcard {
         Ipv4Addr::UNSPECIFIED
@@ -59,12 +87,21 @@ fn bind_pair(port: u16, lan: bool) -> io::Result<BoundListeners> {
     };
     let ipv4 = bind(SocketAddr::new(ipv4.into(), port))?;
     let port = ipv4.local_addr()?.port();
-    let ipv6 = bind(SocketAddr::new(ipv6.into(), port))?;
+    let (ipv6, ipv6_error) = match bind(SocketAddr::new(ipv6.into(), port)) {
+        Ok(listener) => (Some(listener), None),
+        Err(error) if port_unavailable(&error) => return Err(error),
+        Err(error) => {
+            let reason = format!("IPv6 listener unavailable, serving IPv4 only: {error}");
+            tracing::warn!("{reason}");
+            (None, Some(reason))
+        }
+    };
     Ok(BoundListeners {
         ipv4,
         ipv6,
         port,
         fallback_reason: None,
+        ipv6_error,
     })
 }
 
@@ -82,4 +119,39 @@ fn bind(address: SocketAddr) -> io::Result<TcpListener> {
     socket.bind(&address.into())?;
     socket.listen(1024)?;
     TcpListener::from_std(socket.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Binds IPv4 normally and fails every IPv6 bind with `kind`.
+    fn without_ipv6(kind: io::ErrorKind) -> impl Fn(SocketAddr) -> io::Result<TcpListener> {
+        move |address| {
+            if address.is_ipv6() {
+                Err(io::Error::new(kind, "simulated IPv6 failure"))
+            } else {
+                bind(address)
+            }
+        }
+    }
+
+    /// A host without IPv6 still gets a working IPv4 proxy, with the reason recorded.
+    #[tokio::test]
+    async fn missing_ipv6_degrades_to_ipv4() -> io::Result<()> {
+        let bound =
+            bind_listeners_with(0, 0, false, without_ipv6(io::ErrorKind::AddrNotAvailable))?;
+        assert!(bound.ipv6.is_none());
+        assert!(bound.ipv6_error.is_some());
+        assert!(bound.fallback_reason.is_none());
+        assert_eq!(bound.listeners().count(), 1);
+        Ok(())
+    }
+
+    /// An occupied IPv6 port is a port problem and still fails the pair.
+    #[tokio::test]
+    async fn occupied_ipv6_port_still_fails() {
+        let result = bind_listeners_with(0, 0, false, without_ipv6(io::ErrorKind::AddrInUse));
+        assert!(result.is_err_and(|error| error.kind() == io::ErrorKind::AddrInUse));
+    }
 }

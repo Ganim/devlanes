@@ -23,6 +23,14 @@ impl TerminalLauncher for Ghostty {
         args.extend(command.iter().cloned());
         Ok(platform(args))
     }
+
+    /// Ghostty.app on macOS, the `ghostty` binary elsewhere.
+    fn available(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return devlanes_term::app_installed("Ghostty.app");
+        #[cfg(not(target_os = "macos"))]
+        return devlanes_term::on_path("ghostty");
+    }
 }
 
 /// Ghostty's macOS app does not support launching windows from its CLI binary,

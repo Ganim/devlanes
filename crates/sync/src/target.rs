@@ -4,6 +4,7 @@ use std::fs::{self, Permissions};
 use std::io::{self, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -33,6 +34,17 @@ impl ContentHash {
         let mut hasher = Sha256::new();
         io::copy(reader, &mut hasher)?;
         Ok(Self(hasher.finalize().into()))
+    }
+
+    /// Lowercase hex, as sent in remote sync manifests.
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+
+    /// Parses lowercase or uppercase hex; `None` unless it is exactly 32 bytes.
+    pub fn from_hex(text: &str) -> Option<Self> {
+        let bytes = hex::decode(text).ok()?;
+        Some(Self(bytes.try_into().ok()?))
     }
 }
 
@@ -84,21 +96,277 @@ pub trait SyncTarget: Send + Sync {
     }
 }
 
+/// File that marks a directory as created by devlanes sync. Only such a directory
+/// may lose whole subtrees (a source directory that became a file) or be pruned.
+pub const OWNER_MARKER: &str = ".devlanes-sync";
+
 /// A directory on the local filesystem.
 #[derive(Debug, Clone)]
 pub struct LocalTarget {
     root: PathBuf,
+    owned: bool,
 }
 
 impl LocalTarget {
-    /// Writes below `root`, created on first write.
+    /// Writes below `root`, created on first write. Never removes a non-empty
+    /// directory that is in the way of a file; use [`LocalTarget::owned`] for that.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            owned: false,
+        }
+    }
+
+    /// A destination devlanes owns: created with an [`OWNER_MARKER`] when absent,
+    /// adopted when empty, refused when it holds files but no marker.
+    pub async fn owned(root: impl Into<PathBuf>) -> Result<Self, SyncError> {
+        let root = root.into();
+        let claimed = root.clone();
+        blocking(format!("claiming {}", root.display()), move || {
+            claim(&claimed)
+        })
+        .await?;
+        Ok(Self { root, owned: true })
     }
 
     /// The destination directory.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Paths of the files held, without reading them.
+    pub async fn files(&self) -> Result<Vec<RelPath>, SyncError> {
+        let root = self.root.clone();
+        blocking(format!("reading {}", self.root.display()), move || {
+            let mut files = Vec::new();
+            walk(&root, |rel, _| {
+                files.push(rel);
+                Ok(())
+            })?;
+            Ok(files)
+        })
+        .await
+    }
+
+    /// Like [`SyncTarget::manifest`], but files whose size, mtime and mode match
+    /// `cache` keep their hash instead of being read again.
+    pub async fn manifest_cached(&self, cache: HashCache) -> Result<HashCache, SyncError> {
+        let root = self.root.clone();
+        blocking(format!("reading {}", self.root.display()), move || {
+            let mut next = HashCache::default();
+            walk(&root, |rel, path| {
+                let meta = fs::symlink_metadata(path)?;
+                let mtime = meta.modified().ok();
+                let mode = meta.permissions().mode() & MODE_MASK;
+                let known = cache.entries.get(&rel).filter(|known| {
+                    known.size == meta.len() && known.mode == mode && mtime == Some(known.mtime)
+                });
+                let entry = match known {
+                    Some(known) => known.clone(),
+                    None => CachedHash {
+                        size: meta.len(),
+                        mode,
+                        mtime: mtime.unwrap_or(SystemTime::UNIX_EPOCH),
+                        hash: ContentHash::of_reader(&mut fs::File::open(path)?)?,
+                    },
+                };
+                next.entries.insert(rel, entry);
+                Ok(())
+            })?;
+            Ok(next)
+        })
+        .await
+    }
+
+    /// Starts writing `path` in pieces; nothing is visible until [`PartialFile::commit`].
+    pub async fn begin_file(&self, path: &RelPath, mode: u32) -> Result<PartialFile, SyncError> {
+        let root = self.root.clone();
+        let rel = path.clone();
+        let dest = path.to_path(&self.root);
+        let temp = blocking(format!("writing {}", dest.display()), move || {
+            let parent = prepare_parents(&root, &rel)?;
+            tempfile::Builder::new()
+                .prefix(TEMP_PREFIX)
+                .suffix(".tmp")
+                .tempfile_in(parent)
+        })
+        .await?;
+        Ok(PartialFile {
+            temp: Some(temp),
+            dest,
+            mode,
+            owned: self.owned,
+            written: 0,
+        })
+    }
+}
+
+/// Hashes of a destination's files with the metadata they were computed for.
+#[derive(Debug, Clone, Default)]
+pub struct HashCache {
+    entries: BTreeMap<RelPath, CachedHash>,
+}
+
+/// One cached hash.
+#[derive(Debug, Clone)]
+struct CachedHash {
+    size: u64,
+    mode: u32,
+    mtime: SystemTime,
+    hash: ContentHash,
+}
+
+impl HashCache {
+    /// The files as a manifest.
+    pub fn manifest(&self) -> Manifest {
+        self.entries
+            .iter()
+            .map(|(rel, cached)| {
+                (
+                    rel.clone(),
+                    ManifestEntry {
+                        size: cached.size,
+                        mode: cached.mode,
+                        hash: cached.hash,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Modification time recorded for `path`.
+    pub fn mtime(&self, path: &RelPath) -> Option<SystemTime> {
+        self.entries.get(path).map(|cached| cached.mtime)
+    }
+}
+
+/// A file being received piece by piece into a temp file next to its destination.
+///
+/// Dropping it without [`PartialFile::commit`] deletes the temp file.
+pub struct PartialFile {
+    temp: Option<tempfile::NamedTempFile>,
+    dest: PathBuf,
+    mode: u32,
+    owned: bool,
+    written: u64,
+}
+
+impl PartialFile {
+    /// Bytes appended so far.
+    pub fn written(&self) -> u64 {
+        self.written
+    }
+
+    /// Appends `data`.
+    pub async fn append(&mut self, data: Bytes) -> Result<(), SyncError> {
+        let mut temp = self.temp.take().ok_or_else(|| SyncError::Io {
+            context: format!("writing {}", self.dest.display()),
+            source: io::Error::other("file already failed"),
+        })?;
+        let length = data.len() as u64;
+        let (temp, result) = tokio::task::spawn_blocking(move || {
+            let result = temp.write_all(&data);
+            (temp, result)
+        })
+        .await
+        .map_err(|join| SyncError::Io {
+            context: format!("writing {}", self.dest.display()),
+            source: io::Error::other(join),
+        })?;
+        result.map_err(|source| SyncError::Io {
+            context: format!("writing {}", self.dest.display()),
+            source,
+        })?;
+        self.temp = Some(temp);
+        self.written += length;
+        Ok(())
+    }
+
+    /// Sets the mode and renames the temp file over the destination.
+    pub async fn commit(mut self) -> Result<(), SyncError> {
+        let temp = self.temp.take().ok_or_else(|| SyncError::Io {
+            context: format!("writing {}", self.dest.display()),
+            source: io::Error::other("file already failed"),
+        })?;
+        let (dest, mode, owned) = (self.dest.clone(), self.mode, self.owned);
+        blocking(format!("writing {}", self.dest.display()), move || {
+            clear_directory(&dest, owned)?;
+            temp.as_file()
+                .set_permissions(Permissions::from_mode(mode & MODE_MASK))?;
+            temp.persist(&dest).map_err(|error| error.error)?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+/// Makes `root` a devlanes-owned destination, or explains why it cannot be one.
+fn claim(root: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(root) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(root)?;
+            fs::write(root.join(OWNER_MARKER), b"")
+        }
+        Err(error) => Err(error),
+        Ok(meta) if !meta.is_dir() => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} exists and is not a directory", root.display()),
+        )),
+        Ok(_) => {
+            if fs::symlink_metadata(root.join(OWNER_MARKER)).is_ok_and(|meta| meta.is_file()) {
+                return Ok(());
+            }
+            if fs::read_dir(root)?.next().is_none() {
+                return fs::write(root.join(OWNER_MARKER), b"");
+            }
+            Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} holds files that devlanes sync did not create; move them away",
+                    root.display()
+                ),
+            ))
+        }
+    }
+}
+
+/// Visits every regular file below `root` without following symlinks, skipping
+/// in-flight temp files and the owner marker. A missing root has no files.
+fn walk(root: &Path, mut visit: impl FnMut(RelPath, &Path) -> io::Result<()>) -> io::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let marker = root.join(OWNER_MARKER);
+    for entry in walkdir::WalkDir::new(root).min_depth(1).follow_links(false) {
+        let entry = entry.map_err(io::Error::other)?;
+        if !entry.file_type().is_file()
+            || entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
+            || entry.path() == marker
+        {
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        // Names the source could never send (non-UTF-8) are left alone.
+        let Ok(rel) = RelPath::from_path(relative) else {
+            continue;
+        };
+        visit(rel, entry.path())?;
+    }
+    Ok(())
+}
+
+/// Removes a directory standing where a file must go: its whole tree only inside
+/// an owned destination, else only when empty.
+fn clear_directory(dest: &Path, owned: bool) -> io::Result<()> {
+    if !fs::symlink_metadata(dest).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(());
+    }
+    if owned {
+        fs::remove_dir_all(dest)
+    } else {
+        fs::remove_dir(dest)
     }
 }
 
@@ -136,9 +404,10 @@ impl SyncTarget for LocalTarget {
     ) -> Result<(), SyncError> {
         let root = self.root.clone();
         let rel = path.clone();
+        let owned = self.owned;
         blocking(
             format!("writing {}", path.to_path(&self.root).display()),
-            move || write_local(&root, &rel, &contents, mode),
+            move || write_local(&root, &rel, &contents, mode, owned),
         )
         .await
     }
@@ -163,25 +432,9 @@ impl SyncTarget for LocalTarget {
 /// Blocking manifest walk.
 fn local_manifest(root: &Path) -> io::Result<Manifest> {
     let mut manifest = Manifest::new();
-    if !root.exists() {
-        return Ok(manifest);
-    }
-    for entry in walkdir::WalkDir::new(root).min_depth(1).follow_links(false) {
-        let entry = entry.map_err(io::Error::other)?;
-        if !entry.file_type().is_file()
-            || entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
-        {
-            continue;
-        }
-        let Ok(relative) = entry.path().strip_prefix(root) else {
-            continue;
-        };
-        // Names the source could never send (non-UTF-8) are left alone.
-        let Ok(rel) = RelPath::from_path(relative) else {
-            continue;
-        };
-        let meta = entry.metadata().map_err(io::Error::other)?;
-        let hash = ContentHash::of_reader(&mut fs::File::open(entry.path())?)?;
+    walk(root, |rel, path| {
+        let meta = fs::symlink_metadata(path)?;
+        let hash = ContentHash::of_reader(&mut fs::File::open(path)?)?;
         manifest.insert(
             rel,
             ManifestEntry {
@@ -190,7 +443,8 @@ fn local_manifest(root: &Path) -> io::Result<Manifest> {
                 hash,
             },
         );
-    }
+        Ok(())
+    })?;
     Ok(manifest)
 }
 
@@ -217,13 +471,17 @@ fn prepare_parents(root: &Path, rel: &RelPath) -> io::Result<PathBuf> {
 }
 
 /// Blocking atomic write.
-fn write_local(root: &Path, rel: &RelPath, contents: &[u8], mode: u32) -> io::Result<()> {
+fn write_local(
+    root: &Path,
+    rel: &RelPath,
+    contents: &[u8],
+    mode: u32,
+    owned: bool,
+) -> io::Result<()> {
     let parent = prepare_parents(root, rel)?;
     let dest = rel.to_path(root);
-    if fs::symlink_metadata(&dest).is_ok_and(|meta| meta.is_dir()) {
-        // The source turned this directory into a file.
-        fs::remove_dir_all(&dest)?;
-    }
+    // The source turned this directory into a file.
+    clear_directory(&dest, owned)?;
     let mut temp = tempfile::Builder::new()
         .prefix(TEMP_PREFIX)
         .suffix(".tmp")
@@ -335,9 +593,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_owned_destinations_lose_directory_trees() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let foreign = dir.path().join("foreign");
+        fs::create_dir_all(foreign.join("a")).expect("dir");
+        fs::write(foreign.join("a/keep.txt"), b"keep").expect("keep");
+        let claimed = LocalTarget::owned(&foreign).await;
+        assert!(
+            claimed.is_err(),
+            "a non-empty directory without marker is refused"
+        );
+        let plain = LocalTarget::new(&foreign);
+        let replaced = plain
+            .write_file(&rel("a"), Bytes::from_static(b"file"), 0o644)
+            .await;
+        assert!(
+            replaced.is_err(),
+            "unowned targets never remove a directory tree"
+        );
+        assert!(foreign.join("a/keep.txt").exists());
+
+        let owned = LocalTarget::owned(dir.path().join("mine"))
+            .await
+            .expect("claim");
+        assert!(dir.path().join("mine").join(OWNER_MARKER).is_file());
+        assert!(
+            owned.manifest().await.expect("manifest").is_empty(),
+            "marker is not a file of the sync"
+        );
+        // A second claim of the same destination succeeds.
+        LocalTarget::owned(dir.path().join("mine"))
+            .await
+            .expect("reclaim");
+    }
+
+    #[tokio::test]
+    async fn streamed_files_appear_only_on_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = LocalTarget::owned(dir.path().join("out"))
+            .await
+            .expect("claim");
+        let mut file = target
+            .begin_file(&rel("x/big.bin"), 0o600)
+            .await
+            .expect("begin");
+        file.append(Bytes::from_static(b"one "))
+            .await
+            .expect("append");
+        assert!(!dir.path().join("out/x/big.bin").exists());
+        file.append(Bytes::from_static(b"two"))
+            .await
+            .expect("append");
+        assert_eq!(file.written(), 7);
+        file.commit().await.expect("commit");
+        assert_eq!(
+            fs::read(dir.path().join("out/x/big.bin")).expect("read"),
+            b"one two"
+        );
+        let abandoned = target
+            .begin_file(&rel("x/gone.bin"), 0o600)
+            .await
+            .expect("begin");
+        drop(abandoned);
+        let files = target.files().await.expect("files");
+        assert_eq!(files, vec![rel("x/big.bin")], "no temp file is left behind");
+    }
+
+    #[tokio::test]
+    async fn cached_manifests_match_fresh_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = LocalTarget::owned(dir.path().join("out"))
+            .await
+            .expect("claim");
+        target
+            .write_file(&rel("a.txt"), Bytes::from_static(b"a"), 0o644)
+            .await
+            .expect("write");
+        let cache = target
+            .manifest_cached(HashCache::default())
+            .await
+            .expect("cache");
+        let again = target.manifest_cached(cache).await.expect("cache");
+        assert_eq!(again.manifest(), target.manifest().await.expect("manifest"));
+        assert!(again.mtime(&rel("a.txt")).is_some());
+        assert_eq!(
+            ContentHash::from_hex(&again.manifest()[&rel("a.txt")].hash.to_hex()),
+            Some(ContentHash::of(b"a"))
+        );
+    }
+
+    #[tokio::test]
     async fn replaces_files_and_directories_in_the_way() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = LocalTarget::new(dir.path());
+        let target = LocalTarget::owned(dir.path()).await.expect("claim");
         target
             .write_file(&rel("a"), Bytes::from_static(b"file"), 0o644)
             .await

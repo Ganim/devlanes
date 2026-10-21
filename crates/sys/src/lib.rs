@@ -9,7 +9,7 @@
 //! # Ok::<(), devlanes_sys::Error>(())
 //! ```
 
-// Unsafe code is limited to the macOS FFI module; each block documents its invariants.
+// Unsafe code is limited to the macOS FFI modules; each block documents its invariants.
 #![deny(unsafe_code)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
@@ -35,6 +35,13 @@ mod os;
 #[allow(unsafe_code)]
 #[path = "macos.rs"]
 mod os;
+
+/// Safe wrappers over macOS libproc, mach and sysctl calls for the metrics and
+/// pressure collectors, so those crates need no `unsafe`.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+#[path = "darwin.rs"]
+pub mod macos;
 
 pub use rlimit::{NofileLimit, child_nofile_limit, raise_nofile_limit};
 pub use tree::{DescendantTracker, session_members};
@@ -181,6 +188,49 @@ pub fn listening_tcp(pids: &[u32]) -> Result<Vec<ListeningSocket>, Error> {
     sockets.sort_unstable();
     sockets.dedup();
     Ok(sockets)
+}
+
+/// Session ID of `pid`, or `None` once it exited or the kernel refused to say.
+pub fn session(pid: u32) -> Option<u32> {
+    let sid = rustix::process::getsid(Some(raw_pid(pid)?)).ok()?;
+    u32::try_from(sid.as_raw_nonzero().get()).ok()
+}
+
+/// Real user ID of this process; other users' processes are never a unit's.
+pub fn current_uid() -> u32 {
+    rustix::process::getuid().as_raw()
+}
+
+/// An open file to look for in other processes' descriptor tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenFile {
+    /// A character device such as a PTY slave, by device number.
+    Device(u64),
+    /// A pipe: its inode on Linux, the kernel handle of the end passed to
+    /// [`open_file`] on macOS. Holders of either end match.
+    Pipe(u64),
+}
+
+/// Identifies what `fd` refers to, for a later [`holders`] lookup. Only character
+/// devices and pipes are supported.
+pub fn open_file(fd: std::os::fd::BorrowedFd<'_>) -> Result<OpenFile, Error> {
+    os::open_file(fd)
+}
+
+/// Returns the PIDs among `pids` that hold `target` open.
+///
+/// Finds processes that keep a unit's PTY or output pipe open after the unit ended,
+/// typically daemonized grandchildren that were never seen in a snapshot. Processes
+/// that exit or cannot be inspected during the scan are skipped. Blocking; the cost
+/// grows with the descriptors of every candidate, so pass a filtered set.
+pub fn holders(target: OpenFile, pids: &[u32]) -> Result<Vec<u32>, Error> {
+    let mut found = Vec::new();
+    for &pid in pids {
+        if os::holds(pid, target)? {
+            found.push(pid);
+        }
+    }
+    Ok(found)
 }
 
 /// Converts a kernel PID; 0 and values beyond `pid_t` are not addressable processes.

@@ -34,6 +34,22 @@ The runner needs a tokio runtime with the IO, time and signal drivers enabled.
 - `ExitReport`: exit outcome, stop details, processes swept after the leader exited, and processes that survived SIGKILL.
 - `StderrMode`: separate or merged stderr for pipe units.
 
+## Config example
+
+```yaml
+# devlanes.yaml
+services:
+  api:
+    run: node server.mjs
+    # Pipes instead of a pseudoterminal; services default to true.
+    pty: false
+tasks:
+  migrate:
+    run: pnpm migrate
+    # Tasks default to a pseudoterminal only when interactive: true.
+    pty: true
+```
+
 ## Behaviour
 
 Each unit leads its own session, with the PTY as its controlling terminal. Pipe units also call `setsid` and get `/dev/null` as stdin. The environment is exactly `LaunchSpec::env`, with nothing inherited from the daemon.
@@ -42,7 +58,7 @@ Leaders are reaped by PID on SIGCHLD, never with `waitpid(-1)`, so `tokio::proce
 
 The first `output()` call sees all output since launch. Later calls only see output from the moment they subscribe.
 
-Stop signals the session's process group and every tracked descendant, including ones that called `setsid`, then sends SIGKILL after the timeout. Processes still running after the leader exits are killed and listed in `ExitReport::swept`. Dropping a handle does not stop the unit.
+Stop signals the session's process group and every tracked descendant, including ones that called `setsid`, then sends SIGKILL after the timeout. Processes still running after the leader exits are killed and listed in `ExitReport::swept`; with `ExitSweep::KeepDaemonized` (used for tasks), descendants that moved to their own session are left running and listed in `ExitReport::left_running`. A process the tracker never saw that still holds the terminal or output pipe is listed in `ExitReport::escaped`, and the runner stops reading and closes the terminal anyway. Dropping a handle does not stop the unit.
 
 Children get the open-file limit the daemon started with, even after the daemon raised its own.
 

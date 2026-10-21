@@ -17,6 +17,10 @@ use tokio::sync::oneshot;
 
 use crate::Error;
 
+/// Memory assumed for a start without history: [`StartRequest::memory_need`]
+/// when the unit has no baseline yet.
+pub const DEFAULT_MEMORY_NEED: u64 = 512 << 20;
+
 /// One service start waiting for a slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartRequest {
@@ -24,9 +28,14 @@ pub struct StartRequest {
     pub lane: String,
     /// Unit name within the lane (`web`, `worker/2`).
     pub unit: String,
-    /// Position of the unit in its config file. Lower values start first; equal
-    /// values (other lanes, other projects) keep arrival order.
+    /// Position of the unit in its config file. Starts are granted first come,
+    /// first served by batch ([`StartGate::enqueue_batch`]: one start request,
+    /// any lane or project); within a batch, lower values go first.
     pub order: usize,
+    /// Bytes the unit is expected to need while starting: its baseline peak,
+    /// or [`DEFAULT_MEMORY_NEED`]. A gate that reads available memory holds the
+    /// head of the queue while this does not fit.
+    pub memory_need: u64,
 }
 
 /// Why a slot was given back.
@@ -192,6 +201,10 @@ pub enum HoldReason {
     WindowFull,
     /// Memory pressure is critical; no new starts until it clears.
     MemoryCritical,
+    /// The next start's [`StartRequest::memory_need`] exceeds the available
+    /// memory minus what starting units may still claim. It goes ahead once
+    /// memory is free or the starts in flight finished or timed out.
+    Memory,
 }
 
 /// A queued start and its 1-based place in line.
@@ -216,6 +229,8 @@ pub struct GateSnapshot {
     pub hold: Option<HoldReason>,
     /// The gate's latest pressure reading, if it reads one.
     pub pressure: Option<PressureSample>,
+    /// The gate's latest available-memory reading in bytes, if it reads one.
+    pub available_memory: Option<u64>,
 }
 
 impl GateSnapshot {
@@ -231,10 +246,18 @@ impl GateSnapshot {
 /// and project of the machine.
 #[async_trait]
 pub trait StartGate: Send + Sync {
-    /// Queues `request` and returns at once. Starts are granted in
-    /// [`StartRequest::order`], then arrival order. Dropping the ticket before
-    /// the grant leaves the queue.
-    fn enqueue(&self, request: StartRequest) -> StartTicket;
+    /// Queues the units of one start request and returns at once, one ticket
+    /// per request in the same order. Batches are served in arrival order, so
+    /// a later lane never jumps ahead of an earlier one; within a batch, by
+    /// [`StartRequest::order`]. Dropping a ticket before its grant leaves the queue.
+    fn enqueue_batch(&self, requests: Vec<StartRequest>) -> Vec<StartTicket>;
+
+    /// Queues a single start as its own batch.
+    fn enqueue(&self, request: StartRequest) -> StartTicket {
+        self.enqueue_batch(vec![request])
+            .pop()
+            .unwrap_or_else(|| StartTicket::granted(StartSlot::unmetered()))
+    }
 
     /// Current window, holders and queue.
     fn snapshot(&self) -> GateSnapshot;

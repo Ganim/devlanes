@@ -104,6 +104,39 @@ pub(crate) fn listening_tcp(pids: &[u32]) -> Result<Vec<ListeningSocket>, Error>
     Ok(sockets)
 }
 
+/// Classifies a descriptor by `fstat`: character devices by rdev, pipes by inode.
+pub(crate) fn open_file(fd: std::os::fd::BorrowedFd<'_>) -> Result<crate::OpenFile, Error> {
+    let metadata = fs::File::from(fd.try_clone_to_owned()?).metadata()?;
+    classify(&metadata).ok_or_else(|| malformed("open file", "not a device or pipe"))
+}
+
+/// Maps file metadata to the comparable identity used by [`holds`].
+fn classify(metadata: &fs::Metadata) -> Option<crate::OpenFile> {
+    use std::os::unix::fs::FileTypeExt;
+    let kind = metadata.file_type();
+    if kind.is_char_device() {
+        Some(crate::OpenFile::Device(metadata.rdev()))
+    } else if kind.is_fifo() {
+        Some(crate::OpenFile::Pipe(metadata.ino()))
+    } else {
+        None
+    }
+}
+
+/// Stats every `/proc/<pid>/fd` entry; the magic links resolve to the open file
+/// itself, pipes included.
+pub(crate) fn holds(pid: u32, target: crate::OpenFile) -> Result<bool, Error> {
+    let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return Ok(false);
+    };
+    Ok(entries.flatten().any(|entry| {
+        fs::metadata(entry.path())
+            .ok()
+            .and_then(|metadata| classify(&metadata))
+            == Some(target)
+    }))
+}
+
 /// Linux accepts any soft limit up to the hard limit; unlimited falls back to `nr_open`.
 pub(crate) fn max_nofile(hard: Option<u64>) -> Result<u64, Error> {
     if let Some(hard) = hard {

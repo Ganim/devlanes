@@ -19,7 +19,8 @@ pub use ignore::IgnoreRules;
 pub use path::RelPath;
 pub use syncer::{SyncHandle, SyncIssue, SyncOptions, SyncState, SyncStatus, Syncer};
 pub use target::{
-    ContentHash, LocalTarget, MODE_MASK, Manifest, ManifestEntry, SyncTarget, TEMP_PREFIX,
+    ContentHash, HashCache, LocalTarget, MODE_MASK, Manifest, ManifestEntry, OWNER_MARKER,
+    PartialFile, SyncTarget, TEMP_PREFIX,
 };
 
 use std::path::PathBuf;

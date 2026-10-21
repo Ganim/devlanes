@@ -23,20 +23,23 @@ pub async fn run(action: Action) -> Result<u8, RpcError> {
 
 /// Serves the client daemon's mux over stdio, backed by this machine's daemon.
 ///
-/// stdout carries only mux frames; failures are reported on stderr, which the
-/// client's SSH transport returns as the connection error.
+/// stdout carries only mux frames; failures go straight to stderr (whatever the
+/// output mode, since a JSON error on stdout would corrupt the pipe), and the
+/// client's SSH transport returns that text as the connection error.
 async fn tunnel() -> Result<u8, RpcError> {
-    let paths = Paths::discover().map_err(|error| {
-        RpcError::new(
-            "daemon_unreachable",
-            json!({"message": error.to_string()}),
-            4,
-        )
-    })?;
-    devlanes_tunnel::run_stdio(paths).await.map_err(|error| {
-        RpcError::new("tunnel_failed", json!({"message": error.to_string()}), 1)
-    })?;
-    Ok(0)
+    let result = match Paths::discover() {
+        Ok(paths) => devlanes_tunnel::run_stdio(paths)
+            .await
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    match result {
+        Ok(()) => Ok(0),
+        Err(message) => {
+            eprintln!("devlanes tunnel: {message}");
+            Ok(1)
+        }
+    }
 }
 
 /// Asks the daemon that launched ssh, which relays to the CLI running `connect`.

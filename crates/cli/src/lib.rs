@@ -18,18 +18,9 @@ pub use runtime::*;
 pub use with::*;
 
 /// Local help for agents; process ownership always remains with the daemon.
-/// Short form of `agent-plugin/skills/devlanes/SKILL.md`; update both together.
-pub const AGENT_GUIDE: &str = "Use devlanes start to bring up the current worktree lane; it waits for ready or failure.\n\
-Never background a process with &. Use devlanes exec --name NAME -- COMMAND instead.\n\
-Lanes are project@N or project@branch; units are LANE:UNIT; globs and +tags select several.\n\
-Inspect with status, wait UNIT --timeout 180s, debug errors, and debug why UNIT.\n\
-Read bounded logs with logs UNIT --tail 100 or --grep RE; use --cursor to continue.\n\
-Follow logs only with --timeout. Use --json for complete structured results.\n\
-Run tests with devlanes with -- COMMAND: start, wait, run, stop, exit with COMMAND's code.\n\
-Use status --mine and stop --mine for your session's units.\n\
-A command that needs confirmation exits 2; rerun it with --yes. Agents are never prompted.\n\
-Ctrl-C detaches from services. Foreground run tasks are the exception.\n\
-Inside a sandbox the daemon is not auto-started; ask the user to run devlanes daemon install.\n";
+/// The same text is `agent-plugin/codex/AGENTS.md` (a test keeps them identical) and the
+/// short form of `agent-plugin/skills/devlanes/SKILL.md`.
+pub const AGENT_GUIDE: &str = include_str!("../agent-guide.md");
 
 /// Process exit statuses shared by all command handlers.
 pub mod exit {

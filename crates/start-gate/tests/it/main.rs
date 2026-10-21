@@ -45,10 +45,15 @@ async fn tick(clock: &ManualClock, seconds: u64) {
 }
 
 fn request(lane: &str, unit: &str, order: usize) -> StartRequest {
+    needing(lane, unit, order, 0)
+}
+
+fn needing(lane: &str, unit: &str, order: usize, memory_need: u64) -> StartRequest {
     StartRequest {
         lane: lane.into(),
         unit: unit.into(),
         order,
+        memory_need,
     }
 }
 
@@ -163,19 +168,27 @@ async fn slot_timeout_frees_the_window() {
 }
 
 #[tokio::test]
-async fn declaration_order_beats_arrival_and_ties_keep_arrival() {
+async fn requests_are_fifo_and_declaration_order_holds_within_one() {
     bounded(async {
         let (gate, _clock) = fixed(1, 60);
         let holder = gate.acquire(request("acme@1", "first", 0)).await;
-        let mut tickets: Vec<(String, StartTicket)> = [
-            ("acme@1", "late", 3),
-            ("acme@1", "early", 1),
-            ("other@1", "tie-a", 2),
-            ("acme@2", "tie-b", 2),
-        ]
-        .into_iter()
-        .map(|(lane, unit, order)| (unit.to_owned(), gate.enqueue(request(lane, unit, order))))
-        .collect();
+        let batch = |lane: &str, units: &[(&str, usize)]| -> Vec<(String, StartTicket)> {
+            let requests = units
+                .iter()
+                .map(|(unit, order)| request(lane, unit, *order))
+                .collect();
+            units
+                .iter()
+                .map(|(unit, _)| (*unit).to_owned())
+                .zip(gate.enqueue_batch(requests))
+                .collect()
+        };
+        let mut tickets = batch("acme@1", &[("late", 3), ("early", 1)]);
+        // A later request with lower declaration indices waits its turn.
+        tickets.extend(batch("other@1", &[("first-of-other", 0)]));
+        tickets.extend(batch("acme@2", &[("x", 5), ("y", 2)]));
+        // A restart of a low-index unit cannot starve the others either.
+        tickets.extend(batch("acme@1", &[("restarted", 0)]));
         let mut started = Vec::new();
         let mut current = holder;
         while !tickets.is_empty() {
@@ -188,7 +201,10 @@ async fn declaration_order_beats_arrival_and_ties_keep_arrival() {
             started.push(tickets.remove(index).0);
             current = slot;
         }
-        assert_eq!(started, ["early", "tie-a", "tie-b", "late"]);
+        assert_eq!(
+            started,
+            ["early", "late", "first-of-other", "y", "x", "restarted"]
+        );
     })
     .await;
 }
@@ -259,7 +275,21 @@ async fn all_at_once_grants_everything_and_counts_holders() {
 struct Trace {
     clock: ManualClock,
     script: fn(u64) -> PressureSample,
+    /// Available bytes by second; `None` for an unknown amount.
+    memory: fn(u64) -> Option<u64>,
     readings: Mutex<Vec<u64>>,
+}
+
+impl Trace {
+    /// A trace with unknown available memory.
+    fn cpu(clock: &ManualClock, script: fn(u64) -> PressureSample) -> Arc<Self> {
+        Arc::new(Self {
+            clock: clock.clone(),
+            script,
+            memory: |_| None,
+            readings: Mutex::new(Vec::new()),
+        })
+    }
 }
 
 #[async_trait]
@@ -277,7 +307,7 @@ impl PressureSource for Trace {
     }
 
     async fn available_memory(&self) -> Result<Option<u64>, devlanes_core::Error> {
-        Ok(None)
+        Ok((self.memory)(self.clock.now().as_secs()))
     }
 }
 
@@ -305,11 +335,7 @@ fn script(second: u64) -> PressureSample {
 async fn adaptive_window_follows_a_pressure_trace() {
     bounded(async {
         let clock = ManualClock::new();
-        let trace = Arc::new(Trace {
-            clock: clock.clone(),
-            script,
-            readings: Mutex::new(Vec::new()),
-        });
+        let trace = Trace::cpu(&clock, script);
         let gate = AdaptiveGate::new(
             AdaptiveConfig::new(2, 6, 75.0),
             options(1000),
@@ -342,7 +368,9 @@ async fn adaptive_window_follows_a_pressure_trace() {
         assert_eq!(
             windows,
             [
-                2, 2, 3, 3, 4, 4, 5, 5, // +1 every 2 s with headroom
+                // The first reading has no CPU (it would span the idle time),
+                // then +1 every 2 s with headroom.
+                2, 2, 2, 3, 3, 4, 4, 5, //
                 5, 5, 5, 2, 2, 2, 1, 1, // halved after 3 s above 90%, again 3 s later
                 1, 1, 1, 1, // warn: halving floors at 1
                 1, 1, 1, // critical: paused
@@ -363,11 +391,7 @@ async fn adaptive_window_follows_a_pressure_trace() {
 async fn adaptive_gate_restarts_at_initial_after_idle() {
     bounded(async {
         let clock = ManualClock::new();
-        let trace = Arc::new(Trace {
-            clock: clock.clone(),
-            script: |_| reading(10.0, MemoryPressure::Normal),
-            readings: Mutex::new(Vec::new()),
-        });
+        let trace = Trace::cpu(&clock, |_| reading(10.0, MemoryPressure::Normal));
         let gate = AdaptiveGate::new(
             AdaptiveConfig::new(2, 8, 75.0),
             options(1000),
@@ -378,7 +402,12 @@ async fn adaptive_gate_restarts_at_initial_after_idle() {
             .map(|i| gate.enqueue(request("acme@1", &format!("s{i}"), i)))
             .collect();
         settle().await;
-        tick(&clock, 6).await;
+        assert_eq!(
+            gate.snapshot().pressure.and_then(|p| p.cpu_percent),
+            None,
+            "first reading of a busy period drops its CPU"
+        );
+        tick(&clock, 7).await;
         assert_eq!(gate.snapshot().window, Some(5));
         let slots = take_granted(&mut tickets);
         assert_eq!(slots.len(), 5);
@@ -388,6 +417,101 @@ async fn adaptive_gate_restarts_at_initial_after_idle() {
         }
         tick(&clock, 1).await;
         assert_eq!(gate.snapshot().window, Some(2));
+        // The next busy period starts with a fresh CPU baseline again.
+        let _again = gate.enqueue(request("acme@1", "again", 0));
+        settle().await;
+        assert_eq!(gate.snapshot().pressure.and_then(|p| p.cpu_percent), None);
+        tick(&clock, 1).await;
+        assert_eq!(
+            gate.snapshot().pressure.and_then(|p| p.cpu_percent),
+            Some(10.0)
+        );
+    })
+    .await;
+}
+
+/// 1000 bytes available until second 4, then 5000.
+fn memory_frees_at_four(second: u64) -> Option<u64> {
+    Some(if second < 4 { 1000 } else { 5000 })
+}
+
+#[tokio::test]
+async fn head_waits_for_memory_then_goes_ahead() {
+    bounded(async {
+        let clock = ManualClock::new();
+        let trace = Arc::new(Trace {
+            clock: clock.clone(),
+            script: |_| reading(10.0, MemoryPressure::Normal),
+            memory: memory_frees_at_four,
+            readings: Mutex::new(Vec::new()),
+        });
+        let gate = FixedWindow::with_pressure(4, options(60), Arc::new(clock.clone()), trace);
+        // The first start runs before any reading: unknown memory never blocks.
+        let holder = gate.acquire(needing("acme@1", "holder", 0, 0)).await;
+        settle().await;
+        assert_eq!(gate.snapshot().available_memory, Some(1000));
+        let mut tickets = gate.enqueue_batch(vec![
+            needing("acme@1", "a", 0, 400),
+            needing("acme@1", "b", 1, 400),
+            needing("acme@1", "c", 2, 400),
+        ]);
+        let first = take_granted(&mut tickets);
+        assert_eq!(first.len(), 2, "two fit in 1000 bytes; the third does not");
+        let snapshot = gate.snapshot();
+        assert_eq!(snapshot.hold, Some(HoldReason::Memory));
+        assert_eq!(snapshot.queued[0].request.memory_need, 400);
+        drop(holder);
+        assert!(
+            take_granted(&mut tickets).is_empty(),
+            "window has room, memory has not"
+        );
+        first[0].release(Release::Ready);
+        assert_eq!(
+            take_granted(&mut tickets).len(),
+            1,
+            "a finished start frees its share"
+        );
+        assert!(tickets.is_empty());
+
+        // A need larger than the machine waits while others start, and goes
+        // ahead once memory is reported free.
+        let mut big = vec![gate.enqueue(needing("acme@2", "big", 0, 4000))];
+        assert_eq!(gate.snapshot().hold, Some(HoldReason::Memory));
+        tick(&clock, 3).await;
+        assert!(take_granted(&mut big).is_empty());
+        tick(&clock, 1).await;
+        assert_eq!(take_granted(&mut big).len(), 1, "memory freed at 4 s");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn memory_hold_never_refuses() {
+    bounded(async {
+        let clock = ManualClock::new();
+        let trace = Arc::new(Trace {
+            clock: clock.clone(),
+            script: |_| reading(10.0, MemoryPressure::Normal),
+            memory: |_| Some(1000),
+            readings: Mutex::new(Vec::new()),
+        });
+        let gate = FixedWindow::with_pressure(4, options(10), Arc::new(clock.clone()), trace);
+        let primer = gate.acquire(needing("acme@1", "primer", 0, 0)).await;
+        settle().await;
+        // With nothing else starting, a need above the available memory goes ahead.
+        drop(primer);
+        let alone = gate.acquire(needing("acme@1", "alone", 0, 9000)).await;
+        settle().await;
+        tick(&clock, 5).await;
+        // Something is starting now, so the next big need waits, but no longer
+        // than `slot_timeout`: here `alone` times out at 10 s and frees it.
+        let mut waiting = vec![gate.enqueue(needing("acme@1", "waits", 1, 9000))];
+        assert_eq!(gate.snapshot().hold, Some(HoldReason::Memory));
+        tick(&clock, 4).await;
+        assert!(take_granted(&mut waiting).is_empty());
+        tick(&clock, 1).await;
+        assert_eq!(alone.released(), Some(Release::Timeout));
+        assert_eq!(take_granted(&mut waiting).len(), 1);
     })
     .await;
 }

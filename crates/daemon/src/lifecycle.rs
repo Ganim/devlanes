@@ -170,8 +170,9 @@ async fn write_files(
     .map_err(|e| internal("io", e))?
 }
 
-/// Maps a resolved readiness spec to the checker's form.
-pub(crate) fn readiness(spec: &ReadySpec) -> Readiness {
+/// Maps a resolved readiness spec to the checker's form. `env` is the unit's launch
+/// environment, which a `cmd` probe runs with.
+pub(crate) fn readiness(spec: &ReadySpec, env: BTreeMap<String, String>) -> Readiness {
     match spec {
         ReadySpec::Started => Readiness::Started,
         ReadySpec::Tcp { port } => Readiness::Tcp { port: *port },
@@ -186,6 +187,7 @@ pub(crate) fn readiness(spec: &ReadySpec) -> Readiness {
         ReadySpec::Cmd { shell, cwd } => Readiness::Cmd {
             command: shell.clone(),
             cwd: cwd.clone(),
+            env,
         },
     }
 }
@@ -713,6 +715,17 @@ impl LanePhase for ServicesPhase {
                 continue;
             }
             for service in resolved.units_of(name) {
+                // Never adopted: the user stops it explicitly; other units go on.
+                let orphaned = cx.lane.st().orphan_error(&cx.project.name(), &service.unit);
+                if let Some(error) = orphaned {
+                    cx.failures.push(UnitFailureData {
+                        lane: cx.reference.clone(),
+                        unit: service.unit.clone(),
+                        reason: Some(error),
+                        ..UnitFailureData::default()
+                    });
+                    continue;
+                }
                 let alive = cx
                     .lane
                     .st()
@@ -805,6 +818,9 @@ impl Inner {
                 .clone()
                 .unwrap_or_else(|| crate::model::derived_color(&st, &request.name));
             let reference = st.reference(&project.name());
+            if let Some(error) = st.orphan_error(&project.name(), &request.name) {
+                return Err(error);
+            }
             let record = st
                 .record
                 .clone()
@@ -833,18 +849,19 @@ impl Inner {
             }
         }
         write_files(lane_path, request.files.clone()).await?;
-        let managed = self
-            .integ
-            .runner
-            .spawn(request.spec)
-            .await
-            .map_err(|error| {
-                RpcError::new(
-                    "spawn_failed",
-                    json!({"unit": request.name, "message": error.to_string()}),
-                    1,
-                )
-            })?;
+        let runner = &self.integ.runner;
+        let spawned = if request.kind == Kind::Task {
+            runner.spawn_task(request.spec).await
+        } else {
+            runner.spawn(request.spec).await
+        };
+        let managed = spawned.map_err(|error| {
+            RpcError::new(
+                "spawn_failed",
+                json!({"unit": request.name, "message": error.to_string()}),
+                1,
+            )
+        })?;
         let identity = managed.identity();
         let log_dir = self
             .opts
@@ -862,7 +879,7 @@ impl Inner {
             retention: crate::units::LogRetention::from_config(&self.opts.user.logs.retention),
         };
         let unit: Arc<dyn Unit> = managed.clone();
-        let host = match UnitHost::start(info, unit, identity) {
+        let host = match UnitHost::start(info, unit, identity).await {
             Ok(host) => host,
             Err(error) => {
                 // Without a host nobody could see or stop it; this spawn is ours to undo.
@@ -1459,11 +1476,7 @@ impl Inner {
             };
             let _ = self
                 .store
-                .set_lane_desired(
-                    record.id,
-                    desired,
-                    crate::model::encode_profiles(&selection.profiles),
-                )
+                .set_lane_desired_profiles(record.id, desired, selection.profiles.clone())
                 .await;
             if let Some(updated) = self.store.lane(record.id).await.ok().flatten() {
                 lane.st().record = Some(updated);
@@ -1561,7 +1574,7 @@ impl Inner {
             if other.id == project.id || other.name() != name {
                 continue;
             }
-            if other.lanes().iter().any(|lane| lane.st().any_alive()) {
+            if other.lanes().iter().any(|lane| lane.st().any_running()) {
                 let path = other.st().root.clone();
                 return Err(RpcError::new(
                     "project_running_elsewhere",
@@ -1596,7 +1609,7 @@ impl Inner {
             self.run_hook(project, lane, TaskWhen::Stop, &Actor::default())
                 .await;
         }
-        let targets: Vec<String> = {
+        let (targets, orphans): (Vec<String>, Vec<String>) = {
             let st = lane.st();
             let mut candidates: Vec<(String, Vec<String>)> = st
                 .units
@@ -1610,11 +1623,25 @@ impl Inner {
                     }
                 }
             }
-            let names = match selectors.as_ref().filter(|s| !s.is_empty()) {
+            for name in st.orphans.keys() {
+                if !candidates.iter().any(|(n, _)| n == name) {
+                    candidates.push((name.clone(), Vec::new()));
+                }
+            }
+            let names: Vec<String> = match selectors.as_ref().filter(|s| !s.is_empty()) {
                 Some(selectors) => crate::engine::match_units(selectors, &candidates, &reference)?,
                 None => candidates.into_iter().map(|(name, _)| name).collect(),
             };
-            names
+            let orphans = names
+                .iter()
+                .filter(|name| {
+                    st.orphans
+                        .get(*name)
+                        .is_some_and(|o| mine.is_none_or(|caller| is_mine(&o.actor, caller)))
+                })
+                .cloned()
+                .collect();
+            let targets = names
                 .into_iter()
                 .filter(|name| {
                     st.units.get(name).is_some_and(|rec| {
@@ -1622,9 +1649,10 @@ impl Inner {
                             && mine.is_none_or(|caller| is_mine(&rec.host.info().actor, caller))
                     })
                 })
-                .collect()
+                .collect();
+            (targets, orphans)
         };
-        if !targets.is_empty() {
+        if !targets.is_empty() || !orphans.is_empty() {
             lane.st().busy = Some("stopping");
             self.emit_lane(project, lane);
         }
@@ -1635,12 +1663,13 @@ impl Inner {
                 .filter_map(|name| st.units.get(name).map(|rec| (rec.host.clone(), rec.stop)))
                 .collect()
         };
-        join_all(stops.iter().map(|(host, policy)| async move {
+        let supervised = join_all(stops.iter().map(|(host, policy)| async move {
             if let Err(error) = host.stop(*policy).await {
                 tracing::warn!(code = %error.code, "unit stop failed");
             }
-        }))
-        .await;
+        }));
+        let (_, terminated) =
+            tokio::join!(supervised, self.terminate_orphans(project, lane, &orphans));
         if whole {
             // An explicit full stop settles crashed services: the lane reads idle.
             // Failed tasks keep their state, since a stop hook may just have failed.
@@ -1653,7 +1682,11 @@ impl Inner {
         if whole && let Some(record) = record {
             let _ = self
                 .store
-                .set_lane_desired(record.id, DesiredState::Stopped, record.profile.clone())
+                .set_lane_desired_profiles(
+                    record.id,
+                    DesiredState::Stopped,
+                    record.profiles.clone(),
+                )
                 .await;
             if let Some(updated) = self.store.lane(record.id).await.ok().flatten() {
                 lane.st().record = Some(updated);
@@ -1662,14 +1695,16 @@ impl Inner {
         lane.st().busy = None;
         self.emit_lane(project, lane);
         let st = lane.st();
-        Ok(targets
+        let mut stopped: Vec<UnitSummary> = targets
             .iter()
             .filter_map(|name| {
                 st.units
                     .get(name)
                     .map(|rec| unit_summary(&reference, name, rec))
             })
-            .collect())
+            .collect();
+        stopped.extend(terminated);
+        Ok(stopped)
     }
 
     /// Runs `lane.stop` or `lane.clean` tasks in file order; failures are reported only.
@@ -1736,10 +1771,10 @@ impl Inner {
                 if let Some(record) = record {
                     let _ = self
                         .store
-                        .set_lane_desired(
+                        .set_lane_desired_profiles(
                             record.id,
                             record.desired_state,
-                            crate::model::encode_profiles(&selection.profiles),
+                            selection.profiles.clone(),
                         )
                         .await;
                     if let Some(updated) = self.store.lane(record.id).await.ok().flatten() {
@@ -1765,6 +1800,25 @@ impl Inner {
             .resolve_full(project, lane)
             .await
             .map_err(|e| with_ownership(e, &reference, &[]))?;
+        // A previous daemon's process is replaced like a running one: terminate it
+        // first, so its ports are free for the new run.
+        let orphans = self.terminate_orphans(project, lane, &units).await;
+        for orphan in &orphans {
+            for port in orphan.ports.values() {
+                if !wait_port_free(*port, PORT_RELEASE).await {
+                    let pid = self.integ.ports.holder(*port).await;
+                    return Err(with_ownership(
+                        RpcError::new(
+                            "port_in_use",
+                            json!({"port": port, "pid": pid, "unit": orphan.name}),
+                            1,
+                        ),
+                        &reference,
+                        &[],
+                    ));
+                }
+            }
+        }
         let old: Vec<(String, UnitHost, StopPolicy, Vec<u16>)> = {
             let st = lane.st();
             units

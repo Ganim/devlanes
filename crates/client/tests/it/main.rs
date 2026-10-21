@@ -142,6 +142,69 @@ async fn incompatible_daemon_is_never_sent_shutdown() -> TestResult {
     .await?
 }
 
+/// `daemon stop`/`restart` reach a daemon of another protocol with the frozen method.
+#[tokio::test]
+async fn connect_any_keeps_an_incompatible_daemon_for_shutdown() -> TestResult {
+    timeout(Duration::from_secs(5), async {
+        let temp = tempfile::tempdir()?;
+        let paths = mock_paths(&temp.path().join("home"))?;
+        paths.prepare()?;
+        let listener = UnixListener::bind(&paths.socket)?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut connection = Connection::new(stream);
+            connection.recv().await?;
+            let mut hello = Hello::current(5);
+            hello.protocol += 1;
+            connection
+                .send(Frame::Control(Control::Hello(hello)))
+                .await?;
+            let Frame::Control(Control::Request(request)) = connection.recv().await? else {
+                panic!("missing shutdown")
+            };
+            assert_eq!(request.method, Method::DaemonShutdown);
+            connection
+                .send(Frame::Control(Control::Response(Response {
+                    id: request.id,
+                    result: Outcome::Ok {
+                        data: json!({"stopping": true, "pid": 4242}),
+                    },
+                })))
+                .await?;
+            Ok::<_, devlanes_ipc::Error>(())
+        });
+        let mut client = Client::connect_any(&paths).await?;
+        assert!(!client.compatible());
+        assert_eq!(client.peer.managed_processes, 5);
+        let data = client
+            .request(Method::DaemonShutdown, json!({}), Context::default())
+            .await?;
+        assert_eq!(data["stopping"], true);
+        server.await??;
+        Ok(())
+    })
+    .await?
+}
+
+/// Only a missing socket or a refused connection means "no daemon".
+#[tokio::test]
+async fn not_running_is_only_missing_or_refused() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let paths = mock_paths(&temp.path().join("home"))?;
+    let missing = Client::connect(&paths).await.err().ok_or("connected")?;
+    assert!(missing.is_not_running());
+    assert!(!Error::Timeout.is_not_running());
+    assert!(!Error::WrongPeer.is_not_running());
+    assert!(
+        !Error::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)).is_not_running()
+    );
+    assert_eq!(
+        Error::Rpc(RpcError::new("not_found", json!({}), 3)).to_string(),
+        "the daemon answered not_found (exit 3)"
+    );
+    Ok(())
+}
+
 /// Completion calls must not create a home even when no daemon has ever run.
 #[tokio::test]
 async fn no_spawn_connect_has_no_filesystem_side_effects() -> TestResult {

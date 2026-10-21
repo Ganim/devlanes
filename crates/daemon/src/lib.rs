@@ -10,10 +10,12 @@ mod control;
 mod dns;
 mod engine;
 pub mod hosts;
+mod input;
 pub mod integrations;
 mod lifecycle;
 mod maintenance;
 mod model;
+mod orphans;
 mod pacing;
 mod platforms;
 pub mod process;
@@ -270,14 +272,23 @@ impl Server {
 
 /// Uses no-follow opens inside owner-only directories to protect the singleton lock.
 fn prepare(options: &Options) -> Result<File, Error> {
-    secure_directory(&options.home)?;
-    let run = options.home.join("run");
-    secure_directory(&run)?;
     let parent = options
         .socket
         .parent()
         .ok_or_else(|| Error::UnsafeDirectory(options.socket.clone()))?;
+    let lock = lock_singleton(&options.home)?;
     secure_directory(parent)?;
+    Ok(lock)
+}
+
+/// Takes the daemon's singleton lock under `home` (blocking I/O). Offline
+/// maintenance such as the CLI's local `daemon reset-state` holds it, so no daemon
+/// starts meanwhile; [`Error::AlreadyRunning`] means one owns it. Dropping the
+/// file releases the lock.
+pub fn lock_singleton(home: &Path) -> Result<File, Error> {
+    secure_directory(home)?;
+    let run = home.join("run");
+    secure_directory(&run)?;
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -346,6 +357,7 @@ async fn serve_client(
         disconnected: disconnected.clone(),
         id: NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     };
+    let mut inputs = input::Inputs::new(handler.clone(), session.clone());
     let result = async {
         loop {
             tokio::select! {
@@ -389,10 +401,8 @@ async fn serve_client(
                                 if stop && accepted { shutdown.cancel(); }
                             });
                         }
-                        Frame::Bytes { stream_id, data } => {
-                            handler.input(stream_id, data, session.clone()).await
-                                .map_err(|_| devlanes_ipc::Error::InvalidFrame)?;
-                        }
+                        // Queued per stream: a unit that never reads must not stall this loop.
+                        Frame::Bytes { stream_id, data } => inputs.push(stream_id, data),
                         _ => return Err(devlanes_ipc::Error::InvalidFrame),
                     }
                 }

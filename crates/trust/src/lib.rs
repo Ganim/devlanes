@@ -23,8 +23,8 @@ use async_trait::async_trait;
 pub use cert::CaCertificate;
 pub use error::TrustError;
 pub use exec::{
-    CommandExecutor, CommandLine, CommandOutput, SystemExecutor, TempPem, path_arg, run,
-    run_checked,
+    CommandExecutor, CommandLine, CommandOutput, SYSTEM_PROGRAM_DIRS, SystemExecutor, TempPem,
+    find_system_program, path_arg, run, run_checked,
 };
 
 /// A store a user can ask `devlanes certs trust` to install the CA into.

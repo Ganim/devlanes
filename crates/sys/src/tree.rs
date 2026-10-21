@@ -14,6 +14,7 @@ use crate::{ProcessIdentity, ProcessInfo};
 pub struct DescendantTracker {
     root: ProcessIdentity,
     tracked: BTreeMap<u32, ProcessInfo>,
+    root_held: bool,
 }
 
 impl DescendantTracker {
@@ -22,7 +23,16 @@ impl DescendantTracker {
         Self {
             root,
             tracked: BTreeMap::new(),
+            root_held: false,
         }
+    }
+
+    /// Declares whether the caller is the root's parent and has not reaped it yet.
+    /// While held, the root's PID (and so its session ID) cannot be recycled, so
+    /// session members keep being adopted even when a platform omits the zombie root
+    /// from its process table (macOS does).
+    pub fn hold_root(&mut self, held: bool) {
+        self.root_held = held;
     }
 
     /// Returns the identity the tracker was created for.
@@ -45,12 +55,17 @@ impl DescendantTracker {
             }
         }
 
-        if let Some(root) = by_pid.get(&self.root.pid)
-            && root.start_time == self.root.start_time
-        {
-            self.tracked.insert(root.pid, (*root).clone());
-        }
-        if self.root.sid != 0 {
+        let root_present = match by_pid.get(&self.root.pid) {
+            Some(root) if root.start_time == self.root.start_time => {
+                self.tracked.insert(root.pid, (*root).clone());
+                true
+            }
+            _ => false,
+        };
+        // Once the leader is gone its session ID can be handed to an unrelated new
+        // session, so only members seen while the leader existed are trusted; later
+        // ones still join through a tracked parent.
+        if (root_present || self.root_held) && self.root.sid != 0 {
             for process in snapshot {
                 // A member older than the leader, or a different process holding the
                 // leader's PID, belongs to a session that merely reuses the ID.
@@ -176,6 +191,22 @@ mod tests {
         // A child older than its parent belongs to an earlier holder of the parent PID.
         tracker.update(&[proc(100, 1, 100, 10), proc(400, 100, 400, 5)]);
         assert_eq!(pids(&tracker), [100]);
+    }
+
+    /// After the leader is gone, a process carrying the old session ID is not adopted
+    /// unless a tracked parent forked it.
+    #[test]
+    fn no_session_adoption_without_root() {
+        let mut tracker = DescendantTracker::new(root());
+        tracker.update(&[proc(100, 1, 100, 10), proc(101, 100, 100, 11)]);
+        tracker.update(&[proc(101, 1, 100, 11), proc(200, 1, 100, 20)]);
+        assert_eq!(pids(&tracker), [101]);
+        tracker.update(&[proc(101, 1, 100, 11), proc(102, 101, 100, 21)]);
+        assert_eq!(pids(&tracker), [101, 102]);
+        // An unreaped root keeps its session trustworthy even when not listed.
+        tracker.hold_root(true);
+        tracker.update(&[proc(101, 1, 100, 11), proc(300, 1, 100, 30)]);
+        assert_eq!(pids(&tracker), [101, 300]);
     }
 
     /// A recycled root PID is never adopted, and zombies are excluded from live members.

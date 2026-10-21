@@ -203,20 +203,33 @@ struct CiState {
     annotated: BTreeSet<(String, String)>,
 }
 
+/// Open log group and annotated failures, shared by every reporter of one
+/// invocation, so an error printed by another reporter still closes the group.
+#[derive(Clone, Default)]
+pub struct CiShared(Arc<Mutex<CiState>>);
+
+impl std::fmt::Debug for CiShared {
+    /// Opaque: the state is rendering bookkeeping.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CiShared")
+    }
+}
+
 /// Wraps the plain reporter while tracking balanced phase groups and duplicate failures.
 pub struct CiPlainReporter {
     plain: PlainReporter,
     provider: Arc<dyn CiProvider>,
-    state: Mutex<CiState>,
+    state: Arc<Mutex<CiState>>,
 }
 
 impl CiPlainReporter {
     /// The injected provider permits hermetic tests and future provider integrations.
     pub fn new(runtime: Runtime, provider: Arc<dyn CiProvider>) -> Self {
+        let state = runtime.ci_state.0.clone();
         Self {
             plain: PlainReporter(runtime),
             provider,
-            state: Mutex::new(CiState::default()),
+            state,
         }
     }
 
@@ -272,6 +285,12 @@ impl Reporter for CiPlainReporter {
         );
         Ok(result)
     }
+    /// Closes an open log group first, so the error is not folded away inside it.
+    fn error(&self, error: &devlanes_proto::RpcError, hint: Option<&crate::Hint>) -> Rendered {
+        let mut rendered = self.plain.error(error, hint);
+        rendered.stdout.insert_str(0, &self.close_group());
+        rendered
+    }
     /// Accepts proto's lane.phase and unit/task event shapes without daemon-side wording.
     fn event(&self, method: Method, event: &Event) -> Result<Rendered, serde_json::Error> {
         if event.event == events::RESULT {
@@ -321,11 +340,42 @@ impl Reporter for CiPlainReporter {
 }
 
 /// Extracts failure payloads from page, lane, unit.changed and task response shapes.
+///
+/// A start result lists `failures` (with log tails, including tasks that are not
+/// units) next to `units`: failures come first, a failed unit without its own tail
+/// borrows the tail from the matching failure, and failed units missing from
+/// `failures` follow.
 pub(crate) fn failures(value: &Value) -> Vec<UnitFailure> {
     if let Some(items) = value.as_array() {
         return items.iter().flat_map(failures).collect();
     }
-    for key in ["items", "units", "failures"] {
+    if let Some(listed) = value.get("failures").and_then(Value::as_array) {
+        let mut found: Vec<UnitFailure> = listed.iter().flat_map(failure_entry).collect();
+        for unit in ["units", "items"]
+            .into_iter()
+            .filter_map(|key| value.get(key).and_then(Value::as_array))
+            .flatten()
+            .flat_map(failures)
+        {
+            // Either side may omit the lane (a single-lane start result).
+            match found.iter_mut().find(|known| {
+                known.unit == unit.unit
+                    && (known.lane == unit.lane || known.lane.is_empty() || unit.lane.is_empty())
+            }) {
+                Some(known) => {
+                    if known.log_tail.is_empty() {
+                        known.log_tail = unit.log_tail;
+                    }
+                    if known.exit_code.is_none() {
+                        known.exit_code = unit.exit_code;
+                    }
+                }
+                None => found.push(unit),
+            }
+        }
+        return found;
+    }
+    for key in ["items", "units"] {
         if let Some(items) = value.get(key).and_then(Value::as_array) {
             return items.iter().flat_map(failures).collect();
         }
@@ -336,15 +386,18 @@ pub(crate) fn failures(value: &Value) -> Vec<UnitFailure> {
     if value.get("state").and_then(Value::as_str) != Some("failed") {
         return Vec::new();
     }
-    let Some(unit) = value
+    failure_entry(value).into_iter().collect()
+}
+
+/// One failure from a unit summary or a `failures` entry (`{lane, unit, exit_code,
+/// log_tail}`); entries of `failures` carry no state because they all failed.
+fn failure_entry(value: &Value) -> Option<UnitFailure> {
+    let unit = value
         .get("name")
         .or_else(|| value.get("unit"))
         .or_else(|| value.get("task"))
-        .and_then(Value::as_str)
-    else {
-        return Vec::new();
-    };
-    vec![UnitFailure {
+        .and_then(Value::as_str)?;
+    Some(UnitFailure {
         lane: value
             .get("lane")
             .and_then(Value::as_str)
@@ -366,7 +419,7 @@ pub(crate) fn failures(value: &Value) -> Vec<UnitFailure> {
                     .collect()
             })
             .unwrap_or_default(),
-    }]
+    })
 }
 
 /// Avoids an early empty annotation suppressing the final useful failure tail.

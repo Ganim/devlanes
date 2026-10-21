@@ -1,4 +1,4 @@
-//! kitty launcher: `kitty --single-instance --directory <dir> <command>`.
+//! kitty launcher: `kitty --directory <dir> <command>`, through `open -na kitty.app` on macOS.
 
 use devlanes_term::{Invocation, LaunchError, LaunchRequest, TerminalLauncher};
 
@@ -12,23 +12,28 @@ impl TerminalLauncher for Kitty {
         "kitty"
     }
 
-    /// Plans a kitty window; `--single-instance` reuses a running kitty when present.
+    /// Plans a kitty window in the request's directory.
     fn invocation(&self, request: &LaunchRequest) -> Result<Invocation, LaunchError> {
         let command = request.require_command()?;
-        let mut args = vec![
-            "--single-instance".into(),
-            "--directory".into(),
-            request.cwd_arg(),
-        ];
+        let mut args = vec!["--directory".into(), request.cwd_arg()];
         if let Some(title) = &request.title {
             args.extend(["--title".into(), title.clone()]);
         }
         args.extend(command.iter().cloned());
         Ok(platform(args))
     }
+
+    /// kitty.app on macOS, the `kitty` binary elsewhere.
+    fn available(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return devlanes_term::app_installed("kitty.app");
+        #[cfg(not(target_os = "macos"))]
+        return devlanes_term::on_path("kitty");
+    }
 }
 
-/// The macOS app bundle does not put `kitty` on PATH by default.
+/// The macOS app bundle does not put `kitty` on PATH by default. `open -n`
+/// starts a separate kitty process, so `--single-instance` would be ignored.
 #[cfg(target_os = "macos")]
 fn platform(args: Vec<String>) -> Invocation {
     let mut open = vec!["-na".into(), "kitty.app".into(), "--args".into()];
@@ -36,10 +41,13 @@ fn platform(args: Vec<String>) -> Invocation {
     Invocation::new("open", open, true)
 }
 
-/// On Linux the first kitty instance stays in the foreground; it is reaped in the background.
+/// On Linux `--single-instance` opens the window in a running kitty when there
+/// is one; the first instance stays in the foreground and is reaped in the background.
 #[cfg(not(target_os = "macos"))]
 fn platform(args: Vec<String>) -> Invocation {
-    Invocation::new("kitty", args, false)
+    let mut single = vec!["--single-instance".to_owned()];
+    single.extend(args);
+    Invocation::new("kitty", single, false)
 }
 
 #[cfg(test)]
@@ -54,9 +62,10 @@ mod tests {
             title: Some("api".into()),
         })?;
         let args = invocation.args.join(" ");
-        assert!(args.ends_with(
-            "--single-instance --directory /work/acme --title api devlanes attach acme@2:api"
-        ));
+        assert!(args.ends_with("--directory /work/acme --title api devlanes attach acme@2:api"));
+        // `open -na` and `--single-instance` contradict each other.
+        let single = invocation.args.iter().any(|arg| arg == "--single-instance");
+        assert_eq!(single, invocation.program == "kitty");
         Ok(())
     }
 }

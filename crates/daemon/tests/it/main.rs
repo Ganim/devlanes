@@ -2,10 +2,12 @@
 //! with fake runner, infra and process table. Every test has a timeout and stops
 //! what it started.
 
+mod attach;
 mod engine;
 mod failures;
 mod fakes;
 mod hosts;
+mod orphans;
 mod pacing;
 mod profiles;
 mod pty;
@@ -129,6 +131,9 @@ pub struct Setup {
     pub user: Option<devlanes_config::UserConfig>,
     /// Route sink, e.g. one reporting a bound HTTPS port.
     pub routes: Option<Arc<dyn devlanes_daemon::integrations::RouteSink>>,
+    /// Logs directory instead of `<home>/logs`. A simulated crash leaves the old
+    /// in-process engine holding its log writers, which a real crash would release.
+    pub logs: Option<PathBuf>,
 }
 
 /// Opens an engine over `home` (reusing its state.db when present).
@@ -150,6 +155,9 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
     let mut options = EngineOptions::new(home, home.join("d.sock"));
     options.watch = setup.watch;
     options.start_timeout = Duration::from_secs(10);
+    if let Some(logs) = setup.logs {
+        options.logs = logs;
+    }
     if let Some(user) = setup.user {
         options.user = user;
         options.dns_listen = "127.0.0.1:0".parse().expect("address");

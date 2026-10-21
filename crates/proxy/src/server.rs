@@ -2,10 +2,7 @@ use std::{
     convert::Infallible,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, PoisonError},
     time::Duration,
 };
 
@@ -22,20 +19,52 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
+    rt::{TokioExecutor, TokioIo, TokioTimer},
     server::conn::auto::Builder,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
+    sync::{OwnedSemaphorePermit, Semaphore, watch},
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{HostHeader, RouteState, RouteTable, Upstream};
+use crate::{
+    HostHeader, RouteState, RouteTable, Upstream,
+    activity::{ActiveBody, Activity},
+    health::{Health, ListenerGuard, ListenerHealth},
+    pool::{Connection, Pool},
+};
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
-type Body = UnsyncBoxBody<Bytes, BoxError>;
+pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type Body = UnsyncBoxBody<Bytes, BoxError>;
+
+/// Each HTTP/2 stream needs its own HTTP/1.1 upstream connection, so this bounds those per client.
+pub(crate) const MAX_H2_STREAMS: u32 = 32;
+
+/// Resource bounds shared by all listeners of one proxy instance.
+#[derive(Clone, Debug)]
+pub struct ProxyLimits {
+    /// Client connections served at once across all listeners, WebSockets included.
+    /// Further clients wait in the kernel backlog.
+    pub max_connections: usize,
+    /// Time allowed for a complete HTTP/1 request head, including between keep-alive requests.
+    pub header_timeout: Duration,
+    /// A connection with no request or response body in flight is closed after this long.
+    pub idle_timeout: Duration,
+}
+
+impl Default for ProxyLimits {
+    /// Allows browser and dev-server bursts while bounding idle and slow clients.
+    fn default() -> Self {
+        Self {
+            max_connections: 512,
+            header_timeout: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(120),
+        }
+    }
+}
 
 /// Peer policy and timeouts apply independently to every provided listener.
 #[derive(Clone, Debug)]
@@ -60,13 +89,13 @@ impl Default for ProxyConfig {
 
 #[derive(Debug)]
 struct Snapshot {
+    /// Changes only when the set of certificate names changes, so state updates keep cached leaves.
     generation: u64,
     table: RouteTable,
 }
 
 #[derive(Debug)]
 struct Routes {
-    next_generation: AtomicU64,
     snapshot: ArcSwap<Snapshot>,
 }
 
@@ -97,6 +126,10 @@ impl CertificatePolicy for Routes {
 pub struct Proxy {
     config: ProxyConfig,
     routes: Arc<Routes>,
+    limits: ProxyLimits,
+    connections: Arc<Semaphore>,
+    health: Health,
+    pool: Arc<Pool>,
 }
 
 impl Proxy {
@@ -105,22 +138,42 @@ impl Proxy {
         Self {
             config,
             routes: Arc::new(Routes {
-                next_generation: AtomicU64::new(1),
                 snapshot: ArcSwap::from_pointee(Snapshot {
                     generation: 0,
                     table: routes,
                 }),
             }),
+            limits: ProxyLimits::default(),
+            connections: Arc::new(Semaphore::new(ProxyLimits::default().max_connections)),
+            health: Health::default(),
+            pool: Arc::new(Pool::default()),
         }
     }
 
     /// Publishes a complete snapshot without interrupting in-flight streams.
     pub fn replace_routes(&self, routes: RouteTable) {
-        let generation = self.routes.next_generation.fetch_add(1, Ordering::Relaxed);
-        self.routes.snapshot.store(Arc::new(Snapshot {
-            generation,
-            table: routes,
-        }));
+        let names = certificate_names(&routes);
+        self.routes.snapshot.rcu(|old| Snapshot {
+            generation: old.generation + u64::from(certificate_names(&old.table) != names),
+            table: routes.clone(),
+        });
+    }
+
+    /// Replaces the default limits; call before cloning the proxy or serving any listener.
+    pub fn with_limits(mut self, limits: ProxyLimits) -> Self {
+        self.connections = Arc::new(Semaphore::new(limits.max_connections.max(1)));
+        self.limits = limits;
+        self
+    }
+
+    /// Reports every listener served so far, sorted by address, including stopped ones.
+    pub fn listener_health(&self) -> Vec<ListenerHealth> {
+        self.health
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Returns a detached snapshot for host listings and diagnostics.
@@ -161,6 +214,8 @@ impl Proxy {
     }
 
     /// All accepted peers, including IPv4-mapped IPv6 peers, pass the same LAN policy.
+    ///
+    /// Accept errors never end the loop: only cancellation does.
     async fn serve_listener(
         &self,
         listener: TcpListener,
@@ -170,32 +225,65 @@ impl Proxy {
         let shutdown = shutdown.child_token();
         let _shutdown_guard = shutdown.clone().drop_guard();
         let local = listener.local_addr()?;
+        let mut health = ListenerGuard::new(self.health.clone(), local, tls.is_some());
         let mut connections = JoinSet::new();
         loop {
-            tokio::select! {
+            // Taking the permit first leaves excess clients in the kernel backlog.
+            let permit = tokio::select! {
                 _ = shutdown.cancelled() => break,
-                Some(_) = connections.join_next(), if !connections.is_empty() => {},
-                accepted = listener.accept() => {
-                    let (stream, peer) = accepted?;
-                    if !self.config.lan && !is_loopback(peer.ip()) {
+                Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+                permit = self.connections.clone().acquire_owned() => match permit {
+                    Ok(permit) => Arc::new(permit),
+                    Err(_) => break,
+                },
+            };
+            let accepted = tokio::select! {
+                _ = shutdown.cancelled() => break,
+                accepted = listener.accept() => accepted,
+            };
+            let (stream, peer) = match accepted {
+                Ok(accepted) => {
+                    health.recovered();
+                    accepted
+                }
+                Err(error) => {
+                    health.failed(&error);
+                    if peer_error(&error) {
+                        // A client reset before accept (ECONNABORTED) concerns that client only.
+                        tracing::debug!(%local, %error, "proxy accept failed");
                         continue;
                     }
-                    let proxy = self.clone();
-                    let tls = tls.clone();
-                    let shutdown = shutdown.clone();
-                    connections.spawn(async move {
-                        if let Some(tls) = tls {
-                            match tokio::time::timeout(Duration::from_secs(10), tls.accept(stream)).await {
-                                Ok(Ok(stream)) => proxy.serve_connection(stream, peer, local, true, shutdown).await,
-                                Ok(Err(error)) => tracing::debug!(%error, "TLS handshake refused"),
-                                Err(_) => tracing::debug!("TLS handshake timed out"),
-                            }
-                        } else {
-                            proxy.serve_connection(stream, peer, local, false, shutdown).await;
-                        }
-                    });
+                    // EMFILE/ENFILE and other resource errors persist; pause instead of spinning.
+                    tracing::warn!(%local, %error, "proxy accept failed, retrying");
+                    tokio::select! {
+                        _ = shutdown.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => continue,
+                    }
                 }
+            };
+            if !self.config.lan && !is_loopback(peer.ip()) {
+                continue;
             }
+            let proxy = self.clone();
+            let tls = tls.clone();
+            let shutdown = shutdown.clone();
+            connections.spawn(async move {
+                let Some(tls) = tls else {
+                    proxy
+                        .serve_connection(stream, peer, local, false, shutdown, permit)
+                        .await;
+                    return;
+                };
+                match tokio::time::timeout(Duration::from_secs(10), tls.accept(stream)).await {
+                    Ok(Ok(stream)) => {
+                        proxy
+                            .serve_connection(stream, peer, local, true, shutdown, permit)
+                            .await;
+                    }
+                    Ok(Err(error)) => tracing::debug!(%error, "TLS handshake refused"),
+                    Err(_) => tracing::debug!("TLS handshake timed out"),
+                }
+            });
         }
         connections.abort_all();
         while connections.join_next().await.is_some() {}
@@ -203,6 +291,8 @@ impl Proxy {
     }
 
     /// Keeps streaming bodies and upgrades attached to the listener's shutdown lifetime.
+    ///
+    /// `permit` is held until the connection and any WebSocket bridged from it end.
     async fn serve_connection<I>(
         &self,
         stream: I,
@@ -210,19 +300,69 @@ impl Proxy {
         local: SocketAddr,
         secure: bool,
         shutdown: CancellationToken,
+        permit: Arc<OwnedSemaphorePermit>,
     ) where
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let proxy = self.clone();
+        let (activity, mut active) = watch::channel(0usize);
         let service = service_fn(move |request| {
             let proxy = proxy.clone();
             let shutdown = shutdown.clone();
-            async move { proxy.handle(request, peer, local, secure, shutdown).await }
+            let permit = permit.clone();
+            let activity = Activity::new(activity.clone());
+            async move {
+                let response = proxy
+                    .handle(request, peer, local, secure, shutdown, permit)
+                    .await?;
+                Ok::<_, Infallible>(
+                    response.map(|body| ActiveBody::new(body, activity).boxed_unsync()),
+                )
+            }
         });
-        let builder = Builder::new(TokioExecutor::new());
+        let mut builder = Builder::new(TokioExecutor::new());
+        // Hyper restarts this timer while waiting for each keep-alive request, so it also
+        // bounds idle HTTP/1 connections.
+        builder
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(self.limits.header_timeout);
+        builder
+            .http2()
+            .timer(TokioTimer::new())
+            .max_concurrent_streams(MAX_H2_STREAMS)
+            .keep_alive_interval(Duration::from_secs(30))
+            .keep_alive_timeout(Duration::from_secs(10));
         let connection = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
-        if let Err(error) = connection.await {
-            tracing::debug!(%error, "proxy connection ended");
+        tokio::pin!(connection);
+        // HTTP/2 has no server idle timeout in Hyper, and pings keep idle browsers alive,
+        // so idleness is measured from requests and response bodies instead.
+        let idle = tokio::time::sleep(self.limits.idle_timeout);
+        tokio::pin!(idle);
+        let mut closing = false;
+        loop {
+            tokio::select! {
+                result = &mut connection => {
+                    if let Err(error) = result {
+                        tracing::debug!(%error, "proxy connection ended");
+                    }
+                    break;
+                }
+                Ok(()) = active.changed() => {
+                    if *active.borrow_and_update() == 0 && !closing {
+                        idle.as_mut().reset(tokio::time::Instant::now() + self.limits.idle_timeout);
+                    }
+                }
+                _ = &mut idle, if closing || *active.borrow() == 0 => {
+                    if closing {
+                        break;
+                    }
+                    // GOAWAY lets HTTP/2 clients retry elsewhere; give it a short grace period.
+                    connection.as_mut().graceful_shutdown();
+                    closing = true;
+                    idle.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(5));
+                }
+            }
         }
     }
 
@@ -234,6 +374,7 @@ impl Proxy {
         local: SocketAddr,
         secure: bool,
         shutdown: CancellationToken,
+        permit: Arc<OwnedSemaphorePermit>,
     ) -> Result<Response<Body>, Infallible> {
         let Some(authority) = request_authority(&request) else {
             return Ok(page(
@@ -321,7 +462,7 @@ impl Proxy {
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Service failed",
                     &route.start_hint,
-                    log_tail,
+                    logs_for_peer(log_tail, peer.ip()),
                 ));
             }
             RouteState::Reconnecting => {
@@ -334,22 +475,14 @@ impl Proxy {
             }
             RouteState::Ready => {}
         }
-        let stream = match dial(route.target(), self.config.connect_timeout).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                tracing::debug!(%error, host = %route.host, "upstream dial failed");
-                return Ok(page(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service unavailable",
-                    &route.start_hint,
-                    "The upstream is not accepting connections.",
-                ));
-            }
-        };
         let upgrading = header_has_token(request.headers(), header::CONNECTION, "upgrade")
             && request.headers().contains_key(header::UPGRADE);
         let downstream_upgrade = upgrading.then(|| hyper::upgrade::on(&mut request));
         strip_hop_headers(request.headers_mut(), upgrading);
+        strip_client_metadata(request.headers_mut());
+        if request.version() == hyper::Version::HTTP_2 {
+            join_cookies(request.headers_mut());
+        }
         // Forwarded metadata is replaced at this trust boundary, never trusted from clients.
         let proto = if secure { "https" } else { "http" };
         let public_port = authority.port_u16().unwrap_or(local.port());
@@ -372,21 +505,9 @@ impl Proxy {
         if let Ok(value) = HeaderValue::from_str(marker) {
             request.headers_mut().append("x-devlanes-via", value);
         }
-        let upstream_authority = if route.host_header == HostHeader::Upstream {
-            stream.peer_addr().map_or_else(
-                |_| route.target().authority(),
-                |addr| {
-                    if matches!(route.target(), Upstream::Local(_)) {
-                        addr.to_string()
-                    } else {
-                        route.target().authority()
-                    }
-                },
-            )
-        } else {
-            authority.to_string()
-        };
-        if let Ok(value) = HeaderValue::from_str(&upstream_authority) {
+        if route.host_header == HostHeader::Preserve
+            && let Ok(value) = HeaderValue::from_str(authority.as_str())
+        {
             request.headers_mut().insert(header::HOST, value);
         }
         // HTTP/2 pseudo-headers and absolute-form requests become origin-form upstream.
@@ -406,39 +527,82 @@ impl Proxy {
             }
         }
         *request.version_mut() = hyper::Version::HTTP_11;
-        let (mut sender, connection) =
-            match hyper::client::conn::http1::handshake(TokioIo::new(stream)).await {
-                Ok(pair) => pair,
-                Err(_) => {
-                    return Ok(page(
-                        StatusCode::BAD_GATEWAY,
-                        "Upstream handshake failed",
-                        &route.start_hint,
-                        "",
-                    ));
-                }
-            };
-        let connection_shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = connection_shutdown.cancelled() => {},
-                result = connection.with_upgrades() => {
-                    if let Err(error) = result { tracing::debug!(%error, "upstream connection ended"); }
+        let target = route.target();
+        let unavailable = || {
+            page(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service unavailable",
+                &route.start_hint,
+                "The upstream is not accepting connections.",
+            )
+        };
+        let failed = || {
+            page(
+                StatusCode::BAD_GATEWAY,
+                "Upstream request failed",
+                &route.start_hint,
+                "",
+            )
+        };
+        // Upgrades dial their own connection, which is never pooled after a 101.
+        let pooled = if upgrading {
+            None
+        } else {
+            self.pool.take(target)
+        };
+        let (connection, sent) = match pooled {
+            Some(mut connection) => {
+                set_upstream_host(&mut request, route.host_header, &connection);
+                match connection.sender.try_send_request(request).await {
+                    Ok(response) => (connection, Ok(response)),
+                    // The upstream closed the idle socket before the request was written,
+                    // so it is safe to send once more on a fresh connection.
+                    Err(mut error) => match error.take_message() {
+                        Some(unsent) => {
+                            request = unsent;
+                            match self.connect(target, shutdown.clone()).await {
+                                Ok(mut fresh) => {
+                                    set_upstream_host(&mut request, route.host_header, &fresh);
+                                    let sent = fresh.sender.send_request(request).await;
+                                    (fresh, sent)
+                                }
+                                Err(error) => {
+                                    tracing::debug!(%error, host = %route.host, "upstream dial failed");
+                                    return Ok(unavailable());
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::debug!(error = %error.error(), host = %route.host, "upstream request failed");
+                            return Ok(failed());
+                        }
+                    },
                 }
             }
-        });
-        let mut response = match sender.send_request(request).await {
+            None => match self.connect(target, shutdown.clone()).await {
+                Ok(mut connection) => {
+                    set_upstream_host(&mut request, route.host_header, &connection);
+                    let sent = connection.sender.send_request(request).await;
+                    (connection, sent)
+                }
+                Err(error) => {
+                    tracing::debug!(%error, host = %route.host, "upstream dial failed");
+                    return Ok(unavailable());
+                }
+            },
+        };
+        let mut response = match sent {
             Ok(response) => response,
-            Err(_) => {
-                return Ok(page(
-                    StatusCode::BAD_GATEWAY,
-                    "Upstream request failed",
-                    &route.start_hint,
-                    "",
-                ));
+            Err(error) => {
+                tracing::debug!(%error, host = %route.host, "upstream request failed");
+                return Ok(failed());
             }
         };
         let switched = response.status() == StatusCode::SWITCHING_PROTOCOLS;
+        if !switched {
+            self.pool
+                .recycle(target.clone(), connection, shutdown.clone());
+        }
         if switched {
             let Some(downstream) = downstream_upgrade else {
                 return Ok(page(
@@ -450,6 +614,7 @@ impl Proxy {
             };
             let upstream = hyper::upgrade::on(&mut response);
             tokio::spawn(async move {
+                let _permit = permit;
                 tokio::select! {
                     _ = shutdown.cancelled() => {},
                     _ = async {
@@ -465,6 +630,103 @@ impl Proxy {
             body.map_err(|error| -> BoxError { Box::new(error) })
                 .boxed_unsync()
         }))
+    }
+
+    /// Dials and handshakes a new HTTP/1.1 connection whose driver stops with the listener.
+    async fn connect(
+        &self,
+        target: &Upstream,
+        shutdown: CancellationToken,
+    ) -> Result<Connection, BoxError> {
+        let stream = dial(target, self.config.connect_timeout).await?;
+        // Local targets may answer on IPv6 only, so the Host rewrite names the address that answered.
+        let authority = if matches!(target, Upstream::Local(_)) {
+            stream.peer_addr()?.to_string()
+        } else {
+            target.authority()
+        };
+        let (sender, connection) =
+            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown.cancelled() => {},
+                result = connection.with_upgrades() => {
+                    if let Err(error) = result {
+                        tracing::debug!(%error, "upstream connection ended");
+                    }
+                }
+            }
+        });
+        Ok(Connection { sender, authority })
+    }
+}
+
+/// Applies `HostHeader::Upstream` once the connection, and so the answering address, is known.
+fn set_upstream_host(request: &mut Request<Incoming>, policy: HostHeader, connection: &Connection) {
+    if policy == HostHeader::Upstream
+        && let Ok(value) = HeaderValue::from_str(&connection.authority)
+    {
+        request.headers_mut().insert(header::HOST, value);
+    }
+}
+
+/// Errors caused by one client's connection, which say nothing about the listener's health.
+fn peer_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+    )
+}
+
+/// State, upstream and insertion-order changes do not alter certificate authorization.
+fn certificate_names(table: &RouteTable) -> Vec<String> {
+    let mut names: Vec<_> = table
+        .routes()
+        .iter()
+        .flat_map(|route| std::iter::once(&route.host).chain(&route.certificate_names))
+        .cloned()
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Logs can contain secrets even when the route is deliberately exposed to the LAN.
+fn logs_for_peer(logs: &str, peer: IpAddr) -> &str {
+    if is_loopback(peer) { logs } else { "" }
+}
+
+/// Removes alternate proxy metadata that frameworks may trust over X-Forwarded-For.
+fn strip_client_metadata(headers: &mut HeaderMap) {
+    for name in [
+        "x-real-ip",
+        "x-forwarded-ssl",
+        "x-forwarded-scheme",
+        "x-forwarded-prefix",
+        "x-forwarded-server",
+        "x-original-url",
+        "front-end-https",
+    ] {
+        headers.remove(name);
+    }
+}
+
+/// RFC 9113 section 8.2.3: HTTP/2 may split `cookie`, but HTTP/1.1 needs one "; "-joined field.
+fn join_cookies(headers: &mut HeaderMap) {
+    let cookies: Vec<&[u8]> = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .map(HeaderValue::as_bytes)
+        .collect();
+    if cookies.len() < 2 {
+        return;
+    }
+    if let Ok(value) = HeaderValue::from_bytes(&cookies.join(b"; ".as_slice())) {
+        headers.insert(header::COOKIE, value);
     }
 }
 
@@ -622,4 +884,31 @@ fn page(status: StatusCode, title: &str, hint: &str, logs: &str) -> Response<Bod
         HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// LAN peers see the failure page without the service's log tail.
+    #[test]
+    fn log_tail_only_for_loopback_peers() {
+        for peer in ["127.0.0.1", "::1", "::ffff:127.0.0.1"] {
+            assert_eq!(logs_for_peer("secret", peer.parse().expect("ip")), "secret");
+        }
+        for peer in ["192.168.1.20", "::ffff:10.0.0.2", "fe80::1"] {
+            assert_eq!(logs_for_peer("secret", peer.parse().expect("ip")), "");
+        }
+    }
+
+    /// Split HTTP/2 cookie fields become one HTTP/1.1 field, in order.
+    #[test]
+    fn cookies_are_joined() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::COOKIE, HeaderValue::from_static("a=1"));
+        headers.append(header::COOKIE, HeaderValue::from_static("b=2; c=3"));
+        join_cookies(&mut headers);
+        let cookies: Vec<_> = headers.get_all(header::COOKIE).iter().collect();
+        assert_eq!(cookies, [HeaderValue::from_static("a=1; b=2; c=3")]);
+    }
 }

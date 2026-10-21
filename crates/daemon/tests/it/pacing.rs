@@ -180,6 +180,12 @@ async fn queued_units_stop_bypass_and_restart() {
         assert_eq!(reason.data["position"], 1);
         assert_eq!(reason.data["in_flight"], 1);
         assert_eq!(reason.data["window"], 1);
+        assert_eq!(reason.data["hold"], "window_full");
+        // No run history yet: the default need.
+        assert_eq!(
+            reason.data["memory_need_bytes"],
+            devlanes_core::gate::DEFAULT_MEMORY_NEED
+        );
         let why = h
             .call(Method::Why, json!({"unit": "b"}), cx(&main))
             .await
@@ -206,6 +212,7 @@ async fn queued_units_stop_bypass_and_restart() {
                 lane: "elsewhere@0".into(),
                 unit: "holder".into(),
                 order: 0,
+                memory_need: 0,
             })
             .await;
         let bypass: StartResult = serde_json::from_value(

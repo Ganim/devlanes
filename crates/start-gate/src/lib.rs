@@ -1,20 +1,25 @@
 //! Start gates for the daemon: [`AllAtOnce`], [`FixedWindow`] and
 //! [`AdaptiveGate`], all implementing [`devlanes_core::gate::StartGate`].
 //!
-//! One gate is shared by every lane and project on the machine. Starts are
-//! granted by declaration order, then arrival. A slot is held until its holder
-//! releases it (ready, failed, settled) or `slot_timeout` passes, so services
-//! that wait on each other cannot block the queue. Gates only schedule starts;
-//! they never limit or signal running processes.
+//! One gate is shared by every lane and project on the machine. Start
+//! requests are served first come, first served; the units of one request go
+//! in declaration order. A slot is held until its holder releases it (ready,
+//! failed, settled) or `slot_timeout` passes, so services that wait on each
+//! other cannot block the queue. Gates that read a `PressureSource` also hold
+//! the head of the queue while its memory need does not fit, for at most
+//! `slot_timeout`. Gates only schedule starts; they never limit or signal
+//! running processes.
 //!
 //! ```
 //! use std::{sync::Arc, time::Duration};
-//! use devlanes_core::{clock::TokioClock, gate::{Release, StartGate, StartRequest}};
+//! use devlanes_core::{clock::TokioClock, gate::{DEFAULT_MEMORY_NEED, Release, StartGate, StartRequest}};
 //! use devlanes_start_gate::{FixedWindow, GateOptions};
 //!
 //! # tokio::runtime::Runtime::new()?.block_on(async {
 //! let gate = FixedWindow::new(2, GateOptions::default(), Arc::new(TokioClock::new()));
-//! let request = |unit: &str, order| StartRequest { lane: "acme@1".into(), unit: unit.into(), order };
+//! let request = |unit: &str, order| StartRequest {
+//!     lane: "acme@1".into(), unit: unit.into(), order, memory_need: DEFAULT_MEMORY_NEED,
+//! };
 //! let web = gate.acquire(request("web", 0)).await;
 //! let _api = gate.acquire(request("api", 1)).await;
 //! let worker = gate.enqueue(request("worker", 2));
@@ -69,8 +74,9 @@ impl FixedWindow {
         ))
     }
 
-    /// Same window, but reads `pressure` while busy so snapshots carry CPU and
-    /// memory pressure. The readings never change the window.
+    /// Same window, but reads `pressure` while busy: snapshots carry CPU and
+    /// memory pressure, and the head of the queue waits while its memory need
+    /// does not fit. The readings never change the window.
     pub fn with_pressure(
         max: usize,
         options: GateOptions,
@@ -113,9 +119,9 @@ impl AdaptiveGate {
 macro_rules! start_gate {
     ($gate:ty) => {
         impl StartGate for $gate {
-            /// Queues the start; see [`StartGate::enqueue`].
-            fn enqueue(&self, request: StartRequest) -> StartTicket {
-                self.0.enqueue(request)
+            /// Queues one start request's units; see [`StartGate::enqueue_batch`].
+            fn enqueue_batch(&self, requests: Vec<StartRequest>) -> Vec<StartTicket> {
+                self.0.enqueue_batch(requests)
             }
 
             /// Window, holders, queue and the latest pressure reading.

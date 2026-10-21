@@ -1,10 +1,11 @@
-//! Remote operation (plan M14).
+//! Remote operation (plan M14). Remote is mirroring only: a client never runs
+//! commands on a box, and nothing in this path carries environments or secrets.
 //!
 //! Client side: `connect` keeps one reconnecting [`Link`] per box in the daemon,
 //! mirrors the box's registry ([`mirror`]: same-number loopback listeners and proxy
-//! routes), applies its folder syncs ([`sync`]) and forwards `--host` requests over
-//! the session. Box side: `status` lists the tunnels serving clients and
-//! `sync.status` lists the sync entries a tunnel may stream.
+//! routes) and applies its folder syncs ([`sync`]) below
+//! `$DEVLANES_HOME/sync/<host>/`. Box side: `status` lists the tunnels serving
+//! clients and `sync.status` lists the sync entries a tunnel may stream.
 
 mod mirror;
 mod sync;
@@ -20,55 +21,47 @@ use std::{
 };
 
 use async_trait::async_trait;
-use base64::Engine as _;
 use bytes::Bytes;
 use devlanes_proto::{
-    AttachResult, Context, Event, Method, Outcome, Request, RpcError,
-    remote::{self as wire, Forward, Input, RemoteClient, Reply, SyncEntry},
+    Event, RpcError,
+    remote::{self as wire, RemoteClient, SyncEntry},
 };
-use devlanes_transport::{
-    ClientRegistry, Link, LinkState, RpcCallError, RpcReceiver, RpcSender, Session as BoxSession,
-    SessionOptions,
-};
+use devlanes_sync::{HashCache, RelPath};
+use devlanes_transport::{ClientRegistry, Link, LinkState, Session as BoxSession, SessionOptions};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::{
+    sync::{oneshot, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     Session,
     engine::{Inner, required},
-    integrations::{RemotePrompt, RemotePrompter, RouteEntry},
+    integrations::{ConnectOptions, RemotePrompt, RemotePrompter, RouteEntry},
     model::lock,
-    registry::internal,
 };
 
-/// How long a forwarded request waits for a reconnecting box before failing.
-const SESSION_WAIT: Duration = Duration::from_secs(10);
 /// `connect --background` returns once connected, failed, or after this long.
 const CONNECT_WAIT: Duration = Duration::from_secs(150);
 /// Unanswered ssh prompts are cancelled after this long.
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Stream ids for forwarded attaches and prompts start far above the engine's own
-/// attach ids, so both can share one client connection.
+/// Stream ids for prompts start far above the engine's own attach ids, so both
+/// can share one client connection.
 static NEXT_STREAM: AtomicU64 = AtomicU64::new(1 << 40);
 
 /// Remote state owned by the engine.
 #[derive(Default)]
 pub(crate) struct Remotes {
     hosts: Mutex<BTreeMap<String, Arc<HostConn>>>,
+    /// Serializes connects so a replaced connection is gone before its successor
+    /// binds the same ports.
+    connecting: tokio::sync::Mutex<()>,
     /// Box side: tunnels currently serving a client, for `status`.
     clients: Mutex<BTreeMap<u64, RemoteClient>>,
-    /// Forwarded attaches by local `(session, stream)`.
-    streams: Mutex<HashMap<(u64, u64), RemoteStream>>,
     next_client: AtomicU64,
-}
-
-/// A forwarded attach: the box's stream id and the input side of its call.
-struct RemoteStream {
-    remote_id: u64,
-    input: mpsc::Sender<Input>,
 }
 
 impl Remotes {
@@ -80,31 +73,10 @@ impl Remotes {
             .collect()
     }
 
-    /// The connection to `host`, if `connect` created one.
-    fn host(&self, host: &str) -> Option<Arc<HostConn>> {
-        lock(&self.hosts).get(host).cloned()
-    }
-
     /// Every connection.
     fn all(&self) -> Vec<Arc<HostConn>> {
         lock(&self.hosts).values().cloned().collect()
     }
-}
-
-/// True when a request carries `--host` and must run on that box.
-///
-/// `connect`, `disconnect` and `host ls` manage the connections themselves, so they
-/// always run here.
-pub(crate) fn forwards(request: &Request) -> bool {
-    request
-        .context
-        .host
-        .as_deref()
-        .is_some_and(|h| !h.is_empty())
-        && !matches!(
-            request.method,
-            Method::Connect | Method::Disconnect | Method::HostList
-        )
 }
 
 /// Where a prompt's answer goes; `None` means cancelled.
@@ -156,7 +128,7 @@ impl Drop for WatchGuard {
     }
 }
 
-/// Sends ssh prompts to the most recently attached `connect` CLI.
+/// Sends ssh's login prompts to the most recently attached `connect` CLI.
 struct HostPrompter {
     board: Arc<PromptBoard>,
 }
@@ -204,8 +176,14 @@ pub(crate) struct HostConn {
     cancel: CancellationToken,
     board: Arc<PromptBoard>,
     view: Mutex<mirror::View>,
+    /// Waited for on close, so this host's listeners are gone afterwards.
+    mirror_task: Mutex<Option<JoinHandle<()>>>,
     /// Sync status by `lane:unit#index`.
     syncs: Mutex<BTreeMap<String, Value>>,
+    /// Destination hashes by sync key, reused while files keep size and mtime.
+    hashes: Mutex<HashMap<String, HashCache>>,
+    /// Version and linger findings about the box, by code.
+    warnings: Mutex<BTreeMap<&'static str, String>>,
 }
 
 impl HostConn {
@@ -286,12 +264,14 @@ impl HostConn {
         value
     }
 
-    /// State plus what is mirrored, for `connect`, `host ls` and `status`.
+    /// State plus what is mirrored, for `connect`, `remote ls` and `status`.
     fn status_json(&self) -> Value {
         let mut value = self.state_json();
         let lanes = self.registry.current().lanes().count();
         let view = lock(&self.view).clone();
         let syncs: Vec<Value> = lock(&self.syncs).values().cloned().collect();
+        let mut warnings: Vec<String> = lock(&self.warnings).values().cloned().collect();
+        warnings.extend(view.warnings());
         if let Some(map) = value.as_object_mut() {
             map.insert("transport".into(), json!(self.kind));
             map.insert("lanes".into(), json!(lanes));
@@ -306,17 +286,24 @@ impl HostConn {
                 ),
             );
             map.insert("skipped_lanes".into(), json!(view.skipped));
+            map.insert("skipped_hosts".into(), json!(view.refused_hosts));
             map.insert("syncs".into(), json!(syncs));
+            map.insert("warnings".into(), json!(warnings));
         }
         value
     }
 
-    /// Stops reconnecting, closes the session and ends every task of this host.
+    /// Stops reconnecting, closes the session and waits until this host's
+    /// listeners and routes are gone.
     async fn close(&self) {
         self.cancel.cancel();
         let link = self.link.lock().await.take();
         if let Some(link) = link {
             link.shutdown().await;
+        }
+        let mirror = lock(&self.mirror_task).take();
+        if let Some(mirror) = mirror {
+            let _ = mirror.await;
         }
     }
 }
@@ -351,12 +338,12 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// `host_not_connected`: `--host` named a box without a `connect`.
+/// `host_not_connected`: `disconnect` named a box without a `connect`.
 fn not_connected(host: &str) -> RpcError {
     RpcError::new("host_not_connected", json!({"host": host}), 4)
 }
 
-/// `remote_failed`: the box or the link failed the request.
+/// `remote_failed`: the link failed.
 fn remote_failed(host: &str, message: impl std::fmt::Display) -> RpcError {
     RpcError::new(
         "remote_failed",
@@ -365,23 +352,15 @@ fn remote_failed(host: &str, message: impl std::fmt::Display) -> RpcError {
     )
 }
 
-/// Keeps a box daemon's structured error, else wraps the transport failure.
-fn call_error(host: &str, error: RpcCallError) -> RpcError {
-    match error {
-        RpcCallError::Remote(remote) => remote
-            .data
-            .and_then(|data| serde_json::from_value::<RpcError>(data).ok())
-            .unwrap_or_else(|| remote_failed(host, remote.message)),
-        other => remote_failed(host, other),
-    }
-}
-
 /// `connect` parameters.
 #[derive(Debug, Deserialize)]
 struct ConnectParams {
     host: String,
     #[serde(default)]
     background: bool,
+    /// Install devlanes on a box that lacks it.
+    #[serde(default)]
+    install: bool,
 }
 
 /// `disconnect` parameters; no host means every box.
@@ -418,33 +397,26 @@ fn valid_host(host: &str) -> bool {
         && !host.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-/// Encodes terminal bytes for JSON transport values.
-fn encode(data: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(data)
-}
-
-/// Decodes terminal bytes; malformed input becomes an empty frame (end of stream).
-fn decode(data: &str) -> Bytes {
-    base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .map(Bytes::from)
-        .unwrap_or_default()
-}
-
-/// The destination of a box sync entry on this machine: the same place under this
-/// user's home, or the default `~/devlanes/sync/<project>/<lane>/<leaf>` when the
-/// box chose a path outside its home.
-fn local_destination(home: &Path, entry: &SyncEntry) -> PathBuf {
-    match &entry.home_relative {
-        Some(relative) if !relative.as_os_str().is_empty() && relative.is_relative() => {
-            home.join(relative)
+/// `$DEVLANES_HOME/sync/<host>/<project>/<lane>/<leaf>` for a box sync entry.
+///
+/// Every component is a single validated path name, so nothing the box sends can
+/// point the destination elsewhere; the box's own `to` is never used.
+fn sync_destination(home: &Path, host: &str, entry: &SyncEntry) -> Result<PathBuf, String> {
+    let host = host.replace('/', "_");
+    let mut path = home.join("sync");
+    for (what, part) in [
+        ("host", host.as_str()),
+        ("project", entry.project.as_str()),
+        ("lane", entry.lane.as_str()),
+        ("folder", entry.leaf.as_str()),
+    ] {
+        let valid = !part.contains('/') && RelPath::new(part).is_ok();
+        if !valid {
+            return Err(format!("the box sent an unusable {what} name {part:?}"));
         }
-        _ => home
-            .join("devlanes/sync")
-            .join(&entry.project)
-            .join(entry.lane.replace(['/', '@'], "-"))
-            .join(&entry.leaf),
+        path.push(part);
     }
+    Ok(path)
 }
 
 impl Inner {
@@ -464,7 +436,10 @@ impl Inner {
                 2,
             ));
         }
-        let conn = self.ensure_host(&args.host)?;
+        let options = ConnectOptions {
+            install: args.install,
+        };
+        let conn = self.ensure_host(&args.host, options).await?;
         let _watching = conn.board.watch(session);
         if args.background {
             conn.settled(CONNECT_WAIT).await;
@@ -495,31 +470,40 @@ impl Inner {
         }
     }
 
-    /// The live connection to `host`, or a new one; a stopped link is replaced.
-    fn ensure_host(self: &Arc<Self>, host: &str) -> Result<Arc<HostConn>, RpcError> {
-        let (conn, old) = {
+    /// The live connection to `host`, or a new one. A stopped link is closed, with
+    /// its listeners, before its replacement starts.
+    async fn ensure_host(
+        self: &Arc<Self>,
+        host: &str,
+        options: ConnectOptions,
+    ) -> Result<Arc<HostConn>, RpcError> {
+        let _connecting = self.remote.connecting.lock().await;
+        let old = {
             let mut hosts = lock(&self.remote.hosts);
-            if let Some(conn) = hosts.get(host)
-                && !conn.ended()
-            {
-                return Ok(conn.clone());
+            match hosts.get(host) {
+                Some(conn) if !conn.ended() => return Ok(conn.clone()),
+                _ => hosts.remove(host),
             }
-            let conn = self.open_host(host)?;
-            (conn.clone(), hosts.insert(host.to_owned(), conn))
         };
         if let Some(old) = old {
-            tokio::spawn(async move { old.close().await });
+            old.close().await;
         }
+        let conn = self.open_host(host, options)?;
+        lock(&self.remote.hosts).insert(host.to_owned(), conn.clone());
         Ok(conn)
     }
 
     /// Starts the link and the host's watcher and mirror tasks.
-    fn open_host(self: &Arc<Self>, host: &str) -> Result<Arc<HostConn>, RpcError> {
+    fn open_host(
+        self: &Arc<Self>,
+        host: &str,
+        options: ConnectOptions,
+    ) -> Result<Arc<HostConn>, RpcError> {
         let board = Arc::new(PromptBoard::default());
         let prompter = Arc::new(HostPrompter {
             board: board.clone(),
         });
-        let transport = self.integ.remote.transport(host, prompter)?;
+        let transport = self.integ.remote.transport(host, prompter, options)?;
         let options = SessionOptions::new(format!("devlanes {}", env!("CARGO_PKG_VERSION")));
         let link = Link::spawn(transport, options, self.integ.remote.backoff());
         let conn = Arc::new(HostConn {
@@ -531,10 +515,14 @@ impl Inner {
             cancel: CancellationToken::new(),
             board,
             view: Mutex::new(mirror::View::default()),
+            mirror_task: Mutex::new(None),
             syncs: Mutex::new(BTreeMap::new()),
+            hashes: Mutex::new(HashMap::new()),
+            warnings: Mutex::new(BTreeMap::new()),
         });
         tokio::spawn(watch_link(Arc::downgrade(self), conn.clone()));
-        tokio::spawn(mirror::run(Arc::downgrade(self), conn.clone()));
+        let mirror = tokio::spawn(mirror::run(Arc::downgrade(self), conn.clone()));
+        *lock(&conn.mirror_task) = Some(mirror);
         Ok(conn)
     }
 
@@ -567,7 +555,7 @@ impl Inner {
         Ok(json!({"disconnected": names}))
     }
 
-    /// `host ls`: boxes known from `remote_hosts` plus live connection state.
+    /// `remote ls`: boxes known from `remote_hosts` plus live connection state.
     pub(crate) async fn host_list(self: &Arc<Self>) -> Result<Value, RpcError> {
         let stored = self.store.remote_hosts().await.unwrap_or_default();
         let mut items: BTreeMap<String, Value> = BTreeMap::new();
@@ -602,228 +590,17 @@ impl Inner {
         }))
     }
 
-    /// Runs a `--host` request on the box and relays its events and answer.
-    ///
-    /// The forwarded context drops cwd, environment and host: they describe this
-    /// machine. Dropping the call (the CLI left) cancels it on the box.
-    pub(crate) async fn forward(
-        self: &Arc<Self>,
-        request: Request,
-        session: &Session,
-    ) -> Result<Value, RpcError> {
-        let Request {
-            method,
-            params,
-            context,
-            ..
-        } = request;
-        if method == Method::Resize
-            && let Some(result) = self.resize_remote(&params, session).await
-        {
-            return result;
-        }
-        let host = context.host.clone().unwrap_or_default();
-        let conn = self
-            .remote
-            .host(&host)
-            .ok_or_else(|| not_connected(&host))?;
-        let box_session = conn
-            .session_within(SESSION_WAIT)
-            .await
-            .ok_or_else(|| remote_failed(&host, "the box is not connected; it is reconnecting"))?;
-        let forward = Forward {
-            method,
-            params,
-            context: Context {
-                cwd: PathBuf::new(),
-                env: None,
-                host: None,
-                ..context
-            },
-        };
-        let value = serde_json::to_value(&forward).map_err(|e| internal("encode", e))?;
-        let call = box_session
-            .call(value)
-            .await
-            .map_err(|error| remote_failed(&host, error))?;
-        let (mut sender, mut receiver) = call.into_split();
-        if method != Method::Attach {
-            sender
-                .finish()
-                .await
-                .map_err(|error| call_error(&host, error))?;
-        }
-        let disconnected = session.disconnected();
-        loop {
-            let item = tokio::select! {
-                item = receiver.next() => item,
-                () = disconnected.cancelled() => {
-                    return Err(RpcError::new("client_disconnected", Value::Null, 4));
-                }
-            };
-            let value = match item {
-                Some(Ok(value)) => value,
-                Some(Err(error)) => return Err(call_error(&host, error)),
-                None => {
-                    return Err(remote_failed(
-                        &host,
-                        "the box ended the request without an answer",
-                    ));
-                }
-            };
-            let reply: Reply =
-                serde_json::from_value(value).map_err(|error| remote_failed(&host, error))?;
-            match reply {
-                Reply::Event { event } => {
-                    if session.event(event).await.is_err() {
-                        return Err(RpcError::new("client_disconnected", Value::Null, 4));
-                    }
-                }
-                // Only attach streams bytes, and only after its answer.
-                Reply::Bytes { .. } => {}
-                Reply::Response {
-                    outcome: Outcome::Error { error },
-                } => return Err(error),
-                Reply::Response {
-                    outcome: Outcome::Ok { data },
-                } if method == Method::Attach => {
-                    return self.adopt_attach(data, sender, receiver, session);
-                }
-                Reply::Response {
-                    outcome: Outcome::Ok { data },
-                } => return Ok(data),
-            }
-        }
-    }
-
-    /// Gives a forwarded attach a local stream id and pumps its bytes both ways.
-    fn adopt_attach(
-        self: &Arc<Self>,
-        data: Value,
-        mut sender: RpcSender,
-        mut receiver: RpcReceiver,
-        session: &Session,
-    ) -> Result<Value, RpcError> {
-        let mut result: AttachResult =
-            serde_json::from_value(data).map_err(|e| internal("decode", e))?;
-        let remote_id = result.stream_id;
-        let local_id = NEXT_STREAM.fetch_add(1, Ordering::Relaxed);
-        result.stream_id = local_id;
-        let (input, mut inputs) = mpsc::channel::<Input>(64);
-        lock(&self.remote.streams)
-            .insert((session.id(), local_id), RemoteStream { remote_id, input });
-        // The input half lives until the stream entry (its only sender) goes away.
-        tokio::spawn(async move {
-            while let Some(input) = inputs.recv().await {
-                let Ok(value) = serde_json::to_value(&input) else {
-                    continue;
-                };
-                if sender.send(value).await.is_err() {
-                    break;
-                }
-            }
-        });
-        let engine = Arc::downgrade(self);
-        let session = session.clone();
-        tokio::spawn(async move {
-            let output = async {
-                loop {
-                    let reply = match receiver.next().await {
-                        Some(Ok(value)) => serde_json::from_value::<Reply>(value).ok(),
-                        _ => None,
-                    };
-                    match reply {
-                        Some(Reply::Bytes { data, .. }) => {
-                            let bytes = decode(&data);
-                            let end = bytes.is_empty();
-                            if session.bytes(local_id, bytes).await.is_err() || end {
-                                return;
-                            }
-                        }
-                        Some(Reply::Event { event }) => {
-                            let _ = session.event(event).await;
-                        }
-                        Some(Reply::Response { .. }) => {}
-                        None => {
-                            let _ = session.bytes(local_id, Bytes::new()).await;
-                            return;
-                        }
-                    }
-                }
-            };
-            let disconnected = session.disconnected();
-            tokio::select! {
-                () = output => {}
-                () = disconnected.cancelled() => {}
-            }
-            if let Some(engine) = engine.upgrade() {
-                lock(&engine.remote.streams).remove(&(session.id(), local_id));
-            }
-        });
-        serde_json::to_value(result).map_err(|e| internal("encode", e))
-    }
-
-    /// `resize` of a forwarded attach goes to the box through the attach call.
-    async fn resize_remote(
-        &self,
-        params: &Value,
-        session: &Session,
-    ) -> Option<Result<Value, RpcError>> {
-        let resize: devlanes_proto::ResizeParams = serde_json::from_value(params.clone()).ok()?;
-        let (remote_id, input) = lock(&self.remote.streams)
-            .get(&(session.id(), resize.stream_id))
-            .map(|stream| (stream.remote_id, stream.input.clone()))?;
-        let sent = input
-            .send(Input::Resize {
-                stream_id: remote_id,
-                columns: resize.columns,
-                rows: resize.rows,
-            })
-            .await;
-        Some(Ok(json!({"applied": sent.is_ok()})))
-    }
-
-    /// `resize`: forwarded attaches first, then the engine's own streams.
-    pub(crate) async fn remote_resize(
-        self: &Arc<Self>,
-        value: Value,
-        session: &Session,
-    ) -> Result<Value, RpcError> {
-        match self.resize_remote(&value, session).await {
-            Some(result) => result,
-            None => self.resize_method(value, session).await,
-        }
-    }
-
-    /// Routes binary frames of prompts and forwarded attaches; false when the
-    /// stream is not remote.
+    /// Routes binary frames that answer ssh login prompts; false for other streams.
     pub(crate) async fn remote_input(
         &self,
         stream_id: u64,
         data: &Bytes,
         session: &Session,
     ) -> bool {
-        if self
-            .remote
+        self.remote
             .all()
             .iter()
             .any(|conn| conn.board.answer(session.id(), stream_id, data))
-        {
-            return true;
-        }
-        let route = lock(&self.remote.streams)
-            .get(&(session.id(), stream_id))
-            .map(|stream| (stream.remote_id, stream.input.clone()));
-        let Some((remote_id, input)) = route else {
-            return false;
-        };
-        let _ = input
-            .send(Input::Bytes {
-                stream_id: remote_id,
-                data: encode(data),
-            })
-            .await;
-        true
     }
 
     /// `status`, plus the tunnels serving clients (on a box) and the boxes this
@@ -831,7 +608,7 @@ impl Inner {
     pub(crate) async fn remote_status(
         self: &Arc<Self>,
         value: Value,
-        context: &Context,
+        context: &devlanes_proto::Context,
         session: &Session,
     ) -> Result<Value, RpcError> {
         let mut result = self.status_method(value, context, session).await?;
@@ -876,13 +653,9 @@ impl Inner {
     pub(crate) async fn sync_status_method(self: &Arc<Self>) -> Result<Value, RpcError> {
         let mut items = Vec::new();
         for (project, lane) in self.all_lanes() {
-            let (alive, home, reference) = {
+            let (alive, reference) = {
                 let st = lane.st();
-                (
-                    st.services_alive(),
-                    st.env.as_ref().and_then(|env| env.get("HOME").cloned()),
-                    st.reference(&project.name()),
-                )
+                (st.services_alive(), st.reference(&project.name()))
             };
             if !alive {
                 continue;
@@ -902,11 +675,6 @@ impl Inner {
                         unit: service.unit.clone(),
                         index,
                         from: spec.from.clone(),
-                        to: spec.to.clone(),
-                        home_relative: home
-                            .as_ref()
-                            .and_then(|home| spec.to.strip_prefix(home).ok())
-                            .map(Path::to_path_buf),
                         leaf: spec
                             .from
                             .file_name()
@@ -942,11 +710,35 @@ impl Inner {
     }
 }
 
+/// Findings about the box behind a handshake label (`devlanes <version>`,
+/// optionally `(linger off)`), as warning code and message.
+fn label_warnings(label: &str) -> Vec<(&'static str, String)> {
+    let ours = env!("CARGO_PKG_VERSION");
+    let mut warnings = Vec::new();
+    let theirs = label
+        .strip_prefix("devlanes ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or("");
+    if theirs != ours {
+        warnings.push((
+            "box_version",
+            format!("the box runs devlanes {theirs} and this machine {ours}; install the same release on both"),
+        ));
+    }
+    if label.contains("(linger off)") {
+        warnings.push((
+            "box_linger_off",
+            "the box stops your processes at logout; run `loginctl enable-linger` there or `devlanes daemon install`".to_owned(),
+        ));
+    }
+    warnings
+}
+
 /// Publishes state changes, records successful connects and restarts syncs on
 /// every new session.
 async fn watch_link(engine: std::sync::Weak<Inner>, conn: Arc<HostConn>) {
     let mut state = conn.state.clone();
-    let mut syncing: Option<tokio::task::JoinHandle<()>> = None;
+    let mut syncing: Option<JoinHandle<()>> = None;
     loop {
         let session = live(&state.borrow_and_update());
         let Some(inner) = engine.upgrade() else { break };
@@ -961,6 +753,19 @@ async fn watch_link(engine: std::sync::Weak<Inner>, conn: Arc<HostConn>) {
             };
             if let Err(error) = inner.store.upsert_remote_host(record).await {
                 tracing::warn!(%error, host = %conn.name, "cannot record remote host");
+            }
+            let findings = label_warnings(session.server());
+            {
+                let mut warnings = lock(&conn.warnings);
+                warnings.clear();
+                warnings.extend(findings.iter().cloned());
+            }
+            for (code, message) in findings {
+                tracing::warn!(host = %conn.name, code, %message, "box warning");
+                inner.bus.emit(
+                    wire::WARNING_EVENT,
+                    json!({"host": conn.name, "code": code, "message": message}),
+                );
             }
             if let Some(task) = syncing.take() {
                 task.abort();
@@ -979,5 +784,59 @@ async fn watch_link(engine: std::sync::Weak<Inner>, conn: Arc<HostConn>) {
     }
     if let Some(task) = syncing {
         task.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(project: &str, lane: &str, leaf: &str) -> SyncEntry {
+        SyncEntry {
+            lane: lane.into(),
+            project: project.into(),
+            unit: "web".into(),
+            index: 0,
+            from: PathBuf::from("/box/ext"),
+            leaf: leaf.into(),
+            ignore: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sync_destinations_stay_under_the_sync_root() {
+        let home = Path::new("/home/u/.devlanes");
+        assert_eq!(
+            sync_destination(home, "box", &entry("app", "app@1", "ext")),
+            Ok(PathBuf::from("/home/u/.devlanes/sync/box/app/app@1/ext"))
+        );
+        for bad in [
+            entry("..", "app@1", "ext"),
+            entry("app", "../..", "ext"),
+            entry("app", "app@1", ".."),
+            entry("app", "app@1", "a/b"),
+            entry("app", "app@1", ""),
+            entry("app", "a\0b", "ext"),
+        ] {
+            assert!(sync_destination(home, "box", &bad).is_err(), "{bad:?}");
+        }
+        assert!(sync_destination(home, "..", &entry("app", "app@1", "ext")).is_err());
+        assert_eq!(
+            sync_destination(home, "user@box/x", &entry("app", "app@1", "ext")),
+            Ok(PathBuf::from(
+                "/home/u/.devlanes/sync/user@box_x/app/app@1/ext"
+            ))
+        );
+    }
+
+    #[test]
+    fn labels_report_version_skew_and_linger() {
+        let ours = format!("devlanes {}", env!("CARGO_PKG_VERSION"));
+        assert!(label_warnings(&ours).is_empty());
+        let codes: Vec<_> = label_warnings("devlanes 0.0.0-other (linger off)")
+            .into_iter()
+            .map(|(code, _)| code)
+            .collect();
+        assert_eq!(codes, ["box_version", "box_linger_off"]);
     }
 }

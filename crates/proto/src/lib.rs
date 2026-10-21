@@ -69,8 +69,6 @@ pub struct Context {
     #[serde(default)]
     pub lane: Option<String>,
     #[serde(default)]
-    pub host: Option<String>,
-    #[serde(default)]
     pub yes: bool,
 }
 
@@ -158,6 +156,10 @@ pub enum Method {
     /// helper: the daemon drops its sudo backoff and reapplies `/etc/hosts` now.
     #[serde(rename = "hosts.retry")]
     HostsRetry,
+    /// Any method name this build does not know, so a request from a newer client
+    /// decodes and gets an `unknown_method` answer instead of a dropped connection.
+    #[serde(rename = "unknown", other)]
+    Unknown,
 }
 
 /// Context is deliberately not `Debug` to prevent accidental environment traces.
@@ -217,13 +219,40 @@ pub struct Event {
 }
 
 /// JSON control frames; PTY bytes use a separate binary frame kind.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 #[serde(tag = "type", content = "body", rename_all = "snake_case")]
 pub enum Control {
     Hello(Hello),
     Request(Request),
     Response(Response),
     Event(Event),
+    /// A frame type this build does not know; receivers skip it instead of
+    /// closing the connection.
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for Control {
+    /// `{type, body}` like the derived form, except that an unknown `type` (with any
+    /// body) becomes [`Control::Unknown`]; serde's `other` only takes bodiless variants.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(default)]
+            body: Value,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let body = raw.body;
+        Ok(match raw.kind.as_str() {
+            "hello" => Self::Hello(serde_json::from_value(body).map_err(D::Error::custom)?),
+            "request" => Self::Request(serde_json::from_value(body).map_err(D::Error::custom)?),
+            "response" => Self::Response(serde_json::from_value(body).map_err(D::Error::custom)?),
+            "event" => Self::Event(serde_json::from_value(body).map_err(D::Error::custom)?),
+            _ => Self::Unknown,
+        })
+    }
 }
 
 /// List cursors are opaque to clients and scoped to the requested collection.
@@ -254,6 +283,11 @@ pub struct Selection {
     #[serde(default)]
     pub profile: Option<String>,
     /// Profiles to start together, in the order given (later env wins).
+    ///
+    /// With neither `profile` nor `profiles`, `start`, `restart` and `resume` keep
+    /// the lane's profiles from its previous start. To go back to the default,
+    /// send [`DEFAULT_PROFILE`]: it selects the config's `default` profile, or
+    /// every `autostart` service when the config defines none.
     #[serde(default)]
     pub profiles: Vec<String>,
     #[serde(default)]
@@ -268,9 +302,12 @@ pub struct Selection {
     pub all_at_once: bool,
 }
 
+/// Profile name that resets a lane to its default selection (see [`Selection::profiles`]).
+pub const DEFAULT_PROFILE: &str = "default";
+
 impl Selection {
     /// Requested profiles: `profile` first, then `profiles`, without repeats and
-    /// blank names. Empty means "the default profile".
+    /// blank names. Empty means "keep the lane's previous profiles".
     pub fn profile_names(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for name in self.profile.iter().chain(&self.profiles) {
@@ -331,7 +368,16 @@ pub struct LogLine {
 /// Public service state is separate from an OS-specific process handle.
 /// States: `idle`, `queued`, `starting`, `ready`, `failed`, `stopping`, `stopped`, `exited`.
 /// `queued` units wait for a start slot; their `reason` has code `queued` with
-/// `{position, queued, in_flight, window, hold, cpu_percent?, memory_pressure?}`.
+/// `{position, queued, in_flight, window, hold, memory_need_bytes,
+/// available_memory_bytes?, cpu_percent?, memory_pressure?}`; `hold` is
+/// `window_full`, `memory_critical` or `memory` (waiting for memory to fit).
+///
+/// `orphaned`: the process was started by a previous daemon and still runs (its
+/// identity verified). It is not supervised: no output, attach or readiness. `pid`,
+/// `started_at_ms` (its original start) and `orphaned_since_ms` are set; its lane
+/// reads `running`. `stop`, lane stop, `restart` and `lane clean` terminate it;
+/// `start` refuses it with `unit_orphaned`. A stop result lists a terminated
+/// orphan as `stopped` and keeps `orphaned_since_ms`, so clients can say so.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UnitSummary {
     pub name: String,
@@ -363,7 +409,14 @@ pub struct UnitSummary {
     pub cpu_percent: Option<f64>,
     #[serde(default)]
     pub memory_bytes: Option<u64>,
+    /// When this daemon found the process left running by a previous one (Unix
+    /// ms); set only for `orphaned` units and orphans a stop just terminated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orphaned_since_ms: Option<u64>,
 }
+
+/// Unit state of a process left running by a previous daemon (see [`UnitSummary`]).
+pub const ORPHANED: &str = "orphaned";
 
 /// Canonical lane references can be pasted into a later command.
 /// States: `idle`, `starting`, `running`, `failed`, `stopping`, `unassigned`, `no-config`.
@@ -513,14 +566,12 @@ pub struct UnitPeak {
 }
 
 /// Messages a client daemon exchanges with a box's `devlanes tunnel` over the remote
-/// mux. They travel as opaque JSON values of the transport's RPC and sync streams.
+/// mux. Remote is mirroring only: these are sync payloads and connection events,
+/// never daemon requests, environments or secrets.
 pub mod remote {
     use std::path::PathBuf;
 
     use serde::{Deserialize, Serialize};
-    use serde_json::Value;
-
-    use super::{Context, Event, Method, Outcome};
 
     /// Event sent to the CLI attached to `connect` when ssh asks for input:
     /// `{host, prompt, kind: secret|confirm|notify, stream_id}`. The CLI answers with
@@ -531,53 +582,14 @@ pub mod remote {
     /// `{host, code, ...}` for mirroring problems such as a skipped lane or a busy port.
     pub const WARNING_EVENT: &str = "remote.warning";
 
-    /// One daemon request forwarded to the box (`devlanes --host <h> <cmd>`).
-    ///
-    /// `context` drops the client's cwd, environment and host before it leaves the
-    /// machine: they describe the client, not the box.
-    #[derive(Clone, Serialize, Deserialize)]
-    pub struct Forward {
-        pub method: Method,
-        #[serde(default)]
-        pub params: Value,
-        #[serde(default)]
-        pub context: Context,
-    }
-
-    /// One reply item of a forwarded request, in the order the box daemon sent it.
-    ///
-    /// The reply ends after `response`, except for `attach`, whose terminal bytes keep
-    /// flowing until the box sends an empty `bytes` item.
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(tag = "type", rename_all = "snake_case")]
-    pub enum Reply {
-        Event {
-            event: Event,
-        },
-        /// Terminal output; `data` is base64 because transport values are JSON.
-        Bytes {
-            stream_id: u64,
-            data: String,
-        },
-        Response {
-            outcome: Outcome,
-        },
-    }
-
-    /// Client input on a forwarded `attach`; ids are the box's stream ids.
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(tag = "type", rename_all = "snake_case")]
-    pub enum Input {
-        /// Keystrokes; `data` is base64.
-        Bytes { stream_id: u64, data: String },
-        Resize {
-            stream_id: u64,
-            columns: u16,
-            rows: u16,
-        },
-    }
+    /// Largest synced file. The box skips (and reports) bigger ones before reading
+    /// them, and the client refuses bigger file headers.
+    pub const MAX_SYNC_FILE: u64 = 256 * 1024 * 1024;
 
     /// A `services.<name>.sync` entry of a running lane, as listed by `sync.status`.
+    ///
+    /// The client always writes to its own `$DEVLANES_HOME/sync/<host>/<project>/
+    /// <lane>/<leaf>`; the box's `to` never travels.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub struct SyncEntry {
         /// Canonical lane reference, `project@index`.
@@ -586,33 +598,56 @@ pub mod remote {
         pub unit: String,
         /// Position within the service's `sync` list.
         pub index: usize,
+        /// Source folder on the box, for display.
         pub from: PathBuf,
-        pub to: PathBuf,
-        /// `to` relative to the box user's home, so a client can re-root it under its own.
-        #[serde(default)]
-        pub home_relative: Option<PathBuf>,
-        /// Last component of `from`, for the default destination.
+        /// Last component of `from`, the destination folder's name.
         pub leaf: String,
         #[serde(default)]
         pub ignore: Vec<String>,
     }
 
-    /// Sync subscription request; the box looks the entry up itself and never takes
+    /// One file the client already holds, so the box sends only what differs.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct SyncFile {
+        /// `/`-separated path below the destination.
+        pub path: String,
+        pub size: u64,
+        /// Permission bits.
+        pub mode: u32,
+        /// Lowercase hex SHA-256 of the contents.
+        pub hash: String,
+        /// Modification time on the client, kept for its own hash cache.
+        #[serde(default)]
+        pub mtime_ms: Option<u64>,
+    }
+
+    /// Sync subscription request. The box looks entries up itself and never takes
     /// paths from the client.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct SyncRequest {
-        pub lane: String,
-        pub unit: String,
-        pub index: usize,
+    #[serde(tag = "op", rename_all = "snake_case")]
+    pub enum SyncRequest {
+        /// Answered with one `entries` manifest, then the stream ends.
+        List,
+        /// Streams one entry: what differs from `have`, then changes.
+        Follow {
+            lane: String,
+            unit: String,
+            index: usize,
+            #[serde(default)]
+            have: Vec<SyncFile>,
+        },
     }
 
     /// Manifest messages of a sync stream; file bytes travel as transport chunks.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(tag = "kind", rename_all = "snake_case")]
     pub enum SyncManifest {
+        /// The answer to [`SyncRequest::List`].
+        Entries { entries: Vec<SyncEntry> },
         /// Precedes the chunks of one file.
         File { path: String, mode: u32, size: u64 },
-        /// The initial copy finished; anything else at the destination is stale.
+        /// The initial pass finished; these are every file the destination should
+        /// hold, so anything else there is stale.
         Ready { files: Vec<String> },
     }
 
@@ -649,6 +684,12 @@ pub mod events {
     /// `memory_baseline`: `{peak_memory_bytes, available_memory_bytes, units}` when
     /// the units being started usually peak above the memory available now.
     pub const LANE_WARNING: &str = "lane.warning";
+    /// `{stream_id, code, dropped_frames, dropped_bytes}`, sent only to the attached
+    /// connection, when its terminal input was discarded. Code `input_overflow`:
+    /// the unit was not reading and the oldest queued input was dropped.
+    /// Otherwise the stream rejected input (`unknown_stream`, ...) and the rest of
+    /// its input is dropped.
+    pub const INPUT_DROPPED: &str = "input.dropped";
 }
 
 #[cfg(test)]
@@ -660,6 +701,24 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Method::DaemonShutdown)?,
             "\"daemon.shutdown\""
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_methods_and_frames_still_decode() -> Result<(), serde_json::Error> {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": 7, "method": "lane.teleport", "params": {}
+        }))?;
+        assert_eq!(request.method, Method::Unknown);
+        assert_eq!(request.id, 7, "the id survives, so the answer can name it");
+        let frame: Control =
+            serde_json::from_value(serde_json::json!({"type": "telemetry", "body": {"x": 1}}))?;
+        assert!(matches!(frame, Control::Unknown));
+        // Known names are unaffected.
+        assert_eq!(
+            serde_json::from_value::<Method>(serde_json::json!("daemon.shutdown"))?,
+            Method::DaemonShutdown
         );
         Ok(())
     }

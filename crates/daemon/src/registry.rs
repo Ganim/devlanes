@@ -325,7 +325,7 @@ impl Inner {
                     .allocation(BlockOwner::Lane(record.id))
                     .await
                     .map_err(store_error)?;
-                st.profiles = crate::model::decode_profiles(record.profile.as_deref());
+                st.profiles = record.profiles.clone();
             }
             map.insert(worktree.id, new_lane(worktree.id, st));
         }
@@ -555,6 +555,7 @@ impl Inner {
                     name: lane_name(index),
                     desired_state: DesiredState::Stopped,
                     profile: None,
+                    profiles: Vec::new(),
                 })
                 .await
                 .map_err(store_error)?;
@@ -625,7 +626,7 @@ impl Inner {
             && let Some(holder) = project.lane_by_index(0)
             && !Arc::ptr_eq(&holder, lane)
         {
-            if holder.st().any_alive() {
+            if holder.st().any_running() {
                 return Ok(());
             }
             let used: BTreeSet<u32> = project
@@ -668,6 +669,7 @@ impl Inner {
                 name: lane_name(index),
                 desired_state: record.desired_state,
                 profile: record.profile.clone(),
+                profiles: record.profiles.clone(),
             })
             .await
             .map_err(store_error)?;
@@ -798,7 +800,7 @@ impl Inner {
             _ => None,
         };
         let differs = before != after || before.is_none();
-        if differs && st.any_alive() {
+        if differs && st.any_running() {
             st.config_changed = true;
         }
         st.config = config;

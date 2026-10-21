@@ -5,11 +5,12 @@
 ## Usage
 
 ```rust
-use devlanes_term::TerminalLauncher;
+use devlanes_term::{LaunchError, LaunchRequest, TerminalLauncher};
 use devlanes_term_wezterm::Wezterm;
 
-// `request` is a `devlanes_term::LaunchRequest`.
-Wezterm.launch(&request)?;
+fn open(request: &LaunchRequest) -> Result<(), LaunchError> {
+    Wezterm.launch(request)
+}
 ```
 
 ## Config example

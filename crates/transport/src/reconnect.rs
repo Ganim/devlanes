@@ -188,8 +188,15 @@ async fn supervise(
             let io = transport.connect().await?;
             Session::establish(io, options.clone()).await
         };
+        // A transport that hangs (a stuck ssh, a dead network path) must not
+        // stall the link forever; the attempt fails and the backoff continues.
+        let limited = async {
+            tokio::time::timeout(options.connect_timeout, connecting)
+                .await
+                .unwrap_or(Err(SessionError::ConnectTimeout))
+        };
         let result: Result<Session, SessionError> = tokio::select! {
-            result = connecting => result,
+            result = limited => result,
             () = cancel.cancelled() => break,
         };
         let error = match result {
@@ -228,6 +235,42 @@ async fn supervise(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A transport whose connect never finishes, like an ssh stuck on the network.
+    struct Hanging;
+
+    #[async_trait::async_trait]
+    impl Transport for Hanging {
+        async fn connect(&self) -> Result<crate::BoxDuplex, crate::TransportError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hanging_connect_is_retried() -> Result<(), Box<dyn std::error::Error>> {
+        let mut options = SessionOptions::new("client");
+        options.connect_timeout = Duration::from_millis(100);
+        let link = Link::spawn(
+            Arc::new(Hanging),
+            options,
+            Backoff::new(Duration::from_millis(10), Duration::from_millis(10)),
+        );
+        let mut state = link.state();
+        let retried = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let LinkState::Retrying { error, .. } = &*state.borrow_and_update() {
+                    return error.clone();
+                }
+                if state.changed().await.is_err() {
+                    return String::new();
+                }
+            }
+        })
+        .await?;
+        assert!(retried.contains("timed out"), "{retried}");
+        link.shutdown().await;
+        Ok(())
+    }
 
     #[test]
     fn backoff_doubles_to_cap_and_resets() {

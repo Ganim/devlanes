@@ -1,6 +1,7 @@
 //! Remote operation over the in-memory transport: a box engine behind a real daemon
 //! socket, `devlanes-tunnel`'s box services on the box end of the pipe, and a
-//! client engine that connects, mirrors, syncs and forwards `--host` requests.
+//! client engine that connects, mirrors and syncs. Remote is mirroring only: the
+//! box refuses daemon requests from a client.
 //!
 //! Box and client share this machine, so the box's services hold `127.0.0.1:<port>`
 //! and the client mirrors on `[::1]` only; routed hostnames then go through relay
@@ -8,7 +9,7 @@
 
 use std::{
     net::{IpAddr, Ipv6Addr},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, atomic::AtomicU64},
     time::Duration,
 };
@@ -16,7 +17,8 @@ use std::{
 use devlanes_daemon::{
     Engine, EngineOptions, Handler, Options, Server, Session,
     integrations::{
-        Integrations, RemoteConnector, RemotePrompter, RouteEntry, RouteSink, RouteStatus,
+        ConnectOptions, Integrations, RemoteConnector, RemotePrompter, RouteEntry, RouteSink,
+        RouteStatus,
     },
 };
 use devlanes_ipc::Frame;
@@ -25,7 +27,7 @@ use devlanes_proto::{
 };
 use devlanes_state::Store;
 use devlanes_transport::{
-    Backoff, ServeOptions, Transport,
+    Backoff, RpcCallError, ServeOptions, SessionOptions, Transport,
     memory::{MemoryTransport, memory_transport},
     serve,
 };
@@ -55,6 +57,9 @@ services:
   secret:
     run: tcp-echo
     hidden: true
+  api:
+    run: tcp-echo
+    hosts: ["api.example.com"]
 "#;
 
 /// Waits used by `eventually`.
@@ -162,7 +167,6 @@ impl BoxSide {
 /// A connector handing out the box's memory transport.
 struct MemoryConnector {
     transport: MemoryTransport,
-    home: PathBuf,
 }
 
 impl RemoteConnector for MemoryConnector {
@@ -171,6 +175,7 @@ impl RemoteConnector for MemoryConnector {
         &self,
         _host: &str,
         _prompts: Arc<dyn RemotePrompter>,
+        _options: ConnectOptions,
     ) -> Result<Arc<dyn Transport>, RpcError> {
         Ok(Arc::new(self.transport.clone()))
     }
@@ -188,11 +193,6 @@ impl RemoteConnector for MemoryConnector {
     /// Fast retries keep the reconnect checks short.
     fn backoff(&self) -> Backoff {
         Backoff::new(Duration::from_millis(50), Duration::from_millis(200))
-    }
-
-    /// Synced folders land below the test's client home.
-    fn home(&self) -> Option<PathBuf> {
-        Some(self.home.clone())
     }
 }
 
@@ -238,7 +238,7 @@ struct ClientSide {
 
 impl ClientSide {
     /// A client engine whose `connect` reaches `side`'s box.
-    async fn start(tmp: &Temp, name: &str, ports: &str, side: &BoxSide, home: &Path) -> Self {
+    async fn start(tmp: &Temp, name: &str, ports: &str, side: &BoxSide) -> Self {
         let proxy = devlanes_proxy::Proxy::new(
             devlanes_proxy::ProxyConfig::default(),
             devlanes_proxy::RouteTable::default(),
@@ -255,7 +255,6 @@ impl ClientSide {
         });
         let connector = Arc::new(MemoryConnector {
             transport: side.transport.clone(),
-            home: home.to_path_buf(),
         });
         let h = engine_with(
             &tmp.path.join(name),
@@ -318,15 +317,6 @@ impl ClientSide {
     async fn stop(self) {
         self.proxy_stop.cancel();
         self.h.close().await;
-    }
-}
-
-/// Context that sends a request to the box.
-fn on_box(lane: Option<&str>) -> Context {
-    Context {
-        host: Some("box".into()),
-        lane: lane.map(str::to_owned),
-        ..Context::default()
     }
 }
 
@@ -395,10 +385,11 @@ async fn http_get(port: u16, host: &str) -> Option<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-/// Connect mirrors ports and hostnames (hidden units excluded), forwards `--host`
-/// requests including a streaming log follow, syncs a folder, picks up a lane that
-/// starts mid-session, keeps listeners through a reconnect whose snapshot replaces
-/// state, and unmirrors on disconnect.
+/// Connect mirrors ports and hostnames (hidden units and foreign hostnames
+/// excluded, a busy local port reported), the box refuses daemon requests, a
+/// folder syncs into the devlanes-owned root, a lane started mid-session gets
+/// listeners, a reconnect keeps listeners and resends no unchanged file, a failed
+/// link unmirrors, and disconnect cleans up.
 async fn remote_box_end_to_end() {
     if !ipv6_loopback().await {
         eprintln!("skipping remote_box_end_to_end: no IPv6 loopback");
@@ -421,10 +412,41 @@ async fn remote_box_end_to_end() {
             box_port(&side.h, 0, "secret").await,
         );
 
-        let client_home = tmp.path.join("client-home");
-        std::fs::create_dir_all(client_home.join("ext-out")).expect("dest");
-        std::fs::write(client_home.join("ext-out/stale.txt"), b"old").expect("stale");
-        let client = ClientSide::start(&tmp, "client", "28000-28499", &side, &client_home).await;
+        let client = ClientSide::start(&tmp, "client", "28000-28499", &side).await;
+        // The sync root is always $DEVLANES_HOME/sync/<host>/<project>/<lane>/<leaf>;
+        // a marked destination may be pruned, anything else there is stale.
+        let out = client.h.home.join("sync/box/boxapp/boxapp@0/ext");
+        std::fs::create_dir_all(&out).expect("dest");
+        std::fs::write(out.join(devlanes_sync::OWNER_MARKER), b"").expect("marker");
+        std::fs::write(out.join("stale.txt"), b"old").expect("stale");
+        // Something on this machine holds the web port on ::1: this listener, or
+        // (when the bind fails) whatever already had it.
+        let squatter = tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, web))
+            .await
+            .ok();
+
+        // Remote is mirroring only: the box refuses a daemon request sent by a client.
+        // (Before `connect`, so the client's link stays the transport's last one.)
+        let direct =
+            devlanes_transport::Session::connect(&side.transport, SessionOptions::new("probe"))
+                .await
+                .expect("session");
+        let refused = direct
+            .request(json!({"method": "daemon.shutdown", "params": {}, "context": {"yes": true}}))
+            .await;
+        let code = match refused {
+            Err(RpcCallError::Remote(error)) => error
+                .data
+                .and_then(|data| serde_json::from_value::<RpcError>(data).ok())
+                .map(|error| error.code),
+            other => panic!("the box answered a daemon request: {other:?}"),
+        };
+        assert_eq!(code.as_deref(), Some("not_supported"));
+        direct.close();
+        assert!(
+            !box_lanes(&side.h).await.is_empty(),
+            "the box daemon is still running"
+        );
 
         let connected = client
             .h
@@ -465,105 +487,39 @@ async fn remote_box_end_to_end() {
         .await;
         assert!(response.is_some(), "proxied request reached the box");
 
-        // `--host` forwarding: status lists the box's lanes and its connected client.
-        let status = client
+        // A busy local port is reported with a clear message, not mirrored.
+        let host = client.host().await;
+        let busy = format!("port {web} is in use on this machine by");
+        assert!(
+            host["warnings"].as_array().is_some_and(|w| w
+                .iter()
+                .any(|m| m.as_str().is_some_and(|m| m.starts_with(&busy)))),
+            "{host}"
+        );
+        drop(squatter);
+
+        // A box hostname outside .localhost is neither routed nor certified here.
+        assert!(
+            host["skipped_hosts"]
+                .as_array()
+                .is_some_and(|h| h.iter().any(|h| h["host"] == "api.example.com")),
+            "{host}"
+        );
+        assert_eq!(client.route_state("api.example.com").await, None);
+
+        // The box lists its connected client.
+        let status = side
             .h
-            .call(Method::Status, json!({"all": true}), on_box(None))
+            .call(Method::Status, json!({"all": true}), Context::default())
             .await
-            .expect("forwarded status");
-        let lanes: Page<LaneSummary> = serde_json::from_value(status.clone()).expect("status page");
-        assert!(lanes.items.iter().any(|lane| lane.project == "boxapp"));
+            .expect("box status");
         assert!(
             status["clients"].as_array().is_some_and(|c| !c.is_empty()),
             "box status lists connected clients: {status}"
         );
 
-        // `--host` streaming: a log follow relays events until the client leaves.
-        let (session, mut frames) = Session::local(9_000);
-        let engine = client.h.engine.clone();
-        let following = session.clone();
-        let follow = tokio::spawn(async move {
-            let request = Request {
-                id: 1,
-                method: Method::Logs,
-                params: json!({"units": ["web"], "follow": true}),
-                context: on_box(Some("boxapp@0")),
-            };
-            engine.handle(request, following).await
-        });
-        let line = tokio::time::timeout(Duration::from_secs(10), async {
-            while let Some(frame) = frames.recv().await {
-                if let Frame::Control(Control::Event(event)) = frame
-                    && event.event == "log"
-                {
-                    return Some(event.data["line"]["text"].as_str().unwrap_or("").to_owned());
-                }
-            }
-            None
-        })
-        .await
-        .expect("a followed log line arrives")
-        .expect("frames open");
-        assert!(line.contains("listening on"), "{line}");
-        session.close();
-        let ended = tokio::time::timeout(Duration::from_secs(5), follow)
-            .await
-            .expect("follow ends when the client leaves")
-            .expect("join");
-        assert!(ended.is_err(), "a detached follow has no answer to deliver");
-
-        // `--host` attach: a local stream id, box output in, keystrokes out.
-        let (session, mut frames) = Session::local(9_002);
-        let attach = Request {
-            id: 2,
-            method: Method::Attach,
-            params: json!({"unit": "web"}),
-            context: on_box(Some("boxapp@0")),
-        };
-        let opened = client
-            .h
-            .engine
-            .handle(attach, session.clone())
-            .await
-            .expect("forwarded attach");
-        let stream_id = opened["stream_id"].as_u64().expect("stream id");
-        client
-            .h
-            .engine
-            .input(
-                stream_id,
-                bytes::Bytes::from_static(b"typed-remotely"),
-                session.clone(),
-            )
-            .await
-            .expect("input routed to the box");
-        let echoed = tokio::time::timeout(Duration::from_secs(10), async {
-            let mut seen = Vec::new();
-            while let Some(frame) = frames.recv().await {
-                if let Frame::Bytes {
-                    stream_id: id,
-                    data,
-                } = frame
-                    && id == stream_id
-                {
-                    seen.extend_from_slice(&data);
-                    if String::from_utf8_lossy(&seen).contains("typed-remotely") {
-                        return true;
-                    }
-                }
-            }
-            false
-        })
-        .await
-        .unwrap_or(false);
-        assert!(
-            echoed,
-            "attach output carries the box unit's echo of our input"
-        );
-        session.close();
-
-        // Sync: full copy, stale files pruned, then changes and deletions.
-        let out = client_home.join("ext-out");
+        // Sync: what differs from the marked destination, stale files pruned, then
+        // changes and deletions. The box's `to:` is ignored.
         let copied = eventually(SOON, || async {
             (std::fs::read(out.join("js/app.js")).ok()? == b"console.log(1)"
                 && !out.join("stale.txt").exists())
@@ -571,6 +527,7 @@ async fn remote_box_end_to_end() {
         })
         .await;
         assert!(copied.is_some(), "initial copy and prune");
+        assert!(!client.h.home.join("ext-out").exists());
         std::fs::write(main.join("ext/js/app.js"), b"console.log(2)").expect("edit");
         std::fs::remove_file(main.join("ext/manifest.json")).expect("delete");
         let followed = eventually(SOON, || async {
@@ -637,6 +594,44 @@ async fn remote_box_end_to_end() {
                 .is_some(),
             "echo works after reconnect"
         );
+        // The new subscription sent this machine's manifest: it reaches "watching"
+        // without writing a file (the previous one wrote several).
+        let resynced = eventually(SOON, || async {
+            let host = client.host().await;
+            let sync = host["syncs"].as_array()?.first()?.clone();
+            (sync["state"] == "watching" && sync["written"] == 0).then_some(sync)
+        })
+        .await;
+        assert!(
+            resynced.is_some(),
+            "unchanged files were resent after reconnect: {}",
+            client.host().await
+        );
+        assert_eq!(
+            std::fs::read(out.join("js/app.js")).ok().as_deref(),
+            Some(&b"console.log(2)"[..])
+        );
+
+        // A link that fails for good unbinds and unroutes, but stays listed.
+        side.transport.refuse(true);
+        side.transport.last_link().expect("link").sever();
+        let failed = eventually(SOON, || async {
+            let host = client.host().await;
+            (host["state"] == "failed").then_some(host)
+        })
+        .await
+        .expect("link failed");
+        assert_eq!(failed["routes"], json!([]), "{failed}");
+        let unbound = eventually(SOON, || async {
+            TcpStream::connect((Ipv6Addr::LOCALHOST, echo_port))
+                .await
+                .is_err()
+                .then_some(())
+        })
+        .await;
+        assert!(unbound.is_some(), "listeners close when the link fails");
+        assert_eq!(client.route_state("web.boxapp.localhost").await, None);
+        side.transport.accept();
 
         // Disconnect unbinds and unroutes.
         client
@@ -687,8 +682,7 @@ async fn colliding_lane_is_skipped() {
             .await
             .expect("box start");
         let local_repo = repo(&tmp.path, "localrepo", BOX);
-        let client_home = tmp.path.join("client-home");
-        let client = ClientSide::start(&tmp, "client", "28500-28999", &side, &client_home).await;
+        let client = ClientSide::start(&tmp, "client", "28500-28999", &side).await;
         client
             .h
             .call(Method::LaneList, json!({}), cx(&local_repo))

@@ -6,9 +6,9 @@
 
 use std::{
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -24,11 +24,11 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use devlanes_proto::AttachParams;
-use devlanes_term::{LaunchRequest, TerminalLauncher};
+use devlanes_term::LaunchRequest;
 use futures_util::{Stream, StreamExt};
 use ratatui::{Terminal, backend::Backend};
 use tokio::{
-    sync::mpsc,
+    sync::{Notify, mpsc},
     task::JoinHandle,
     time::{Instant, MissedTickBehavior, interval, sleep, sleep_until},
 };
@@ -44,9 +44,16 @@ use crate::{
 const FRAME: Duration = Duration::from_millis(16);
 const MESSAGE_QUEUE: usize = 1024;
 const ATTACH_INPUT_QUEUE: usize = 256;
+/// Queued messages applied per frame before drawing again.
+const MAX_DRAIN: usize = 512;
+/// Larger copies are refused: terminals drop OSC 52 writes past roughly this size.
+const MAX_COPY_BYTES: usize = 100 * 1024;
 
 /// Set while the terminal is in raw mode, so the panic hook restores only then.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Wakes the loop after a panic on any thread, so it ends instead of drawing
+/// over the terminal the hook already restored.
+static PANICKED: OnceLock<Notify> = OnceLock::new();
 
 /// Puts the terminal into TUI mode and restores it on drop and on panic.
 pub struct TerminalGuard;
@@ -106,6 +113,9 @@ fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
         restore();
         previous(info);
+        if let Some(panicked) = PANICKED.get() {
+            panicked.notify_one();
+        }
     }));
 }
 
@@ -133,6 +143,7 @@ where
     if !executor.flush(&mut app) {
         return Ok(());
     }
+    let panicked = PANICKED.get_or_init(Notify::new);
     let mut tick = interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut dirty = true;
@@ -155,6 +166,9 @@ where
             msg = receiver.recv() => msg,
             _ = tick.tick() => Some(Msg::Tick),
             _ = sleep_until(next_frame), if dirty => None,
+            // The panic hook already restored the terminal; a UI drawing over
+            // the shell afterwards would only make things worse.
+            () = panicked.notified() => return Err(Error::Panicked),
         };
         let Some(msg) = msg else {
             continue;
@@ -163,8 +177,12 @@ where
         if !executor.apply(&mut app, msg) {
             return Ok(());
         }
-        // Drain what is already queued so a burst of output costs one frame.
-        while let Ok(msg) = receiver.try_recv() {
+        // Drain what is already queued so a burst of output costs one frame,
+        // but stop after a while so a flood cannot hold the screen still.
+        for _ in 0..MAX_DRAIN {
+            let Ok(msg) = receiver.try_recv() else {
+                break;
+            };
             if !executor.apply(&mut app, msg) {
                 return Ok(());
             }
@@ -202,8 +220,11 @@ fn deliver_blocking(sender: &mpsc::Sender<Msg>, msg: Msg) -> bool {
 struct Executor {
     api: Arc<dyn DaemonApi>,
     sender: mpsc::Sender<Msg>,
-    launcher: Result<Arc<dyn TerminalLauncher>, String>,
+    /// Launchers and the configured terminal; picked per launch, off the loop.
+    options: Options,
     clipboard: Box<dyn Write + Send>,
+    /// Set inside tmux, whose OSC 52 needs passthrough wrapping.
+    in_tmux: bool,
     subscription: Option<JoinHandle<()>>,
     attach: Option<(JoinHandle<()>, mpsc::Sender<AttachInput>)>,
     metrics: Option<JoinHandle<()>>,
@@ -216,7 +237,7 @@ struct Executor {
 }
 
 impl Executor {
-    /// Picks the configured terminal launcher once.
+    /// Keeps the options for launching terminals later.
     fn new(
         api: Arc<dyn DaemonApi>,
         sender: mpsc::Sender<Msg>,
@@ -226,8 +247,9 @@ impl Executor {
         Self {
             api,
             sender,
-            launcher: options.launcher(),
+            options: options.clone(),
             clipboard,
+            in_tmux: std::env::var_os("TMUX").is_some(),
             subscription: None,
             attach: None,
             metrics: None,
@@ -327,18 +349,25 @@ impl Executor {
                 unit,
                 columns,
                 rows,
+                interactive,
             } => {
                 self.detach();
                 let (input_tx, input_rx) = mpsc::channel(ATTACH_INPUT_QUEUE);
                 let params = AttachParams {
                     unit,
-                    interactive: true,
+                    interactive,
                     columns: Some(columns),
                     rows: Some(rows),
                 };
                 let task =
                     tokio::spawn(pump_attach(api, sender, generation, lane, params, input_rx));
                 self.attach = Some((task, input_tx));
+            }
+            Effect::SettleResize { token, after_ms } => {
+                tokio::spawn(async move {
+                    sleep(Duration::from_millis(after_ms)).await;
+                    deliver(&sender, Msg::ResizeSettled { token }).await;
+                });
             }
             Effect::Detach => self.detach(),
             Effect::Input(bytes) => self.send_attach(AttachInput::Bytes(Bytes::from(bytes))),
@@ -411,9 +440,18 @@ impl Executor {
             }
             Effect::OpenTerminal { cwd, attach, title } => self.open_terminal(cwd, attach, title),
             Effect::Copy(text) => {
+                if text.len() > MAX_COPY_BYTES {
+                    self.fail(
+                        "copy",
+                        "the selection is over 100 KiB; terminals drop clipboard writes that large"
+                            .into(),
+                    );
+                    return true;
+                }
+                let sequence = input::osc52(&text, self.in_tmux);
                 let written = self
                     .clipboard
-                    .write_all(input::osc52(&text).as_bytes())
+                    .write_all(sequence.as_bytes())
                     .and_then(|()| self.clipboard.flush());
                 if let Err(error) = written {
                     self.fail("copy", error.to_string());
@@ -440,7 +478,7 @@ impl Executor {
                     deliver(&sender, Msg::DaemonInfo { status, doctor }).await;
                 }));
             }
-            Effect::ReadDaemonLog { offset } => {
+            Effect::ReadDaemonLog { from } => {
                 if self.log.as_ref().is_some_and(|task| !task.is_finished()) {
                     return true;
                 }
@@ -451,7 +489,7 @@ impl Executor {
                     return true;
                 };
                 self.log = Some(tokio::task::spawn_blocking(move || {
-                    let result = crate::logfile::read(&path, offset)
+                    let result = crate::logfile::read(&path, from)
                         .map_err(|error| format!("{}: {error}", path.display()));
                     deliver_blocking(&sender, Msg::DaemonLog(result));
                 }));
@@ -504,41 +542,63 @@ impl Executor {
         }
     }
 
-    /// Opens a new terminal window through the configured launcher.
+    /// Opens a new terminal window through the configured or default launcher.
     fn open_terminal(&mut self, cwd: PathBuf, attach: Option<String>, title: String) {
         let sender = self.sender.clone();
-        let launcher = match &self.launcher {
-            Ok(launcher) => Arc::clone(launcher),
-            Err(message) => {
-                let message = message.clone();
-                self.fail("open terminal", message);
-                return;
-            }
-        };
+        let options = self.options.clone();
+        let home = self.api.home();
         tokio::task::spawn_blocking(move || {
-            let command = match attach {
-                Some(unit) => {
-                    // The same binary attaches, so client and daemon versions match.
-                    let exe = std::env::current_exe()
-                        .map_or_else(|_| "devlanes".to_owned(), |p| p.display().to_string());
-                    vec![exe, "attach".into(), unit]
-                }
-                None => vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())],
+            let failed = |message: String| {
+                let msg = Msg::Failed {
+                    what: "open terminal".into(),
+                    message,
+                };
+                deliver_blocking(&sender, msg);
             };
+            let launcher = match options.pick_launcher() {
+                Ok(launcher) => launcher,
+                Err(message) => {
+                    failed(message);
+                    return;
+                }
+            };
+            // The same binary attaches, so client and daemon versions match.
+            let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("devlanes"));
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
             let request = LaunchRequest {
                 cwd,
-                command,
+                command: terminal_command(&exe, &shell, home.as_deref(), attach.as_deref()),
                 title: Some(title),
             };
             if let Err(error) = launcher.launch(&request) {
-                let msg = Msg::Failed {
-                    what: "open terminal".into(),
-                    message: error.to_string(),
-                };
-                deliver_blocking(&sender, msg);
+                failed(error.to_string());
             }
         });
     }
+}
+
+/// The command a new terminal runs: `devlanes attach <unit>`, or the user's
+/// shell for a lane. Terminals started through `open` or `osascript` inherit
+/// launchd's environment, not this one, so `DEVLANES_HOME` travels explicitly
+/// and the command reaches the same daemon.
+pub fn terminal_command(
+    exe: &Path,
+    shell: &str,
+    home: Option<&Path>,
+    attach: Option<&str>,
+) -> Vec<String> {
+    let mut command = Vec::new();
+    if let Some(home) = home {
+        command.extend([
+            "env".to_owned(),
+            format!("DEVLANES_HOME={}", home.display()),
+        ]);
+    }
+    match attach {
+        Some(unit) => command.extend([exe.display().to_string(), "attach".into(), unit.into()]),
+        None => command.push(shell.to_owned()),
+    }
+    command
 }
 
 impl Drop for Executor {

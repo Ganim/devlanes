@@ -103,7 +103,7 @@ fn kinfo(pid: libc::pid_t) -> Option<(u8, u64)> {
 }
 
 /// Returns every PID, retrying when the table grew past the buffer between calls.
-fn all_pids() -> io::Result<Vec<libc::pid_t>> {
+pub(crate) fn all_pids() -> io::Result<Vec<libc::pid_t>> {
     loop {
         // SAFETY: a null buffer with zero size only asks libproc for the current count.
         let count = unsafe { libc::proc_listallpids(ptr::null_mut(), 0) };
@@ -206,6 +206,148 @@ pub(crate) fn listening_tcp(pids: &[u32]) -> Result<Vec<ListeningSocket>, Error>
         });
     }
     Ok(lsof::parse(&stdout))
+}
+
+/// `PROC_PIDFDVNODEINFO` and `PROC_PIDFDPIPEINFO` from `<sys/proc_info.h>`.
+const PROC_PIDFDVNODEINFO: c_int = 1;
+const PROC_PIDFDPIPEINFO: c_int = 6;
+
+/// `struct proc_fileinfo`; libc does not define it. Unread fields keep the layout.
+#[repr(C)]
+struct ProcFileInfo {
+    _fi_openflags: u32,
+    _fi_status: u32,
+    _fi_offset: i64,
+    _fi_type: i32,
+    _fi_guardflags: u32,
+}
+
+/// `struct vnode_fdinfo`.
+#[repr(C)]
+struct VnodeFdInfo {
+    _pfi: ProcFileInfo,
+    pvi: libc::vnode_info,
+}
+
+/// `struct pipe_info`.
+#[repr(C)]
+struct PipeInfo {
+    _pipe_stat: libc::vinfo_stat,
+    pipe_handle: u64,
+    pipe_peerhandle: u64,
+    _pipe_status: i32,
+    _rfu_1: i32,
+}
+
+/// `struct pipe_fdinfo`.
+#[repr(C)]
+struct PipeFdInfo {
+    _pfi: ProcFileInfo,
+    pipeinfo: PipeInfo,
+}
+
+/// Kernel structs made only of integers, valid for every bit pattern.
+trait PlainData {}
+impl PlainData for VnodeFdInfo {}
+impl PlainData for PipeFdInfo {}
+
+/// Device number for character devices; for pipes, this end's kernel handle.
+pub(crate) fn open_file(fd: std::os::fd::BorrowedFd<'_>) -> Result<crate::OpenFile, Error> {
+    use std::os::{fd::AsRawFd, unix::fs::FileTypeExt, unix::fs::MetadataExt};
+    let metadata = std::fs::File::from(fd.try_clone_to_owned()?).metadata()?;
+    if metadata.file_type().is_char_device() {
+        return Ok(crate::OpenFile::Device(metadata.rdev()));
+    }
+    let own = i32::try_from(std::process::id()).map_err(|_| io::Error::other("pid range"))?;
+    pipe_info(own, fd.as_raw_fd())
+        .map(|info| crate::OpenFile::Pipe(info.pipeinfo.pipe_handle))
+        .ok_or_else(|| Error::Malformed {
+            source_name: "open file",
+            detail: "not a device or pipe".into(),
+        })
+}
+
+/// Walks the descriptor table of `pid` through libproc.
+pub(crate) fn holds(pid: u32, target: crate::OpenFile) -> Result<bool, Error> {
+    let Ok(pid) = i32::try_from(pid) else {
+        return Ok(false);
+    };
+    for fd in descriptors(pid) {
+        let matched = match target {
+            crate::OpenFile::Device(rdev) if fd.proc_fdtype == libc::PROX_FDTYPE_VNODE as u32 => {
+                vnode_info(pid, fd.proc_fd)
+                    .is_some_and(|info| u64::from(info.pvi.vi_stat.vst_rdev) == rdev)
+            }
+            crate::OpenFile::Pipe(handle) if fd.proc_fdtype == libc::PROX_FDTYPE_PIPE as u32 => {
+                pipe_info(pid, fd.proc_fd).is_some_and(|info| {
+                    info.pipeinfo.pipe_handle == handle || info.pipeinfo.pipe_peerhandle == handle
+                })
+            }
+            _ => false,
+        };
+        if matched {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Lists the open descriptors of `pid`; empty when it exited or is not inspectable.
+fn descriptors(pid: c_int) -> Vec<libc::proc_fdinfo> {
+    // SAFETY: a null buffer with size 0 only asks libproc for the needed byte count.
+    let needed = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, ptr::null_mut(), 0) };
+    let Ok(needed) = usize::try_from(needed) else {
+        return Vec::new();
+    };
+    // Room for descriptors opened between the two calls.
+    let capacity = needed / size_of::<libc::proc_fdinfo>() + 16;
+    let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity(capacity);
+    let Ok(bytes) = c_int::try_from(capacity * size_of::<libc::proc_fdinfo>()) else {
+        return Vec::new();
+    };
+    // SAFETY: `fds` has capacity for `bytes` bytes of proc_fdinfo, and libproc writes
+    // at most `bytes`, returning how many it wrote.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            bytes,
+        )
+    };
+    let Ok(written) = usize::try_from(written) else {
+        return Vec::new();
+    };
+    let count = (written / size_of::<libc::proc_fdinfo>()).min(capacity);
+    // SAFETY: libproc initialized `count` whole entries, all plain integers, and
+    // `count` never exceeds the allocated capacity.
+    unsafe { fds.set_len(count) };
+    fds
+}
+
+/// Reads one descriptor's flavor-specific info; `None` unless libproc filled it all.
+fn fd_info<T: PlainData>(pid: c_int, fd: i32, flavor: c_int) -> Option<T> {
+    let size = c_int::try_from(size_of::<T>()).ok()?;
+    let mut info = MaybeUninit::<T>::zeroed();
+    // SAFETY: `info` is `size` writable bytes for one `T`; libproc writes at most that.
+    let written = unsafe { libc::proc_pidfdinfo(pid, fd, flavor, info.as_mut_ptr().cast(), size) };
+    if written != size {
+        return None;
+    }
+    // SAFETY: `T: PlainData` is valid for any bit pattern, and libproc filled the
+    // whole zero-initialized buffer.
+    Some(unsafe { info.assume_init() })
+}
+
+/// `PROC_PIDFDVNODEINFO` for one descriptor.
+fn vnode_info(pid: c_int, fd: i32) -> Option<VnodeFdInfo> {
+    fd_info(pid, fd, PROC_PIDFDVNODEINFO)
+}
+
+/// `PROC_PIDFDPIPEINFO` for one descriptor.
+fn pipe_info(pid: c_int, fd: i32) -> Option<PipeFdInfo> {
+    fd_info(pid, fd, PROC_PIDFDPIPEINFO)
 }
 
 /// Caps the soft limit at `kern.maxfilesperproc`; macOS rejects larger values.

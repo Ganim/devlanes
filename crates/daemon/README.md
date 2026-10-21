@@ -37,6 +37,16 @@ async fn serve(home: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 - `units::UnitHost`: one running unit with its output pump, screen snapshot, log writer and state watch.
 - `process::install_panic_hook`: routes panics into `daemon.log`.
 
+## Config example
+
+```yaml
+# ~/.devlanes/config.yaml
+ports:
+  # Machine-wide pool that every lane's port block is allocated from; the default
+  # stays below Linux's usual ephemeral range.
+  range: 20000-32767
+```
+
 ## Behaviour
 
 - The daemon is a headless API: results are structured data with machine codes and data (`not_found`, `needs_env`, `port_in_use`); wording, hints and output modes belong to the clients.

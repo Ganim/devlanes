@@ -158,6 +158,13 @@ impl Store {
         if input.name.is_empty() {
             return Err(Error::Invalid("empty lane name".into()));
         }
+        let profiles = if input.profiles.is_empty() {
+            legacy_profiles(input.profile)
+        } else {
+            input.profiles
+        };
+        let profile = profiles.first().cloned();
+        let profiles = encode_profiles(&profiles)?;
         self.call(move |c| {
             c.immediate_transaction(|c| {
                 if !diesel::select(exists(
@@ -175,7 +182,8 @@ impl Store {
                     lane_index: i64::from(input.index),
                     name: input.name,
                     desired_state: input.desired_state.as_str().into(),
-                    profile: input.profile,
+                    profile,
+                    profiles,
                     created_at: now()?,
                 };
                 diesel::insert_into(lanes::table)
@@ -187,6 +195,7 @@ impl Store {
                         lanes::name.eq(&row.name),
                         lanes::desired_state.eq(&row.desired_state),
                         lanes::profile.eq(&row.profile),
+                        lanes::profiles.eq(&row.profiles),
                         lanes::cleaned_at.eq(None::<i64>),
                     ))
                     .returning(LaneRow::as_returning())
@@ -226,19 +235,35 @@ impl Store {
         })
         .await
     }
-    /// Changes resume intent without touching live processes.
+    /// Compatibility setter for a plain name or an older daemon's encoded array.
+    /// Use `set_lane_desired_profiles` to persist an ordered selection directly.
     pub async fn set_lane_desired(
         &self,
         id: LaneId,
         desired: DesiredState,
         profile: Option<String>,
     ) -> Result<(), Error> {
+        self.set_lane_desired_profiles(id, desired, legacy_profiles(profile))
+            .await
+    }
+
+    /// Updates resume intent and the complete ordered profile selection atomically.
+    /// An empty vector clears both the selection and its compatibility first entry.
+    pub async fn set_lane_desired_profiles(
+        &self,
+        id: LaneId,
+        desired: DesiredState,
+        profiles: Vec<String>,
+    ) -> Result<(), Error> {
+        let profile = profiles.first().cloned();
+        let profiles = encode_profiles(&profiles)?;
         self.call(move |c| {
             require_changed(
                 diesel::update(lanes::table.find(id.0).filter(lanes::cleaned_at.is_null()))
                     .set((
                         lanes::desired_state.eq(desired.as_str()),
                         lanes::profile.eq(profile),
+                        lanes::profiles.eq(profiles),
                     ))
                     .execute(c)?,
                 "active lane",
@@ -368,6 +393,18 @@ impl Store {
         })
         .await
     }
+}
+
+/// Keeps the old decoder's literal fallback while callers adopt ordered selections.
+fn legacy_profiles(profile: Option<String>) -> Vec<String> {
+    profile.map_or_else(Vec::new, |value| {
+        serde_json::from_str(&value).unwrap_or_else(|_| vec![value])
+    })
+}
+
+/// Serializes only the typed profile list; JSON representation stays inside state.
+fn encode_profiles(profiles: &[String]) -> Result<String, Error> {
+    serde_json::to_string(profiles).map_err(|error| Error::Invalid(error.to_string()))
 }
 
 /// Rejects cleanup while process or task identities remain unfinished.

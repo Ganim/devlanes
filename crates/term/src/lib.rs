@@ -60,6 +60,35 @@ pub trait TerminalLauncher: Send + Sync {
     fn launch(&self, request: &LaunchRequest) -> Result<(), LaunchError> {
         self.invocation(request)?.run()
     }
+
+    /// Whether the terminal is installed here; used to pick a default when
+    /// the user configured none. Checks the filesystem, so call it off async
+    /// executor threads.
+    fn available(&self) -> bool {
+        true
+    }
+}
+
+/// True when `program` is an executable file in a `PATH` directory.
+pub fn on_path(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        std::fs::metadata(dir.join(program))
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    })
+}
+
+/// True when a macOS app bundle such as `kitty.app` is in `/Applications` or
+/// `~/Applications`.
+pub fn app_installed(bundle: &str) -> bool {
+    let mut dirs = vec![PathBuf::from("/Applications")];
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join("Applications"));
+    }
+    dirs.iter().any(|dir| dir.join(bundle).is_dir())
 }
 
 impl Invocation {
@@ -111,14 +140,17 @@ impl LaunchRequest {
         Ok(&self.command)
     }
 
-    /// The `cd <cwd> && <command>` line typed into terminals that only accept shell text.
+    /// The line typed into terminals that only accept shell text:
+    /// `sh -c 'cd <cwd> && exec <command>'`. The user's login shell may be
+    /// fish or nushell, so it only has to run `sh` with one quoted word.
     pub fn shell_line(&self) -> Result<String, LaunchError> {
         let command = self.require_command()?;
-        Ok(format!(
-            "cd {} && {}",
+        let script = format!(
+            "cd {} && exec {}",
             shell_quote(&self.cwd.to_string_lossy()),
             shell_join(command)
-        ))
+        );
+        Ok(format!("sh -c {}", shell_quote(&script)))
     }
 
     /// The working directory as a string argument.
@@ -168,8 +200,35 @@ mod tests {
     fn shell_line_quotes_paths_and_keeps_safe_words() -> Result<(), LaunchError> {
         assert_eq!(
             request().shell_line()?,
-            "cd '/tmp/my repo' && devlanes attach acme@2:api"
+            r#"sh -c 'cd '\''/tmp/my repo'\'' && exec devlanes attach acme@2:api'"#
         );
+        Ok(())
+    }
+
+    #[test]
+    fn shell_line_round_trips_through_sh() -> Result<(), Box<dyn std::error::Error>> {
+        let request = LaunchRequest {
+            cwd: std::env::temp_dir(),
+            command: vec!["printf".into(), "%s|%s".into(), "it's".into(), "a b".into()],
+            title: None,
+        };
+        // The typed line is itself a shell command: run it the way a login shell would.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(request.shell_line()?)
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while child.try_wait()?.is_none() {
+            if std::time::Instant::now() > deadline {
+                child.kill()?;
+                child.wait()?;
+                return Err("sh did not finish within 5 seconds".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let output = child.wait_with_output()?;
+        assert_eq!(String::from_utf8(output.stdout)?, "it's|a b");
         Ok(())
     }
 

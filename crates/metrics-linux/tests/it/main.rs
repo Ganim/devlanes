@@ -45,6 +45,17 @@ fn proc_stat_fixtures_give_system_cpu() {
         "counters went back"
     );
     assert_eq!(before.busy_percent_since(&before), None, "no time passed");
+    // iowait dropped by more than idle grew: a busy reading, not a gap.
+    let iowait_back = CpuTimes {
+        total: before.total + 100,
+        idle: before.idle - 5,
+    };
+    assert_eq!(iowait_back.busy_percent_since(&before), Some(100.0));
+    let partly = CpuTimes {
+        total: before.total + 100,
+        idle: before.idle + 40,
+    };
+    assert_eq!(partly.busy_percent_since(&before), Some(60.0));
     for text in [
         "",
         "cpu0 1 2 3 4 5 6 7 8\n",

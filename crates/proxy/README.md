@@ -27,6 +27,8 @@ async fn serve(shutdown: CancellationToken) -> Result<(), Box<dyn std::error::Er
 - `Proxy::replace_routes` publishes a snapshot without interrupting active streams.
 - `Proxy::tls_config` and `serve_tls` use a shared CA with HTTP/1.1 and HTTP/2 ALPN.
 - `RouteState` supplies idle, starting, failed and reconnecting status pages.
+- `Proxy::listener_health` reports each accept loop's `ListenerHealth`: whether it is running, its accept error count and the latest error.
+- `Proxy::with_limits` replaces the default `ProxyLimits` (connection cap, header timeout, idle timeout).
 
 ## Config example
 
@@ -43,9 +45,15 @@ The daemon binds these ports on both address families. When a port is denied or 
 
 ## Behaviour
 
-Host is preserved unless a route selects `HostHeader::Upstream`. `Upstream::Local` tries IPv4 loopback before IPv6. WebSockets and SSE stream without an idle timeout.
+Host is preserved unless a route selects `HostHeader::Upstream`. `Upstream::Local` tries IPv4 loopback before IPv6. WebSockets and SSE stream without an idle timeout. Idle upstream connections are reused for a few seconds, only for requests to the same target; WebSocket upgrades always get their own connection.
 
-`bind_listeners(80, 8080, false)` binds both address families and falls back when the requested port is denied or occupied; use `(443, 8443, false)` for TLS. Serve both returned listeners through `Proxy`, which rejects non-loopback peers unless `ProxyConfig::lan` is enabled. Set `https_redirect_port` to the actual TLS port when enabling HTTP redirects.
+Routes marked `fallback` apply only when no other route matches, even an exact fallback route against a wildcard. Within each group an exact host beats the longest matching wildcard.
+
+The proxy replaces `Forwarded` and the `X-Forwarded-*` headers and drops client-sent `X-Real-IP`, `X-Forwarded-Ssl`, `X-Forwarded-Scheme`, `X-Forwarded-Prefix`, `X-Forwarded-Server`, `X-Original-URL` and `Front-End-Https`. Upstream apps always connect from loopback, so with `lan: true` they see 127.0.0.1 as the peer address and must read the client address from `X-Forwarded-For` or `Forwarded`. Failure pages include the service's log tail only for loopback clients.
+
+`bind_listeners(80, 8080, false)` binds both address families and falls back when the requested port is denied or occupied; use `(443, 8443, false)` for TLS. If IPv6 is unavailable on the host, it serves IPv4 only and sets `ipv6_error`. Serve every listener from `BoundListeners::listeners` through `Proxy`, which rejects non-loopback peers unless `ProxyConfig::lan` is enabled. Set `https_redirect_port` to the actual TLS port when enabling HTTP redirects.
+
+A failed `accept` never stops a listener: client resets are skipped and descriptor exhaustion is retried after a short pause. Check `listener_health` instead of the bind result to know whether a listener is still serving.
 
 ## License
 

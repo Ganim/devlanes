@@ -4,13 +4,14 @@
 //! (`;`-separated): `echo <text>`, `printenv <KEY>`, `serve` (binds `$PORT` and stays
 //! up), `tcp-echo` (echoes every connection on `$PORT`), `http <body>` (answers
 //! every request on `$PORT` with `<body>`), `sleep` (stays up), `exit <code>`,
-//! `fail` (prints `boom`, exits 1).
+//! `fail` (prints `boom`, exits 1), `deaf` (stops reading input: writes block
+//! until the unit stops).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -46,6 +47,8 @@ impl Journal {
 #[derive(Default, Clone)]
 pub struct FakeRunner {
     pub journal: Journal,
+    /// `<unit pid> <columns>x<rows>` for every resize, in order.
+    pub resizes: Journal,
 }
 
 /// Extracts the script from `/bin/sh -c <script>` or argv.
@@ -79,6 +82,8 @@ impl UnitRunner for FakeRunner {
             first: Mutex::new(Some(first)),
             exit: watch::channel(None).0,
             stop: watch::channel(false).0,
+            deaf: AtomicBool::new(false),
+            resizes: self.resizes.clone(),
         });
         let runner = unit.clone();
         tokio::spawn(async move { runner.run(script, spec.env).await });
@@ -93,6 +98,9 @@ pub struct FakeUnit {
     first: Mutex<Option<broadcast::Receiver<OutputChunk>>>,
     exit: watch::Sender<Option<ExitOutcome>>,
     stop: watch::Sender<bool>,
+    /// Set by `deaf`: input never completes, like a process that stopped reading.
+    deaf: AtomicBool,
+    resizes: Journal,
 }
 
 impl FakeUnit {
@@ -129,6 +137,7 @@ impl FakeUnit {
             let (word, rest) = command.split_once(' ').unwrap_or((command, ""));
             match word {
                 "echo" => self.print(rest),
+                "deaf" => self.deaf.store(true, Ordering::SeqCst),
                 "printenv" => self.print(env.get(rest).map_or("", String::as_str)),
                 "exit" => {
                     let code = rest.trim().parse().unwrap_or(0);
@@ -254,11 +263,22 @@ impl Unit for FakeUnit {
         if self.exit.borrow().is_some() {
             return Err(Error::Exited);
         }
+        if self.deaf.load(Ordering::SeqCst) {
+            // A full PTY buffer: the write returns only once the unit goes away.
+            let _ = self.stop.subscribe().wait_for(|stopped| *stopped).await;
+            return Err(Error::Exited);
+        }
         self.print(&String::from_utf8_lossy(&bytes));
         Ok(())
     }
-    /// Accepts any size.
-    async fn resize(&self, _: TerminalSize) -> Result<(), Error> {
+    /// Accepts any size and records it.
+    async fn resize(&self, size: TerminalSize) -> Result<(), Error> {
+        if let Ok(mut resizes) = self.resizes.0.lock() {
+            resizes.push(format!(
+                "{} {}x{}",
+                self.identity.pid, size.columns, size.rows
+            ));
+        }
         Ok(())
     }
     /// Ends the unit with the requested signal.

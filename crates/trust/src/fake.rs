@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -32,9 +32,11 @@ impl FakeExecutor {
         }
     }
 
-    /// Makes [`CommandExecutor::find_program`] report these names as installed.
+    /// Registers installed programs.
     ///
-    /// Found programs resolve to their bare name so argv assertions stay readable.
+    /// Bare names answer [`CommandExecutor::find_program`] and resolve to the bare
+    /// name so argv assertions stay readable. Absolute paths answer
+    /// [`CommandExecutor::is_executable`], which root commands are resolved through.
     #[must_use]
     pub fn with_programs(mut self, names: &[&str]) -> Self {
         self.programs
@@ -72,5 +74,11 @@ impl CommandExecutor for FakeExecutor {
     /// Reports only programs registered with [`FakeExecutor::with_programs`].
     fn find_program(&self, name: &str, _extra_dirs: &[PathBuf]) -> Option<PathBuf> {
         self.programs.contains(name).then(|| PathBuf::from(name))
+    }
+
+    /// True only for absolute paths registered with [`FakeExecutor::with_programs`].
+    fn is_executable(&self, path: &Path) -> bool {
+        path.to_str()
+            .is_some_and(|path| path.starts_with('/') && self.programs.contains(path))
     }
 }

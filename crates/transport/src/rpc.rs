@@ -81,13 +81,22 @@ pub(crate) async fn serve_call(
     let reader_cancel = cancel.clone();
     let reader = tokio::spawn(async move {
         let mut input_tx = Some(input_tx);
+        let mut dropped = 0u64;
         loop {
             match wire::recv::<_, RpcClientFrame>(&mut source).await {
                 Ok(Some((RpcClientFrame::Input { value }, _))) => {
                     if let Some(tx) = input_tx.as_ref() {
-                        // A handler that ignores input must not stall cancel detection.
-                        if tx.send(value).await.is_err() {
-                            input_tx = None;
+                        // Never wait on a slow handler: this loop must keep reading to
+                        // notice the client leaving. Input beyond the queue is dropped.
+                        match tx.try_send(value) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                dropped += 1;
+                                if dropped.is_power_of_two() {
+                                    tracing::warn!(dropped, "rpc input queue full; dropping input");
+                                }
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => input_tx = None,
                         }
                     }
                 }

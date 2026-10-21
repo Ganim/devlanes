@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use devlanes_trust::nss::{CertutilLookup, NssDatabases, NssStore};
 use devlanes_trust::{
     CaCertificate, CommandExecutor, CommandLine, CommandOutput, SystemExecutor, TempPem,
-    TrustError, TrustStatus, TrustStore, TrustTarget, path_arg, run,
+    TrustError, TrustStatus, TrustStore, TrustTarget, find_system_program, path_arg, run,
 };
 
 /// Store id of the distribution CA bundle.
@@ -34,8 +34,16 @@ const CA_TOOLS_HINT: &str = "install the `ca-certificates` package";
 /// Shown when sudo is missing.
 const SUDO_HINT: &str = "run `devlanes certs trust` as root or install sudo";
 
-/// Non-root `PATH`s on Debian lack the sbin directories the refresh tools live in.
-const SBIN_DIRS: [&str; 4] = ["/usr/sbin", "/sbin", "/usr/bin", "/bin"];
+/// Shown if `install` or `rm` is missing from the system directories.
+const COREUTILS_HINT: &str = "install coreutils";
+
+/// Absolute paths of the root-run tools for one change.
+struct Tools {
+    install: String,
+    rm: String,
+    refresh: String,
+    refresh_args: Vec<String>,
+}
 
 /// How root commands are run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,24 +280,30 @@ impl SystemStore {
         }
     }
 
-    /// Resolves the refresh tool before any change, so a missing tool leaves no stray anchor.
-    fn refresh_command(&self, layout: CaStoreLayout) -> Result<(String, Vec<String>), TrustError> {
-        let (name, args) = layout.refresh();
-        let dirs: Vec<PathBuf> = SBIN_DIRS.iter().map(PathBuf::from).collect();
-        let program =
-            self.executor
-                .find_program(name, &dirs)
-                .ok_or_else(|| TrustError::ToolMissing {
-                    tool: name.into(),
-                    hint: CA_TOOLS_HINT.into(),
-                })?;
-        Ok((
-            path_arg(&program)?,
-            args.iter().map(|arg| (*arg).to_owned()).collect(),
-        ))
+    /// Absolute path of a root-run tool from the system directories, never `PATH`.
+    fn system_program(&self, name: &str, hint: &str) -> Result<String, TrustError> {
+        let path = find_system_program(self.executor.as_ref(), name).ok_or_else(|| {
+            TrustError::ToolMissing {
+                tool: name.into(),
+                hint: hint.into(),
+            }
+        })?;
+        path_arg(&path)
     }
 
-    /// Runs `program args` as root and requires success.
+    /// Resolves every tool a change needs before running any of them, so a missing
+    /// tool leaves no stray anchor.
+    fn tools(&self, layout: CaStoreLayout) -> Result<Tools, TrustError> {
+        let (refresh, args) = layout.refresh();
+        Ok(Tools {
+            install: self.system_program("install", COREUTILS_HINT)?,
+            rm: self.system_program("rm", COREUTILS_HINT)?,
+            refresh: self.system_program(refresh, CA_TOOLS_HINT)?,
+            refresh_args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        })
+    }
+
+    /// Runs the absolute `program` with `args` as root and requires success.
     async fn privileged(
         &self,
         program: &str,
@@ -298,14 +312,7 @@ impl SystemStore {
         let command = match self.privilege {
             Privilege::Root => CommandLine::new(program).args(args.iter().cloned()),
             Privilege::Sudo { interactive } => {
-                let dirs: Vec<PathBuf> = SBIN_DIRS.iter().map(PathBuf::from).collect();
-                let sudo = self.executor.find_program("sudo", &dirs).ok_or_else(|| {
-                    TrustError::ToolMissing {
-                        tool: "sudo".into(),
-                        hint: SUDO_HINT.into(),
-                    }
-                })?;
-                let mut command = CommandLine::new(path_arg(&sudo)?);
+                let mut command = CommandLine::new(self.system_program("sudo", SUDO_HINT)?);
                 if !interactive {
                     command = command.arg("-n");
                 }
@@ -358,7 +365,10 @@ impl TrustStore for SystemStore {
         {
             return Ok(());
         }
-        let (refresh, refresh_args) = self.refresh_command(layout)?;
+        let tools = self.tools(layout)?;
+        if let Privilege::Sudo { .. } = self.privilege {
+            self.system_program("sudo", SUDO_HINT)?;
+        }
         let pem = TempPem::create(ca).await?;
         let copy = vec![
             "-m".to_owned(),
@@ -366,13 +376,13 @@ impl TrustStore for SystemStore {
             pem.arg().to_owned(),
             path_arg(&anchor)?,
         ];
-        self.privileged("install", &copy).await?;
+        self.privileged(&tools.install, &copy).await?;
         pem.close().await;
-        if let Err(error) = self.privileged(&refresh, &refresh_args).await {
+        if let Err(error) = self.privileged(&tools.refresh, &tools.refresh_args).await {
             // Status only reads the anchor, so a stale anchor would report Installed
             // and make the next install skip the refresh. Removal is best effort.
             let _ = self
-                .privileged("rm", &["-f".to_owned(), path_arg(&anchor)?])
+                .privileged(&tools.rm, &["-f".to_owned(), path_arg(&anchor)?])
                 .await;
             return Err(error);
         }
@@ -386,10 +396,10 @@ impl TrustStore for SystemStore {
         if self.read_anchor(&anchor).await?.is_none() {
             return Ok(());
         }
-        let (refresh, refresh_args) = self.refresh_command(layout)?;
-        self.privileged("rm", &["-f".to_owned(), path_arg(&anchor)?])
+        let tools = self.tools(layout)?;
+        self.privileged(&tools.rm, &["-f".to_owned(), path_arg(&anchor)?])
             .await?;
-        self.privileged(&refresh, &refresh_args).await?;
+        self.privileged(&tools.refresh, &tools.refresh_args).await?;
         Ok(())
     }
 

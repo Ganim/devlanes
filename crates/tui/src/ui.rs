@@ -4,21 +4,25 @@
 //! reaches the buffer (see [`crate::text`]), so long or hostile text cannot
 //! spill into another widget or move the real terminal's cursor.
 
-use devlanes_proto::{LaneSummary, UnitSummary};
+use devlanes_proto::{LaneSummary, ORPHANED, UnitSummary};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::Marker,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Row as TableRow, Sparkline, Table},
+    widgets::{
+        Axis, Block, BorderType, Borders, Chart, Clear, Dataset, GraphType, Paragraph,
+        Row as TableRow, Table, TableState,
+    },
 };
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::api::UnitMetrics;
 use crate::app::{
     App, AttachState, Connection, CopyState, Dialog, ErrorEntry, Focus, LogView, MIN_HEIGHT,
-    MIN_WIDTH, PaneMode, PanelLine, ProfileChoice, ProfilesState, Row, Tab, Target, areas,
-    error_panel_area, lane_profiles, started_by_agent, unit_ref,
+    MIN_WIDTH, MonitorRow, PaneMode, PanelLine, ProfileChoice, ProfilesState, Row, Tab, Target,
+    areas, error_panel_area, is_orphaned, lane_profiles, started_by_agent, unit_ref,
 };
 use crate::doctor;
 use crate::text::{self, clean, clip};
@@ -31,6 +35,8 @@ const MUTED: Color = Color::Rgb(0xa6, 0xa3, 0x99);
 const RULE: Color = Color::Rgb(0x3d, 0x3b, 0x36);
 const READY: Color = Color::Rgb(0x3e, 0xa6, 0x6b);
 const FAILED: Color = Color::Rgb(0xd9, 0x4f, 0x3d);
+/// Needs attention without being a failure (orphaned processes); red stays for failures.
+const WARN: Color = Color::Rgb(0xe8, 0x8a, 0x3c);
 /// Width of the label column in detail panes.
 const LABEL: usize = 10;
 /// `warn sandbox ` fits the doctor check label column.
@@ -274,6 +280,13 @@ fn lane_spans(app: &App, lane: &LaneSummary) -> Vec<Span<'static>> {
     if let Some(entry) = app.target_error(&Target::Lane(lane.reference.clone())) {
         spans.push(failure_badge(entry));
     }
+    let orphans = lane.units.iter().filter(|unit| is_orphaned(unit)).count();
+    if orphans > 0 {
+        spans.push(Span::styled(
+            format!("  ◆ {orphans} orphaned"),
+            Style::new().fg(WARN),
+        ));
+    }
     let mut badges = Vec::new();
     if let Some(next) = lane.moves_to {
         badges.push(format!("moves to lane {next}"));
@@ -281,9 +294,8 @@ fn lane_spans(app: &App, lane: &LaneSummary) -> Vec<Span<'static>> {
     if lane.config_changed {
         badges.push("config changed".to_owned());
     }
-    if lane.needs_env {
-        badges.push("needs start from a shell".to_owned());
-    }
+    // No badge for `needs_env`: `s` here sends this TUI's environment, which
+    // is all such a lane needs; the details pane says so.
     for badge in badges {
         spans.push(Span::styled(format!("  {badge}"), Style::new().fg(MUTED)));
     }
@@ -303,9 +315,10 @@ fn lane_spans(app: &App, lane: &LaneSummary) -> Vec<Span<'static>> {
 fn unit_spans(unit: &UnitSummary, error: Option<&ErrorEntry>) -> Vec<Span<'static>> {
     let (glyph, state_color) = unit_glyph(&unit.state);
     let own = unit.color.as_deref().and_then(palette_color);
-    // A failed unit's marker stays red whatever its color, so failures stand out.
+    // Failed and orphaned markers keep their state color whatever the unit's
+    // color, so both stand out (red for failures, amber for orphans).
     let marker = match own {
-        Some(color) if unit.state != "failed" => color,
+        Some(color) if unit.state != "failed" && unit.state != ORPHANED => color,
         _ => state_color,
     };
     let name = own.map_or_else(Style::new, |color| Style::new().fg(color));
@@ -333,11 +346,13 @@ fn unit_spans(unit: &UnitSummary, error: Option<&ErrorEntry>) -> Vec<Span<'stati
     spans
 }
 
-/// Lowercase state word, with the exit code for failed and exited units.
+/// Lowercase state word, with the exit code for failed and exited units and
+/// the pid for orphans, which can only be found by it.
 pub fn unit_state(unit: &UnitSummary) -> String {
     let state = clean(&unit.state);
-    match (state.as_str(), unit.exit_code) {
-        ("failed" | "exited", Some(code)) => format!("{state} {code}"),
+    match (state.as_str(), unit.exit_code, unit.pid) {
+        ("failed" | "exited", Some(code), _) => format!("{state} {code}"),
+        (ORPHANED, _, Some(pid)) => format!("{state} pid {pid}"),
         _ => state,
     }
 }
@@ -359,6 +374,7 @@ fn unit_glyph(state: &str) -> (&'static str, Color) {
         "starting" | "stopping" => ("◐", MUTED),
         "queued" => ("◌", MUTED),
         "failed" => ("✕", FAILED),
+        ORPHANED => ("◆", WARN),
         _ => ("○", MUTED),
     }
 }
@@ -392,6 +408,23 @@ fn render_pane(app: &App, frame: &mut Frame, area: Rect, inner: Rect) {
     let focused = app.focus == Focus::Terminal;
     let width = usize::from(inner.width);
     let Some(attached) = &app.attached else {
+        if let (Some(lane), Some(unit)) = (app.selected_lane(), app.selected_unit())
+            && is_orphaned(unit)
+        {
+            let title = format!(
+                " {} · {} ",
+                clean(&unit_ref(&lane.reference, &unit.name)),
+                unit_state(unit)
+            );
+            frame.render_widget(block(vec![Span::raw(title)], false, area.width), area);
+            let target = Target::Unit {
+                lane: lane.reference.clone(),
+                unit: unit.name.clone(),
+            };
+            let lines = unit_details(app, Some(unit), &target, None, width);
+            render_details(app, frame, lines, inner);
+            return;
+        }
         let title = app.selected_lane().map_or_else(
             || " devlanes ".to_owned(),
             |lane| format!(" {} ", clean(&lane.reference)),
@@ -425,7 +458,7 @@ fn render_pane(app: &App, frame: &mut Frame, area: Rect, inner: Rect) {
     };
     match (&attached.state, &attached.mode) {
         (AttachState::Failed(reason), _) => {
-            let lines = unit_details(app, &target, Some(reason), width);
+            let lines = unit_details(app, app.attached_unit(), &target, Some(reason), width);
             render_details(app, frame, lines, inner);
         }
         (_, PaneMode::Logs(view)) => render_logs(view, frame, inner),
@@ -571,13 +604,28 @@ fn worded_lines(
 /// Unit facts, its last failed action and why there is no terminal.
 fn unit_details(
     app: &App,
+    unit: Option<&UnitSummary>,
     target: &Target,
     attach: Option<&Worded>,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let unit = app.attached_unit();
     let mut lines = Vec::new();
-    if let Some(unit) = unit {
+    // An orphan has no stream, so the pane says what it is and how to end it.
+    if let Some(unit) = unit.filter(|unit| is_orphaned(unit)) {
+        let pid = unit
+            .pid
+            .map_or_else(|| "unknown".to_owned(), |pid| pid.to_string());
+        let text = format!(
+            "orphaned process (pid {pid}) left running by a previous daemon; it has no terminal. press x to terminate it"
+        );
+        lines.extend(
+            text::wrap(&text, width)
+                .into_iter()
+                .map(|line| Line::from(line).style(Style::new().fg(WARN))),
+        );
+        lines.push(Line::from(""));
+    }
+    if let Some(unit) = unit.filter(|unit| !is_orphaned(unit)) {
         lines.extend(field("state", &unit_state(unit), width, Style::new()));
     }
     let entry = app.target_error(target);
@@ -694,7 +742,7 @@ fn lane_details(app: &App, width: usize) -> Vec<Line<'static>> {
     if lane.needs_env {
         lines.extend(field(
             "env",
-            "run devlanes start from a shell",
+            "lost when the daemon restarted; s starts the lane with this TUI's environment",
             width,
             plain,
         ));
@@ -785,26 +833,41 @@ fn render_monitor(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
     let spark_width = table_area.width.saturating_sub(48).clamp(4, 30);
+    let number = |cpu: Option<f64>, memory: Option<u64>| {
+        (
+            cpu.map_or_else(|| "-".to_owned(), |cpu| format!("{cpu:.0}%")),
+            memory.map_or_else(|| "-".to_owned(), format_bytes),
+        )
+    };
     let body: Vec<TableRow> = rows
         .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let cpu_history: Vec<f64> = row.history.iter().map(|point| point.1).collect();
-            let cells = vec![
-                clean(&row.lane),
-                clean(&row.unit),
-                row.cpu_percent
-                    .map_or_else(|| "-".to_owned(), |cpu| format!("{cpu:.0}%")),
-                row.memory_bytes
-                    .map_or_else(|| "-".to_owned(), format_bytes),
-                text_sparkline(&cpu_history, usize::from(spark_width), 100.0),
-            ];
-            let style = if index == app.monitor_index {
-                Style::new().fg(ON_PAINT).bg(PAINT)
-            } else {
-                Style::new()
-            };
-            TableRow::new(cells).style(style)
+        .map(|row| match row {
+            MonitorRow::Lane {
+                lane,
+                cpu_percent,
+                memory_bytes,
+            } => {
+                let (cpu, memory) = number(*cpu_percent, *memory_bytes);
+                TableRow::new(vec![
+                    clean(lane),
+                    "total".to_owned(),
+                    cpu,
+                    memory,
+                    String::new(),
+                ])
+                .style(Style::new().add_modifier(Modifier::BOLD))
+            }
+            MonitorRow::Unit(unit) => {
+                let history: Vec<f64> = unit.history.iter().map(|point| point.1).collect();
+                let (cpu, memory) = number(unit.cpu_percent, unit.memory_bytes);
+                TableRow::new(vec![
+                    String::new(),
+                    clean(&unit.unit),
+                    cpu,
+                    memory,
+                    text_sparkline(&history, usize::from(spark_width), 100.0),
+                ])
+            }
         })
         .collect();
     let header =
@@ -820,26 +883,52 @@ fn render_monitor(app: &App, frame: &mut Frame, area: Rect) {
         ],
     )
     .header(header)
-    .block(table_block);
-    frame.render_widget(table, table_area);
-    if detail_area.height > 0
-        && let Some(row) = rows.get(app.monitor_index)
-    {
-        render_memory_detail(row, frame, detail_area);
+    .block(table_block)
+    .row_highlight_style(Style::new().fg(ON_PAINT).bg(PAINT));
+    // The table scrolls itself to keep the selected row in view.
+    let mut state = TableState::default().with_selected(Some(app.monitor_index));
+    frame.render_stateful_widget(table, table_area, &mut state);
+    if detail_area.height > 0 {
+        match rows.get(app.monitor_index) {
+            Some(MonitorRow::Unit(unit)) => render_memory_detail(unit, frame, detail_area),
+            Some(MonitorRow::Lane { lane, .. }) => {
+                let block = block(
+                    vec![Span::raw(format!(" {} ", clean(lane)))],
+                    false,
+                    detail_area.width,
+                );
+                let inner = block.inner(detail_area);
+                frame.render_widget(block, detail_area);
+                frame.render_widget(
+                    Paragraph::new("select a unit to see its memory over time")
+                        .style(Style::new().fg(MUTED)),
+                    inner,
+                );
+            }
+            None => {}
+        }
     }
 }
 
-/// Memory over time for one unit.
+/// Memory over time for one unit: the newest samples that fit, on a scale
+/// padded around them so steady memory reads as a flat line, not a full block.
+/// The baseline (typical memory of recent runs) is drawn when the daemon sends one.
 fn render_memory_detail(row: &UnitMetrics, frame: &mut Frame, area: Rect) {
     let current = row
         .memory_bytes
         .map_or_else(|| "-".to_owned(), format_bytes);
-    let title = format!(
+    let mut title = vec![Span::raw(format!(
         " {} memory {current} ",
         clean(&unit_ref(&row.lane, &row.unit))
-    );
-    let block = block(vec![Span::raw(title)], false, area.width);
-    if row.history.is_empty() {
+    ))];
+    if let Some(baseline) = row.baseline_memory_bytes {
+        title.push(Span::styled(
+            format!("baseline {} ", format_bytes(baseline)),
+            Style::new().fg(MUTED),
+        ));
+    }
+    let block = block(title, false, area.width);
+    if row.history.len() < 2 {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         frame.render_widget(
@@ -848,14 +937,49 @@ fn render_memory_detail(row: &UnitMetrics, frame: &mut Frame, area: Rect) {
         );
         return;
     }
-    let data: Vec<u64> = row.history.iter().map(|point| point.2).collect();
-    frame.render_widget(
-        Sparkline::default()
-            .block(block)
-            .data(&data)
-            .style(Style::new().fg(READY)),
-        area,
-    );
+    // Braille gives two points per column.
+    let keep = usize::from(area.width.saturating_sub(12)).max(2) * 2;
+    let recent = &row.history[row.history.len().saturating_sub(keep)..];
+    let points: Vec<(f64, f64)> = recent
+        .iter()
+        .map(|(ts, _, memory)| (*ts as f64, *memory as f64))
+        .collect();
+    let first = points.first().map_or(0.0, |p| p.0);
+    let last = points.last().map_or(1.0, |p| p.0).max(first + 1.0);
+    let baseline = row.baseline_memory_bytes.map(|b| b as f64);
+    let values = points.iter().map(|p| p.1).chain(baseline);
+    let low = values.clone().fold(f64::MAX, f64::min);
+    let high = values.fold(0.0, f64::max);
+    let pad = ((high - low) * 0.15).max(high * 0.05).max(1.0);
+    let (bottom, top) = ((low - pad).max(0.0), high + pad);
+    let baseline_points: Vec<(f64, f64)> =
+        baseline.map_or_else(Vec::new, |b| vec![(first, b), (last, b)]);
+    let mut datasets = vec![
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(READY))
+            .data(&points),
+    ];
+    if !baseline_points.is_empty() {
+        datasets.push(
+            Dataset::default()
+                .marker(Marker::Dot)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(MUTED))
+                .data(&baseline_points),
+        );
+    }
+    let chart = Chart::new(datasets)
+        .block(block)
+        .x_axis(Axis::default().bounds([first, last]))
+        .y_axis(
+            Axis::default()
+                .bounds([bottom, top])
+                .labels([format_bytes(bottom as u64), format_bytes(top as u64)])
+                .style(Style::new().fg(MUTED)),
+        );
+    frame.render_widget(chart, area);
 }
 
 /// The last `width` samples as block characters scaled to `max(floor, peak)`.
@@ -1070,7 +1194,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
                 ("j/k", "scroll log"),
                 ("R", "restart"),
                 ("S", "stop"),
-                ("g", "lane gc"),
+                ("X", "lane gc"),
                 ("tab", "lanes"),
                 ("q", "quit"),
             ];
@@ -1108,24 +1232,36 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     if !app.errors.is_empty() && app.focus == Focus::List {
         hints.insert(1, ("e", "errors"));
     }
-    let mut spans = vec![Span::raw(" ")];
-    let mut used = 1;
-    // Hints that do not fit are dropped whole.
-    for (key, label) in hints {
-        let width = text::width(key) + text::width(label) + 3;
-        if used + width > usize::from(area.width) {
+    // `? help` and `q quit` always fit; others are dropped whole from the end.
+    let fixed: Vec<(&str, &str)> = [("?", "help"), ("q", "quit")]
+        .into_iter()
+        .filter(|hint| hints.contains(hint))
+        .collect();
+    hints.retain(|hint| !fixed.contains(hint));
+    let size = |(key, label): &(&str, &str)| text::width(key) + text::width(label) + 3;
+    let budget = usize::from(area.width).saturating_sub(1 + fixed.iter().map(size).sum::<usize>());
+    let mut used = 0;
+    let mut shown: Vec<(&str, &str)> = Vec::new();
+    for hint in hints {
+        if used + size(&hint) > budget {
             break;
         }
-        used += width;
+        used += size(&hint);
+        shown.push(hint);
+    }
+    shown.extend(fixed);
+    let mut spans = vec![Span::raw(" ")];
+    for (key, label) in shown {
         spans.push(Span::styled(key, Style::new().fg(PAINT)));
         spans.push(Span::styled(format!(" {label}  "), Style::new().fg(MUTED)));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(Paragraph::new(fit(spans, usize::from(area.width))), area);
 }
 
 /// Every binding, for the help dialog.
 const HELP: &[(&str, &str)] = &[
     ("j/k, arrows", "move"),
+    ("g / G", "first / last, on every list"),
     ("enter, h/l", "expand or collapse a lane"),
     ("shift+tab", "switch between list and terminal"),
     ("s / x / r", "start / stop / restart unit or lane"),
@@ -1139,7 +1275,7 @@ const HELP: &[(&str, &str)] = &[
     ("e", "recent errors in full"),
     ("tab", "lanes / monitor / daemon, from the list"),
     ("R / S", "daemon tab: restart / stop the daemon"),
-    ("g", "daemon tab: lane gc"),
+    ("X", "daemon tab: lane gc"),
     ("s", "daemon tab: start a stopped daemon"),
     ("q", "quit; everything keeps running"),
 ];
@@ -1207,6 +1343,40 @@ fn tail_fit(input: &str, width: usize) -> String {
     kept.into_iter().rev().collect()
 }
 
+/// First index of a `room`-row window over `len` items that shows `selected`.
+fn window(len: usize, selected: usize, room: usize) -> usize {
+    if len <= room {
+        return 0;
+    }
+    selected.saturating_sub(room / 2).min(len - room)
+}
+
+/// Fits a dialog into `rows`: the tail always shows; the body loses its last
+/// lines, the final kept one replaced by `…`.
+fn compact(
+    mut body: Vec<Line<'static>>,
+    tail: Vec<Line<'static>>,
+    rows: usize,
+) -> Vec<Line<'static>> {
+    // A blank line separates body and tail when there is room for it.
+    if body.len() + tail.len() < rows && !body.is_empty() {
+        body.push(Line::from(""));
+    }
+    if body.len() + tail.len() <= rows {
+        body.extend(tail);
+        return body;
+    }
+    if tail.len() >= rows {
+        let skip = tail.len() - rows;
+        return tail.into_iter().skip(skip).collect();
+    }
+    let room = rows - tail.len();
+    body.truncate(room.saturating_sub(1));
+    body.push(Line::from("…").style(Style::new().fg(MUTED)));
+    body.extend(tail);
+    body
+}
+
 /// Modal dialogs over a cleared box.
 fn render_dialog(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
     if let Dialog::Errors { scroll } = dialog {
@@ -1236,10 +1406,12 @@ fn render_dialog(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
                     .map(Line::from),
             );
         }
-        lines.push(Line::from(""));
         lines
     };
-    let (title, lines): (&str, Vec<Line>) = match dialog {
+    // Rows inside the border; lists are windowed to fit next to the tail.
+    let rows = usize::from(area.height.saturating_sub(2)).max(1);
+    // `body` may be cut to fit; `tail` (input line, key hints) always stays.
+    let (title, body, tail): (&str, Vec<Line>, Vec<Line>) = match dialog {
         Dialog::Errors { .. } => return,
         Dialog::Confirm {
             prompt,
@@ -1248,18 +1420,16 @@ fn render_dialog(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
             strict,
             ..
         } => {
-            let mut lines = explained(prompt, detail);
             let keys = if *strict {
                 format!("y {action} · n or esc cancels")
             } else {
                 format!("y or enter {action} · n or esc cancels")
             };
-            lines.extend(
-                text::wrap(&keys, narrow)
-                    .into_iter()
-                    .map(|line| Line::from(line).style(muted)),
-            );
-            (" confirm ", lines)
+            let tail = text::wrap(&keys, narrow)
+                .into_iter()
+                .map(|line| Line::from(line).style(muted))
+                .collect();
+            (" confirm ", explained(prompt, detail), tail)
         }
         Dialog::TypeConfirm {
             prompt,
@@ -1269,79 +1439,97 @@ fn render_dialog(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
             mismatch,
             ..
         } => {
-            let mut lines = explained(prompt, detail);
-            lines.extend(
+            let mut tail: Vec<Line> =
                 text::wrap(&format!("type {} and press enter", clean(expected)), narrow)
                     .into_iter()
-                    .map(Line::from),
-            );
+                    .map(Line::from)
+                    .collect();
             let input = clean(input);
             let shown = tail_fit(&input, narrow.saturating_sub(3));
-            lines.push(Line::from(vec![
+            tail.push(Line::from(vec![
                 Span::styled("> ", Style::new().fg(MUTED)),
                 Span::styled(shown, Style::new().fg(PAINT)),
                 Span::raw("▏"),
             ]));
             if *mismatch {
-                lines.extend(
+                tail.extend(
                     text::wrap("that is not the lane name", narrow)
                         .into_iter()
                         .map(|line| Line::from(line).style(Style::new().fg(FAILED))),
                 );
             }
-            lines.push(Line::from(""));
-            lines.extend(
+            tail.extend(
                 text::wrap("esc cancels", narrow)
                     .into_iter()
                     .map(|line| Line::from(line).style(muted)),
             );
-            (" confirm ", lines)
+            (" confirm ", explained(prompt, detail), tail)
         }
         Dialog::Tasks { lane, tasks, index } => {
-            let mut lines = wrapped(&format!("tasks in {lane}"), Style::new());
-            lines.extend(tasks.iter().enumerate().map(|(i, task)| {
-                let task = clip(&clean(task), max.saturating_sub(2));
-                if i == *index {
-                    Line::from(format!("> {task}")).style(Style::new().fg(ON_PAINT).bg(PAINT))
-                } else {
-                    Line::from(format!("  {task}"))
-                }
-            }));
-            lines.push(Line::from(""));
-            lines.extend(wrapped("enter choose · esc cancel", muted));
-            (" run task ", lines)
+            let mut body = wrapped(&format!("tasks in {lane}"), Style::new());
+            let hint = wrapped("enter choose · esc cancel", muted);
+            let room = rows.saturating_sub(body.len() + hint.len()).max(1);
+            let start = window(tasks.len(), *index, room);
+            body.extend(
+                tasks
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(room)
+                    .map(|(i, task)| {
+                        let task = clip(&clean(task), max.saturating_sub(2));
+                        if i == *index {
+                            Line::from(format!("> {task}"))
+                                .style(Style::new().fg(ON_PAINT).bg(PAINT))
+                        } else {
+                            Line::from(format!("  {task}"))
+                        }
+                    }),
+            );
+            (" run task ", body, hint)
         }
         Dialog::Profiles { lane, state } => {
-            let mut lines = wrapped(&format!("start {lane} with:"), Style::new());
-            match state {
-                ProfilesState::Loading => lines.extend(wrapped("loading profiles", muted)),
+            let mut body = wrapped(&format!("start {lane} with:"), Style::new());
+            let tail = match state {
+                ProfilesState::Loading => {
+                    body.extend(wrapped("loading profiles", muted));
+                    wrapped("esc cancels", muted)
+                }
                 ProfilesState::Unsupported => {
-                    lines.extend(wrapped("profiles need a newer daemon", muted));
-                    lines.push(Line::from(""));
-                    lines.extend(wrapped("esc closes", muted));
+                    body.extend(wrapped("profiles need a newer daemon", muted));
+                    wrapped("esc closes", muted)
                 }
                 ProfilesState::Ready { items, .. } if items.is_empty() => {
-                    lines.extend(wrapped("this lane's config defines no profiles", muted));
-                    lines.push(Line::from(""));
-                    lines.extend(wrapped("esc closes", muted));
+                    body.extend(wrapped("this lane's config defines no profiles", muted));
+                    wrapped("esc closes", muted)
                 }
                 ProfilesState::Ready { items, index } => {
+                    let mut tail = wrapped("space toggles · enter starts · esc cancels", muted);
+                    // Matches what Enter sends with nothing checked.
+                    let empty = if items.iter().any(|item| item.profile.is_default) {
+                        "nothing checked starts the default profile"
+                    } else {
+                        "nothing checked starts the lane without a profile"
+                    };
+                    tail.extend(wrapped(empty, muted));
                     let width = max.min(72);
-                    lines.extend(
+                    let room = rows.saturating_sub(body.len() + tail.len()).max(1);
+                    let start = window(items.len(), *index, room);
+                    body.extend(
                         items
                             .iter()
                             .enumerate()
+                            .skip(start)
+                            .take(room)
                             .map(|(i, item)| profile_row(item, i == *index, width)),
                     );
-                    lines.push(Line::from(""));
-                    lines.extend(wrapped("space toggles · enter starts · esc cancels", muted));
-                    lines.extend(wrapped("nothing checked starts the default profile", muted));
+                    tail
                 }
-            }
-            (" profiles ", lines)
+            };
+            (" profiles ", body, tail)
         }
         Dialog::Help => {
-            let mut lines: Vec<Line> = HELP
+            let mut body: Vec<Line> = HELP
                 .iter()
                 .map(|(key, what)| {
                     fit(
@@ -1353,15 +1541,15 @@ fn render_dialog(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
                     )
                 })
                 .collect();
-            lines.push(Line::from(""));
-            lines.extend(wrapped(
+            body.push(Line::from(""));
+            body.extend(wrapped(
                 "shift+tab is reserved for focus; apps in the pane don't receive it",
                 muted,
             ));
-            lines.extend(wrapped("any key closes", muted));
-            (" keys ", lines)
+            (" keys ", body, wrapped("any key closes", muted))
         }
     };
+    let lines = compact(body, tail, rows);
     let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
     let width = u16::try_from(content_width + 4)
         .unwrap_or(area.width)

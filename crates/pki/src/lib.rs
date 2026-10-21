@@ -5,14 +5,17 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, NameConstraints,
 };
+
+/// DNS subtrees every newly created devlanes CA may sign for. A configured TLD is added at creation.
+pub const PERMITTED_DOMAINS: &[&str] = &["localhost", "test", "internal", "home.arpa"];
 use rustls::{
     ServerConfig,
     pki_types::{CertificateDer, PrivatePkcs8KeyDer},
@@ -57,9 +60,18 @@ impl std::fmt::Debug for CertificateAuthority {
 impl CertificateAuthority {
     /// Loads or creates `ca.pem` and `ca-key.pem` under a private user directory.
     ///
-    /// This performs blocking I/O; async callers must use `spawn_blocking`.
-    /// Incomplete pairs are refused rather than silently replacing a trusted CA.
+    /// Same as [`Self::load_or_create_with_tld`] without a configured TLD.
     pub fn load_or_create(directory: &Path) -> Result<Self, Error> {
+        Self::load_or_create_with_tld(directory, None)
+    }
+
+    /// Loads or creates the CA; a new CA is name-constrained to [`PERMITTED_DOMAINS`] plus `tld`.
+    ///
+    /// This performs blocking I/O; async callers must use `spawn_blocking`. An existing CA
+    /// is loaded unchanged, so a TLD configured later needs a recreated CA. A certificate
+    /// without its key is refused rather than silently replacing a trusted CA.
+    pub fn load_or_create_with_tld(directory: &Path, tld: Option<&str>) -> Result<Self, Error> {
+        let permitted = permitted_domains(tld)?;
         create_private_directory(directory)?;
         let lock_path = directory.join(".lock");
         match fs::symlink_metadata(&lock_path) {
@@ -80,7 +92,10 @@ impl CertificateAuthority {
         let key = directory.join("ca-key.pem");
         match (certificate.try_exists()?, key.try_exists()?) {
             (true, true) => Self::load(&certificate, &key),
-            (false, false) => {
+            (true, false) => Err(Error::IncompleteCa),
+            // The certificate is renamed into place last, so a key without one comes from an
+            // interrupted creation (or a deleted root) and no client can trust it yet.
+            (false, _) => {
                 let key_pair = KeyPair::generate()?;
                 let mut params = CertificateParams::new(Vec::<String>::new())?;
                 let now = time::OffsetDateTime::now_utc();
@@ -95,12 +110,22 @@ impl CertificateAuthority {
                 params
                     .distinguished_name
                     .push(DnType::CommonName, "devlanes local development CA");
+                // A leaked key can then only impersonate development names, never public sites.
+                params.name_constraints = Some(NameConstraints {
+                    permitted_subtrees: permitted
+                        .into_iter()
+                        .map(GeneralSubtree::DnsName)
+                        .collect(),
+                    excluded_subtrees: Vec::new(),
+                });
                 let cert = params.self_signed(&key_pair)?;
-                write_new(&key, key_pair.serialize_pem().as_bytes())?;
-                write_new(&certificate, cert.pem().as_bytes())?;
+                write_private(&key, key_pair.serialize_pem().as_bytes(), true)?;
+                // The key rename must be durable before the certificate can appear without it.
+                sync_directory(directory)?;
+                write_private(&certificate, cert.pem().as_bytes(), false)?;
+                sync_directory(directory)?;
                 Self::load(&certificate, &key)
             }
-            _ => Err(Error::IncompleteCa),
         }
     }
 
@@ -213,6 +238,18 @@ struct Cache {
     keys: HashMap<String, CachedKey>,
 }
 
+impl Cache {
+    /// Returns a cached key only while it is young and still carries the authorized SANs.
+    fn fresh(&self, name: &str, names: &[String]) -> Option<Arc<CertifiedKey>> {
+        self.keys
+            .get(name)
+            .filter(|entry| {
+                entry.issued.elapsed() < Duration::from_secs(24 * 3600) && entry.names == names
+            })
+            .map(|entry| entry.key.clone())
+    }
+}
+
 /// Synchronous on-demand issuance with bounded memory and route-generation invalidation.
 #[derive(Debug)]
 pub struct DynamicCertResolver {
@@ -238,18 +275,26 @@ impl DynamicCertResolver {
         }
         let name = name.to_ascii_lowercase();
         let identity = self.policy.lookup(&name)?;
-        let mut cache = self.cache.lock().ok()?;
-        if cache.generation != Some(identity.generation) {
-            cache.keys.clear();
-            cache.generation = Some(identity.generation);
-        }
-        if let Some(entry) = cache.keys.get(&name)
-            && entry.issued.elapsed() < Duration::from_secs(24 * 3600)
-            && entry.names == identity.names
         {
-            return Some(entry.key.clone());
+            let mut cache = self.cache();
+            if cache.generation != Some(identity.generation) {
+                cache.keys.clear();
+                cache.generation = Some(identity.generation);
+            }
+            if let Some(key) = cache.fresh(&name, &identity.names) {
+                return Some(key);
+            }
         }
+        // Key generation and signing run unlocked so one miss does not stall every handshake.
         let key = self.ca.issue(&identity.names).ok()?;
+        let mut cache = self.cache();
+        // Routes changed while minting: serve this handshake but leave the new generation's cache alone.
+        if cache.generation != Some(identity.generation) {
+            return Some(key);
+        }
+        if let Some(winner) = cache.fresh(&name, &identity.names) {
+            return Some(winner);
+        }
         if cache.keys.len() >= 256 {
             cache.keys.clear();
         }
@@ -262,6 +307,11 @@ impl DynamicCertResolver {
             },
         );
         Some(key)
+    }
+
+    /// A panic while holding the lock leaves a usable map; refusing it would disable TLS forever.
+    fn cache(&self) -> MutexGuard<'_, Cache> {
+        self.cache.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Uses an explicit ring provider, avoiding process-global provider races.
@@ -334,14 +384,89 @@ fn check_private(path: &Path, directory: bool) -> Result<(), Error> {
     Ok(())
 }
 
-/// A private tempfile prevents partially written keys from becoming the live pair.
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+/// Builds the permitted subtrees for a new CA, adding a normalized TLD when it is not covered.
+fn permitted_domains(tld: Option<&str>) -> Result<Vec<String>, Error> {
+    let mut domains: Vec<String> = PERMITTED_DOMAINS.iter().map(|&d| d.to_owned()).collect();
+    if let Some(tld) = tld.map(|tld| tld.trim_matches('.').to_ascii_lowercase())
+        && !tld.is_empty()
+    {
+        if tld.starts_with("*.") || !valid_dns_name(&tld) {
+            return Err(Error::InvalidNames);
+        }
+        if !domains.contains(&tld) {
+            domains.push(tld);
+        }
+    }
+    Ok(domains)
+}
+
+/// A private tempfile prevents partially written files from becoming part of the live pair.
+///
+/// `replace` is only for the key, which may be an orphan left by an interrupted creation.
+fn write_private(path: &Path, bytes: &[u8], replace: bool) -> Result<(), Error> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("CA path has no parent"))?;
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
-    file.persist_noclobber(path).map_err(|error| error.error)?;
+    if replace {
+        file.persist(path).map_err(|error| error.error)?;
+    } else {
+        file.persist_noclobber(path).map_err(|error| error.error)?;
+    }
     Ok(())
+}
+
+/// Makes completed renames durable so a power loss cannot reorder the key and certificate.
+fn sync_directory(directory: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    fs::File::open(directory)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = directory;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct One;
+
+    impl CertificatePolicy for One {
+        /// Authorizes a single name at a fixed generation.
+        fn lookup(&self, name: &str) -> Option<CertificateIdentity> {
+            (name == "app.lane.localhost").then(|| CertificateIdentity {
+                generation: 1,
+                names: vec![name.into()],
+            })
+        }
+    }
+
+    /// A thread that panicked while holding the cache lock must not disable TLS.
+    #[test]
+    fn poisoned_cache_still_resolves() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let ca = Arc::new(CertificateAuthority::load_or_create(
+            &directory.path().join("ca"),
+        )?);
+        let resolver = Arc::new(DynamicCertResolver::new(ca, Arc::new(One)));
+        let poisoner = resolver.clone();
+        let panicked = std::thread::spawn(move || {
+            let _guard = poisoner.cache.lock();
+            panic!("poison the certificate cache");
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert!(resolver.cache.is_poisoned());
+        let first = resolver
+            .resolve_name("app.lane.localhost")
+            .ok_or("no certificate")?;
+        let cached = resolver
+            .resolve_name("app.lane.localhost")
+            .ok_or("no cached certificate")?;
+        assert!(Arc::ptr_eq(&first, &cached));
+        Ok(())
+    }
 }

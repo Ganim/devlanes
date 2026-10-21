@@ -127,6 +127,45 @@ async fn resolver_strategy_serves_lane_hostnames() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+/// A TLD outside the special-use names starts no server, never reaches the
+/// lane domain expression, and `doctor` says why.
+async fn public_tld_is_refused() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let mut user = UserConfig::default();
+        user.hostnames.resolver = Resolver::Resolver;
+        user.hostnames.tld = Some("com".into());
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                user: Some(user),
+                ..Setup::default()
+            },
+        )
+        .await;
+
+        let domain = lane(&h, &main).await.domain.unwrap_or_default();
+        assert!(!domain.ends_with(".com"), "{domain}");
+        let doctor = h
+            .call(Method::Doctor, json!({}), cx(&main))
+            .await
+            .expect("doctor");
+        assert_eq!(doctor["dns"]["running"], false, "{}", doctor["dns"]);
+        assert!(
+            doctor["dns"]["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("home.arpa")),
+            "{}",
+            doctor["dns"]
+        );
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 /// A finished run's log segments are recorded in `log_segments`.
 async fn finished_runs_record_log_segments() {
     tokio::time::timeout(LIMIT, async {

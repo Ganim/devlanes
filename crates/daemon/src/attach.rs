@@ -1,6 +1,8 @@
 //! Terminal attach streams. A stream belongs to the connection that opened it;
 //! input is accepted only on that connection, and only the most recent interactive
-//! viewer of a unit may resize it (agents and observers never do).
+//! viewer of a unit may resize it (agents and observers never do). When that
+//! viewer leaves, the newest remaining interactive viewer takes over with its own
+//! size; the unit returns to 120x40 only when none remains.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -21,10 +23,55 @@ use crate::{
 /// Unit identity for viewer ownership.
 type UnitKey = (WorktreeId, String);
 
+/// Smallest PTY a viewer may request; smaller sizes are raised to it.
+pub(crate) const MIN_SIZE: TerminalSize = TerminalSize {
+    columns: 20,
+    rows: 5,
+};
+
+/// `size` raised to [`MIN_SIZE`] in each dimension.
+fn at_least_min(size: TerminalSize) -> TerminalSize {
+    TerminalSize {
+        columns: size.columns.max(MIN_SIZE.columns),
+        rows: size.rows.max(MIN_SIZE.rows),
+    }
+}
+
 /// One open stream.
 struct Stream {
     host: UnitHost,
     key: UnitKey,
+    interactive: bool,
+    /// The viewer's last requested size, applied when it owns the unit.
+    size: Option<TerminalSize>,
+}
+
+impl AttachTable {
+    /// After `(session, stream)` left `key`: the newest remaining interactive
+    /// viewer becomes active. Returns the size to apply, the default when nobody
+    /// is left, or `None` when the leaver was not the active viewer.
+    fn hand_over(&mut self, key: &UnitKey, session: u64, stream: u64) -> Option<TerminalSize> {
+        if self.active.get(key) != Some(&(session, stream)) {
+            return None;
+        }
+        // Stream ids grow with every attach, so the largest is the most recent.
+        let next = self
+            .streams
+            .iter()
+            .filter(|(_, s)| s.interactive && &s.key == key)
+            .max_by_key(|((_, id), _)| *id)
+            .map(|(owner, s)| (*owner, s.size));
+        match next {
+            Some((owner, size)) => {
+                self.active.insert(key.clone(), owner);
+                Some(size.unwrap_or_default())
+            }
+            None => {
+                self.active.remove(key);
+                Some(TerminalSize::default())
+            }
+        }
+    }
 }
 
 /// Open streams by `(session, stream)` and the active interactive viewer per unit.
@@ -50,6 +97,10 @@ impl Inner {
         let name = selectors.into_iter().next().unwrap_or_default();
         let (host, reference) = {
             let st = lane.st();
+            // Its terminal belongs to a daemon that is gone; there is nothing to show.
+            if let Some(error) = st.orphan_error(&project.name(), &name) {
+                return Err(error);
+            }
             let host = st
                 .units
                 .get(&name)
@@ -67,6 +118,12 @@ impl Inner {
             .next_stream
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = (lane.worktree, name.clone());
+        let size = match (args.columns, args.rows) {
+            (Some(columns), Some(rows)) if columns > 0 && rows > 0 => {
+                Some(at_least_min(TerminalSize { columns, rows }))
+            }
+            _ => None,
+        };
         {
             let mut table = lock(&self.attach);
             table.streams.insert(
@@ -74,6 +131,8 @@ impl Inner {
                 Stream {
                     host: host.clone(),
                     key: key.clone(),
+                    interactive: args.interactive,
+                    size,
                 },
             );
             if args.interactive {
@@ -81,11 +140,9 @@ impl Inner {
             }
         }
         if args.interactive
-            && let (Some(columns), Some(rows)) = (args.columns, args.rows)
-            && columns > 0
-            && rows > 0
+            && let Some(size) = size
         {
-            let _ = host.resize(TerminalSize { columns, rows }).await;
+            let _ = host.resize(size).await;
         }
         let (snapshot, live) = host.attach();
         let engine = self.clone();
@@ -102,24 +159,22 @@ impl Inner {
         .map_err(|e| internal("encode", e))
     }
 
-    /// Removes a stream; when it was the active viewer, the unit returns to 120x40.
+    /// Removes a stream; when it was the active viewer, ownership and its size
+    /// pass to the newest remaining interactive viewer, else the unit returns to 120x40.
     async fn close_stream(&self, session: u64, stream: u64) {
         let restore = {
             let mut table = lock(&self.attach);
             let Some(entry) = table.streams.remove(&(session, stream)) else {
                 return;
             };
-            if table.active.get(&entry.key) == Some(&(session, stream)) {
-                table.active.remove(&entry.key);
-                Some(entry.host)
-            } else {
-                None
-            }
+            table
+                .hand_over(&entry.key, session, stream)
+                .map(|size| (entry.host, size))
         };
-        if let Some(host) = restore
+        if let Some((host, size)) = restore
             && host.is_alive()
         {
-            let _ = host.resize(TerminalSize::default()).await;
+            let _ = host.resize(size).await;
         }
     }
 
@@ -147,20 +202,6 @@ impl Inner {
         session: &Session,
     ) -> Result<Value, RpcError> {
         let args: ResizeParams = required(value)?;
-        let host = {
-            let table = lock(&self.attach);
-            let stream = table
-                .streams
-                .get(&(session.id(), args.stream_id))
-                .ok_or_else(|| {
-                    RpcError::new("unknown_stream", json!({"stream_id": args.stream_id}), 1)
-                })?;
-            (table.active.get(&stream.key) == Some(&(session.id(), args.stream_id)))
-                .then(|| stream.host.clone())
-        };
-        let Some(host) = host else {
-            return Ok(json!({"applied": false}));
-        };
         if args.columns == 0 || args.rows == 0 {
             return Err(RpcError::new(
                 "bad_request",
@@ -168,12 +209,26 @@ impl Inner {
                 2,
             ));
         }
-        host.resize(TerminalSize {
+        let size = at_least_min(TerminalSize {
             columns: args.columns,
             rows: args.rows,
-        })
-        .await?;
-        Ok(json!({"applied": true}))
+        });
+        let host = {
+            let mut table = lock(&self.attach);
+            let owner = (session.id(), args.stream_id);
+            let stream = table.streams.get_mut(&owner).ok_or_else(|| {
+                RpcError::new("unknown_stream", json!({"stream_id": args.stream_id}), 1)
+            })?;
+            // Remembered even while another viewer owns the unit, for a later handover.
+            stream.size = Some(size);
+            let (key, host) = (stream.key.clone(), stream.host.clone());
+            (table.active.get(&key) == Some(&owner)).then_some(host)
+        };
+        let Some(host) = host else {
+            return Ok(json!({"applied": false}));
+        };
+        host.resize(size).await?;
+        Ok(json!({"applied": true, "columns": size.columns, "rows": size.rows}))
     }
 }
 

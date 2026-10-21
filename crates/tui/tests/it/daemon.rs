@@ -8,7 +8,7 @@ use devlanes_tui::{
     ApiError, DaemonApi, Options,
     app::{App, Dialog, Effect, Msg, Tab, Target},
     drive,
-    logfile::LogChunk,
+    logfile::{LogChunk, LogPosition},
 };
 use futures_util::stream;
 use ratatui::{Terminal, backend::TestBackend};
@@ -21,7 +21,7 @@ use crate::fake::{FakeApi, daemon_status, doctor_facts, mixed_lanes};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 /// Shift+letter as crossterm reports it.
-fn shifted(c: char) -> Msg {
+pub fn shifted(c: char) -> Msg {
     Msg::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT))
 }
 
@@ -61,7 +61,7 @@ async fn daemon_app(width: u16, height: u16) -> Result<App, Box<dyn std::error::
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::ReadDaemonLog { offset: 0 }))
+            .any(|e| matches!(e, Effect::ReadDaemonLog { from } if from.offset == 0))
     );
     app.update(Msg::DaemonInfo {
         status: api.daemon_status().await,
@@ -69,7 +69,10 @@ async fn daemon_app(width: u16, height: u16) -> Result<App, Box<dyn std::error::
     });
     app.update(Msg::DaemonLog(Ok(LogChunk {
         lines: log_lines(),
-        offset: 900,
+        position: LogPosition {
+            offset: 900,
+            file: (1, 2),
+        },
         reset: true,
     })));
     Ok(app)
@@ -106,7 +109,10 @@ async fn daemon_log_pauses_when_scrolled_and_follows_again() -> TestResult {
     assert_eq!(app.daemon.scroll, 2);
     app.update(Msg::DaemonLog(Ok(LogChunk {
         lines: vec!["new line".into()],
-        offset: 950,
+        position: LogPosition {
+            offset: 950,
+            file: (1, 2),
+        },
         reset: false,
     })));
     assert_eq!(
@@ -121,7 +127,7 @@ async fn daemon_log_pauses_when_scrolled_and_follows_again() -> TestResult {
     let ticks: Vec<Vec<Effect>> = (0..3).map(|_| app.update(Msg::Tick)).collect();
     assert!(ticks.iter().all(|e| {
         e.iter()
-            .any(|e| matches!(e, Effect::ReadDaemonLog { offset: 950 }))
+            .any(|e| matches!(e, Effect::ReadDaemonLog { from } if from.offset == 950))
     }));
     assert_eq!(
         ticks
@@ -221,14 +227,35 @@ async fn restart_and_stop_ask_first_and_enter_does_not_confirm() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_small_window_keeps_the_dialog_input_and_esc_hint() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let mut app = App::new(50, 9);
+    app.update(Msg::Status(api.status().await));
+    app.update(shifted('C'));
+    type_text(&mut app, "acme@0");
+    let buffer = render(&app)?;
+    let text = screen(&buffer);
+    // The explanation is cut; what the user types and how to leave are not.
+    for expected in ["clean acme@0?", "> acme@0", "esc cancels", "…"] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    insta::assert_snapshot!("clean_confirm_50x9", text);
+    Ok(())
+}
+
+#[tokio::test]
 async fn lane_gc_asks_first() -> TestResult {
     let mut app = daemon_app(80, 24).await?;
-    assert!(app.update(key(KeyCode::Char('g'))).is_empty());
+    // `g` is "top" on every tab, the daemon log included; gc moved to `X`.
+    app.update(key(KeyCode::Char('g')));
+    assert!(app.dialog.is_none());
+    assert_eq!(app.daemon.scroll, app.daemon.log.len());
+    assert!(app.update(shifted('X')).is_empty());
     assert!(
         matches!(&app.dialog, Some(Dialog::Confirm { prompt, .. }) if prompt == "run lane gc?")
     );
     assert!(app.update(key(KeyCode::Esc)).is_empty());
-    app.update(key(KeyCode::Char('g')));
+    app.update(shifted('X'));
     let effects = app.update(key(KeyCode::Char('y')));
     assert!(matches!(effects.as_slice(), [Effect::LaneGc]));
     let effects = app.update(Msg::GcDone(Ok(json!({"cleaned": ["acme@4"]}))));

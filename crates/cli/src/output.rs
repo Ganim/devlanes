@@ -87,7 +87,7 @@ pub trait Reporter: Send + Sync {
 
     /// JSON is serialized unchanged; text modes shape data on the client only.
     fn result(&self, report: &Report<'_>) -> Result<Rendered, serde_json::Error> {
-        let exit_code = result_exit_code(report.data);
+        let exit_code = result_exit_code(report.method, report.data);
         if self.runtime().quiet && self.mode() != OutputMode::Json && exit_code == 0 {
             return Ok(Rendered {
                 stderr: ownership_note(report, self.runtime()),
@@ -95,6 +95,16 @@ pub trait Reporter: Send + Sync {
             });
         }
         if self.mode() == OutputMode::Json {
+            // Only the client knows its output mode and why it was chosen.
+            if report.method == Method::Doctor && report.data.is_object() {
+                let mut data = report.data.clone();
+                data["output"] = self.runtime().doctor_output(&Value::Null)["output"].take();
+                return Ok(Rendered {
+                    stdout: format!("{}\n", serde_json::to_string(&data)?),
+                    exit_code,
+                    ..Rendered::default()
+                });
+            }
             return Ok(Rendered {
                 stdout: format!("{}\n", serde_json::to_string(report.data)?),
                 exit_code,
@@ -140,7 +150,7 @@ pub trait Reporter: Send + Sync {
             return Ok(Rendered {
                 stdout: format!("{}\n", serde_json::to_string(event)?),
                 exit_code: if event.event == "result" {
-                    result_exit_code(&event.data)
+                    result_exit_code(method, &event.data)
                 } else {
                     exit::OK
                 },
@@ -225,7 +235,7 @@ pub struct ReporterStream<'a> {
     reporter: &'a dyn Reporter,
     method: Method,
     remaining: usize,
-    more: Hint,
+    more: Option<Hint>,
     exhausted: bool,
     /// Last log lines the budget hid; a failed `run` shows them in its summary.
     hidden: std::collections::VecDeque<String>,
@@ -235,10 +245,19 @@ impl<'a> ReporterStream<'a> {
     /// The continuation should include the original selectors and query filters.
     pub fn new(reporter: &'a dyn Reporter, method: Method, more: Hint) -> Self {
         Self {
+            more: Some(more),
+            ..Self::without_hint(reporter, method)
+        }
+    }
+
+    /// A stream whose continuation is not known yet (a foreground `run` learns from
+    /// its result whether the task is a unit with logs): the notice says `truncated`.
+    pub fn without_hint(reporter: &'a dyn Reporter, method: Method) -> Self {
+        Self {
             remaining: reporter.runtime().budget,
             reporter,
             method,
-            more,
+            more: None,
             exhausted: false,
             hidden: std::collections::VecDeque::new(),
         }
@@ -261,7 +280,10 @@ impl<'a> ReporterStream<'a> {
         if self.reporter.mode() != OutputMode::Agent || rendered.stdout.is_empty() {
             return Ok(rendered);
         }
-        let notice = format!("truncated; more: {}", self.more.0);
+        let notice = match &self.more {
+            Some(more) => format!("truncated; more: {}", more.0),
+            None => "truncated".to_owned(),
+        };
         let reserve = (notice.len() + 1).min(64.max(self.reporter.runtime().budget / 2));
         if rendered.stdout.len() + reserve > self.remaining {
             // Reserve the notice before consuming the final event, including exact-boundary cases.
@@ -419,9 +441,18 @@ impl Render for LogLine {
     }
 }
 
-/// Produces shell assignments without evaluating values received from the daemon.
-pub fn export_environment(values: &BTreeMap<String, String>) -> Result<String, crate::Error> {
-    let mut output = String::new();
+/// Shell assignments for `env export`, plus the names a POSIX shell cannot take
+/// (config allows names like `NEXT-PUBLIC` that `export` rejects) or values with NUL.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Exported {
+    pub script: String,
+    pub skipped: Vec<String>,
+}
+
+/// Produces shell assignments without evaluating values received from the daemon;
+/// variables a POSIX shell cannot hold are skipped, so one name does not cost the rest.
+pub fn export_environment(values: &BTreeMap<String, String>) -> Exported {
+    let mut exported = Exported::default();
     for (key, value) in values {
         let mut chars = key.chars();
         if !chars
@@ -430,13 +461,14 @@ pub fn export_environment(values: &BTreeMap<String, String>) -> Result<String, c
             || !chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
             || value.contains('\0')
         {
-            return Err(crate::Error::Usage(format!(
-                "cannot export invalid shell variable {key:?}"
-            )));
+            exported.skipped.push(key.clone());
+            continue;
         }
-        output.push_str(&format!("export {key}={}\n", shell_quote(value)));
+        exported
+            .script
+            .push_str(&format!("export {key}={}\n", shell_quote(value)));
     }
-    Ok(output)
+    exported
 }
 
 /// Quotes POSIX shell metacharacters, including empty strings and embedded quotes.
@@ -522,10 +554,90 @@ fn continuation(report: &Report<'_>) -> String {
     format!("truncated; more: {}", Hint::command(args).0)
 }
 
-/// Status failures and foreground task exit codes are reflected in process status.
-fn result_exit_code(data: &Value) -> u8 {
+/// The process status for a result of `method`.
+///
+/// - start, restart, `lane new --start` and resume: 124 when the start timed out,
+///   1 on any failure or when not ready, else 0;
+/// - wait: 0 only when ready;
+/// - stop, status, lane ls: 1 only for a failed unit or lane, never for a leftover
+///   nonzero exit code of a unit that stopped normally;
+/// - run: the task's exit code.
+pub(crate) fn result_exit_code(method: Method, data: &Value) -> u8 {
+    match method {
+        Method::Start | Method::Restart => start_exit_code(data),
+        Method::LaneNew => data.get("start").map_or(exit::OK, start_exit_code),
+        Method::Resume => data
+            .get("items")
+            .and_then(Value::as_array)
+            .map_or(exit::OK, |items| {
+                items
+                    .iter()
+                    .map(|item| {
+                        if item.get("error").is_some() {
+                            exit::FAILED
+                        } else {
+                            start_exit_code(item)
+                        }
+                    })
+                    .max()
+                    .unwrap_or(exit::OK)
+            }),
+        Method::Wait => {
+            if data.get("ready").and_then(Value::as_bool) == Some(true) {
+                exit::OK
+            } else {
+                exit::FAILED
+            }
+        }
+        Method::Stop | Method::Status | Method::LaneList => {
+            if failed_state(data) {
+                exit::FAILED
+            } else {
+                exit::OK
+            }
+        }
+        _ => generic_exit_code(data),
+    }
+}
+
+/// A [`devlanes_proto::StartResult`]'s status; other shapes (`with`'s failure pages)
+/// fall back to the generic rule.
+fn start_exit_code(data: &Value) -> u8 {
+    if data.get("ready").is_none() {
+        return generic_exit_code(data);
+    }
+    if data.get("timed_out").and_then(Value::as_bool) == Some(true) {
+        return exit::TIMEOUT;
+    }
+    let failures = data
+        .get("failures")
+        .and_then(Value::as_array)
+        .is_some_and(|failures| !failures.is_empty());
+    if failures || failed_state(data) || data.get("ready").and_then(Value::as_bool) != Some(true) {
+        return exit::FAILED;
+    }
+    exit::OK
+}
+
+/// Whether `data` (a unit, lane, page or list) holds a unit or lane in state `failed`.
+fn failed_state(data: &Value) -> bool {
+    if let Some(items) = data.as_array() {
+        return items.iter().any(failed_state);
+    }
+    if data.get("state").and_then(Value::as_str) == Some("failed") {
+        return true;
+    }
+    ["items", "units"].into_iter().any(|key| {
+        data.get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(failed_state))
+    })
+}
+
+/// Results without a dedicated rule: a nonzero `exit_code` or a failed state.
+fn generic_exit_code(data: &Value) -> u8 {
     if let Some(items) = data.as_array()
-        && items.iter().any(|v| result_exit_code(v) != 0)
+        && items.iter().any(|v| generic_exit_code(v) != 0)
     {
         return exit::FAILED;
     }
@@ -539,7 +651,7 @@ fn result_exit_code(data: &Value) -> u8 {
     }
     for key in ["items", "units"] {
         if let Some(items) = data.get(key).and_then(Value::as_array)
-            && items.iter().any(|v| result_exit_code(v) != 0)
+            && items.iter().any(|v| generic_exit_code(v) != 0)
         {
             return exit::FAILED;
         }

@@ -1,6 +1,9 @@
 //! Daemon process entry plus local actions that must run in the user's terminal.
 
-use std::process::ExitCode;
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use devlanes_cli::{Action, Runtime};
 use devlanes_client::Paths;
@@ -60,6 +63,17 @@ pub fn run() -> ExitCode {
             }
             Err(error) => {
                 tracing::error!(%error, "bind failed");
+                let message = match &error {
+                    devlanes_daemon::Error::UnsafeDirectory(path) => {
+                        let data = crate::driver::unsafe_directory(path).data;
+                        match data.get("fix").and_then(serde_json::Value::as_str) {
+                            Some(fix) => format!("{error}; fix: {fix}"),
+                            None => error.to_string(),
+                        }
+                    }
+                    _ => error.to_string(),
+                };
+                let _ = readiness.failed(&message);
                 return 1;
             }
         };
@@ -265,4 +279,109 @@ pub async fn local_action(runtime: &Runtime, action: Action) -> Result<u8, RpcEr
 /// I/O errors keep their message as data.
 fn io(error: std::io::Error) -> RpcError {
     RpcError::new("io", json!({"message": error.to_string()}), 1)
+}
+
+/// SQLite's files for `db`: the database, its WAL and shared memory.
+const STATE_SUFFIXES: [&str; 3] = ["", "-wal", "-shm"];
+
+/// `db` with `suffix` appended to its file name.
+fn with_suffix(db: &Path, suffix: &str) -> PathBuf {
+    let mut path = db.as_os_str().to_owned();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+/// Which of the state files exist (symlinks included, never followed).
+pub fn state_files(db: &Path) -> Vec<PathBuf> {
+    STATE_SUFFIXES
+        .iter()
+        .map(|suffix| with_suffix(db, suffix))
+        .filter(|path| path.symlink_metadata().is_ok())
+        .collect()
+}
+
+/// Refuses while a daemon holds the singleton lock under `home`; otherwise the
+/// returned file keeps any daemon from starting until it is dropped.
+pub fn hold_daemon_lock(home: &Path) -> Result<std::fs::File, RpcError> {
+    match devlanes_daemon::lock_singleton(home) {
+        Ok(lock) => Ok(lock),
+        Err(devlanes_daemon::Error::AlreadyRunning) => Err(RpcError::new(
+            "daemon_running",
+            json!({"message": "a daemon is running or starting, so state.db was not moved; retry once it answers, or after `devlanes daemon stop`"}),
+            1,
+        )),
+        Err(error) => Err(RpcError::new(
+            "io",
+            json!({"message": error.to_string()}),
+            1,
+        )),
+    }
+}
+
+/// `daemon reset-state` without a daemon: under the daemon lock, renames
+/// `state.db`, `-wal` and `-shm` to `state.db.legacy-<stamp>[-wal|-shm]`, so the
+/// pair stays readable with SQLite. Nothing is deleted; an existing target fails
+/// the whole move before anything is renamed. Returns `(from, to)` pairs.
+pub fn move_state_aside(
+    home: &Path,
+    db: &Path,
+    stamp: &str,
+) -> Result<Vec<(PathBuf, PathBuf)>, RpcError> {
+    let _lock = hold_daemon_lock(home)?;
+    let base = with_suffix(db, &format!(".legacy-{stamp}"));
+    let moves: Vec<(PathBuf, PathBuf)> = STATE_SUFFIXES
+        .iter()
+        .map(|suffix| (with_suffix(db, suffix), with_suffix(&base, suffix)))
+        .filter(|(from, _)| from.symlink_metadata().is_ok())
+        .collect();
+    if let Some((_, taken)) = moves.iter().find(|(_, to)| to.symlink_metadata().is_ok()) {
+        return Err(RpcError::new(
+            "io",
+            json!({"message": format!("{} already exists; nothing was moved", taken.display())}),
+            1,
+        ));
+    }
+    for (from, to) in &moves {
+        std::fs::rename(from, to).map_err(io)?;
+    }
+    Ok(moves)
+}
+
+/// `YYYYMMDDTHHMMSSZ` for Unix seconds, in UTC.
+pub fn utc_stamp(seconds: u64) -> String {
+    // Days to civil date (Howard Hinnant's algorithm), proleptic Gregorian.
+    let days = i64::try_from(seconds / 86_400).unwrap_or_default() + 719_468;
+    let rest = seconds % 86_400;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    /// Known instants, including a leap day.
+    fn utc_stamps() {
+        assert_eq!(utc_stamp(0), "19700101T000000Z");
+        assert_eq!(utc_stamp(951_782_400), "20000229T000000Z");
+        assert_eq!(utc_stamp(1_792_595_045), "20261021T150405Z");
+    }
 }

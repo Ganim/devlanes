@@ -68,7 +68,7 @@ async fn udp_exchange(server: SocketAddr, message: &[u8]) -> Vec<u8> {
 async fn udp_answers_zone_names_and_refuses_others() {
     let (addr, _guard, _task) = start().await;
 
-    let response = udp_exchange(addr, &query(0x1234, "crm.clickmax-2.test", TYPE_A)).await;
+    let response = udp_exchange(addr, &query(0x1234, "api.acme-2.test", TYPE_A)).await;
     assert_eq!(&response[..2], &[0x12, 0x34]);
     assert_eq!((rcode(&response), ancount(&response)), (0, 1));
     assert_eq!(

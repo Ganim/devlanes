@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/it/orphans.rs
+expression: text
+---
+" devlanes  lanes  monitor  daemon                                               "
+"┌ lanes ───────────────────────┐┌ acme@0:api · orphaned pid 4242 ──────────────┐"
+"│acme                          ││orphaned process (pid 4242) left running by a │"
+"│▾ ● @0 main  ◆ 1 orphaned     ││previous daemon; it has no terminal. press x  │"
+"│    ◆ api  orphaned pid 4242  ││to terminate it                               │"
+"│    ● web  ready              ││                                              │"
+"│  ○ @1 feat  idle             ││                                              │"
+"│                              ││s start · x stop · r restart                  │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"│                              ││                                              │"
+"└──────────────────────────────┘└──────────────────────────────────────────────┘"
+" j/k move  s start  x stop  r restart  t task  ? help  q quit                   "

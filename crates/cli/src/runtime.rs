@@ -96,6 +96,8 @@ pub struct Runtime {
     pub quiet: bool,
     pub ci: Option<CiKind>,
     pub summary_path: Option<PathBuf>,
+    /// CI log-group state shared by every reporter of this invocation.
+    pub ci_state: crate::CiShared,
 }
 
 impl Runtime {
@@ -138,6 +140,7 @@ impl Runtime {
             quiet: cli.quiet,
             ci: signals.ci,
             summary_path: signals.summary_path,
+            ci_state: crate::CiShared::default(),
         })
     }
 

@@ -63,6 +63,7 @@ pub(crate) struct LaneRow {
     pub name: String,
     pub desired_state: String,
     pub profile: Option<String>,
+    pub profiles: String,
     pub created_at: i64,
     pub cleaned_at: Option<i64>,
 }
@@ -75,6 +76,7 @@ pub(crate) struct NewLane {
     pub name: String,
     pub desired_state: String,
     pub profile: Option<String>,
+    pub profiles: String,
     pub created_at: i64,
 }
 #[derive(Queryable, Selectable, Insertable)]
@@ -244,6 +246,13 @@ impl TryFrom<LaneRow> for Lane {
     type Error = Error;
     /// Rejects corrupt states and indices rather than inventing defaults.
     fn try_from(row: LaneRow) -> Result<Self, Error> {
+        let profiles: Vec<String> = serde_json::from_str(&row.profiles)
+            .map_err(|_| Error::Invalid("corrupt lane profiles".into()))?;
+        if row.profile.as_ref() != profiles.first() {
+            return Err(Error::Invalid(
+                "lane profile does not match profiles first entry".into(),
+            ));
+        }
         let desired_state = match row.desired_state.as_str() {
             "running" => DesiredState::Running,
             "stopped" => DesiredState::Stopped,
@@ -257,6 +266,7 @@ impl TryFrom<LaneRow> for Lane {
             name: row.name,
             desired_state,
             profile: row.profile,
+            profiles,
             created_at: row.created_at,
             cleaned_at: row.cleaned_at,
         })

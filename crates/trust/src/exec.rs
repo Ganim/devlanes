@@ -129,8 +129,29 @@ pub trait CommandExecutor: Send + Sync {
     /// capturing output does not hide their prompts.
     async fn run(&self, command: &CommandLine) -> io::Result<CommandOutput>;
 
-    /// Finds an executable named `name` on `PATH`, then in `extra_dirs`.
+    /// Finds an executable named `name` in `extra_dirs`, then on `PATH`.
+    ///
+    /// Only for tools that run as the user (`certutil`); root commands use
+    /// [`find_system_program`], which never reads `PATH`.
     fn find_program(&self, name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf>;
+
+    /// Whether `path` is an executable regular file.
+    fn is_executable(&self, path: &Path) -> bool;
+}
+
+/// Root-owned directories searched for privileged programs, in order.
+pub const SYSTEM_PROGRAM_DIRS: [&str; 4] = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"];
+
+/// Absolute path of `name` in [`SYSTEM_PROGRAM_DIRS`].
+///
+/// Commands run through sudo or as root must not come from the user's `PATH`: a
+/// directory the user (or anything running as the user) can write would turn a
+/// trust change into arbitrary code running as root.
+pub fn find_system_program(executor: &dyn CommandExecutor, name: &str) -> Option<PathBuf> {
+    SYSTEM_PROGRAM_DIRS
+        .iter()
+        .map(|dir| Path::new(dir).join(name))
+        .find(|candidate| executor.is_executable(candidate))
 }
 
 /// Runs commands with `tokio::process`.
@@ -159,11 +180,18 @@ impl CommandExecutor for SystemExecutor {
         let path_dirs = std::env::var_os("PATH")
             .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
             .unwrap_or_default();
-        path_dirs
+        extra_dirs
             .iter()
-            .chain(extra_dirs)
+            .chain(&path_dirs)
+            // Relative PATH entries would depend on the current directory.
+            .filter(|dir| dir.is_absolute())
             .map(|dir| dir.join(name))
             .find(|candidate| is_executable(candidate))
+    }
+
+    /// Checks the real filesystem.
+    fn is_executable(&self, path: &Path) -> bool {
+        is_executable(path)
     }
 }
 
@@ -264,6 +292,25 @@ mod tests {
         let command = CommandLine::new("certutil").args(["-n", "devlanes CA", ""]);
         assert_eq!(command.to_string(), "certutil -n 'devlanes CA' ''");
         assert_eq!(command.argv(), ["certutil", "-n", "devlanes CA", ""]);
+    }
+
+    #[test]
+    fn system_programs_never_come_from_path() {
+        let fake = crate::fake::FakeExecutor::new(|_| Ok(CommandOutput::ok("")))
+            .with_programs(&["sudo", "/bin/rm"]);
+        assert_eq!(find_system_program(&fake, "sudo"), None, "bare PATH entry");
+        assert_eq!(
+            find_system_program(&fake, "rm"),
+            Some(PathBuf::from("/bin/rm"))
+        );
+        let sh = find_system_program(&SystemExecutor, "sh").expect("sh");
+        assert!(
+            SYSTEM_PROGRAM_DIRS
+                .iter()
+                .any(|dir| sh.parent() == Some(Path::new(dir))),
+            "{}",
+            sh.display()
+        );
     }
 
     #[tokio::test]

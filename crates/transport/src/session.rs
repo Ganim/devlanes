@@ -50,15 +50,20 @@ pub struct SessionOptions {
     pub timing: Timing,
     /// State replaced by each session's snapshot; share it across reconnects.
     pub registry: ClientRegistry,
+    /// Limit for one whole attempt in a [`crate::Link`]: transport connect
+    /// (including SSH prompts) plus handshake.
+    pub connect_timeout: Duration,
 }
 
 impl SessionOptions {
-    /// Default timing and a fresh registry.
+    /// Default timing, a fresh registry and a 3-minute attempt limit, enough for a
+    /// person to answer SSH prompts.
     pub fn new(client: impl Into<String>) -> Self {
         Self {
             client: client.into(),
             timing: Timing::default(),
             registry: ClientRegistry::new(),
+            connect_timeout: Duration::from_secs(180),
         }
     }
 }
@@ -102,6 +107,9 @@ pub enum SessionError {
     /// The box did not complete the handshake in time.
     #[error("box did not complete the handshake in time")]
     HandshakeTimeout,
+    /// The whole connection attempt took longer than its limit.
+    #[error("connecting to the box timed out")]
+    ConnectTimeout,
     /// The box sent something unexpected during the handshake.
     #[error("handshake failed: {0}")]
     Handshake(&'static str),
@@ -405,7 +413,10 @@ async fn run_control(
     let mut nonce = 0u64;
     let mut outstanding: Option<(u64, Instant)> = None;
     let end = loop {
-        let deadline = outstanding.map(|(_, sent)| sent + timing.ping_timeout);
+        // Any inbound frame proves the box is alive: a pong queued behind a large
+        // transfer must not end the session.
+        let deadline =
+            outstanding.map(|(_, sent)| sent.max(mux.last_inbound()) + timing.ping_timeout);
         tokio::select! {
             () = cancel.cancelled() => break SessionEnd::Closed,
             () = mux.closed() => break lost(&mux).await,
@@ -435,7 +446,13 @@ async fn run_control(
                     Err(_) => break SessionEnd::PingTimeout,
                 }
             }
-            () = sleep_until_opt(deadline) => break SessionEnd::PingTimeout,
+            () = sleep_until_opt(deadline) => {
+                let silent_since = outstanding.map(|(_, sent)| sent.max(mux.last_inbound()));
+                if silent_since.is_some_and(|since| since + timing.ping_timeout > Instant::now()) {
+                    continue;
+                }
+                break SessionEnd::PingTimeout;
+            }
         }
     };
     tracing::debug!("session ended: {end}");
@@ -481,6 +498,63 @@ mod tests {
             dialer: Arc::new(LoopbackDialer),
             sync: Arc::new(NoSync),
         }
+    }
+
+    #[tokio::test]
+    async fn data_keeps_a_session_alive_without_pongs() -> Result<(), Box<dyn std::error::Error>> {
+        timeout(Duration::from_secs(10), async {
+            let (client_io, box_io) = tokio::io::duplex(1024 * 1024);
+            // A box that never answers pings but streams one call's reply for a while,
+            // like a large transfer that queues pongs behind data.
+            let streaming = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let flag = streaming.clone();
+            let fake_box = tokio::spawn(async move {
+                let mut mux = mux::server(Box::new(box_io));
+                let mut control = wire::channel(mux.accept().await.ok_or("no control")?);
+                let _hello = wire::recv::<_, OpenRequest>(&mut control).await?;
+                let welcome = BoxControl::Welcome {
+                    protocol: PROTOCOL_VERSION,
+                    server: "box".into(),
+                };
+                wire::send(&mut control, &welcome).await?;
+                let snapshot = BoxControl::Snapshot {
+                    snapshot: RegistrySnapshot::default(),
+                };
+                wire::send(&mut control, &snapshot).await?;
+                let mut call = wire::channel(mux.accept().await.ok_or("no call")?);
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_millis(800) {
+                    let item = crate::wire::RpcBoxFrame::Item { value: Value::Null };
+                    wire::send(&mut call, &item).await?;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                // Hold everything open, reading pings without answering, until the
+                // client gives up.
+                while let Ok(Some(_)) = wire::recv::<_, Value>(&mut control).await {}
+                drop(call);
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+            });
+            let mut options = SessionOptions::new("client");
+            options.timing = Timing {
+                ping_interval: Duration::from_millis(50),
+                ping_timeout: Duration::from_millis(150),
+                handshake_timeout: Duration::from_secs(5),
+            };
+            let session = Session::establish(Box::new(client_io), options).await?;
+            let mut call = session.call(Value::Null).await?;
+            let reader = tokio::spawn(async move { while let Some(Ok(_)) = call.next().await {} });
+            while streaming.load(std::sync::atomic::Ordering::SeqCst) {
+                assert_eq!(session.end(), None, "session died while data was flowing");
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            let end = timeout(Duration::from_secs(2), session.closed()).await?;
+            assert_eq!(end, SessionEnd::PingTimeout);
+            reader.abort();
+            fake_box.abort();
+            Ok(())
+        })
+        .await?
     }
 
     #[tokio::test]

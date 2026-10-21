@@ -25,4 +25,4 @@ expression: screen(&buffer)
 "│hint: devlanes infra status                                                   │"
 "│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
-" j/k move  e errors  s start  x stop  r restart  t task  shift+tab terminal     "
+" j/k move  e errors  s start  x stop  r restart  t task  ? help  q quit         "

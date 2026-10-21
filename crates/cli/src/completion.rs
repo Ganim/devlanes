@@ -50,7 +50,7 @@ fn kind_of(id: &str) -> Option<CompletionKind> {
         "lane" | "status_lane" | "clean_lane" => CompletionKind::Lane,
         "task" => CompletionKind::Task,
         "project" => CompletionKind::Project,
-        "host" | "connect_host" | "disconnect_host" => CompletionKind::Host,
+        "connect_host" | "disconnect_host" => CompletionKind::Host,
         _ => return None,
     })
 }

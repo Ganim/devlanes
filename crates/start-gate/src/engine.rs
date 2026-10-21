@@ -103,18 +103,28 @@ struct Waiter {
 struct Held {
     deadline: Duration,
     below_since: Option<Duration>,
+    /// Memory the unit may still claim while it starts.
+    memory_need: u64,
     cell: Arc<Cell>,
 }
+
+/// Queue key: batch arrival, declaration order within the batch, then ticket id.
+type Key = (u64, usize, u64);
 
 /// Mutable gate state, behind one short-lived lock.
 struct State {
     policy: Policy,
     next_id: u64,
-    /// Keyed by declaration order, then arrival.
-    queue: BTreeMap<(usize, u64), Waiter>,
+    next_batch: u64,
+    queue: BTreeMap<Key, Waiter>,
     held: HashMap<u64, Held>,
     pressure: Option<PressureSample>,
+    available_memory: Option<u64>,
     next_sample: Duration,
+    /// Why the last grant pass stopped with starts still queued.
+    hold: Option<HoldReason>,
+    /// Set while idle: the next CPU reading spans the idle time and is dropped.
+    fresh_period: bool,
 }
 
 /// Grants made under the lock and delivered after it is released, because a
@@ -152,10 +162,14 @@ impl Engine {
             state: Mutex::new(State {
                 policy,
                 next_id: 0,
+                next_batch: 0,
                 queue: BTreeMap::new(),
                 held: HashMap::new(),
                 pressure: None,
+                available_memory: None,
                 next_sample: Duration::ZERO,
+                hold: None,
+                fresh_period: true,
             }),
             wake: Arc::new(Notify::new()),
             driving: AtomicBool::new(false),
@@ -168,27 +182,34 @@ impl Engine {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Queues a start, granting it at once when the window allows.
-    pub(crate) fn enqueue(&self, request: StartRequest) -> StartTicket {
+    /// Queues one start request's units as a batch behind every earlier batch,
+    /// granting what the window allows at once.
+    pub(crate) fn enqueue_batch(&self, requests: Vec<StartRequest>) -> Vec<StartTicket> {
         self.start_driver();
-        let (sender, receiver) = oneshot::channel();
-        let (grants, key) = {
+        let mut tickets = Vec::with_capacity(requests.len());
+        let grants = {
             let mut state = self.state();
-            let id = state.next_id;
-            state.next_id += 1;
-            let key = (request.order, id);
-            state.queue.insert(key, Waiter { request, sender });
-            (self.grant(&mut state), key)
+            let batch = state.next_batch;
+            state.next_batch += 1;
+            for request in requests {
+                let (sender, receiver) = oneshot::channel();
+                let id = state.next_id;
+                state.next_id += 1;
+                let key = (batch, request.order, id);
+                state.queue.insert(key, Waiter { request, sender });
+                tickets.push(StartTicket::queued(
+                    receiver,
+                    Leave {
+                        engine: self.me.clone(),
+                        key,
+                    },
+                ));
+            }
+            self.grant(&mut state)
         };
         self.deliver(grants);
         self.wake.notify_one();
-        StartTicket::queued(
-            receiver,
-            Leave {
-                engine: self.me.clone(),
-                key,
-            },
-        )
+        tickets
     }
 
     /// Point-in-time view for `status` and `why`.
@@ -204,13 +225,11 @@ impl Engine {
                 position: index + 1,
             })
             .collect();
-        let hold = (!queued.is_empty()).then(|| {
-            if state.policy.paused() {
-                HoldReason::MemoryCritical
-            } else {
-                HoldReason::WindowFull
-            }
-        });
+        let hold = if queued.is_empty() {
+            None
+        } else {
+            Some(state.hold.unwrap_or(HoldReason::WindowFull))
+        };
         GateSnapshot {
             mode: self.mode.into(),
             window: match state.policy {
@@ -221,27 +240,61 @@ impl Engine {
             queued,
             hold,
             pressure: state.pressure,
+            available_memory: state.available_memory,
         }
     }
 
-    /// Moves waiters into free slots, in queue order.
+    /// True while the head must wait for memory: its need does not fit in the
+    /// available memory minus what starting units may still claim. Never a
+    /// refusal: with nothing in flight it goes ahead, so the wait ends at the
+    /// latest when the starts in flight finish or reach `slot_timeout`.
+    fn memory_blocked(state: &State, need: u64) -> bool {
+        let Some(available) = state.available_memory else {
+            return false;
+        };
+        let reserved = state
+            .held
+            .values()
+            .fold(0_u64, |sum, held| sum.saturating_add(held.memory_need));
+        !state.held.is_empty() && need > available.saturating_sub(reserved)
+    }
+
+    /// Moves waiters into free slots, in queue order, and records why it
+    /// stopped while starts are still waiting.
     fn grant(&self, state: &mut State) -> Grants {
         let mut grants = Vec::new();
         let now = self.clock.now();
-        while state.held.len() < state.policy.window() && !state.policy.paused() {
-            let Some(((_, id), waiter)) = state.queue.pop_first() else {
-                break;
-            };
+        state.hold = None;
+        while let Some((&key, waiter)) = state.queue.first_key_value() {
             // The ticket was dropped between its last poll and now.
             if waiter.sender.is_closed() {
+                state.queue.remove(&key);
                 continue;
             }
+            let need = waiter.request.memory_need;
+            if state.policy.paused() {
+                state.hold = Some(HoldReason::MemoryCritical);
+                break;
+            }
+            if state.held.len() >= state.policy.window() {
+                state.hold = Some(HoldReason::WindowFull);
+                break;
+            }
+            if Self::memory_blocked(state, need) {
+                state.hold = Some(HoldReason::Memory);
+                break;
+            }
+            let Some(waiter) = state.queue.remove(&key) else {
+                break;
+            };
+            let id = key.2;
             let cell = Arc::new(Cell::default());
             state.held.insert(
                 id,
                 Held {
                     deadline: now + self.options.slot_timeout,
                     below_since: None,
+                    memory_need: need,
                     cell: cell.clone(),
                 },
             );
@@ -335,6 +388,7 @@ impl Engine {
                     controller.reset();
                 }
                 state.next_sample = Duration::ZERO;
+                state.fresh_period = true;
             }
             let every = state
                 .policy
@@ -346,10 +400,22 @@ impl Engine {
         };
         if let (Some(every), Some(source)) = (reading, &self.pressure) {
             let sample = source.sample().await;
+            let available = source.available_memory().await;
             let now = self.clock.now();
             let mut state = self.state();
+            match available {
+                Ok(available) => state.available_memory = available,
+                Err(error) => {
+                    tracing::debug!(source = source.name(), %error, "available memory unknown")
+                }
+            }
             match sample {
-                Ok(sample) => {
+                Ok(mut sample) => {
+                    // The source's CPU counters date from the previous busy
+                    // period, so this reading averages over the idle time.
+                    if std::mem::take(&mut state.fresh_period) {
+                        sample.cpu_percent = None;
+                    }
                     state.pressure = Some(sample);
                     let demand = !state.queue.is_empty();
                     if let Policy::Adaptive(controller) = &mut state.policy {
@@ -381,10 +447,7 @@ impl Engine {
             let busy = !state.queue.is_empty() || !state.held.is_empty();
             let deadline = state.held.values().map(|held| held.deadline).min();
             let sample = (busy && self.pressure.is_some()).then_some(state.next_sample);
-            let next = match (deadline, sample) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            let next = [deadline, sample].into_iter().flatten().min();
             (grants, next)
         };
         self.deliver(grants);
@@ -422,7 +485,7 @@ async fn drive(engine: Weak<Engine>, wake: Arc<Notify>, clock: Arc<dyn Clock>) {
 /// Takes an abandoned ticket's request out of the queue.
 struct Leave {
     engine: Weak<Engine>,
-    key: (usize, u64),
+    key: Key,
 }
 
 impl Drop for Leave {

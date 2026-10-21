@@ -41,6 +41,11 @@ impl TerminalLauncher for Iterm2 {
     fn invocation(&self, _request: &LaunchRequest) -> Result<Invocation, LaunchError> {
         Err(LaunchError::Unsupported { terminal: "iTerm2" })
     }
+
+    /// iTerm.app in an Applications folder; never off macOS.
+    fn available(&self) -> bool {
+        cfg!(target_os = "macos") && devlanes_term::app_installed("iTerm.app")
+    }
 }
 
 #[cfg(test)]
@@ -64,7 +69,12 @@ mod tests {
         let script = &invocation.args[1];
         assert!(script.contains("create window with default profile"));
         assert!(script.contains("set name to \"acme@2:api\""));
-        assert!(script.contains("write text \"cd /work/acme && devlanes attach acme@2:api\""));
+        // The login shell may not be POSIX, so it only runs `sh -c` with one word.
+        assert!(
+            script.contains(
+                "write text \"sh -c 'cd /work/acme && exec devlanes attach acme@2:api'\""
+            )
+        );
         Ok(())
     }
 

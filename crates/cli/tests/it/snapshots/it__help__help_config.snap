@@ -33,9 +33,6 @@ Global options:
       --lane <LANE>
           Use this lane ([project@]lane) instead of the current worktree's
 
-      --host <HOST>
-          Run the command on a connected box (see devlanes remote connect)
-
       --yes
           Confirm actions that would ask first; needed when no terminal can prompt
 

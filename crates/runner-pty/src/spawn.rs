@@ -1,8 +1,11 @@
-//! Blocking fork/exec of unit leaders. The only module allowed to use `unsafe`.
+//! Blocking fork/exec of unit leaders, including the `unsafe` pre-exec hook.
 
 use std::{
     io,
-    os::{fd::OwnedFd, unix::process::CommandExt},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::process::CommandExt,
+    },
     process::{Command, Stdio},
     sync::{Mutex, PoisonError},
 };
@@ -22,6 +25,12 @@ use crate::StderrMode;
 /// Serializes PTY/pipe creation with spawning. macOS cannot create the master or
 /// `std::io::pipe` ends atomically close-on-exec, so a concurrent unit spawn could
 /// otherwise fork in that window and leak another unit's descriptors into its child.
+///
+/// Helper commands (`tokio::process`, git, docker) do not take this lock, so on macOS
+/// one of them forking inside that window inherits the fresh descriptor until it
+/// execs or exits. The window is a single `fcntl`, a leaked copy only delays the
+/// unit's EOF until the helper ends, and routing every helper through this lock
+/// would serialize all process spawns in the daemon; it is accepted as is.
 static SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 /// A started leader and the parent's ends of its output channels.
@@ -29,6 +38,9 @@ pub(crate) struct Launched {
     pub identity: ProcessIdentity,
     pub master: Option<OwnedFd>,
     pub pipes: Vec<(OutputStream, OwnedFd)>,
+    /// The slave or pipe write ends given to the child, for finding processes that
+    /// still hold them after the unit ended.
+    pub held: Vec<devlanes_sys::OpenFile>,
 }
 
 /// Forks and execs the leader, then records its identity before anything can reap it.
@@ -55,8 +67,10 @@ pub(crate) fn launch(
     });
 
     let guard = SPAWN_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut held = Vec::new();
     let (master, mut pipes) = if spec.pty {
         let (master, slave) = open_pty(spec.size)?;
+        held.extend(devlanes_sys::open_file(slave.as_fd()).ok());
         command
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
@@ -88,6 +102,12 @@ pub(crate) fn launch(
     if let Some(stderr) = child.stderr.take() {
         pipes.push((OutputStream::Stderr, stderr.into()));
     }
+    // A pipe's read end identifies the pipe; holders of the write end match it.
+    held.extend(
+        pipes
+            .iter()
+            .filter_map(|(_, fd)| devlanes_sys::open_file(fd.as_fd()).ok()),
+    );
     let pid = child.id();
     // The std handle is dropped without waiting: the supervisor reaps by PID instead.
     drop(child);
@@ -102,6 +122,7 @@ pub(crate) fn launch(
             },
             master,
             pipes,
+            held,
         }),
         failure => {
             // Without an identity the unit cannot be verified later; do not leave it running.

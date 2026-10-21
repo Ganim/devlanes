@@ -68,7 +68,7 @@ fn entire_command_inventory_builds_actions() {
         ),
         (&["restart", "2:api"], Some(Method::Restart)),
         (
-            &["status", "acme@2", "--watch", "--mine"],
+            &["status", "acme@2", "--watch", "--mine", "--timeout", "30s"],
             Some(Method::Status),
         ),
         (
@@ -147,7 +147,10 @@ fn entire_command_inventory_builds_actions() {
         ),
         (&["remote", "disconnect", "box"], Some(Method::Disconnect)),
         (&["remote", "ls"], Some(Method::HostList)),
-        (&["debug", "events", "-f"], Some(Method::Subscribe)),
+        (
+            &["debug", "events", "-f", "--timeout", "30s"],
+            Some(Method::Subscribe),
+        ),
         (&["certs", "trust", "--hosts"], None),
         (&["certs", "untrust"], None),
         (&["certs", "untrust", "--hosts", "--keep-ca"], None),
@@ -166,7 +169,13 @@ fn entire_command_inventory_builds_actions() {
     for (args, method) in cases {
         let cli = Cli::try_parse_from(std::iter::once("devlanes").chain(args.iter().copied()))
             .expect("inventory parses");
-        let action = action(&cli, &runtime(&cli, OutputMode::Agent));
+        // Agents without a terminal cannot attach (agent_mode_bounds_streams_and_terminals).
+        let mode = if args[0] == "attach" {
+            OutputMode::Plain
+        } else {
+            OutputMode::Agent
+        };
+        let action = action(&cli, &runtime(&cli, mode));
         if let Some(method) = method {
             assert_eq!(request(action).method, *method, "{args:?}");
         }
@@ -192,12 +201,54 @@ fn positional_lanes_and_hosts_do_not_collide_with_global_flags() {
         request(action(&cli, &runtime(&cli, OutputMode::Plain))).params["lane"],
         "acme@5"
     );
-    let cli = Cli::try_parse_from(["devlanes", "remote", "connect", "box", "--host", "other"])
-        .expect("connect with --host");
+    let cli = Cli::try_parse_from(["devlanes", "remote", "connect", "box"]).expect("connect");
     let request = request(action(&cli, &runtime(&cli, OutputMode::Plain)));
     assert_eq!(request.params["host"], "box");
-    assert_eq!(request.context.host.as_deref(), Some("other"));
-    assert!(Cli::try_parse_from(["devlanes", "remote", "disconnect", "--host", "box"]).is_ok());
+    // Remote is mirroring only: no command runs on a box from here.
+    assert!(Cli::try_parse_from(["devlanes", "status", "--host", "box"]).is_err());
+}
+
+/// Agents get bounded, terminal-free variants: streams need --timeout, attach points
+/// at logs, and `start --attach` returns the start result without the TUI.
+#[test]
+fn agent_mode_bounds_streams_and_terminals() {
+    let agent = |args: &[&str]| {
+        let cli = Cli::parse_from(args);
+        let runtime = runtime(&cli, OutputMode::Agent);
+        cli.action_with(&runtime, PathBuf::from("/fixture"), BTreeMap::new)
+    };
+    for args in [
+        &["devlanes", "status", "--watch"][..],
+        &["devlanes", "debug", "events", "-f"],
+    ] {
+        let error = agent(args).err().expect("refused");
+        assert!(error.to_string().contains("--timeout"), "{error}");
+        let mut bounded = args.to_vec();
+        bounded.extend(["--timeout", "30s"]);
+        assert!(agent(&bounded).is_ok(), "{bounded:?}");
+    }
+    let error = agent(&["devlanes", "attach", "api"])
+        .err()
+        .expect("refused");
+    assert!(
+        error
+            .to_string()
+            .contains("devlanes logs api -f --timeout 30s"),
+        "{error}"
+    );
+    assert!(matches!(
+        agent(&["devlanes", "start", "--attach"]),
+        Ok(Action::Rpc(_))
+    ));
+    let cli = Cli::parse_from(["devlanes", "start", "--attach"]);
+    assert!(matches!(
+        cli.action_with(
+            &runtime(&cli, OutputMode::Human),
+            PathBuf::new(),
+            BTreeMap::new
+        ),
+        Ok(Action::RpcThenUi(_))
+    ));
 }
 
 #[test]
@@ -383,8 +434,6 @@ fn typed_params_preserve_opaque_refs_argv_and_context() {
         "acme",
         "--lane",
         "feat/checkout",
-        "--host",
-        "box",
         "--yes",
         "start",
         "2:api-*",
@@ -400,7 +449,6 @@ fn typed_params_preserve_opaque_refs_argv_and_context() {
     assert_eq!(params.env["X"], "last=part");
     assert_eq!(params.timeout_ms, Some(180_000));
     assert_eq!(req.context.lane.as_deref(), Some("feat/checkout"));
-    assert_eq!(req.context.host.as_deref(), Some("box"));
     assert_eq!(req.context.project.as_deref(), Some("acme"));
     assert!(req.context.yes);
     let cli = Cli::parse_from([
@@ -673,11 +721,18 @@ fn shell_exports_and_hints_are_injection_safe() {
         ("EMPTY".into(), "".into()),
         ("MESSAGE".into(), "it's $(touch /bad)".into()),
     ]);
-    insta::assert_snapshot!(export_environment(&values).expect("exports"), @r#"
+    insta::assert_snapshot!(export_environment(&values).script, @r#"
     export EMPTY=''
     export MESSAGE='it'"'"'s $(touch /bad)'
     "#);
-    assert!(export_environment(&BTreeMap::from([("X;bad".into(), "y".into())])).is_err());
+    // A name a POSIX shell cannot take is skipped, the rest still exported.
+    let exported = export_environment(&BTreeMap::from([
+        ("X;bad".into(), "y".into()),
+        ("NEXT-PUBLIC".into(), "z".into()),
+        ("OK".into(), "1".into()),
+    ]));
+    assert_eq!(exported.script, "export OK=1\n");
+    assert_eq!(exported.skipped, ["NEXT-PUBLIC", "X;bad"]);
     assert_eq!(
         Hint::logs("acme@2", "api-*", 200).0,
         "devlanes logs 'acme@2:api-*' --tail 200"
@@ -966,6 +1021,206 @@ fn exit_codes_and_truncation_cursor_survive_rendering() {
     );
 }
 
+/// Each method decides its status from its own result shape.
+#[test]
+fn exit_codes_follow_the_method() {
+    let cli = Cli::parse_from(["devlanes", "status"]);
+    let reporter = runtime(&cli, OutputMode::Json).reporter();
+    let code = |method, data: Value| {
+        reporter
+            .result(&Report::new(method, &data))
+            .expect("render")
+            .exit_code
+    };
+    let start = |ready: bool, timed_out: bool, failures: Value| {
+        json!({"lane": "acme@2", "ready": ready, "timed_out": timed_out, "failures": failures,
+               "units": [{"name": "api", "state": "ready"}]})
+    };
+    assert_eq!(code(Method::Start, start(true, false, json!([]))), exit::OK);
+    assert_eq!(
+        code(Method::Start, start(false, true, json!([]))),
+        exit::TIMEOUT
+    );
+    let failure = json!([{"unit": "seed", "exit_code": 3, "log_tail": []}]);
+    assert_eq!(
+        code(Method::Restart, start(true, false, failure)),
+        exit::FAILED
+    );
+    assert_eq!(
+        code(Method::Start, start(false, false, json!([]))),
+        exit::FAILED
+    );
+    assert_eq!(
+        code(
+            Method::LaneNew,
+            json!({"lane": "acme@3", "start": start(false, true, json!([]))})
+        ),
+        exit::TIMEOUT
+    );
+    assert_eq!(code(Method::LaneNew, json!({"lane": "acme@3"})), exit::OK);
+    // A unit stopped by SIGTERM keeps its 143; that is a normal stop.
+    let stopped = json!({"items": [{"lane": "acme@2", "state": "stopped",
+        "units": [{"name": "api", "state": "stopped", "exit_code": 143}]}]});
+    assert_eq!(code(Method::Stop, stopped.clone()), exit::OK);
+    assert_eq!(code(Method::Status, stopped), exit::OK);
+    let failed = json!({"items": [{"lane": "acme@2", "state": "running",
+        "units": [{"name": "api", "state": "failed", "exit_code": 1}]}]});
+    assert_eq!(code(Method::Status, failed.clone()), exit::FAILED);
+    assert_eq!(code(Method::LaneList, failed), exit::FAILED);
+    assert_eq!(
+        code(
+            Method::LaneList,
+            json!({"items": [{"lane": "acme@2", "state": "failed"}]})
+        ),
+        exit::FAILED
+    );
+    // `wait` ends with 0 only when ready; a unit that exited 3 gives 1, not 3.
+    assert_eq!(code(Method::Wait, json!({"ready": true})), exit::OK);
+    assert_eq!(
+        code(
+            Method::Wait,
+            json!({"ready": false, "state": "exited", "exit_code": 3})
+        ),
+        exit::FAILED
+    );
+    assert_eq!(
+        code(Method::Wait, json!({"ready": false, "state": "idle"})),
+        exit::FAILED
+    );
+    // A foreground run passes the task's own status through.
+    assert_eq!(
+        code(Method::Run, json!({"task": "test", "exit_code": 3})),
+        3
+    );
+}
+
+/// `doctor --json` adds the client's output mode and its reason to the daemon's checks.
+#[test]
+fn doctor_json_names_the_output_mode() {
+    let cli = Cli::parse_from(["devlanes", "--json", "doctor"]);
+    let runtime = Runtime::resolve(&cli, Signals::default()).expect("runtime");
+    let rendered = runtime
+        .reporter()
+        .result(&Report::new(Method::Doctor, &json!({"projects": 1})))
+        .expect("doctor");
+    let data: Value = serde_json::from_str(&rendered.stdout).expect("json");
+    assert_eq!(data["projects"], 1);
+    assert_eq!(data["output"]["mode"], "json");
+    assert_eq!(data["output"]["reason"], "--json");
+}
+
+/// A unit a previous daemon left running: shown with its pid and the stop command,
+/// not a failure for status or stop, never ready for wait, and refused starts say so.
+#[test]
+fn orphaned_units_render_and_exit() {
+    let orphan = UnitSummary {
+        name: "api".into(),
+        lane: "acme@2".into(),
+        state: devlanes_proto::ORPHANED.into(),
+        pid: Some(4242),
+        started_at_ms: Some(1_000),
+        orphaned_since_ms: Some(2_000),
+        ..UnitSummary::default()
+    };
+    let lane = devlanes_proto::LaneSummary {
+        reference: "acme@2".into(),
+        project: "acme".into(),
+        index: Some(2),
+        state: "running".into(),
+        units: vec![orphan.clone()],
+        ..devlanes_proto::LaneSummary::default()
+    };
+    let status = json!({"items": [lane], "truncated": false, "next_cursor": null});
+    let cli = Cli::parse_from(["devlanes", "status"]);
+    let stop_hint = "devlanes stop api --lane acme@2";
+    for mode in [OutputMode::Human, OutputMode::Plain, OutputMode::Agent] {
+        let rendered = runtime(&cli, mode)
+            .reporter()
+            .result(&Report::new(Method::Status, &status))
+            .expect("status");
+        assert_eq!(rendered.exit_code, exit::OK, "{mode:?}");
+        assert!(rendered.stdout.contains("orphaned"), "{}", rendered.stdout);
+        assert!(
+            rendered
+                .stdout
+                .contains("left running by a previous daemon (pid 4242)"),
+            "{}",
+            rendered.stdout
+        );
+        assert!(rendered.stdout.contains(stop_hint), "{}", rendered.stdout);
+    }
+    let json = runtime(&cli, OutputMode::Json)
+        .reporter()
+        .result(&Report::new(Method::Status, &status))
+        .expect("json");
+    assert_eq!(json.exit_code, exit::OK);
+    let parsed: Value = serde_json::from_str(&json.stdout).expect("json");
+    assert_eq!(parsed["items"][0]["units"][0]["state"], "orphaned");
+    assert_eq!(parsed["items"][0]["units"][0]["pid"], 4242);
+
+    let stopped = UnitSummary {
+        state: "stopped".into(),
+        ..orphan
+    };
+    let rendered = runtime(&cli, OutputMode::Agent)
+        .reporter()
+        .result(&Report::new(Method::Stop, &json!({"items": [stopped]})))
+        .expect("stop");
+    assert_eq!(rendered.exit_code, exit::OK);
+    assert!(
+        rendered
+            .stdout
+            .contains("stopped acme@2:api (left running by a previous daemon)"),
+        "{}",
+        rendered.stdout
+    );
+
+    let wait =
+        json!({"lane": "acme@2", "unit": "api", "state": "orphaned", "ready": false, "pid": 4242});
+    let rendered = runtime(&cli, OutputMode::Agent)
+        .reporter()
+        .result(&Report::new(Method::Wait, &wait))
+        .expect("wait");
+    assert_eq!(rendered.exit_code, exit::FAILED);
+    assert!(rendered.stdout.contains(stop_hint), "{}", rendered.stdout);
+
+    let refused = RpcError::new(
+        "unit_orphaned",
+        json!({"lane": "acme@2", "unit": "api", "pid": 4242,
+               "message": "api in acme@2 was left running by a previous daemon (pid 4242)"}),
+        1,
+    );
+    let rendered = runtime(&cli, OutputMode::Agent)
+        .reporter()
+        .error(&refused, None);
+    assert_eq!(rendered.exit_code, exit::FAILED);
+    assert!(
+        rendered
+            .stderr
+            .contains("api in acme@2 was left running by a previous daemon (pid 4242)"),
+        "{}",
+        rendered.stderr
+    );
+    assert!(rendered.stderr.contains(stop_hint), "{}", rendered.stderr);
+    // The daemon's own shape: no message, so the CLI words it from the fields.
+    let refused = RpcError::new(
+        "unit_orphaned",
+        json!({"lane": "acme@2", "unit": "api", "pid": 4242,
+               "command": "devlanes stop api --lane acme@2"}),
+        1,
+    );
+    let rendered = runtime(&cli, OutputMode::Plain)
+        .reporter()
+        .error(&refused, None);
+    assert_eq!(rendered.exit_code, exit::FAILED);
+    assert!(
+        rendered.stderr.contains("(pid 4242)"),
+        "{}",
+        rendered.stderr
+    );
+    assert!(rendered.stderr.contains(stop_hint), "{}", rendered.stderr);
+}
+
 struct FakeCompletion(AtomicUsize);
 impl CompletionSource for FakeCompletion {
     /// Simulates an existing daemon without giving completion any spawn capability.
@@ -1035,6 +1290,7 @@ fn completion_is_lazy_and_filters_existing_candidates() {
             .contains("COMPLETE=")
     );
 }
+mod agent_guide;
 mod ci;
 mod help;
 mod render;

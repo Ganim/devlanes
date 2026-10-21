@@ -39,20 +39,34 @@ logs:
   retention: { days: 7, max_size: 5GiB }
 ```
 
-The config crate parses this setting, but the daemon does not pass it on yet: each run directory uses the `LogOptions` defaults of 7 days and 512 MiB.
+The daemon passes these bounds to every unit's `LogOptions`. Its maintenance pass
+applies the size bound across all unit directories.
+
+## API
+
+- `UnitLog::open`: the single writer of a unit directory; `Error::Locked` while another writer holds it.
+- `UnitLog::reader`: a metadata snapshot to query after releasing any lock around the writer.
+- `LogReader::open`: reads a directory without recovering, locking or creating anything.
+- `UnitLog::trim_to(max_bytes) -> Result<u64>`: removes oldest data until the directory fits `max_bytes`; returns the bytes left.
+- `UnitLog::disk_bytes`: bytes the directory's segments use now.
 
 ## Behaviour
 
 The API blocks on disk I/O and compression. Use a dedicated thread or
-`spawn_blocking`, with one writer per run directory.
+`spawn_blocking`. A `.writer.lock` file keeps a second writer out of a directory
+until `finish` or drop.
 
-Segments rotate by size or age; closed segments use zstd compression by default.
-`segments()` exposes metadata for the daemon to persist. Carry `next_sequence()`
-into the next run's `LogOptions::initial_sequence` to preserve cursor identity.
+Segments rotate by size or age; closed segments use zstd compression by default and
+keep their index in a `.meta.json` file, so opening reads only those files and the
+previous run's unfinished segment. A segment that fails to load is renamed to
+`*.corrupt` with a warning. `segments()` exposes metadata for the daemon to persist.
+Carry `next_sequence()` into the next run's `LogOptions::initial_sequence` to
+preserve cursor identity.
 
 Queries support grep, severity filters, time windows and context around a cursor.
 Forward cursors use `unit#seq`; tail pages return `before:unit#seq` to fetch older
-records. Pass the returned `next_cursor` back as `LogQuery::cursor`.
+records. Pass the returned `next_cursor` back as `LogQuery::cursor`. Tail queries
+read the newest segments first and stop once the page is full.
 
 ## License
 

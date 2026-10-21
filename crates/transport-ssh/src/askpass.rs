@@ -8,6 +8,7 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,12 +16,15 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::sh_quote;
 
 /// Environment variable carrying the relay socket to the askpass process.
 pub const SOCKET_ENV: &str = "DEVLANES_ASKPASS_SOCKET";
+
+/// Longest Unix socket path (`sun_path` is 104 bytes on macOS, with the NUL).
+const MAX_SOCKET_PATH: usize = 103;
 
 /// Upper bound for one request or reply line.
 const MAX_LINE: u64 = 64 * 1024;
@@ -167,6 +171,15 @@ impl AskpassServer {
         destination: &str,
     ) -> io::Result<Self> {
         let socket = dir.join(format!("{name}.sock"));
+        if socket.as_os_str().len() > MAX_SOCKET_PATH {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "askpass socket path {} is too long; use a shorter devlanes home",
+                    socket.display()
+                ),
+            ));
+        }
         let script = dir.join(format!("{name}.askpass"));
         let exe = config.exe.to_str().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "devlanes path is not UTF-8")
@@ -178,17 +191,32 @@ impl AskpassServer {
             .await
             .map_err(io::Error::other)??;
         let listener = UnixListener::bind(&socket)?;
+        // The directory is private to this user; answering only peers of the same
+        // uid also covers a directory whose mode was loosened later.
+        let owner = std::fs::metadata(dir)?.uid();
         let relay = config.relay.clone();
         let destination = destination.to_owned();
         let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let relay = relay.clone();
-                let destination = destination.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = answer(stream, relay, destination).await {
-                        tracing::debug!("askpass request failed: {error}");
+            // Held here so aborting this task also cancels prompts in flight.
+            let mut answering = JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else { break };
+                        if !stream.peer_cred().is_ok_and(|cred| cred.uid() == owner) {
+                            tracing::warn!("askpass request from another user refused");
+                            continue;
+                        }
+                        let relay = relay.clone();
+                        let destination = destination.clone();
+                        answering.spawn(async move {
+                            if let Err(error) = answer(stream, relay, destination).await {
+                                tracing::debug!("askpass request failed: {error}");
+                            }
+                        });
                     }
-                });
+                    Some(_) = answering.join_next(), if !answering.is_empty() => {}
+                }
             }
         });
         Ok(Self {

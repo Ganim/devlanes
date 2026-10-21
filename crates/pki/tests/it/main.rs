@@ -76,11 +76,98 @@ fn refuses_incomplete_and_mismatched_ca() -> Result {
     CertificateAuthority::load_or_create(&b)?;
     fs::copy(b.join("ca.pem"), a.join("ca.pem"))?;
     assert!(CertificateAuthority::load_or_create(&a).is_err());
-    fs::remove_file(a.join("ca.pem"))?;
+    fs::remove_file(a.join("ca-key.pem"))?;
     assert!(matches!(
         CertificateAuthority::load_or_create(&a),
         Err(devlanes_pki::Error::IncompleteCa)
     ));
+    Ok(())
+}
+
+/// A crash after the key rename leaves only the key; the next start must create a working CA.
+#[test]
+fn recovers_from_interrupted_creation() -> Result {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("ca");
+    let first = CertificateAuthority::load_or_create(&path)?;
+    fs::remove_file(path.join("ca.pem"))?;
+    let recovered = CertificateAuthority::load_or_create(&path)?;
+    assert_ne!(first.certificate_der(), recovered.certificate_der());
+    let again = CertificateAuthority::load_or_create(&path)?;
+    assert_eq!(recovered.certificate_der(), again.certificate_der());
+    recovered.issue(&["app.lane.localhost".into()])?;
+    Ok(())
+}
+
+/// Verifies a leaf chain with rustls' WebPKI verifier, which enforces CA name constraints.
+fn verify(ca: &CertificateAuthority, sans: &[&str], server_name: &str) -> Result {
+    use rustls::{
+        client::{WebPkiServerVerifier, danger::ServerCertVerifier},
+        pki_types::{ServerName, UnixTime},
+    };
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(ca.certificate_der())?;
+    let verifier = WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::new(rustls::crypto::ring::default_provider()),
+    )
+    .build()?;
+    let names: Vec<String> = sans.iter().map(|&name| name.to_owned()).collect();
+    let leaf = ca.issue(&names)?;
+    verifier.verify_server_cert(
+        &leaf.cert[0],
+        &[],
+        &ServerName::try_from(server_name.to_owned())?,
+        &[],
+        UnixTime::now(),
+    )?;
+    Ok(())
+}
+
+/// New CAs sign routed development names but clients reject anything outside the permitted trees.
+#[test]
+fn name_constraints_limit_new_cas() -> Result {
+    let directory = tempfile::tempdir()?;
+    let ca =
+        CertificateAuthority::load_or_create_with_tld(&directory.path().join("ca"), Some("Acme."))?;
+    verify(&ca, &["app.lane.localhost"], "app.lane.localhost")?;
+    verify(
+        &ca,
+        &["*.lane.localhost", "lane.localhost"],
+        "x.lane.localhost",
+    )?;
+    verify(&ca, &["api.acme"], "api.acme")?;
+    verify(&ca, &["printer.home.arpa"], "printer.home.arpa")?;
+    verify(&ca, &["app.test"], "app.test")?;
+    let violation = |result: Result| {
+        result
+            .err()
+            .is_some_and(|error| format!("{error:?}").contains("NameConstraintViolation"))
+    };
+    assert!(violation(verify(
+        &ca,
+        &["app.example.com"],
+        "app.example.com"
+    )));
+    assert!(violation(verify(
+        &ca,
+        &["localhost.example"],
+        "localhost.example"
+    )));
+    assert!(violation(verify(
+        &ca,
+        &["app.lane.localhost", "evil.example"],
+        "app.lane.localhost"
+    )));
+    let plain = CertificateAuthority::load_or_create(&directory.path().join("plain"))?;
+    assert!(violation(verify(&plain, &["api.acme"], "api.acme")));
+    assert!(
+        CertificateAuthority::load_or_create_with_tld(
+            &directory.path().join("bad"),
+            Some("bad/tld")
+        )
+        .is_err()
+    );
     Ok(())
 }
 

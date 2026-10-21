@@ -19,7 +19,7 @@ const OUTPUT_QUEUE: usize = 1024;
 const EVENT_QUEUE: usize = 1024;
 
 /// Failures the TUI shows in its status line or reacts to by reconnecting.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ApiError {
     /// The socket closed or could not be opened; the TUI retries.
     #[error("daemon unreachable: {0}")]
@@ -58,6 +58,8 @@ pub struct UnitMetrics {
     pub memory_bytes: Option<u64>,
     /// `(ts_ms, cpu_percent, memory_bytes)`, oldest first.
     pub history: Vec<(u64, f64, u64)>,
+    /// Typical memory of recent runs (M13.5 baseline), when the daemon sends one.
+    pub baseline_memory_bytes: Option<u64>,
 }
 
 impl UnitMetrics {
@@ -96,6 +98,10 @@ impl UnitMetrics {
                         .and_then(Value::as_f64)
                         .map(|bytes| bytes as u64),
                     history,
+                    baseline_memory_bytes: unit
+                        .get("baseline_memory_bytes")
+                        .and_then(Value::as_f64)
+                        .map(|bytes| bytes as u64),
                 })
             })
             .collect()
@@ -212,6 +218,11 @@ pub trait DaemonApi: Send + Sync {
     fn daemon_log(&self) -> Option<PathBuf> {
         None
     }
+    /// `DEVLANES_HOME` of the daemon this TUI talks to, passed to commands it
+    /// opens in other terminals so they reach the same daemon.
+    fn home(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// One profile from `profile.list`.
@@ -237,6 +248,39 @@ pub struct ProfileList {
     pub lane: String,
     #[serde(default)]
     pub items: Vec<ProfileInfo>,
+}
+
+/// What one frame on an attach connection means for the stream.
+#[derive(Debug, PartialEq)]
+pub enum StreamFrame {
+    Output(Bytes),
+    /// The daemon's empty binary frame: the unit exited and the stream is closed.
+    End,
+    Failed(ApiError),
+    /// Frames for other streams or control traffic the pump ignores.
+    Other,
+}
+
+/// Classifies a frame read on an attach connection.
+pub fn attach_frame(frame: devlanes_client::Result<Frame>, stream_id: u64) -> StreamFrame {
+    match frame {
+        Ok(Frame::Bytes {
+            stream_id: id,
+            data,
+        }) if id == stream_id => {
+            if data.is_empty() {
+                StreamFrame::End
+            } else {
+                StreamFrame::Output(data)
+            }
+        }
+        Ok(Frame::Control(Control::Response(response))) => match response.result {
+            Outcome::Error { error } => StreamFrame::Failed(ApiError::Rpc(error)),
+            Outcome::Ok { .. } => StreamFrame::Other,
+        },
+        Ok(_) => StreamFrame::Other,
+        Err(error) => StreamFrame::Failed(ApiError::from(error)),
+    }
 }
 
 /// Codes an older daemon answers for a method it does not know.
@@ -369,7 +413,13 @@ impl DaemonApi for ClientApi {
         let (sender, receiver) = mpsc::channel(EVENT_QUEUE);
         tokio::spawn(async move {
             let ending = loop {
-                match client.next_frame().await {
+                // A replaced subscription drops its stream; stop at once instead of
+                // holding the connection until the next event fails to send.
+                let frame = tokio::select! {
+                    frame = client.next_frame() => frame,
+                    () = sender.closed() => return,
+                };
+                match frame {
                     Ok(Frame::Control(Control::Event(event))) => {
                         if sender.send(Ok(event)).await.is_err() {
                             // The TUI dropped the stream; nobody is listening.
@@ -413,8 +463,8 @@ impl DaemonApi for ClientApi {
                 Input(Option<AttachInput>),
                 Frame(devlanes_client::Result<Frame>),
             }
-            // The reason the stream ended, shown by the UI.
-            let ending: ApiError = loop {
+            // Why the stream ended; `None` for the daemon's normal end of stream.
+            let ending: Option<ApiError> = loop {
                 // Both receives are cancel-safe, so losing the race drops nothing.
                 let step = tokio::select! {
                     input = input_rx.recv() => Step::Input(input),
@@ -425,7 +475,7 @@ impl DaemonApi for ClientApi {
                     Step::Input(None) => return,
                     Step::Input(Some(AttachInput::Bytes(data))) => {
                         if let Err(error) = client.send_bytes(stream_id, data).await {
-                            break ApiError::from(error);
+                            break Some(ApiError::from(error));
                         }
                     }
                     Step::Input(Some(AttachInput::Resize { columns, rows })) => {
@@ -436,7 +486,7 @@ impl DaemonApi for ClientApi {
                         };
                         let params = match serde_json::to_value(params) {
                             Ok(params) => params,
-                            Err(error) => break ApiError::Decode(error.to_string()),
+                            Err(error) => break Some(ApiError::Decode(error.to_string())),
                         };
                         match client
                             .request(Method::Resize, params, context.clone())
@@ -450,27 +500,25 @@ impl DaemonApi for ClientApi {
                                     return;
                                 }
                             }
-                            Err(error) => break ApiError::from(error),
+                            Err(error) => break Some(ApiError::from(error)),
                         }
                     }
-                    Step::Frame(Ok(Frame::Bytes {
-                        stream_id: id,
-                        data,
-                    })) if id == stream_id => {
-                        if output_tx.send(AttachEvent::Output(data)).await.is_err() {
-                            return;
+                    Step::Frame(frame) => match attach_frame(frame, stream_id) {
+                        StreamFrame::Output(data) => {
+                            if output_tx.send(AttachEvent::Output(data)).await.is_err() {
+                                return;
+                            }
                         }
-                    }
-                    Step::Frame(Ok(Frame::Control(Control::Response(response)))) => {
-                        if let Outcome::Error { error } = response.result {
-                            break ApiError::Rpc(error);
-                        }
-                    }
-                    Step::Frame(Ok(_)) => {}
-                    Step::Frame(Err(error)) => break ApiError::from(error),
+                        StreamFrame::Other => {}
+                        StreamFrame::End => break None,
+                        StreamFrame::Failed(error) => break Some(error),
+                    },
                 }
             };
-            if output_tx.send(AttachEvent::Error(ending)).await.is_err() {
+            // Closing the output channel tells the TUI the stream ended.
+            if let Some(error) = ending
+                && output_tx.send(AttachEvent::Error(error)).await.is_err()
+            {
                 // The TUI already detached; there is nobody left to tell.
             }
         });
@@ -610,6 +658,11 @@ impl DaemonApi for ClientApi {
     fn daemon_log(&self) -> Option<PathBuf> {
         Some(self.paths.logs.join("daemon.log"))
     }
+
+    /// The home the client resolved, explicit or default.
+    fn home(&self) -> Option<PathBuf> {
+        Some(self.paths.home.clone())
+    }
 }
 
 #[cfg(test)]
@@ -629,5 +682,26 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].history, vec![(1, 1.0, 10), (2, 2.5, 20)]);
         assert_eq!(parsed[1].cpu_percent, None);
+    }
+
+    #[test]
+    fn an_empty_binary_frame_ends_the_stream() {
+        let bytes = |id, data: &'static [u8]| {
+            Ok(Frame::Bytes {
+                stream_id: id,
+                data: Bytes::from_static(data),
+            })
+        };
+        assert_eq!(
+            attach_frame(bytes(7, b"hello"), 7),
+            StreamFrame::Output(Bytes::from_static(b"hello"))
+        );
+        assert_eq!(attach_frame(bytes(7, b""), 7), StreamFrame::End);
+        // Another stream's frames, empty or not, are not this stream's end.
+        assert_eq!(attach_frame(bytes(8, b""), 7), StreamFrame::Other);
+        assert!(matches!(
+            attach_frame(Err(devlanes_client::Error::Timeout), 7),
+            StreamFrame::Failed(ApiError::Disconnected(_))
+        ));
     }
 }

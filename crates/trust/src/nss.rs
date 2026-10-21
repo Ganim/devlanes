@@ -92,12 +92,29 @@ impl NssStore {
     }
 
     /// Status of `ca` in one database.
+    ///
+    /// Installed needs both the exact certificate under the nickname and the `C`
+    /// (trusted CA) SSL flag on every entry with that nickname; a certificate that is
+    /// present but not trusted for TLS does nothing for the browser.
     async fn database_status(
         &self,
         certutil: &str,
         db: &Path,
         ca: &CaCertificate,
     ) -> Result<TrustStatus, TrustError> {
+        let list = CommandLine::new(certutil)
+            .args(["-L", "-d"])
+            .arg(sql_arg(db)?);
+        let output = run(self.executor.as_ref(), &list, &self.certutil.hint).await?;
+        if !output.success() {
+            return Ok(TrustStatus::Unknown {
+                reason: format!("{}: {}", db.display(), output.stderr.trim()),
+            });
+        }
+        let flags = ssl_flags(&output.stdout, ca.name());
+        if flags.is_empty() || !flags.iter().all(|ssl| ssl.contains('C')) {
+            return Ok(TrustStatus::Missing);
+        }
         let command = CommandLine::new(certutil)
             .args(["-L", "-d"])
             .arg(sql_arg(db)?)
@@ -278,6 +295,20 @@ fn sql_arg(db: &Path) -> Result<String, TrustError> {
     Ok(format!("sql:{}", path_arg(db)?))
 }
 
+/// SSL trust flags (the part before the first comma) of every `certutil -L` row
+/// whose nickname is `nickname`.
+///
+/// Rows are the nickname, padding, then `SSL,S/MIME,JAR/XPI` flags such as `C,,` or
+/// `CT,C,C`; nicknames may contain spaces, so the flags are the last field.
+fn ssl_flags(listing: &str, nickname: &str) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| line.trim_end().rsplit_once(char::is_whitespace))
+        .filter(|(name, flags)| name.trim() == nickname && flags.matches(',').count() == 2)
+        .map(|(_, flags)| flags.split(',').next().unwrap_or_default().to_owned())
+        .collect()
+}
+
 /// Whether certutil's stderr says the nickname or database is absent.
 fn is_not_found(stderr: &str) -> bool {
     let stderr = stderr.to_ascii_lowercase();
@@ -403,18 +434,7 @@ mod tests {
             ]
         );
         assert_eq!(adds[1][3], second_db);
-        assert_eq!(
-            argvs[0],
-            [
-                "certutil",
-                "-L",
-                "-d",
-                &first_db,
-                "-n",
-                "devlanes test CA",
-                "-a"
-            ]
-        );
+        assert_eq!(argvs[0], ["certutil", "-L", "-d", &first_db]);
         assert_eq!(
             argvs[1],
             ["certutil", "-D", "-d", &first_db, "-n", "devlanes test CA"]
@@ -430,11 +450,7 @@ mod tests {
         std::fs::create_dir_all(&db).expect("dir");
         std::fs::write(db.join("cert9.db"), b"").expect("db");
         let ca = ca();
-        let pem = ca.pem().to_owned();
-        let executor = Arc::new(
-            FakeExecutor::new(move |_| Ok(CommandOutput::ok(pem.clone())))
-                .with_programs(&["certutil"]),
-        );
+        let executor = trusting(&ca, "CT,C,C");
         let store = NssStore::new(
             executor.clone(),
             TrustTarget::Chrome,
@@ -443,11 +459,71 @@ mod tests {
             lookup(),
         );
         store.install(&ca).await.expect("install");
-        assert_eq!(executor.argvs().len(), 1, "only the status probe runs");
+        assert_eq!(executor.argvs().len(), 2, "only the status probes run");
         assert_eq!(
             store.status(&ca).await.expect("status"),
             TrustStatus::Installed
         );
+    }
+
+    /// Answers the listing with `flags` for the CA's nickname and `-a` with its PEM;
+    /// records nothing else as failing.
+    fn trusting(ca: &CaCertificate, flags: &'static str) -> Arc<FakeExecutor> {
+        let pem = ca.pem().to_owned();
+        Arc::new(
+            FakeExecutor::new(move |command| {
+                Ok(match command.args.first().map(String::as_str) {
+                    Some("-L") if command.args.len() == 3 => CommandOutput::ok(format!(
+                        "\nCertificate Nickname                                         Trust Attributes\n\
+                         {:<61}SSL,S/MIME,JAR/XPI\n\n\
+                         Some Other CA                                                C,,\n\
+                         devlanes test CA                                             {flags}\n",
+                        ""
+                    )),
+                    Some("-L") => CommandOutput::ok(pem.clone()),
+                    Some("-D") => not_found(),
+                    _ => CommandOutput::ok(""),
+                })
+            })
+            .with_programs(&["certutil"]),
+        )
+    }
+
+    #[tokio::test]
+    async fn present_without_ssl_trust_is_missing_and_reinstalled() {
+        let home = tempfile::tempdir().expect("home");
+        let db = profile(home.path(), "nssdb");
+        let ca = ca();
+        for (flags, expected) in [
+            (",C,", TrustStatus::Missing),
+            ("p,,", TrustStatus::Missing),
+            (",,", TrustStatus::Missing),
+            ("C,,", TrustStatus::Installed),
+        ] {
+            let executor = trusting(&ca, flags);
+            let store = NssStore::new(
+                executor.clone(),
+                TrustTarget::Chrome,
+                "nss-chromium",
+                NssDatabases::Shared { dir: db.clone() },
+                lookup(),
+            );
+            assert_eq!(
+                store.status(&ca).await.expect("status"),
+                expected,
+                "{flags}"
+            );
+            store.install(&ca).await.expect("install");
+            let added = executor.argvs().iter().any(|argv| argv[1] == "-A");
+            assert_eq!(added, expected == TrustStatus::Missing, "{flags}");
+        }
+    }
+
+    #[test]
+    fn parses_trust_rows_with_spaces_in_nicknames() {
+        let listing = "devlanes test CA   CT,C,C\nother devlanes test CA   C,,\nheader   SSL,S/MIME,JAR/XPI\n";
+        assert_eq!(ssl_flags(listing, "devlanes test CA"), ["CT"]);
+        assert!(ssl_flags(listing, "devlanes").is_empty());
     }
 
     #[tokio::test]

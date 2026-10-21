@@ -5,11 +5,12 @@
 ## Usage
 
 ```rust
-use devlanes_term::TerminalLauncher;
+use devlanes_term::{LaunchError, LaunchRequest, TerminalLauncher};
 use devlanes_term_iterm2::Iterm2;
 
-// `request` is a `devlanes_term::LaunchRequest`.
-Iterm2.launch(&request)?;
+fn open(request: &LaunchRequest) -> Result<(), LaunchError> {
+    Iterm2.launch(request)
+}
 ```
 
 ## Config example
@@ -21,7 +22,7 @@ terminal: iterm2
 
 ## Behaviour
 
-It runs `osascript`, opens a window with the default profile, sets the session name to the title and types `cd <cwd> && <command>` into the login shell.
+It runs `osascript`, opens a window with the default profile, sets the session name to the title and types `sh -c 'cd <cwd> && exec <command>'` into the login shell, so fish or nushell work too.
 
 ## License
 

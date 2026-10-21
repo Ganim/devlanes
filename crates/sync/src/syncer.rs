@@ -45,14 +45,17 @@ pub struct SyncOptions {
     pub ignore: Vec<String>,
     /// Quiet period before processing a burst of events.
     pub debounce: Duration,
+    /// Files larger than this are reported and skipped instead of read into memory.
+    pub max_file: Option<u64>,
 }
 
 impl Default for SyncOptions {
-    /// No ignores, 100 ms debounce.
+    /// No ignores, 100 ms debounce, no size limit.
     fn default() -> Self {
         Self {
             ignore: Vec::new(),
             debounce: DEFAULT_DEBOUNCE,
+            max_file: None,
         }
     }
 }
@@ -131,6 +134,7 @@ pub struct Syncer {
     target: Arc<dyn SyncTarget>,
     rules: Arc<IgnoreRules>,
     debounce: Duration,
+    max_file: Option<u64>,
 }
 
 impl Syncer {
@@ -146,6 +150,7 @@ impl Syncer {
             target,
             rules: Arc::new(IgnoreRules::new(&options.ignore)?),
             debounce: options.debounce,
+            max_file: options.max_file,
         })
     }
 
@@ -208,6 +213,7 @@ impl Syncer {
             index: BTreeMap::new(),
             primed: false,
             status,
+            max_file: self.max_file,
         }
     }
 }
@@ -307,6 +313,7 @@ struct Engine {
     /// cannot know what the target already holds.
     primed: bool,
     status: watch::Sender<SyncStatus>,
+    max_file: Option<u64>,
 }
 
 impl Engine {
@@ -443,7 +450,9 @@ impl Engine {
             }
             let root = self.root.clone();
             let read_rel = rel.clone();
-            let read = tokio::task::spawn_blocking(move || read_source(&root, &read_rel)).await;
+            let max_file = self.max_file;
+            let read =
+                tokio::task::spawn_blocking(move || read_source(&root, &read_rel, max_file)).await;
             let (contents, tracked) = match read {
                 Ok(Ok(Some(read))) => read,
                 // Gone or replaced by a symlink since the scan; its own event follows.
@@ -877,8 +886,20 @@ fn relative(root: &Path, path: &Path) -> Option<RelPath> {
     RelPath::from_path(path.strip_prefix(root).ok()?).ok()
 }
 
+/// The error for a file over [`SyncOptions::max_file`].
+fn too_large(size: u64, limit: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::FileTooLarge,
+        format!("{size} bytes is over the sync limit of {limit} bytes; not synced"),
+    )
+}
+
 /// Reads a source file; `None` when it is gone or no longer a regular file.
-fn read_source(root: &Path, rel: &RelPath) -> io::Result<Option<(Bytes, Tracked)>> {
+fn read_source(
+    root: &Path,
+    rel: &RelPath,
+    max_file: Option<u64>,
+) -> io::Result<Option<(Bytes, Tracked)>> {
     let path = rel.to_path(root);
     match fs::symlink_metadata(&path) {
         Ok(meta) if meta.is_file() => {}
@@ -893,8 +914,21 @@ fn read_source(root: &Path, rel: &RelPath) -> io::Result<Option<(Bytes, Tracked)
     };
     // Metadata from the open handle describes the bytes being read, not a later file.
     let meta = file.metadata()?;
+    // Whole files are held in memory, so the size is checked before reading, and
+    // the read is capped in case the file grows meanwhile.
+    if let Some(limit) = max_file
+        && meta.len() > limit
+    {
+        return Err(too_large(meta.len(), limit));
+    }
+    let cap = max_file.unwrap_or(u64::MAX);
     let mut contents = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-    file.read_to_end(&mut contents)?;
+    (&mut file)
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut contents)?;
+    if contents.len() as u64 > cap {
+        return Err(too_large(contents.len() as u64, cap));
+    }
     let mtime = meta.modified().ok();
     let racy = mtime.is_none_or(|mtime| {
         SystemTime::now()

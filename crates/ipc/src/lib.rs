@@ -15,7 +15,10 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("invalid frame kind or length")]
     InvalidFrame,
-    #[error("frame exceeds maximum length")]
+    #[error(
+        "a message exceeded the {} MiB frame limit; ask for less (a smaller --tail or --budget) or page with --cursor",
+        devlanes_proto::MAX_FRAME_SIZE / (1024 * 1024)
+    )]
     TooLarge,
     #[error("peer disconnected")]
     Disconnected,

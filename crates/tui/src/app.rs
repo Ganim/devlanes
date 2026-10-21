@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use devlanes_proto::{
-    ActorKind, AttachResult, Event, LaneSummary, LogLine, LogQuery, Method, Page, RpcError,
-    RunParams, Selection, UnitSummary, events,
+    ActorKind, AttachResult, Event, LaneSummary, LogLine, LogQuery, Method, ORPHANED, Page,
+    RpcError, RunParams, Selection, UnitSummary, events,
 };
 use ratatui::layout::Rect;
 use serde_json::Value;
@@ -61,7 +61,7 @@ pub struct DaemonView {
     /// `doctor` facts; the UI words them as checks.
     pub doctor: Option<Value>,
     pub log: VecDeque<String>,
-    pub log_offset: u64,
+    pub log_position: crate::logfile::LogPosition,
     /// Why the log cannot be read, shown in place of the tail.
     pub log_error: Option<String>,
     /// Log lines scrolled up from the newest; 0 follows the file.
@@ -253,7 +253,27 @@ pub struct Attached {
     pub state: AttachState,
     pub screen: TerminalScreen,
     pub mode: PaneMode,
+    /// Interactive streams own the unit's PTY size. Browsing attaches as an
+    /// observer so moving through the list never resizes anyone's terminal.
+    pub interactive: bool,
 }
+
+/// One row of the monitor table.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MonitorRow {
+    /// Sum of the lane's units that report numbers.
+    Lane {
+        lane: String,
+        cpu_percent: Option<f64>,
+        memory_bytes: Option<u64>,
+    },
+    Unit(UnitMetrics),
+}
+
+/// The PTY is never made smaller than this, whatever the pane size.
+pub const MIN_PTY: (u16, u16) = (20, 5);
+/// A resize settles this long before the stream is reopened for a fresh screen.
+const RESIZE_SETTLE_MS: u64 = 200;
 
 /// Inputs to [`App::update`].
 #[derive(Debug)]
@@ -281,6 +301,10 @@ pub enum Msg {
     },
     AttachClosed {
         generation: u64,
+    },
+    /// The pause after the last resize is over.
+    ResizeSettled {
+        token: u64,
     },
     /// Input, resize or the stream itself failed on an open attach.
     StreamError {
@@ -343,6 +367,12 @@ pub enum Effect {
         unit: String,
         columns: u16,
         rows: u16,
+        interactive: bool,
+    },
+    /// Sends [`Msg::ResizeSettled`] with `token` after a short pause.
+    SettleResize {
+        token: u64,
+        after_ms: u64,
     },
     Detach,
     Input(Vec<u8>),
@@ -384,7 +414,7 @@ pub enum Effect {
     LaneGc,
     FetchDaemon,
     ReadDaemonLog {
-        offset: u64,
+        from: crate::logfile::LogPosition,
     },
     /// Sends `yes`; only produced by a confirmed dialog.
     StopDaemon,
@@ -466,8 +496,12 @@ pub struct App {
     cleaning: HashSet<String>,
     /// The last failed action per lane or unit.
     target_errors: HashMap<Target, ErrorEntry>,
-    /// Lanes with an action in flight; their phase events are not reported twice.
-    pending: HashSet<String>,
+    /// Actions in flight per lane; their phase events are not reported twice.
+    pending: HashMap<String, usize>,
+    /// Focus the terminal once the stream that is opening is live.
+    want_terminal: bool,
+    /// The latest resize; older settle timers are ignored.
+    resize_token: u64,
     /// Metrics fail every tick when unsupported; only a change is reported.
     last_metrics_error: Option<String>,
     notice_ticks: u8,
@@ -498,7 +532,9 @@ impl App {
             expanded: HashMap::new(),
             cleaning: HashSet::new(),
             target_errors: HashMap::new(),
-            pending: HashSet::new(),
+            pending: HashMap::new(),
+            want_terminal: false,
+            resize_token: 0,
             last_metrics_error: None,
             notice_ticks: 0,
             generation: 0,
@@ -506,9 +542,10 @@ impl App {
         }
     }
 
-    /// Subscribes before querying so no change between the two is missed.
+    /// Subscribes first; status is queried once the subscription is open, so no
+    /// change between the two is missed.
     pub fn start(&self) -> Vec<Effect> {
-        vec![Effect::Subscribe, Effect::Refresh]
+        vec![Effect::Subscribe]
     }
 
     /// Applies one message.
@@ -536,6 +573,7 @@ impl App {
                 self.connection = Connection::Online;
                 // Someone may have started the daemon this TUI stopped.
                 self.daemon.stopped = false;
+                effects.push(Effect::Refresh);
                 if reconnected {
                     self.reattach_if_closed(&mut effects);
                 }
@@ -543,25 +581,45 @@ impl App {
             Msg::Subscribed(Err(error)) => {
                 if !error.is_disconnect() {
                     self.report("subscribe", None, words::api(&error));
+                    // A daemon that refuses subscriptions can still answer status.
+                    effects.push(Effect::Refresh);
                 }
                 self.lost_connection(Some(&error), &mut effects);
             }
             Msg::EventsEnded(reason) => self.lost_connection(reason.as_ref(), &mut effects),
             Msg::Reconnect => {
                 self.reconnect_pending = false;
-                effects.extend([Effect::Subscribe, Effect::Refresh]);
+                effects.push(Effect::Subscribe);
             }
             Msg::Event(event) => self.event(event, &mut effects),
             Msg::AttachOpened { generation, result } => {
+                let size = self.attach_size();
                 let Some(attached) = self.attached_mut(generation) else {
                     return effects;
                 };
                 match result {
-                    Ok(_) => attached.state = AttachState::Live,
+                    Ok(_) => {
+                        attached.state = AttachState::Live;
+                        // Another viewer may have resized the PTY since the attach was sent.
+                        if attached.interactive {
+                            effects.push(Effect::ResizePty {
+                                columns: size.0,
+                                rows: size.1,
+                            });
+                        }
+                        if std::mem::take(&mut self.want_terminal) {
+                            self.focus = Focus::Terminal;
+                        }
+                    }
                     Err(error) => {
                         let worded = words::api(&error);
                         let what = format!("attach {}", unit_ref(&attached.lane, &attached.unit));
                         attached.state = AttachState::Failed(worded.clone());
+                        if self.focus == Focus::Terminal || std::mem::take(&mut self.want_terminal)
+                        {
+                            self.focus = Focus::List;
+                            self.set_notice(format!("no terminal: {}", worded.summary));
+                        }
                         // A unit that is not running simply has no terminal; the pane says so.
                         if worded.code.as_deref() != Some("not_running") {
                             self.api_error(&what, None, error, &mut effects);
@@ -570,9 +628,20 @@ impl App {
                 }
             }
             Msg::StreamError { generation, error } => {
-                if let Some(attached) = self.attached_mut(generation) {
+                // A lost connection is reported once by the subscription, and an
+                // intentional daemon stop or restart is not an error at all.
+                let expected =
+                    error.is_disconnect() || self.daemon.stopped || self.daemon.busy.is_some();
+                let Some(attached) = self.attached_mut(generation) else {
+                    return effects;
+                };
+                let worded = words::api(&error);
+                // Failed, not Closed: the close that follows must not reopen at once,
+                // or a stream that keeps failing would reopen in a loop.
+                attached.state = AttachState::Failed(worded.clone());
+                if !expected {
                     let what = format!("terminal {}", unit_ref(&attached.lane, &attached.unit));
-                    self.report(&what, None, words::api(&error));
+                    self.report(&what, None, worded);
                 }
             }
             Msg::AttachOutput { generation, bytes } => {
@@ -581,13 +650,34 @@ impl App {
                 }
             }
             Msg::AttachClosed { generation } => {
-                if let Some(attached) = self.attached_mut(generation) {
-                    if !matches!(attached.state, AttachState::Failed(_)) {
-                        attached.state = AttachState::Closed;
-                    }
-                    if self.focus == Focus::Terminal {
-                        self.focus = Focus::List;
-                    }
+                let Some(attached) = self.attached_mut(generation) else {
+                    return effects;
+                };
+                let clean = !matches!(attached.state, AttachState::Failed(_));
+                if clean {
+                    attached.state = AttachState::Closed;
+                }
+                // Focus stays on the dead terminal so typed keys are dropped there
+                // instead of landing on list shortcuts such as `x` or `r`.
+                if self.focus == Focus::Terminal {
+                    self.set_notice("the terminal ended; shift+tab returns to the list".into());
+                }
+                // A clean end of a unit still listed as running means it restarted:
+                // its new PTY is already there. Otherwise the next unit.changed, or
+                // the reconnect, reopens it.
+                let online = self.connection == Connection::Online;
+                if clean
+                    && online
+                    && self
+                        .attached_unit()
+                        .is_some_and(|unit| is_active(&unit.state))
+                {
+                    self.reattach_if_closed(&mut effects);
+                }
+            }
+            Msg::ResizeSettled { token } => {
+                if token == self.resize_token {
+                    self.reopen_attach(&mut effects);
                 }
             }
             Msg::ActionDone {
@@ -595,7 +685,7 @@ impl App {
                 target,
                 result,
             } => {
-                self.pending.remove(target_lane(&target));
+                self.pending_end(target_lane(&target));
                 match result {
                     Ok(_) => {
                         self.target_errors.remove(&target);
@@ -632,7 +722,7 @@ impl App {
             Msg::Failed { what, message } => self.report(&what, None, Worded::local(&message)),
             Msg::CleanDone { lane, result } => {
                 self.cleaning.remove(&lane);
-                self.pending.remove(&lane);
+                self.pending_end(&lane);
                 let target = Target::Lane(lane.clone());
                 match result {
                     Ok(value) => {
@@ -713,7 +803,7 @@ impl App {
                     self.daemon.log.pop_front();
                 }
                 self.daemon.scroll = self.daemon.scroll.min(self.daemon.log.len());
-                self.daemon.log_offset = chunk.offset;
+                self.daemon.log_position = chunk.position;
             }
             Msg::DaemonLog(Err(message)) => {
                 self.daemon.log_error = Some(text::clean(&message));
@@ -920,16 +1010,15 @@ impl App {
         }
     }
 
-    /// Re-opens the attach stream after the daemon or the unit came back.
+    /// Re-opens the attach stream after the daemon or the unit came back,
+    /// keeping its role and the focus.
     fn reattach_if_closed(&mut self, effects: &mut Vec<Effect>) {
         let closed = self
             .attached
             .as_ref()
             .is_some_and(|a| matches!(a.state, AttachState::Closed | AttachState::Failed(_)));
         if closed {
-            self.attached = None;
-            effects.push(Effect::Detach);
-            self.sync_attach(effects);
+            self.reopen_attach(effects);
         }
     }
 
@@ -1007,7 +1096,7 @@ impl App {
                         .unwrap_or("lane"),
                 );
                 // This TUI's own action reports the same failure when it returns.
-                if self.pending.contains(&lane) {
+                if self.pending.contains_key(&lane) {
                     return;
                 }
                 let phase = text::clean(
@@ -1164,8 +1253,8 @@ impl App {
         if height == 0 {
             return;
         }
-        if row < self.list_offset {
-            // Keep a project header visible above its first lane.
+        if row <= self.list_offset {
+            // Keep the row above (often a project header) visible when moving up.
             self.list_offset = row.saturating_sub(1);
         } else if row >= self.list_offset + height {
             self.list_offset = row + 1 - height;
@@ -1195,10 +1284,12 @@ impl App {
 
     // ---- attach -----------------------------------------------------------
 
-    /// Attaches to the selected unit and detaches from anything else.
+    /// Attaches to the selected unit and detaches from anything else. An
+    /// orphaned unit has no stream; the pane explains it instead.
     fn sync_attach(&mut self, effects: &mut Vec<Effect>) {
+        let orphaned = self.selected_unit().is_some_and(is_orphaned);
         let wanted = match &self.selected {
-            Some(Selected::Unit { lane, unit }) => Some((lane.clone(), unit.clone())),
+            Some(Selected::Unit { lane, unit }) if !orphaned => Some((lane.clone(), unit.clone())),
             _ => None,
         };
         let current = self
@@ -1211,13 +1302,27 @@ impl App {
         if self.attached.take().is_some() {
             effects.push(Effect::Detach);
         }
-        if self.focus == Focus::Terminal {
-            self.focus = Focus::List;
-        }
+        self.focus = Focus::List;
+        self.want_terminal = false;
         let Some((lane, unit)) = wanted else {
             return;
         };
-        let (columns, rows) = self.pane_size();
+        // Browsing only watches; focusing the pane or zooming takes the size.
+        self.open_attach(lane, unit, false, effects);
+    }
+
+    /// Opens a new stream on `lane:unit`, replacing the current one.
+    fn open_attach(
+        &mut self,
+        lane: String,
+        unit: String,
+        interactive: bool,
+        effects: &mut Vec<Effect>,
+    ) {
+        if self.attached.take().is_some() {
+            effects.push(Effect::Detach);
+        }
+        let (columns, rows) = self.attach_size();
         self.generation += 1;
         self.attached = Some(Attached {
             generation: self.generation,
@@ -1226,6 +1331,7 @@ impl App {
             state: AttachState::Opening,
             screen: TerminalScreen::new(rows, columns),
             mode: PaneMode::Live,
+            interactive,
         });
         effects.push(Effect::Attach {
             generation: self.generation,
@@ -1233,7 +1339,22 @@ impl App {
             lane,
             columns,
             rows,
+            interactive,
         });
+    }
+
+    /// Reopens the current stream for a fresh snapshot, keeping its role and
+    /// the focus; keys typed meanwhile are dropped until it is live.
+    fn reopen_attach(&mut self, effects: &mut Vec<Effect>) {
+        let Some(attached) = self.attached.as_ref() else {
+            return;
+        };
+        let (lane, unit, interactive) = (
+            attached.lane.clone(),
+            attached.unit.clone(),
+            attached.interactive,
+        );
+        self.open_attach(lane, unit, interactive, effects);
     }
 
     /// The pane's inner `(columns, rows)`, using the lanes layout on every tab so
@@ -1244,17 +1365,34 @@ impl App {
         })
     }
 
-    /// Resizes the local grid and the remote PTY after a layout change.
-    fn resize_pane(&mut self, effects: &mut Vec<Effect>) {
+    /// The size requested for the PTY: the pane, but never below [`MIN_PTY`].
+    pub fn attach_size(&self) -> (u16, u16) {
         let (columns, rows) = self.pane_size();
+        (columns.max(MIN_PTY.0), rows.max(MIN_PTY.1))
+    }
+
+    /// Resizes the local grid and, for an interactive stream, the PTY; once
+    /// resizing pauses the stream is reopened, because a grid that shrank
+    /// cannot redraw what it cut off.
+    fn resize_pane(&mut self, effects: &mut Vec<Effect>) {
+        let (columns, rows) = self.attach_size();
         self.ensure_visible();
         if let Some(attached) = self.attached.as_mut()
             && attached.screen.size() != (rows, columns)
         {
             attached.screen.resize(rows, columns);
-            if attached.state == AttachState::Live {
+            if let PaneMode::Copy(state) = &mut attached.mode {
+                state.cursor.0 = state.cursor.0.min(rows - 1);
+                state.cursor.1 = state.cursor.1.min(columns - 1);
+            }
+            if attached.state == AttachState::Live && attached.interactive {
                 effects.push(Effect::ResizePty { columns, rows });
             }
+            self.resize_token += 1;
+            effects.push(Effect::SettleResize {
+                token: self.resize_token,
+                after_ms: RESIZE_SETTLE_MS,
+            });
         }
     }
 
@@ -1277,6 +1415,19 @@ impl App {
 
     /// Routes a key to the dialog, the terminal, copy mode, logs or the list.
     fn key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
+        // Below the minimum size nothing is drawn, so nothing may act blind.
+        if areas(self.size.0, self.size.1, self.zoom).is_none() {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Char('c') if ctrl => effects.push(Effect::Quit),
+                KeyCode::Char('q') if self.dialog.is_none() && self.focus == Focus::List => {
+                    effects.push(Effect::Quit);
+                }
+                KeyCode::Esc => self.dialog = None,
+                _ => {}
+            }
+            return;
+        }
         if self.dialog.is_some() {
             self.dialog_key(key, effects);
             return;
@@ -1284,7 +1435,7 @@ impl App {
         // Shift+Tab is reserved for focus, so apps in the pane never receive it;
         // Tab and C-a reach them (shell completion, tmux prefix).
         if key.code == KeyCode::BackTab {
-            self.toggle_focus();
+            self.toggle_focus(effects);
             return;
         }
         if self.focus == Focus::Terminal && self.tab == Tab::Lanes {
@@ -1317,7 +1468,7 @@ impl App {
         if tab == Tab::Daemon && self.tab != Tab::Daemon {
             self.daemon.ticks = 0;
             effects.push(Effect::ReadDaemonLog {
-                offset: self.daemon.log_offset,
+                from: self.daemon.log_position,
             });
             if !self.daemon.stopped {
                 effects.push(Effect::FetchDaemon);
@@ -1346,7 +1497,8 @@ impl App {
             }
             KeyCode::PageUp => self.daemon.scroll = (self.daemon.scroll + page).min(log_len),
             KeyCode::PageDown => self.daemon.scroll = self.daemon.scroll.saturating_sub(page),
-            KeyCode::Home => self.daemon.scroll = log_len,
+            // g/G mean top/bottom on every tab: the oldest line, then following again.
+            KeyCode::Home | KeyCode::Char('g') => self.daemon.scroll = log_len,
             KeyCode::End | KeyCode::Char('G') => self.daemon.scroll = 0,
             KeyCode::Char('R') => self.daemon_prompt(
                 "restart the daemon?",
@@ -1360,7 +1512,7 @@ impl App {
                 "press s on this tab to start it again.",
                 Effect::StopDaemon,
             ),
-            KeyCode::Char('g') => {
+            KeyCode::Char('X') => {
                 if self.daemon.busy.is_none() {
                     self.dialog = Some(Dialog::Confirm {
                         prompt: "run lane gc?".into(),
@@ -1446,11 +1598,9 @@ impl App {
     /// Records an action the user just confirmed, so its progress shows.
     fn begin(&mut self, effect: &Effect) {
         match effect {
-            Effect::Run { lane, .. } => {
-                self.pending.insert(lane.clone());
-            }
+            Effect::Run { lane, .. } => self.pending_begin(lane),
             Effect::CleanLane { lane } => {
-                self.pending.insert(lane.clone());
+                self.pending_begin(lane);
                 self.cleaning.insert(lane.clone());
                 self.set_notice(format!("cleaning {lane}"));
             }
@@ -1461,16 +1611,65 @@ impl App {
         }
     }
 
-    /// Toggles list and terminal focus; the terminal needs an attached unit.
-    fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Terminal => Focus::List,
-            Focus::List if self.tab == Tab::Lanes && self.attached.is_some() => Focus::Terminal,
-            Focus::List => {
-                self.set_notice("select a unit to type into it".into());
-                Focus::List
+    /// Toggles list and terminal focus.
+    fn toggle_focus(&mut self, effects: &mut Vec<Effect>) {
+        match self.focus {
+            Focus::Terminal => {
+                self.focus = Focus::List;
+                self.want_terminal = false;
             }
+            Focus::List => self.focus_terminal(effects),
+        }
+    }
+
+    /// Moves focus to the terminal pane, only onto a live stream. A watching
+    /// stream is reopened as interactive first, so typing comes with the size.
+    fn focus_terminal(&mut self, effects: &mut Vec<Effect>) {
+        if self.tab != Tab::Lanes {
+            self.set_notice("the terminal is on the lanes tab".into());
+            return;
+        }
+        let Some(attached) = self.attached.as_ref() else {
+            let notice = match self.selected_unit() {
+                Some(unit) if is_orphaned(unit) => {
+                    "a previous daemon left this process running; it has no terminal".into()
+                }
+                _ => "select a unit to type into it".into(),
+            };
+            self.set_notice(notice);
+            return;
         };
+        match (&attached.state, attached.interactive) {
+            (AttachState::Live, true) => self.focus = Focus::Terminal,
+            (AttachState::Live | AttachState::Opening, false) => {
+                self.want_terminal = true;
+                let (lane, unit) = (attached.lane.clone(), attached.unit.clone());
+                self.open_attach(lane, unit, true, effects);
+            }
+            (AttachState::Opening, true) => self.want_terminal = true,
+            (AttachState::Closed, _) => {
+                self.set_notice("the terminal ended; it reopens when the unit runs again".into());
+            }
+            (AttachState::Failed(reason), _) => {
+                let notice = format!("no terminal: {}", reason.summary);
+                self.set_notice(notice);
+            }
+        }
+    }
+
+    /// Records the start of an action on `lane`.
+    fn pending_begin(&mut self, lane: &str) {
+        *self.pending.entry(lane.to_owned()).or_insert(0) += 1;
+    }
+
+    /// Records the end of an action on `lane`.
+    fn pending_end(&mut self, lane: &str) {
+        if let Some(count) = self.pending.get_mut(lane) {
+            *count -= 1;
+            if *count == 0 {
+                self.pending.remove(lane);
+            }
+        }
     }
 
     /// Keys in list focus.
@@ -1485,7 +1684,7 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.move_selection(isize::MAX / 2, effects),
             KeyCode::Enter | KeyCode::Char(' ') => match self.selected {
                 Some(Selected::Lane(_)) => self.toggle_lane(effects),
-                Some(Selected::Unit { .. }) => self.toggle_focus(),
+                Some(Selected::Unit { .. }) => self.focus_terminal(effects),
                 None => {}
             },
             KeyCode::Left | KeyCode::Char('h') => {
@@ -1517,7 +1716,19 @@ impl App {
             KeyCode::Char('p') => self.profile_prompt(effects),
             KeyCode::Char('z') => {
                 self.zoom = !self.zoom;
-                self.resize_pane(effects);
+                // Zooming means looking at this terminal: take its size.
+                let watching = self
+                    .attached
+                    .as_ref()
+                    .filter(|a| !a.interactive)
+                    .map(|a| (a.lane.clone(), a.unit.clone()));
+                match watching {
+                    Some((lane, unit)) => {
+                        self.ensure_visible();
+                        self.open_attach(lane, unit, true, effects);
+                    }
+                    None => self.resize_pane(effects),
+                }
             }
             KeyCode::Char('o') => self.open_url(effects),
             KeyCode::Char('O') => self.open_terminal(effects),
@@ -1540,7 +1751,8 @@ impl App {
         }
     }
 
-    /// Keys in terminal focus go to the unit, except the focus toggle.
+    /// Keys in terminal focus go to the unit, except the focus toggle. With no
+    /// live stream they are dropped, never handed to list shortcuts.
     fn terminal_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
         let modes = self.modes();
         let Some(attached) = self.attached.as_mut() else {
@@ -1548,6 +1760,7 @@ impl App {
             return;
         };
         if attached.state != AttachState::Live {
+            self.set_notice("the terminal is not live; shift+tab returns to the list".into());
             return;
         }
         // Typing returns to the live screen, like a real terminal.
@@ -1720,19 +1933,31 @@ impl App {
                     item.checked = !item.checked;
                 }
             }
+            // A config without profiles has nothing to pick; Enter starts nothing.
+            KeyCode::Enter if items.is_empty() => {}
             KeyCode::Enter => {
                 // List order, so later profiles' env wins the way the config reads.
-                let profiles: Vec<String> = items
+                let mut profiles: Vec<String> = items
                     .iter()
                     .filter(|item| item.checked)
                     .map(|item| item.profile.name.clone())
                     .collect();
                 let label = if profiles.is_empty() {
-                    format!("start {lane} with the default profile")
+                    // An empty list would make the daemon reuse the lane's last
+                    // profiles; `default` is accepted even when the config has no
+                    // such profile, and then means none.
+                    let default = items.iter().find(|item| item.profile.is_default);
+                    profiles.push(
+                        default.map_or_else(|| "default".into(), |item| item.profile.name.clone()),
+                    );
+                    match default {
+                        Some(_) => format!("start {lane} with the default profile"),
+                        None => format!("start {lane} without a profile"),
+                    }
                 } else {
                     format!("start {lane} with {}", profiles.join(", "))
                 };
-                self.pending.insert(lane.clone());
+                self.pending_begin(&lane);
                 effects.push(Effect::Control {
                     method: Method::Start,
                     target: Target::Lane(lane.clone()),
@@ -1818,6 +2043,11 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.monitor_index = self.monitor_index.saturating_sub(1);
             }
+            KeyCode::Char('g') | KeyCode::Home => self.monitor_index = 0,
+            KeyCode::Char('G') | KeyCode::End => {
+                self.monitor_index = usize::MAX;
+                self.clamp_monitor();
+            }
             KeyCode::Char('?') => self.dialog = Some(Dialog::Help),
             _ => {}
         }
@@ -1860,7 +2090,7 @@ impl App {
             }
             None => (Vec::new(), reference.clone()),
         };
-        self.pending.insert(reference.clone());
+        self.pending_begin(&reference);
         effects.push(Effect::Control {
             method,
             lane: reference,
@@ -1931,7 +2161,7 @@ impl App {
         result: Result<Value, ApiError>,
         effects: &mut Vec<Effect>,
     ) {
-        self.pending.remove(&lane);
+        self.pending_end(&lane);
         let target = Target::Unit {
             lane: lane.clone(),
             unit: task.clone(),
@@ -1944,8 +2174,9 @@ impl App {
                 self.selected = Some(Selected::Unit { lane, unit: task });
                 self.after_change(effects);
                 let interactive = value.get("interactive").and_then(Value::as_bool) == Some(true);
-                if interactive && self.attached.is_some() {
-                    self.focus = Focus::Terminal;
+                if interactive {
+                    // Reopens the task's stream as interactive; focus follows once it is live.
+                    self.focus_terminal(effects);
                 }
             }
             Err(error) => {
@@ -2161,7 +2392,11 @@ impl App {
                 let text = text.trim_end().to_owned();
                 if !text.is_empty() {
                     effects.push(Effect::Copy(text));
-                    self.set_notice("copied".into());
+                    // OSC 52 has no reply: the terminal may ignore it silently.
+                    self.set_notice(
+                        "copied with OSC 52; it reaches the clipboard if the terminal allows that"
+                            .into(),
+                    );
                 }
             }
             _ => {}
@@ -2197,8 +2432,8 @@ impl App {
             match mouse.kind {
                 MouseEventKind::ScrollUp => self.scroll(WHEEL_LINES, effects),
                 MouseEventKind::ScrollDown => self.scroll(-WHEEL_LINES, effects),
-                MouseEventKind::Down(_) if self.attached.is_some() => {
-                    self.focus = Focus::Terminal;
+                MouseEventKind::Down(_) if self.focus == Focus::List => {
+                    self.focus_terminal(effects);
                 }
                 _ => {}
             }
@@ -2212,6 +2447,10 @@ impl App {
             MouseEventKind::ScrollDown => self.move_selection(1, effects),
             MouseEventKind::Down(_) => {
                 self.focus = Focus::List;
+                // Rows live between the borders; a click on either border selects nothing.
+                if mouse.row + 1 >= list.bottom() {
+                    return;
+                }
                 let Some(offset) = mouse.row.checked_sub(list.y + 1) else {
                     return;
                 };
@@ -2244,7 +2483,7 @@ impl App {
         if self.tab == Tab::Daemon {
             // The log is a local file, readable even while the daemon is down.
             effects.push(Effect::ReadDaemonLog {
-                offset: self.daemon.log_offset,
+                from: self.daemon.log_position,
             });
             self.daemon.ticks += 1;
             if self.daemon.ticks >= DAEMON_REFRESH_TICKS {
@@ -2265,23 +2504,49 @@ impl App {
         self.notice_ticks = NOTICE_TICKS;
     }
 
-    /// Rows of the monitor table: metrics when the daemon has them, else status numbers.
-    pub fn monitor_rows(&self) -> Vec<UnitMetrics> {
-        if !self.metrics.is_empty() {
-            return self.metrics.clone();
+    /// Rows of the monitor table: each lane's total, then its units. Unit
+    /// numbers come from metrics when the daemon has them, else from status.
+    pub fn monitor_rows(&self) -> Vec<MonitorRow> {
+        let units: Vec<UnitMetrics> = if self.metrics.is_empty() {
+            self.lanes
+                .iter()
+                .flat_map(|lane| lane.units.iter())
+                .filter(|unit| is_active(&unit.state))
+                .map(|unit| UnitMetrics {
+                    lane: unit.lane.clone(),
+                    unit: unit.name.clone(),
+                    cpu_percent: unit.cpu_percent,
+                    memory_bytes: unit.memory_bytes,
+                    ..UnitMetrics::default()
+                })
+                .collect()
+        } else {
+            self.metrics.clone()
+        };
+        let mut lanes: Vec<String> = units.iter().map(|unit| unit.lane.clone()).collect();
+        lanes.sort();
+        lanes.dedup();
+        let mut rows = Vec::new();
+        for lane in lanes {
+            let members: Vec<&UnitMetrics> = units.iter().filter(|u| u.lane == lane).collect();
+            let cpu = members
+                .iter()
+                .filter_map(|u| u.cpu_percent)
+                .reduce(|a, b| a + b);
+            let memory = members
+                .iter()
+                .filter_map(|u| u.memory_bytes)
+                .reduce(|a, b| a + b);
+            rows.push(MonitorRow::Lane {
+                lane: lane.clone(),
+                cpu_percent: cpu,
+                memory_bytes: memory,
+            });
+            let mut sorted: Vec<UnitMetrics> = members.into_iter().cloned().collect();
+            sorted.sort_by_key(|unit| unit.unit.to_lowercase());
+            rows.extend(sorted.into_iter().map(MonitorRow::Unit));
         }
-        self.lanes
-            .iter()
-            .flat_map(|lane| lane.units.iter())
-            .filter(|unit| is_active(&unit.state))
-            .map(|unit| UnitMetrics {
-                lane: unit.lane.clone(),
-                unit: unit.name.clone(),
-                cpu_percent: unit.cpu_percent,
-                memory_bytes: unit.memory_bytes,
-                history: Vec::new(),
-            })
-            .collect()
+        rows
     }
 
     /// Keeps the monitor selection inside the table.
@@ -2307,12 +2572,18 @@ pub fn unit_ref(lane: &str, unit: &str) -> String {
     format!("{lane}:{unit}")
 }
 
-/// States with a live process behind them, or one about to start.
+/// States with a live process behind them, or one about to start. Orphans
+/// count: their process runs, so their lane is expanded and restart covers them.
 pub fn is_active(state: &str) -> bool {
     matches!(
         state,
-        "queued" | "starting" | "ready" | "running" | "stopping"
+        "queued" | "starting" | "ready" | "running" | "stopping" | ORPHANED
     )
+}
+
+/// A process a previous daemon left running: no output stream to attach to.
+pub fn is_orphaned(unit: &UnitSummary) -> bool {
+    unit.state == ORPHANED
 }
 
 /// Display order: services and tasks together by name, ad-hoc exec units

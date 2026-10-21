@@ -30,6 +30,8 @@ The system store runs, through sudo unless already root:
 - Fedora and RHEL: `install -m 0644 <ca.pem> /etc/pki/ca-trust/source/anchors/<name>.pem`, then `update-ca-trust extract`
 - uninstall: `rm -f <anchor>`, then the same refresh command
 
+`sudo` and every root-run tool are resolved to absolute paths in `/usr/sbin`, `/usr/bin`, `/sbin` and `/bin`; the user's `PATH` is never searched for them.
+
 With a terminal on stdin, sudo prompts for a password. Without one it runs `sudo -n`, so CI with passwordless sudo works and a required password fails with `TrustError::InteractionRequired` instead of hanging.
 
 The NSS stores run `certutil` as the user and need `libnss3-tools` (Debian/Ubuntu), `nss-tools` (Fedora) or `nss` (Arch). The `chrome` target creates `~/.pki/nssdb` when it is missing. Playwright's Chromium reads it too.

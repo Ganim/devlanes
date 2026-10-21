@@ -7,7 +7,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InputModes {
     pub application_cursor: bool,
-    pub application_keypad: bool,
     pub bracketed_paste: bool,
     pub mouse: MouseReporting,
 }
@@ -37,7 +36,6 @@ impl InputModes {
         };
         Self {
             application_cursor: screen.application_cursor(),
-            application_keypad: screen.application_keypad(),
             bracketed_paste: screen.bracketed_paste(),
             mouse,
         }
@@ -150,8 +148,9 @@ pub fn encode_paste(text: &str, modes: InputModes) -> Vec<u8> {
     if !modes.bracketed_paste {
         return normalized.into_bytes();
     }
-    // A pasted end marker would let the paste escape bracketing.
-    let safe = normalized.replace("\x1b[201~", "");
+    // A pasted end marker would let the paste escape bracketing. Removing the
+    // marker can join pieces into a new one, so every ESC goes instead.
+    let safe = normalized.replace('\x1b', "");
     let mut bytes = b"\x1b[200~".to_vec();
     bytes.extend_from_slice(safe.as_bytes());
     bytes.extend_from_slice(b"\x1b[201~");
@@ -212,10 +211,17 @@ pub fn encode_mouse(
     ])
 }
 
-/// OSC 52 sets the clipboard of the outer terminal, including over SSH and tmux.
-pub fn osc52(text: &str) -> String {
+/// OSC 52 sets the clipboard of the outer terminal, also over SSH. Inside tmux
+/// the sequence goes through DCS passthrough (ESC doubled), which tmux forwards
+/// when `allow-passthrough` is on; tmux's own `set-clipboard` handles the bare form.
+pub fn osc52(text: &str, tmux: bool) -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(text);
-    format!("\x1b]52;c;{encoded}\x07")
+    let sequence = format!("\x1b]52;c;{encoded}\x07");
+    if tmux {
+        format!("\x1bPtmux;{}\x1b\\", sequence.replace('\x1b', "\x1b\x1b"))
+    } else {
+        sequence
+    }
 }
 
 #[cfg(test)]
@@ -292,8 +298,12 @@ mod tests {
         };
         assert_eq!(
             encode_paste("ls\x1b[201~rm", bracketed),
-            b"\x1b[200~lsrm\x1b[201~".to_vec()
+            b"\x1b[200~ls[201~rm\x1b[201~".to_vec()
         );
+        // Removing one end marker must not assemble another.
+        let nested = encode_paste("a\x1b[20\x1b[201~1~b", bracketed);
+        let inner = &nested[6..nested.len() - 6];
+        assert!(!inner.contains(&0x1b), "{inner:?}");
     }
 
     #[test]
@@ -338,7 +348,8 @@ mod tests {
     }
 
     #[test]
-    fn osc52_is_base64() {
-        assert_eq!(osc52("hi"), "\x1b]52;c;aGk=\x07");
+    fn osc52_is_base64_and_wrapped_for_tmux() {
+        assert_eq!(osc52("hi", false), "\x1b]52;c;aGk=\x07");
+        assert_eq!(osc52("hi", true), "\x1bPtmux;\x1b\x1b]52;c;aGk=\x07\x1b\\");
     }
 }

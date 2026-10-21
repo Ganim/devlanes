@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 /// Raw records are split at this bound, even when a child never writes a newline.
 pub const MAX_LINE_BYTES: usize = 16 * 1024;
 /// The caller's timer should poll at least this often to expose interactive prompts.
@@ -164,35 +162,5 @@ impl Framer {
             ControlString::Osc => {}
             ControlString::Normal => self.parser.advance(&mut self.text, &[byte]),
         }
-    }
-}
-
-/// Exact recent terminal bytes, evicted by bytes rather than by line length.
-pub struct RawRing {
-    bytes: VecDeque<u8>,
-    capacity: usize,
-}
-
-impl RawRing {
-    /// A zero capacity explicitly disables terminal replay storage.
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            bytes: VecDeque::new(),
-            capacity,
-        }
-    }
-
-    /// Keeps the newest bytes even when one read exceeds the entire capacity.
-    pub fn push(&mut self, bytes: &[u8]) {
-        let keep = bytes.len().min(self.capacity);
-        let remaining = self.capacity - keep;
-        let remove = self.bytes.len().saturating_sub(remaining);
-        self.bytes.drain(..remove);
-        self.bytes.extend(&bytes[bytes.len() - keep..]);
-    }
-
-    /// Returns a replay snapshot without exposing mutable ring state.
-    pub fn snapshot(&self) -> Vec<u8> {
-        self.bytes.iter().copied().collect()
     }
 }

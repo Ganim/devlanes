@@ -26,7 +26,7 @@ async fn trust_login_keychain(ca_pem: &str) -> Result<(), TrustError> {
 All commands run `/usr/bin/security` directly:
 
 - install: `add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db <ca.pem>`
-- uninstall: `delete-certificate -Z <sha1> -t <keychain>`, which also drops the trust settings
+- uninstall: `delete-certificate -Z <sha1> -t <keychain>`, which also drops the trust settings. With `with_ca_label`, every certificate found by `find-certificate -a -c <label> -Z` is deleted too, so older devlanes CAs do not stay trusted.
 - status: `find-certificate -a -Z <keychain>`, then `verify-cert -c <ca.pem> -l -L -q`
 
 Trust settings go to the user domain, so no sudo is needed. macOS still asks for the account password in a dialog on install and removal. Over SSH without a desktop session the change fails with `TrustError::InteractionRequired`.

@@ -277,6 +277,10 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             format!("daemon does not support {}", field(data, "method")),
             None,
         ),
+        "unknown_method" => (
+            "the running daemon is older and does not know this command".into(),
+            Some(Hint::command(["daemon", "restart"])),
+        ),
         "incompatible" | "protocol_mismatch" => (
             format!(
                 "daemon v{} (build {}) runs {} processes; protocol is incompatible",
@@ -285,6 +289,51 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
                 field(data, "managed_processes")
             ),
             Some(Hint::command(["daemon", "restart"])),
+        ),
+        // The daemon's own message names the unit and pid; the hint stops it.
+        "unit_orphaned" => {
+            let (lane, unit) = (text(data, "lane"), text(data, "unit"));
+            (
+                match data.get("message").and_then(Value::as_str) {
+                    Some(message) => super::clean(message),
+                    None => match int(data, "pid") {
+                        Some(pid) => format!(
+                            "{} is still running from a previous daemon (pid {pid}); start does not take it over",
+                            target(data)
+                        ),
+                        None => format!(
+                            "{} is still running from a previous daemon; start does not take it over",
+                            target(data)
+                        ),
+                    },
+                },
+                (!unit.is_empty() && !lane.is_empty())
+                    .then(|| Hint::command(["stop", unit.as_str(), "--lane", lane.as_str()])),
+            )
+        }
+        "interrupted" => (
+            format!(
+                "interrupted by {}; stopping what this run started",
+                field(data, "signal")
+            ),
+            None,
+        ),
+        "daemon_sandboxed" => (
+            // The agent guide tells agents to look for this phrase.
+            format!(
+                "auto-spawn refused in sandbox ({}); run devlanes daemon install outside the sandbox, then retry",
+                super::clean(&text(data, "message"))
+            ),
+            // Installed as a service, the daemon runs outside the sandbox.
+            Some(Hint::command(["daemon", "install"])),
+        ),
+        "daemon_still_running" => (
+            format!(
+                "the old daemon (pid {}) was still running after {}s",
+                field(data, "pid"),
+                field(data, "waited_s")
+            ),
+            Some(Hint::command(["daemon", "status"])),
         ),
         "daemon_unreachable" => (
             match data.get("message").and_then(Value::as_str) {

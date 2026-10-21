@@ -5,11 +5,12 @@
 ## Usage
 
 ```rust
-use devlanes_term::TerminalLauncher;
+use devlanes_term::{LaunchError, LaunchRequest, TerminalLauncher};
 use devlanes_term_ghostty::Ghostty;
 
-// `request` is a `devlanes_term::LaunchRequest`.
-Ghostty.launch(&request)?;
+fn open(request: &LaunchRequest) -> Result<(), LaunchError> {
+    Ghostty.launch(request)
+}
 ```
 
 ## Config example

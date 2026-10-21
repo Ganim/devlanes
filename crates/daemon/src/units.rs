@@ -3,21 +3,29 @@
 
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex as StdMutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
 use devlanes_core::{ExitOutcome, ProcessIdentity, StopPolicy, TerminalSize, Unit};
-use devlanes_logs::{LogOptions, UnitLog};
+use devlanes_logs::{LogOptions, LogReader, UnitLog};
 use devlanes_proto::{Actor, LogLine, LogQuery, Page, RpcError};
 use serde_json::json;
 use tokio::sync::{broadcast, watch};
 
 /// Daemon-side scrollback stays small; deep history comes from log segments.
 const SCROLLBACK: usize = 200;
-/// Bounds per-unit raw memory; 40 units must not cost hundreds of MiB.
-const RAW_RING: usize = 1024 * 1024;
+/// Most output chunks fed to the screen model per blocking-pool trip.
+const PUMP_BATCH: usize = 64;
+/// Output chunks queued for the log thread; beyond this, chunks are dropped from
+/// the log (and counted) rather than buffered without bound.
+const LOG_QUEUE: usize = 1024;
+/// Partial-line and file-buffer flush cadence, matching `devlanes_logs::PARTIAL_FLUSH_MS`.
+const LOG_TICK: Duration = Duration::from_millis(devlanes_logs::PARTIAL_FLUSH_MS);
 
 /// Lifecycle as exposed through `UnitSummary.state`.
 #[derive(Debug, Clone, PartialEq)]
@@ -88,7 +96,6 @@ impl LogRetention {
     /// Log options for one unit with these bounds.
     fn options(self) -> LogOptions {
         LogOptions {
-            raw_ring_bytes: RAW_RING,
             retention_bytes: self.max_bytes,
             retention_age_ms: self.max_age_ms,
             ..LogOptions::default()
@@ -102,6 +109,15 @@ enum LogCommand {
     /// Answered once every earlier command was applied, so queries see all output.
     Sync(tokio::sync::oneshot::Sender<()>),
     Finish,
+}
+
+/// State the async side shares with the log thread outside the bounded queue.
+#[derive(Default)]
+struct LogSignals {
+    /// Output chunks dropped because the queue was full, since the run started.
+    dropped: AtomicU64,
+    /// Set by the exit; covers a `Finish` that found the queue full.
+    finish: AtomicBool,
 }
 
 /// Shared handle; cloning is cheap and never affects the process.
@@ -121,7 +137,8 @@ struct Inner {
     screen: StdMutex<vt100::Parser>,
     live: broadcast::Sender<Bytes>,
     log: Arc<StdMutex<UnitLog>>,
-    log_tx: std::sync::mpsc::Sender<LogCommand>,
+    log_tx: std::sync::mpsc::SyncSender<LogCommand>,
+    log_signals: Arc<LogSignals>,
     /// Set when someone asked for a stop, so a signal exit reads as `stopped`, not `failed`.
     stop_requested: std::sync::atomic::AtomicBool,
     /// Flips once the pump saw the end of output, so the exit is published after it.
@@ -144,23 +161,31 @@ const STOP_MARGIN: Duration = Duration::from_secs(10);
 const LOG_CLOSE: Duration = Duration::from_secs(5);
 
 impl UnitHost {
-    /// Starts pumping output immediately so a chatty process never blocks on a full PTY.
-    pub fn start(
+    /// Opens the log off the executor, then starts pumping output so a chatty process
+    /// never blocks on a full PTY.
+    pub async fn start(
         info: UnitInfo,
         unit: Arc<dyn Unit>,
         identity: Option<ProcessIdentity>,
     ) -> Result<Self, RpcError> {
-        let log = UnitLog::open(
-            &info.log_dir,
+        let log = open_log(
+            info.log_dir.clone(),
             info.name.replace('#', "_"),
             info.retention.options(),
         )
-        .map_err(|error| internal("log_open_failed", error))?;
+        .await?;
         let first_seq = log.next_sequence();
         let log = Arc::new(StdMutex::new(log));
-        let (log_tx, log_rx) = std::sync::mpsc::channel();
+        let (log_tx, log_rx) = std::sync::mpsc::sync_channel(LOG_QUEUE);
+        let log_signals = Arc::new(LogSignals::default());
         let log_done = watch::channel(false).0;
-        spawn_log_thread(log.clone(), log_rx, log_done.clone());
+        spawn_log_thread(
+            log.clone(),
+            log_rx,
+            log_signals.clone(),
+            info.name.clone(),
+            log_done.clone(),
+        );
         let size = TerminalSize::default();
         let host = Self {
             inner: Arc::new(Inner {
@@ -177,6 +202,7 @@ impl UnitHost {
                 live: broadcast::channel(1024).0,
                 log,
                 log_tx,
+                log_signals,
                 stop_requested: std::sync::atomic::AtomicBool::new(false),
                 pump_done: watch::channel(false).0,
                 first_seq,
@@ -401,17 +427,24 @@ impl UnitHost {
     /// Queries this unit's logs off the executor.
     pub async fn logs(&self, query: LogQuery) -> Result<Page<LogLine>, RpcError> {
         let (synced, applied) = tokio::sync::oneshot::channel();
-        // A finished log thread has nothing queued; its send failure is fine.
-        if self.inner.log_tx.send(LogCommand::Sync(synced)).is_ok() {
-            let _ = tokio::time::timeout(PUMP_DRAIN, applied).await;
-        }
+        let log_tx = self.inner.log_tx.clone();
+        // The queue is bounded, so a full one is waited on off the executor. A finished
+        // log thread has nothing queued; its send failure is fine.
+        let queued =
+            tokio::task::spawn_blocking(move || log_tx.send(LogCommand::Sync(synced)).is_ok());
+        let _ = tokio::time::timeout(PUMP_DRAIN, async {
+            if matches!(queued.await, Ok(true)) {
+                let _ = applied.await;
+            }
+        })
+        .await;
         let log = self.inner.log.clone();
         tokio::task::spawn_blocking(move || {
-            let mut log = log.lock().map_err(|_| poisoned())?;
-            // Flush so the query sees lines written moments ago.
-            log.flush()
-                .map_err(|error| internal("log_flush_failed", error))?;
-            log.query(&query)
+            // The snapshot flushes under the lock; reading happens after releasing it,
+            // so a long query never stalls the writer.
+            let reader = log.lock().map_err(|_| poisoned())?.reader();
+            reader
+                .query(&query)
                 .map_err(|error| internal("log_query_failed", error))
         })
         .await
@@ -429,9 +462,8 @@ impl UnitHost {
             log.lock()
                 .map(|log| {
                     log.segments()
-                        .iter()
+                        .into_iter()
                         .filter(|segment| segment.first_seq >= first && segment.records > 0)
-                        .cloned()
                         .collect()
                 })
                 .unwrap_or_default()
@@ -460,24 +492,53 @@ impl UnitHost {
 
     /// Feeds the screen, re-broadcasts under the screen lock, then hands bytes to the log thread.
     fn spawn_pump(&self) {
+        use broadcast::error::{RecvError, TryRecvError};
         let inner = self.inner.clone();
         let mut output = inner.unit.output();
         tokio::spawn(async move {
-            loop {
+            let mut closed = false;
+            // Set after lost chunks: attached viewers then get a full redraw instead
+            // of raw bytes that assume a screen they never received.
+            let mut stale = false;
+            while !closed {
+                let mut batch = Vec::new();
                 match output.recv().await {
-                    Ok(chunk) => {
-                        if let Ok(mut screen) = inner.screen.lock() {
-                            screen.process(&chunk.bytes);
-                            let _ = inner.live.send(chunk.bytes.clone());
-                        }
-                        let _ = inner.log_tx.send(LogCommand::Output(chunk.bytes, now_ms()));
-                    }
-                    // Lost chunks are still in the runner's own buffers only if it keeps them;
-                    // the screen may be stale until the next redraw, logs miss those bytes.
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    Ok(chunk) => batch.push(chunk.bytes),
+                    Err(RecvError::Lagged(skipped)) => {
                         tracing::warn!(unit = %inner.info.name, skipped, "output pump lagged");
+                        stale = true;
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(RecvError::Closed) => closed = true,
+                }
+                // Whatever is already queued joins this batch, so a burst costs one
+                // trip to the blocking pool instead of one per chunk.
+                while !closed && batch.len() < PUMP_BATCH {
+                    match output.try_recv() {
+                        Ok(chunk) => batch.push(chunk.bytes),
+                        Err(TryRecvError::Lagged(skipped)) => {
+                            tracing::warn!(unit = %inner.info.name, skipped, "output pump lagged");
+                            stale = true;
+                        }
+                        Err(TryRecvError::Closed) => closed = true,
+                        Err(TryRecvError::Empty) => break,
+                    }
+                }
+                if batch.is_empty() {
+                    continue;
+                }
+                // vt100 parsing is CPU work proportional to output; keep it off the
+                // executor. Awaiting each batch keeps screen and live order intact.
+                let screen = inner.clone();
+                let fed = batch.clone();
+                let redraw = std::mem::take(&mut stale);
+                let _ = tokio::task::spawn_blocking(move || screen.feed_screen(&fed, redraw)).await;
+                for bytes in batch {
+                    // Never wait on disk here: a stalled pump would block the PTY.
+                    if let Err(std::sync::mpsc::TrySendError::Full(_)) =
+                        inner.log_tx.try_send(LogCommand::Output(bytes, now_ms()))
+                    {
+                        inner.log_signals.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
             // send_replace: the waiter may subscribe only after this flips.
@@ -502,6 +563,25 @@ impl UnitHost {
 }
 
 impl Inner {
+    /// Feeds output to the screen model and re-broadcasts it under the screen lock,
+    /// so an attacher's snapshot and subscription never leave a gap. With `redraw`,
+    /// viewers get one full redraw of the model instead of the raw bytes, because
+    /// they missed the chunks lost before this batch. Blocking.
+    fn feed_screen(&self, batch: &[Bytes], redraw: bool) {
+        let Ok(mut screen) = self.screen.lock() else {
+            return;
+        };
+        for bytes in batch {
+            screen.process(bytes);
+            if !redraw {
+                let _ = self.live.send(bytes.clone());
+            }
+        }
+        if redraw {
+            let _ = self.live.send(snapshot_bytes(&screen));
+        }
+    }
+
     /// Classifies the run, then publishes the exit and closes the log, once per run.
     ///
     /// The exit uses `send_replace`: plain `send` discards the value while nobody is
@@ -535,70 +615,106 @@ impl Inner {
             true
         });
         self.exit.send_replace(Some(outcome));
-        let _ = self.log_tx.send(LogCommand::Finish);
+        // The flag finishes the log once the queue drains if this send finds it full.
+        self.log_signals.finish.store(true, Ordering::SeqCst);
+        let _ = self.log_tx.try_send(LogCommand::Finish);
     }
 }
 
 /// Queries the logs of a unit that has no live host (earlier runs, other daemons).
-/// Opening recovers and closes segments, so call it only while nothing writes there.
+/// Read-only: it recovers nothing and creates no files, so a unit starting in the
+/// same directory is unaffected. `_retention` is unused since reads never prune.
 pub async fn query_log_dir(
     dir: PathBuf,
     unit: String,
     query: LogQuery,
-    retention: LogRetention,
+    _retention: LogRetention,
 ) -> Result<Page<LogLine>, RpcError> {
     tokio::task::spawn_blocking(move || {
-        if !dir.exists() {
-            return Ok(Page::complete(Vec::new()));
-        }
-        let mut log = UnitLog::open(&dir, unit.replace('#', "_"), retention.options())
-            .map_err(|error| internal("log_open_failed", error))?;
-        let page = log
+        LogReader::open(&dir, unit.replace('#', "_"))
+            .map_err(|error| internal("log_open_failed", error))?
             .query(&query)
-            .map_err(|error| internal("log_query_failed", error));
-        let _ = log.finish(now_ms());
-        page
+            .map_err(|error| internal("log_query_failed", error))
     })
     .await
     .map_err(|error| internal("log_task_failed", error))?
+}
+
+/// Opens a run's log on a blocking thread. Right after a restart the previous run may
+/// still be closing the directory and hold its writer lock, so that is retried briefly.
+async fn open_log(dir: PathBuf, unit: String, options: LogOptions) -> Result<UnitLog, RpcError> {
+    tokio::task::spawn_blocking(move || {
+        let deadline = Instant::now() + LOG_CLOSE;
+        loop {
+            match UnitLog::open(&dir, unit.clone(), options.clone()) {
+                Err(devlanes_logs::Error::Locked) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                result => return result,
+            }
+        }
+    })
+    .await
+    .map_err(|error| internal("log_task_failed", error))?
+    .map_err(|error| internal("log_open_failed", error))
 }
 
 /// One thread per unit keeps log I/O ordered and off the async runtime.
 fn spawn_log_thread(
     log: Arc<StdMutex<UnitLog>>,
     commands: std::sync::mpsc::Receiver<LogCommand>,
+    signals: Arc<LogSignals>,
+    unit: String,
     done: watch::Sender<bool>,
 ) {
+    use std::sync::mpsc::RecvTimeoutError;
     std::thread::Builder::new()
         .name("devlanes-log".into())
         .spawn(move || {
             // Dropped on every return path, so waiters never hang on a dead thread.
             let _done = DoneGuard(done);
+            let mut last_tick = Instant::now();
+            let mut reported_drops = 0;
+            let mut warned = false;
             loop {
-                // The timeout drives the 200 ms partial-line flush even when output stops.
-                let command = commands.recv_timeout(Duration::from_millis(200));
+                // A deadline rather than an idle timeout, so partial lines and the file
+                // buffer also flush while output keeps arriving.
+                let command = commands.recv_timeout(LOG_TICK.saturating_sub(last_tick.elapsed()));
                 let Ok(mut log) = log.lock() else { return };
-                let result = match command {
+                let finishing = matches!(
+                    command,
+                    Ok(LogCommand::Finish) | Err(RecvTimeoutError::Disconnected)
+                ) || (matches!(command, Err(RecvTimeoutError::Timeout))
+                    && signals.finish.load(Ordering::SeqCst));
+                let dropped = signals.dropped.load(Ordering::Relaxed);
+                if dropped > reported_drops && (finishing || last_tick.elapsed() >= LOG_TICK) {
+                    tracing::warn!(unit, chunks = dropped - reported_drops, total = dropped, "log writer fell behind; output chunks were not logged");
+                    reported_drops = dropped;
+                }
+                if finishing {
+                    if let Err(error) = log.finish(now_ms()) {
+                        tracing::warn!(unit, %error, "log finish failed");
+                    }
+                    return;
+                }
+                let mut result = match command {
                     Ok(LogCommand::Output(bytes, ts)) => log.ingest(&bytes, ts),
                     Ok(LogCommand::Sync(done)) => {
                         let _ = done.send(());
                         Ok(())
                     }
-                    Ok(LogCommand::Finish)
-                    | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        if let Err(error) = log.finish(now_ms()) {
-                            tracing::warn!(%error, "log finish failed");
-                        }
-                        return;
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        let now = now_ms();
-                        log.flush_partial(now, false)
-                            .and_then(|()| log.maintain(now))
-                    }
+                    _ => Ok(()),
                 };
-                if let Err(error) = result {
-                    tracing::warn!(%error, "log write failed");
+                if last_tick.elapsed() >= LOG_TICK {
+                    last_tick = Instant::now();
+                    result = result.and_then(|()| log.flush_partial(now_ms(), false));
+                }
+                // A failed writer refuses everything after; one warning per run is enough.
+                if let Err(error) = result
+                    && !warned
+                {
+                    warned = true;
+                    tracing::warn!(unit, %error, "log write failed; later output of this run is not logged");
                 }
             }
         })
@@ -654,7 +770,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use async_trait::async_trait;
-    use devlanes_core::{Error, OutputChunk};
+    use devlanes_core::{Error, OutputChunk, OutputStream};
 
     use super::*;
 
@@ -742,7 +858,7 @@ mod tests {
     }
 
     /// A host for `unit` logging into its own directory under `dir`.
-    fn host(unit: Arc<ScriptedUnit>, dir: &tempfile::TempDir) -> UnitHost {
+    async fn host(unit: Arc<ScriptedUnit>, dir: &tempfile::TempDir) -> UnitHost {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let run = NEXT.fetch_add(1, Ordering::Relaxed);
         let info = UnitInfo {
@@ -755,7 +871,9 @@ mod tests {
             retention: LogRetention::default(),
         };
         let identity = Some(unit.identity);
-        UnitHost::start(info, unit, identity).expect("host starts")
+        UnitHost::start(info, unit, identity)
+            .await
+            .expect("host starts")
     }
 
     /// An identity whose process is gone: a child that was spawned and reaped.
@@ -779,7 +897,7 @@ mod tests {
     async fn exit_published_without_subscribers_is_kept() {
         let dir = tempfile::tempdir().expect("tempdir");
         let unit = ScriptedUnit::start(Some(Duration::ZERO), gone_identity());
-        let host = host(unit, &dir);
+        let host = host(unit, &dir).await;
         let mut state = host.watch_state();
         tokio::time::timeout(STEP, state.wait_for(UnitState::is_terminal))
             .await
@@ -797,6 +915,58 @@ mod tests {
             .expect("stop succeeds");
     }
 
+    /// The log tick flushes partial lines and the file buffer, so a read-only query of
+    /// a live unit's directory sees its output without taking the writer's lock, and a
+    /// query of a missing directory creates nothing.
+    #[tokio::test]
+    async fn live_output_reaches_read_only_directory_queries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing");
+        let query = |dir: PathBuf| {
+            query_log_dir(
+                dir,
+                "web".into(),
+                LogQuery::default(),
+                LogRetention::default(),
+            )
+        };
+        let page = query(missing.clone()).await.expect("query");
+        assert!(page.items.is_empty());
+        assert!(!missing.exists());
+
+        let unit = ScriptedUnit::start(None, gone_identity_cached());
+        let output = unit
+            .output
+            .lock()
+            .expect("output lock")
+            .clone()
+            .expect("output open");
+        let host = host(unit, &dir).await;
+        output
+            .send(OutputChunk {
+                stream: OutputStream::Terminal,
+                bytes: Bytes::from_static(b"hello\nprompt> "),
+            })
+            .expect("send");
+        let deadline = Instant::now() + STEP;
+        loop {
+            let page = query(host.info().log_dir.clone())
+                .await
+                .expect("read-only query");
+            let lines: Vec<_> = page.items.into_iter().map(|line| line.text).collect();
+            if lines == ["hello", "prompt> "] {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{lines:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(host.tail(10).await, ["hello", "prompt> "]);
+        tokio::time::timeout(STEP, host.stop(StopPolicy::default()))
+            .await
+            .expect("stop is bounded")
+            .expect("stop succeeds");
+    }
+
     /// Stops sent right as units exit on their own always finish with a known outcome.
     #[tokio::test]
     async fn stop_racing_natural_exit_always_finishes() {
@@ -804,7 +974,7 @@ mod tests {
         for round in 0..200_u64 {
             let natural = Duration::from_micros((round % 20) * 50);
             let unit = ScriptedUnit::start(Some(natural), gone_identity_cached());
-            let host = host(unit, &dir);
+            let host = host(unit, &dir).await;
             tokio::time::sleep(Duration::from_micros((round % 7) * 70)).await;
             tokio::time::timeout(STEP, host.stop(StopPolicy::default()))
                 .await
@@ -838,7 +1008,7 @@ mod tests {
 
         let unit = ScriptedUnit::start(None, gone_identity());
         unit.hang.store(true, Ordering::SeqCst);
-        let gone = host(unit, &dir);
+        let gone = host(unit, &dir).await;
         tokio::time::timeout(STEP, gone.stop_within(policy, margin))
             .await
             .expect("bounded")
@@ -861,12 +1031,41 @@ mod tests {
             .expect("own identity");
         let unit = ScriptedUnit::start(None, me);
         unit.hang.store(true, Ordering::SeqCst);
-        let alive = host(unit, &dir);
+        let alive = host(unit, &dir).await;
         let error = tokio::time::timeout(STEP, alive.stop_within(policy, margin))
             .await
             .expect("bounded")
             .expect_err("live process is reported");
         assert_eq!(error.code, "stop_timeout");
         assert!(alive.is_alive());
+    }
+
+    /// After the pump loses chunks, attached viewers get a full redraw of the screen
+    /// model rather than raw bytes that assume output they never saw.
+    #[tokio::test]
+    async fn lagged_pump_sends_a_full_redraw() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let unit = ScriptedUnit::start(None, gone_identity_cached());
+        let output = unit
+            .output
+            .lock()
+            .expect("output lock")
+            .clone()
+            .expect("output open");
+        let host = host(unit, &dir).await;
+        let (_, mut live) = host.attach();
+        // The scripted unit buffers 4 chunks; the pump has not run yet, so it lags.
+        for line in 0..20 {
+            let _ = output.send(OutputChunk {
+                stream: OutputStream::Terminal,
+                bytes: Bytes::from(format!("line{line}\r\n")),
+            });
+        }
+        let redraw = tokio::time::timeout(STEP, live.recv())
+            .await
+            .expect("viewer gets output")
+            .expect("live open");
+        assert!(redraw.starts_with(b"\x1b[H\x1b[2J"), "{redraw:?}");
+        assert!(String::from_utf8_lossy(&redraw).contains("line19"));
     }
 }

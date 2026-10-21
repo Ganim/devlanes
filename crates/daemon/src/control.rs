@@ -123,7 +123,7 @@ impl Inner {
         let mut stopped: Vec<UnitSummary> = Vec::new();
         if selection.mine && selection.units.is_empty() && context.lane.is_none() {
             for (project, lane) in self.all_lanes() {
-                if lane.st().any_alive() {
+                if lane.st().any_running() {
                     stopped.extend(
                         self.stop_lane(&project, &lane, None, Some(&context.actor))
                             .await?,
@@ -788,7 +788,7 @@ impl Inner {
         let running: Vec<String> = project
             .lanes()
             .iter()
-            .filter(|lane| lane.st().any_alive())
+            .filter(|lane| lane.st().any_running())
             .map(|lane| lane.st().reference(&project.name()))
             .collect();
         if !running.is_empty() && !context.yes {

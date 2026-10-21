@@ -5,7 +5,7 @@
 //! limited.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -15,7 +15,10 @@ use std::{
 
 use devlanes_core::{
     WorktreeId,
-    gate::{GateSnapshot, QueuedStart, Release, StartRequest, StartSlot, StartTicket},
+    gate::{
+        DEFAULT_MEMORY_NEED, GateSnapshot, QueuedStart, Release, StartRequest, StartSlot,
+        StartTicket,
+    },
 };
 use devlanes_metrics::{Subject, UnitKey};
 use devlanes_proto::{Actor, LaneSummary, RpcError, UnitFailureData, events};
@@ -30,6 +33,7 @@ use crate::{
     model::{LaneRt, ProjectRt, is_mine, lock},
     ready::run_check,
     registry::internal,
+    sampler::CpuReading,
     units::{UnitHost, UnitState},
 };
 
@@ -140,8 +144,13 @@ impl Inner {
         if services.is_empty() {
             return;
         }
-        self.warn_memory(cx, services).await;
         let gate = self.integ.start_gate.clone().filter(|_| !cx.all_at_once);
+        let peaks = if gate.is_some() || self.integ.pressure.is_some() {
+            self.baseline_peaks(cx, services).await
+        } else {
+            HashMap::new()
+        };
+        self.warn_memory(cx, &peaks).await;
         let mut ordered: Vec<(usize, &ResolvedService)> = services
             .iter()
             .map(|service| {
@@ -157,16 +166,31 @@ impl Inner {
         // Gated spawns of one request run in file order: each waits for the
         // previous one, which the gate granted no later.
         let mut after: Option<oneshot::Receiver<()>> = None;
-        // Enqueue everything before spawning anything, so the queue holds the
-        // lane's services in file order.
-        for (order, service) in ordered {
-            let ticket = gate.as_ref().map(|gate| {
-                gate.enqueue(StartRequest {
-                    lane: cx.reference.clone(),
-                    unit: service.unit.clone(),
-                    order,
-                })
-            });
+        // The whole request is one batch, queued before anything spawns: the
+        // gate serves it after earlier requests and in file order within it.
+        let mut tickets: Vec<Option<StartTicket>> = match &gate {
+            Some(gate) => gate
+                .enqueue_batch(
+                    ordered
+                        .iter()
+                        .map(|(order, service)| StartRequest {
+                            lane: cx.reference.clone(),
+                            unit: service.unit.clone(),
+                            order: *order,
+                            memory_need: peaks
+                                .get(&service.unit)
+                                .copied()
+                                .unwrap_or(DEFAULT_MEMORY_NEED),
+                        })
+                        .collect(),
+                )
+                .into_iter()
+                .map(Some)
+                .collect(),
+            None => Vec::new(),
+        };
+        tickets.resize_with(ordered.len(), || None);
+        for ((_, service), ticket) in ordered.into_iter().zip(tickets) {
             let (id, token) =
                 self.pacing
                     .register(cx.lane.worktree, &cx.reference, &service.unit, &cx.actor);
@@ -255,10 +279,13 @@ impl Inner {
             self.emit_lane(&project, &lane);
             return Paced::Cancelled;
         }
-        // A restarted unit must not settle on its previous run's CPU.
-        lock(&self.metrics)
-            .latest
-            .remove(&(reference.clone(), name.clone()));
+        // A `cmd` probe runs in the unit's environment; copy it before the spawn takes
+        // the spec. Kept in memory only, like the launch environment itself.
+        let probe_env = if matches!(ready.check, ReadySpec::Cmd { .. }) {
+            request.spec.env.clone()
+        } else {
+            BTreeMap::new()
+        };
         match self.spawn_unit(&project, &lane, request).await {
             Ok((host, managed)) => {
                 let started = matches!(ready.check, ReadySpec::Started);
@@ -266,7 +293,7 @@ impl Inner {
                 tokio::spawn(async move {
                     run_check(
                         &checked,
-                        readiness(&ready.check),
+                        readiness(&ready.check, probe_env),
                         ready.timeout,
                         || async move { managed.listening_ports().await },
                     )
@@ -298,6 +325,12 @@ impl Inner {
         name: String,
     ) {
         let mut state = host.watch_state();
+        let key = (reference, name);
+        // Only readings of this run taken after the last one reported count:
+        // the sampler can still hold (or, mid-sample, re-insert) the previous
+        // run's value, and a value read twice is not a second second of calm.
+        let pid = host.identity().map(|identity| identity.pid);
+        let mut reported_at = host.info().started_at_ms;
         loop {
             if slot.released().is_some() {
                 return;
@@ -330,12 +363,10 @@ impl Inner {
                 }
                 () = tokio::time::sleep(HOLD_POLL) => {
                     if settling {
-                        let cpu = lock(&self.metrics)
-                            .latest
-                            .get(&(reference.clone(), name.clone()))
-                            .map(|(cpu, _)| *cpu);
-                        if let Some(cpu) = cpu {
-                            slot.report_cpu(cpu);
+                        let reading = lock(&self.metrics).cpu_readings.get(&key).copied();
+                        if let Some(reading) = fresh_reading(reading, pid, reported_at) {
+                            reported_at = reading.at_ms;
+                            slot.report_cpu(reading.cpu_percent);
                         }
                     }
                 }
@@ -343,17 +374,17 @@ impl Inner {
         }
     }
 
-    /// Emits `lane.warning` when the units about to start usually peak above
-    /// the memory available now. Advice only: the start goes ahead.
-    async fn warn_memory(&self, cx: &StartCx, services: &[&ResolvedService]) {
-        let Some(pressure) = &self.integ.pressure else {
-            return;
-        };
+    /// Baseline peak memory per unit: the median `mem_peak` of its recent runs
+    /// in this lane. Units without history are absent.
+    async fn baseline_peaks(
+        &self,
+        cx: &StartCx,
+        services: &[&ResolvedService],
+    ) -> HashMap<String, u64> {
+        let mut baselines = HashMap::new();
         let Some(lane_id) = cx.lane.st().record.as_ref().map(|record| record.id) else {
-            return;
+            return baselines;
         };
-        let mut total: u64 = 0;
-        let mut units = Vec::new();
         for service in services {
             let series = Subject::Unit(UnitKey {
                 project: cx.project.id,
@@ -373,13 +404,28 @@ impl Inner {
                 continue;
             }
             peaks.sort_unstable();
-            let peak = peaks[peaks.len() / 2];
-            total = total.saturating_add(peak);
-            units.push(json!({"unit": service.unit, "peak_memory_bytes": peak}));
+            baselines.insert(service.unit.clone(), peaks[peaks.len() / 2]);
         }
+        baselines
+    }
+
+    /// Emits `lane.warning` when the units about to start usually peak above
+    /// the memory available now. Advice only: the start goes ahead.
+    async fn warn_memory(&self, cx: &StartCx, peaks: &HashMap<String, u64>) {
+        let Some(pressure) = &self.integ.pressure else {
+            return;
+        };
+        let total = peaks
+            .values()
+            .fold(0_u64, |sum, peak| sum.saturating_add(*peak));
         if total == 0 {
             return;
         }
+        let mut units: Vec<Value> = peaks
+            .iter()
+            .map(|(unit, peak)| json!({"unit": unit, "peak_memory_bytes": peak}))
+            .collect();
+        units.sort_by(|a, b| a["unit"].as_str().cmp(&b["unit"].as_str()));
         let available = match pressure.available_memory().await {
             Ok(Some(available)) => available,
             Ok(None) => return,
@@ -494,7 +540,19 @@ impl Inner {
     }
 }
 
-/// `{position, queued, in_flight, window, hold, cpu_percent?, memory_pressure?}`.
+/// A reading worth reporting to the settle rule: same run (leader PID) and
+/// taken after `reported_at` (Unix ms).
+fn fresh_reading(
+    reading: Option<CpuReading>,
+    pid: Option<u32>,
+    reported_at: u64,
+) -> Option<CpuReading> {
+    reading.filter(|reading| pid.is_some() && reading.pid == pid && reading.at_ms > reported_at)
+}
+
+/// `{position, queued, in_flight, window, hold, memory_need_bytes,
+/// available_memory_bytes?, cpu_percent?, memory_pressure?}`. `hold` is
+/// `window_full`, `memory_critical` or `memory`.
 /// `window` is null for an unlimited gate.
 fn queued_data(snapshot: &GateSnapshot, entry: &QueuedStart) -> Value {
     let mut data = json!({
@@ -512,5 +570,35 @@ fn queued_data(snapshot: &GateSnapshot, entry: &QueuedStart) -> Value {
             data["memory_pressure"] = json!(memory.word());
         }
     }
+    data["memory_need_bytes"] = json!(entry.request.memory_need);
+    if let Some(available) = snapshot.available_memory {
+        data["available_memory_bytes"] = json!(available);
+    }
     data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reading(pid: u32, at_ms: u64) -> Option<CpuReading> {
+        Some(CpuReading {
+            cpu_percent: 1.0,
+            at_ms,
+            pid: Some(pid),
+        })
+    }
+
+    #[test]
+    fn settle_only_counts_new_readings_of_the_same_run() {
+        // The previous run's value (other PID), even if re-inserted late.
+        assert!(fresh_reading(reading(7, 2_000), Some(8), 1_000).is_none());
+        // Older than the run's start or than the last reported reading.
+        assert!(fresh_reading(reading(8, 900), Some(8), 1_000).is_none());
+        assert!(fresh_reading(reading(8, 1_000), Some(8), 1_000).is_none());
+        assert!(fresh_reading(reading(8, 1_500), Some(8), 1_000).is_some());
+        // Without an identity nothing can be matched to the run.
+        assert!(fresh_reading(reading(8, 1_500), None, 1_000).is_none());
+        assert!(fresh_reading(None, Some(8), 1_000).is_none());
+    }
 }

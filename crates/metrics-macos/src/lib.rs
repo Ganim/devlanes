@@ -7,11 +7,9 @@
 //! `MacosPressure` is the start gate's `PressureSource`: system CPU from
 //! `host_statistics`, memory pressure from `kern.memorystatus_vm_pressure_level`.
 //!
-//! Unsafe code is confined to the FFI and pressure modules; every block states
-//! its invariants.
+//! All system calls go through the safe wrappers in `devlanes_sys::macos`.
 
-#![cfg_attr(target_os = "macos", allow(unsafe_code))]
-#![deny(clippy::undocumented_unsafe_blocks)]
+#![forbid(unsafe_code)]
 
 #[cfg(target_os = "macos")]
 mod collector;

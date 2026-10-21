@@ -168,6 +168,8 @@ pub struct BootstrapPlan {
     pub platform: RemotePlatform,
     /// Matching artifact, or `None` when the manifest has none (or none was given).
     pub artifact: Option<Artifact>,
+    /// Why the release manifest could not be fetched, when it could not.
+    pub manifest_error: Option<String>,
 }
 
 impl BootstrapPlan {
@@ -180,23 +182,31 @@ impl BootstrapPlan {
     pub fn instructions(&self) -> String {
         match &self.artifact {
             Some(artifact) => format!(
-                "devlanes is not installed on {}. Approve installing {} ({}/{}) to {}, \
-                 then run `devlanes daemon install` there and, on Linux, \
-                 `loginctl enable-linger` so the box daemon survives logout",
+                "devlanes is not installed on {}. Run `devlanes remote connect {} --install` \
+                 to install {} ({}/{}) to {}, then run `devlanes daemon install` there and, \
+                 on Linux, `loginctl enable-linger` so the box daemon survives logout",
+                self.destination,
                 self.destination,
                 artifact.url,
                 self.platform.os,
                 self.platform.arch,
                 self.install_path()
             ),
-            None => format!(
-                "devlanes is not installed on {} and no release matches {}/{}. \
-                 Install it there manually so `devlanes` is on PATH or at {}",
-                self.destination,
-                self.platform.os,
-                self.platform.arch,
-                self.install_path()
-            ),
+            None => {
+                let why = match &self.manifest_error {
+                    Some(error) => format!("the release list could not be read ({error})"),
+                    None => format!(
+                        "no release matches {}/{}",
+                        self.platform.os, self.platform.arch
+                    ),
+                };
+                format!(
+                    "devlanes is not installed on {} and {why}. \
+                     Install it there manually so `devlanes` is on PATH or at {}",
+                    self.destination,
+                    self.install_path()
+                )
+            }
         }
     }
 }
@@ -230,36 +240,86 @@ pub(crate) fn parse_probe(output: &str) -> Option<RemoteProbe> {
 
 /// Builds the install script run on the box with `sh -c`.
 ///
-/// Downloads with curl or wget, verifies SHA-256 with `sha256sum` or
-/// `shasum -a 256`, and moves the binary into place only if none exists.
+/// Downloads over HTTPS only (redirects included) with curl or wget, verifies
+/// SHA-256 with `sha256sum` or `shasum -a 256`, and places the binary with a hard
+/// link, which fails instead of replacing a binary that appeared meanwhile.
 pub(crate) fn install_script(artifact: &Artifact) -> Result<String, ManifestError> {
+    install_script_for(artifact, "=https")
+}
+
+/// [`install_script`] with curl's `--proto` value; tests allow `file` too.
+fn install_script_for(artifact: &Artifact, protocols: &str) -> Result<String, ManifestError> {
     artifact.validate_script_inputs()?;
     let url = sh_quote(&artifact.url);
     let sha = &artifact.sha256;
-    let place = match &artifact.format {
-        ArtifactFormat::Binary => "chmod 755 \"$tmp\"; mv \"$tmp\" \"$dest\"".to_owned(),
+    let protocols = sh_quote(protocols);
+    let built = match &artifact.format {
+        ArtifactFormat::Binary => "bin=\"$tmp\"".to_owned(),
         ArtifactFormat::TarGz { member } => {
             let member = sh_quote(member);
             format!(
-                "mkdir \"$tmp.x\"; tar -xzf \"$tmp\" -C \"$tmp.x\" {member}; \
-                 chmod 755 \"$tmp.x\"/{member}; mv \"$tmp.x\"/{member} \"$dest\""
+                "mkdir \"$tmp.x\"; tar -xzf \"$tmp\" -C \"$tmp.x\" {member}; bin=\"$tmp.x\"/{member}"
             )
         }
     };
     Ok(format!(
         "set -eu\n\
          dir=\"$HOME/{INSTALL_DIR}\"; dest=\"$dir/devlanes\"\n\
-         if [ -e \"$dest\" ]; then echo \"devlanes already exists at $dest; not replacing it\" >&2; exit {EXIT_ALREADY_INSTALLED}; fi\n\
+         exists() {{ echo \"devlanes already exists at $dest; not replacing it\" >&2; exit {EXIT_ALREADY_INSTALLED}; }}\n\
+         if [ -e \"$dest\" ]; then exists; fi\n\
          mkdir -p \"$dir\"\n\
          tmp=$(mktemp \"$dir/.download.XXXXXX\")\n\
          trap 'rm -rf \"$tmp\" \"$tmp.x\"' EXIT\n\
-         if command -v curl >/dev/null 2>&1; then curl -fsSL -o \"$tmp\" {url}\n\
-         elif command -v wget >/dev/null 2>&1; then wget -q -O \"$tmp\" {url}\n\
+         if command -v curl >/dev/null 2>&1; then curl -fsSL --proto {protocols} --proto-redir {protocols} -o \"$tmp\" {url}\n\
+         elif command -v wget >/dev/null 2>&1; then wget -q --https-only -O \"$tmp\" {url}\n\
          else echo 'curl or wget is required to install devlanes' >&2; exit 11; fi\n\
          sum=$( (sha256sum \"$tmp\" 2>/dev/null || shasum -a 256 \"$tmp\") | cut -d ' ' -f 1)\n\
          if [ \"$sum\" != {sha} ]; then echo \"sha256 mismatch: expected {sha}, got $sum\" >&2; exit 12; fi\n\
-         {place}\n"
+         {built}\n\
+         chmod 755 \"$bin\"\n\
+         if ! ln \"$bin\" \"$dest\" 2>/dev/null; then if [ -e \"$dest\" ]; then exists; fi; echo \"cannot place devlanes at $dest\" >&2; exit 13; fi\n"
     ))
+}
+
+/// Downloads and validates the release manifest at `url` with the local `curl`,
+/// over HTTPS only, and checks it is for `version`.
+pub async fn fetch_manifest(url: &str, version: &str) -> Result<ReleaseManifest, ManifestError> {
+    if !url.starts_with("https://") {
+        return Err(ManifestError(format!("{url} is not an https URL")));
+    }
+    let output = tokio::process::Command::new("curl")
+        .args([
+            "-fsSL",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-time",
+            "30",
+            "--max-filesize",
+            "1048576",
+            "--",
+            url,
+        ])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|error| ManifestError(format!("running curl: {error}")))?;
+    if !output.status.success() {
+        return Err(ManifestError(format!(
+            "downloading {url} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let manifest = ReleaseManifest::from_json(&String::from_utf8_lossy(&output.stdout))?;
+    if manifest.version != version {
+        return Err(ManifestError(format!(
+            "{url} describes {} but this client is {version}",
+            manifest.version
+        )));
+    }
+    Ok(manifest)
 }
 
 #[cfg(test)]
@@ -350,13 +410,20 @@ mod tests {
                 }
             };
 
-            let bad = install_script(&artifact(url.clone(), format!("{:064x}", 0)))?;
-            let output = run(bad).await?;
-            assert_eq!(output.status.code(), Some(12));
+            // Production scripts refuse anything but HTTPS, file:// included.
+            let https_only = install_script(&artifact(url.clone(), sha.clone()))?;
+            let output = run(https_only).await?;
+            assert!(!output.status.success());
             let installed = home.join(INSTALL_DIR).join("devlanes");
             assert!(!installed.exists());
 
-            let good = install_script(&artifact(url, sha))?;
+            let bad =
+                install_script_for(&artifact(url.clone(), format!("{:064x}", 0)), "=https,file")?;
+            let output = run(bad).await?;
+            assert_eq!(output.status.code(), Some(12));
+            assert!(!installed.exists());
+
+            let good = install_script_for(&artifact(url, sha), "=https,file")?;
             let output = run(good.clone()).await?;
             assert!(
                 output.status.success(),

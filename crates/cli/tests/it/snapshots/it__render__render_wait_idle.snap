@@ -2,12 +2,12 @@
 source: crates/cli/tests/it/render.rs
 expression: text
 ---
---- human (exit 0)
+--- human (exit 1)
 idle acme@2
   not started; devlanes start --lane acme@2
---- plain (exit 0)
+--- plain (exit 1)
 idle acme@2
   not started; devlanes start --lane acme@2
---- agent (exit 0)
+--- agent (exit 1)
 idle acme@2
   not started; devlanes start --lane acme@2

@@ -609,8 +609,9 @@ impl Inner {
         let push = |reasons: &mut Vec<Value>, code: &str, data: Value| {
             reasons.push(json!({"code": code, "data": data}))
         };
-        let (host, service, st_reason, needs_env, config, busy, unassigned) = {
+        let (host, service, st_reason, needs_env, config, busy, unassigned, orphan) = {
             let st = lane.st();
+            let orphan = st.orphan_error(&project.name(), &name);
             let host = st.units.get(&name).map(|rec| rec.host.clone());
             let service = st
                 .view
@@ -624,8 +625,20 @@ impl Inner {
                 st.config.clone(),
                 st.busy,
                 st.unassigned.clone(),
+                orphan,
             )
         };
+        // Left running by a previous daemon at `started_at_ms`, found at
+        // `orphaned_since_ms`, pid `pid`; `command` stops it.
+        if let Some(orphan) = orphan {
+            push(&mut reasons, "orphaned", orphan.data);
+            return Ok(json!({
+                "lane": reference,
+                "unit": name,
+                "state": devlanes_proto::ORPHANED,
+                "reasons": reasons,
+            }));
+        }
         if let Some(reason) = unassigned {
             push(&mut reasons, "unassigned", reason.data);
         }

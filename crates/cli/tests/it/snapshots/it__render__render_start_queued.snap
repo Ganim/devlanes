@@ -2,7 +2,7 @@
 source: crates/cli/tests/it/render.rs
 expression: text
 ---
---- human (exit 1)
+--- human (exit 124)
 acme@2 · feat/billing
 ✗ services  4 of 6 ready
   ✗       admin   exited 1   Error: Cannot find module './env'
@@ -15,7 +15,7 @@ acme@2 · feat/billing
 ! seed skipped: admin failed
 
 logs: devlanes logs acme@2:admin --tail 200
---- plain (exit 1)
+--- plain (exit 124)
 acme@2 · feat/billing
 failed services  4 of 6 ready
   failed  admin   exited 1   Error: Cannot find module './env'
@@ -28,7 +28,7 @@ timed out before every unit was ready
 skipped seed: admin failed
 
 logs: devlanes logs acme@2:admin --tail 200
---- agent (exit 1)
+--- agent (exit 124)
 acme@2 (feat/billing): 4/6 ready, 1 failed, timed out, seed skipped
 failed admin exit=1
   | Error: Cannot find module './env'

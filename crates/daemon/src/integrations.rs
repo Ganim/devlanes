@@ -29,6 +29,17 @@ pub trait UnitRunner: Send + Sync {
     /// Starts `spec` in its own session. The returned unit's first `output()`
     /// subscriber must receive everything since launch.
     async fn spawn(&self, spec: LaunchSpec) -> Result<Arc<dyn ManagedUnit>, devlanes_core::Error>;
+
+    /// Starts a task. Unlike services, tasks may legitimately start daemons
+    /// (`pg_ctl start`, `redis-server --daemonize yes`), so runners that sweep
+    /// leftovers after a natural exit should spare descendants that left the task's
+    /// session. Defaults to [`UnitRunner::spawn`].
+    async fn spawn_task(
+        &self,
+        spec: LaunchSpec,
+    ) -> Result<Arc<dyn ManagedUnit>, devlanes_core::Error> {
+        self.spawn(spec).await
+    }
 }
 
 /// Adapts any core [`devlanes_core::Runner`]; identity comes from the first subject.
@@ -571,6 +582,14 @@ pub trait RemotePrompter: Send + Sync {
     async fn ask(&self, prompt: RemotePrompt) -> Option<String>;
 }
 
+/// What `remote connect` asked for beyond the host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConnectOptions {
+    /// Install the client's own release on a box that lacks devlanes
+    /// (`--install`); without it a missing binary is only reported.
+    pub install: bool,
+}
+
 /// Builds transports to boxes; the composition root wires SSH, tests an in-memory pipe.
 pub trait RemoteConnector: Send + Sync {
     /// A transport to `host`; prompts during authentication go to `prompts`.
@@ -578,6 +597,7 @@ pub trait RemoteConnector: Send + Sync {
         &self,
         host: &str,
         prompts: Arc<dyn RemotePrompter>,
+        options: ConnectOptions,
     ) -> Result<Arc<dyn devlanes_transport::Transport>, devlanes_proto::RpcError>;
 
     /// Transport name recorded in `remote_hosts`.
@@ -597,9 +617,6 @@ pub trait RemoteConnector: Send + Sync {
     fn backoff(&self) -> devlanes_transport::Backoff {
         devlanes_transport::Backoff::default()
     }
-
-    /// This machine's user home: synced folders land below it.
-    fn home(&self) -> Option<PathBuf>;
 }
 
 /// Connector used when no transport is registered: `connect` is unsupported.
@@ -611,17 +628,13 @@ impl RemoteConnector for NoRemote {
         &self,
         _: &str,
         _: Arc<dyn RemotePrompter>,
+        _: ConnectOptions,
     ) -> Result<Arc<dyn devlanes_transport::Transport>, devlanes_proto::RpcError> {
         Err(devlanes_proto::RpcError::new(
             "not_supported_yet",
             serde_json::json!({"feature": "remote transport"}),
             1,
         ))
-    }
-
-    /// No home: syncs are skipped.
-    fn home(&self) -> Option<PathBuf> {
-        None
     }
 }
 

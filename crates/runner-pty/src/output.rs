@@ -8,40 +8,43 @@ use tokio::{
     io::{AsyncReadExt, unix::AsyncFd},
     net::unix::pipe,
     sync::{broadcast, watch},
-    task::JoinSet,
+    task::{AbortHandle, JoinSet},
 };
 
 /// Read size per syscall; large enough for bursty build output.
 const CHUNK: usize = 16 * 1024;
 
-/// Starts one reader per stream and flips `done` once all reached EOF.
+/// Starts one reader per stream and flips `done` once all reached EOF or were aborted.
 ///
 /// Readers never wait for subscribers: a lagging receiver loses chunks rather than
-/// stalling the process on a full PTY buffer.
+/// stalling the process on a full PTY buffer. The returned handles let the
+/// supervisor end readers whose EOF never comes because an untracked process still
+/// holds the slave or a pipe; aborting drops their sender clones and master reference.
 pub(crate) fn start(
     master: Option<Arc<AsyncFd<OwnedFd>>>,
     pipes: Vec<(OutputStream, OwnedFd)>,
     sender: broadcast::Sender<OutputChunk>,
     done: watch::Sender<bool>,
-) -> io::Result<()> {
+) -> io::Result<Vec<AbortHandle>> {
     // Convert every pipe before spawning so a failure cannot leave half-started readers.
     let pipes = pipes
         .into_iter()
         .map(|(stream, fd)| Ok((stream, pipe::Receiver::from_owned_fd(fd)?)))
         .collect::<io::Result<Vec<_>>>()?;
     let mut readers = JoinSet::new();
+    let mut handles = Vec::new();
     if let Some(master) = master {
-        readers.spawn(read_terminal(master, sender.clone()));
+        handles.push(readers.spawn(read_terminal(master, sender.clone())));
     }
     for (stream, receiver) in pipes {
-        readers.spawn(read_pipe(stream, receiver, sender.clone()));
+        handles.push(readers.spawn(read_pipe(stream, receiver, sender.clone())));
     }
     drop(sender);
     tokio::spawn(async move {
         while readers.join_next().await.is_some() {}
-        let _ = done.send(true);
+        done.send_replace(true);
     });
-    Ok(())
+    Ok(handles)
 }
 
 /// Reads the master until EOF. Linux reports EIO once the last slave descriptor closes.

@@ -21,6 +21,14 @@ impl TerminalLauncher for Wezterm {
         args.extend(command.iter().cloned());
         Ok(platform(args))
     }
+
+    /// WezTerm.app on macOS, the `wezterm` binary elsewhere.
+    fn available(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return devlanes_term::app_installed("WezTerm.app");
+        #[cfg(not(target_os = "macos"))]
+        return devlanes_term::on_path("wezterm");
+    }
 }
 
 /// The macOS app bundle does not put `wezterm` on PATH by default.

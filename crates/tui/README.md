@@ -27,6 +27,7 @@ async fn main() -> Result<(), devlanes_tui::Error> {
 | key | does |
 |---|---|
 | `j`/`k`, arrows | move |
+| `g` / `G` | first / last row, on every tab |
 | `enter`, `h`/`l` | expand or collapse a lane |
 | `shift+tab` | switch between the list and the unit's terminal |
 | `s` / `x` / `r` | start / stop / restart the selected unit or lane |
@@ -42,14 +43,18 @@ async fn main() -> Result<(), devlanes_tui::Error> {
 | `?` | all keys |
 | `q` | quit |
 
-The daemon tab shows the daemon's status, each doctor check with its fix, and a live tail of `~/.devlanes/logs/daemon.log` (`j`/`k` scroll, `G` follows again).
+The daemon tab shows the daemon's status, each doctor check with its fix, and a live tail of `~/.devlanes/logs/daemon.log` (`j`/`k` scroll, `g` jumps to the oldest line, `G` follows again).
 
 | key (daemon tab) | does |
 |---|---|
 | `R` | restart the daemon; asks first and says how many processes it stops |
 | `S` | stop the daemon; asks first |
 | `s` | start the daemon after it was stopped |
-| `g` | lane gc; asks first |
+| `X` | lane gc; asks first |
+
+Units a previous daemon left running show as `orphaned` with their pid, in amber, and their lane counts them. They have no terminal; `x` (or a lane stop, restart or `C` clean) asks the daemon to terminate them, and `s` shows the daemon's refusal.
+
+The terminal pane only takes focus while its stream is live. Browsing the list watches a unit without resizing its PTY; focusing the pane or zooming takes over the size. When a unit restarts, the pane reopens its stream; a terminal that ended keeps focus and drops keys until `shift+tab`.
 
 In terminal focus every key except `shift+tab` goes to the unit, encoded for its current vt100 modes. Tab and `C-a` reach the unit, so shell completion and a tmux prefix work; shift+tab is reserved for focus and apps in the pane don't receive it.
 

@@ -1,7 +1,9 @@
 //! Box side: accepts client streams and answers them from injected services.
 
+use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,6 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio::task::JoinSet;
 use tokio::time::{Instant, timeout};
+use tokio_util::sync::CancellationToken;
 
 use crate::mux::{self, MuxStream};
 use crate::registry::{AuthorizedTarget, Registry, RegistrySource, RegistryUpdate};
@@ -117,6 +120,43 @@ struct StreamContext {
     services: BoxServices,
     handshake_timeout: Duration,
     dial_timeout: Duration,
+    /// Open data streams, closed when their target stops being authorized.
+    open: Mutex<HashMap<u64, (DialTarget, CancellationToken)>>,
+    next_stream: AtomicU64,
+}
+
+impl StreamContext {
+    /// Closes data streams whose unit was hidden, removed or stopped.
+    fn revoke(&self) {
+        let registry = self.registry.read().unwrap_or_else(PoisonError::into_inner);
+        for (target, cancel) in self
+            .open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+        {
+            if registry.authorize(target).is_err() {
+                cancel.cancel();
+            }
+        }
+    }
+}
+
+/// Removes a data stream from [`StreamContext::open`] when it ends.
+struct OpenGuard<'a> {
+    context: &'a StreamContext,
+    id: u64,
+}
+
+impl Drop for OpenGuard<'_> {
+    /// Forgets the stream.
+    fn drop(&mut self) {
+        self.context
+            .open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.id);
+    }
 }
 
 /// Runs one box-side session over `io` until the client leaves.
@@ -181,6 +221,8 @@ where
         services,
         handshake_timeout: timing.handshake_timeout,
         dial_timeout: options.dial_timeout,
+        open: Mutex::new(HashMap::new()),
+        next_stream: AtomicU64::new(0),
     });
     let idle_limit = timing.ping_interval + timing.ping_timeout;
     let mut deadline = Instant::now() + idle_limit;
@@ -214,9 +256,17 @@ where
                     }
                     None => return Err(ServeError::RegistryClosed),
                 };
+                context.revoke();
                 send_control(&mut control, &message, timing).await?;
             }
-            () = tokio::time::sleep_until(deadline) => return Err(ServeError::ClientTimeout),
+            () = tokio::time::sleep_until(deadline) => {
+                // Any inbound frame counts: pings can queue behind a large upload.
+                let alive_until = mux.last_inbound() + idle_limit;
+                if alive_until <= Instant::now() {
+                    return Err(ServeError::ClientTimeout);
+                }
+                deadline = alive_until;
+            }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
         }
     }
@@ -275,14 +325,31 @@ async fn serve_data(mut channel: Channel<MuxStream>, target: DialTarget, context
         Err(reason) => {
             let message = match reason {
                 RejectReason::Hidden => "target belongs to a hidden unit".to_owned(),
+                RejectReason::NotRunning => "target's unit is not running".to_owned(),
                 _ => "target is not registered on this box".to_owned(),
             };
             reject(&mut channel, reason, message).await;
             return;
         }
     };
+    let id = context.next_stream.fetch_add(1, Ordering::Relaxed);
+    let cancel = CancellationToken::new();
+    context
+        .open
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(
+            id,
+            (
+                DialTarget::Port {
+                    port: target.port(),
+                },
+                cancel.clone(),
+            ),
+        );
+    let _open = OpenGuard { context, id };
     let dialed = timeout(context.dial_timeout, context.services.dialer.dial(&target)).await;
-    let mut upstream = match dialed {
+    let upstream = match dialed {
         Ok(Ok(upstream)) => upstream,
         Ok(Err(error)) => {
             let message = format!("dial port {}: {error}", target.port());
@@ -301,9 +368,16 @@ async fn serve_data(mut channel: Channel<MuxStream>, target: DialTarget, context
     {
         return;
     }
-    let mut downstream = wire::into_raw(channel);
-    if let Err(error) = tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await {
-        tracing::debug!("data stream to port {} ended: {error}", target.port());
+    let downstream = wire::into_raw(channel);
+    tokio::select! {
+        spliced = crate::splice::splice(downstream, upstream, crate::splice::HALF_CLOSE_IDLE) => {
+            if let Err(error) = spliced {
+                tracing::debug!("data stream to port {} ended: {error}", target.port());
+            }
+        }
+        () = cancel.cancelled() => {
+            tracing::debug!("data stream to port {} closed: its unit stopped", target.port());
+        }
     }
 }
 

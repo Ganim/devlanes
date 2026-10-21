@@ -452,9 +452,13 @@ fn every_result_shape_in_every_text_mode() {
             .reporter()
             .result(&Report::new(method, &data))
             .expect("json");
+        let mut printed = serde_json::from_str::<Value>(&json.stdout).expect("json output");
+        // doctor adds the client's own output section (tested on its own).
+        if method == Method::Doctor {
+            printed.as_object_mut().map(|map| map.remove("output"));
+        }
         assert_eq!(
-            serde_json::from_str::<Value>(&json.stdout).expect("json output"),
-            data,
+            printed, data,
             "{name}: JSON mode prints the daemon data unchanged"
         );
         let text = render_text(method, &data);
@@ -464,6 +468,26 @@ fn every_result_shape_in_every_text_mode() {
         );
         insta::assert_snapshot!(format!("render_{name}"), text);
     }
+}
+
+#[test]
+fn doctor_says_how_to_recreate_an_unconstrained_ca() {
+    let data = json!({
+        "ca": {
+            "present": true, "kind": "devlanes", "path": "/home/u/.devlanes/ca/ca.pem",
+            "name_constrained": false,
+            "hint": "the devlanes CA has no name constraints",
+            "fix": "devlanes certs untrust && rm -r /home/u/.devlanes/ca && devlanes certs trust && devlanes daemon restart",
+        },
+    });
+    let text = render_text(Method::Doctor, &data);
+    assert!(
+        text.contains("the devlanes CA has no name constraints"),
+        "{text}"
+    );
+    assert!(text.contains("rm -r /home/u/.devlanes/ca"), "{text}");
+    let constrained = json!({"ca": {"present": true, "path": "/x/ca.pem", "name_constrained": true, "hint": null}});
+    assert!(!render_text(Method::Doctor, &constrained).contains("name constraints"));
 }
 
 #[test]

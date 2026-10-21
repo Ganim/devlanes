@@ -147,6 +147,62 @@ async fn several_profiles_select_merge_and_persist() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+/// An empty selection keeps the previous profiles (start and restart); sending
+/// the default profile name resets the lane to its default selection.
+async fn empty_keeps_and_default_resets_profiles() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                infra: true,
+                ..Setup::default()
+            },
+        )
+        .await;
+        h.call(Method::Start, json!({"profiles": ["front"]}), cx(&main))
+            .await
+            .expect("start");
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        let kept = lane(&h, &main).await;
+        assert_eq!(kept.profiles, ["front"]);
+        assert_eq!(running(&kept), ["web"]);
+        h.call(Method::Restart, json!({"units": ["web"]}), cx(&main))
+            .await
+            .expect("restart");
+        assert_eq!(lane(&h, &main).await.profiles, ["front"]);
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+
+        h.call(
+            Method::Start,
+            json!({"profiles": [devlanes_proto::DEFAULT_PROFILE]}),
+            cx(&main),
+        )
+        .await
+        .expect("start");
+        let reset = lane(&h, &main).await;
+        assert_eq!(reset.profiles, ["default"]);
+        let mut all = running(&reset);
+        all.sort_unstable();
+        assert_eq!(all, ["api", "web", "worker"], "every autostart service");
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 /// Services (idle or running), tasks, exec units and containers carry a color.
 async fn units_and_containers_have_colors() {
     tokio::time::timeout(LIMIT, async {
