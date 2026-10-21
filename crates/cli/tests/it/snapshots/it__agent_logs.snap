@@ -1,0 +1,8 @@
+---
+source: crates/cli/tests/it/main.rs
+expression: rendered.stdout
+---
+acme@2:api#0 error: failure
+acme@2:api#1 repeat (x2)
+  (2 node_modules frames folded)
+truncated; more: devlanes logs acme@2:api --output json --tail 200
