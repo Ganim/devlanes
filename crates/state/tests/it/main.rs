@@ -1,5 +1,7 @@
 //! Real SQLite round-trips and allocation transaction regressions.
 
+mod lifecycle;
+
 use devlanes_core::{
     Actor, ActorKind, ExitOutcome, ProcessIdentity, ProjectId,
     ports::{PortName, PortPool},

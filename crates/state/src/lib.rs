@@ -6,8 +6,8 @@ mod queries;
 mod records;
 
 pub use lifecycle::{
-    LogSegmentInput, Pruned, RemoteHost, RollupRow, RunSummaryRow, SetupRecord, TaskRun,
-    TaskRunId, TaskRunInput,
+    LogSegmentInput, Pruned, RemoteHost, RollupRow, RunSummaryRow, SetupRecord, TaskRun, TaskRunId,
+    TaskRunInput,
 };
 pub use records::*;
 

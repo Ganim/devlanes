@@ -136,7 +136,9 @@ impl Store {
     pub async fn project_config_dirs(&self) -> Result<Vec<(ProjectId, PathBuf)>, Error> {
         self.call(|connection| {
             Ok(connection
-                .prepare("SELECT id, config_dir FROM projects WHERE config_dir IS NOT NULL ORDER BY id")?
+                .prepare(
+                    "SELECT id, config_dir FROM projects WHERE config_dir IS NOT NULL ORDER BY id",
+                )?
                 .query_map([], |row| {
                     Ok((
                         ProjectId(row.get(0)?),
@@ -208,7 +210,11 @@ impl Store {
     }
 
     /// Completes a task run once; a second call keeps the first result.
-    pub async fn finish_task_run(&self, id: TaskRunId, exit_code: Option<i32>) -> Result<(), Error> {
+    pub async fn finish_task_run(
+        &self,
+        id: TaskRunId,
+        exit_code: Option<i32>,
+    ) -> Result<(), Error> {
         self.call(move |connection| {
             connection.execute(
                 "UPDATE task_runs SET ended_at=?1, exit_code=?2 WHERE id=?3 AND ended_at IS NULL",
@@ -359,7 +365,11 @@ impl Store {
     }
 
     /// Recent run profiles of a series, newest first, for baselines.
-    pub async fn run_summaries(&self, series: String, limit: u32) -> Result<Vec<RunSummaryRow>, Error> {
+    pub async fn run_summaries(
+        &self,
+        series: String,
+        limit: u32,
+    ) -> Result<Vec<RunSummaryRow>, Error> {
         self.call(move |connection| {
             Ok(connection
                 .prepare("SELECT unit_run_id, series, started_at, ended_at, samples, mem_p50, mem_p95, mem_peak, cpu_p50, cpu_p95, cpu_peak, rss_peak FROM run_summaries WHERE series=?1 ORDER BY ended_at DESC LIMIT ?2")?
