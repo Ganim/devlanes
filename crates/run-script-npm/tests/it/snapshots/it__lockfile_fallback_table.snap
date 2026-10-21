@@ -1,0 +1,27 @@
+---
+source: crates/run-script-npm/tests/it/main.rs
+expression: table(cases)
+---
+pnpm: Pnpm (lockfile pnpm-lock.yaml)
+    note: no packageManager field; detected pnpm from pnpm-lock.yaml. Add "packageManager": "pnpm@<version>" to package.json
+npm: Npm (lockfile package-lock.json)
+    note: no packageManager field; detected npm from package-lock.json. Add "packageManager": "npm@<version>" to package.json
+npm shrinkwrap: Npm (lockfile npm-shrinkwrap.json)
+    note: no packageManager field; detected npm from npm-shrinkwrap.json. Add "packageManager": "npm@<version>" to package.json
+yarn 1 header: YarnClassic (lockfile yarn.lock)
+    note: no packageManager field; detected yarn from yarn.lock. Add "packageManager": "yarn@<version>" to package.json
+yarn 2+ header: YarnBerry (lockfile yarn.lock) linker=Pnp
+    note: no packageManager field; detected yarn from yarn.lock. Add "packageManager": "yarn@<version>" to package.json
+empty yarn.lock, .yarnrc.yml: YarnBerry (lockfile yarn.lock) linker=Pnpm
+    note: no packageManager field; detected yarn from yarn.lock. Add "packageManager": "yarn@<version>" to package.json
+empty yarn.lock alone: YarnClassic (lockfile yarn.lock)
+    note: no packageManager field; detected yarn from yarn.lock. Add "packageManager": "yarn@<version>" to package.json
+bun text lockfile: Bun (lockfile bun.lock)
+    note: no packageManager field; detected bun from bun.lock. Add "packageManager": "bun@<version>" to package.json
+bun binary lockfile: Bun (lockfile bun.lockb)
+    note: no packageManager field; detected bun from bun.lockb. Add "packageManager": "bun@<version>" to package.json
+nearest lockfile wins: Npm (lockfile packages/app/package-lock.json)
+    note: no packageManager field; detected npm from packages/app/package-lock.json. Add "packageManager": "npm@<version>" to packages/app/package.json
+two managers: error: ambiguous in `.`: pnpm-lock.yaml, bun.lock
+nothing: Npm (default)
+    note: no packageManager field or lockfile; using npm. Add "packageManager": "<manager>@<version>" to package.json

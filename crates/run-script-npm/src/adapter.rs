@@ -1,7 +1,7 @@
 //! Core adapters: the `package.json` script runner and argument placement for
 //! presets.
 
-use crate::{NpmError, ScriptRequest, handles, plan};
+use crate::{NpmError, ScriptRequest, handles, npm, plan};
 use async_trait::async_trait;
 use devlanes_core::{
     Error,
@@ -42,6 +42,8 @@ impl ScriptRunner for NpmScripts {
         .await
         .map_err(|e| Error::Integration(format!("package.json script resolution failed: {e}")))?
         .map_err(into_core)?;
+        // `planned.notes` and `planned.version` are dropped here: `ScriptPlan`
+        // has no field for them yet (needs a core change).
         Ok(ScriptPlan {
             argv: planned.argv,
             cwd: planned.cwd,
@@ -76,13 +78,6 @@ pub fn forward_args(draft: &mut LaunchDraft, args: Vec<String>) {
     draft.args.extend(args);
 }
 
-/// npm subcommands that run a script and forward arguments after `--`.
-const RUN_COMMANDS: &[&str] = &["run", "run-script", "rum", "urn"];
-const LIFECYCLE_COMMANDS: &[&str] = &["start", "test", "t", "tst", "restart", "stop"];
-
-/// npm options whose value is the next token, so it is not the subcommand.
-const VALUE_FLAGS: &[&str] = &["-w", "--workspace", "--prefix", "-C", "--script-shell"];
-
 /// Returns whether arguments appended to `command` need a `--` first: true for
 /// a plain command whose last simple command is an npm script run without a
 /// `--` yet (in the command or in `pending` draft args).
@@ -106,58 +101,13 @@ pub fn needs_npm_separator(command: &DraftCommand, pending: &[String]) -> bool {
                     segment.push(token);
                 }
             }
-            is_npm_script_run(&segment)
+            npm::is_script_run(&segment)
         }
         DraftCommand::Argv(argv) => {
             let tokens: Vec<&str> = argv.iter().map(String::as_str).collect();
-            is_npm_script_run(&tokens)
+            npm::is_script_run(&tokens)
         }
         DraftCommand::Script { .. } => false,
-    }
-}
-
-/// Recognises `[VAR=x ...] npm [flags] (run <name> | start | test ...)` with
-/// no `--` after the subcommand.
-fn is_npm_script_run(tokens: &[&str]) -> bool {
-    let unquote = |token: &str| token.trim_matches(|c| c == '"' || c == '\'').to_owned();
-    let mut rest = tokens
-        .iter()
-        .map(|token| unquote(token))
-        .skip_while(|token| !token.starts_with('-') && token.contains('='));
-    let Some(program) = rest.next() else {
-        return false;
-    };
-    if Path::new(&program)
-        .file_name()
-        .is_none_or(|name| name != "npm")
-    {
-        return false;
-    }
-    let mut subcommand = None;
-    let mut skip_value = false;
-    for token in rest.by_ref() {
-        if std::mem::take(&mut skip_value) {
-            continue;
-        }
-        if token.starts_with('-') {
-            skip_value = VALUE_FLAGS.contains(&token.as_str());
-            continue;
-        }
-        subcommand = Some(token);
-        break;
-    }
-    let Some(subcommand) = subcommand else {
-        return false;
-    };
-    let after: Vec<String> = rest.collect();
-    if after.iter().any(|token| token == "--") {
-        return false;
-    }
-    if RUN_COMMANDS.contains(&subcommand.as_str()) {
-        // Without a script name npm lists scripts and runs nothing.
-        after.iter().any(|token| !token.starts_with('-'))
-    } else {
-        LIFECYCLE_COMMANDS.contains(&subcommand.as_str())
     }
 }
 

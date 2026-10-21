@@ -1,0 +1,12 @@
+---
+source: crates/run-script-python/tests/it/main.rs
+expression: rendered
+---
+uv.lock: Uv: uv run serve --port 20010 (entry acme:main)
+[tool.uv], not packaged: Uv: uv run serve --port 20010 (entry acme:main)
+    note: uv installs [project.scripts] only for packaged projects; add a [build-system] table or `tool.uv.package = true` so `serve` exists
+[tool.uv] package = true: Uv: uv run serve --port 20010 (entry acme:main)
+poetry.lock: Poetry: poetry run serve --port 20010 (entry acme.cli:serve)
+uv and poetry: Uv: uv run serve --port 20010 (entry acme:main)
+    note: both uv and poetry are configured (poetry.lock is present); using uv
+neither: error: `<lane>/pyproject.toml` has no uv.lock, [tool.uv] table or poetry.lock, so devlanes cannot tell uv from poetry; run `uv lock` or `poetry lock` in its directory

@@ -1,11 +1,19 @@
 use devlanes_core::contrib::{self, ScriptRunner};
 use devlanes_run_script_npm::{
-    DetectionSource, NpmError, NpmScripts, PackageManager, ScriptRequest, detect_package_manager,
-    plan,
+    Detection, DetectionSource, NpmError, NpmScripts, PackageManager, ScriptRequest,
+    detect_package_manager, plan,
 };
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+const ALL: [PackageManager; 5] = [
+    PackageManager::Npm,
+    PackageManager::Pnpm,
+    PackageManager::YarnClassic,
+    PackageManager::YarnBerry,
+    PackageManager::Bun,
+];
 
 /// Creates `files` (path, contents) under `root`, with parent directories.
 fn write_files(root: &Path, files: &[(&str, &str)]) {
@@ -17,7 +25,7 @@ fn write_files(root: &Path, files: &[(&str, &str)]) {
 }
 
 /// Renders a detection with paths relative to `root` for stable snapshots.
-fn describe(root: &Path, result: Result<devlanes_run_script_npm::Detection, NpmError>) -> String {
+fn describe(root: &Path, result: Result<Detection, NpmError>) -> String {
     let relative = |path: &Path| match path
         .strip_prefix(root)
         .unwrap_or(path)
@@ -29,14 +37,25 @@ fn describe(root: &Path, result: Result<devlanes_run_script_npm::Detection, NpmE
     };
     match result {
         Ok(detection) => {
-            let source = match detection.source {
-                DetectionSource::Lockfile(path) => format!("lockfile {}", relative(&path)),
+            let source = match &detection.source {
                 DetectionSource::PackageManagerField(path) => {
-                    format!("packageManager in {}", relative(&path))
+                    format!("packageManager in {}", relative(path))
                 }
+                DetectionSource::DevEngines(path) => format!("devEngines in {}", relative(path)),
+                DetectionSource::Lockfile(path) => format!("lockfile {}", relative(path)),
                 DetectionSource::Default => "default".to_owned(),
             };
-            format!("{:?} ({source})", detection.manager)
+            let mut line = format!("{:?} ({source})", detection.manager);
+            if let Some(version) = &detection.version {
+                line.push_str(&format!(" version={version}"));
+            }
+            if let Some(linker) = detection.yarn_linker {
+                line.push_str(&format!(" linker={linker:?}"));
+            }
+            for note in &detection.notes {
+                line.push_str(&format!("\n    note: {note}"));
+            }
+            line
         }
         Err(NpmError::AmbiguousLockfiles { dir, lockfiles }) => {
             format!(
@@ -49,12 +68,151 @@ fn describe(root: &Path, result: Result<devlanes_run_script_npm::Detection, NpmE
     }
 }
 
-/// Lockfile detection for a package at `worktree/packages/app`.
+/// Runs detection for `worktree/packages/app` over each case's files.
+fn table(cases: &[(&str, &[(&str, &str)])]) -> String {
+    let mut table = String::new();
+    for (label, files) in cases {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let worktree = temp.path().join("lane");
+        write_files(
+            &worktree,
+            &[("packages/app/package.json", r#"{"name":"app"}"#)],
+        );
+        write_files(&worktree, files);
+        let result = detect_package_manager(&worktree.join("packages/app"), &worktree);
+        table.push_str(&format!("{label}: {}\n", describe(&worktree, result)));
+    }
+    table
+}
+
+/// Declared fields: `packageManager` beats `devEngines`, nearest manifest
+/// wins up to the workspace root, and the field beats any lockfile.
 #[test]
-fn lockfile_detection_table() {
-    let pkg = r#"{"name":"app"}"#;
+fn declared_field_precedence() {
     let cases: &[(&str, &[(&str, &str)])] = &[
-        ("pnpm workspace root", &[("pnpm-lock.yaml", "")]),
+        (
+            "packageManager in the script's package.json",
+            &[
+                (
+                    "packages/app/package.json",
+                    r#"{"packageManager":"pnpm@10.4.1+sha512.abc"}"#,
+                ),
+                ("pnpm-lock.yaml", ""),
+            ],
+        ),
+        (
+            "packageManager at the workspace root",
+            &[
+                ("package.json", r#"{"packageManager":"pnpm@10.4.1"}"#),
+                ("pnpm-lock.yaml", ""),
+            ],
+        ),
+        (
+            "nearest packageManager wins",
+            &[
+                (
+                    "packages/app/package.json",
+                    r#"{"packageManager":"bun@1.3.0"}"#,
+                ),
+                ("package.json", r#"{"packageManager":"pnpm@10.4.1"}"#),
+            ],
+        ),
+        (
+            "devEngines object",
+            &[(
+                "package.json",
+                r#"{"devEngines":{"packageManager":{"name":"npm","version":"^11.0.0","onFail":"error"}}}"#,
+            )],
+        ),
+        (
+            "devEngines array, first supported entry",
+            &[(
+                "package.json",
+                r#"{"devEngines":{"packageManager":[{"name":"deno"},{"name":"pnpm","version":">=10"}]}}"#,
+            )],
+        ),
+        (
+            "devEngines array, several supported",
+            &[(
+                "package.json",
+                r#"{"devEngines":{"packageManager":[{"name":"pnpm"},{"name":"npm"}]}}"#,
+            )],
+        ),
+        (
+            "packageManager and devEngines disagree",
+            &[(
+                "package.json",
+                r#"{"packageManager":"pnpm@10.4.1","devEngines":{"packageManager":{"name":"npm"}}}"#,
+            )],
+        ),
+        (
+            "field contradicts the lockfile",
+            &[
+                ("package.json", r#"{"packageManager":"pnpm@10.4.1"}"#),
+                ("yarn.lock", ""),
+            ],
+        ),
+        (
+            "field resolves lockfiles of two managers",
+            &[
+                ("package.json", r#"{"packageManager":"pnpm@10.4.1"}"#),
+                ("pnpm-lock.yaml", ""),
+                ("package-lock.json", "{}"),
+            ],
+        ),
+        (
+            "unsupported packageManager",
+            &[
+                ("package.json", r#"{"packageManager":"deno@2.5.0"}"#),
+                ("pnpm-lock.yaml", ""),
+            ],
+        ),
+        (
+            "yarn 4, Plug'n'Play without .pnp.cjs",
+            &[
+                ("package.json", r#"{"packageManager":"yarn@4.5.0"}"#),
+                ("yarn.lock", ""),
+            ],
+        ),
+        (
+            "yarn 4, Plug'n'Play installed",
+            &[
+                ("package.json", r#"{"packageManager":"yarn@4.5.0"}"#),
+                ("yarn.lock", ""),
+                (".pnp.cjs", ""),
+            ],
+        ),
+        (
+            "yarn 4, node-modules linker",
+            &[
+                ("package.json", r#"{"packageManager":"yarn@4.5.0"}"#),
+                ("yarn.lock", ""),
+                (".yarnrc.yml", "nodeLinker: \"node-modules\"\n"),
+            ],
+        ),
+        (
+            "yarn 1 by version over a 2+ lockfile header",
+            &[
+                ("package.json", r#"{"packageManager":"yarn@1.22.22"}"#),
+                ("yarn.lock", "__metadata:\n  version: 8\n"),
+            ],
+        ),
+        (
+            "field above the workspace root is not used",
+            &[
+                ("package.json", r#"{"packageManager":"bun@1.3.0"}"#),
+                ("packages/pnpm-workspace.yaml", "packages: ['*']\n"),
+            ],
+        ),
+    ];
+    insta::assert_snapshot!(table(cases));
+}
+
+/// Without a declared field, the nearest lockfile decides and a note asks for the field.
+#[test]
+fn lockfile_fallback_table() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        ("pnpm", &[("pnpm-lock.yaml", "")]),
         ("npm", &[("package-lock.json", "{}")]),
         ("npm shrinkwrap", &[("npm-shrinkwrap.json", "{}")]),
         (
@@ -66,28 +224,17 @@ fn lockfile_detection_table() {
         ),
         (
             "yarn 2+ header",
-            &[(
-                "yarn.lock",
-                "# This file is generated\n\n__metadata:\n  version: 8\n",
-            )],
-        ),
-        (
-            "empty yarn.lock, packageManager yarn 4",
             &[
-                ("yarn.lock", ""),
-                ("package.json", r#"{"packageManager":"yarn@4.5.0"}"#),
-            ],
-        ),
-        (
-            "empty yarn.lock, packageManager yarn 1",
-            &[
-                ("yarn.lock", ""),
-                ("package.json", r#"{"packageManager":"yarn@1.22.22"}"#),
+                (
+                    "yarn.lock",
+                    "# This file is generated\n\n__metadata:\n  version: 8\n",
+                ),
+                (".pnp.cjs", ""),
             ],
         ),
         (
             "empty yarn.lock, .yarnrc.yml",
-            &[("yarn.lock", ""), (".yarnrc.yml", "nodeLinker: pnp\n")],
+            &[("yarn.lock", ""), (".yarnrc.yml", "nodeLinker: pnpm\n")],
         ),
         ("empty yarn.lock alone", &[("yarn.lock", "")]),
         ("bun text lockfile", &[("bun.lock", "{}")]),
@@ -100,44 +247,12 @@ fn lockfile_detection_table() {
             ],
         ),
         (
-            "two managers, packageManager picks",
-            &[
-                ("pnpm-lock.yaml", ""),
-                ("package-lock.json", "{}"),
-                (
-                    "package.json",
-                    r#"{"packageManager":"pnpm@10.0.0+sha512.abc"}"#,
-                ),
-            ],
-        ),
-        (
-            "two managers, no packageManager",
+            "two managers",
             &[("pnpm-lock.yaml", ""), ("bun.lock", "{}")],
-        ),
-        (
-            "two managers, packageManager names neither",
-            &[
-                ("pnpm-lock.yaml", ""),
-                ("bun.lock", "{}"),
-                ("package.json", r#"{"packageManager":"yarn@4.0.0"}"#),
-            ],
-        ),
-        (
-            "no lockfile, packageManager",
-            &[("package.json", r#"{"packageManager":"bun@1.3.0"}"#)],
         ),
         ("nothing", &[]),
     ];
-    let mut table = String::new();
-    for (label, files) in cases {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let worktree = temp.path().join("lane");
-        write_files(&worktree, &[("packages/app/package.json", pkg)]);
-        write_files(&worktree, files);
-        let result = detect_package_manager(&worktree.join("packages/app"), &worktree);
-        table.push_str(&format!("{label}: {}\n", describe(&worktree, result)));
-    }
-    insta::assert_snapshot!(table);
+    insta::assert_snapshot!(table(cases));
 }
 
 /// Lockfiles above the lane worktree, such as a parent checkout's, are ignored.
@@ -154,13 +269,35 @@ fn detection_stops_at_worktree() {
     assert_eq!(detection.source, DetectionSource::Default);
 }
 
-/// The plan runs in the manifest's directory and exposes the script body.
+/// argv and `--` placement for every manager, with and without arguments.
+#[test]
+fn per_manager_argv() {
+    let args = vec!["--port".to_owned(), "20012".to_owned()];
+    let mut rendered = String::new();
+    for manager in ALL {
+        rendered.push_str(&format!(
+            "{manager:?}: {} | {}\n",
+            manager.run_argv("dev", &[]).join(" "),
+            manager.run_argv("dev", &args).join(" ")
+        ));
+    }
+    insta::assert_snapshot!(rendered, @r"
+    Npm: npm run dev | npm run dev -- --port 20012
+    Pnpm: pnpm run dev | pnpm run dev --port 20012
+    YarnClassic: yarn run dev | yarn run dev --port 20012
+    YarnBerry: yarn run dev | yarn run dev --port 20012
+    Bun: bun run dev | bun run dev --port 20012
+    ");
+}
+
+/// The plan runs in the manifest's directory and carries the body, version and notes.
 #[test]
 fn plan_uses_manifest_dir_and_exposes_body() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_files(
         temp.path(),
         &[
+            ("package.json", r#"{"packageManager":"pnpm@10.4.1"}"#),
             ("pnpm-lock.yaml", ""),
             (
                 "apps/api/package.json",
@@ -169,17 +306,29 @@ fn plan_uses_manifest_dir_and_exposes_body() {
         ],
     );
     let args = vec!["--port".to_owned(), "20010".to_owned()];
-    let plan = plan(&ScriptRequest {
+    let request = ScriptRequest {
         worktree: temp.path(),
         source: Path::new("apps/api/package.json"),
         name: "dev",
         extra_args: &args,
-    })
-    .expect("plan");
-    assert_eq!(plan.argv, ["pnpm", "run", "dev", "--port", "20010"]);
-    assert_eq!(plan.cwd, temp.path().join("apps/api"));
-    assert_eq!(plan.manager, PackageManager::Pnpm);
-    assert_eq!(plan.script_body, "wrangler dev --persist-to .state");
+    };
+    let declared = plan(&request).expect("plan");
+    assert_eq!(declared.argv, ["pnpm", "run", "dev", "--port", "20010"]);
+    assert_eq!(declared.cwd, temp.path().join("apps/api"));
+    assert_eq!(declared.manager, PackageManager::Pnpm);
+    assert_eq!(declared.version.as_deref(), Some("10.4.1"));
+    assert!(declared.notes.is_empty(), "{:?}", declared.notes);
+    assert_eq!(declared.script_body, "wrangler dev --persist-to .state");
+
+    write_files(temp.path(), &[("package.json", "{}")]);
+    let detected = plan(&request).expect("plan");
+    assert_eq!(detected.manager, PackageManager::Pnpm);
+    assert_eq!(
+        detected.notes,
+        [
+            r#"no packageManager field; detected pnpm from pnpm-lock.yaml. Add "packageManager": "pnpm@<version>" to package.json"#
+        ]
+    );
 }
 
 /// A missing script names the file and lists the scripts that exist.

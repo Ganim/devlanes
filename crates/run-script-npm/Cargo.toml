@@ -1,6 +1,6 @@
 [package]
 name = "devlanes-run-script-npm"
-description = "Runs package.json scripts with the package manager picked from the lockfile"
+description = "Runs package.json scripts with the project's declared package manager"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,18 +1,28 @@
 //! `run_script` support for `package.json` scripts.
 //!
-//! [`plan`] picks the package manager from the nearest lockfile and renders
-//! `<pm> run <name>` in the manifest's directory. It reads the manifest,
-//! lockfile headers and `package.json` files on the way up to the lane
-//! worktree, so async callers should run it on a blocking thread.
+//! [`plan`] picks the package manager from the declared `packageManager` or
+//! `devEngines.packageManager` field, falling back to lockfiles, and renders
+//! `<pm> run <name>` in the manifest's directory. It reads `package.json`
+//! files and lockfile headers on the way up to the lane worktree, so async
+//! callers should run it on a blocking thread.
 //!
-//! [`NpmScripts`] adapts it to `devlanes_core::contrib::ScriptRunner`, and
-//! [`forward_args`] is the helper presets use to add arguments to a draft.
+//! Each manager's argv and `--` rules live in its own module (`npm`, `pnpm`,
+//! `yarn`, `bun`). [`NpmScripts`] adapts [`plan`] to
+//! `devlanes_core::contrib::ScriptRunner`, and [`forward_args`] is the helper
+//! presets use to add arguments to a draft.
 
 mod adapter;
+mod bun;
 mod detect;
+mod manager;
+mod npm;
+mod pnpm;
+mod yarn;
 
 pub use adapter::{NpmScripts, forward_args, needs_npm_separator};
 pub use detect::{Detection, DetectionSource, detect_package_manager};
+pub use manager::PackageManager;
+pub use yarn::{YarnLinker, linker as yarn_linker};
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -20,67 +30,6 @@ use std::path::{Component, Path, PathBuf};
 
 /// File name handled by this runner.
 pub const MANIFEST: &str = "package.json";
-
-/// Package managers that can run `package.json` scripts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PackageManager {
-    Npm,
-    Pnpm,
-    /// Yarn 1.x.
-    YarnClassic,
-    /// Yarn 2 and later.
-    YarnBerry,
-    Bun,
-}
-
-impl PackageManager {
-    /// Returns the executable name looked up on `PATH`.
-    pub fn program(self) -> &'static str {
-        match self {
-            Self::Npm => "npm",
-            Self::Pnpm => "pnpm",
-            Self::YarnClassic | Self::YarnBerry => "yarn",
-            Self::Bun => "bun",
-        }
-    }
-
-    /// Returns whether arguments for the script need a `--` after its name.
-    ///
-    /// Checked in October 2026 against the official docs and against npm 11.17,
-    /// pnpm 12.10, yarn 1.22 and 4.18 and bun 1.3:
-    ///
-    /// - npm: "Use `--` to pass `-`-prefixed flags and options which would
-    ///   otherwise be parsed by npm" (<https://docs.npmjs.com/cli/v11/commands/npm-run>).
-    ///   Without it npm consumes `--port` itself.
-    /// - pnpm: "Options listed after the script's name are passed to the executed
-    ///   script" (<https://pnpm.io/cli/run>). A `--` is forwarded literally, and
-    ///   CLIs such as Vite then treat the flags after it as positionals.
-    /// - yarn 2+: `yarn run <scriptName> ...` forwards everything verbatim,
-    ///   including `--` (<https://yarnpkg.com/cli/run>).
-    /// - yarn 1: "pass additional arguments to your script by passing them after
-    ///   the script name" (<https://classic.yarnpkg.com/en/docs/cli/run>). It drops
-    ///   `--` with a warning that a future version will forward it as-is.
-    /// - bun: `bun [bun flags] run <script> [script flags]`; flags after the
-    ///   script name go to the script (<https://bun.com/docs/runtime>).
-    pub fn needs_separator(self) -> bool {
-        matches!(self, Self::Npm)
-    }
-
-    /// Renders `<pm> run <script> [--] <extra_args>`, adding `--` only when
-    /// [`Self::needs_separator`] is true and there are arguments to forward.
-    pub fn run_argv(self, script: &str, extra_args: &[String]) -> Vec<String> {
-        let mut argv = vec![
-            self.program().to_owned(),
-            "run".to_owned(),
-            script.to_owned(),
-        ];
-        if !extra_args.is_empty() && self.needs_separator() {
-            argv.push("--".to_owned());
-        }
-        argv.extend(extra_args.iter().cloned());
-        argv
-    }
-}
 
 /// A `run_script` reference to a `package.json` script.
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +52,11 @@ pub struct LaunchPlan {
     pub cwd: PathBuf,
     pub manager: PackageManager,
     pub detection: DetectionSource,
+    /// Version from the declared field, for diagnostics.
+    pub version: Option<String>,
+    /// Non-fatal findings for `env --explain` and `why`, such as a missing
+    /// `packageManager` field.
+    pub notes: Vec<String>,
     /// The script's command line, for presets that reject hardcoded flags.
     pub script_body: String,
 }
@@ -169,6 +123,13 @@ pub(crate) struct Manifest {
     pub(crate) scripts: BTreeMap<String, String>,
     #[serde(default, rename = "packageManager")]
     pub(crate) package_manager: Option<String>,
+    /// Kept as raw JSON: only `packageManager` inside it is read, in either
+    /// the object or the array form.
+    #[serde(default, rename = "devEngines")]
+    pub(crate) dev_engines: Option<serde_json::Value>,
+    /// Presence marks an npm, yarn or bun workspace root.
+    #[serde(default)]
+    pub(crate) workspaces: Option<serde_json::Value>,
 }
 
 /// Parses a `package.json`, returning `None` when the file does not exist.
@@ -220,9 +181,9 @@ pub fn read_script(manifest: &Path, name: &str) -> Result<PackageScript, NpmErro
 
 /// Resolves a script reference into the command to spawn.
 ///
-/// Errors when the source escapes the worktree, the script is missing or
-/// lockfiles of different managers sit in the same directory without a
-/// `packageManager` field to pick one.
+/// Errors when the source escapes the worktree, the script is missing or,
+/// without a declared field, lockfiles of different managers share a
+/// directory.
 pub fn plan(request: &ScriptRequest<'_>) -> Result<LaunchPlan, NpmError> {
     validate_name(request.name)?;
     let worktree = normalize(request.worktree);
@@ -243,6 +204,8 @@ pub fn plan(request: &ScriptRequest<'_>) -> Result<LaunchPlan, NpmError> {
         cwd,
         manager: detection.manager,
         detection: detection.source,
+        version: detection.version,
+        notes: detection.notes,
         script_body: script.body,
     })
 }

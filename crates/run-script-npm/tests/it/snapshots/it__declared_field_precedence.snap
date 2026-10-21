@@ -1,0 +1,26 @@
+---
+source: crates/run-script-npm/tests/it/main.rs
+expression: table(cases)
+---
+packageManager in the script's package.json: Pnpm (packageManager in packages/app/package.json) version=10.4.1
+packageManager at the workspace root: Pnpm (packageManager in package.json) version=10.4.1
+nearest packageManager wins: Bun (packageManager in packages/app/package.json) version=1.3.0
+devEngines object: Npm (devEngines in package.json) version=^11.0.0
+devEngines array, first supported entry: Pnpm (devEngines in package.json) version=>=10
+devEngines array, several supported: Pnpm (devEngines in package.json)
+    note: devEngines.packageManager in package.json lists several package managers; using the first, pnpm
+packageManager and devEngines disagree: Pnpm (packageManager in package.json) version=10.4.1
+    note: packageManager (pnpm) and devEngines.packageManager (npm) in package.json disagree; using packageManager
+field contradicts the lockfile: Pnpm (packageManager in package.json) version=10.4.1
+    note: packageManager in package.json says pnpm, but yarn.lock belongs to another package manager; using pnpm
+field resolves lockfiles of two managers: Pnpm (packageManager in package.json) version=10.4.1
+unsupported packageManager: Pnpm (lockfile pnpm-lock.yaml)
+    note: packageManager "deno@2.5.0" in package.json is not npm, pnpm, yarn or bun; ignored
+    note: no packageManager field; detected pnpm from pnpm-lock.yaml. Add "packageManager": "pnpm@<version>" to package.json
+yarn 4, Plug'n'Play without .pnp.cjs: YarnBerry (packageManager in package.json) version=4.5.0 linker=Pnp
+    note: yarn Plug'n'Play is enabled but .pnp.cjs is missing; run `yarn install`
+yarn 4, Plug'n'Play installed: YarnBerry (packageManager in package.json) version=4.5.0 linker=Pnp
+yarn 4, node-modules linker: YarnBerry (packageManager in package.json) version=4.5.0 linker=NodeModules
+yarn 1 by version over a 2+ lockfile header: YarnClassic (packageManager in package.json) version=1.22.22
+field above the workspace root is not used: Npm (default)
+    note: no packageManager field or lockfile; using npm. Add "packageManager": "<manager>@<version>" to packages/package.json
