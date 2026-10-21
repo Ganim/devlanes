@@ -1,0 +1,24 @@
+[package]
+name = "devlanes-preset-tauri"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+devlanes-core = { path = "../core" }
+devlanes-run-script-npm = { path = "../run-script-npm" }
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+insta = "1"
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
