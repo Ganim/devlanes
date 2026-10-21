@@ -22,6 +22,9 @@ pub enum Error {
 }
 
 /// A stream identifier distinguishes simultaneous terminal byte streams.
+// Frames are built and consumed once per message; boxing Control would add an
+// allocation per request for no memory win, since frames are never stored in bulk.
+#[allow(clippy::large_enum_variant)]
 pub enum Frame {
     Control(Control),
     Bytes { stream_id: u64, data: Bytes },

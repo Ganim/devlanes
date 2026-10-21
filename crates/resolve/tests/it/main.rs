@@ -629,7 +629,13 @@ async fn snapshot_reference() {
         50,
         vec![("FORCE_COLOR", "1")],
     ));
-    let contributors = [node, mise];
+    // Preset options are opaque to config, so the inspector port comes from the
+    // wrangler contributor, as it does with the real WranglerPreset.
+    let wrangler: Arc<dyn Contributor> = Arc::new(FakeContributor {
+        preset_ports: Some(("wrangler", "inspector")),
+        ..FakeContributor::env("fake-wrangler", 100, vec![])
+    });
+    let contributors = [node, mise, wrangler];
     let (block, offsets) = allocation(&config, 21_000, &contributors);
     let runners: [Arc<dyn ScriptRunner>; 1] = [Arc::new(FakeRunner::new())];
     let infra = infra();

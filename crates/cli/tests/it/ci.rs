@@ -239,8 +239,8 @@ fn phase_groups_and_failed_unit_annotation() {
     lane.phase lane=acme@0 phase=infra state=done
     ::endgroup::
     ::error title=api exited 1::missing config%0Aat app.ts:1
-    unit.changed unit={"exit_code":1,"lane":"acme@0","log_tail":["missing config","at app.ts:1"],"name":"api","state":"failed"}
-    unit: {"exit_code":1,"lane":"acme@0","log_tail":["missing config","at app.ts:1"],"name":"api","state":"failed"}
+    unit.changed unit={"name":"api","lane":"acme@0","state":"failed","exit_code":1,"log_tail":["missing config","at app.ts:1"]}
+    unit: {"name":"api","lane":"acme@0","state":"failed","exit_code":1,"log_tail":["missing config","at app.ts:1"]}
     "#);
 }
 

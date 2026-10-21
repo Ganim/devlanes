@@ -283,7 +283,11 @@ impl DaemonApi for ClientApi {
     async fn status(&self) -> Result<Vec<LaneSummary>, ApiError> {
         let value = self
             // The TUI shows every project, not just the cwd's (cli-design 5).
-            .shared_request(Method::Status, json!({"all": true}), self.context(None, false))
+            .shared_request(
+                Method::Status,
+                json!({"all": true}),
+                self.context(None, false),
+            )
             .await?;
         let page: Page<LaneSummary> = from_value(value)?;
         Ok(page.items)
@@ -329,6 +333,8 @@ impl DaemonApi for ClientApi {
         let (output_tx, output_rx) = mpsc::channel(OUTPUT_QUEUE);
         let (input_tx, mut input_rx) = mpsc::channel(INPUT_QUEUE);
         tokio::spawn(async move {
+            // One Step lives on the stack per loop iteration; boxing buys nothing.
+            #[allow(clippy::large_enum_variant)]
             enum Step {
                 Input(Option<AttachInput>),
                 Frame(devlanes_client::Result<Frame>),
