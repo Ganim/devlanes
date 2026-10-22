@@ -47,14 +47,19 @@ pub async fn facts(paths: &Paths) -> Value {
     })
 }
 
-/// Adds `terminal: {elevated, job, conpty}` about the shell running this command:
-/// an elevated shell cannot start the daemon, and a job that kills its processes
+/// Adds `terminal: {elevated, elevation_allowed, job, conpty}` about the shell
+/// running this command: an elevated shell cannot start the daemon unless
+/// `DEVLANES_ALLOW_ELEVATED=1` allows it, and a job that kills its processes
 /// when the terminal closes takes a daemon started inside it along. `conpty` is
 /// `bundled` or `system`: which ConPTY units get, judged from this executable,
 /// which is also the daemon's.
 #[cfg(windows)]
 pub fn annotate_terminal(data: &mut Value) {
-    use devlanes_sys::windows::{conpty, process::job_of_self, token::elevated};
+    use devlanes_sys::windows::{
+        conpty,
+        process::job_of_self,
+        token::{elevated, elevation_refused},
+    };
     let job = job_of_self()
         .ok()
         .flatten()
@@ -64,7 +69,15 @@ pub fn annotate_terminal(data: &mut Value) {
     } else {
         "system"
     };
-    data["terminal"] = json!({"elevated": elevated().ok(), "job": job, "conpty": conpty});
+    let elevated = elevated().ok();
+    // Elevated but not refused means the override is set.
+    let allowed = elevated == Some(true) && elevation_refused().ok() == Some(false);
+    data["terminal"] = json!({
+        "elevated": elevated,
+        "elevation_allowed": allowed,
+        "job": job,
+        "conpty": conpty,
+    });
 }
 
 /// Nothing to add on Unix: the daemon leaves the terminal's session itself.

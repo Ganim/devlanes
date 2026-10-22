@@ -1023,9 +1023,17 @@ fn terminal_checks(terminal: &Value, running: bool) -> Vec<Check> {
         )),
         None => {}
     }
+    let allowed = terminal.get("elevation_allowed").and_then(Value::as_bool) == Some(true);
     if terminal.get("elevated").and_then(Value::as_bool) == Some(true) {
         // An elevated CLI can still talk to a daemon that runs unelevated.
-        checks.push(if running {
+        checks.push(if allowed {
+            // CI runners that only run elevated set the override on purpose.
+            Check::new(
+                "terminal",
+                Outcome::Skip,
+                "this terminal runs as administrator, and DEVLANES_ALLOW_ELEVATED=1 lets the daemon and its units run elevated",
+            )
+        } else if running {
             Check::new(
                 "terminal",
                 Outcome::Skip,

@@ -749,6 +749,18 @@ fn doctor_terminal_and_acl_checks() {
         !after(&elevated_running, "runs as administrator").contains("fix:"),
         "{elevated_running}"
     );
+    // `DEVLANES_ALLOW_ELEVATED=1` (CI runners): a warning, not a failure.
+    let allowed = with(
+        false,
+        json!({"elevated": true, "elevation_allowed": true, "job": null}),
+    );
+    assert!(allowed.contains("--- agent (exit 0)"), "{allowed}");
+    assert!(
+        allowed.contains(
+            "warn terminal: this terminal runs as administrator, and DEVLANES_ALLOW_ELEVATED=1"
+        ),
+        "{allowed}"
+    );
 
     let stopped = with(false, killing.clone());
     assert!(
