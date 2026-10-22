@@ -550,6 +550,16 @@ impl LanePhase for ResolvePhase {
             Ok(resolved) => {
                 // Infra came up already when it was on; this governs `infra.setup`.
                 cx.infra_enabled &= resolved.infra_enabled;
+                // From here a stop can name the tasks and setup entries this start
+                // may run, also between their spawn and their record on the lane.
+                for (name, task) in &resolved.tasks {
+                    if task.active && matches!(task.when, Some(TaskWhen::Create | TaskWhen::Start))
+                    {
+                        cx.ctl.plan_tasks(task_units(&resolved, name));
+                    }
+                }
+                cx.ctl
+                    .plan_tasks(resolved.setup.keys().map(|entry| format!("setup.{entry}")));
                 cx.resolved = Some(resolved);
                 PhaseResult::Done
             }
@@ -639,6 +649,8 @@ impl LanePhase for SetupPhase {
                 .map(|(name, _)| format!("setup.{name}"))
                 .collect(),
         );
+        // Entries a stop withdrew before they ran are left for a later start.
+        pending.retain(|(name, _)| cx.ctl.withdrawn_by(&format!("setup.{name}")).is_none());
         let runs = pending.iter().map(|(name, _)| {
             let engine = engine.clone();
             let project = cx.project.clone();
@@ -831,6 +843,19 @@ impl LanePhase for TasksPhase {
             engine.phase_step(cx, self.name(), &name, index + 1, count);
             // A stop naming the task or one of its steps interrupts the start.
             let _running = cx.ctl.running_tasks(task_units(&resolved, &name));
+            // Checked after registering: a stop either saw it running (and
+            // interrupts the start) or withdrew it before; never neither.
+            if cx.ctl.withdrawn_by(&name).is_some() {
+                cx.skipped_tasks.push(name.clone());
+                engine.task_event(
+                    &cx.reference,
+                    &name,
+                    "skipped",
+                    None,
+                    Some(json!({"code": "cancelled_by_stop"})),
+                );
+                continue;
+            }
             let outcome = engine
                 .run_task(
                     &cx.project,
@@ -2205,7 +2230,10 @@ impl Inner {
         by: &'static str,
     ) -> Result<Vec<UnitSummary>, RpcError> {
         let reference = lane.st().reference(&project.name());
-        let mut names = Self::matching_units(lane, &reference, selectors.as_deref())?;
+        // Tasks the start runs or plans count even before the lane records their
+        // unit: the runner may have spawned one that is not registered yet.
+        let tasks = start.task_units();
+        let mut names = Self::matching_units(lane, &reference, selectors.as_deref(), &tasks)?;
         if let Some(caller) = mine {
             // Only the caller's running units: the start's own were not theirs yet.
             let st = lane.st();
@@ -2233,17 +2261,27 @@ impl Inner {
             if stopped.iter().any(|summary| &summary.name == name) {
                 continue;
             }
-            let Some(service) = st
-                .view
-                .as_ref()
-                .and_then(|view| view.services.iter().find(|s| &s.unit == name))
-            else {
-                continue;
-            };
             if st.units.get(name).is_some_and(|rec| rec.host.is_alive()) {
                 continue;
             }
-            let mut summary = crate::model::idle_summary(&reference, service);
+            let service = st
+                .view
+                .as_ref()
+                .and_then(|view| view.services.iter().find(|s| &s.unit == name));
+            let mut summary = match (service, st.units.get(name)) {
+                (Some(service), _) => crate::model::idle_summary(&reference, service),
+                // A task of the start that has already ended: the start's own
+                // cancellation may have stopped it before this stop got to it.
+                (None, Some(rec)) if tasks.contains(name) => unit_summary(&reference, name, rec),
+                // A task the start had not run yet; it skips it now.
+                (None, None) if tasks.contains(name) => UnitSummary {
+                    name: name.clone(),
+                    lane: reference.clone(),
+                    kind: "task".into(),
+                    ..UnitSummary::default()
+                },
+                _ => continue,
+            };
             summary.state = "stopped".into();
             summary.reason = Some(withdrawn_reason(&reference, name, by));
             stopped.push(summary);
@@ -2272,18 +2310,19 @@ impl Inner {
             self.run_hook(project, lane, TaskWhen::Stop, &Actor::default(), &cancel)
                 .await;
         }
-        let names = Self::matching_units(lane, &reference, selectors.as_deref())?;
+        let names = Self::matching_units(lane, &reference, selectors.as_deref(), &BTreeSet::new())?;
         Ok(self
             .stop_named(project, lane, &reference, &names, mine, whole, true)
             .await)
     }
 
-    /// The lane's units (running, configured or orphaned) that `selectors`
-    /// match; every one without selectors.
+    /// The lane's units (running, configured or orphaned, plus `extra`) that
+    /// `selectors` match; every one without selectors.
     fn matching_units(
         lane: &LaneRt,
         reference: &str,
         selectors: Option<&[String]>,
+        extra: &BTreeSet<String>,
     ) -> Result<Vec<String>, RpcError> {
         let st = lane.st();
         let mut candidates: Vec<(String, Vec<String>)> = st
@@ -2291,6 +2330,11 @@ impl Inner {
             .iter()
             .map(|(name, rec)| (name.clone(), rec.tags.clone()))
             .collect();
+        for name in extra {
+            if !st.units.contains_key(name) {
+                candidates.push((name.clone(), Vec::new()));
+            }
+        }
         if let Some(view) = &st.view {
             for service in &view.services {
                 if !candidates.iter().any(|(n, _)| *n == service.unit) {

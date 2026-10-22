@@ -137,8 +137,12 @@ async fn stop_interrupts_a_hung_start() {
             json!({"profiles": ["slow"], "timeout_ms": 60_000}),
             cx(&main),
         );
+        // What the daemon reports, not the runner's journal: the journal shows a
+        // spawn before the lane records the unit.
         let hung = eventually(Duration::from_secs(5), || async {
-            (h.runner.journal.entries() == ["sleep"]).then_some(())
+            alive(&lane(&h, &main).await)
+                .contains(&"hang".to_owned())
+                .then_some(())
         })
         .await;
         assert!(hung.is_some(), "the task runs");

@@ -10,7 +10,9 @@
 //! until the unit stops), `daemonize <name>` and `escape <name>` (report a
 //! process left running or escaped once the unit ends), `stubborn` (ignores
 //! its first stop request; with [`FakeRunner::stubborn_identity`] set it also
-//! carries that real identity, so an overdue stop finds it alive).
+//! carries that real identity, so an overdue stop finds it alive), `lag`
+//! (the spawn returns 500 ms after the journal recorded it, like a slow
+//! `fork`/`exec`, which widens the window before the daemon registers the unit).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -98,6 +100,9 @@ impl UnitRunner for FakeRunner {
         let script = script_of(&spec);
         if let Ok(mut journal) = self.journal.0.lock() {
             journal.push(script.clone());
+        }
+        if script.split(';').any(|command| command.trim() == "lag") {
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
         let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
         let (sender, first) = broadcast::channel(256);

@@ -77,6 +77,26 @@ async fn lane(h: &Harness, cwd: &std::path::Path) -> LaneSummary {
     page.items.into_iter().next().expect("lane")
 }
 
+/// Waits until the daemon lists `unit` at `cwd` as a running process. The fake
+/// runner's journal is no substitute: it records a spawn before the daemon
+/// registers the unit on its lane.
+async fn until_running(h: &Harness, cwd: &std::path::Path, unit: &str) {
+    let up = eventually(Duration::from_secs(5), || async {
+        lane(h, cwd)
+            .await
+            .units
+            .iter()
+            .any(|u| {
+                u.name == unit
+                    && u.pid.is_some()
+                    && matches!(u.state.as_str(), "starting" | "ready" | "running")
+            })
+            .then_some(())
+    })
+    .await;
+    assert!(up.is_some(), "{unit} runs");
+}
+
 /// How many spawned scripts start with `prefix`.
 fn spawned(h: &Harness, prefix: &str) -> usize {
     h.runner
@@ -183,11 +203,7 @@ async fn a_starting_unit_stops_and_the_start_moves_on() {
         let h = harness(&tmp.path.join("home"), Setup::default()).await;
         let (_session, _frames, starting) =
             spawn_call(&h, Method::Start, json!({"timeout_ms": 30_000}), cx(&main));
-        let up = eventually(Duration::from_secs(5), || async {
-            (spawned(&h, "echo slow") == 1).then_some(())
-        })
-        .await;
-        assert!(up.is_some(), "slow spawned");
+        until_running(&h, &main, "slow").await;
 
         let stopped = quick_stop(&h, &["slow"], cx(&main)).await;
         assert_eq!(stopped["items"][0]["name"], "slow", "{stopped}");
@@ -236,11 +252,7 @@ async fn a_service_stopped_before_the_services_phase_is_skipped() {
         let h = harness(&tmp.path.join("home"), Setup::default()).await;
         let (_session, _frames, starting) =
             spawn_call(&h, Method::Start, json!({"timeout_ms": 10_000}), cx(&main));
-        let napping = eventually(Duration::from_secs(5), || async {
-            (spawned(&h, "nap") == 1).then_some(())
-        })
-        .await;
-        assert!(napping.is_some(), "the task runs");
+        until_running(&h, &main, "pause").await;
 
         let stopped = quick_stop(&h, &["web"], cx(&main)).await;
         assert_eq!(stopped["items"][0]["state"], "stopped", "{stopped}");
@@ -272,15 +284,7 @@ async fn stopping_the_running_task_interrupts_the_start() {
             json!({"profiles": ["slow"], "timeout_ms": 60_000}),
             cx(&main),
         );
-        let hung = eventually(Duration::from_secs(5), || async {
-            (h.runner.journal.entries() == ["nap 1500", "sleep"]).then_some(())
-        })
-        .await;
-        assert!(
-            hung.is_some(),
-            "hang runs: {:?}",
-            h.runner.journal.entries()
-        );
+        until_running(&h, &main, "hang").await;
 
         quick_stop(&h, &["hang"], cx(&main)).await;
         let error = tokio::time::timeout(Duration::from_secs(5), starting)
@@ -299,6 +303,92 @@ async fn stopping_the_running_task_interrupts_the_start() {
         .expect("result");
         assert!(next.ready, "{next:?}");
         assert_eq!(next.started.len(), 2);
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A task the start plans but has not run yet leaves the start: it is skipped
+/// and the start goes on.
+async fn a_planned_task_is_withdrawn_before_it_runs() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", TASKED);
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        let (_session, _frames, starting) = spawn_call(
+            &h,
+            Method::Start,
+            json!({"profiles": ["slow"], "timeout_ms": 10_000}),
+            cx(&main),
+        );
+        until_running(&h, &main, "pause").await;
+
+        let stopped = quick_stop(&h, &["hang"], cx(&main)).await;
+        assert_eq!(stopped["items"][0]["name"], "hang", "{stopped}");
+        assert_eq!(stopped["items"][0]["state"], "stopped");
+        let result = start_result(starting).await;
+        assert!(result.ready, "{result:?}");
+        assert_eq!(result.skipped_tasks, ["hang"]);
+        assert_eq!(result.started.len(), 2, "{result:?}");
+        assert!(
+            !h.runner.journal.entries().iter().any(|s| s == "sleep"),
+            "hang never spawned"
+        );
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+const LAGGING: &str = r#"project: lagging
+tasks:
+  hang: { run: "lag; sleep", when: lane.start }
+services:
+  web: { run: "echo web; sleep", ready: started }
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+/// A stop naming the task a start is spawning, before the lane records its
+/// unit, finds it: the spawn lands, the task stops and the start is interrupted.
+async fn a_task_between_spawn_and_record_is_stopped() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", LAGGING);
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        let (_session, _frames, starting) =
+            spawn_call(&h, Method::Start, json!({"timeout_ms": 60_000}), cx(&main));
+        // The runner's journal on purpose: `lag` holds the spawn 500 ms after it,
+        // before the daemon records the unit.
+        let spawning = eventually(Duration::from_secs(5), || async {
+            (spawned(&h, "lag") == 1).then_some(())
+        })
+        .await;
+        assert!(spawning.is_some(), "hang is spawning");
+
+        let stopped = tokio::time::timeout(
+            Duration::from_secs(3),
+            h.call(Method::Stop, json!({"units": ["hang"]}), cx(&main)),
+        )
+        .await
+        .expect("the stop answers once the spawn landed")
+        .expect("hang is found");
+        assert_eq!(stopped["items"][0]["name"], "hang", "{stopped}");
+        let error = tokio::time::timeout(Duration::from_secs(5), starting)
+            .await
+            .expect("the start answers")
+            .expect("join")
+            .expect_err("interrupted");
+        assert_eq!(error.code, "start_cancelled", "{error:?}");
+        let summary = lane(&h, &main).await;
+        assert!(
+            summary
+                .units
+                .iter()
+                .all(|u| !matches!(u.state.as_str(), "starting" | "ready" | "running")),
+            "{summary:?}"
+        );
         h.close().await;
     })
     .await
@@ -325,11 +415,7 @@ async fn restart_takes_a_unit_out_of_a_running_start() {
         let h = harness(&tmp.path.join("home"), Setup::default()).await;
         let (_session, _frames, starting) =
             spawn_call(&h, Method::Start, json!({"timeout_ms": 20_000}), cx(&main));
-        let napping = eventually(Duration::from_secs(5), || async {
-            (spawned(&h, "nap 1000") == 1).then_some(())
-        })
-        .await;
-        assert!(napping.is_some(), "the start runs its first task");
+        until_running(&h, &main, "pause").await;
 
         let asked = Instant::now();
         let restarted: StartResult = serde_json::from_value(
@@ -385,11 +471,7 @@ async fn restart_replaces_a_unit_the_start_waits_for() {
         let h = harness(&tmp.path.join("home"), Setup::default()).await;
         let (_session, _frames, starting) =
             spawn_call(&h, Method::Start, json!({"timeout_ms": 30_000}), cx(&main));
-        let up = eventually(Duration::from_secs(5), || async {
-            (spawned(&h, "echo slow") == 1).then_some(())
-        })
-        .await;
-        assert!(up.is_some(), "slow spawned");
+        until_running(&h, &main, "slow").await;
 
         let restarted: StartResult = serde_json::from_value(
             tokio::time::timeout(
