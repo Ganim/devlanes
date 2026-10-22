@@ -15,11 +15,20 @@ const CHECK: &str = r#"set -e
 url="$DEVLANES_PUBLIC_URL_API"
 host="${url#https://}"
 host="${host%%:*}"
-curl -fsS --max-time 10 --cacert "$DEVLANES_CA_CERT" \
+curl -fsS --max-time 10 --cacert "$DEVLANES_CA_CERT" $E2E_CURL_FLAGS \
   --resolve "$host:$E2E_HTTPS_PORT:127.0.0.1" "$url/healthz"
 devlanes status --json > "$E2E_STATUS"
 docker compose -p devlanes-fixture-full exec -T postgres \
   psql -U postgres -d full_0 -tAc "SELECT count(*) FROM items" > "$E2E_ROWS""#;
+
+/// Extra curl flags for [`CHECK`]: none on Unix.
+#[cfg(unix)]
+const CURL_FLAGS: &str = "";
+/// Extra curl flags for [`CHECK`]. Windows' curl verifies through Schannel,
+/// which fails when it cannot check revocation, and the devlanes CA publishes
+/// no revocation list; best effort still verifies the chain.
+#[cfg(windows)]
+const CURL_FLAGS: &str = "--ssl-revoke-best-effort";
 
 /// Runs `devlanes with` with [`CHECK`] followed by `tail`.
 fn with(lab: &Lab, name: &str, tail: &str) -> Result<(Output, Value, String)> {
@@ -43,6 +52,7 @@ fn with(lab: &Lab, name: &str, tail: &str) -> Result<(Output, Value, String)> {
     )?;
     command
         .env("E2E_HTTPS_PORT", lab.https_port().to_string())
+        .env("E2E_CURL_FLAGS", CURL_FLAGS)
         .env("E2E_STATUS", &status)
         .env("E2E_ROWS", &rows);
     let output = lab.run(command, Duration::from_secs(420))?;
@@ -76,8 +86,7 @@ fn started(status: &Value, name: &str) -> Result<u64> {
 /// and seed ran in order; then exit 3 is passed through and seed (`lane.create`) does not
 /// run again.
 #[test]
-#[cfg_attr(not(windows), ignore = "needs docker")]
-#[cfg_attr(windows, ignore = "needs docker and Docker support on Windows, step 7")]
+#[ignore = "needs docker"]
 fn docker_with_full_fixture() -> Result<()> {
     let lab = Lab::docker("full", COMPOSE_PROJECT, Duration::from_secs(900))?;
     lab.write(".env", &format!("FULL_PG_PORT={}\n", lab.spare_port(0)))?;

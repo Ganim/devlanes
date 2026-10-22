@@ -5,7 +5,12 @@ use serde::Deserialize;
 use crate::Error;
 
 /// The engine Docker uses without `DOCKER_HOST` or a context.
+#[cfg(unix)]
 pub const DEFAULT_HOST: &str = "unix:///var/run/docker.sock";
+/// The engine Docker uses without `DOCKER_HOST` or a context: Docker Desktop's
+/// named pipe, which bollard reaches through its `npipe://` support.
+#[cfg(windows)]
+pub const DEFAULT_HOST: &str = "npipe:////./pipe/docker_engine";
 
 #[derive(Deserialize)]
 struct CliConfig {
