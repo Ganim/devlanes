@@ -14,7 +14,7 @@ devlanes attach web                 # raw terminal; C-a d detaches
 devlanes lane ls                    # worktree lanes, including idle and unassigned ones
 devlanes with --profile e2e -- pnpm test:e2e
 devlanes daemon status
-devlanes daemon install             # launchd agent or systemd user unit
+devlanes daemon install             # launchd agent, systemd user unit or Windows logon entry
 ```
 
 Run `devlanes` with no arguments on a terminal to open the TUI; elsewhere it prints `status`. Add `--json` to any command for machine-readable output. Closing the TUI, or pressing Ctrl-C during `start`, `logs -f` or `wait`, leaves everything running.
@@ -46,6 +46,10 @@ Any command except `devlanes daemon status`, `daemon stop`, `daemon reset-state`
 Everything lives under `~/.devlanes`, or `DEVLANES_HOME` when set: `state.db`, `config.yaml`, `logs/` (including `daemon.log`), `ca/` and `run/daemon.sock`. When the socket path is too long for macOS, it moves to a short temporary directory. devlanes refuses a home that other users can read or write, so create it with `mkdir -m 700 ~/.devlanes` when you add `config.yaml` before the first run.
 
 On Windows the home is `%USERPROFILE%\.devlanes` and the daemon listens on a named pipe, `\\.\pipe\devlanes-<hash of the home>`, instead of `run/daemon.sock`. Instead of mode 700, the daemon limits the home's access list to you, SYSTEM and Administrators when it starts; `devlanes doctor` shows a home that is still too open, with an `icacls` command to fix it.
+
+`devlanes daemon install` on Windows writes the value `devlanes` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, `"<dir>\devlanesw.exe" --home "<home>"`, and starts the daemon if none runs. `devlanesw.exe` is a small launcher without a console that ships next to `devlanes.exe` and starts `devlanes daemon run`, so logon opens no console window. One entry per user, for the home `install` ran with. `daemon status` and `doctor` show whether the entry exists and whether it matches this executable and home; `daemon uninstall` deletes it and leaves a running daemon alone.
+
+The daemon has no console on Windows, so the programs it runs for itself (`git`, Docker Compose, `mise`, `direnv`, `fnox`, `curl`, `mkcert`, ready probes) start with `CREATE_NO_WINDOW` and never flash a window. Logoff and shutdown reach it through a hidden window instead of console events: it stops units and records their exits as `daemon stop` does, within the few seconds Windows allows. Orphans left by a crashed daemon get Ctrl-Break and `WM_CLOSE` first and are terminated after 5 seconds. A unit ended by Ctrl-C or Ctrl-Break exits with code `-1073741510` (`STATUS_CONTROL_C_EXIT`), which the CLI shows as `interrupted (Ctrl-C)`; `--json` keeps the number.
 
 `devlanes attach` on Windows drops the win32-input-mode and focus-event switches (`ESC[?9001h/l`, `ESC[?1004h/l`) from the unit's output, because ConPTY sends them for itself and they would stay on in your terminal after detaching. A unit that asks for focus events itself therefore does not get them while attached.
 

@@ -22,6 +22,7 @@ use devlanes_core::{
     contrib::{ContribCx, Contributor, LaunchDraft},
     env,
 };
+use devlanes_sys::NoWindow;
 
 /// The file direnv loads.
 pub const ENVRC: &str = ".envrc";
@@ -113,6 +114,7 @@ impl DirenvContributor {
         }
         let mut command = tokio::process::Command::new(&self.program);
         command
+            .no_window()
             .args(["export", "json"])
             .current_dir(lane)
             .env_clear()

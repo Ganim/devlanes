@@ -556,8 +556,9 @@ impl ProcessTable for SysProcesses {
     /// and children started after the last recording (or after the crash) were
     /// never recorded, so they are found by parent in a fresh snapshot, the way
     /// Unix sweeps a session. Each recorded member arrives here on its own (see
-    /// `track_escaped`). Asking them to exit first with a console control event,
-    /// honouring `grace`, comes with graceful stop.
+    /// `track_escaped`). This is the hard part only: the composition root wraps
+    /// it with a phase that asks first (Ctrl-Break, `WM_CLOSE`) and honours
+    /// `grace`, since asking needs the runner's console-control helper.
     #[cfg(windows)]
     async fn terminate(&self, identity: ProcessIdentity, _grace: Duration) {
         let ended = tokio::task::spawn_blocking(move || {
@@ -719,15 +720,13 @@ fn first_file(root: &std::path::Path) -> Option<std::path::PathBuf> {
 /// `PATH` scan did not recognise (a shim, a custom layout).
 #[cfg(windows)]
 async fn git_sh_from_exec_path() -> Option<std::path::PathBuf> {
+    use devlanes_sys::NoWindow;
     use std::process::Stdio;
-    /// `CREATE_NO_WINDOW`: the daemon has no console, so a console program
-    /// would otherwise open a window.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let output = tokio::process::Command::new("git")
+        .no_window()
         .arg("--exec-path")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
         .kill_on_drop(true)
         .output();
     let exec_path = match tokio::time::timeout(EXEC_PATH_TIMEOUT, output).await {

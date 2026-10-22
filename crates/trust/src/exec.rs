@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use async_trait::async_trait;
+use devlanes_sys::NoWindow;
 use tempfile::TempPath;
 
 use crate::{CaCertificate, TrustError};
@@ -163,6 +164,7 @@ impl CommandExecutor for SystemExecutor {
     /// Spawns the program directly, without a shell.
     async fn run(&self, command: &CommandLine) -> io::Result<CommandOutput> {
         let output = tokio::process::Command::new(&command.program)
+            .no_window()
             .args(&command.args)
             .stdin(Stdio::null())
             .kill_on_drop(true)

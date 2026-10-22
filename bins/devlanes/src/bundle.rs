@@ -10,6 +10,7 @@ use std::{
 use devlanes_cli::{OutputMode, Rendered, Runtime};
 use devlanes_client::{Client, Context, Method, Paths};
 use devlanes_proto::RpcError;
+use devlanes_sys::NoWindow;
 use serde_json::{Value, json};
 
 use crate::output::emit;
@@ -113,6 +114,7 @@ pub async fn run(
         )),
     };
     let status = tokio::process::Command::new("tar")
+        .no_window()
         .arg("-czf")
         .arg(&archive)
         .arg("-C")
@@ -173,6 +175,7 @@ async fn rerun(args: &[String], cwd: &Path) -> String {
     };
     let mut command = tokio::process::Command::new(exe);
     command
+        .no_window()
         .arg("-vv")
         .args(args)
         .current_dir(cwd)

@@ -16,6 +16,8 @@ use std::{
     process::{Command, Stdio},
 };
 
+use devlanes_sys::NoWindow;
+
 /// What the new terminal window or tab should run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchRequest {
@@ -167,7 +169,11 @@ impl Invocation {
     /// Runs the helper with no inherited stdio, so it cannot draw over the TUI.
     pub fn run(&self) -> Result<(), LaunchError> {
         let mut command = Command::new(&self.program);
+        // Windows Terminal (`wt.exe`) and `wezterm-gui` are GUI programs, which
+        // the flag does not affect; it only keeps a console launcher such as
+        // `wezterm.exe` from flashing a console next to the terminal it opens.
         command
+            .no_window()
             .args(&self.args)
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::null())

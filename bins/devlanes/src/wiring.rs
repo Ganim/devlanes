@@ -23,10 +23,11 @@ use devlanes_daemon::{
     integrations::{
         InfraContainer, InfraError, InfraEvent, InfraPortNeed, InfraProvider, InfraSpec, InfraUp,
         Integrations, LaunchCheck, ManagedUnit, PlannedUnit, PortInspector, PortScope, PresetEntry,
-        RouteEntry, RouteSink, RouteStatus, SysProcesses, UnitRunner, unavailable,
+        RouteEntry, RouteSink, RouteStatus, UnitRunner, unavailable,
     },
 };
 use devlanes_proto::RpcError;
+use devlanes_sys::NoWindow;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -128,7 +129,7 @@ pub async fn engine(
     integ.routes = routes;
     integ.metrics = metrics_sources();
     integ.ports = Arc::new(SysPorts);
-    integ.processes = Arc::new(SysProcesses);
+    integ.processes = crate::orphans::process_table();
     integ.shell = devlanes_daemon::integrations::detect_shell().await;
     integ.ca_env = ca_env;
     integ.ca_status = ca_status;
@@ -473,6 +474,7 @@ async fn certificate_authority_with(
         devlanes_config::CaKind::Devlanes => None,
         devlanes_config::CaKind::Mkcert => {
             let output = tokio::process::Command::new(mkcert)
+                .no_window()
                 .arg("-CAROOT")
                 .stdin(std::process::Stdio::null())
                 .output()

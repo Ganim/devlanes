@@ -23,6 +23,7 @@ pub use devlanes_core::ProcessIdentity;
 #[cfg(unix)]
 pub use rustix::process::Signal;
 
+mod command;
 mod file;
 mod rlimit;
 mod snapshot;
@@ -58,6 +59,7 @@ use windows as os;
 #[path = "darwin.rs"]
 pub mod macos;
 
+pub use command::NoWindow;
 pub use file::{
     FileIdentity, file_identity, path_identity, remove_file_retrying, rename_retrying, retrying,
 };

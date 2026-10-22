@@ -52,6 +52,42 @@ extern "system" fn visit(window: HWND, state: LPARAM) -> BOOL {
     1
 }
 
+/// A visible top-level window and the process that owns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TopWindow {
+    /// The window handle as a number; only compared, never used to reach the window.
+    pub handle: isize,
+    pub pid: u32,
+}
+
+/// Every visible top-level window on the caller's desktop. Tests use it to check
+/// that devlanes opens no console windows.
+pub fn visible_windows() -> Vec<TopWindow> {
+    let mut found: Vec<TopWindow> = Vec::new();
+    // SAFETY: the callback only runs during this call, so the pointer to `found`
+    // stays valid; a FALSE return means only that enumeration ended.
+    unsafe { EnumWindows(Some(collect), (&raw mut found) as LPARAM) };
+    found
+}
+
+/// Adds `window` to the list when it is visible.
+extern "system" fn collect(window: HWND, state: LPARAM) -> BOOL {
+    // SAFETY: `state` is the vector `visible_windows` passed, alive and not used
+    // elsewhere while the enumeration runs.
+    let found = unsafe { &mut *(state as *mut Vec<TopWindow>) };
+    // SAFETY: plain query on an enumerated window.
+    if unsafe { IsWindowVisible(window) } != 0 {
+        let mut pid = 0;
+        // SAFETY: `window` comes from the enumeration; `pid` is writable.
+        unsafe { GetWindowThreadProcessId(window, &raw mut pid) };
+        found.push(TopWindow {
+            handle: window as isize,
+            pid,
+        });
+    }
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +97,12 @@ mod tests {
     fn closes_only_listed_processes() {
         assert_eq!(close_windows(&[]), 0);
         assert_eq!(close_windows(&[std::process::id()]), 0);
+    }
+
+    /// This test process owns no visible window, whatever else the desktop shows.
+    #[test]
+    fn lists_visible_windows() {
+        let own = std::process::id();
+        assert!(visible_windows().iter().all(|window| window.pid != own));
     }
 }

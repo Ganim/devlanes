@@ -1096,6 +1096,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
+ "devlanes-sys",
  "devlanes-testing",
  "serde_json",
  "tempfile",
@@ -1109,6 +1110,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
+ "devlanes-sys",
  "devlanes-testing",
  "serde_json",
  "tempfile",
@@ -1121,6 +1123,7 @@ name = "devlanes-git"
 version = "0.1.0"
 dependencies = [
  "devlanes-core",
+ "devlanes-sys",
  "dunce",
  "notify",
  "serde",
@@ -1140,6 +1143,7 @@ dependencies = [
 name = "devlanes-infra-compose"
 version = "0.1.0"
 dependencies = [
+ "devlanes-sys",
  "serde",
  "serde_json",
  "tempfile",
@@ -1585,6 +1589,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
+ "devlanes-sys",
  "devlanes-testing",
  "serde",
  "serde_json",
@@ -1657,6 +1662,7 @@ name = "devlanes-term"
 version = "0.1.0"
 dependencies = [
  "devlanes-proto",
+ "devlanes-sys",
  "serde",
  "serde_json",
  "tempfile",
@@ -1764,6 +1770,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "devlanes-pki",
+ "devlanes-sys",
  "hex",
  "rcgen",
  "rustls-pki-types",

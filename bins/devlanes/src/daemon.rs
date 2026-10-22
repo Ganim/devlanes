@@ -56,6 +56,9 @@ pub fn run() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // Set once the server runs; told below when the shutdown has finished.
+    let session_end = std::sync::OnceLock::new();
+    let session_slot = &session_end;
     let code = tokio.block_on(async move {
         let options = Options {
             home: paths.home.clone(),
@@ -98,6 +101,7 @@ pub fn run() -> ExitCode {
             "daemon started"
         );
         watch_signals(server.shutdown_token());
+        let _ = session_slot.set(SessionEnd::watch(server.shutdown_token()));
         // Taken by whichever comes first: readiness, or a failed reconcile.
         let readiness = std::sync::Mutex::new(Some(readiness));
         let take = || readiness.lock().ok().and_then(|mut slot| slot.take());
@@ -120,7 +124,81 @@ pub fn run() -> ExitCode {
     // Dropping the runtime waits for every spawn_blocking task (git, getaddrinfo, file
     // watchers), which can keep a stopped daemon alive indefinitely; bound the wait.
     tokio.shutdown_timeout(std::time::Duration::from_secs(5));
+    if let Some(session_end) = session_end.get() {
+        session_end.finished();
+    }
     ExitCode::from(code)
+}
+
+/// Logoff and shutdown on Windows: a detached daemon gets no console events, so
+/// a hidden window (`devlanes_sys::windows::session`) hears `WM_ENDSESSION`
+/// and starts the same graceful shutdown as `daemon stop`. Windows ends the
+/// process soon after that message is answered, so the answer waits until the
+/// shutdown finished, at most [`SessionEnd::WAIT`].
+#[cfg(windows)]
+struct SessionEnd {
+    finished: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    /// Keeps the window and its thread alive.
+    _watch: Option<devlanes_sys::windows::session::SessionWatch>,
+}
+
+#[cfg(windows)]
+impl SessionEnd {
+    /// Longest the session-end answer waits for units to stop and state to
+    /// close; Windows may end the process on its own before that.
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Starts the window; without one, logoff ends the daemon without a shutdown
+    /// and the next start reconciles.
+    fn watch(shutdown: CancellationToken) -> Self {
+        let finished =
+            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let waiting = std::sync::Arc::clone(&finished);
+        let watch = devlanes_sys::windows::session::watch(move |end| {
+            tracing::info!(reason = ?end, "the session ends; shutting down");
+            shutdown.cancel();
+            let (done, changed) = &*waiting;
+            let Ok(guard) = done.lock() else {
+                return;
+            };
+            let _ = changed.wait_timeout_while(guard, Self::WAIT, |done| !*done);
+        });
+        let watch = match watch {
+            Ok(watch) => Some(watch),
+            Err(error) => {
+                tracing::warn!(%error, "no session-end window; logoff ends the daemon without a shutdown");
+                None
+            }
+        };
+        Self {
+            finished,
+            _watch: watch,
+        }
+    }
+
+    /// Lets a waiting session-end answer return: units stopped, state closed.
+    fn finished(&self) {
+        let (done, changed) = &*self.finished;
+        if let Ok(mut done) = done.lock() {
+            *done = true;
+        }
+        changed.notify_all();
+    }
+}
+
+/// Logout reaches the Unix daemon as SIGTERM, which [`watch_signals`] handles.
+#[cfg(unix)]
+struct SessionEnd;
+
+#[cfg(unix)]
+impl SessionEnd {
+    /// Nothing to watch.
+    fn watch(_: CancellationToken) -> Self {
+        Self
+    }
+
+    /// Nothing waits.
+    fn finished(&self) {}
 }
 
 /// SIGTERM and SIGINT (a service manager, logout, `kill`) shut the daemon down
@@ -269,26 +347,260 @@ pub async fn uninstall(runtime: &Runtime) -> Result<u8, RpcError> {
     Ok(0)
 }
 
-/// `daemon install` on Windows: refused until the daemon can start at logon there.
+/// Whether the daemon starts at login, for `daemon status` and `doctor`; `None`
+/// on Unix, where `daemon install` writes a service file those do not check.
+#[cfg(unix)]
+pub async fn autostart(_paths: &Paths) -> Option<serde_json::Value> {
+    None
+}
+
+/// `daemon install` on Windows: a logon entry in the user's `Run` key that starts
+/// the daemon through `devlanesw.exe`, which has no console window, then the
+/// daemon itself if none runs, as the Unix services start at once.
 #[cfg(windows)]
 pub async fn install(_: &Runtime) -> Result<u8, RpcError> {
-    Err(service_unsupported())
+    let paths = Paths::discover()
+        .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
+    let entry = logon::RunEntry::user();
+    let launcher = logon::launcher().map_err(io)?;
+    let shown = entry.to_string();
+    let home = paths.home.clone();
+    tokio::task::spawn_blocking(move || logon::install(&entry, &launcher, &home))
+        .await
+        .map_err(|error| io(std::io::Error::other(error)))??;
+    println!("installed {shown}");
+    // The client's own spawn: it leaves the terminal's job when it can and passes
+    // only the allowed environment, which a launcher started from here would not.
+    devlanes_client::Client::connect_or_spawn(&paths)
+        .await
+        .map_err(crate::driver::rpc_error)?;
+    Ok(0)
 }
 
-/// `daemon uninstall` on Windows: refused, since `install` installs nothing yet.
+/// `daemon uninstall` on Windows: removes the logon entry (the running daemon
+/// keeps running).
 #[cfg(windows)]
 pub async fn uninstall(_: &Runtime) -> Result<u8, RpcError> {
-    Err(service_unsupported())
+    let entry = logon::RunEntry::user();
+    let shown = entry.to_string();
+    tokio::task::spawn_blocking(move || logon::uninstall(&entry))
+        .await
+        .map_err(|error| io(std::io::Error::other(error)))?
+        .map_err(io)?;
+    println!("removed {shown}");
+    Ok(0)
 }
 
-/// The error for `daemon install`/`uninstall` on Windows.
+/// Whether the daemon starts at logon: `{installed, entry, command?, current}`.
+/// `current` is false when the entry names another devlanes or home, so
+/// `daemon install` would rewrite it.
 #[cfg(windows)]
-fn service_unsupported() -> RpcError {
-    RpcError::new(
-        "not_supported_yet",
-        json!({"feature": "daemon install on Windows"}),
-        1,
-    )
+pub async fn autostart(paths: &Paths) -> Option<serde_json::Value> {
+    let home = paths.home.clone();
+    tokio::task::spawn_blocking(move || {
+        let expected = logon::launcher()
+            .ok()
+            .and_then(|launcher| logon::command_line(&launcher, &home).ok());
+        logon::report(&logon::RunEntry::user(), expected.as_deref())
+    })
+    .await
+    .ok()
+}
+
+/// The Windows logon entry: a `REG_SZ` value in the user's `Run` key holding
+/// `"<dir>\devlanesw.exe" --home "<home>"`. One entry per user, like the Unix
+/// services, for the home `daemon install` ran with.
+#[cfg(windows)]
+mod logon {
+    use std::path::{Path, PathBuf};
+
+    use devlanes_proto::RpcError;
+    use devlanes_sys::windows::registry;
+    use serde_json::{Value, json};
+
+    /// The launcher's file name, next to `devlanes.exe`.
+    const LAUNCHER: &str = "devlanesw.exe";
+
+    /// A registry value under `HKEY_CURRENT_USER`; tests use a scratch key so
+    /// they never touch the real `Run` key.
+    #[derive(Debug, Clone)]
+    pub(super) struct RunEntry {
+        pub(super) key: String,
+        pub(super) name: String,
+    }
+
+    impl RunEntry {
+        /// `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `devlanes`,
+        /// which Explorer runs at logon.
+        pub(super) fn user() -> Self {
+            Self {
+                key: r"Software\Microsoft\Windows\CurrentVersion\Run".into(),
+                name: "devlanes".into(),
+            }
+        }
+    }
+
+    impl std::fmt::Display for RunEntry {
+        /// `HKCU\<key>\<name>`, as `install` and `uninstall` print it.
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, r"HKCU\{}\{}", self.key, self.name)
+        }
+    }
+
+    /// `devlanesw.exe` next to this executable; installing without it would
+    /// leave an entry that starts nothing.
+    pub(super) fn launcher() -> std::io::Result<PathBuf> {
+        let launcher = std::env::current_exe()?.with_file_name(LAUNCHER);
+        if launcher.is_file() {
+            Ok(launcher)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "{} is missing; reinstall devlanes so the launcher sits next to devlanes.exe",
+                    launcher.display()
+                ),
+            ))
+        }
+    }
+
+    /// `"<launcher>" --home "<home>"`, quoted so Windows splits it back into
+    /// exactly these arguments.
+    pub(super) fn command_line(launcher: &Path, home: &Path) -> Result<String, RpcError> {
+        Ok(format!("{} --home {}", quote(launcher)?, quote(home)?))
+    }
+
+    /// One argument in double quotes, with the backslash rules of the Microsoft
+    /// C runtime (and Rust's `args`): backslashes before a quote, or before the
+    /// closing quote (`C:\`), are doubled.
+    fn quote(path: &Path) -> Result<String, RpcError> {
+        let text = path.to_str().ok_or_else(|| {
+            RpcError::new(
+                "io",
+                json!({"message": format!("{} is not valid Unicode", path.display())}),
+                1,
+            )
+        })?;
+        let mut quoted = String::from('"');
+        let mut backslashes = 0;
+        for c in text.chars() {
+            match c {
+                '\\' => backslashes += 1,
+                // Windows paths cannot hold quotes; escaped all the same.
+                '"' => {
+                    quoted.push_str(&"\\".repeat(backslashes + 1));
+                    backslashes = 0;
+                }
+                _ => backslashes = 0,
+            }
+            quoted.push(c);
+        }
+        quoted.push_str(&"\\".repeat(backslashes));
+        quoted.push('"');
+        Ok(quoted)
+    }
+
+    /// Writes the entry for `launcher` and `home`. Blocking.
+    pub(super) fn install(entry: &RunEntry, launcher: &Path, home: &Path) -> Result<(), RpcError> {
+        let command = command_line(launcher, home)?;
+        registry::write_string(&entry.key, &entry.name, &command).map_err(|error| {
+            RpcError::new(
+                "service_install_failed",
+                json!({"command": entry.to_string(), "message": error.to_string()}),
+                1,
+            )
+        })
+    }
+
+    /// Removes the entry; a missing one is fine. Blocking.
+    pub(super) fn uninstall(entry: &RunEntry) -> std::io::Result<()> {
+        registry::delete_value(&entry.key, &entry.name).map(drop)
+    }
+
+    /// `{installed, entry, command?, current}` for `entry`; `current` compares
+    /// with `expected`, the command `install` would write now. Blocking.
+    pub(super) fn report(entry: &RunEntry, expected: Option<&str>) -> Value {
+        match registry::read_string(&entry.key, &entry.name) {
+            Ok(Some(command)) => json!({
+                "installed": true,
+                "entry": entry.to_string(),
+                "command": command,
+                "current": expected.is_some_and(|expected| expected == command),
+            }),
+            Ok(None) => json!({"installed": false, "entry": entry.to_string(), "current": false}),
+            Err(error) => json!({
+                "installed": null,
+                "entry": entry.to_string(),
+                "current": false,
+                "error": error.to_string(),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A scratch key under `HKCU\Software`, deleted when dropped, so tests
+        /// never touch the real `Run` key.
+        struct Scratch(RunEntry);
+
+        impl Scratch {
+            fn new() -> Self {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.subsec_nanos())
+                    .unwrap_or_default();
+                Self(RunEntry {
+                    key: format!(r"Software\devlanes-test-{}-{nanos}", std::process::id()),
+                    name: "devlanes".into(),
+                })
+            }
+        }
+
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = registry::delete_tree(&self.0.key);
+            }
+        }
+
+        /// Install writes the quoted command, the report sees it as current, a
+        /// different home is not current, and uninstall removes it (twice is fine).
+        #[test]
+        fn installs_reports_and_removes_the_entry() {
+            let scratch = Scratch::new();
+            let launcher = Path::new(r"C:\Program Files\devlanes\devlanesw.exe");
+            let home = Path::new(r"C:\Users\a b\.devlanes");
+            let expected = command_line(launcher, home).expect("command");
+            assert_eq!(
+                expected,
+                r#""C:\Program Files\devlanes\devlanesw.exe" --home "C:\Users\a b\.devlanes""#
+            );
+            assert_eq!(report(&scratch.0, Some(&expected))["installed"], false);
+            install(&scratch.0, launcher, home).expect("install");
+            let installed = report(&scratch.0, Some(&expected));
+            assert_eq!(installed["installed"], true, "{installed}");
+            assert_eq!(installed["command"], expected.as_str());
+            assert_eq!(installed["current"], true);
+            let other = command_line(launcher, Path::new(r"C:\other")).expect("command");
+            assert_eq!(report(&scratch.0, Some(&other))["current"], false);
+            uninstall(&scratch.0).expect("uninstall");
+            uninstall(&scratch.0).expect("uninstall again");
+            assert_eq!(report(&scratch.0, Some(&expected))["installed"], false);
+        }
+
+        /// A drive root keeps its backslash: `"C:\\"` reads back as `C:\`, not as
+        /// an escaped quote.
+        #[test]
+        fn trailing_backslashes_survive_quoting() {
+            assert_eq!(quote(Path::new(r"C:\")).expect("quoted"), r#""C:\\""#);
+            assert_eq!(quote(Path::new(r"C:\x")).expect("quoted"), r#""C:\x""#);
+            assert_eq!(
+                quote(Path::new(r"C:\x\\")).expect("quoted"),
+                r#""C:\x\\\\""#
+            );
+        }
+    }
 }
 
 /// Unloads the launchd agent at `path`.
@@ -504,6 +816,39 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), shutdown.cancelled())
             .await
             .expect("shutdown requested");
+    }
+
+    /// Logoff starts the graceful shutdown, and the answer to Windows waits until
+    /// the daemon says the shutdown finished.
+    #[cfg(windows)]
+    #[test]
+    fn session_end_shuts_down_and_waits() {
+        use std::time::{Duration, Instant};
+        let shutdown = CancellationToken::new();
+        let session = SessionEnd::watch(shutdown.clone());
+        let window = session._watch.as_ref().expect("session window");
+        std::thread::scope(|scope| {
+            let answer = scope.spawn(|| {
+                window.simulate(
+                    devlanes_sys::windows::session::SessionEnd::Logoff,
+                    Duration::from_secs(20),
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !shutdown.is_cancelled() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(shutdown.is_cancelled(), "logoff did not start the shutdown");
+            assert!(
+                !answer.is_finished(),
+                "answered before the shutdown finished"
+            );
+            session.finished();
+            answer
+                .join()
+                .expect("answer thread")
+                .expect("the window answered");
+        });
     }
 
     #[test]

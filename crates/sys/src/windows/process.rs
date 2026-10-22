@@ -32,6 +32,14 @@ pub const CREATE_BREAKAWAY_FROM_JOB: u32 =
 /// by a process that has none, so no window flashes.
 pub const CREATE_NO_WINDOW: u32 = windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
+/// Whether this process is attached to a console. Children of a process without
+/// one get a console of their own, with a window unless [`CREATE_NO_WINDOW`] is set.
+pub fn has_console() -> bool {
+    use windows_sys::Win32::System::Console::GetConsoleCP;
+    // SAFETY: plain query; it fails (returns 0) when no console is attached.
+    unsafe { GetConsoleCP() != 0 }
+}
+
 /// Clears the inherited "ignore Ctrl-C" flag, so processes this one starts receive
 /// Ctrl-C again.
 ///

@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 devlanes-core = { path = "../core" }
+devlanes-sys = { path = "../sys" }
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

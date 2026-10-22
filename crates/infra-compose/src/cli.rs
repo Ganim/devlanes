@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use devlanes_sys::NoWindow;
 use serde::Deserialize;
 use tokio::process::Command;
 
@@ -317,6 +318,7 @@ impl ComposeCli {
     ) -> Result<std::process::Output, Error> {
         let mut command = Command::new(&self.program);
         command
+            .no_window()
             .args(args)
             .current_dir(cwd)
             .stdin(Stdio::null())

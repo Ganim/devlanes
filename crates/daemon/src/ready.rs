@@ -236,11 +236,12 @@ async fn cmd_succeeds(
 #[cfg(unix)]
 mod os {
     use devlanes_core::shell::Shell;
+    use devlanes_sys::NoWindow;
 
     /// `<shell> <args> <command>`.
     pub(super) fn shell_command(shell: &Shell, command: &str) -> tokio::process::Command {
         let mut process = tokio::process::Command::new(&shell.program);
-        process.args(&shell.args).arg(command);
+        process.no_window().args(&shell.args).arg(command);
         process
     }
 }
@@ -248,10 +249,7 @@ mod os {
 #[cfg(windows)]
 mod os {
     use devlanes_core::shell::{Shell, ShellKind};
-
-    /// `CREATE_NO_WINDOW`: the daemon has no console, so a console program
-    /// would otherwise open a window for every probe attempt.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    use devlanes_sys::NoWindow;
 
     /// `<shell> <args> <command>`. `cmd.exe` does not undo the `\"` escaping
     /// std applies, so its text goes verbatim inside the quotes `/s` strips.
@@ -262,7 +260,8 @@ mod os {
             ShellKind::Posix => process.arg(command),
             ShellKind::Cmd => process.raw_arg(format!("\"{command}\"")),
         };
-        process.creation_flags(CREATE_NO_WINDOW);
+        // The daemon has no console, so each probe attempt would open a window.
+        process.no_window();
         process
     }
 }

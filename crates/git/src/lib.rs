@@ -1,6 +1,7 @@
 //! Git worktree discovery preserves administration identities across directory moves.
 
 use devlanes_core::paths::{same_path, slash_joined, strip_path_prefix};
+use devlanes_sys::NoWindow;
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -83,7 +84,7 @@ pub async fn find_config(cwd: &Path) -> Result<Option<PathBuf>, Error> {
 
 /// Returns `None` for an ordinary non-Git directory; other failures remain errors.
 pub async fn discover(cwd: &Path, primary: Option<&str>) -> Result<Option<Repository>, Error> {
-    let probe = Command::new("git")
+    let probe = git_command()
         .args(["-C"])
         .arg(cwd)
         .args(["rev-parse", "--show-toplevel"])
@@ -176,7 +177,7 @@ pub async fn has_git_link(path: &Path) -> Result<bool, Error> {
 /// when its `.git` entry is gone, also when it vanished after [`has_git_link`]
 /// found it.
 async fn admin_dir(path: &Path) -> Result<Option<PathBuf>, Error> {
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command
         .arg("-C")
         .arg(path)
@@ -250,7 +251,7 @@ pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>, Error> {
 /// Branch names are passed after an option boundary and never interpreted by a shell.
 pub async fn add(root: &Path, destination: &Path, branch: &str) -> Result<(), Error> {
     git(root, &["check-ref-format", "--branch", branch]).await?;
-    let exists = Command::new("git")
+    let exists = git_command()
         .arg("-C")
         .arg(root)
         .args([
@@ -263,7 +264,7 @@ pub async fn add(root: &Path, destination: &Path, branch: &str) -> Result<(), Er
         .status()
         .await?
         .success();
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command.arg("-C").arg(root).args(["worktree", "add"]);
     if !exists {
         command.args(["-b", branch]);
@@ -354,9 +355,16 @@ async fn default_branch(root: &Path) -> Result<String, Error> {
     Ok("main".into())
 }
 
+/// `git`, without a console window when the daemon runs it.
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    command.no_window();
+    command
+}
+
 /// Helper subprocesses use Tokio's own reaping independently of managed units.
 async fn git(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, Error> {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(cwd)
         .args(args)

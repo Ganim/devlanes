@@ -6,7 +6,7 @@ use devlanes_proto::{Event, LogLine, Method, RpcError, events};
 use serde_json::Value;
 
 use super::{
-    Ctx, Outcome, bytes, cap_line, clean, compact_fields, display_value, duration, int,
+    Ctx, Outcome, bytes, cap_line, clean, compact_fields, display_value, duration, exit_field, int,
     leftover_notes_of, list, percent, plural, table, tail_lines, text, tree, words,
 };
 use crate::Hint;
@@ -159,7 +159,7 @@ pub(super) fn run(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             cx.state(if failed { "failed" } else { "exited" })
         );
         if let Some(code) = int(data, "exit_code") {
-            line.push_str(&format!(" exit={code}"));
+            line.push_str(&exit_field(code));
         }
         let mut lines = vec![line];
         for leftovers in list(data, "leftovers") {
@@ -468,7 +468,7 @@ pub(crate) fn event_line(event: &Event) -> String {
                 text(data, "state")
             );
             if let Some(code) = int(data, "exit_code") {
-                line.push_str(&format!(" exit={code}"));
+                line.push_str(&exit_field(code));
             }
             line
         }
@@ -561,9 +561,7 @@ pub(super) fn task_line(data: &Value, cx: &Ctx<'_>) -> Option<String> {
         "failed" => Some(format!(
             "{} {task}{}",
             cx.mark(Outcome::Fail),
-            int(data, "exit_code")
-                .map(|code| format!(" exit={code}"))
-                .unwrap_or_default()
+            int(data, "exit_code").map(exit_field).unwrap_or_default()
         )),
         "skipped" => Some(cx.skipped(&task, data.get("reason").and_then(reason_text).as_deref())),
         _ => None,
@@ -742,6 +740,7 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
         )
         .fix("devlanes start, or devlanes daemon restart")
     }];
+    checks.extend(autostart_check(&data["autostart"]));
     checks.extend(home_checks(&data["home_check"]));
     match (
         int(data, "schema_version"),
@@ -1439,7 +1438,42 @@ pub(super) fn daemon_status(data: &Value) -> Vec<String> {
     if data.get("socket").is_some() {
         lines.push(format!("socket: {}", display_value(&data["socket"])));
     }
+    if let Some(check) = autostart_check(&data["autostart"]) {
+        lines.push(format!("logon: {}", check.text));
+    }
     lines
+}
+
+/// The logon entry (`autostart: {installed, entry, command?, current}`, reported
+/// on Windows), for `daemon status` and `doctor`. `None` without the facts.
+fn autostart_check(autostart: &Value) -> Option<Check> {
+    let entry = text(autostart, "entry");
+    let check = match autostart.get("installed").and_then(Value::as_bool) {
+        Some(true) if autostart.get("current").and_then(Value::as_bool) == Some(true) => {
+            Check::new("daemon", Outcome::Ok, format!("starts at logon ({entry})"))
+        }
+        Some(true) => Check::new(
+            "daemon",
+            Outcome::Skip,
+            format!(
+                "starts at logon with another devlanes or home: {}",
+                text(autostart, "command")
+            ),
+        )
+        .fix("devlanes daemon install"),
+        Some(false) => Check::new(
+            "daemon",
+            Outcome::Ok,
+            "does not start at logon (devlanes daemon install adds that)",
+        ),
+        None if autostart.is_object() => Check::new(
+            "daemon",
+            Outcome::Skip,
+            format!("cannot read {entry}: {}", text(autostart, "error")),
+        ),
+        None => return None,
+    };
+    Some(check)
 }
 
 /// `daemon stop`.

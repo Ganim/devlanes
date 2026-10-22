@@ -115,6 +115,13 @@ impl ConsoleHelper {
         })
     }
 
+    /// Sends Ctrl-Break to every process attached to `pid`'s console, the
+    /// graceful stop for `SIGTERM`; `true` when the event went out. For processes
+    /// no runner supervises any more (a previous daemon's orphans). Blocking.
+    pub fn ask_to_stop(&self, pid: u32) -> bool {
+        self.send(pid, Request::CtrlBreak).is_ok()
+    }
+
     /// Sends Ctrl-C or Ctrl-Break to `pid`'s console. Blocking.
     pub(crate) fn send(&self, pid: u32, request: Request) -> Result<(), HelperError> {
         self.run(pid, request).map(drop)

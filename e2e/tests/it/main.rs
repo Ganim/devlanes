@@ -12,6 +12,8 @@ mod lanes;
 mod lifecycle;
 mod proxy;
 mod tasks;
+#[cfg(windows)]
+mod windows;
 mod with;
 mod worktrees;
 

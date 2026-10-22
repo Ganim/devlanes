@@ -16,6 +16,7 @@ use std::{
 
 use async_trait::async_trait;
 use devlanes_core::contrib::{SecretEnv, SecretsError, SecretsProvider, SecretsRequest};
+use devlanes_sys::NoWindow;
 use serde::Deserialize;
 
 /// Config files that make fnox apply to a worktree without an explicit `fnox:` key.
@@ -165,6 +166,7 @@ impl SecretsProvider for FnoxProvider {
         }
         let mut command = tokio::process::Command::new(&self.program);
         command
+            .no_window()
             .args(Self::args(request.profile))
             .current_dir(request.worktree)
             .env_clear()

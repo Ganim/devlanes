@@ -11,6 +11,7 @@ use std::{
 };
 
 use devlanes_proto::release::{ReleaseCheck, UpdateInfo, Version, is_newer};
+use devlanes_sys::NoWindow;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -273,6 +274,7 @@ async fn fetch_latest(url: &str, timeout: Duration) -> Result<String, String> {
     let output = tokio::time::timeout(
         timeout + Duration::from_secs(1),
         tokio::process::Command::new("curl")
+            .no_window()
             .args(["-fsSL", "--max-time", &seconds, "--proto", protocols])
             .args(["--proto-redir", protocols, "--max-filesize", "65536", url])
             .stdin(Stdio::null())

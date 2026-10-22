@@ -292,6 +292,9 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
                 .map_err(rpc_error)?;
             if data.is_object() {
                 data["running"] = json!(true);
+                if let Some(autostart) = crate::daemon::autostart(&paths).await {
+                    data["autostart"] = autostart;
+                }
             }
             render_result(runtime, Method::DaemonStatus, &data, None)
         }
@@ -470,7 +473,8 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                 client
             }
             Err(error) if error.is_not_running() => {
-                let rendered = daemon_not_running(runtime, &paths);
+                let autostart = crate::daemon::autostart(&paths).await;
+                let rendered = daemon_not_running(runtime, &paths, autostart);
                 emit(&rendered);
                 return Ok(rendered.exit_code);
             }
@@ -483,6 +487,9 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                 let mut data = crate::local_doctor::facts(&paths).await;
                 crate::notices::annotate_doctor(None, &mut data).await;
                 crate::local_doctor::annotate_terminal(&mut data);
+                if let Some(autostart) = crate::daemon::autostart(&paths).await {
+                    data["autostart"] = autostart;
+                }
                 return render_result(runtime, Method::Doctor, &data, None);
             }
             Err(error) => return Err(rpc_error(error)),
@@ -547,6 +554,9 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                             if method == Method::Doctor {
                                 crate::notices::annotate_doctor(Some(&mut client), &mut data).await;
                                 crate::local_doctor::annotate_terminal(&mut data);
+                                if let Some(autostart) = crate::daemon::autostart(&paths).await {
+                                    data["autostart"] = autostart;
+                                }
                                 // Trust stores belong to this user and machine, so the
                                 // CLI checks them, not the daemon.
                                 if data.get("ca").is_some_and(Value::is_object) {
@@ -556,6 +566,9 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                             // The counterpart of the not-running answer's `false`.
                             if method == Method::DaemonStatus && data.is_object() {
                                 data["running"] = json!(true);
+                                if let Some(autostart) = crate::daemon::autostart(&paths).await {
+                                    data["autostart"] = autostart;
+                                }
                             }
                             // The budget hid the end of a failed task's output: show its tail.
                             if let Some(stream) = &log_stream
@@ -678,14 +691,18 @@ async fn interrupted(
 }
 
 /// `daemon status` when no daemon answers: said so in the mode's form, exit 1.
-/// Nothing is started; the socket and home say where devlanes looked.
-fn daemon_not_running(runtime: &Runtime, paths: &Paths) -> Rendered {
+/// Nothing is started; the socket and home say where devlanes looked. JSON also
+/// carries `autostart` where the platform reports it (Windows).
+fn daemon_not_running(runtime: &Runtime, paths: &Paths, autostart: Option<Value>) -> Rendered {
     let socket = paths.socket.display().to_string();
     let stdout = match runtime.mode {
-        devlanes_cli::OutputMode::Json => format!(
-            "{}\n",
-            json!({"running": false, "socket": socket, "home": paths.home})
-        ),
+        devlanes_cli::OutputMode::Json => {
+            let mut data = json!({"running": false, "socket": socket, "home": paths.home});
+            if let Some(autostart) = autostart {
+                data["autostart"] = autostart;
+            }
+            format!("{data}\n")
+        }
         devlanes_cli::OutputMode::Agent => format!("stopped daemon socket={socket}\n"),
         _ => format!(
             "daemon is not running (socket {socket}); devlanes start or devlanes daemon restart starts it\n"
@@ -1181,20 +1198,25 @@ mod tests {
             let cli = Cli::parse_from(["devlanes", "--output", name]);
             Runtime::resolve(&cli, devlanes_cli::Signals::default()).expect("runtime")
         };
-        let json = daemon_not_running(&mode("json"), &paths);
+        let json = daemon_not_running(&mode("json"), &paths, None);
         assert_eq!(json.exit_code, 1);
         let value: Value = serde_json::from_str(&json.stdout).expect("json");
         assert_eq!(value["running"], false);
         assert_eq!(value["socket"], socket);
         assert_eq!(value["home"], home);
+        assert_eq!(value.get("autostart"), None);
+        let autostart = json!({"installed": false});
+        let json = daemon_not_running(&mode("json"), &paths, Some(autostart.clone()));
+        let value: Value = serde_json::from_str(&json.stdout).expect("json");
+        assert_eq!(value["autostart"], autostart);
         assert_eq!(
-            daemon_not_running(&mode("plain"), &paths).stdout,
+            daemon_not_running(&mode("plain"), &paths, None).stdout,
             format!(
                 "daemon is not running (socket {socket}); devlanes start or devlanes daemon restart starts it\n"
             )
         );
         assert_eq!(
-            daemon_not_running(&mode("agent"), &paths).stdout,
+            daemon_not_running(&mode("agent"), &paths, None).stdout,
             format!("stopped daemon socket={socket}\n")
         );
     }

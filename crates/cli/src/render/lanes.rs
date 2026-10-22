@@ -5,8 +5,8 @@ use devlanes_proto::{LaneSummary, RpcError, StartResult, UnitFailureData, UnitSu
 use serde_json::Value;
 
 use super::{
-    Ctx, Outcome, bytes, cap_line, clean, display_value, int, leftover_notes, leftover_notes_of,
-    list, percent, plural, table, tail_lines, text, tree, words,
+    Ctx, INTERRUPTED, Outcome, bytes, cap_line, clean, ctrl_c_exit, display_value, exit_field, int,
+    leftover_notes, leftover_notes_of, list, percent, plural, table, tail_lines, text, tree, words,
 };
 use crate::Hint;
 
@@ -69,7 +69,7 @@ pub(crate) fn unit_line(unit: &UnitSummary, cx: &Ctx<'_>) -> String {
         line.push_str(&format!(" {place}"));
     }
     if let Some(code) = unit.exit_code {
-        line.push_str(&format!(" exit={code}"));
+        line.push_str(&exit_field(code));
     }
     if orphaned(unit)
         && let Some(pid) = unit.pid
@@ -300,7 +300,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
         for (name, failure, unit) in &view.failed {
             let mut line = format!("failed {}", clean(name));
             if let Some(code) = failure_exit(*failure, *unit) {
-                line.push_str(&format!(" exit={code}"));
+                line.push_str(&exit_field(code));
             }
             lines.push(line);
             if let Some(reason) = failure_reason(*failure, *unit) {
@@ -384,6 +384,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
     let mut rows = Vec::new();
     for (name, failure, unit) in &view.failed {
         let mut detail = match failure_exit(*failure, *unit) {
+            Some(code) if ctrl_c_exit(code) => INTERRUPTED.into(),
             Some(code) => format!("exited {code}"),
             None => failure_reason(*failure, *unit)
                 .map(row_reason)
@@ -553,7 +554,7 @@ pub(super) fn stop(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
                 clean(&unit.name)
             );
             if let Some(code) = unit.exit_code.filter(|code| *code != 0) {
-                line.push_str(&format!(" exit={code}"));
+                line.push_str(&exit_field(code));
             }
             // A stopped orphan keeps `orphaned_since_ms`.
             if unit.orphaned_since_ms.is_some() {
@@ -880,7 +881,11 @@ fn unit_table(lane: &LaneSummary, cx: &Ctx<'_>) -> Vec<String> {
         let ports: Vec<String> = unit.ports.values().map(u16::to_string).collect();
         let mut state = state_label(unit);
         if let Some(code) = unit.exit_code.filter(|_| unit.state == "failed") {
-            state.push_str(&format!(" ({code})"));
+            if ctrl_c_exit(code) {
+                state.push_str(" (Ctrl-C)");
+            } else {
+                state.push_str(&format!(" ({code})"));
+            }
         }
         rows.push(vec![
             cx.unit_name(&clean(&unit.name), &unit.state, unit.color.as_deref()),
@@ -1003,9 +1008,10 @@ pub(super) fn lane_clean(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         } else if let Some(code) = int(entry, "exit_code").filter(|code| *code != 0) {
             let note = if ignored { " (ignored)" } else { "" };
             lines.push(format!(
-                "  {} {} exit={code}{note}",
+                "  {} {}{}{note}",
                 cx.state("failed"),
-                text(entry, key)
+                text(entry, key),
+                exit_field(code)
             ));
         }
     }
@@ -1072,7 +1078,7 @@ pub(super) fn wait(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
     };
     let mut line = format!("{} {target}", cx.state(word));
     if let Some(code) = int(data, "exit_code") {
-        line.push_str(&format!(" exit={code}"));
+        line.push_str(&exit_field(code));
     }
     let mut lines = vec![line];
     match word {
@@ -1131,7 +1137,7 @@ pub(super) fn errors(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         let (lane, unit) = (text(item, "lane"), text(item, "unit"));
         let mut line = format!("{} {lane}:{unit}", cx.state(&text(item, "state")));
         if let Some(code) = int(item, "exit_code") {
-            line.push_str(&format!(" exit={code}"));
+            line.push_str(&exit_field(code));
         }
         if let Some(crashes) = int(item, "crashes").filter(|n| *n > 0) {
             line.push_str(&format!(" crashes={crashes}"));

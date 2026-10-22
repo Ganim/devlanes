@@ -4,7 +4,7 @@
 use devlanes_proto::RpcError;
 use serde_json::{Value, json};
 
-use super::{compact_fields, display_value, list, text};
+use super::{INTERRUPTED, compact_fields, ctrl_c_exit, display_value, exited_with, list, text};
 use crate::Hint;
 
 /// A field as text, `unknown` when absent.
@@ -338,7 +338,7 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
         ),
         "exited" => (
             match int(data, "code") {
-                Some(code) => format!("exited with code {code}"),
+                Some(code) => exited_with(code),
                 None => match int(data, "signal") {
                     Some(signal) => format!("killed by signal {signal}"),
                     None => "exited".into(),
@@ -651,6 +651,7 @@ fn more_errors(code: &str, data: &Value) -> Option<(String, Option<Hint>)> {
             let task = text(data, "task");
             (
                 match int(data, "exit_code") {
+                    Some(code) if ctrl_c_exit(code) => format!("task {task} was {INTERRUPTED}"),
                     Some(code) => format!("task {task} failed with exit code {code}"),
                     None => format!("task {task} failed"),
                 },
@@ -1137,7 +1138,7 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
         ),
         "exited" => (
             match int(data, "code") {
-                Some(code) => format!("exited with code {code}"),
+                Some(code) => exited_with(code),
                 None => format!("killed by signal {}", field(data, "signal")),
             },
             Some(Hint::logs(lane, unit, 200)),
@@ -1148,6 +1149,7 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
                 int(data, "exit_code"),
                 data.get("signal").and_then(Value::as_i64),
             ) {
+                (Some(code), _) if ctrl_c_exit(code) => "Ctrl-C".into(),
                 (Some(code), _) => format!("exit code {code}"),
                 (None, Some(signal)) => format!("signal {signal}"),
                 _ => "no exit status".into(),

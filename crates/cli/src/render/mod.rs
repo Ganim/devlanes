@@ -275,6 +275,40 @@ pub(crate) fn text(value: &Value, key: &str) -> String {
         .unwrap_or_default()
 }
 
+/// `STATUS_CONTROL_C_EXIT` (0xC000013A): the exit code of a Windows process that
+/// Ctrl-C or Ctrl-Break ended, as the signed number units record. The unsigned
+/// spelling is accepted too.
+const CTRL_C_EXIT: i64 = -1_073_741_510;
+
+/// What a Ctrl-C exit reads as instead of its number.
+pub(crate) const INTERRUPTED: &str = "interrupted (Ctrl-C)";
+
+/// Whether `code` is a Windows Ctrl-C exit. Unix exit codes never reach it.
+pub(crate) fn ctrl_c_exit(code: impl Into<i64>) -> bool {
+    let code = code.into();
+    code == CTRL_C_EXIT || code == CTRL_C_EXIT + (1 << 32)
+}
+
+/// ` exit=<code>`, or ` interrupted (Ctrl-C)`, appended to status lines.
+pub(crate) fn exit_field(code: impl Into<i64>) -> String {
+    let code = code.into();
+    if ctrl_c_exit(code) {
+        format!(" {INTERRUPTED}")
+    } else {
+        format!(" exit={code}")
+    }
+}
+
+/// `exited with code <code>`, or `interrupted (Ctrl-C)`.
+pub(crate) fn exited_with(code: impl Into<i64>) -> String {
+    let code = code.into();
+    if ctrl_c_exit(code) {
+        INTERRUPTED.into()
+    } else {
+        format!("exited with code {code}")
+    }
+}
+
 /// Integer field.
 pub(crate) fn int(value: &Value, key: &str) -> Option<i64> {
     value.get(key).and_then(Value::as_i64)

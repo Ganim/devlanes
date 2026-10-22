@@ -15,6 +15,7 @@ mod local;
 mod local_doctor;
 mod migrate;
 mod notices;
+mod orphans;
 mod output;
 mod progress;
 mod remote;

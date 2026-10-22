@@ -18,6 +18,7 @@ use devlanes_core::{
     contrib::{ContribCx, Contributor, LaunchDraft},
     env,
 };
+use devlanes_sys::NoWindow;
 
 /// Files that make a directory a mise project
 /// (<https://mise.jdx.dev/configuration.html>).
@@ -109,6 +110,7 @@ impl MiseContributor {
         }
         let mut command = tokio::process::Command::new(&self.program);
         command
+            .no_window()
             .args(["env", "--json"])
             .current_dir(lane)
             .env_clear()

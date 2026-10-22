@@ -144,6 +144,9 @@ impl CiProvider for GithubActions {
     /// Mirrors actions/toolkit packages/core/src/command.ts escaping rules.
     fn error_annotation(&self, failure: &UnitFailure) -> String {
         let title = match failure.exit_code {
+            Some(code) if crate::render::ctrl_c_exit(code) => {
+                format!("{} {}", failure.unit, crate::render::INTERRUPTED)
+            }
             Some(code) => format!("{} exited {code}", failure.unit),
             None => format!("{} failed", failure.unit),
         };

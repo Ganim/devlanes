@@ -15,6 +15,7 @@ use devlanes_client::{Client, Paths};
 use devlanes_proto::{Context, Method, RpcError};
 use devlanes_resolver_dns::ResolverFile;
 use devlanes_resolver_hosts::CommandSpec;
+use devlanes_sys::NoWindow;
 use devlanes_trust::{CaCertificate, TrustStatus, TrustStore, TrustTarget};
 use serde_json::{Value, json};
 
@@ -125,6 +126,7 @@ pub(crate) async fn certificate(
     let pem = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
         if mkcert {
             let output = std::process::Command::new("mkcert")
+                .no_window()
                 .arg("-CAROOT")
                 .stdin(std::process::Stdio::null())
                 .output()

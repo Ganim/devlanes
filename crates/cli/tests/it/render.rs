@@ -801,6 +801,105 @@ fn doctor_terminal_and_acl_checks() {
     }
 }
 
+/// `STATUS_CONTROL_C_EXIT` (0xC000013A as a signed exit code) reads as
+/// `interrupted (Ctrl-C)` in task results, error lists and reasons; the data
+/// stays the number.
+#[test]
+fn ctrl_c_exits_read_as_interrupted() {
+    const CTRL_C: i64 = -1_073_741_510;
+    let cases = [
+        (
+            Method::Run,
+            json!({"task": "test", "lane": "acme@2", "unit": "test", "interactive": false, "exit_code": CTRL_C, "state": "failed"}),
+        ),
+        (
+            Method::Errors,
+            json!({"items": [{"lane": "acme@2", "unit": "admin", "state": "failed", "exit_code": CTRL_C,
+                "crashes": 1, "reason": null, "error_lines": [], "port_conflicts": []}],
+                "truncated": false, "next_cursor": null}),
+        ),
+        (
+            Method::Why,
+            json!({"lane": "acme@2", "unit": "admin", "state": "failed",
+                "reasons": [{"code": "exited", "data": {"code": CTRL_C, "signal": null}}]}),
+        ),
+    ];
+    for (method, data) in cases {
+        let text = render_text(method, &data);
+        assert!(text.contains("interrupted (Ctrl-C)"), "{text}");
+        assert!(!text.contains("1073741510"), "{text}");
+        let json = runtime(OutputMode::Json)
+            .reporter()
+            .result(&Report::new(method, &data))
+            .expect("json");
+        assert!(json.stdout.contains("-1073741510"), "{}", json.stdout);
+    }
+    // Ordinary codes keep their number.
+    let text = render_text(
+        Method::Run,
+        &json!({"task": "test", "lane": "acme@2", "unit": "test", "interactive": false, "exit_code": 2, "state": "failed"}),
+    );
+    assert!(text.contains("exit=2"), "{text}");
+}
+
+/// The Windows logon entry (`autostart`): `daemon status` names it in one line
+/// and doctor as a check; an entry for another devlanes or home is a warning
+/// with the fix. Without the facts (Unix) neither mentions logon.
+#[test]
+fn logon_entry_in_status_and_doctor() {
+    let entry = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run\devlanes";
+    let current = json!({"installed": true, "entry": entry, "current": true,
+        "command": r#""C:\devlanes\devlanesw.exe" --home "C:\Users\u\.devlanes""#});
+    let stale = json!({"installed": true, "entry": entry, "current": false,
+        "command": r#""C:\old\devlanesw.exe" --home "C:\Users\u\.devlanes""#});
+    let missing = json!({"installed": false, "entry": entry, "current": false});
+    let status = |autostart: &Value| {
+        let mut data = json!({"version": "0.3.0", "pid": 7, "socket": r"\\.\pipe\devlanes-0"});
+        if !autostart.is_null() {
+            data["autostart"] = autostart.clone();
+        }
+        render_text(Method::DaemonStatus, &data)
+    };
+    let text = status(&current);
+    assert!(
+        text.contains(&format!("logon: starts at logon ({entry})")),
+        "{text}"
+    );
+    let text = status(&missing);
+    assert!(
+        text.contains("logon: does not start at logon (devlanes daemon install adds that)"),
+        "{text}"
+    );
+    assert!(!status(&Value::Null).contains("logon"));
+
+    let doctor = |autostart: &Value| {
+        let mut data = json!({
+            "running": false, "version": "0.3.0", "home": r"C:\Users\u\.devlanes",
+            "socket": r"\\.\pipe\devlanes-0",
+            "sandbox": {"codex_sandbox": false, "app_sandbox": false},
+        });
+        if !autostart.is_null() {
+            data["autostart"] = autostart.clone();
+        }
+        render_text(Method::Doctor, &data)
+    };
+    let text = doctor(&current);
+    assert!(
+        text.contains(&format!("ok daemon: starts at logon ({entry})")),
+        "{text}"
+    );
+    let text = doctor(&stale);
+    assert!(
+        text.contains(
+            r#"warn daemon: starts at logon with another devlanes or home: "C:\old\devlanesw.exe""#
+        ),
+        "{text}"
+    );
+    assert!(text.contains("  fix: devlanes daemon install"), "{text}");
+    assert!(text.contains("--- agent (exit 0)"), "{text}");
+    assert!(!doctor(&Value::Null).contains("logon"));
+}
+
 #[test]
 fn doctor_says_how_to_recreate_an_unconstrained_ca() {
     let data = json!({
