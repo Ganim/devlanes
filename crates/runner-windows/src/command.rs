@@ -684,7 +684,7 @@ mod tests {
             Err(CommandError::InvalidProgram(_))
         ));
         // cmd.exe would run only the first line.
-        let cmd = PathBuf::from(r"C:\Windows\System32\cmd.exe");
+        let cmd = file(r"C:\Windows\System32", "cmd.exe");
         let system = BTreeMap::from([("PATH".to_owned(), r"C:\Windows\System32".to_owned())]);
         assert!(matches!(
             build_in(
