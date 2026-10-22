@@ -128,12 +128,10 @@ pub async fn list(root: &Path, common_dir: &Path) -> Result<Vec<Worktree>, Error
     for worktree in &mut worktrees {
         worktree.present = has_git_link(&worktree.path).await? && !worktree.prunable;
         if worktree.present {
-            let admin = git(
-                &worktree.path,
-                &["rev-parse", "--path-format=absolute", "--git-dir"],
-            )
-            .await?;
-            let admin = native(text(&admin)?.trim_end_matches('\n'));
+            let Some(admin) = admin_dir(&worktree.path).await? else {
+                worktree.present = false;
+                continue;
+            };
             worktree.identity = if same_path(&admin, common_dir) {
                 "main".into()
             } else {
@@ -172,6 +170,34 @@ pub async fn list(root: &Path, common_dir: &Path) -> Result<Vec<Worktree>, Error
 /// worktree nested in another checkout Git would answer for the outer one.
 pub async fn has_git_link(path: &Path) -> Result<bool, Error> {
     Ok(tokio::fs::try_exists(path.join(".git")).await?)
+}
+
+/// The absolute administration directory of the worktree at `path`, or `None`
+/// when its `.git` entry is gone, also when it vanished after [`has_git_link`]
+/// found it.
+async fn admin_dir(path: &Path) -> Result<Option<PathBuf>, Error> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--path-format=absolute", "--git-dir"])
+        .stdin(Stdio::null());
+    // Git must not search above the worktree: for a worktree nested in another
+    // checkout it would answer for the outer repository, and the worktree would
+    // take the outer one's identity.
+    if let Some(parent) = path.parent().filter(|parent| parent.is_absolute()) {
+        command.env("GIT_CEILING_DIRECTORIES", parent);
+    }
+    let output = command.output().await?;
+    if output.status.success() {
+        return Ok(Some(native(text(&output.stdout)?.trim_end_matches('\n'))));
+    }
+    if !has_git_link(path).await? {
+        return Ok(None);
+    }
+    Err(Error::Git(
+        String::from_utf8_lossy(&output.stderr).trim().into(),
+    ))
 }
 
 /// NUL records preserve spaces and newlines in worktree paths.
@@ -474,6 +500,53 @@ mod tests {
                 1,
                 "{trees:?}"
             );
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    /// The race behind the check above: `.git` vanishes after `has_git_link`
+    /// saw it. The admin lookup must not climb into the enclosing checkout.
+    #[tokio::test]
+    async fn admin_lookup_never_answers_for_the_enclosing_checkout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let dir = tempfile::tempdir()?;
+            let temp = TempPath(dunce::canonicalize(dir.path())?);
+            git(temp.path(), &["init", "-b", "main"]).await?;
+            git(
+                temp.path(),
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial",
+                ],
+            )
+            .await?;
+            let lane = temp.path().join("lane");
+            add(temp.path(), &lane, "feat/race").await?;
+            let common = temp.path().join(".git");
+            let admin = admin_dir(&lane).await?.ok_or("the worktree has its link")?;
+            assert!(
+                strip_path_prefix(&admin, &common.join("worktrees")).is_some(),
+                "{admin:?}"
+            );
+            std::fs::remove_file(lane.join(".git"))?;
+            // Without the ceiling, Git answers for the main checkout.
+            let outer = git(&lane, &["rev-parse", "--path-format=absolute", "--git-dir"]).await?;
+            assert!(same_path(
+                &native(text(&outer)?.trim_end_matches('\n')),
+                &common
+            ));
+            assert_eq!(admin_dir(&lane).await?, None);
             Ok::<_, Box<dyn std::error::Error>>(())
         })
         .await??;

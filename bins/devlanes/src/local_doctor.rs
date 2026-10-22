@@ -47,17 +47,24 @@ pub async fn facts(paths: &Paths) -> Value {
     })
 }
 
-/// Adds `terminal: {elevated, job}` about the shell running this command: an
-/// elevated shell cannot start the daemon, and a job that kills its processes when
-/// the terminal closes takes a daemon started inside it along.
+/// Adds `terminal: {elevated, job, conpty}` about the shell running this command:
+/// an elevated shell cannot start the daemon, and a job that kills its processes
+/// when the terminal closes takes a daemon started inside it along. `conpty` is
+/// `bundled` or `system`: which ConPTY units get, judged from this executable,
+/// which is also the daemon's.
 #[cfg(windows)]
 pub fn annotate_terminal(data: &mut Value) {
-    use devlanes_sys::windows::{process::job_of_self, token::elevated};
+    use devlanes_sys::windows::{conpty, process::job_of_self, token::elevated};
     let job = job_of_self()
         .ok()
         .flatten()
         .map(|job| json!({"kill_on_close": job.kill_on_close, "breakaway_ok": job.breakaway_ok}));
-    data["terminal"] = json!({"elevated": elevated().ok(), "job": job});
+    let conpty = if conpty::bundled_in_use() {
+        "bundled"
+    } else {
+        "system"
+    };
+    data["terminal"] = json!({"elevated": elevated().ok(), "job": job, "conpty": conpty});
 }
 
 /// Nothing to add on Unix: the daemon leaves the terminal's session itself.

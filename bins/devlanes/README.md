@@ -47,6 +47,8 @@ Everything lives under `~/.devlanes`, or `DEVLANES_HOME` when set: `state.db`, `
 
 On Windows the home is `%USERPROFILE%\.devlanes` and the daemon listens on a named pipe, `\\.\pipe\devlanes-<hash of the home>`, instead of `run/daemon.sock`. Instead of mode 700, the daemon limits the home's access list to you, SYSTEM and Administrators when it starts; `devlanes doctor` shows a home that is still too open, with an `icacls` command to fix it.
 
+`devlanes attach` on Windows drops the win32-input-mode and focus-event switches (`ESC[?9001h/l`, `ESC[?1004h/l`) from the unit's output, because ConPTY sends them for itself and they would stay on in your terminal after detaching. A unit that asks for focus events itself therefore does not get them while attached.
+
 ## Diagnostics
 
 `-v` (or `DEVLANES_VERBOSE=1`) prints timestamped debug lines on stderr: the output mode and why it was chosen, the home, config and socket paths, connecting to or spawning the daemon and how long that took, the versions exchanged, each request with its duration, and why the exit code is what it is. The daemon adds its own lines for that request, marked `daemon +<ms>`: lane resolution, config reads, port allocation, the Docker Compose commands it runs and their output, start gate waits, readiness probes and each spawn with its program, working directory and environment variable names. The run ends with a table of timings per request and start phase. `-vv` (or `DEVLANES_VERBOSE=2`) adds trace detail and span durations. stdout is untouched, so `--json -v` still prints parseable JSON. Environment and secret values never appear, only variable names. `-v` keeps `start` out of the TUI so the lines stay visible.

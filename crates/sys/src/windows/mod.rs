@@ -7,6 +7,7 @@
 
 pub mod conpty;
 pub mod console;
+pub mod ctrl;
 pub mod job;
 pub mod pipe;
 pub mod proc;
@@ -15,6 +16,7 @@ pub mod security;
 pub mod shell;
 pub mod spawn;
 pub mod token;
+pub mod window;
 
 pub(crate) use proc::{boot_id, listening_tcp, process, processes};
 

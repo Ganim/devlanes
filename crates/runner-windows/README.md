@@ -43,19 +43,22 @@ let report = unit.stop_with_report(StopPolicy::default()).await?;
 - `WindowsRunner`: spawns units; `with_stderr`, `with_exit_sweep`, `with_track_interval`, `with_output_capacity`.
 - `WindowsUnit`: `identity`, `processes`, `listening_ports`, `stop_with_report`, `wait_report`, `exit_report`, plus `devlanes_core::Unit`.
 - `ExitReport`: the exit code plus processes swept, escaped, or left running.
+- `ConsoleHelper`, `console_ctrl_main`: the console-control helper and its entry point for the binary that hosts it.
 - `command::build`: resolves the program and builds the command line; fails with `CommandError`.
 - `command::Command`: `application`, `command_line`, and `arguments()` for std's `raw_arg`.
 - `command::CommandError`: `NotFound` (with the directories searched), `ArgumentNotSafeForBatch`, and invalid input.
 
 ## Units
 
-A unit's leader starts inside a new job object (breakaway allowed, no limits, no kill on close, so units outlive a daemon crash). Its descendants are tracked from the job's members and from process snapshots by parent, which also catches processes that broke away. A stop terminates the job and then every tracked process outside it, each checked by PID and start time first. After a natural exit, leftovers are ended too.
+A unit's leader starts inside a new job object (breakaway allowed, no limits, no kill on close, so units outlive a daemon crash). Its descendants are tracked from the job's members and from process snapshots by parent, which also catches processes that broke away. Terminating ends the job and then every tracked process outside it, each checked by PID and start time first. After a natural exit, leftovers are ended too.
 
 `pty: true` units run in a pseudo console (ConPTY): their output is one terminal stream, and input and resizes go to the console. Closing it ends the processes still attached, so the console is closed only after the final sweep. A pseudo console dies with the process that owns it, so these units stop about five seconds after the daemon does; pipe units (`pty: false`) outlive it.
 
-Not yet:
-- A stop terminates without first sending Ctrl-C or Ctrl-Break.
-- Tasks (`ExitSweep::KeepDaemonized`) keep only processes that left their job (detached with breakaway); daemons a task starts inside its job, such as `start redis-server`, are still ended when it exits.
+## Stopping
+
+A stop first asks: `SIGINT` sends Ctrl-C (as a key to a pseudo console, else as an event), every other signal Ctrl-Break, and the members' visible windows get `WM_CLOSE`. Console control events go through a helper process started without a console, which attaches to the unit's console (a process can only be on one): `devlanes __console-ctrl` in the shipped binary, set with `WindowsRunner::with_console_helper`. Processes still running at the stop timeout are terminated (`escalated`). `SIGKILL`, or a pipe unit without a helper, terminates at once. A `cmd.exe` left asking "Terminate batch job (Y/N)?" after the program it ran exited (an `npm.cmd` shim) is ended without counting as escalation.
+
+After a task (`ExitSweep::KeepDaemonized`) exits on its own, processes still attached to its console are leftovers and end, while those with a console of their own, none, or outside the job are daemons it started and keep running (`left_running`). The runner learns who shares the console by asking the helper while the task runs; without a helper, job membership decides. `pty: true` tasks keep nothing, since closing their pseudo console ends everything attached.
 
 ## Program resolution
 

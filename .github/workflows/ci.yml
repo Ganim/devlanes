@@ -47,6 +47,8 @@ jobs:
           tool: nextest
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # Built once here and passed as DEVLANES_FAKE_TOOL, so no test process runs cargo.
+      - run: cargo build -p devlanes-testing --bin fake-tool --locked
       # The default nextest profile leaves out devlanes-e2e; the e2e jobs run it.
       # Every nextest step runs all tests and repeats failed output at the end, so
       # one failure neither hides the others nor gets buried in the PASS lines.
@@ -55,6 +57,7 @@ jobs:
           # GitHub's Windows runners only run as administrator, which the daemon
           # refuses outside tests. Ignored on other OSes.
           DEVLANES_ALLOW_ELEVATED: "1"
+          DEVLANES_FAKE_TOOL: ${{ github.workspace }}/target/debug/fake-tool${{ runner.os == 'Windows' && '.exe' || '' }}
       - run: cargo test --workspace --doc --all-features --locked
       - run: cargo build --workspace --all-targets --all-features --locked
       - name: kache stats

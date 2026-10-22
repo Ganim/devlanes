@@ -1015,9 +1015,10 @@ impl Inner {
                 let (user, _) = devlanes_config::load_user_lenient(&user_file);
                 extra.extend(user.platform_warnings().into_iter().map(|w| {
                     json!({
-                        "path": format!("user config {}", w.path),
+                        "path": w.path,
                         "message": w.message,
                         "file": user_file,
+                        "code": "user_config",
                     })
                 }));
             }

@@ -44,7 +44,21 @@ impl Drop for RawGuard {
 #[cfg(windows)]
 struct RawGuard {
     _input: Option<ModeGuard<std::io::Stdin>>,
-    _output: Option<ModeGuard<std::io::Stdout>>,
+    output: Option<ModeGuard<std::io::Stdout>>,
+}
+
+#[cfg(windows)]
+impl Drop for RawGuard {
+    /// Shows the cursor: ConPTY hides it around every repaint, so attach can end
+    /// between a hide and its show. Runs before the guards drop, while the
+    /// console still interprets VT sequences.
+    fn drop(&mut self) {
+        if self.output.is_some() {
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(b"\x1b[?25h");
+            let _ = stdout.flush();
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -58,7 +72,7 @@ impl RawGuard {
         if !interactive {
             return Ok(Self {
                 _input: None,
-                _output: None,
+                output: None,
             });
         }
         // No line editing, echo or Ctrl-C handling: Ctrl-C reaches the unit as a
@@ -82,7 +96,7 @@ impl RawGuard {
         .ok();
         Ok(Self {
             _input: Some(input),
-            _output: output,
+            output,
         })
     }
 }
@@ -278,7 +292,8 @@ impl Passthrough {
 
 /// Mode switches ConPTY emits for itself when it starts (win32-input-mode and
 /// focus events) and turns off when it closes. Forwarded, they would change how
-/// the user's terminal sends keys and focus changes after attach ends.
+/// the user's terminal sends keys and focus changes after attach ends. The cost:
+/// a unit that requests focus events itself does not get them while attached.
 #[cfg(any(windows, test))]
 const CONPTY_MODES: [&[u8]; 4] = [
     b"\x1b[?9001h",

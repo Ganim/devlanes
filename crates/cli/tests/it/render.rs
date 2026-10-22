@@ -586,6 +586,21 @@ fn config_check_shell_fallback_is_not_prefixed() {
     assert!(!text.contains("services.web.run: "), "{text}");
 }
 
+/// User config warnings carry the key path; the label names the file they are in.
+#[test]
+fn config_check_labels_user_config_warnings() {
+    let text = render_text(
+        Method::ConfigCheck,
+        &json!({"project": "acme", "path": "/work/acme/devlanes.yaml", "warnings": [
+            {"code": "user_config", "path": "terminal", "file": "/home/u/.devlanes/config.yaml", "message": "iterm2 is not available on Windows"},
+        ]}),
+    );
+    assert!(
+        text.contains("warn user config terminal: iterm2 is not available on Windows"),
+        "{text}"
+    );
+}
+
 #[test]
 fn every_result_shape_in_every_text_mode() {
     for (name, method, data) in fixtures() {
@@ -752,6 +767,25 @@ fn doctor_terminal_and_acl_checks() {
         json!({"elevated": false, "job": {"kill_on_close": true, "breakaway_ok": true}}),
     );
     assert!(!escapable.contains("stops every process"), "{escapable}");
+
+    // The ConPTY units get is named, as a passing check.
+    for (conpty, line) in [
+        (
+            "system",
+            "ok terminal: units run in the system's ConPTY (no usable conpty.dll next to devlanes)",
+        ),
+        (
+            "bundled",
+            "ok terminal: units run in the bundled ConPTY (conpty.dll next to devlanes)",
+        ),
+    ] {
+        let text = with(
+            false,
+            json!({"elevated": false, "job": null, "conpty": conpty}),
+        );
+        assert!(text.contains(line), "{text}");
+        assert!(text.contains("--- agent (exit 0)"), "{text}");
+    }
 
     // JSON prints the facts unchanged; the exit code follows the same checks.
     for (running, exit_code) in [(false, 1), (true, 0)] {

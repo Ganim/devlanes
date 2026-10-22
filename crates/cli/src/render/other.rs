@@ -898,13 +898,27 @@ fn home_checks(home: &Value) -> Vec<Check> {
     vec![check]
 }
 
-/// The shell running `doctor` (`terminal: {elevated, job}`, reported on Windows):
-/// an elevated shell cannot start the daemon, and a job that kills its processes
-/// on close, with no way out, stops a daemon started from it. Both only matter
-/// when this shell would start the daemon, so a `running` one turns the first
-/// into a note and silences the second.
+/// The shell running `doctor` (`terminal: {elevated, job, conpty}`, reported on
+/// Windows): an elevated shell cannot start the daemon, and a job that kills its
+/// processes on close, with no way out, stops a daemon started from it. Both only
+/// matter when this shell would start the daemon, so a `running` one turns the
+/// first into a note and silences the second. `conpty` names the pseudo console
+/// units run in.
 fn terminal_checks(terminal: &Value, running: bool) -> Vec<Check> {
     let mut checks = Vec::new();
+    match terminal.get("conpty").and_then(Value::as_str) {
+        Some("bundled") => checks.push(Check::new(
+            "terminal",
+            Outcome::Ok,
+            "units run in the bundled ConPTY (conpty.dll next to devlanes)",
+        )),
+        Some(_) => checks.push(Check::new(
+            "terminal",
+            Outcome::Ok,
+            "units run in the system's ConPTY (no usable conpty.dll next to devlanes)",
+        )),
+        None => {}
+    }
     if terminal.get("elevated").and_then(Value::as_bool) == Some(true) {
         // An elevated CLI can still talk to a daemon that runs unelevated.
         checks.push(if running {
@@ -1376,11 +1390,12 @@ pub(super) fn config_check(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             }
             _ => text(warning, "message"),
         };
-        lines.push(format!(
-            "{} {}: {message}",
-            cx.state("warn"),
-            text(warning, "path"),
-        ));
+        // The user config's warnings carry its own key path, labelled as in doctor.
+        let path = match code.as_str() {
+            "user_config" => format!("user config {}", text(warning, "path")),
+            _ => text(warning, "path"),
+        };
+        lines.push(format!("{} {path}: {message}", cx.state("warn")));
     }
     lines
 }

@@ -42,6 +42,24 @@ pub struct DnsServer {
     zone: Arc<Zone>,
 }
 
+/// Whether a failed TCP bind on the UDP port's number should try another
+/// ephemeral port: the TCP twin is taken.
+#[cfg(not(windows))]
+fn retry_ephemeral(kind: io::ErrorKind) -> bool {
+    kind == io::ErrorKind::AddrInUse
+}
+
+/// Whether a failed TCP bind on the UDP port's number should try another
+/// ephemeral port: the TCP twin is taken, or it lies inside a TCP range that
+/// Hyper-V or WSL reserved, which Windows reports as access denied.
+#[cfg(windows)]
+fn retry_ephemeral(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+    )
+}
+
 impl DnsServer {
     /// Binds UDP and TCP on `listen`.
     ///
@@ -65,17 +83,8 @@ impl DnsServer {
             let addr = udp.local_addr().map_err(|e| bind_error(listen, e))?;
             match TcpListener::bind(addr).await {
                 Ok(tcp) => return Ok(Self::new(udp, tcp, zone)),
-                // The UDP port's TCP twin is taken, or (Windows, as access denied)
-                // inside a TCP range Hyper-V or WSL reserved; another ephemeral
-                // port will do.
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
-                    ) =>
-                {
-                    last = error;
-                }
+                // Another ephemeral port will do.
+                Err(error) if retry_ephemeral(error.kind()) => last = error,
                 Err(error) => return Err(bind_error(addr, error)),
             }
         }
@@ -182,5 +191,22 @@ async fn serve_tcp(mut stream: TcpStream, zone: &Zone) -> io::Result<()> {
         tokio::time::timeout(TCP_IDLE_TIMEOUT, stream.write_all(&framed))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "dns client stopped reading"))??;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Access denied means a reserved range only on Windows; elsewhere it is a
+    /// real error that a retry would hide.
+    #[test]
+    fn ephemeral_retries_follow_the_os() {
+        assert!(retry_ephemeral(io::ErrorKind::AddrInUse));
+        assert!(!retry_ephemeral(io::ErrorKind::AddrNotAvailable));
+        #[cfg(windows)]
+        assert!(retry_ephemeral(io::ErrorKind::PermissionDenied));
+        #[cfg(not(windows))]
+        assert!(!retry_ephemeral(io::ErrorKind::PermissionDenied));
     }
 }

@@ -397,13 +397,15 @@ devlanes env export [OPTIONS] [UNIT]
 
 - `[UNIT]`: Unit whose environment to export ([lane:]unit) [default: the lane's variables]
 - `--shell <SHELL>`: Syntax of the printed assignments
-  Values: `posix` (`export NAME='value'`, for sh, bash, zsh and Git Bash), `pwsh` (`$env:NAME = 'value'`, for PowerShell).
+  Values: `posix` (`export NAME='value'`, for sh, bash, zsh and Git Bash), `pwsh` (`$env:NAME = 'value'`, for PowerShell; the script is ASCII, other text is decoded from Base64).
   Default: `posix`.
 
 ```text
 Examples:
   eval "$(devlanes env export api)"
   devlanes env export api --shell pwsh | Out-String | Invoke-Expression
+
+In PowerShell, assigning an empty value removes the variable, so variables with empty values end up unset.
 ```
 
 ### devlanes env shell

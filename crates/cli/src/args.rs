@@ -466,7 +466,7 @@ pub enum EnvCommand {
     },
     /// Print export KEY=VALUE lines for eval in a shell
     #[command(
-        after_help = "Examples:\n  eval \"$(devlanes env export api)\"\n  devlanes env export api --shell pwsh | Out-String | Invoke-Expression"
+        after_help = "Examples:\n  eval \"$(devlanes env export api)\"\n  devlanes env export api --shell pwsh | Out-String | Invoke-Expression\n\nIn PowerShell, assigning an empty value removes the variable, so variables with empty values end up unset."
     )]
     Export {
         /// Unit whose environment to export ([lane:]unit) [default: the lane's variables]
@@ -492,7 +492,7 @@ pub enum ExportShell {
     #[default]
     #[value(alias = "sh")]
     Posix,
-    /// `$env:NAME = 'value'`, for PowerShell
+    /// `$env:NAME = 'value'`, for PowerShell; the script is ASCII, other text is decoded from Base64
     #[value(alias = "powershell")]
     Pwsh,
 }

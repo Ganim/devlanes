@@ -16,8 +16,9 @@ impl TerminalLauncher for Wezterm {
     /// The title is ignored: `wezterm start` has no title flag.
     fn invocation(&self, request: &LaunchRequest) -> Result<Invocation, LaunchError> {
         let command = request.require_command()?;
-        let mut args = vec!["start".into(), "--cwd".into(), request.cwd_arg()];
-        args.push("--".into());
+        let mut args = vec!["start".to_owned()];
+        args.extend(START_FLAGS.iter().map(|flag| (*flag).to_owned()));
+        args.extend(["--cwd".into(), request.cwd_arg(), "--".into()]);
         args.extend(command.iter().cloned());
         Ok(platform(args, &request.env))
     }
@@ -30,6 +31,16 @@ impl TerminalLauncher for Wezterm {
         return devlanes_term::on_path("wezterm");
     }
 }
+
+/// Extra `wezterm start` flags: none outside Windows.
+#[cfg(not(windows))]
+const START_FLAGS: &[&str] = &[];
+
+/// Extra `wezterm start` flags. On Windows a running WezTerm GUI would open the
+/// window itself, with its own environment, so the request's `env`
+/// (`DEVLANES_HOME`) would not reach the command; a new process carries it.
+#[cfg(windows)]
+const START_FLAGS: &[&str] = &["--always-new-process"];
 
 /// The macOS app bundle does not put `wezterm` on PATH by default. `open`
 /// starts the app with launchd's environment, so `env` cannot reach it.
@@ -61,7 +72,50 @@ mod tests {
             env: Vec::new(),
         })?;
         let args = invocation.args.join(" ");
-        assert!(args.ends_with("start --cwd /work/acme -- devlanes attach acme@2:api"));
+        assert!(args.ends_with("--cwd /work/acme -- devlanes attach acme@2:api"));
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn reuses_a_running_gui_outside_windows() -> Result<(), LaunchError> {
+        let invocation = Wezterm.invocation(&LaunchRequest {
+            cwd: "/work/acme".into(),
+            command: vec!["devlanes".into()],
+            title: None,
+            env: Vec::new(),
+        })?;
+        assert!(
+            invocation
+                .args
+                .join(" ")
+                .ends_with("start --cwd /work/acme -- devlanes")
+        );
+        Ok(())
+    }
+
+    /// The new window must come from a new process, which has `env`.
+    #[cfg(windows)]
+    #[test]
+    fn starts_a_new_process_on_windows() -> Result<(), LaunchError> {
+        let invocation = Wezterm.invocation(&LaunchRequest {
+            cwd: r"C:\work\acme".into(),
+            command: vec!["devlanes.exe".into()],
+            title: None,
+            env: Vec::new(),
+        })?;
+        assert_eq!(invocation.program, "wezterm");
+        assert_eq!(
+            invocation.args,
+            [
+                "start",
+                "--always-new-process",
+                "--cwd",
+                r"C:\work\acme",
+                "--",
+                "devlanes.exe"
+            ]
+        );
         Ok(())
     }
 

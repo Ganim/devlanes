@@ -28,6 +28,15 @@ use devlanes_cli::{Action, Cli, Runtime, Signals, clap::Parser};
 
 /// Parses, resolves output policy once, then dispatches to client or daemon code.
 fn main() -> ExitCode {
+    // The daemon's console-control helper: no parsing, no threads, no output
+    // beyond what the daemon reads, and it must not be listed as a command.
+    #[cfg(windows)]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == devlanes_runner_windows::ctrl::HELPER_ARG)
+    {
+        return ExitCode::from(devlanes_runner_windows::console_ctrl_main());
+    }
     // CompleteEnv must run before any thread exists; it exits when completing.
     completion::install();
     let cli = match Cli::try_parse() {

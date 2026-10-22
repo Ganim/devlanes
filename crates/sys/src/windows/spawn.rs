@@ -125,21 +125,23 @@ impl Child {
 pub fn spawn(spec: &Spawn<'_>) -> io::Result<Child> {
     // Checked first, so a bad variable fails before anything is created.
     let environment = spec.environment.map(environment_block).transpose()?;
-    let null = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .open("NUL")?;
-    let handle_of = |stdio: Stdio<'_>| match stdio {
-        Stdio::Null => null.as_raw_handle(),
-        Stdio::Handle(handle) => handle.as_raw_handle(),
-    };
     let inherited = match spec.console {
         Some(_) => None,
-        None => Some([
-            inheritable(null.as_raw_handle())?,
-            inheritable(handle_of(spec.stdout))?,
-            inheritable(handle_of(spec.stderr))?,
-        ]),
+        None => {
+            let null = std::fs::File::options()
+                .read(true)
+                .write(true)
+                .open("NUL")?;
+            let handle_of = |stdio: Stdio<'_>| match stdio {
+                Stdio::Null => null.as_raw_handle(),
+                Stdio::Handle(handle) => handle.as_raw_handle(),
+            };
+            Some([
+                inheritable(null.as_raw_handle())?,
+                inheritable(handle_of(spec.stdout))?,
+                inheritable(handle_of(spec.stderr))?,
+            ])
+        }
     };
     let raw_inherited = inherited
         .as_ref()

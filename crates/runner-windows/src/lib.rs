@@ -10,10 +10,14 @@
 //! compiled on every OS, so its rules are tested everywhere.
 
 pub mod command;
+#[cfg(windows)]
+pub mod ctrl;
 
 #[cfg(windows)]
 mod unit;
 
+#[cfg(windows)]
+pub use ctrl::{ConsoleHelper, console_ctrl_main};
 #[cfg(windows)]
 pub use runner::WindowsRunner;
 #[cfg(windows)]
@@ -26,10 +30,11 @@ mod runner {
     use async_trait::async_trait;
     use devlanes_core::{Error, ExitSweep, LaunchSpec, Runner, StderrMode, Unit};
 
+    use crate::ctrl::ConsoleHelper;
     use crate::unit::{WindowsUnit, spawn_unit};
 
-    /// Spawns units in job objects with piped output. Cheap to clone; holds only
-    /// tuning values.
+    /// Spawns units in job objects with piped output or a pseudo console. Cheap
+    /// to clone; holds only tuning values.
     #[derive(Debug, Clone)]
     pub struct WindowsRunner {
         pub(crate) stderr: StderrMode,
@@ -38,6 +43,7 @@ mod runner {
         pub(crate) drain_timeout: Duration,
         pub(crate) sweep_timeout: Duration,
         pub(crate) exit_sweep: ExitSweep,
+        pub(crate) helper: Option<ConsoleHelper>,
     }
 
     impl Default for WindowsRunner {
@@ -51,11 +57,20 @@ mod runner {
                 drain_timeout: Duration::from_millis(500),
                 sweep_timeout: Duration::from_secs(1),
                 exit_sweep: ExitSweep::KillAll,
+                helper: None,
             }
         }
     }
 
     impl WindowsRunner {
+        /// Sets the console-control helper graceful stops go through. Without
+        /// one, only `pty: true` units can be asked to stop (Ctrl-C as a key);
+        /// other stops terminate at once.
+        pub fn with_console_helper(mut self, helper: ConsoleHelper) -> Self {
+            self.helper = Some(helper);
+            self
+        }
+
         /// Selects the natural-exit sweep for units spawned by this runner.
         pub fn with_exit_sweep(mut self, sweep: ExitSweep) -> Self {
             self.exit_sweep = sweep;

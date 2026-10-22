@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_core::{
     Error, ExitOutcome, ExitSweep, LaunchSpec, OutputChunk, OutputStream, ProcessIdentity,
-    StderrMode, StopPolicy, TerminalSize, Unit,
+    StderrMode, StopPolicy, StopSignal, TerminalSize, Unit, WindowsStop,
 };
 use devlanes_sys::windows::{
     conpty::PseudoConsole,
@@ -32,6 +32,7 @@ use tokio::{
     time::{self, Instant, MissedTickBehavior},
 };
 
+use crate::ctrl::{ConsoleHelper, Request};
 use crate::{WindowsRunner, command};
 
 /// Read size per call; large enough for bursty build output.
@@ -40,6 +41,13 @@ const CHUNK: usize = 16 * 1024;
 const SWEEP_POLL: Duration = Duration::from_millis(25);
 /// Exit code given to processes the runner terminates, like a failed command.
 const TERMINATED: u32 = 1;
+/// How long a pseudo console's output must stay quiet before it is closed.
+const OUTPUT_PAUSE: Duration = Duration::from_millis(100);
+/// Poll period while a stop waits for the unit to exit.
+const EXIT_POLL: Duration = Duration::from_millis(100);
+/// Ctrl-C as a key, which a console in processed-input mode turns into
+/// `CTRL_C_EVENT` for every process attached to it.
+const CTRL_C: &[u8] = b"\x03";
 
 /// Everything known about a finished unit. Shared by all waiters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,8 +98,16 @@ struct Inner {
     /// The pseudo console while the unit runs; taken (closed) once its processes
     /// are ended, which is what ends its output.
     terminal: Mutex<Option<Terminal>>,
-    /// Keeps concurrent inputs from interleaving partial writes.
-    input_lock: tokio::sync::Mutex<()>,
+    /// When the readers last published output, for closing the console only once
+    /// it went quiet.
+    last_output: Arc<Mutex<Instant>>,
+    /// Sends console control events and lists console members; `None` disables
+    /// graceful stops of pipe units.
+    helper: Option<ConsoleHelper>,
+    /// Processes seen attached to the unit's own console (PID and start time),
+    /// for deciding what a task keeps after it exits. `None` until a listing
+    /// succeeded; only recorded for pipe tasks with a helper.
+    on_console: Mutex<Option<BTreeSet<(u32, u64)>>>,
     leader_exited: AtomicBool,
     /// Set when the supervisor ended without publishing a real report.
     crashed: AtomicBool,
@@ -136,7 +152,31 @@ struct Launched {
 /// processes still attached to it.
 struct Terminal {
     console: PseudoConsole,
-    input: io::PipeWriter,
+    /// Feeds the writer thread. Dropping it ends the thread, which closes the
+    /// console's input pipe.
+    input: mpsc::Sender<Input>,
+}
+
+/// Bytes for the console's input, and where to report the write's result.
+type Input = (Bytes, oneshot::Sender<io::Result<()>>);
+
+/// Input chunks queued before callers wait; enough for typing and pastes.
+const INPUT_QUEUE: usize = 64;
+
+/// Starts the thread that writes queued input to the console in order. Writes
+/// block while the console does not read, so they cannot run on the executor,
+/// and one thread keeps them in order even when callers give up waiting: a write
+/// already queued still happens, in its place.
+fn input_writer(mut pipe: io::PipeWriter) -> io::Result<mpsc::Sender<Input>> {
+    let (sender, mut queue) = mpsc::channel::<Input>(INPUT_QUEUE);
+    std::thread::Builder::new()
+        .name("devlanes-unit-input".into())
+        .spawn(move || {
+            while let Some((bytes, reply)) = queue.blocking_recv() {
+                let _ = reply.send(std::io::Write::write_all(&mut pipe, &bytes));
+            }
+        })?;
+    Ok(sender)
 }
 
 /// Launches the leader, starts its output readers and its supervisor.
@@ -157,7 +197,13 @@ pub(crate) async fn spawn_unit(
 
     let (sender, first) = broadcast::channel(runner.output_capacity);
     let sender = Arc::new(Mutex::new(Some(sender)));
-    let output_done = match start_readers(launched.pipes, Arc::clone(&sender)) {
+    let last_output = Arc::new(Mutex::new(Instant::now()));
+    let readers = start_readers(
+        launched.pipes,
+        Arc::clone(&sender),
+        Arc::clone(&last_output),
+    );
+    let output_done = match readers {
         Ok(output_done) => output_done,
         Err(error) => {
             // Nothing would supervise or ever stop the leader; end it now.
@@ -177,7 +223,9 @@ pub(crate) async fn spawn_unit(
         tracker: Mutex::new(DescendantTracker::new(identity)),
         pty: launched.terminal.is_some(),
         terminal: Mutex::new(launched.terminal),
-        input_lock: tokio::sync::Mutex::new(()),
+        last_output,
+        helper: runner.helper.clone(),
+        on_console: Mutex::new(None),
         leader_exited: AtomicBool::new(false),
         crashed: AtomicBool::new(false),
         stops,
@@ -257,7 +305,9 @@ fn launch_in_console(
     job: Job,
     cwd: &std::path::Path,
 ) -> Result<Launched, Error> {
-    let (input_reader, input_writer) = io::pipe()?;
+    let (input_reader, input_writer_pipe) = io::pipe()?;
+    // Started before the leader, so a failure here leaves nothing running.
+    let input = input_writer(input_writer_pipe)?;
     let (output_reader, output_writer) = io::pipe()?;
     let console = PseudoConsole::create(
         spec.size.columns,
@@ -281,10 +331,7 @@ fn launch_in_console(
         job,
         child: Arc::new(child),
         pipes: vec![(OutputStream::Terminal, output_reader)],
-        terminal: Some(Terminal {
-            console,
-            input: input_writer,
-        }),
+        terminal: Some(Terminal { console, input }),
     })
 }
 
@@ -292,8 +339,8 @@ fn launch_in_console(
 /// cannot use a verbatim working directory and silently starts in the Windows
 /// directory instead, which would run batch files and shell strings elsewhere.
 fn plain_drive_path(path: &std::path::Path) -> std::path::PathBuf {
-    let text = path.as_os_str().to_string_lossy();
-    match text.strip_prefix(r"\\?\") {
+    // Paths that are not valid Unicode are left as they are rather than mangled.
+    match path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
         Some(rest) if rest.as_bytes().get(1) == Some(&b':') && rest.len() < 260 => rest.into(),
         _ => path.to_owned(),
     }
@@ -325,15 +372,17 @@ fn command_error(error: command::CommandError) -> Error {
 fn start_readers(
     pipes: Vec<(OutputStream, io::PipeReader)>,
     sender: Arc<Mutex<Option<broadcast::Sender<OutputChunk>>>>,
+    last_output: Arc<Mutex<Instant>>,
 ) -> io::Result<watch::Receiver<bool>> {
     let (done_tx, done_rx) = watch::channel(false);
     let mut readers = Vec::new();
     for (stream, pipe) in pipes {
         let sender = Arc::clone(&sender);
+        let last_output = Arc::clone(&last_output);
         readers.push(
             std::thread::Builder::new()
                 .name("devlanes-unit-output".into())
-                .spawn(move || read_pipe(stream, pipe, &sender))?,
+                .spawn(move || read_pipe(stream, pipe, &sender, &last_output))?,
         );
     }
     std::thread::Builder::new()
@@ -352,12 +401,14 @@ fn read_pipe(
     stream: OutputStream,
     mut pipe: io::PipeReader,
     sender: &Mutex<Option<broadcast::Sender<OutputChunk>>>,
+    last_output: &Mutex<Instant>,
 ) {
     let mut buffer = vec![0_u8; CHUNK];
     loop {
         match pipe.read(&mut buffer) {
             Ok(0) => return,
             Ok(read) => {
+                *lock(last_output) = Instant::now();
                 // Having no subscribers is not an error; lagging ones lose chunks
                 // rather than stalling the unit on a full pipe.
                 if let Some(sender) = lock(sender).as_ref() {
@@ -405,10 +456,11 @@ async fn supervise(
     let timing = inner.timing;
     let mut tick = time::interval(timing.track_interval);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut stopped = false;
+    let mut stopping: Option<Stopping> = None;
     let mut waiter_alive = true;
 
     let outcome = loop {
+        let asking = stopping.filter(|s| !s.escalated);
         tokio::select! {
             code = &mut exited, if waiter_alive => match code {
                 Ok(Ok(code)) => break inner.leader_outcome(code),
@@ -425,20 +477,65 @@ async fn supervise(
                     break inner.leader_outcome(code);
                 }
                 inner.refresh_logged(timing.track_interval / 2).await;
+                inner.record_console().await;
             }
-            Some(_policy) = requests.recv() => {
-                // Every request terminates again: harmless if the first one ended
-                // everything, and the only retry if it did not.
+            Some(policy) = requests.recv() => {
+                let deadline = Instant::now() + policy.timeout;
+                match &mut stopping {
+                    // A repeated stop can only shorten the grace period, and after
+                    // escalation every request terminates again: harmless if the
+                    // first one ended everything, the only retry if it did not.
+                    Some(current) => {
+                        current.deadline = current.deadline.min(deadline);
+                        if current.escalated {
+                            inner.terminate_all().await;
+                        }
+                    }
+                    None => {
+                        let asked = inner.ask_to_stop(policy.signal).await;
+                        if !asked {
+                            inner.terminate_all().await;
+                        }
+                        stopping = Some(Stopping { deadline, escalated: !asked });
+                    }
+                }
+            }
+            () = until(asking.map(|s| s.deadline)) => {
                 inner.terminate_all().await;
-                stopped = true;
+                if let Some(current) = &mut stopping {
+                    current.escalated = true;
+                }
+            }
+            () = time::sleep(EXIT_POLL), if asking.is_some() => {
+                inner.end_waiting_shims().await;
             }
         }
     };
     // A stop that arrived as the leader exited still counts, so a task's kept
     // daemons are not spared from an explicit stop.
     while requests.try_recv().is_ok() {
-        stopped = true;
+        stopping.get_or_insert(Stopping {
+            deadline: Instant::now(),
+            escalated: false,
+        });
     }
+    if let Some(current) = &mut stopping {
+        // Members that outlive the leader get the rest of the grace period.
+        while !current.escalated && !inner.live_members().await.is_empty() {
+            if Instant::now() >= current.deadline {
+                inner.terminate_all().await;
+                current.escalated = true;
+            } else {
+                inner.end_waiting_shims().await;
+                time::sleep(EXIT_POLL).await;
+            }
+        }
+    } else {
+        // The last look at the console's members before deciding what a task
+        // keeps; the leader is gone, but the others may still share it.
+        inner.record_console().await;
+    }
+    let stopped = stopping.is_some();
 
     // A pseudo console's output only ends once it is closed, so waiting for it
     // first would always time out; pipes may end on their own.
@@ -447,19 +544,45 @@ async fn supervise(
         let _ = time::timeout(timing.drain_timeout, output_done.wait_for(|done| *done)).await;
     }
     let sweep = inner.sweep(stopped).await;
-    // Closing the console flushes what it still holds and then ends its output.
-    // It also ends processes still attached to it (those kept by a task too, if
-    // they share it), which is why it comes after the sweep.
+    if inner.pty {
+        // Some ConPTY versions drop what they still hold on close, so the last
+        // frame is given until the output pauses (bounded by the drain timeout).
+        let deadline = Instant::now() + timing.drain_timeout;
+        while Instant::now() < deadline && lock(&inner.last_output).elapsed() < OUTPUT_PAUSE {
+            time::sleep(OUTPUT_PAUSE / 4).await;
+        }
+    }
+    // Closing the console ends its output and the processes still attached to
+    // it, which is why it comes after the sweep.
     lock(&inner.terminal).take();
     // Collect the last output of processes the sweep just ended.
     let _ = time::timeout(timing.drain_timeout, output_done.wait_for(|done| *done)).await;
     inner.finish(ExitReport {
         outcome,
-        stop: stopped.then_some(StopOutcome { escalated: true }),
+        stop: stopping.map(|s| StopOutcome {
+            escalated: s.escalated,
+        }),
         swept: sweep.swept,
         escaped: sweep.escaped,
         left_running: sweep.left_running,
     });
+}
+
+/// Stop progress owned by the supervisor.
+#[derive(Debug, Clone, Copy)]
+struct Stopping {
+    /// When asking ends and terminating starts.
+    deadline: Instant,
+    /// The processes were terminated, not asked to stop.
+    escalated: bool,
+}
+
+/// Sleeps until `deadline`, or forever when there is none.
+async fn until(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Publishes a status-less report if the supervisor ends early (panic or runtime
@@ -552,6 +675,112 @@ impl Inner {
         processes
     }
 
+    /// Asks the unit to stop the way `signal` maps on Windows: Ctrl-C as a key
+    /// for a pseudo console, Ctrl-C or Ctrl-Break through the helper otherwise,
+    /// plus `WM_CLOSE` to the members' visible windows. Returns whether anything
+    /// was asked; `false` (SIGKILL, or no way to reach the unit) means terminate.
+    async fn ask_to_stop(self: &Arc<Self>, signal: StopSignal) -> bool {
+        let event = match signal.windows_stop() {
+            WindowsStop::Terminate => return false,
+            WindowsStop::CtrlC => Request::CtrlC,
+            WindowsStop::CtrlBreak => Request::CtrlBreak,
+        };
+        let live = self.live_members().await;
+        let mut asked = false;
+        if event == Request::CtrlC && self.pty {
+            let queue = lock(&self.terminal)
+                .as_ref()
+                .map(|terminal| terminal.input.clone());
+            if let Some(queue) = queue {
+                let (reply, _written) = oneshot::channel();
+                asked = queue
+                    .send((Bytes::from_static(CTRL_C), reply))
+                    .await
+                    .is_ok();
+            }
+        } else if let Some(helper) = self.helper.clone() {
+            // The leader's console is the unit's; after it exited, any member
+            // still running shares it unless it made its own.
+            let leader_alive = matches!(self.child.exit_code(), Ok(None));
+            let target = if leader_alive {
+                Some(self.identity.pid)
+            } else {
+                live.first().map(|p| p.pid)
+            };
+            if let Some(pid) = target {
+                match blocking(move || helper.send(pid, event)).await {
+                    Ok(Ok(())) => asked = true,
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, pid, "console control event not sent")
+                    }
+                    Err(error) => tracing::debug!(%error, pid, "console control event not sent"),
+                }
+            }
+        }
+        let pids: Vec<u32> = live.iter().map(|p| p.pid).collect();
+        let closed = blocking(move || devlanes_sys::windows::window::close_windows(&pids))
+            .await
+            .unwrap_or(0);
+        asked || closed > 0
+    }
+
+    /// Ends `cmd.exe` processes left waiting at "Terminate batch job (Y/N)?" once
+    /// everything they ran has exited: a `.cmd` shim (`npm.cmd`) asks that after
+    /// Ctrl-C or Ctrl-Break and would otherwise hold the stop until its timeout.
+    /// This is expected cleanup, so it does not count as escalation.
+    async fn end_waiting_shims(self: &Arc<Self>) {
+        let live = self.live_members().await;
+        let shims_only =
+            !live.is_empty() && live.iter().all(|p| p.name.eq_ignore_ascii_case("cmd.exe"));
+        if shims_only {
+            let _ = blocking(move || {
+                for shim in &live {
+                    let _ = terminate_verified(&shim.identity(), TERMINATED);
+                }
+            })
+            .await;
+        }
+    }
+
+    /// Records which processes are attached to the unit's console, for a pipe
+    /// task (`ExitSweep::KeepDaemonized`) with a helper: after the task exits,
+    /// those are its leftovers, and members with their own console or none are
+    /// daemons it started. Asks through the leader, or after it exited through a
+    /// recorded member that still runs.
+    async fn record_console(self: &Arc<Self>) {
+        if self.pty || self.timing.exit_sweep != ExitSweep::KeepDaemonized {
+            return;
+        }
+        let Some(helper) = self.helper.clone() else {
+            return;
+        };
+        let leader_alive = matches!(self.child.exit_code(), Ok(None));
+        let tracked: Vec<ProcessInfo> = lock(&self.tracker).live().cloned().collect();
+        let anchor = if leader_alive {
+            Some(self.identity.pid)
+        } else {
+            let known = lock(&self.on_console).clone().unwrap_or_default();
+            tracked
+                .iter()
+                .find(|p| known.contains(&(p.pid, p.start_time)))
+                .map(|p| p.pid)
+        };
+        let Some(anchor) = anchor else {
+            return;
+        };
+        let Ok(Ok(pids)) = blocking(move || helper.list(anchor)).await else {
+            return;
+        };
+        let mut known = lock(&self.on_console);
+        let set = known.get_or_insert_with(BTreeSet::new);
+        set.extend(
+            tracked
+                .iter()
+                .filter(|p| pids.contains(&p.pid))
+                .map(|p| (p.pid, p.start_time)),
+        );
+    }
+
     /// Terminates the job and every tracked process that left it.
     async fn terminate_all(self: &Arc<Self>) {
         let targets = self.live_members().await;
@@ -574,42 +803,58 @@ impl Inner {
         }
     }
 
-    /// Ends live tracked processes until none remain or the sweep times out. After
-    /// a natural exit in [`ExitSweep::KeepDaemonized`] mode, descendants outside
-    /// the job (started detached or with breakaway) are reported instead.
+    /// Ends live tracked processes until none remain or the sweep times out.
+    ///
+    /// After a natural exit in [`ExitSweep::KeepDaemonized`] mode (decision Q9),
+    /// processes still attached to the unit's console are leftovers and end, while
+    /// those that made their own console, run without one, or broke away from the
+    /// job are daemons the task started and are reported as left running. When the
+    /// console's members were never listed (no helper), the job stands in for it:
+    /// members end, processes outside it are kept.
     async fn sweep(self: &Arc<Self>, explicit_stop: bool) -> Sweep {
-        let keep_daemonized = !explicit_stop && self.timing.exit_sweep == ExitSweep::KeepDaemonized;
+        // Processes kept outside the job are still attached to a pseudo console,
+        // which ends them when it closes, so `pty: true` tasks keep nothing.
+        let keep_daemonized =
+            !explicit_stop && self.timing.exit_sweep == ExitSweep::KeepDaemonized && !self.pty;
+        let on_console = lock(&self.on_console).clone().filter(|_| keep_daemonized);
         let deadline = Instant::now() + self.timing.sweep_timeout;
         let mut ended = BTreeMap::new();
-        // In both modes the job holds only processes that must end. Ending it first
-        // also reaches members started after the last snapshot, which the loop
-        // below cannot see. Live members seen before are reported as swept.
-        let live = self.live_members().await;
-        let inner = Arc::clone(self);
-        let in_job = blocking(move || {
-            let in_job: BTreeSet<u32> = inner
-                .job
-                .members()
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-            if let Err(error) = inner.job.terminate(TERMINATED) {
-                tracing::debug!(%error, "terminating the unit's job failed");
+        // Unless some job members are kept, the job holds only processes that must
+        // end. Ending it first also reaches members started after the last
+        // snapshot, which the loop below cannot see. Live members seen before are
+        // reported as swept.
+        if on_console.is_none() {
+            let live = self.live_members().await;
+            let inner = Arc::clone(self);
+            let in_job = blocking(move || {
+                let in_job: BTreeSet<u32> = inner
+                    .job
+                    .members()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                if let Err(error) = inner.job.terminate(TERMINATED) {
+                    tracing::debug!(%error, "terminating the unit's job failed");
+                }
+                in_job
+            })
+            .await
+            .unwrap_or_default();
+            for process in live.into_iter().filter(|p| in_job.contains(&p.pid)) {
+                ended.insert(process.pid, process);
             }
-            in_job
-        })
-        .await
-        .unwrap_or_default();
-        for process in live.into_iter().filter(|p| in_job.contains(&p.pid)) {
-            ended.insert(process.pid, process);
         }
         loop {
             let live = self.live_members().await;
             let in_job: BTreeSet<u32> =
                 self.job.members().unwrap_or_default().into_iter().collect();
-            let (targets, kept): (Vec<_>, Vec<_>) = live
-                .into_iter()
-                .partition(|p| !keep_daemonized || in_job.contains(&p.pid));
+            let (targets, kept): (Vec<_>, Vec<_>) =
+                live.into_iter()
+                    .partition(|p| match (&on_console, keep_daemonized) {
+                        (_, false) => true,
+                        (Some(console), true) => console.contains(&(p.pid, p.start_time)),
+                        (None, true) => in_job.contains(&p.pid),
+                    });
             if targets.is_empty() || Instant::now() >= deadline {
                 for process in &targets {
                     ended.remove(&process.pid);
@@ -621,9 +866,15 @@ impl Inner {
                 };
             }
             let inner = Arc::clone(self);
+            let precise = on_console.is_some();
             // Survivors show up in the next round and end as escaped at the deadline.
             let ended_now = blocking(move || {
-                if keep_daemonized {
+                if precise {
+                    // Kept members share the job, so only the targets end.
+                    for process in &targets {
+                        let _ = terminate_verified(&process.identity(), TERMINATED);
+                    }
+                } else if keep_daemonized {
                     // The job holds exactly the processes to end; kept ones are outside.
                     if let Err(error) = inner.job.terminate(TERMINATED) {
                         tracing::debug!(%error, "terminating the unit's job failed");
@@ -708,7 +959,10 @@ impl WindowsUnit {
         if self.inner.stops.send(policy).is_err() && self.inner.crashed.load(Ordering::SeqCst) {
             return self.stop_without_supervisor().await;
         }
-        let bound = self.inner.timing.sweep_timeout
+        // The grace period, then the supervisor's own worst case: the sweep, both
+        // output drains, and slack for scans on a loaded machine.
+        let bound = policy.timeout
+            + self.inner.timing.sweep_timeout
             + self.inner.timing.drain_timeout * 2
             + Duration::from_secs(5);
         time::timeout(bound, self.wait_report())
@@ -737,6 +991,8 @@ impl WindowsUnit {
             }
             time::sleep(SWEEP_POLL).await;
         };
+        // The supervisor would have closed the console after its sweep.
+        lock(&self.inner.terminal).take();
         let outcome = match self.inner.child.exit_code() {
             Ok(Some(code)) => exit_outcome(code),
             _ => UNKNOWN,
@@ -765,27 +1021,29 @@ impl fmt::Debug for WindowsUnit {
 
 #[async_trait]
 impl Unit for WindowsUnit {
-    /// Writes all bytes to the pseudo console's input. Blocks while the console
-    /// does not read, so a program that never reads its input can stall this
-    /// call; callers may cancel it. Pipe units have no terminal.
+    /// Writes all bytes to the pseudo console's input, in call order. Waits while
+    /// the console does not read, so a program that never reads its input can
+    /// stall this call; a caller that gives up still gets its bytes written, in
+    /// their place. Pipe units have no terminal.
     async fn input(&self, bytes: Bytes) -> Result<(), Error> {
         if !self.inner.pty {
             return Err(Error::Unsupported("pipe units have no terminal".into()));
         }
-        let _serial = self.inner.input_lock.lock().await;
-        let writer = match lock(&self.inner.terminal).as_ref() {
-            Some(terminal) => terminal.input.try_clone()?,
+        let queue = match lock(&self.inner.terminal).as_ref() {
+            Some(terminal) => terminal.input.clone(),
             None => return Err(Error::Exited),
         };
-        blocking(move || {
-            let mut writer = writer;
-            std::io::Write::write_all(&mut writer, &bytes)
-        })
-        .await?
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::BrokenPipe => Error::Exited,
-            _ => error.into(),
-        })
+        let (reply, written) = oneshot::channel();
+        queue
+            .send((bytes, reply))
+            .await
+            .map_err(|_| Error::Exited)?;
+        match written.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe => Err(Error::Exited),
+            Ok(Err(error)) => Err(error.into()),
+            Err(_) => Err(Error::Exited),
+        }
     }
 
     /// Resizes the pseudo console; the attached programs see the new size.

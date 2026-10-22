@@ -1,5 +1,5 @@
 //! Windows Terminal launcher: a new tab in the most recent window,
-//! `wt.exe -w 0 new-tab --startingDirectory <dir> -- <command>`.
+//! `wt.exe -w 0 new-tab --inheritEnvironment --startingDirectory <dir> -- <command>`.
 
 use devlanes_term::{Invocation, LaunchError, LaunchRequest, TerminalLauncher};
 
@@ -15,13 +15,22 @@ impl TerminalLauncher for WindowsTerminal {
 
     /// Plans a tab in the most recently used window (`-w 0`), or a new window
     /// when none is open. `wt.exe` hands its environment to the tab's command,
-    /// so the request's `env` is set on it.
+    /// so the request's `env` is set on it. `--inheritEnvironment` is the
+    /// default for a tab with a command line since Windows Terminal 1.18, but
+    /// a profile's `compatibility.reloadEnvironmentVariables` can change the
+    /// default; the flag wins over the profile.
     fn invocation(&self, request: &LaunchRequest) -> Result<Invocation, LaunchError> {
         let command = request.require_command()?;
-        let mut args: Vec<String> = ["-w", "0", "new-tab", "--startingDirectory"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        let mut args: Vec<String> = [
+            "-w",
+            "0",
+            "new-tab",
+            "--inheritEnvironment",
+            "--startingDirectory",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         args.push(escape(&request.cwd_arg()));
         if let Some(title) = &request.title {
             args.extend(["--title".into(), escape(title)]);
@@ -86,6 +95,7 @@ mod tests {
                 "-w",
                 "0",
                 "new-tab",
+                "--inheritEnvironment",
                 "--startingDirectory",
                 r"C:\src\acme lanes\checkout",
                 "--title",
@@ -109,8 +119,8 @@ mod tests {
             title: Some("x;y".into()),
             env: Vec::new(),
         })?;
-        assert_eq!(invocation.args[4], r"C:\src\a\;b");
-        assert_eq!(invocation.args[6], r"x\;y");
+        assert_eq!(invocation.args[5], r"C:\src\a\;b");
+        assert_eq!(invocation.args[7], r"x\;y");
         assert_eq!(
             invocation.args.last().map(String::as_str),
             Some(r"echo one\;two")

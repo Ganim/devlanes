@@ -764,28 +764,35 @@ fn shell_exports_and_hints_are_injection_safe() {
 }
 
 #[test]
-fn powershell_exports_are_single_quoted_literals() {
+fn powershell_exports_are_ascii_literals_or_base64() {
     let values = BTreeMap::from([
         ("EMPTY".into(), "".into()),
         ("MESSAGE".into(), "it's $(touch /bad) `n".into()),
         ("SMART".into(), "a\u{2019}; calc".into()),
+        ("LINES".into(), "a\nb".into()),
         ("PORT".into(), "3000".into()),
         ("NEXT-PUBLIC".into(), "z".into()),
         ("ProgramFiles(x86)".into(), "C:\\Program Files (x86)".into()),
         ("A}B".into(), "x".into()),
-        ("A*".into(), "x".into()),
+        ("CAF\u{c9}".into(), "x".into()),
+        ("A=B".into(), "x".into()),
+        ("A\tB".into(), "x".into()),
         ("NUL".into(), "a\0b".into()),
     ]);
     let exported = export_environment(&values, ExportShell::Pwsh);
     insta::assert_snapshot!(exported.script, @r"
+    [Environment]::SetEnvironmentVariable('A}B', 'x', 'Process')
+    [Environment]::SetEnvironmentVariable([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('Q0FGw4k=')), 'x', 'Process')
     $env:EMPTY = ''
+    $env:LINES = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('YQpi'))
     $env:MESSAGE = 'it''s $(touch /bad) `n'
     ${env:NEXT-PUBLIC} = 'z'
     $env:PORT = '3000'
     ${env:ProgramFiles(x86)} = 'C:\Program Files (x86)'
-    $env:SMART = 'a’’; calc'
+    $env:SMART = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('YeKAmTsgY2FsYw=='))
     ");
-    assert_eq!(exported.skipped, ["A*", "A}B", "NUL"]);
+    assert!(exported.script.is_ascii());
+    assert_eq!(exported.skipped, ["A\tB", "A=B", "NUL"]);
 }
 
 #[test]
@@ -1384,6 +1391,8 @@ mod codes;
 mod diagnostics;
 mod help;
 mod progress;
+#[cfg(windows)]
+mod pwsh_export;
 mod reference_docs;
 mod render;
 mod start_ui;

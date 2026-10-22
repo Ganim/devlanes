@@ -69,7 +69,7 @@ devlanes start
 
 The daemon notices new, moved and removed worktrees by itself. `devlanes lane ls` lists every lane, and commands take a lane reference such as `2`, `feat/checkout` or `acme@2:api` from any directory. Removing a worktree stops its lane; `devlanes lane clean <lane> --yes` also removes its data and frees its ports.
 
-On Windows, run `devlanes stop` in the worktree before `git worktree remove`. Windows cannot delete a directory that a running process uses as its working directory, so while units run Git deletes the files and its own record of the worktree, then fails on the directories. The daemon still counts the worktree as removed and stops its lane; delete the leftover directory once it has.
+On Windows, run `devlanes stop` in the worktree before `git worktree remove`. Windows cannot delete a directory that a running process uses as its working directory, so while units run Git for Windows asks `Deletion of directory '...' failed. Should I try again? (y/n)` for each such directory; answer `n`. Git then deletes what it can and its own record of the worktree, which is what tells the daemon the worktree is gone: it counts the worktree as removed and stops its lane. Delete the leftover directory once it has.
 
 ## HTTPS and certificates
 

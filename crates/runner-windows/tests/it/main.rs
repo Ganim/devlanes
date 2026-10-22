@@ -52,6 +52,9 @@ impl Drop for Ends {
 
 /// Spawns `spec` with `runner` under a cleanup guard.
 async fn spawn(runner: WindowsRunner, spec: LaunchSpec) -> Result<Guard, devlanes_core::Error> {
+    // As the daemon does at startup: a test run from Git Bash inherits the
+    // "ignore Ctrl-C" flag, and units would inherit it and never see Ctrl-C.
+    devlanes_sys::windows::process::accept_ctrl_c()?;
     Ok(Guard(runner.spawn_unit(spec).await?))
 }
 
@@ -76,20 +79,20 @@ fn cmd(text: &str) -> LaunchSpec {
     }
 }
 
-/// This test binary running [`breakaway_leader`] in `role`.
+/// This test binary running [`breakaway_leader`] (roles `stay` and `exit`) or
+/// [`graceful_leader`] (the others) in `role`.
 fn leader(role: &str) -> Result<LaunchSpec, std::io::Error> {
     let mut env = env();
     env.insert(ROLE.into(), role.into());
+    let test = match role {
+        "stay" | "exit" => "breakaway_leader",
+        _ => "graceful_leader",
+    };
     Ok(LaunchSpec {
         program: std::env::current_exe()?.to_string_lossy().into_owned(),
-        args: [
-            "--exact",
-            "breakaway_leader",
-            "--nocapture",
-            "--test-threads=1",
-        ]
-        .map(String::from)
-        .into(),
+        args: ["--exact", test, "--nocapture", "--test-threads=1"]
+            .map(String::from)
+            .into(),
         cwd: std::env::temp_dir(),
         env,
         pty: false,
@@ -120,6 +123,219 @@ fn breakaway_leader() -> std::io::Result<()> {
         30_000
     }));
     Ok(())
+}
+
+/// Not a test of its own: this binary as the console-control helper, when the
+/// runner starts it with a request. Without one it does nothing.
+#[test]
+fn console_ctrl_helper() {
+    if std::env::var_os(devlanes_runner_windows::ctrl::REQUEST_VAR).is_some() {
+        std::process::exit(i32::from(devlanes_runner_windows::console_ctrl_main()));
+    }
+}
+
+/// The runner with this binary as its console-control helper.
+fn runner_with_helper() -> Result<WindowsRunner, std::io::Error> {
+    Ok(
+        WindowsRunner::default().with_console_helper(devlanes_runner_windows::ConsoleHelper {
+            program: std::env::current_exe()?,
+            args: [
+                "--exact",
+                "console_ctrl_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ]
+            .map(Into::into)
+            .into(),
+        }),
+    )
+}
+
+/// Not a test of its own: as a unit (role `graceful`), waits for Ctrl-C or
+/// Ctrl-Break, prints which arrived and exits 0, the way a server stops cleanly.
+/// Role `q9` starts one `ping` sharing its console and one with a console of its
+/// own (`CREATE_NO_WINDOW`), prints `shared <pid>` and `own <pid>`, then exits
+/// after a while. Without a role it does nothing.
+#[test]
+fn graceful_leader() -> std::io::Result<()> {
+    match std::env::var(ROLE).as_deref() {
+        Ok("graceful") => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async {
+                let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+                let mut ctrl_break = tokio::signal::windows::ctrl_break()?;
+                println!("handlers ready");
+                std::io::stdout().flush()?;
+                let event = tokio::select! {
+                    _ = ctrl_c.recv() => "c",
+                    _ = ctrl_break.recv() => "break",
+                };
+                println!("graceful {event}");
+                std::io::stdout().flush()?;
+                std::process::exit(0);
+            })
+        }
+        Ok("q9") => {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let ping = || {
+                let mut command = std::process::Command::new("ping");
+                command
+                    .args(["-n", "60", "127.0.0.1"])
+                    .stdout(std::process::Stdio::null());
+                command
+            };
+            let shared = ping().spawn()?;
+            let own = ping().creation_flags(CREATE_NO_WINDOW).spawn()?;
+            println!("shared {}", shared.id());
+            println!("own {}", own.id());
+            std::io::stdout().flush()?;
+            std::thread::sleep(Duration::from_millis(2500));
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Reads output until a line containing `marker` and returns the text after it.
+async fn wait_for(
+    output: &mut tokio::sync::broadcast::Receiver<devlanes_core::OutputChunk>,
+    seen: &mut String,
+    marker: &str,
+) -> Option<String> {
+    loop {
+        if let Some(line) = seen.lines().find_map(|line| line.split_once(marker)) {
+            return Some(line.1.trim().to_owned());
+        }
+        let chunk = output.recv().await.ok()?;
+        seen.push_str(&String::from_utf8_lossy(&chunk.bytes));
+    }
+}
+
+/// A pipe unit asked to stop gets Ctrl-Break through the helper and exits on its
+/// own: no escalation, its own exit code.
+#[tokio::test]
+async fn pipe_units_stop_gracefully_on_ctrl_break() -> TestResult {
+    timeout(Duration::from_secs(60), async {
+        let unit = spawn(runner_with_helper()?, leader("graceful")?).await?;
+        let mut output = unit.output();
+        let mut seen = String::new();
+        wait_for(&mut output, &mut seen, "handlers ready")
+            .await
+            .ok_or("leader never got ready")?;
+        let report = unit.stop_with_report(StopPolicy::default()).await?;
+        assert_eq!(report.stop.map(|s| s.escalated), Some(false), "{report:?}");
+        assert_eq!(report.outcome.code, Some(0), "{report:?}");
+        wait_for(&mut output, &mut seen, "graceful ")
+            .await
+            .filter(|event| event == "break")
+            .ok_or_else(|| format!("no graceful break in {seen:?}"))?;
+        Ok(())
+    })
+    .await?
+}
+
+/// A `pty: true` unit stopped with SIGINT gets Ctrl-C as a key and exits on its own.
+#[tokio::test]
+async fn pty_units_stop_gracefully_on_ctrl_c() -> TestResult {
+    timeout(Duration::from_secs(60), async {
+        let mut spec = leader("graceful")?;
+        spec.pty = true;
+        let unit = spawn(WindowsRunner::default(), spec).await?;
+        let mut output = unit.output();
+        let mut seen = String::new();
+        wait_for(&mut output, &mut seen, "handlers ready")
+            .await
+            .ok_or("leader never got ready")?;
+        let policy = StopPolicy {
+            signal: devlanes_core::StopSignal::Interrupt,
+            timeout: Duration::from_secs(10),
+        };
+        let report = unit.stop_with_report(policy).await?;
+        assert_eq!(report.stop.map(|s| s.escalated), Some(false), "{report:?}");
+        assert_eq!(report.outcome.code, Some(0), "{report:?}");
+        Ok(())
+    })
+    .await?
+}
+
+/// A `.cmd` shim left asking "Terminate batch job (Y/N)?" after its program
+/// stopped is ended without counting as escalation.
+#[tokio::test]
+async fn batch_shims_do_not_hold_a_stop() -> TestResult {
+    timeout(Duration::from_secs(60), async {
+        let dir = tempfile::tempdir()?;
+        let shim = dir.path().join("serve.cmd");
+        std::fs::write(
+            &shim,
+            format!(
+                "@\"{}\" --exact graceful_leader --nocapture --test-threads=1\r\n@echo after\r\n",
+                std::env::current_exe()?.display()
+            ),
+        )?;
+        let mut spec = leader("graceful")?;
+        spec.program = shim.to_string_lossy().into_owned();
+        spec.args.clear();
+        spec.pty = true;
+        let unit = spawn(WindowsRunner::default(), spec).await?;
+        let mut output = unit.output();
+        let mut seen = String::new();
+        wait_for(&mut output, &mut seen, "handlers ready")
+            .await
+            .ok_or("leader never got ready")?;
+        let policy = StopPolicy {
+            signal: devlanes_core::StopSignal::Interrupt,
+            timeout: Duration::from_secs(20),
+        };
+        let started = std::time::Instant::now();
+        let report = unit.stop_with_report(policy).await?;
+        assert_eq!(report.stop.map(|s| s.escalated), Some(false), "{report:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "waited for the timeout"
+        );
+        Ok(())
+    })
+    .await?
+}
+
+/// After a pipe task exits (Q9), a process still on its console is a leftover
+/// and ends, while one with a console of its own is a daemon it started and keeps
+/// running.
+#[tokio::test]
+async fn tasks_keep_processes_with_their_own_console() -> TestResult {
+    timeout(Duration::from_secs(60), async {
+        let runner = runner_with_helper()?
+            .with_track_interval(Duration::from_millis(100))
+            .with_exit_sweep(ExitSweep::KeepDaemonized);
+        let unit = spawn(runner, leader("q9")?).await?;
+        let mut output = unit.output();
+        let mut seen = String::new();
+        let shared: u32 = wait_for(&mut output, &mut seen, "shared ")
+            .await
+            .and_then(|pid| pid.parse().ok())
+            .ok_or("no shared line")?;
+        let own: u32 = wait_for(&mut output, &mut seen, "own ")
+            .await
+            .and_then(|pid| pid.parse().ok())
+            .ok_or("no own line")?;
+        let shared = devlanes_sys::process(shared)?.ok_or("shared ping missing")?;
+        let own = devlanes_sys::process(own)?.ok_or("own ping missing")?;
+        let _ends = (Ends(shared.identity()), Ends(own.identity()));
+        let report = unit.wait_report().await?;
+        assert!(
+            report.swept.iter().any(|p| p.pid == shared.pid),
+            "{report:?}"
+        );
+        assert!(
+            report.left_running.iter().any(|p| p.pid == own.pid),
+            "{report:?}"
+        );
+        assert!(devlanes_sys::matches(&own.identity())?, "kept daemon ended");
+        Ok(())
+    })
+    .await?
 }
 
 /// Reads output until the `breakaway <pid>` line and returns the PID.

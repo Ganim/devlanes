@@ -55,15 +55,28 @@ fn api() -> Api {
 }
 
 /// The redistributed `conpty.dll` beside the executable. It starts
-/// `OpenConsole.exe` from its own directory, so both must be there.
+/// `OpenConsole.exe` from its own directory or from the per-architecture folder
+/// the NuGet package uses (`x64\`, `arm64\`), so one of those must be there too;
+/// without it the DLL would quietly fall back to the inbox console host.
 fn bundled() -> Option<Api> {
     let directory = std::env::current_exe().ok()?.parent()?.to_owned();
     let dll = directory.join("conpty.dll");
-    if !dll.is_file() || !directory.join("OpenConsole.exe").is_file() {
+    let host = [
+        directory.join("OpenConsole.exe"),
+        directory.join(ARCH).join("OpenConsole.exe"),
+    ];
+    if !dll.is_file() || !host.iter().any(|path| path.is_file()) {
         return None;
     }
     load(&dll)
 }
+
+/// The NuGet package's folder name for this architecture.
+#[cfg(target_arch = "x86_64")]
+const ARCH: &str = "x64";
+/// The NuGet package's folder name for this architecture.
+#[cfg(target_arch = "aarch64")]
+const ARCH: &str = "arm64";
 
 /// Loads `dll` by full path and resolves the three functions.
 fn load(dll: &Path) -> Option<Api> {
@@ -230,8 +243,10 @@ mod tests {
             PseudoConsole::create(100, 30, input_read.as_handle(), output_write.as_handle())?;
         // The console holds its own duplicates of these ends.
         drop((input_read, output_write));
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        let cmd = Path::new(&root).join(r"System32\cmd.exe");
         let child = spawn(&Spawn {
-            program: Path::new(r"C:\Windows\System32\cmd.exe"),
+            program: &cmd,
             // Delayed expansion (`!NAME!`), since `%NAME%` expands before `set /p` runs.
             command_line: std::ffi::OsStr::new(
                 r#"cmd.exe /d /q /v:on /c "set /p NAME=& echo hello !NAME!""#,

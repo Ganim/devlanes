@@ -525,14 +525,22 @@ impl Inner {
             Ok(list) => list.iter().map(tree).collect(),
             // The registered root may itself be a removed worktree; ask another one.
             Err(_) => {
-                let alternative = project
+                let mut alternative = None;
+                for path in project
                     .lanes()
                     .into_iter()
                     .map(|lane| lane.st().path.clone())
+                {
                     // A directory without `.git` is a removed worktree too: on
                     // Windows `git worktree remove` leaves directories that
                     // running units use as their cwd.
-                    .find(|path| path.join(".git").exists() && !same_path(path, &root));
+                    if !same_path(&path, &root)
+                        && devlanes_git::has_git_link(&path).await.unwrap_or(false)
+                    {
+                        alternative = Some(path);
+                        break;
+                    }
+                }
                 match alternative {
                     Some(path) => devlanes_git::list(&path, &common_dir)
                         .await

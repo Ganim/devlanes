@@ -961,6 +961,7 @@ name = "devlanes-cli"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "clap",
  "clap_complete",
  "devlanes-proto",

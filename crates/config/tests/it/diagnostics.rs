@@ -161,6 +161,62 @@ fn windows_terminal_parses_with_its_launcher_name() {
     assert_eq!(on_windows, ["wezterm", "windows-terminal"]);
 }
 
+/// `as_str` is the serde name of every variant. The names come from the schema,
+/// so a new variant is covered without editing this test.
+#[test]
+fn terminal_names_match_serde_for_every_variant() {
+    /// Every `const` and `enum` string in a schema.
+    fn names(schema: &serde_json::Value, found: &mut Vec<String>) {
+        match schema {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    match (key.as_str(), value) {
+                        ("const", serde_json::Value::String(name)) => found.push(name.clone()),
+                        ("enum", serde_json::Value::Array(items)) => found.extend(
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str().map(str::to_owned)),
+                        ),
+                        _ => names(value, found),
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| names(item, found)),
+            _ => {}
+        }
+    }
+    let schema = serde_json::to_value(schemars::schema_for!(Terminal)).expect("schema");
+    let mut found = Vec::new();
+    // Examples repeat the names; only the variant definitions count.
+    let mut variants = schema.clone();
+    strip_examples(&mut variants);
+    names(&variants, &mut found);
+    found.sort();
+    found.dedup();
+    assert!(
+        found.len() >= 6,
+        "the walk missed variants: {found:?}\n{schema}"
+    );
+    for name in found {
+        let app: Terminal = serde_json::from_value(serde_json::Value::String(name.clone()))
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(app.as_str(), name);
+        assert_eq!(serde_json::to_value(app).expect("serialize"), name.as_str());
+    }
+}
+
+/// Removes `examples` everywhere in a schema.
+fn strip_examples(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Object(map) => {
+            map.remove("examples");
+            map.values_mut().for_each(strip_examples);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_examples),
+        _ => {}
+    }
+}
+
 /// A terminal app without a Windows version warns on Windows (config check and
 /// doctor show it) but never fails, since configs move between machines.
 #[cfg(windows)]

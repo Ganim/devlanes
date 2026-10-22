@@ -851,8 +851,24 @@ impl devlanes_transport_ssh::PromptRelay for PromptBridge {
 }
 
 /// The unit runner the daemon spawns services and tasks with.
+#[cfg(unix)]
 fn unit_runner() -> Arc<dyn UnitRunner> {
     Arc::new(OsUnits(OsRunner::default()))
+}
+
+/// The unit runner the daemon spawns services and tasks with. Graceful stops
+/// send console control events through this binary as a helper
+/// (`devlanes __console-ctrl`); without it units are terminated at once.
+#[cfg(windows)]
+fn unit_runner() -> Arc<dyn UnitRunner> {
+    let runner = match devlanes_runner_windows::ConsoleHelper::current_exe() {
+        Ok(helper) => OsRunner::default().with_console_helper(helper),
+        Err(error) => {
+            tracing::warn!(%error, "no console helper; units are terminated without a graceful stop");
+            OsRunner::default()
+        }
+    };
+    Arc::new(OsUnits(runner))
 }
 
 /// The PTY runner: sessions, PTYs and signals.

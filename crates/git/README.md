@@ -51,7 +51,7 @@ A worktree's `identity` is its administration name under the common Git director
 
 `watch` relists on filesystem events and on a timer, because notifications can be dropped.
 
-A worktree is `present` only while its directory holds its `.git` entry (`has_git_link`). On Windows, `git worktree remove` cannot delete directories that a running process uses as its working directory: it deletes `.git`, the files and its record, then fails, leaving the directories behind. Such a worktree counts as removed.
+A worktree is `present` only while its directory holds its `.git` entry (`has_git_link`), and Git is never asked about directories above it. On Windows, `git worktree remove` cannot delete directories that a running process uses as its working directory: Git for Windows asks `Deletion of directory '...' failed. Should I try again? (y/n)`, and after `n` it deletes what it can (not necessarily `.git` first) and the worktree's administration record, then fails. Without the record Git no longer lists the worktree, so it counts as removed whatever is left on disk.
 
 ## License
 

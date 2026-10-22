@@ -3,17 +3,22 @@
 //!
 //! Mode changes apply to the console buffer behind a handle, not to the handle,
 //! so they are visible to every process sharing the console until restored;
-//! [`ModeGuard`] puts the previous mode back.
+//! [`ModeGuard`] puts the previous mode back, also when a console control event
+//! ends the process without running destructors.
 
 use std::fs::File;
 use std::io;
 use std::os::windows::io::{AsHandle, AsRawHandle};
 use std::ptr;
+use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 
-use windows_sys::Win32::Foundation::{ERROR_OPERATION_ABORTED, GetLastError, SetLastError};
+use windows_sys::Win32::Foundation::{ERROR_OPERATION_ABORTED, GetLastError, HANDLE, SetLastError};
 use windows_sys::Win32::System::Console::{
-    self as win, GetConsoleMode, ReadConsoleW, SetConsoleMode, WriteConsoleW,
+    self as win, CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT,
+    CTRL_SHUTDOWN_EVENT, GetConsoleMode, ReadConsoleW, SetConsoleCtrlHandler, SetConsoleMode,
+    WriteConsoleW,
 };
+use windows_sys::core::BOOL;
 
 /// Input mode: typed characters are echoed (needs [`LINE_INPUT`]).
 pub const ECHO_INPUT: u32 = win::ENABLE_ECHO_INPUT;
@@ -133,9 +138,16 @@ pub fn write_output(handle: impl AsHandle, text: &str) -> io::Result<()> {
 
 /// A console mode change that is undone on drop, also on error paths, so the
 /// user's shell gets its console back as it was.
+///
+/// Ctrl-Break, closing the console window, logoff and shutdown end the process
+/// from the console's control handler thread without running destructors, so
+/// every live guard is also listed in a registry that a control handler restores
+/// before the default handling ends the process. The handler also covers Ctrl-C,
+/// which ends a process without a handler of its own while a prompt has echo off.
 pub struct ModeGuard<H: AsHandle> {
     handle: H,
     previous: u32,
+    id: u64,
 }
 
 impl<H: AsHandle> ModeGuard<H> {
@@ -143,16 +155,126 @@ impl<H: AsHandle> ModeGuard<H> {
     /// behind `handle`. Fails, changing nothing, when `handle` is not a console or
     /// the console host rejects the new mode.
     pub fn change(handle: H, set: u32, clear: u32) -> io::Result<Self> {
+        install_handler();
         let previous = mode(&handle)?;
+        // The lock is held across the change, so the control handler sees either
+        // no change or a change with its registry entry.
+        let mut registry = active();
         set_mode(&handle, (previous | set) & !clear)?;
-        Ok(Self { handle, previous })
+        let id = registry.add(handle.as_handle().as_raw_handle() as usize, previous);
+        Ok(Self {
+            handle,
+            previous,
+            id,
+        })
     }
 }
 
 impl<H: AsHandle> Drop for ModeGuard<H> {
     /// Restores the previous mode; there is nothing useful to do if that fails.
     fn drop(&mut self) {
+        let mut registry = active();
         let _ = set_mode(&self.handle, self.previous);
+        registry.remove(self.id);
+    }
+}
+
+/// Modes of live [`ModeGuard`]s, for the control handler.
+static ACTIVE: Mutex<Registry> = Mutex::new(Registry::new());
+
+/// Installs [`restore_on_exit`] once per process.
+static HANDLER: Once = Once::new();
+
+/// Locks [`ACTIVE`]. A panic while it was held cannot leave an entry half
+/// written, so a poisoned lock is still used.
+fn active() -> MutexGuard<'static, Registry> {
+    ACTIVE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Adds the control handler on first use. If that fails, guards still restore
+/// on drop; only the control events are left to the default handling.
+fn install_handler() {
+    HANDLER.call_once(|| {
+        // SAFETY: `restore_on_exit` is a valid handler for the life of the
+        // process and is never removed.
+        let _ = unsafe { SetConsoleCtrlHandler(Some(restore_on_exit), 1) };
+    });
+}
+
+/// Puts back every registered mode when `event` is about to end the process,
+/// then returns FALSE so the next handler, or the default one that exits, runs.
+/// When another handler keeps the process alive, the guards restore again on drop.
+extern "system" fn restore_on_exit(event: u32) -> BOOL {
+    if ends_process(event) {
+        active().restore(|handle, previous| {
+            // SAFETY: entries are removed under the lock held here before their
+            // guard releases the handle, so `handle` is still open; the mode is
+            // passed by value.
+            let _ = unsafe { SetConsoleMode(handle as HANDLE, previous) };
+        });
+    }
+    0
+}
+
+/// Whether the default handling of console control `event` ends the process.
+fn ends_process(event: u32) -> bool {
+    matches!(
+        event,
+        CTRL_C_EVENT
+            | CTRL_BREAK_EVENT
+            | CTRL_CLOSE_EVENT
+            | CTRL_LOGOFF_EVENT
+            | CTRL_SHUTDOWN_EVENT
+    )
+}
+
+/// The previous modes of live guards, in the order they were taken.
+#[derive(Debug)]
+struct Registry {
+    next: u64,
+    entries: Vec<Entry>,
+}
+
+/// One live guard: the console handle as an integer and the mode to restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Entry {
+    id: u64,
+    handle: usize,
+    previous: u32,
+}
+
+impl Registry {
+    /// An empty registry, usable in a static.
+    const fn new() -> Self {
+        Self {
+            next: 0,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Records a guard and returns its id for [`Self::remove`].
+    fn add(&mut self, handle: usize, previous: u32) -> u64 {
+        let id = self.next;
+        self.next += 1;
+        self.entries.push(Entry {
+            id,
+            handle,
+            previous,
+        });
+        id
+    }
+
+    /// Forgets the guard `id`, when it has restored the mode itself.
+    fn remove(&mut self, id: u64) {
+        self.entries.retain(|entry| entry.id != id);
+    }
+
+    /// Calls `set` for every entry, newest first, so a buffer changed by nested
+    /// guards ends at the mode it had before the oldest one.
+    fn restore(&self, mut set: impl FnMut(usize, u32)) {
+        for entry in self.entries.iter().rev() {
+            set(entry.handle, entry.previous);
+        }
     }
 }
 
@@ -165,5 +287,54 @@ mod tests {
         let file = tempfile::tempfile().expect("temp file");
         assert!(mode(&file).is_err());
         assert!(ModeGuard::change(&file, VIRTUAL_TERMINAL_PROCESSING, 0).is_err());
+        let raw = file.as_raw_handle() as usize;
+        assert!(active().entries.iter().all(|entry| entry.handle != raw));
+    }
+
+    /// Replays `registry` onto a fake console: handle -> current mode.
+    fn replay(registry: &Registry) -> Vec<(usize, u32)> {
+        let mut modes: Vec<(usize, u32)> = Vec::new();
+        registry.restore(|handle, previous| {
+            match modes.iter_mut().find(|(known, _)| *known == handle) {
+                Some(slot) => slot.1 = previous,
+                None => modes.push((handle, previous)),
+            }
+        });
+        modes.sort_unstable();
+        modes
+    }
+
+    #[test]
+    fn restore_ends_at_the_oldest_previous_mode_per_handle() {
+        let mut registry = Registry::new();
+        let outer = registry.add(1, 0o7);
+        let inner = registry.add(1, 0o3);
+        let other = registry.add(2, 0o5);
+        assert_eq!(replay(&registry), [(1, 0o7), (2, 0o5)]);
+        // A guard that restored itself is not restored again.
+        registry.remove(other);
+        registry.remove(inner);
+        assert_eq!(replay(&registry), [(1, 0o7)]);
+        registry.remove(outer);
+        assert!(replay(&registry).is_empty());
+        // Ids are not reused, so a stale id removes nothing.
+        let next = registry.add(3, 1);
+        assert_ne!(next, outer);
+        registry.remove(outer);
+        assert_eq!(replay(&registry), [(3, 1)]);
+    }
+
+    #[test]
+    fn only_events_that_end_the_process_restore() {
+        for event in [
+            CTRL_C_EVENT,
+            CTRL_BREAK_EVENT,
+            CTRL_CLOSE_EVENT,
+            CTRL_LOGOFF_EVENT,
+            CTRL_SHUTDOWN_EVENT,
+        ] {
+            assert!(ends_process(event), "{event}");
+        }
+        assert!(!ends_process(7));
     }
 }

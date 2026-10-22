@@ -24,7 +24,7 @@ use std::{
     process::{Command, Stdio},
     sync::OnceLock,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
@@ -132,10 +132,12 @@ pub fn sidecar(program: &Path) -> PathBuf {
 /// The built `fake-tool`: `DEVLANES_FAKE_TOOL` when set, else the binary next to
 /// the running test's `deps` directory (`target/<profile>/fake-tool`).
 ///
-/// Without `DEVLANES_FAKE_TOOL`, the first call in a process runs `cargo build
-/// -p devlanes-testing --bin fake-tool` into the same target directory and
-/// profile, bounded by ten minutes, so a binary left from older sources is never
-/// used. Cargo makes that a quick no-op when the binary is current.
+/// Without `DEVLANES_FAKE_TOOL`, the first call in a process checks that binary
+/// against this crate's `src` and `Cargo.toml`. When it is missing or older than
+/// any of them, it runs `cargo build -p devlanes-testing --bin fake-tool` into the
+/// same target directory and profile, bounded by ten minutes, so a binary left
+/// from older sources is never used. A current binary is used without cargo, so
+/// parallel test processes do not queue on cargo's build lock.
 pub fn binary() -> Result<PathBuf, Error> {
     static BINARY: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     BINARY
@@ -156,7 +158,13 @@ fn locate() -> Result<PathBuf, Error> {
         .and_then(Path::parent)
         .ok_or_else(|| Error::FakeTool(format!("no target directory above {}", exe.display())))?;
     let program = profile_dir.join(format!("fake-tool{}", std::env::consts::EXE_SUFFIX));
-    build(profile_dir)?;
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !is_current(
+        &program,
+        &[&crate_dir.join("src"), &crate_dir.join("Cargo.toml")],
+    ) {
+        build(profile_dir)?;
+    }
     if program.is_file() {
         Ok(program)
     } else {
@@ -165,6 +173,31 @@ fn locate() -> Result<PathBuf, Error> {
             program.display()
         )))
     }
+}
+
+/// Whether `program` exists and was modified no earlier than every file under
+/// `sources` (files or directories, searched recursively). Sources that cannot
+/// be read are left out, so a test binary run without its source tree takes the
+/// binary as it is.
+fn is_current(program: &Path, sources: &[&Path]) -> bool {
+    let Ok(built) = std::fs::metadata(program).and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    let mut newest: Option<SystemTime> = None;
+    let mut pending: Vec<PathBuf> = sources.iter().map(|path| path.to_path_buf()).collect();
+    while let Some(path) = pending.pop() {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                pending.extend(entries.flatten().map(|entry| entry.path()));
+            }
+        } else if let Ok(modified) = meta.modified() {
+            newest = newest.max(Some(modified));
+        }
+    }
+    newest.is_none_or(|newest| newest <= built)
 }
 
 /// Builds the binary into `profile_dir` (`<target>/<profile>`).
@@ -275,6 +308,39 @@ mod tests {
             expand_json(&value, r"C:\w", &env),
             serde_json::json!({"DIR": r"C:\w", "list": ["seen"], "gone": null})
         );
+    }
+
+    /// A missing binary or one older than any source is rebuilt; nothing else is.
+    #[test]
+    fn binary_is_current_only_when_newer_than_its_sources() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let sources = dir.path().join("src");
+        std::fs::create_dir_all(sources.join("bin"))?;
+        let manifest = dir.path().join("Cargo.toml");
+        let program = dir.path().join("fake-tool");
+        let at = |path: &Path, seconds: u64| -> std::io::Result<()> {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(path)?
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+        };
+        at(&sources.join("lib.rs"), 1_000)?;
+        at(&sources.join("bin").join("fake-tool.rs"), 2_000)?;
+        at(&manifest, 1_500)?;
+        let all = [sources.as_path(), manifest.as_path()];
+        assert!(!is_current(&program, &all), "missing");
+        at(&program, 2_000)?;
+        assert!(is_current(&program, &all), "as new as the newest source");
+        at(&sources.join("bin").join("fake-tool.rs"), 3_000)?;
+        assert!(!is_current(&program, &all), "a nested source is newer");
+        at(&program, 4_000)?;
+        at(&manifest, 5_000)?;
+        assert!(!is_current(&program, &all), "the manifest is newer");
+        // Without readable sources, the binary is taken as it is.
+        assert!(is_current(&program, &[&dir.path().join("gone")]));
+        Ok(())
     }
 
     /// Behaviours survive the sidecar round trip; missing fields take defaults.

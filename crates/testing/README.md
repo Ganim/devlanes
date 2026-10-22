@@ -51,7 +51,7 @@ let fake = install(dir, "mise", &Behaviour::new()
     .stdout_json(serde_json::json!({ "FROM_DIR": "{cwd}" })))?;
 ```
 
-The binary is taken from `DEVLANES_FAKE_TOOL`. Without it, each test process runs `cargo build -p devlanes-testing --bin fake-tool` once on first use (a no-op when current) and takes the binary next to the running test (`target/<profile>/fake-tool`), so a stale build is never used.
+The binary is taken from `DEVLANES_FAKE_TOOL`, which CI sets after building it once. Without it, a test process takes the binary next to the running test (`target/<profile>/fake-tool`) and runs `cargo build -p devlanes-testing --bin fake-tool` first only when that binary is missing or older than a file under `crates/testing/src` or `crates/testing/Cargo.toml`, so a stale build is never used.
 
 ## Behaviour
 
