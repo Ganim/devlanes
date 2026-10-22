@@ -5,11 +5,13 @@
 //! [`crate::ProcessInfo`] reports `sid`, `pgid` and `uid` as `None`; units are
 //! grouped by Job Objects instead.
 
+pub mod cert;
 pub mod conpty;
 pub mod console;
 pub mod ctrl;
 pub mod handles;
 pub mod job;
+pub mod net;
 pub mod pipe;
 pub mod proc;
 pub mod process;

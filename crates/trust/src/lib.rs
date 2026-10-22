@@ -1,18 +1,21 @@
 //! Contract for installing the devlanes CA into OS and browser trust stores.
 //!
 //! Trust changes run in the CLI process because they prompt (the macOS keychain
-//! dialog, a sudo password). The daemon never calls a [`TrustStore`].
+//! dialog, a sudo password, the Windows root store warning). The daemon never
+//! calls a [`TrustStore`].
 //!
-//! Platform crates (`devlanes-trust-macos`, `devlanes-trust-linux`) implement the
-//! stores. Every external command goes through a [`CommandExecutor`], so tests
-//! check argv without touching real stores. The NSS implementation used by
-//! Firefox and Chromium lives here because both platforms share it.
+//! Platform crates (`devlanes-trust-macos`, `devlanes-trust-linux`,
+//! `devlanes-trust-windows`) implement the stores. Every external command goes
+//! through a [`CommandExecutor`], so tests check argv without touching real stores.
+//! The NSS implementation used by Firefox and Chromium lives here because macOS
+//! and Linux share it; Windows browsers read the Windows store instead.
 
 mod cert;
 mod error;
 mod exec;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+#[cfg(unix)]
 pub mod nss;
 
 use std::fmt;
@@ -22,9 +25,11 @@ use async_trait::async_trait;
 
 pub use cert::CaCertificate;
 pub use error::TrustError;
+#[cfg(unix)]
+pub use exec::SYSTEM_PROGRAM_DIRS;
 pub use exec::{
-    CommandExecutor, CommandLine, CommandOutput, SYSTEM_PROGRAM_DIRS, SystemExecutor, TempPem,
-    find_system_program, path_arg, run, run_checked,
+    CommandExecutor, CommandLine, CommandOutput, SystemExecutor, TempPem, find_system_program,
+    path_arg, run, run_checked, system_program_dirs,
 };
 
 /// A store a user can ask `devlanes certs trust` to install the CA into.
@@ -32,11 +37,14 @@ pub use exec::{
 /// Mirrors `tls.trust` in the user config; the composition root maps between the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TrustTarget {
-    /// The OS store: the login keychain on macOS, the distribution CA bundle on Linux.
+    /// The OS store: the login keychain on macOS, the distribution CA bundle on
+    /// Linux, the current user's root store on Windows.
     System,
-    /// Every Firefox profile's NSS database.
+    /// Every Firefox profile's NSS database; on Windows, the system store, which
+    /// Firefox reads.
     Firefox,
-    /// Chrome and Chromium: the keychain on macOS, `~/.pki/nssdb` on Linux.
+    /// Chrome and Chromium: the keychain on macOS, `~/.pki/nssdb` on Linux, the
+    /// system store on Windows (Edge too).
     Chrome,
     /// Excluded from v1; always [`TrustError::Unsupported`].
     IosSimulator,
@@ -130,6 +138,27 @@ pub trait TrustStore: Send + Sync {
 
     /// Human description of what the store changes, for prompts and `doctor`.
     fn describe(&self) -> String;
+
+    /// Short name of where the CA goes, shown next to the target in status lines
+    /// when the target name alone does not say it (`Windows user root store`).
+    /// `None` keeps the plain target name.
+    fn location(&self) -> Option<String> {
+        None
+    }
+
+    /// The confirmation the OS asks for while `install` or `uninstall` changes
+    /// this store, printed before the change so the dialog is expected. `None`
+    /// when nothing beyond the platform's usual prompt appears.
+    fn approval(&self) -> Option<String> {
+        None
+    }
+
+    /// A setting outside devlanes that keeps this store from being used (Firefox
+    /// ignoring the Windows store), found without prompting. `None` when there is
+    /// none or it cannot be read.
+    async fn hint(&self) -> Option<String> {
+        None
+    }
 
     /// Adds the CA and marks it trusted for TLS servers.
     async fn install(&self, ca: &CaCertificate) -> Result<(), TrustError>;

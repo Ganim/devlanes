@@ -34,6 +34,12 @@ rustix = { version = "1", features = ["process", "termios"] }
 [target.'cfg(windows)'.dependencies]
 devlanes-runner-windows = { path = "../../crates/runner-windows" }
 devlanes-term-windows-terminal = { path = "../../crates/term-windows-terminal" }
+devlanes-trust-windows = { path = "../../crates/trust-windows" }
+# Windows has no PEM root bundle: bundle.pem is built from the system certificate store.
+# schannel is what rustls-native-certs reads it with; used directly because that
+# crate prefers SSL_CERT_FILE when set, which may name bundle.pem itself.
+base64.workspace = true
+schannel = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true

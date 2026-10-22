@@ -29,7 +29,7 @@ pub async fn facts(paths: &Paths) -> Value {
             .await
             .unwrap_or_default()
     };
-    json!({
+    let mut facts = json!({
         "running": false,
         "version": env!("CARGO_PKG_VERSION"),
         "home": paths.home,
@@ -44,8 +44,35 @@ pub async fn facts(paths: &Paths) -> Value {
         "user_config": user_config,
         "port_holders": port_holders,
         "hosts": hosts_helper().await,
-    })
+    });
+    annotate_excluded_ports(&mut facts, &home.join("config.yaml")).await;
+    facts
 }
+
+/// Adds `excluded_ports` as the daemon's doctor reports it, judged against
+/// `ports.range` in the user config on disk (the default without a file). No box
+/// is mirrored without a daemon.
+#[cfg(windows)]
+async fn annotate_excluded_ports(facts: &mut Value, config: &Path) {
+    let config = config.to_owned();
+    let pool = tokio::task::spawn_blocking(move || {
+        let user = if config.exists() {
+            devlanes_config::load_user_lenient(&config).0
+        } else {
+            devlanes_config::UserConfig::default()
+        };
+        user.ports.bounds().ok()
+    })
+    .await
+    .ok()
+    .flatten();
+    facts["excluded_ports"] =
+        devlanes_daemon::excluded_ports::doctor(pool, &std::collections::BTreeSet::new()).await;
+}
+
+/// Windows alone reserves port ranges this way.
+#[cfg(unix)]
+async fn annotate_excluded_ports(_facts: &mut Value, _config: &Path) {}
 
 /// Adds `terminal: {elevated, elevation_allowed, job, conpty}` about the shell
 /// running this command: an elevated shell cannot start the daemon unless

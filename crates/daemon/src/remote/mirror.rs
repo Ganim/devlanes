@@ -326,12 +326,12 @@ impl Mirror {
                     // No IPv6 loopback on this machine: nothing to mirror there.
                     Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {}
                     Err(error) => {
-                        let in_use = error.kind() == std::io::ErrorKind::AddrInUse;
-                        let pid = if in_use {
+                        let pid = if maybe_held(&error) {
                             engine.integ.ports.holder(*port).await
                         } else {
                             None
                         };
+                        let in_use = error.kind() == std::io::ErrorKind::AddrInUse || pid.is_some();
                         let message = if in_use {
                             let holder = match pid {
                                 Some(pid) => format!("{} (pid {pid})", process_name(pid).await),
@@ -587,17 +587,48 @@ async fn process_name(pid: u32) -> String {
     .unwrap_or_else(|| "an unknown process".to_owned())
 }
 
-/// Binds a mirror listener. `SO_REUSEADDR` only on Linux, where it merely skips
-/// `TIME_WAIT` on rebinds: on macOS it would let this listener shadow another
-/// process bound to the wildcard address instead of reporting the conflict.
+/// Binds a mirror listener.
 fn bind(address: IpAddr, port: u16) -> std::io::Result<TcpListener> {
     let socket = match address {
         IpAddr::V4(_) => TcpSocket::new_v4()?,
         IpAddr::V6(_) => TcpSocket::new_v6()?,
     };
-    socket.set_reuseaddr(cfg!(target_os = "linux"))?;
+    claim(&socket)?;
     socket.bind(SocketAddr::new(address, port))?;
     socket.listen(1024)
+}
+
+/// `SO_REUSEADDR` only on Linux, where it merely skips `TIME_WAIT` on rebinds: on
+/// macOS it would let this listener shadow another process bound to the wildcard
+/// address instead of reporting the conflict.
+#[cfg(unix)]
+fn claim(socket: &TcpSocket) -> std::io::Result<()> {
+    socket.set_reuseaddr(cfg!(target_os = "linux"))
+}
+
+/// Windows lets another program bind a more specific address on the same port and
+/// take connections, unless the listener claims the port exclusively.
+#[cfg(windows)]
+fn claim(socket: &TcpSocket) -> std::io::Result<()> {
+    devlanes_sys::windows::net::exclusive_address_use(socket)
+}
+
+/// Whether a failed bind may mean another socket holds the port, so its holder
+/// is worth looking up.
+#[cfg(unix)]
+fn maybe_held(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::AddrInUse
+}
+
+/// With `SO_EXCLUSIVEADDRUSE` a port another socket holds can also fail with
+/// access denied, which an excluded port range returns too; the holder lookup
+/// tells them apart.
+#[cfg(windows)]
+fn maybe_held(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+    )
 }
 
 /// Accepts local connections and splices each into a data stream to the box.

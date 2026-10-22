@@ -829,8 +829,100 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
             .fix("stop that process, or set proxy ports in ~/.devlanes/config.yaml"),
         );
     }
+    checks.extend(excluded_port_checks(&data["excluded_ports"]));
     checks.extend(service_checks(data));
     checks.extend(tls_and_hosts_checks(data, running, cx));
+    checks
+}
+
+/// Lists `[{start, end}]` port ranges as `27339, 49745-49844`.
+fn port_ranges(ranges: &[Value]) -> String {
+    ranges
+        .iter()
+        .map(|range| {
+            let (start, end) = (display_value(&range["start"]), display_value(&range["end"]));
+            if start == end {
+                start
+            } else {
+                format!("{start}-{end}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The TCP port ranges Windows reserves (`excluded_ports: {ranges, pool,
+/// pool_overlaps, mirrored}` or `{error}`, reported on Windows only): a lane
+/// port or a mirrored box port inside one cannot be bound.
+fn excluded_port_checks(excluded: &Value) -> Vec<Check> {
+    const LIST: &str = "netsh int ipv4 show excludedportrange protocol=tcp";
+    if !excluded.is_object() {
+        return Vec::new();
+    }
+    if let Some(error) = excluded.get("error").and_then(Value::as_str) {
+        return vec![
+            Check::new(
+                "ports",
+                Outcome::Skip,
+                format!(
+                    "cannot read the port ranges Windows reserves: {}",
+                    clean(error)
+                ),
+            )
+            .fix(format!("run {LIST} to see them")),
+        ];
+    }
+    let mut checks = Vec::new();
+    let pool = &excluded["pool"];
+    if pool.is_object() {
+        let range = port_ranges(std::slice::from_ref(pool));
+        let overlaps = list(excluded, "pool_overlaps");
+        checks.push(if overlaps.is_empty() {
+            Check::new(
+                "ports",
+                Outcome::Ok,
+                format!("no port range Windows reserves overlaps ports.range {range}"),
+            )
+        } else {
+            Check::new(
+                "ports",
+                Outcome::Skip,
+                format!(
+                    "ports.range {range} overlaps ports Windows reserves ({}); a service given one of them cannot bind it",
+                    port_ranges(overlaps)
+                ),
+            )
+            .fix(format!(
+                "set ports.range in ~/.devlanes/config.yaml clear of them ({LIST} lists them; Hyper-V, WSL and Docker Desktop reserve them)"
+            ))
+        });
+    }
+    let mirrored: Vec<String> = list(excluded, "mirrored")
+        .iter()
+        .map(display_value)
+        .collect();
+    if !mirrored.is_empty() {
+        checks.push(
+            Check::new(
+                "ports",
+                Outcome::Skip,
+                if mirrored.len() == 1 {
+                    format!(
+                        "box port {} is inside a port range Windows reserves; it cannot be mirrored here",
+                        mirrored.join(", ")
+                    )
+                } else {
+                    format!(
+                        "box ports {} are inside port ranges Windows reserves; they cannot be mirrored here",
+                        mirrored.join(", ")
+                    )
+                },
+            )
+            .fix(format!(
+                "set ports.range on the box clear of the reserved ranges, then restart its lanes ({LIST} lists them)"
+            )),
+        );
+    }
     checks
 }
 
@@ -1135,14 +1227,24 @@ fn tls_and_hosts_checks(data: &Value, running: bool, cx: &Ctx<'_>) -> Vec<Check>
             Outcome::Ok,
             format!("CA at {}", display_value(&ca["path"])),
         ));
-        // `[{store, state, reason?}]`, added by the CLI from this user's stores.
+        // `[{store, state, reason?, location?, approval?, hint?}]`, added by the CLI
+        // from this user's stores. `location` names the store when the target does
+        // not (Windows), `approval` the dialog `certs trust` shows.
         for entry in list(ca, "trust") {
-            let store = text(entry, "store");
+            let store = match entry.get("location").and_then(Value::as_str) {
+                Some(location) => format!("{} ({})", text(entry, "store"), clean(location)),
+                None => text(entry, "store"),
+            };
+            let note = |key: &str| entry.get(key).and_then(Value::as_str).map(clean);
             checks.push(match text(entry, "state").as_str() {
                 "trusted" => Check::new("tls", Outcome::Ok, format!("CA trusted by {store}")),
                 "untrusted" => {
-                    Check::new("tls", Outcome::Fail, format!("CA not trusted by {store}"))
-                        .fix("devlanes certs trust")
+                    Check::new("tls", Outcome::Fail, format!("CA not trusted by {store}")).fix(
+                        match note("approval") {
+                            Some(approval) => format!("devlanes certs trust ({approval})"),
+                            None => "devlanes certs trust".into(),
+                        },
+                    )
                 }
                 _ => Check::new(
                     "tls",
@@ -1156,6 +1258,11 @@ fn tls_and_hosts_checks(data: &Value, running: bool, cx: &Ctx<'_>) -> Vec<Check>
                     },
                 ),
             });
+            // A browser setting that keeps the store from working (Firefox ignoring
+            // the Windows store); `certs trust` cannot change it.
+            if let Some(hint) = note("hint") {
+                checks.push(Check::new("tls", Outcome::Skip, hint));
+            }
         }
         // A CA from before name constraints stays until the user recreates it.
         if let Some(hint) = ca.get("hint").and_then(Value::as_str) {

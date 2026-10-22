@@ -45,6 +45,12 @@ pub enum TrustError {
         /// What is missing, with a hint.
         detail: String,
     },
+    /// The user declined the OS confirmation dialog (the Windows root store warning).
+    #[error("{detail}")]
+    Cancelled {
+        /// What was declined and how to retry.
+        detail: String,
+    },
     /// A command exited unsuccessfully.
     #[error("`{command}` failed with {}: {}", exit_code(*.code), stderr.trim())]
     CommandFailed {

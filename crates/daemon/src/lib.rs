@@ -11,6 +11,8 @@ mod control;
 pub mod diagnostics;
 mod dns;
 mod engine;
+#[cfg(windows)]
+pub mod excluded_ports;
 pub mod hosts;
 mod input;
 pub mod integrations;

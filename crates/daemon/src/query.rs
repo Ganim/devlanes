@@ -951,7 +951,7 @@ impl Inner {
             "codex_sandbox": std::env::var_os("CODEX_SANDBOX").is_some(),
             "app_sandbox": std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some(),
         });
-        Ok(json!({
+        let mut data = json!({
             "version": env!("CARGO_PKG_VERSION"),
             "pid": std::process::id(),
             "home": self.opts.home,
@@ -975,7 +975,22 @@ impl Inner {
             "user_config": self.user_config_doctor().await,
             // The CLI compares them with the service manager's stop window.
             "stop_timeouts": self.stop_timeouts(),
-        }))
+        });
+        self.excluded_ports_doctor(&mut data).await;
+        Ok(data)
+    }
+
+    /// Nothing reserves port ranges on Unix the way Windows does.
+    #[cfg(unix)]
+    async fn excluded_ports_doctor(&self, _data: &mut Value) {}
+
+    /// `doctor`'s `excluded_ports`: the port ranges Windows reserves, judged
+    /// against the port pool in effect and the ports of connected boxes.
+    #[cfg(windows)]
+    async fn excluded_ports_doctor(&self, data: &mut Value) {
+        let pool = self.pool().ok().map(|pool| (pool.start, pool.end));
+        let mirrored = self.remote.advertised_ports();
+        data["excluded_ports"] = crate::excluded_ports::doctor(pool, &mirrored).await;
     }
 
     /// `doctor`'s `stop_timeouts`: the longest stop timeout of each service of

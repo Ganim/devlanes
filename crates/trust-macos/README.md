@@ -33,7 +33,7 @@ Trust settings go to the user domain, so no sudo is needed. macOS still asks for
 
 Firefox needs `certutil` (`brew install nss`). Firefox 120 and later also reads user-added keychain roots.
 
-The crate builds on every platform so its argv tests run in Linux CI too.
+The crate builds on every Unix platform so its argv tests run in Linux CI too. It is empty on Windows.
 
 ## License
 

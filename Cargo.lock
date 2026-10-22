@@ -887,6 +887,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "bollard",
  "bytes",
  "crossterm",
@@ -943,10 +944,12 @@ dependencies = [
  "devlanes-trust",
  "devlanes-trust-linux",
  "devlanes-trust-macos",
+ "devlanes-trust-windows",
  "devlanes-tui",
  "devlanes-tunnel",
  "futures-util",
  "rustix",
+ "schannel",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1426,6 +1429,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "devlanes-pki",
+ "devlanes-sys",
  "futures-util",
  "http-body-util",
  "hyper",
@@ -1662,6 +1666,7 @@ version = "0.1.0"
 dependencies = [
  "devlanes-core",
  "libc",
+ "rcgen",
  "rustix",
  "tempfile",
  "thiserror 2.0.21",
@@ -1812,6 +1817,19 @@ dependencies = [
  "async-trait",
  "devlanes-pki",
  "devlanes-trust",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "devlanes-trust-windows"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "devlanes-pki",
+ "devlanes-sys",
+ "devlanes-trust",
+ "rcgen",
  "tempfile",
  "tokio",
 ]
@@ -4158,6 +4176,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "schannel"
+version = "0.1.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cb23c424d8ee841bb4d813677ca237e2a610067d594fec130f87d6093495ab5"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

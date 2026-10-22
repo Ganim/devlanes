@@ -21,6 +21,10 @@ thiserror.workspace = true
 tracing.workspace = true
 socket2 = "0.6"
 
+# `SO_EXCLUSIVEADDRUSE`, which socket2 does not set.
+[target.'cfg(windows)'.dependencies]
+devlanes-sys = { path = "../sys" }
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio-tungstenite = "0.28"

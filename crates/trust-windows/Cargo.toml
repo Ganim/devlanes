@@ -1,0 +1,23 @@
+[package]
+name = "devlanes-trust-windows"
+description = "Windows user root store trust for the devlanes CA, used by Chrome, Edge and Firefox."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The store calls go through devlanes-sys, so the crate is empty on other platforms.
+[target.'cfg(windows)'.dependencies]
+async-trait.workspace = true
+devlanes-sys = { path = "../sys" }
+devlanes-trust = { path = "../trust" }
+tokio.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+devlanes-pki = { path = "../pki" }
+rcgen = "0.14"
+tempfile.workspace = true
+
+[lints]
+workspace = true

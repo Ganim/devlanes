@@ -371,47 +371,72 @@ fn valid_dns_name(name: &str) -> bool {
         })
 }
 
-/// Existing directories are checked, never silently chmodded.
+/// Creates the directory only the owner can enter. Existing directories are
+/// checked, never silently chmodded.
+#[cfg(unix)]
 fn create_private_directory(path: &Path) -> Result<(), Error> {
-    match private_dir_builder().create(path) {
+    use std::os::unix::fs::DirBuilderExt;
+    match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => check_private(path, true),
         Err(error) => Err(error.into()),
     }
 }
 
-/// Creates directories only the owner can enter.
-#[cfg(unix)]
-fn private_dir_builder() -> fs::DirBuilder {
-    use std::os::unix::fs::DirBuilderExt;
-    let mut builder = fs::DirBuilder::new();
-    builder.mode(0o700);
-    builder
-}
-
-/// Without mode bits the directory inherits its parent's ACL.
-#[cfg(not(unix))]
-fn private_dir_builder() -> fs::DirBuilder {
-    fs::DirBuilder::new()
+/// Creates the directory with an access list for this user, SYSTEM and
+/// Administrators, which the key and certificate inherit. An existing one must
+/// already be private, a real directory and this user's; its access list is
+/// never changed here.
+#[cfg(windows)]
+fn create_private_directory(path: &Path) -> Result<(), Error> {
+    match devlanes_sys::windows::security::ensure_private_dir(path, false)? {
+        Ok(_) => Ok(()),
+        Err(_) => Err(Error::InsecurePath),
+    }
 }
 
 /// Rejects symlinks and group/world access before secret material is opened.
+#[cfg(unix)]
 fn check_private(path: &Path, directory: bool) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt;
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(Error::InsecurePath);
+    }
+    Ok(())
+}
+
+/// Rejects any reparse point (symlinks and junctions, which could point anywhere)
+/// and a directory others can open. A file's access comes from the directory it
+/// sits in: files created there inherit its private access list, so a file is
+/// checked through its parent.
+#[cfg(windows)]
+fn check_private(path: &Path, directory: bool) -> Result<(), Error> {
+    use devlanes_sys::windows::security::check_private_dir;
+    use std::os::windows::fs::MetadataExt;
+    /// `FILE_ATTRIBUTE_REPARSE_POINT`.
+    const REPARSE_POINT: u32 = 0x400;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_attributes() & REPARSE_POINT != 0
         || (directory && !metadata.is_dir())
         || (!directory && !metadata.is_file())
     {
         return Err(Error::InsecurePath);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(Error::InsecurePath);
-        }
+    let directory = if directory { Some(path) } else { path.parent() };
+    // A bare file name sits in the working directory.
+    let directory = match directory {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    match check_private_dir(directory)? {
+        Ok(()) => Ok(()),
+        Err(_) => Err(Error::InsecurePath),
     }
-    Ok(())
 }
 
 /// Builds the permitted subtrees for a new CA, adding a normalized TLD when it is not covered.

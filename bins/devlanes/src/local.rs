@@ -223,8 +223,10 @@ fn targets(paths: &Paths) -> Vec<TrustTarget> {
 }
 
 /// The OS decides the store implementation at compile time. `own_ca` lets the
-/// macOS keychain also remove older devlanes CAs by label; mkcert's CA is not ours.
-/// On Linux, sudo may ask for a password only when this invocation may prompt.
+/// macOS keychain and the Windows root store also remove older devlanes CAs by
+/// name; mkcert's CA is not ours. On Linux, sudo may ask for a password only when
+/// this invocation may prompt; the macOS and Windows dialogs appear on the desktop
+/// either way.
 fn store(
     target: TrustTarget,
     own_ca: bool,
@@ -262,16 +264,50 @@ fn store(
     }
     #[cfg(windows)]
     {
-        let _ = (target, own_ca, can_prompt);
-        Err(devlanes_trust::TrustError::UnsupportedSystem(
-            "trust stores on Windows are not supported yet".into(),
-        ))
+        let _ = can_prompt;
+        let trust = devlanes_trust_windows::WindowsTrust::from_env();
+        let trust = if own_ca {
+            trust.with_ca_subject(devlanes_trust_windows::DEVLANES_CA_SUBJECT)
+        } else {
+            trust
+        };
+        trust.store(target)
+    }
+}
+
+/// What a store adds to its status: where the CA goes, the dialog a change
+/// shows, and a setting that keeps the store from working (see [`TrustStore`]).
+#[derive(Debug, Default)]
+struct StoreNotes {
+    location: Option<String>,
+    approval: Option<String>,
+    hint: Option<String>,
+}
+
+impl StoreNotes {
+    /// Reads the notes of `store`; the hint may read files.
+    async fn of(store: &dyn TrustStore) -> Self {
+        Self {
+            location: store.location(),
+            approval: store.approval(),
+            hint: store.hint().await,
+        }
+    }
+
+    /// `target`, followed by the location when there is one:
+    /// `system (Windows user root store)`.
+    fn name(&self, target: TrustTarget) -> String {
+        match &self.location {
+            Some(location) => format!("{target} ({location})"),
+            None => target.to_string(),
+        }
     }
 }
 
 /// Whether each configured trust store trusts the CA, for `doctor`:
-/// `[{store, state: trusted|untrusted|unknown, reason?}]`, `null` without a CA.
-/// Read-only and never prompts: a store that would need a password is `unknown`.
+/// `[{store, state: trusted|untrusted|unknown, reason?, location?, approval?, hint?}]`,
+/// `null` without a CA. Read-only and never prompts: a store that would need a
+/// password is `unknown`.
 pub(crate) async fn trust_report() -> Value {
     let Ok(paths) = Paths::discover() else {
         return Value::Null;
@@ -289,12 +325,16 @@ pub(crate) async fn trust_report() -> Value {
             if !done.insert(store.id()) {
                 return Ok(None);
             }
-            store.status(&certificate).await.map(Some)
+            let status = store.status(&certificate).await?;
+            Ok::<_, devlanes_trust::TrustError>(Some((
+                status,
+                StoreNotes::of(store.as_ref()).await,
+            )))
         }
         .await;
         report.push(match status {
             Ok(None) => continue,
-            Ok(Some(status)) => trust_entry(target, &status),
+            Ok(Some((status, notes))) => trust_entry(target, &status, &notes),
             Err(error) => {
                 json!({"store": target.as_str(), "state": "unknown", "reason": error.to_string()})
             }
@@ -304,14 +344,24 @@ pub(crate) async fn trust_report() -> Value {
 }
 
 /// One store's line of [`trust_report`].
-fn trust_entry(target: TrustTarget, status: &TrustStatus) -> Value {
-    match status {
+fn trust_entry(target: TrustTarget, status: &TrustStatus, notes: &StoreNotes) -> Value {
+    let mut entry = match status {
         TrustStatus::Installed => json!({"store": target.as_str(), "state": "trusted"}),
         TrustStatus::Missing => json!({"store": target.as_str(), "state": "untrusted"}),
         TrustStatus::Unknown { reason } => {
             json!({"store": target.as_str(), "state": "unknown", "reason": reason})
         }
+    };
+    for (key, note) in [
+        ("location", &notes.location),
+        ("approval", &notes.approval),
+        ("hint", &notes.hint),
+    ] {
+        if let Some(note) = note {
+            entry[key] = json!(note);
+        }
     }
+    entry
 }
 
 /// Installs or removes the CA in every configured store; one failure doesn't skip the rest.
@@ -344,40 +394,66 @@ async fn trust(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
         return Ok(0);
     };
     let mut done = BTreeSet::new();
+    let mut announced = BTreeSet::new();
     let mut failed = false;
     let mut lines = String::new();
+    let mut hints = String::new();
     for target in targets(&paths) {
         let result = async {
             target.ensure_supported()?;
             let store: Arc<dyn TrustStore> =
                 Arc::from(store(target, !mkcert, runtime.can_prompt())?);
-            // System and Chrome share the macOS login keychain; touch it once.
+            // System and Chrome share the macOS login keychain and the Windows
+            // user root store; touch it once.
             if !done.insert(store.id()) {
                 return Ok(None);
+            }
+            // Said before the change, which waits on the dialog; once per dialog text.
+            if let Some(approval) = store.approval()
+                && !runtime.quiet
+                && announced.insert(approval.clone())
+            {
+                emit(&Rendered {
+                    stderr: format!("{approval}\n"),
+                    ..Rendered::default()
+                });
             }
             if install {
                 store.install(&certificate).await?;
             } else {
                 store.uninstall(&certificate).await?;
             }
-            store.status(&certificate).await.map(Some)
+            let status = store.status(&certificate).await?;
+            Ok::<_, devlanes_trust::TrustError>(Some((
+                status,
+                StoreNotes::of(store.as_ref()).await,
+            )))
         }
         .await;
         match result {
             Ok(None) => {}
-            Ok(Some(status)) => {
+            Ok(Some((status, notes))) => {
                 let word = match status {
                     TrustStatus::Installed => "trusted",
                     TrustStatus::Missing => "untrusted",
                     TrustStatus::Unknown { .. } => "unknown",
                 };
-                lines.push_str(&format!("{word} {target}\n"));
+                lines.push_str(&format!("{word} {}\n", notes.name(target)));
+                if let Some(hint) = notes.hint {
+                    hints.push_str(&format!("warning: {hint}\n"));
+                }
             }
             Err(error) => {
                 failed = true;
                 lines.push_str(&format!("failed {target}: {error}\n"));
             }
         }
+    }
+    if !hints.is_empty() {
+        emit(&Rendered {
+            stderr: hints,
+            ..Rendered::default()
+        });
     }
     // mkcert roots are never constrained and not ours to replace.
     if install
@@ -451,7 +527,7 @@ fn system_program(name: &str) -> Result<String, RpcError> {
         .ok_or_else(|| {
             RpcError::new(
                 "tool_missing",
-                json!({"message": format!("`{name}` was not found in {:?}", devlanes_trust::SYSTEM_PROGRAM_DIRS)}),
+                json!({"message": format!("`{name}` was not found in {:?}", devlanes_trust::system_program_dirs())}),
                 1,
             )
         })
@@ -760,7 +836,11 @@ mod tests {
     /// Doctor's trust entries name the store and its state.
     fn trust_entries_name_store_and_state() {
         assert_eq!(
-            trust_entry(TrustTarget::System, &TrustStatus::Missing),
+            trust_entry(
+                TrustTarget::System,
+                &TrustStatus::Missing,
+                &StoreNotes::default()
+            ),
             json!({"store": "system", "state": "untrusted"})
         );
         assert_eq!(
@@ -768,10 +848,37 @@ mod tests {
                 TrustTarget::Firefox,
                 &TrustStatus::Unknown {
                     reason: "certutil is missing".into()
-                }
+                },
+                &StoreNotes::default()
             ),
             json!({"store": "firefox", "state": "unknown", "reason": "certutil is missing"})
         );
+    }
+
+    #[test]
+    /// Stores that say where the CA goes (the Windows user root store) add it to
+    /// the entry and the status line, with the dialog and any hint.
+    fn trust_entries_carry_store_notes() {
+        let notes = StoreNotes {
+            location: Some("Windows user root store".into()),
+            approval: Some("choose Yes".into()),
+            hint: Some("set it to true in about:config".into()),
+        };
+        assert_eq!(
+            trust_entry(TrustTarget::Firefox, &TrustStatus::Installed, &notes),
+            json!({
+                "store": "firefox",
+                "state": "trusted",
+                "location": "Windows user root store",
+                "approval": "choose Yes",
+                "hint": "set it to true in about:config",
+            })
+        );
+        assert_eq!(
+            notes.name(TrustTarget::System),
+            "system (Windows user root store)"
+        );
+        assert_eq!(StoreNotes::default().name(TrustTarget::System), "system");
     }
 
     #[test]

@@ -8,8 +8,9 @@ license.workspace = true
 publish.workspace = true
 
 # Commands are only built here and run through an injected executor, so the crate
-# and its argv tests compile on every platform; only the composition root picks it on macOS.
-[dependencies]
+# and its argv tests compile on every Unix platform (Linux CI runs them); only the
+# composition root picks it on macOS. Empty on Windows, which has no NSS support.
+[target.'cfg(unix)'.dependencies]
 async-trait.workspace = true
 devlanes-trust = { path = "../trust" }
 

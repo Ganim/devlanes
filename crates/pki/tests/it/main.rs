@@ -295,3 +295,101 @@ fn refuses_exposed_or_symlink_keys() -> Result {
     ));
     Ok(())
 }
+
+/// Runs a program with a 30 s limit and reports whether it succeeded.
+#[cfg(windows)]
+fn run(program: &str, args: &[&std::ffi::OsStr]) -> Result<bool> {
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.success());
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Err(format!("{program} timed out").into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// A junction in place of the CA directory (creating one needs no privilege) is
+/// refused for devlanes' own CA and for a mkcert CAROOT, never followed.
+#[cfg(windows)]
+#[test]
+fn refuses_junctioned_ca_directories() -> Result {
+    let directory = tempfile::tempdir()?;
+    let target = directory.path().join("ca");
+    CertificateAuthority::load_or_create(&target)?;
+    fs::copy(target.join("ca.pem"), target.join("rootCA.pem"))?;
+    fs::copy(target.join("ca-key.pem"), target.join("rootCA-key.pem"))?;
+    let link = directory.path().join("link");
+    let mklink: [&std::ffi::OsStr; 6] = [
+        "/d".as_ref(),
+        "/c".as_ref(),
+        "mklink".as_ref(),
+        "/J".as_ref(),
+        link.as_os_str(),
+        target.as_os_str(),
+    ];
+    assert!(run("cmd", &mklink)?, "mklink /J failed");
+    assert!(matches!(
+        CertificateAuthority::load_or_create(&link),
+        Err(devlanes_pki::Error::InsecurePath)
+    ));
+    assert!(matches!(
+        CertificateAuthority::from_mkcert(&link),
+        Err(devlanes_pki::Error::InsecurePath)
+    ));
+    CertificateAuthority::from_mkcert(&target)?;
+    Ok(())
+}
+
+/// A symlinked key is refused. File symlinks need Developer Mode or the
+/// symlink privilege; without either that half is skipped.
+#[cfg(windows)]
+#[test]
+fn refuses_symlinked_keys() -> Result {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("ca");
+    CertificateAuthority::load_or_create(&path)?;
+    let key = path.join("ca-key.pem");
+    fs::rename(&key, path.join("real-key"))?;
+    match std::os::windows::fs::symlink_file(path.join("real-key"), &key) {
+        Ok(()) => assert!(matches!(
+            CertificateAuthority::load_or_create(&path),
+            Err(devlanes_pki::Error::InsecurePath)
+        )),
+        // ERROR_PRIVILEGE_NOT_HELD
+        Err(error) if error.raw_os_error() == Some(1314) => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+/// A CA directory other accounts can open is refused, not tightened: its key
+/// would keep the grant it inherited.
+#[cfg(windows)]
+#[test]
+fn refuses_ca_directories_others_can_open() -> Result {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("ca");
+    CertificateAuthority::load_or_create(&path)?;
+    // Everyone (S-1-1-0), read access, inherited by the key.
+    let grant: [&std::ffi::OsStr; 3] = [
+        path.as_os_str(),
+        "/grant".as_ref(),
+        "*S-1-1-0:(OI)(CI)R".as_ref(),
+    ];
+    assert!(run("icacls", &grant)?, "icacls failed");
+    assert!(matches!(
+        CertificateAuthority::load_or_create(&path),
+        Err(devlanes_pki::Error::InsecurePath)
+    ));
+    Ok(())
+}

@@ -55,6 +55,12 @@ The proxy replaces `Forwarded` and the `X-Forwarded-*` headers and drops client-
 
 A failed `accept` never stops a listener: client resets are skipped and descriptor exhaustion is retried after a short pause. Check `listener_health` instead of the bind result to know whether a listener is still serving.
 
+## Windows
+
+Listeners set `SO_EXCLUSIVEADDRUSE`, so no other program can bind the same port on a more specific address and take connections. A port another program holds then fails with access denied as well as "in use"; both fall back. Port 80 is often held by http.sys (PID 4, System; `netsh http show servicestate` lists its registrations), and Hyper-V, WSL and Docker Desktop reserve port ranges (`netsh int ipv4 show excludedportrange protocol=tcp`), which `devlanes doctor` checks against `ports.range`. Low ports need no privilege.
+
+With `lan: false` the proxy only listens on loopback. With `lan: true` it listens on all addresses, and Windows Defender Firewall asks the first time whether to let `devlanes.exe` accept connections from the network; until that is allowed, other machines cannot connect.
+
 ## License
 
 Apache-2.0

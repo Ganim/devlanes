@@ -7,6 +7,9 @@
 //! [`TrustError::InteractionRequired`]. Chrome and Safari read these settings.
 //! Firefox 120 and later also imports user-added keychain roots, and the `firefox`
 //! target additionally writes each profile's NSS database when `certutil` exists.
+//!
+//! Empty on Windows. It builds on Linux so the argv tests run there too.
+#![cfg(unix)]
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

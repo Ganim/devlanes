@@ -520,14 +520,7 @@ async fn certificate_authority_with(
         if !directory.exists() {
             create_private_dir(&directory)?;
         }
-        let system = [
-            "/etc/ssl/cert.pem",
-            "/etc/ssl/certs/ca-certificates.crt",
-            "/etc/pki/tls/certs/ca-bundle.crt",
-        ]
-        .iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
-        .unwrap_or_default();
+        let system = system_roots(ca.certificate_der().as_ref());
         let bundle = directory.join("bundle.pem");
         let temp = directory.join(".bundle.pem.tmp");
         std::fs::write(&temp, ca.combined_bundle(&system))?;
@@ -563,6 +556,78 @@ async fn certificate_authority_with(
     }
 }
 
+/// The system's PEM roots for `bundle.pem`, from the first bundle file the OS
+/// ships; empty when there is none. Blocking.
+#[cfg(unix)]
+fn system_roots(_own: &[u8]) -> String {
+    [
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ]
+    .iter()
+    .find_map(|path| std::fs::read_to_string(path).ok())
+    .unwrap_or_default()
+}
+
+/// The system's roots for `bundle.pem` as PEM, from the current user's `Root`
+/// store, which also lists the machine's roots. Filtered like rustls-native-certs
+/// 0.8 does: valid now and usable for server authentication. The devlanes root
+/// (`own`, listed there once `certs trust` added it) and duplicates are left out,
+/// since the bundle appends the root itself. A store that cannot be opened leaves
+/// only the devlanes root, like a Unix machine without a bundle file. Blocking.
+///
+/// Windows fetches some third-party roots on first use (automatic root update),
+/// so a root no Windows program has needed yet is missing here.
+#[cfg(windows)]
+fn system_roots(own: &[u8]) -> String {
+    use schannel::cert_context::ValidUses;
+    /// The server authentication extended key usage.
+    const SERVER_AUTH: &str = "1.3.6.1.5.5.7.3.1";
+    let store = match schannel::cert_store::CertStore::open_current_user("Root") {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(%error, "cannot read the Windows root store; bundle.pem has only the devlanes root");
+            return String::new();
+        }
+    };
+    let usable = store.certs().filter_map(|cert| {
+        let server_auth = match cert.valid_uses() {
+            Ok(ValidUses::All) => true,
+            Ok(ValidUses::Oids(oids)) => oids.iter().any(|oid| oid == SERVER_AUTH),
+            Err(_) => false,
+        };
+        (server_auth && cert.is_time_valid().unwrap_or(false)).then(|| cert.to_der().to_vec())
+    });
+    roots_pem(usable, own)
+}
+
+/// `roots` as PEM blocks, each certificate once and without `own`.
+#[cfg(windows)]
+fn roots_pem(roots: impl IntoIterator<Item = Vec<u8>>, own: &[u8]) -> String {
+    let mut seen = std::collections::HashSet::from([own.to_vec()]);
+    roots
+        .into_iter()
+        .filter(|der| seen.insert(der.clone()))
+        .map(|der| pem_certificate(&der))
+        .collect()
+}
+
+/// One `CERTIFICATE` PEM block with 64-character lines (RFC 7468).
+#[cfg(windows)]
+fn pem_certificate(der: &[u8]) -> String {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    // Base64 is ASCII, so byte chunks are whole characters.
+    for line in encoded.as_bytes().chunks(64) {
+        pem.push_str(&String::from_utf8_lossy(line));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
+}
+
 /// Creates the CA directory readable by the owner only.
 #[cfg(unix)]
 fn create_private_dir(directory: &Path) -> std::io::Result<()> {
@@ -573,8 +638,8 @@ fn create_private_dir(directory: &Path) -> std::io::Result<()> {
         .create(directory)
 }
 
-/// Creates the CA directory. It inherits the ACL of the devlanes home until the
-/// home gets a private ACL on Windows.
+/// Creates the CA directory. It inherits the private access list the daemon gives
+/// the devlanes home before it loads the CA.
 #[cfg(windows)]
 fn create_private_dir(directory: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(directory)
@@ -2166,6 +2231,82 @@ mod tests {
                 .is_some_and(|m| m.contains("relative")),
             "{status}"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    /// On Windows bundle.pem holds the root store's certificates, a well-known
+    /// public root among them, plus the devlanes root exactly once, and every
+    /// block parses as a PEM certificate.
+    async fn windows_bundle_has_system_roots_and_the_devlanes_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir(&home).expect("home");
+        let (env, status, ca) = certificate_authority_with(
+            &home,
+            devlanes_config::CaKind::Devlanes,
+            Path::new("mkcert"),
+            None,
+        )
+        .await;
+        let ca = ca.expect("devlanes CA");
+        assert_eq!(status["present"], true, "{status}");
+        let bundle = std::fs::read_to_string(&env[CA_BUNDLE_ENV]).expect("bundle");
+        let blocks: Vec<&str> = bundle
+            .split_inclusive("-----END CERTIFICATE-----\n")
+            .filter(|block| !block.trim().is_empty())
+            .collect();
+        assert!(blocks.len() > 1, "only {} certificates", blocks.len());
+        let ders: Vec<Vec<u8>> = blocks
+            .iter()
+            .map(|block| {
+                devlanes_trust::CaCertificate::from_pem(block, "root")
+                    .expect("PEM certificate")
+                    .der()
+                    .to_vec()
+            })
+            .collect();
+        let own = ca.certificate_der();
+        assert_eq!(
+            ders.iter()
+                .filter(|der| der.as_slice() == own.as_ref())
+                .count(),
+            1
+        );
+        // Subject names are plain ASCII inside the DER.
+        let known = [
+            "DigiCert",
+            "ISRG Root",
+            "GlobalSign",
+            "USERTrust",
+            "Microsoft",
+        ];
+        assert!(
+            ders.iter().any(|der| known.iter().any(|name| der
+                .windows(name.len())
+                .any(|bytes| bytes == name.as_bytes()))),
+            "no well-known root among {} certificates",
+            ders.len()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// The store lists the devlanes root once `certs trust` added it, and a root
+    /// can sit in both the user's and the machine's store: each ends up in the
+    /// bundle once, the devlanes root only where `combined_bundle` appends it.
+    fn windows_roots_skip_duplicates_and_the_devlanes_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ca =
+            devlanes_pki::CertificateAuthority::load_or_create(&tmp.path().join("ca")).expect("ca");
+        let own = ca.certificate_der().to_vec();
+        let other = vec![0x30, 0x03, 0x02, 0x01, 0x01];
+        let pem = roots_pem([other.clone(), own.clone(), other.clone()], &own);
+        assert_eq!(pem, pem_certificate(&other));
+        let parsed =
+            devlanes_trust::CaCertificate::from_pem(&pem_certificate(&own), "root").expect("pem");
+        assert_eq!(parsed.der(), own.as_slice());
+        assert_eq!(parsed.pem(), pem_certificate(&own));
     }
 
     /// An empty one-page SQLite database whose header carries `user_version`.

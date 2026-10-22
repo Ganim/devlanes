@@ -1,4 +1,5 @@
 //! Argv tests for the macOS stores, plus ignored tests against a real keychain and certutil.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -36,7 +37,6 @@ fn keychain_store(executor: Arc<FakeExecutor>, keychain: &Path) -> KeychainStore
 }
 
 #[tokio::test]
-#[cfg_attr(windows, ignore = "macOS keychain paths are Unix paths")]
 async fn install_adds_to_login_keychain_with_root_trust() {
     let ca = ca();
     let written = Arc::new(Mutex::new(String::new()));
@@ -160,7 +160,6 @@ async fn uninstall_deletes_by_sha1_with_trust_settings() {
 }
 
 #[tokio::test]
-#[cfg_attr(windows, ignore = "macOS keychain paths are Unix paths")]
 async fn uninstall_with_label_also_removes_older_devlanes_cas() {
     let ca = ca();
     let sha1 = ca.sha1_hex();

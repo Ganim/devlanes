@@ -130,7 +130,8 @@ pub trait CommandExecutor: Send + Sync {
     /// capturing output does not hide their prompts.
     async fn run(&self, command: &CommandLine) -> io::Result<CommandOutput>;
 
-    /// Finds an executable named `name` in `extra_dirs`, then on `PATH`.
+    /// Finds an executable named `name` in `extra_dirs`, then on `PATH`. On
+    /// Windows `name` may leave out the extension, as on the command line.
     ///
     /// Only for tools that run as the user (`certutil`); root commands use
     /// [`find_system_program`], which never reads `PATH`.
@@ -141,18 +142,58 @@ pub trait CommandExecutor: Send + Sync {
 }
 
 /// Root-owned directories searched for privileged programs, in order.
+#[cfg(unix)]
 pub const SYSTEM_PROGRAM_DIRS: [&str; 4] = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"];
 
-/// Absolute path of `name` in [`SYSTEM_PROGRAM_DIRS`].
+/// Directories [`find_system_program`] searches, in order: [`SYSTEM_PROGRAM_DIRS`].
+#[cfg(unix)]
+pub fn system_program_dirs() -> Vec<PathBuf> {
+    SYSTEM_PROGRAM_DIRS.iter().map(PathBuf::from).collect()
+}
+
+/// Directories [`find_system_program`] searches: `%SystemRoot%\System32`, where
+/// Windows' own tools (`certutil.exe`, `netsh.exe`) live.
+#[cfg(windows)]
+pub fn system_program_dirs() -> Vec<PathBuf> {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    vec![PathBuf::from(root).join("System32")]
+}
+
+/// Absolute path of `name` in [`system_program_dirs`].
 ///
 /// Commands run through sudo or as root must not come from the user's `PATH`: a
 /// directory the user (or anything running as the user) can write would turn a
 /// trust change into arbitrary code running as root.
 pub fn find_system_program(executor: &dyn CommandExecutor, name: &str) -> Option<PathBuf> {
-    SYSTEM_PROGRAM_DIRS
+    system_program_dirs()
         .iter()
-        .map(|dir| Path::new(dir).join(name))
+        .flat_map(|dir| candidates(dir, name))
         .find(|candidate| executor.is_executable(candidate))
+}
+
+/// The file `name` in `dir`; Unix runs it by name alone.
+#[cfg(unix)]
+fn candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    vec![dir.join(name)]
+}
+
+/// The files `name` may mean in `dir`: `name` itself when it has an extension,
+/// then `name` plus each `PATHEXT` extension (`certutil` finds `certutil.exe`),
+/// as `cmd.exe` searches.
+#[cfg(windows)]
+fn candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if Path::new(name).extension().is_some() {
+        found.push(dir.join(name));
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    found.extend(
+        pathext
+            .split(';')
+            .filter(|ext| ext.starts_with('.') && ext.len() > 1)
+            .map(|ext| dir.join(format!("{name}{ext}"))),
+    );
+    found
 }
 
 /// Runs commands with `tokio::process`.
@@ -187,7 +228,7 @@ impl CommandExecutor for SystemExecutor {
             .chain(&path_dirs)
             // Relative PATH entries would depend on the current directory.
             .filter(|dir| dir.is_absolute())
-            .map(|dir| dir.join(name))
+            .flat_map(|dir| candidates(dir, name))
             .find(|candidate| is_executable(candidate))
     }
 
@@ -340,6 +381,28 @@ mod tests {
         assert!(
             matches!(error, TrustError::ToolMissing { ref tool, .. } if tool == "devlanes-definitely-missing-tool")
         );
+    }
+
+    /// Windows tools are found without their extension, through `PATHEXT`, both on
+    /// `PATH` and in System32.
+    #[cfg(windows)]
+    #[test]
+    fn windows_programs_resolve_through_pathext() {
+        let system32 = system_program_dirs().remove(0);
+        let expected = system32
+            .join("certutil.exe")
+            .to_string_lossy()
+            .to_lowercase();
+        for name in ["certutil", "certutil.exe", "CertUtil"] {
+            let found = find_system_program(&SystemExecutor, name).expect(name);
+            assert_eq!(found.to_string_lossy().to_lowercase(), expected, "{name}");
+        }
+        assert!(
+            SystemExecutor
+                .find_program("cmd", std::slice::from_ref(&system32))
+                .is_some()
+        );
+        assert_eq!(find_system_program(&SystemExecutor, "no-such-tool"), None);
     }
 
     /// Windows runs files by extension: listed extensions count in any case,

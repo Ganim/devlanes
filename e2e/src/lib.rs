@@ -1014,18 +1014,10 @@ mod os {
         }
     }
 
-    /// Rows of `netsh ... show excludedportrange`: two port numbers, maybe followed
-    /// by `*` for administered exclusions. Headers are localized, so every line
-    /// that does not start with two numbers is skipped.
+    /// Rows of `netsh ... show excludedportrange`, also the format of the saved
+    /// copy (see [`devlanes_sys::windows::net::parse_excluded_ranges`]).
     fn parse_excluded(text: &str) -> Vec<(u16, u16)> {
-        text.lines()
-            .filter_map(|line| {
-                let mut fields = line.split_whitespace();
-                let start = fields.next()?.parse().ok()?;
-                let end = fields.next()?.parse().ok()?;
-                Some((start, end))
-            })
-            .collect()
+        devlanes_sys::windows::net::parse_excluded_ranges(text)
     }
 
     /// The process, when it is visible to this user.

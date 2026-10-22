@@ -84,21 +84,47 @@ fn parse_pids(answer: &str) -> Option<Vec<u32>> {
 /// exit code the runner reads (0, or 3/4/5 for the attach failures in
 /// `devlanes_sys::windows::ctrl::CtrlError`, 2 for a malformed request).
 pub fn console_ctrl_main() -> u8 {
-    use devlanes_sys::windows::ctrl::{self, CtrlEvent};
+    use devlanes_sys::windows::ctrl::CtrlEvent;
     let Some((pid, request)) = std::env::var(REQUEST_VAR)
         .ok()
         .and_then(|text| Request::parse(&text))
     else {
         return 2;
     };
-    let result = match request {
-        Request::CtrlC => ctrl::send(pid, CtrlEvent::CtrlC),
-        Request::CtrlBreak => ctrl::send(pid, CtrlEvent::CtrlBreak),
-        Request::Anchor => ctrl::Attached::to(pid).map(|attached| serve_anchor(&attached)),
-    };
+    let result = attach_patiently(pid).and_then(|attached| match request {
+        Request::CtrlC => attached.send(CtrlEvent::CtrlC),
+        Request::CtrlBreak => attached.send(CtrlEvent::CtrlBreak),
+        Request::Anchor => {
+            serve_anchor(&attached);
+            Ok(())
+        }
+    });
     match result {
         Ok(()) => 0,
         Err(error) => error.exit_code(),
+    }
+}
+
+/// How long a target may still be setting up its console. A process creates
+/// it during its own startup, so a unit's leader asked about right after it
+/// was started may not have one yet.
+const CONSOLE_SETUP: Duration = Duration::from_secs(2);
+
+/// Attaches to `pid`'s console, waiting up to [`CONSOLE_SETUP`] for a process
+/// that has none yet. A process that never gets one (a GUI program,
+/// `DETACHED_PROCESS`) costs that wait.
+fn attach_patiently(
+    pid: u32,
+) -> Result<devlanes_sys::windows::ctrl::Attached, devlanes_sys::windows::ctrl::CtrlError> {
+    use devlanes_sys::windows::ctrl::{Attached, CtrlError};
+    let deadline = Instant::now() + CONSOLE_SETUP;
+    loop {
+        match Attached::to(pid) {
+            Err(CtrlError::NoConsole) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
     }
 }
 

@@ -661,6 +661,34 @@ fn doctor_without_a_daemon() {
     );
 }
 
+/// Trust entries with a location (Windows) name the store, the dialog `certs
+/// trust` shows, and a hint the CLI cannot fix (Firefox ignoring the store).
+#[test]
+fn doctor_names_the_store_its_dialog_and_hints() {
+    let data = json!({
+        "running": false, "version": "0.3.0", "home": r"C:\Users\u\.devlanes",
+        "socket": r"\\.\pipe\devlanes-0", "db_path": r"C:\Users\u\.devlanes\state.db",
+        "ca": {"present": true, "kind": "devlanes", "path": r"C:\Users\u\.devlanes\ca\ca.pem",
+               "name_constrained": true, "hint": null, "fix": null,
+               "trust": [
+                   {"store": "system", "state": "untrusted", "location": "Windows user root store",
+                    "approval": "Windows asks you to confirm; choose Yes"},
+                   {"store": "firefox", "state": "trusted",
+                    "location": "Windows user root store, read by Firefox at startup",
+                    "hint": "Firefox profile a.default sets security.enterprise_roots.enabled to false"},
+               ]},
+    });
+    let text = render_text(Method::Doctor, &data);
+    for expected in [
+        "fail tls: CA not trusted by system (Windows user root store)",
+        "devlanes certs trust (Windows asks you to confirm; choose Yes)",
+        "ok tls: CA trusted by firefox (Windows user root store, read by Firefox at startup)",
+        "tls: Firefox profile a.default sets security.enterprise_roots.enabled to false",
+    ] {
+        assert!(text.contains(expected), "{expected}:\n{text}");
+    }
+}
+
 /// Windows terminal facts. Without a daemon an elevated shell fails doctor and a
 /// job that kills on close without breakaway is a warning; with one running, the
 /// elevated shell is only a warning and the job is not mentioned. An ordinary
@@ -811,6 +839,85 @@ fn doctor_terminal_and_acl_checks() {
         assert_eq!(printed["terminal"], data["terminal"]);
         assert_eq!(printed["home_check"], data["home_check"]);
     }
+}
+
+/// Port ranges Windows reserves (`excluded_ports`): a pool clear of them is a
+/// passing check, overlaps with the pool or with mirrored box ports are warnings
+/// with a fix, and an unreadable list is a warning too. None of them fails doctor.
+#[test]
+fn doctor_excluded_port_checks() {
+    let with = |excluded: Value| {
+        render_text(
+            Method::Doctor,
+            &json!({
+                "running": false, "version": "0.3.0", "home": r"C:\Users\u\.devlanes",
+                "socket": r"\\.\pipe\devlanes-0", "db_path": r"C:\Users\u\.devlanes\state.db",
+                "sandbox": {"codex_sandbox": false, "app_sandbox": false},
+                "excluded_ports": excluded,
+            }),
+        )
+    };
+    let after = |text: &str, needle: &str| {
+        let agent = text.split("--- agent").nth(1).unwrap_or_default();
+        let mut lines = agent.lines().skip_while(|line| !line.contains(needle));
+        assert!(lines.next().is_some(), "{needle} missing\n{text}");
+        lines.next().unwrap_or_default().to_owned()
+    };
+    let pool = json!({"start": 20000, "end": 32767});
+
+    let clear = with(json!({
+        "ranges": [{"start": 50000, "end": 50059}], "pool": pool,
+        "pool_overlaps": [], "mirrored": [],
+    }));
+    assert!(
+        clear.contains("ok ports: no port range Windows reserves overlaps ports.range 20000-32767"),
+        "{clear}"
+    );
+
+    let overlapping = with(json!({
+        "ranges": [{"start": 27339, "end": 27339}, {"start": 32700, "end": 32799}],
+        "pool": pool,
+        "pool_overlaps": [{"start": 27339, "end": 27339}, {"start": 32700, "end": 32799}],
+        "mirrored": [27339, 32701],
+    }));
+    insta::assert_snapshot!("render_doctor_excluded_ports", overlapping);
+    assert!(overlapping.contains("--- agent (exit 0)"), "{overlapping}");
+    assert!(
+        overlapping.contains(
+            "warn ports: ports.range 20000-32767 overlaps ports Windows reserves (27339, 32700-32799)"
+        ),
+        "{overlapping}"
+    );
+    assert!(
+        after(&overlapping, "overlaps ports Windows reserves")
+            .starts_with("  fix: set ports.range in ~/.devlanes/config.yaml clear of them"),
+        "{overlapping}"
+    );
+    assert!(
+        overlapping
+            .contains("warn ports: box ports 27339, 32701 are inside port ranges Windows reserves"),
+        "{overlapping}"
+    );
+    let one = with(json!({
+        "ranges": [{"start": 27339, "end": 27339}], "pool": null,
+        "pool_overlaps": [], "mirrored": [27339],
+    }));
+    assert!(
+        one.contains("warn ports: box port 27339 is inside a port range"),
+        "{one}"
+    );
+    assert!(!one.contains("overlaps"), "{one}");
+
+    let failed = with(json!({"error": "netsh did not answer within 10s"}));
+    assert!(
+        failed.contains("warn ports: cannot read the port ranges Windows reserves: netsh did not answer within 10s"),
+        "{failed}"
+    );
+    assert!(failed.contains("--- agent (exit 0)"), "{failed}");
+
+    // Unix reports nothing, so nothing is rendered.
+    let unix = with(Value::Null);
+    assert!(!unix.contains("ports:"), "{unix}");
 }
 
 /// `STATUS_CONTROL_C_EXIT` (0xC000013A as a signed exit code) reads as

@@ -53,7 +53,7 @@ fn bind_listeners_with(
                 )
             } else {
                 format!(
-                    "Could not bind port {port}: {error}; using {}. On Linux, configure CAP_NET_BIND_SERVICE or ip_unprivileged_port_start for low ports.",
+                    "Could not bind port {port}: {error}; using {}. {DENIED_HINT}",
                     listeners.port
                 )
             };
@@ -65,7 +65,20 @@ fn bind_listeners_with(
     }
 }
 
+/// What usually denies a port, for the fallback message.
+#[cfg(unix)]
+const DENIED_HINT: &str =
+    "On Linux, configure CAP_NET_BIND_SERVICE or ip_unprivileged_port_start for low ports.";
+
+/// Windows needs no privilege for low ports. Access denied means another program
+/// holds the port exclusively (port 80 is often held by http.sys, owner PID 4),
+/// or Windows reserved it (Hyper-V, WSL or Docker excluded ranges).
+#[cfg(windows)]
+const DENIED_HINT: &str = "On Windows, another program may hold it: port 80 is often held by http.sys (PID 4, System), listed by `netsh http show servicestate`. Reserved ports are listed by `netsh int ipv4 show excludedportrange protocol=tcp`.";
+
 /// Errors that mean this port is taken or privileged, as opposed to the host lacking a family.
+/// On Windows `PermissionDenied` (WSAEACCES) also covers excluded port ranges and
+/// ports another socket holds exclusively.
 fn port_unavailable(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -122,10 +135,24 @@ fn bind(address: SocketAddr) -> io::Result<TcpListener> {
     if address.is_ipv6() {
         socket.set_only_v6(true)?;
     }
+    exclusive(&socket)?;
     socket.set_nonblocking(true)?;
     socket.bind(&address.into())?;
     socket.listen(1024)?;
     TcpListener::from_std(socket.into())
+}
+
+/// Unix has no such option; the listener keeps the default socket options.
+#[cfg(unix)]
+fn exclusive(_socket: &Socket) -> io::Result<()> {
+    Ok(())
+}
+
+/// Windows lets another program bind a more specific address on the same port and
+/// take connections, unless the listener claims the port exclusively.
+#[cfg(windows)]
+fn exclusive(socket: &Socket) -> io::Result<()> {
+    devlanes_sys::windows::net::exclusive_address_use(socket)
 }
 
 #[cfg(test)]
@@ -164,6 +191,41 @@ mod tests {
         assert_ne!(bound.port, port);
         let reason = bound.fallback_reason.unwrap_or_default();
         assert!(reason.contains("in use"), "{reason}");
+        Ok(())
+    }
+
+    /// WSAEACCES (10013), what an excluded port range or an exclusively held port
+    /// returns, makes the proxy fall back with the Windows hint.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn access_denied_port_falls_back_with_the_windows_hint() -> io::Result<()> {
+        assert!(port_unavailable(&io::Error::from_raw_os_error(10013)));
+        let denied = |address: SocketAddr| {
+            if address.port() == 80 {
+                Err(io::Error::from_raw_os_error(10013))
+            } else {
+                bind(address)
+            }
+        };
+        let bound = bind_listeners_with(80, 0, false, denied)?;
+        assert_ne!(bound.port, 80);
+        let reason = bound.fallback_reason.unwrap_or_default();
+        assert!(
+            reason.contains("http.sys") && reason.contains("excludedportrange"),
+            "{reason}"
+        );
+        Ok(())
+    }
+
+    /// Every proxy listener claims its port exclusively.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn listeners_hold_their_port_exclusively() -> io::Result<()> {
+        for listener in bind_listeners_with(0, 0, false, bind)?.listeners() {
+            assert!(devlanes_sys::windows::net::is_exclusive_address_use(
+                &listener
+            )?);
+        }
         Ok(())
     }
 

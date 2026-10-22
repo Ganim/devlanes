@@ -3,6 +3,8 @@
 //! Only `sql:` databases (`cert9.db`) are handled; NSS dropped the legacy `cert8.db`
 //! format years ago. The `sql:` backend tolerates a running browser, so Firefox
 //! does not need to be closed.
+//!
+//! Unix only: on Windows, Chrome, Edge and Firefox read the Windows store.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -176,19 +178,12 @@ impl NssStore {
 
 /// Creates `dir` and its parents. Chromium creates the shared NSS directory
 /// 0700; match it since it can hold client keys.
-#[cfg(unix)]
 fn create_private_dir(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)
-}
-
-/// Creates `dir` and its parents; it inherits the ACL of the user's profile.
-#[cfg(windows)]
-fn create_private_dir(dir: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(dir)
 }
 
 #[async_trait]
