@@ -833,9 +833,11 @@ impl Inner {
             // Ends with the daemon or a clean or reset of the lane; `stop` of the
             // task's unit ends it otherwise.
             let (adhoc, cancel) = lane.enter_adhoc(&self.shutdown).await;
+            // The run's error, or `None` once it ended without one.
+            let (ended, mut outcome) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
                 let _adhoc = adhoc;
-                let _ = engine
+                let result = engine
                     .run_task(
                         &task_project,
                         &task_lane,
@@ -848,10 +850,12 @@ impl Inner {
                         0,
                     )
                     .await;
+                let _ = ended.send(result.err());
             });
             // The client attaches to this unit, so this run of it must exist before
             // we answer; an earlier run that ended does not count, or the client
-            // would attach to its finished screen.
+            // would attach to its finished screen. A run that could not start (its
+            // previous run still going) answers with its error.
             if let Some(unit) = &unit {
                 for _ in 0..100 {
                     let spawned = lane.st().units.get(unit).is_some_and(|rec| {
@@ -861,6 +865,13 @@ impl Inner {
                     });
                     if spawned {
                         break;
+                    }
+                    match outcome.try_recv() {
+                        Ok(Some(error)) => return Err(error),
+                        Ok(None) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                            break;
+                        }
+                        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }

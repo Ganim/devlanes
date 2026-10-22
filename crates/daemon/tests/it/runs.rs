@@ -13,11 +13,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{LIMIT, Setup, cx, harness, repo, temp};
 
-/// The pid of `unit` in the cwd's lane.
-async fn pid_of(h: &crate::Harness, main: &std::path::Path, unit: &str) -> Option<u32> {
+/// `(pid, state)` of `unit` in the cwd's lane. The fake runner hands out each
+/// pid once (a counter), so the pid names the run.
+async fn run_of(h: &crate::Harness, main: &std::path::Path, unit: &str) -> Option<(u32, String)> {
     let status = h.call(Method::Status, json!({}), cx(main)).await.ok()?;
     let lanes: Page<LaneSummary> = serde_json::from_value(status).ok()?;
-    lanes.items[0].units.iter().find(|u| u.name == unit)?.pid
+    let unit = lanes.items[0].units.iter().find(|u| u.name == unit)?;
+    Some((unit.pid?, unit.state.clone()))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -36,19 +38,56 @@ async fn a_detached_rerun_answers_with_the_new_run() {
         h.call(Method::Run, detached.clone(), cx(&main))
             .await
             .expect("first run");
-        let first = crate::eventually(Duration::from_secs(5), || async {
-            pid_of(&h, &main, "hello").await
+        // The earlier run has ended, as when someone runs a task again.
+        let (first, _) = crate::eventually(Duration::from_secs(5), || async {
+            run_of(&h, &main, "hello")
+                .await
+                .filter(|(_, state)| state != "running" && state != "starting")
         })
         .await
-        .expect("first run listed");
+        .expect("first run ended");
         h.call(Method::Run, detached, cx(&main))
             .await
             .expect("second run");
-        let second = pid_of(&h, &main, "hello").await.expect("listed");
+        let (second, _) = run_of(&h, &main, "hello").await.expect("listed");
         assert_ne!(
             second, first,
             "the answer came after the new run was listed"
         );
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A detached run of a task whose previous run still goes answers with
+/// `unit_running` instead of a success for a run that never started.
+async fn a_detached_run_over_a_running_one_is_refused() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(
+            &tmp.path,
+            "r",
+            "project: demo\ntasks:\n  hello: { run: \"echo hi; hold\" }\n",
+        );
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        let detached = json!({"task": "hello", "detach": true, "terminal": true});
+        h.call(Method::Run, detached.clone(), cx(&main))
+            .await
+            .expect("first run");
+        let (first, _) = crate::eventually(Duration::from_secs(5), || async {
+            run_of(&h, &main, "hello").await
+        })
+        .await
+        .expect("first run listed");
+        let refused = h
+            .call(Method::Run, detached, cx(&main))
+            .await
+            .expect_err("still running");
+        assert_eq!(refused.code, "unit_running");
+        assert_eq!(run_of(&h, &main, "hello").await.map(|r| r.0), Some(first));
+        h.runner.release();
         h.close().await;
     })
     .await
