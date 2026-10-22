@@ -889,12 +889,26 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use async_trait::async_trait;
-    use devlanes_core::{Error, OutputChunk, OutputStream};
+    use devlanes_core::{Error, OutputChunk, OutputStream, StopSignal};
 
     use super::*;
 
     /// Bound for each awaited step; a lost exit shows up as a timeout, not a hang.
     const STEP: Duration = Duration::from_secs(5);
+
+    /// The exit signal a Unix runner reports for `signal` (Linux numbering; the
+    /// tests only need a signal death).
+    fn signal_number(signal: StopSignal) -> i32 {
+        match signal {
+            StopSignal::Hangup => 1,
+            StopSignal::Interrupt => 2,
+            StopSignal::Quit => 3,
+            StopSignal::Kill => 9,
+            StopSignal::User1 => 10,
+            StopSignal::User2 => 12,
+            StopSignal::Terminate => 15,
+        }
+    }
 
     /// A unit that exits on its own after `natural`, or when stopped, whichever is first.
     /// `hang` makes `wait` never return, like a runner whose exit report got lost.
@@ -951,7 +965,7 @@ mod tests {
             Ok(())
         }
         async fn stop(&self, policy: StopPolicy) -> Result<(), Error> {
-            self.end(None, Some(policy.signal));
+            self.end(None, Some(signal_number(policy.signal)));
             Ok(())
         }
         async fn wait(&self) -> Result<ExitOutcome, Error> {
@@ -1119,7 +1133,7 @@ mod tests {
     async fn overdue_stop_is_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
         let policy = StopPolicy {
-            signal: 15,
+            signal: StopSignal::Terminate,
             timeout: Duration::ZERO,
         };
         let margin = Duration::from_millis(200);

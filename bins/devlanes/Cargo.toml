@@ -31,6 +31,9 @@ devlanes-runner-pty = { path = "../../crates/runner-pty" }
 devlanes-transport-ssh = { path = "../../crates/transport-ssh" }
 rustix = { version = "1", features = ["process", "termios"] }
 
+[target.'cfg(windows)'.dependencies]
+devlanes-runner-windows = { path = "../../crates/runner-windows" }
+
 [dev-dependencies]
 tempfile.workspace = true
 

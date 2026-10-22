@@ -1,4 +1,4 @@
-//! Process-table snapshots shared by all units in this process.
+//! Process-table snapshots shared by every caller in this process.
 //!
 //! Scans are coalesced: a caller that needs a fresh table waits for a scan that
 //! started after its request, and every caller waiting at that point shares it. So
@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use devlanes_sys::ProcessInfo;
+use crate::{Error, ProcessInfo};
 
 /// A completed scan, or its error message (shared by every waiter).
 type ScanResult = Result<Arc<Vec<ProcessInfo>>, Arc<str>>;
@@ -42,7 +42,7 @@ fn lock() -> MutexGuard<'static, State> {
 /// started after this call; concurrent callers share it.
 ///
 /// Blocking: call from `spawn_blocking`.
-pub(crate) fn processes(max_age: Duration) -> Result<Arc<Vec<ProcessInfo>>, devlanes_sys::Error> {
+pub fn shared_processes(max_age: Duration) -> Result<Arc<Vec<ProcessInfo>>, Error> {
     let mut state = lock();
     if !max_age.is_zero()
         && let Some((taken, Ok(snapshot))) = &state.last
@@ -59,7 +59,7 @@ pub(crate) fn processes(max_age: Duration) -> Result<Arc<Vec<ProcessInfo>>, devl
         {
             return result
                 .clone()
-                .map_err(|message| devlanes_sys::Error::Io(io::Error::other(message.to_string())));
+                .map_err(|message| Error::Io(io::Error::other(message.to_string())));
         }
         if !state.scanning {
             state.started += 1;
@@ -67,7 +67,7 @@ pub(crate) fn processes(max_age: Duration) -> Result<Arc<Vec<ProcessInfo>>, devl
             let number = state.started;
             drop(state);
             let guard = ScanGuard;
-            let result = devlanes_sys::processes().map(Arc::new);
+            let result = crate::processes().map(Arc::new);
             std::mem::forget(guard);
             state = lock();
             state.scanning = false;
@@ -87,8 +87,7 @@ pub(crate) fn processes(max_age: Duration) -> Result<Arc<Vec<ProcessInfo>>, devl
 }
 
 /// Number of scans started so far, for tests that count scans.
-#[cfg(test)]
-pub(crate) fn scans_started() -> u64 {
+pub fn scans_started() -> u64 {
     lock().started
 }
 
@@ -110,14 +109,14 @@ mod tests {
     /// Concurrent fresh requests share scans instead of running one each.
     #[test]
     fn concurrent_fresh_requests_coalesce() {
-        let before = lock().started;
+        let before = scans_started();
         let threads: Vec<_> = (0..16)
-            .map(|_| std::thread::spawn(|| processes(Duration::ZERO).map(|s| s.len())))
+            .map(|_| std::thread::spawn(|| shared_processes(Duration::ZERO).map(|s| s.len())))
             .collect();
         for thread in threads {
             assert!(thread.join().expect("no panic").expect("scan") > 0);
         }
-        let scans = lock().started - before;
+        let scans = scans_started() - before;
         assert!((1..16).contains(&scans), "{scans} scans for 16 callers");
     }
 }

@@ -76,6 +76,7 @@ pub(crate) fn copy_env(env: &Environment) -> Environment {
     Environment {
         values: env.values.clone(),
         sources: env.sources.clone(),
+        shell_env: env.shell_env.clone(),
     }
 }
 
@@ -1101,9 +1102,9 @@ impl Inner {
         let log_dir = self
             .opts
             .logs
-            .join(project.name())
+            .join(devlanes_core::paths::disk_name(&project.name()))
             .join(record.index.to_string())
-            .join(request.name.replace('/', "_"));
+            .join(devlanes_core::paths::disk_name(&request.name));
         let managed = match spawned {
             Ok(managed) => managed,
             Err(error) => {

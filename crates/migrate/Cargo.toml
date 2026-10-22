@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 devlanes-config = { path = "../config" }
+devlanes-core = { path = "../core" }
 globset = "0.4"
 indexmap = { version = "2", features = ["serde"] }
 regex = "1"

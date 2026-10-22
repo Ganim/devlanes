@@ -9,15 +9,14 @@ use std::{
 
 use async_trait::async_trait;
 use devlanes_client::Paths;
-#[cfg(unix)]
-use devlanes_core::{ExitOutcome, OutputChunk, ProcessIdentity, StopPolicy, TerminalSize, Unit};
 use devlanes_core::{
-    LaunchSpec,
+    ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopPolicy, TerminalSize, Unit,
     contrib::{CA_BUNDLE_ENV, CA_CERT_ENV, Contributor, ScriptRunner},
 };
+use devlanes_daemon::integrations::ExitDetails;
 #[cfg(unix)]
 use devlanes_daemon::integrations::{
-    ConnectOptions, ExitDetails, RemoteConnector, RemotePrompt, RemotePrompter,
+    ConnectOptions, RemoteConnector, RemotePrompt, RemotePrompter,
 };
 use devlanes_daemon::{
     Engine, EngineOptions, Handler,
@@ -840,46 +839,30 @@ impl devlanes_transport_ssh::PromptRelay for PromptBridge {
 }
 
 /// The unit runner the daemon spawns services and tasks with.
-#[cfg(unix)]
 fn unit_runner() -> Arc<dyn UnitRunner> {
-    Arc::new(PtyUnits(devlanes_runner_pty::PtyRunner::default()))
+    Arc::new(OsUnits(OsRunner::default()))
 }
 
-/// The unit runner the daemon spawns services and tasks with; a stub on Windows
-/// until the Windows runner exists.
-#[cfg(windows)]
-fn unit_runner() -> Arc<dyn UnitRunner> {
-    Arc::new(NoUnits)
-}
-
-/// Refuses every spawn, so the rest of the daemon runs on Windows before units can.
-#[cfg(windows)]
-struct NoUnits;
-
-#[cfg(windows)]
-#[async_trait]
-impl UnitRunner for NoUnits {
-    /// Always [`devlanes_core::Error::Unsupported`].
-    async fn spawn(&self, _: LaunchSpec) -> Result<Arc<dyn ManagedUnit>, devlanes_core::Error> {
-        Err(devlanes_core::Error::Unsupported(
-            "running units on Windows is not implemented yet".into(),
-        ))
-    }
-}
-
-/// The PTY runner with identity and socket inspection.
+/// The PTY runner: sessions, PTYs and signals.
 #[cfg(unix)]
-struct PtyUnits(devlanes_runner_pty::PtyRunner);
+use devlanes_runner_pty::{PtyRunner as OsRunner, PtyUnit as OsUnit};
+/// The Windows runner: job objects and pipes.
+#[cfg(windows)]
+use devlanes_runner_windows::{WindowsRunner as OsRunner, WindowsUnit as OsUnit};
 
-#[cfg(unix)]
+/// The platform's unit runner with identity and socket inspection. Both runners
+/// offer the same methods, so the wrappers below are shared.
+struct OsUnits(OsRunner);
+
 #[async_trait]
-impl UnitRunner for PtyUnits {
-    /// Spawns in a PTY or pipes per the spec.
+impl UnitRunner for OsUnits {
+    /// Spawns per the spec.
     async fn spawn(&self, spec: LaunchSpec) -> Result<Arc<dyn ManagedUnit>, devlanes_core::Error> {
-        Ok(Arc::new(PtyManaged(self.0.spawn_unit(spec).await?)))
+        Ok(Arc::new(OsManaged(self.0.spawn_unit(spec).await?)))
     }
 
-    /// Tasks keep daemons they started in their own session running after they exit.
+    /// Tasks keep daemons they started outside their session (Unix) or job
+    /// (Windows) running after they exit.
     async fn spawn_task(
         &self,
         spec: LaunchSpec,
@@ -887,18 +870,16 @@ impl UnitRunner for PtyUnits {
         let runner = self
             .0
             .clone()
-            .with_exit_sweep(devlanes_runner_pty::ExitSweep::KeepDaemonized);
-        Ok(Arc::new(PtyManaged(runner.spawn_unit(spec).await?)))
+            .with_exit_sweep(devlanes_core::ExitSweep::KeepDaemonized);
+        Ok(Arc::new(OsManaged(runner.spawn_unit(spec).await?)))
     }
 }
 
-/// [`devlanes_runner_pty::PtyUnit`] as a daemon unit.
-#[cfg(unix)]
-struct PtyManaged(Arc<devlanes_runner_pty::PtyUnit>);
+/// The platform runner's unit as a daemon unit.
+struct OsManaged(Arc<OsUnit>);
 
-#[cfg(unix)]
 #[async_trait]
-impl Unit for PtyManaged {
+impl Unit for OsManaged {
     /// Delegates.
     async fn input(&self, bytes: bytes::Bytes) -> Result<(), devlanes_core::Error> {
         self.0.input(bytes).await
@@ -925,9 +906,8 @@ impl Unit for PtyManaged {
     }
 }
 
-#[cfg(unix)]
 #[async_trait]
-impl ManagedUnit for PtyManaged {
+impl ManagedUnit for OsManaged {
     /// Leader identity recorded at spawn.
     fn identity(&self) -> Option<ProcessIdentity> {
         Some(self.0.identity())

@@ -1,8 +1,8 @@
-//! `MiseContributor` against fake `mise` scripts, plus an opt-in real-binary test.
+//! `MiseContributor` against fake `mise` programs, plus an opt-in real-binary test.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -10,15 +10,11 @@ use devlanes_core::contrib::{
     ContribCx, ContribMemo, Contributor, DraftCommand, LaunchDraft, UnitKind,
 };
 use devlanes_env_mise::MiseContributor;
+use devlanes_testing::fake_tool::Behaviour;
 
-/// Writes an executable shell script and returns its path.
-#[cfg(unix)]
-fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    path
+/// Installs a `fake-tool` copy called `name` in `dir` and returns its path.
+fn fake(dir: &Path, name: &str, behaviour: Behaviour) -> PathBuf {
+    devlanes_testing::fake_tool::install(dir, name, &behaviour).expect("install fake")
 }
 
 /// Applies `contributor` once for a service in `lane` and returns the draft.
@@ -63,7 +59,6 @@ async fn apply(
     Ok(draft)
 }
 
-#[cfg(unix)]
 #[tokio::test]
 /// mise runs in the lane with the client env, once per resolution.
 async fn runs_mise_env_once_per_lane() {
@@ -71,15 +66,16 @@ async fn runs_mise_env_once_per_lane() {
     let lane = tempfile::tempdir().expect("tempdir");
     std::fs::write(lane.path().join("mise.toml"), "[env]\nA = '1'\n").expect("write");
     let calls = bin.path().join("calls");
-    let fake = script(
+    let fake = fake(
         bin.path(),
         "mise",
-        &format!(
-            r#"[ "$1 $2" = "env --json" ] || exit 2
-echo run >> '{}'
-printf '{{"PATH":"/tools/bin:%s","FROM_DIR":"%s"}}' "$PATH" "$(pwd -P)""#,
-            calls.display()
-        ),
+        Behaviour::new()
+            .args(["env", "--json"])
+            .record(&calls)
+            .stdout_json(serde_json::json!({
+                "PATH": "/tools/bin:{env:PATH}",
+                "FROM_DIR": "{cwd}",
+            })),
     );
     let contributor = MiseContributor::new(fake, Duration::from_secs(5));
     let memo = ContribMemo::default();
@@ -112,34 +108,31 @@ async fn skips_and_notes() {
         .expect("apply");
     assert_eq!(draft.notes.len(), 1);
 
-    // The fake mise is a `#!/bin/sh` script, which Windows cannot run.
-    #[cfg(unix)]
-    {
-        let bin = tempfile::tempdir().expect("tempdir");
-        let untrusted = script(
-            bin.path(),
-            "mise",
-            "echo 'mise ERROR Config files in ./mise.toml are not trusted.' >&2; exit 1",
-        );
-        let contributor = MiseContributor::new(untrusted, Duration::from_secs(5));
-        let draft = apply(&contributor, lane.path(), &ContribMemo::default())
-            .await
-            .expect("apply");
-        assert!(draft.notes[0].contains("mise trust"));
-    }
+    let bin = tempfile::tempdir().expect("tempdir");
+    let untrusted = fake(
+        bin.path(),
+        "mise",
+        Behaviour::new()
+            .stderr("mise ERROR Config files in ./mise.toml are not trusted.\n")
+            .exit(1),
+    );
+    let contributor = MiseContributor::new(untrusted, Duration::from_secs(5));
+    let draft = apply(&contributor, lane.path(), &ContribMemo::default())
+        .await
+        .expect("apply");
+    assert!(draft.notes[0].contains("mise trust"));
 }
 
-#[cfg(unix)]
 #[tokio::test]
 /// Other failures and hangs fail the unit with a bounded error.
 async fn failures_and_timeouts() {
     let lane = tempfile::tempdir().expect("tempdir");
     std::fs::write(lane.path().join("mise.toml"), "").expect("write");
     let bin = tempfile::tempdir().expect("tempdir");
-    let broken = script(
+    let broken = fake(
         bin.path(),
         "broken",
-        "echo 'mise ERROR parse error' >&2; exit 1",
+        Behaviour::new().stderr("mise ERROR parse error\n").exit(1),
     );
     let error = apply(
         &MiseContributor::new(broken, Duration::from_secs(5)),
@@ -151,7 +144,11 @@ async fn failures_and_timeouts() {
     .expect("fails");
     assert!(error.to_string().contains("parse error"));
 
-    let slow = script(bin.path(), "slow", "exec sleep 5");
+    let slow = fake(
+        bin.path(),
+        "slow",
+        Behaviour::new().sleep(Duration::from_secs(5)),
+    );
     let started = std::time::Instant::now();
     let error = apply(
         &MiseContributor::new(slow, Duration::from_millis(200)),

@@ -15,6 +15,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+devlanes-testing = { path = "../testing" }
 tempfile.workspace = true
 
 [lints]

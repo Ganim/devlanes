@@ -307,6 +307,61 @@ fn forward_stop(pid: Option<u32>, stop: Stop) {
     let _ = rustix::process::kill_process(pid, signal);
 }
 
+/// The `with` command before its environment and directory are set. std looks
+/// `program` up on the `PATH` in `env` itself.
+#[cfg(unix)]
+async fn with_command(
+    program: &str,
+    args: &[String],
+    _env: &BTreeMap<String, String>,
+    _cwd: &Path,
+) -> Result<tokio::process::Command, RpcError> {
+    let mut command = tokio::process::Command::new(program);
+    command.args(args);
+    Ok(command)
+}
+
+/// The `with` command before its environment and directory are set. std would
+/// only try `program.exe`, so the program is resolved with `PATHEXT` against the
+/// `PATH` in `env` (finding `npm.cmd`), and batch files run through `cmd.exe`
+/// with std's argument escaping.
+#[cfg(windows)]
+async fn with_command(
+    program: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+    cwd: &Path,
+) -> Result<tokio::process::Command, RpcError> {
+    let spawn_failed = |message: String| {
+        RpcError::new(
+            "spawn_failed",
+            json!({"message": message, "program": program}),
+            127,
+        )
+    };
+    let owned = (
+        std::ffi::OsString::from(program),
+        args.iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>(),
+        env.clone(),
+        cwd.to_owned(),
+    );
+    // Resolution checks candidate files, so it stays off the executor threads.
+    let built = tokio::task::spawn_blocking(move || {
+        let (program, args, env, cwd) = owned;
+        devlanes_runner_windows::command::build(&program, &args, &env, &cwd)
+    })
+    .await
+    .map_err(|error| spawn_failed(error.to_string()))?
+    .map_err(|error| spawn_failed(error.to_string()))?;
+    let mut command = tokio::process::Command::new(&built.application);
+    if !built.arguments().is_empty() {
+        command.raw_arg(built.arguments());
+    }
+    Ok(command)
+}
+
 /// Nothing to pass on: the `with` command shares this console, so Ctrl-C and
 /// Ctrl-Break already reached it.
 #[cfg(windows)]
@@ -451,26 +506,34 @@ pub fn unsafe_directory(path: &Path) -> RpcError {
     RpcError::new("unsafe_home", data, 4)
 }
 
-/// An `icacls` command that leaves `path` to this user, SYSTEM and Administrators:
-/// stops inheritance, grants those three, and removes the explicit grants of
-/// `others` (SIDs), which `/grant:r` would keep. SIDs instead of names, which
-/// Windows translates per display language. The quotes work in cmd and PowerShell.
+/// Two `icacls` commands that leave `path` and everything in it to this user,
+/// SYSTEM and Administrators. The first makes the directory private: stops
+/// inheritance, grants those three, and removes the explicit grants of `others`
+/// (SIDs), which `/grant:r` would keep. The second resets every entry inside to
+/// inherit from it; entries keep their old grants otherwise. (`/T` on the first
+/// would copy directory-only inheritance flags onto files and lock them.)
+///
+/// SIDs instead of names, which Windows translates per display language. The
+/// quotes work in cmd and PowerShell, but no separator works in both, so the
+/// commands are joined by ", then ".
 #[cfg(windows)]
 pub(crate) fn acl_fix(path: &Path, others: &[String]) -> Option<String> {
     let user = devlanes_sys::windows::token::current_user()
         .and_then(|sid| sid.to_sddl())
         .ok()?;
-    let mut fix = format!(
-        r#"icacls "{}" /inheritance:r /grant:r "*{user}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F""#,
-        path.display()
+    let path = path.display();
+    let mut directory = format!(
+        r#"icacls "{path}" /inheritance:r /grant:r "*{user}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F""#
     );
     if !others.is_empty() {
-        fix.push_str(" /remove:g");
+        directory.push_str(" /remove:g");
         for sid in others {
-            fix.push_str(&format!(r#" "*{sid}""#));
+            directory.push_str(&format!(r#" "*{sid}""#));
         }
     }
-    Some(fix)
+    Some(format!(
+        r#"{directory}, then icacls "{path}\*" /reset /T /C"#
+    ))
 }
 
 #[async_trait]
@@ -722,8 +785,8 @@ impl WithDriver for ClientDriver {
                 2,
             ));
         };
-        let mut child = tokio::process::Command::new(program)
-            .args(args)
+        let mut command = with_command(program, args, env, cwd).await?;
+        let mut child = command
             .env_clear()
             .envs(env)
             .current_dir(cwd)
@@ -1061,7 +1124,11 @@ mod tests {
             fix.starts_with("icacls \"") && fix.contains("/inheritance:r"),
             "{fix}"
         );
-        assert!(fix.ends_with(r#"/remove:g "*S-1-1-0""#), "{fix}");
+        assert!(
+            fix.contains(r#"/remove:g "*S-1-1-0", then icacls"#),
+            "{fix}"
+        );
+        assert!(fix.ends_with(r#"\*" /reset /T /C"#), "{fix}");
     }
 
     #[cfg(windows)]

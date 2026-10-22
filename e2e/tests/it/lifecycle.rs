@@ -54,6 +54,10 @@ fn killed_client_during_start_still_brings_the_lane_up() -> Result<()> {
 /// `start` refuses it and names the stop command, `stop` terminates it, and
 /// `lane resume` then brings the lane back.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "api and web must die with the daemon like PTY units; ConPTY services are step 4"
+)]
 fn daemon_crash_reconciles_and_resumes() -> Result<()> {
     // A pipe-runner service survives its daemon (no PTY hangup), so reconciliation has
     // a real orphan; the PTY services die with the old daemon's terminals.

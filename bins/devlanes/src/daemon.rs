@@ -181,7 +181,9 @@ fn init_logging(paths: &Paths) -> Option<tracing_appender::non_blocking::WorkerG
     use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
     let path = paths.logs.join("daemon.log");
     if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > LOG_ROTATE_BYTES) {
-        let _ = std::fs::rename(&path, paths.logs.join("daemon.log.1"));
+        // Retried: on Windows a `daemon logs -f` from another tool, or a scanner,
+        // may hold either file for a moment.
+        let _ = devlanes_sys::rename_retrying(&path, &paths.logs.join("daemon.log.1"));
     }
     let opened = std::fs::OpenOptions::new()
         .create(true)
@@ -455,7 +457,8 @@ pub fn move_state_aside(
         ));
     }
     for (from, to) in &moves {
-        std::fs::rename(from, to).map_err(io)?;
+        // A SQLite browser or backup tool may still hold a file on Windows.
+        devlanes_sys::rename_retrying(from, to).map_err(io)?;
     }
     Ok(moves)
 }

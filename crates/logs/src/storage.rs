@@ -593,7 +593,7 @@ fn recover_tail(
         .set_len(meta.uncompressed_bytes)?;
     remove_if_exists(&duplicate)?;
     if meta.records == 0 {
-        fs::remove_file(path)?;
+        devlanes_sys::remove_file_retrying(path)?;
         return Ok(None);
     }
     close_segment(directory, compress, &mut meta)?;
@@ -677,7 +677,7 @@ fn load_metadata(path: &Path, first: u64) -> Result<SegmentMetadata> {
 fn quarantine(path: &Path) -> Result<()> {
     let mut destination = path.as_os_str().to_owned();
     destination.push(".corrupt");
-    match fs::rename(path, destination) {
+    match devlanes_sys::rename_retrying(path, Path::new(&destination)) {
         Err(error) if error.kind() != ErrorKind::NotFound => Err(error.into()),
         _ => Ok(()),
     }
@@ -687,9 +687,10 @@ fn is_not_found(error: &Error) -> bool {
     matches!(error, Error::Io(error) if error.kind() == ErrorKind::NotFound)
 }
 
-/// Retention and the daemon's maintenance pass may race on the same file.
+/// Retention and the daemon's maintenance pass may race on the same file. On
+/// Windows a reader holding the file delays the removal briefly.
 fn remove_if_exists(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
+    match devlanes_sys::remove_file_retrying(path) {
         Err(error) if error.kind() != ErrorKind::NotFound => Err(error.into()),
         _ => Ok(()),
     }
@@ -705,8 +706,10 @@ fn close_segment(directory: &Path, compress: bool, meta: &mut SegmentMetadata) -
         let mut target = File::create(&temporary)?;
         zstd::stream::copy_encode(&mut source, &mut target, 3)?;
         target.flush()?;
-        fs::rename(&temporary, &destination)?;
-        fs::remove_file(&meta.path)?;
+        // Retried: on Windows a scanner may still hold the fresh file, or a
+        // reader the segment being replaced.
+        devlanes_sys::rename_retrying(&temporary, &destination)?;
+        devlanes_sys::remove_file_retrying(&meta.path)?;
         meta.path = destination;
         meta.compressed = true;
         meta.bytes = fs::metadata(&meta.path)?.len();
@@ -714,7 +717,7 @@ fn close_segment(directory: &Path, compress: bool, meta: &mut SegmentMetadata) -
     let metadata_path = directory.join(metadata_name(meta.first_seq));
     let temporary = metadata_path.with_extension("json.tmp");
     fs::write(&temporary, serde_json::to_vec(meta)?)?;
-    fs::rename(temporary, metadata_path)?;
+    devlanes_sys::rename_retrying(&temporary, &metadata_path)?;
     Ok(())
 }
 

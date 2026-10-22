@@ -571,6 +571,21 @@ fn render_text(method: Method, data: &Value) -> String {
     output
 }
 
+/// The daemon's shell warnings name their path in the sentence, so `config
+/// check` prints them without a `path:` prefix.
+#[test]
+fn config_check_shell_fallback_is_not_prefixed() {
+    let message = "`services.web.run` and 2 more run with cmd.exe: Git for Windows' sh.exe was not found, and POSIX syntax may fail there. Install Git for Windows, then run `devlanes daemon restart`.";
+    let text = render_text(
+        Method::ConfigCheck,
+        &json!({"project": "acme", "path": "/work/acme/devlanes.yaml", "warnings": [
+            {"code": "shell_fallback", "path": "services.web.run", "message": message},
+        ]}),
+    );
+    assert!(text.contains(&format!("warn {message}")), "{text}");
+    assert!(!text.contains("services.web.run: "), "{text}");
+}
+
 #[test]
 fn every_result_shape_in_every_text_mode() {
     for (name, method, data) in fixtures() {

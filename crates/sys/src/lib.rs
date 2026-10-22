@@ -25,6 +25,7 @@ pub use rustix::process::Signal;
 
 mod file;
 mod rlimit;
+mod snapshot;
 mod tree;
 
 #[cfg(any(target_os = "linux", test))]
@@ -57,8 +58,11 @@ use windows as os;
 #[path = "darwin.rs"]
 pub mod macos;
 
-pub use file::{FileIdentity, file_identity, path_identity};
+pub use file::{
+    FileIdentity, file_identity, path_identity, remove_file_retrying, rename_retrying, retrying,
+};
 pub use rlimit::{NofileLimit, child_nofile_limit, raise_nofile_limit};
+pub use snapshot::{scans_started, shared_processes};
 pub use tree::{DescendantTracker, session_members, session_members_known};
 
 /// Failures reading process tables or invoking diagnostic tools.
@@ -98,10 +102,14 @@ impl From<Error> for devlanes_core::Error {
 pub struct ProcessInfo {
     pub pid: u32,
     pub ppid: u32,
-    pub pgid: u32,
-    /// Absent when the platform refused to report the session.
+    /// Unix process group; `None` on Windows, which has none, and when the
+    /// platform did not report it.
+    pub pgid: Option<u32>,
+    /// Absent when the platform refused to report the session, and on Windows.
     pub sid: Option<u32>,
-    pub uid: u32,
+    /// Unix real user ID; `None` on Windows, which identifies users by SID, and
+    /// when the platform did not report it.
+    pub uid: Option<u32>,
     pub start_time: u64,
     /// Exited but not yet reaped by its parent; signals have no effect.
     pub zombie: bool,

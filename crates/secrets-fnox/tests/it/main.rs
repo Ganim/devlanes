@@ -1,18 +1,18 @@
-//! `FnoxProvider` against fake `fnox` scripts, plus an opt-in real-binary test.
+//! `FnoxProvider` against fake `fnox` programs, plus an opt-in real-binary test.
 
-use std::{collections::BTreeMap, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use devlanes_core::contrib::{SecretsError, SecretsProvider, SecretsRequest};
 use devlanes_secrets_fnox::FnoxProvider;
+use devlanes_testing::fake_tool::Behaviour;
 
-/// Writes an executable shell script and returns its path.
-#[cfg(unix)]
-fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    path
+/// Installs a `fake-tool` copy called `name` in `dir` and returns its path.
+fn fake(dir: &Path, name: &str, behaviour: Behaviour) -> PathBuf {
+    devlanes_testing::fake_tool::install(dir, name, &behaviour).expect("install fake")
 }
 
 /// A request for `worktree`.
@@ -30,18 +30,24 @@ fn request<'a>(
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 /// fnox runs in the worktree with the profile flag and the client env.
 async fn resolves_through_fnox() {
     let bin = tempfile::tempdir().expect("tempdir");
     let lane = tempfile::tempdir().expect("tempdir");
     std::fs::write(lane.path().join("fnox.toml"), "").expect("write");
-    let fake = script(
+    let fake = fake(
         bin.path(),
         "fnox",
-        r#"[ "$*" = "--profile dev env --json --non-interactive" ] || { echo "bad args: $*" >&2; exit 2; }
-printf '{"schema":1,"set":{"TOKEN":"t","MARK":"%s","DIR":"%s"},"remove":["FNOX_AGE_KEY"],"files":{},"missing":[]}\n' "$CLIENT_MARK" "$(pwd -P)""#,
+        Behaviour::new()
+            .args(["--profile", "dev", "env", "--json", "--non-interactive"])
+            .stdout_json(serde_json::json!({
+                "schema": 1,
+                "set": {"TOKEN": "t", "MARK": "{env:CLIENT_MARK}", "DIR": "{cwd}"},
+                "remove": ["FNOX_AGE_KEY"],
+                "files": {},
+                "missing": [],
+            })),
     );
     let env = BTreeMap::from([("CLIENT_MARK".to_owned(), "client".to_owned())]);
     let provider = FnoxProvider::new(fake, Duration::from_secs(5));
@@ -81,17 +87,24 @@ async fn skips_without_config() {
     assert!(matches!(error, SecretsError::Other(m) if m.contains("not installed")));
 }
 
-#[cfg(unix)]
 #[tokio::test]
 /// Error documents map to locked or other; missing documents and hangs are errors.
 async fn failures() {
     let bin = tempfile::tempdir().expect("tempdir");
     let lane = tempfile::tempdir().expect("tempdir");
     let env = BTreeMap::new();
-    let locked = script(
+    let locked = fake(
         bin.path(),
         "locked",
-        r#"echo '{"schema":1,"error":{"kind":"resolution","message":"1Password requires an interactive sign in"}}'; exit 1"#,
+        Behaviour::new()
+            .stdout_json(serde_json::json!({
+                "schema": 1,
+                "error": {
+                    "kind": "resolution",
+                    "message": "1Password requires an interactive sign in",
+                },
+            }))
+            .exit(1),
     );
     let error = FnoxProvider::new(locked, Duration::from_secs(5))
         .env(&request(lane.path(), None, true, &env))
@@ -100,10 +113,12 @@ async fn failures() {
         .expect("locked");
     assert!(matches!(error, SecretsError::Locked { .. }));
 
-    let old = script(
+    let old = fake(
         bin.path(),
         "old",
-        "echo \"error: unrecognized subcommand 'env'\" >&2; exit 2",
+        Behaviour::new()
+            .stderr("error: unrecognized subcommand 'env'\n")
+            .exit(2),
     );
     let error = FnoxProvider::new(old, Duration::from_secs(5))
         .env(&request(lane.path(), None, true, &env))
@@ -114,7 +129,11 @@ async fn failures() {
         matches!(&error, SecretsError::Other(m) if m.contains("1.39+") && m.contains("unrecognized"))
     );
 
-    let slow = script(bin.path(), "slow", "exec /bin/sleep 5");
+    let slow = fake(
+        bin.path(),
+        "slow",
+        Behaviour::new().sleep(Duration::from_secs(5)),
+    );
     let error = FnoxProvider::new(slow, Duration::from_millis(200))
         .env(&request(lane.path(), None, true, &env))
         .await

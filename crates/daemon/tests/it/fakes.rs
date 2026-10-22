@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_core::{
     Error, ExitOutcome, LaunchSpec, OutputChunk, OutputStream, ProcessIdentity, StopPolicy,
-    TerminalSize, Unit,
+    StopSignal, TerminalSize, Unit,
 };
 use devlanes_daemon::integrations::{
     ExitDetails, InfraContainer, InfraError, InfraPortNeed, InfraProvider, InfraSpec, InfraUp,
@@ -37,6 +37,20 @@ use tokio::sync::{broadcast, watch};
 
 /// Identities handed out by the fake runner; far above real PIDs.
 static NEXT_PID: AtomicU32 = AtomicU32::new(4_000_000);
+
+/// The exit signal a Unix runner reports for `signal` (Linux numbering; the
+/// tests only need a signal death).
+fn signal_number(signal: StopSignal) -> i32 {
+    match signal {
+        StopSignal::Hangup => 1,
+        StopSignal::Interrupt => 2,
+        StopSignal::Quit => 3,
+        StopSignal::Kill => 9,
+        StopSignal::User1 => 10,
+        StopSignal::User2 => 12,
+        StopSignal::Terminate => 15,
+    }
+}
 
 /// Records every spawned script in order.
 #[derive(Default, Clone)]
@@ -370,7 +384,7 @@ impl Unit for FakeUnit {
         self.stop.send_replace(true);
         self.end(ExitOutcome {
             code: None,
-            signal: Some(policy.signal),
+            signal: Some(signal_number(policy.signal)),
         });
         Ok(())
     }

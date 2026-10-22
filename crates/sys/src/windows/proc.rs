@@ -36,7 +36,9 @@ use crate::{Error, ListeningSocket, ProcessIdentity, ProcessInfo, SignalOutcome}
 
 /// Every process this user can query. Protected and other users' processes that
 /// refuse `PROCESS_QUERY_LIMITED_INFORMATION` are skipped: no start time, no
-/// identity. Units always run as this user, so none of theirs is lost.
+/// identity. Units always run as this user, so none of theirs is lost. Exited
+/// processes are not listed even while a handle keeps them, so `zombie` is only
+/// set for one that exits during the walk.
 pub(crate) fn processes() -> Result<Vec<ProcessInfo>, Error> {
     // SAFETY: plain call; the result is checked before use.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
@@ -53,15 +55,15 @@ pub(crate) fn processes() -> Result<Vec<ProcessInfo>, Error> {
     // SAFETY: `snapshot` is open and `entry.dwSize` is set as the API requires.
     let mut more = unsafe { Process32FirstW(raw(&snapshot), &raw mut entry) } != 0;
     while more {
-        if let Some(handle) = open(entry.th32ProcessID, PROCESS_QUERY_LIMITED_INFORMATION)
+        if let Some(handle) = open_query(entry.th32ProcessID)
             && let Ok(start_time) = creation_time(&handle)
         {
             found.push(ProcessInfo {
                 pid: entry.th32ProcessID,
                 ppid: entry.th32ParentProcessID,
-                pgid: 0,
+                pgid: None,
                 sid: None,
-                uid: 0,
+                uid: None,
                 start_time,
                 zombie: exited(&handle),
                 name: wide_name(&entry.szExeFile),
@@ -77,16 +79,16 @@ pub(crate) fn processes() -> Result<Vec<ProcessInfo>, Error> {
 /// exited while someone still holds a handle to it (the runner does until the
 /// final report) is reported with `zombie: true`, like an unreaped Unix child.
 pub(crate) fn process(pid: u32) -> Result<Option<ProcessInfo>, Error> {
-    let Some(handle) = open(pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
+    let Some(handle) = open_query(pid) else {
         return Ok(None);
     };
     let start_time = creation_time(&handle)?;
     Ok(Some(ProcessInfo {
         pid,
         ppid: parent_pid(&handle).unwrap_or(0),
-        pgid: 0,
+        pgid: None,
         sid: None,
-        uid: 0,
+        uid: None,
         start_time,
         zombie: exited(&handle),
         name: image_name(&handle).unwrap_or_default(),
@@ -97,8 +99,12 @@ pub(crate) fn process(pid: u32) -> Result<Option<ProcessInfo>, Error> {
 /// whole boot and changes with the next one. A Fast Startup resume keeps the
 /// hibernated kernel's value, which is harmless: every user process is gone then
 /// anyway, and the recorded start times no longer match.
+///
+/// Setting the clock moves `BootTime` and `BootTimeBias` by the same amount, so
+/// their difference is the value that stays fixed for the boot.
 pub(crate) fn boot_id() -> Result<String, Error> {
-    // SYSTEM_TIMEOFDAY_INFORMATION is 48 bytes; BootTime is its first 64-bit field.
+    // SYSTEM_TIMEOFDAY_INFORMATION is 48 bytes: BootTime, CurrentTime,
+    // TimeZoneBias, TimeZoneId plus padding, BootTimeBias, SleepTimeBias.
     let mut info = [0_i64; 6];
     // SAFETY: `info` is 48 writable, 8-aligned bytes, the size of the structure.
     let status = unsafe {
@@ -115,7 +121,7 @@ pub(crate) fn boot_id() -> Result<String, Error> {
             detail: format!("status {status:#x}"),
         });
     }
-    Ok(format!("boot-{}", info[0]))
+    Ok(format!("boot-{}", info[0].wrapping_sub(info[4])))
 }
 
 /// TCP listeners (IPv4 and IPv6) owned by `pids`.
@@ -157,7 +163,9 @@ pub fn terminate_verified(
     exit_code: u32,
 ) -> Result<SignalOutcome, Error> {
     let access = PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
-    let Some(handle) = open(identity.pid, access) else {
+    // Only a PID that names no process is gone; a live one that refuses is an error,
+    // so the caller keeps its record instead of forgetting a running process.
+    let Some(handle) = open(identity.pid, access)? else {
         return Ok(SignalOutcome::Gone);
     };
     if creation_time(&handle)? != identity.start_time {
@@ -178,19 +186,30 @@ pub fn terminate_verified(
     Ok(SignalOutcome::Sent)
 }
 
-/// Opens `pid` with `access`, or `None` when it is gone or refuses.
-pub(crate) fn open(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> Option<OwnedHandle> {
+/// Opens `pid` with `access`; `None` when no process has that PID.
+pub(crate) fn open(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> io::Result<Option<OwnedHandle>> {
     if pid == 0 {
-        return None;
+        return Ok(None);
     }
-    // SAFETY: plain call; a null result is mapped to `None`.
+    // SAFETY: plain call; a null result is checked.
     let handle = unsafe { OpenProcess(access, 0, pid) };
     match owned(handle) {
-        Ok(handle) => Some(handle),
-        Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => None,
-        // Access denied: a protected or other user's process, no identity to give.
-        Err(_) => None,
+        Ok(handle) => Ok(Some(handle)),
+        Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => Ok(None),
+        Err(error) => Err(error),
     }
+}
+
+/// Opens `pid` for queries, or `None` when it is gone or refuses: a protected or
+/// another user's process has no identity to give.
+///
+/// `SYNCHRONIZE` is asked for too, because only a waitable handle tells an exited
+/// process from a running one; processes that refuse it are opened without.
+fn open_query(pid: u32) -> Option<OwnedHandle> {
+    open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE)
+        .ok()
+        .flatten()
+        .or_else(|| open(pid, PROCESS_QUERY_LIMITED_INFORMATION).ok().flatten())
 }
 
 /// The creation time of an open process as one 64-bit value.
@@ -207,11 +226,23 @@ pub(crate) fn creation_time(handle: &OwnedHandle) -> io::Result<u64> {
     Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
 }
 
-/// Whether an open process has exited. Waiting is used rather than the exit code,
-/// because a running process can legitimately report 259 (`STILL_ACTIVE`).
+/// Whether an open process has exited. Waiting is preferred over the exit code,
+/// because a running process can legitimately report 259 (`STILL_ACTIVE`); the
+/// code is the fallback for a handle without `SYNCHRONIZE`.
 pub(crate) fn exited(handle: &OwnedHandle) -> bool {
+    use windows_sys::Win32::Foundation::{STILL_ACTIVE, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::GetExitCodeProcess;
     // SAFETY: `handle` is open; a zero timeout only polls.
-    unsafe { WaitForSingleObject(raw(handle), 0) == WAIT_OBJECT_0 }
+    match unsafe { WaitForSingleObject(raw(handle), 0) } {
+        WAIT_OBJECT_0 => true,
+        WAIT_TIMEOUT => false,
+        _ => {
+            let mut code = 0;
+            // SAFETY: `handle` is open with query rights; `code` is writable.
+            let ok = unsafe { GetExitCodeProcess(raw(handle), &raw mut code) } != 0;
+            ok && code != STILL_ACTIVE as u32
+        }
+    }
 }
 
 /// The parent PID recorded at creation; the parent may be gone or its PID reused.
@@ -233,7 +264,8 @@ fn parent_pid(handle: &OwnedHandle) -> Option<u32> {
 
 /// The executable's file name, like the snapshot's `szExeFile`.
 fn image_name(handle: &OwnedHandle) -> Option<String> {
-    let mut buffer = vec![0_u16; 1024];
+    // The longest path Windows supports, so long image paths still have a name.
+    let mut buffer = vec![0_u16; 32_768];
     let mut len = buffer.len() as u32;
     // SAFETY: `buffer` holds `len` writable units; the call stores the length used.
     let ok = unsafe {
@@ -381,6 +413,27 @@ mod tests {
         let status = child.wait()?;
         assert_eq!(status.code(), Some(1));
         assert_eq!(terminate_verified(&identity, 1)?, SignalOutcome::Gone);
+        Ok(())
+    }
+
+    /// An exited process that someone still holds a handle to is a zombie, and
+    /// disappears once the last handle closes.
+    #[test]
+    fn exited_but_held_is_a_zombie() -> Result<(), Error> {
+        let mut child = Command::new("cmd")
+            .args(["/d", "/c", "exit 0"])
+            .stdout(Stdio::null())
+            .spawn()?;
+        let pid = child.id();
+        // `wait` keeps the handle open until `child` is dropped.
+        child.wait()?;
+        let held = process(pid)?.ok_or(Error::Unsupported("held process missing"))?;
+        assert!(held.zombie, "{held:?}");
+        assert!(!crate::matches(&held.identity())?);
+        // Snapshots leave exited processes out, held or not, as macOS does.
+        assert!(!processes()?.iter().any(|p| p.pid == pid && !p.zombie));
+        drop(child);
+        assert!(process(pid)?.is_none_or(|p| p.start_time != held.start_time));
         Ok(())
     }
 }

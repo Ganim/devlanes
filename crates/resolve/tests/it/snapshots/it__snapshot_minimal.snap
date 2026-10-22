@@ -47,7 +47,7 @@ expression: lane_view(&lane)
         "api.acme-1.localhost"
       ],
       "ready": "Tcp { port: 21000 } within 60s",
-      "stop": "signal 15 after 10s",
+      "stop": "signal SIGTERM after 10s",
       "pty": true,
       "autostart": true,
       "hidden": false,
@@ -101,7 +101,7 @@ expression: lane_view(&lane)
         "acme-1.localhost"
       ],
       "ready": "Tcp { port: 21001 } within 60s",
-      "stop": "signal 15 after 10s",
+      "stop": "signal SIGTERM after 10s",
       "pty": true,
       "autostart": true,
       "hidden": false,

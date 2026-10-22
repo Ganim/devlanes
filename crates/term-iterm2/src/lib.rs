@@ -42,12 +42,16 @@ impl TerminalLauncher for Iterm2 {
         Err(LaunchError::Unsupported { terminal: "iTerm2" })
     }
 
-    /// iTerm.app in an Applications folder; never off macOS.
+    /// iTerm.app in an Applications folder.
+    #[cfg(target_os = "macos")]
     fn available(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        return devlanes_term::app_installed("iTerm.app");
-        #[cfg(not(target_os = "macos"))]
-        return false;
+        devlanes_term::app_installed("iTerm.app")
+    }
+
+    /// iTerm2 exists only on macOS.
+    #[cfg(not(target_os = "macos"))]
+    fn available(&self) -> bool {
+        false
     }
 }
 

@@ -1,8 +1,9 @@
 //! Win32 backend: the process table (`proc`) plus safe wrappers for the endpoint,
 //! daemon and runner crates.
 //!
-//! Processes have no session or process group here, so [`crate::ProcessInfo`]
-//! reports `sid: None` and `pgid: 0`; units are grouped by Job Objects instead.
+//! Processes have no session, process group or numeric user ID here, so
+//! [`crate::ProcessInfo`] reports `sid`, `pgid` and `uid` as `None`; units are
+//! grouped by Job Objects instead.
 
 pub mod job;
 pub mod pipe;

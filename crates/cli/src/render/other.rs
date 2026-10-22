@@ -1352,7 +1352,14 @@ pub(super) fn config_check(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         display_value(&data["path"])
     )];
     for warning in list(data, "warnings") {
-        let message = match text(warning, "code").as_str() {
+        let code = text(warning, "code");
+        // The daemon's shell warnings name their path (and how many more) in
+        // the sentence itself.
+        if code == "shell_fallback" {
+            lines.push(format!("{} {}", cx.state("warn"), text(warning, "message")));
+            continue;
+        }
+        let message = match code.as_str() {
             "unknown_platform" => {
                 let data = &warning["data"];
                 let known: Vec<String> = list(data, "known").iter().map(display_value).collect();

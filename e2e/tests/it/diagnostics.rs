@@ -42,7 +42,13 @@ fn spawn_failure_names_the_program_and_reaches_the_log() -> Result<()> {
     assert_eq!(failure["reason"]["code"], "spawn_failed", "{result}");
     assert_eq!(data["program"], "devlanes-no-such-program", "{result}");
     assert_eq!(data["reason"], "not_found", "{result}");
-    assert_eq!(data["errno"], "ENOENT", "{result}");
+    // The OS's own name for "no such file".
+    let missing = if cfg!(windows) {
+        "ERROR_FILE_NOT_FOUND"
+    } else {
+        "ENOENT"
+    };
+    assert_eq!(data["errno"], missing, "{result}");
     assert!(
         data["path_searched"]
             .as_array()

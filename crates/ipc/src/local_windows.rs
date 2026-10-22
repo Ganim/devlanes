@@ -43,8 +43,8 @@ pub(super) async fn bind(path: &Path) -> Result<Listener, BindError> {
     let mut pipes = PipeFactory::new(path.as_os_str())?;
     match pipes.create(true) {
         Ok(next) => Ok(Listener { pipes, next }),
-        // The caller holds the singleton lock, so whoever owns this name is either
-        // a daemon that predates the lock file or another account squatting on it.
+        // The caller holds the singleton lock, so whoever owns this name is not a
+        // devlanes daemon of this home; the daemon reports the name as taken.
         Err(error) if matches!(error.raw_os_error(), Some(ACCESS_DENIED | PIPE_BUSY)) => {
             Err(BindError::AlreadyListening(path.to_owned()))
         }

@@ -46,6 +46,10 @@ fn same_path(lane: &Value, expected: &Path) -> bool {
 /// removing a running worktree stops its lane and keeps its record and logs; lane 0
 /// is never touched.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows refuses to remove a worktree that running units use as cwd, step 4"
+)]
 fn worktree_add_move_and_remove_reach_the_running_daemon() -> Result<()> {
     let lab = Lab::new("two-services", BUDGET)?;
     let started = lab.json(lab.repo(), &["start"])?;

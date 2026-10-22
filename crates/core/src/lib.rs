@@ -10,9 +10,13 @@ pub mod ports;
 pub mod refs;
 pub mod runtime;
 pub mod shell;
+pub mod stop;
 
 pub use runtime::*;
 use serde::{Deserialize, Serialize};
+pub use stop::StopSignal;
+#[cfg(windows)]
+pub use stop::WindowsStop;
 
 macro_rules! id {
     ($name:ident) => {

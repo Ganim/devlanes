@@ -11,10 +11,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Variable that stops MSYS from rewriting arguments that look like POSIX
-/// paths (`/api` would reach a native program as `C:/Program Files/Git/api`).
-/// Git for Windows honours it.
+/// Variable that stops Git for Windows' MSYS from rewriting arguments and
+/// environment values that look like POSIX paths when it starts a native
+/// program (`/api` would arrive as `C:/Program Files/Git/api`, `/a:/b` as a
+/// `;` list). Measured with Git for Windows 2.x: without it, `X=/api` reaches
+/// `cmd.exe` started by `sh.exe` as `C:/Program Files/Git/api`; with it, as
+/// `/api`.
 pub const MSYS_NO_PATHCONV: &str = "MSYS_NO_PATHCONV";
+
+/// Upstream MSYS2's switch for the same argument conversion, set as `*` so an
+/// `sh.exe` built on the plain MSYS2 runtime also leaves arguments alone. It
+/// does not cover environment values; [`MSYS_NO_PATHCONV`] does in Git for
+/// Windows.
+pub const MSYS2_ARG_CONV_EXCL: &str = "MSYS2_ARG_CONV_EXCL";
 
 /// Syntax and quoting rules of a [`Shell`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,13 +60,16 @@ impl Shell {
     }
 
     /// Git for Windows' `sh.exe` at `program`, with MSYS path conversion off so
-    /// arguments reach native programs as written.
+    /// arguments and variables reach native programs as written.
     pub fn git_sh(program: &Path) -> Self {
         Self {
             kind: ShellKind::Posix,
             program: program.display().to_string(),
             args: vec!["-c".to_owned()],
-            env: BTreeMap::from([(MSYS_NO_PATHCONV.to_owned(), "1".to_owned())]),
+            env: BTreeMap::from([
+                (MSYS_NO_PATHCONV.to_owned(), "1".to_owned()),
+                (MSYS2_ARG_CONV_EXCL.to_owned(), "*".to_owned()),
+            ]),
         }
     }
 
@@ -100,20 +112,58 @@ impl Default for Shell {
     }
 }
 
-/// Where `sh.exe` can be for a Git for Windows install whose `git --exec-path`
-/// printed `exec_path` (`<root>/mingw64/libexec/git-core`, or `clangarm64`
-/// on ARM64), in preference order: `<root>/bin/sh.exe` (a launcher that puts
-/// Git's `usr/bin` tools on `PATH`), then `<root>/usr/bin/sh.exe` (MinGit
-/// ships only this one).
-pub fn git_sh_candidates(exec_path: &Path) -> Vec<PathBuf> {
-    let Some(root) = exec_path
+/// Directories under a Git for Windows root that hold the native toolchain's
+/// `bin` (`clangarm64` on ARM64, `mingw32` in 32-bit installs).
+const GIT_TOOLCHAIN_DIRS: [&str; 3] = ["mingw64", "clangarm64", "mingw32"];
+
+/// The Git for Windows install root for a `git.exe` found on `PATH`, from the
+/// layouts the installer and MinGit create: `<root>\cmd\git.exe`,
+/// `<root>\bin\git.exe` and `<root>\mingw64\bin\git.exe`. `None` for anything
+/// else, such as a scoop shim or MSYS2's own `usr\bin\git.exe`, whose `sh.exe`
+/// does not know [`MSYS_NO_PATHCONV`]. Names compare ignoring ASCII case, as
+/// Windows does.
+pub fn git_root_from_exe(git: &Path) -> Option<PathBuf> {
+    let named = |path: &Path, name: &str| {
+        path.file_name()
+            .is_some_and(|found| found.eq_ignore_ascii_case(name))
+    };
+    if !named(git, "git.exe") {
+        return None;
+    }
+    let dir = git.parent()?;
+    let up = dir.parent()?;
+    let root = if named(dir, "cmd") {
+        up
+    } else if named(dir, "bin") && GIT_TOOLCHAIN_DIRS.iter().any(|name| named(up, name)) {
+        up.parent()?
+    } else if named(dir, "bin") && !named(up, "usr") {
+        up
+    } else {
+        return None;
+    };
+    (!root.as_os_str().is_empty()).then(|| root.to_path_buf())
+}
+
+/// The Git for Windows install root for what `git --exec-path` printed
+/// (`<root>\mingw64\libexec\git-core`). Only an absolute path counts, which on
+/// Windows means one with a drive or UNC prefix: MSYS2's and Cygwin's Git print
+/// `/usr/lib/git-core`, which is not a Windows path.
+pub fn git_root_from_exec_path(exec_path: &Path) -> Option<PathBuf> {
+    if !exec_path.is_absolute() {
+        return None;
+    }
+    exec_path
         .ancestors()
         .nth(3)
         .filter(|root| !root.as_os_str().is_empty())
-    else {
-        return Vec::new();
-    };
-    vec![
+        .map(Path::to_path_buf)
+}
+
+/// Where `sh.exe` can be under a Git for Windows `root`, in preference order:
+/// `<root>\bin\sh.exe` (a launcher that puts Git's `usr\bin` tools on `PATH`),
+/// then `<root>\usr\bin\sh.exe` (MinGit ships only this one).
+pub fn git_sh_candidates(root: &Path) -> [PathBuf; 2] {
+    [
         root.join("bin").join("sh.exe"),
         root.join("usr").join("bin").join("sh.exe"),
     ]
@@ -171,23 +221,88 @@ mod tests {
         assert_eq!(sh.kind, ShellKind::Posix);
         assert_eq!(sh.args, ["-c"]);
         assert_eq!(sh.env[MSYS_NO_PATHCONV], "1");
+        assert_eq!(sh.env[MSYS2_ARG_CONV_EXCL], "*");
         assert!(Shell::posix().env.is_empty());
+        assert!(Shell::cmd(Path::new("W")).env.is_empty());
+    }
+
+    /// An absolute directory to build install layouts under.
+    fn install_root() -> PathBuf {
+        std::env::temp_dir().join("Git")
     }
 
     #[test]
-    /// `sh.exe` is looked up three levels above `git --exec-path`.
-    fn candidates_come_from_the_git_root() {
-        let root = Path::new("Git");
+    /// The installer's `cmd` and `bin` and the toolchain `bin` all lead to the
+    /// install root, ignoring case; other layouts do not.
+    fn git_root_comes_from_the_git_exe_layout() {
+        let root = install_root();
+        for git in [
+            root.join("cmd").join("git.exe"),
+            root.join("bin").join("git.exe"),
+            root.join("mingw64").join("bin").join("git.exe"),
+            root.join("clangarm64").join("bin").join("git.exe"),
+            root.join("CMD").join("Git.EXE"),
+            root.join("MinGW64").join("BIN").join("git.exe"),
+        ] {
+            assert_eq!(git_root_from_exe(&git), Some(root.clone()), "{git:?}");
+        }
+        for git in [
+            root.join("usr").join("bin").join("git.exe"),
+            root.join("shims").join("git.exe"),
+            root.join("cmd").join("git"),
+            root.join("cmd").join("sh.exe"),
+            PathBuf::from("cmd").join("git.exe"),
+            PathBuf::from("git.exe"),
+        ] {
+            assert_eq!(git_root_from_exe(&git), None, "{git:?}");
+        }
+    }
+
+    #[test]
+    /// The root is three levels above an absolute `git --exec-path`, and
+    /// `sh.exe` is looked up under it, the launcher first.
+    fn git_root_comes_from_the_exec_path() {
+        let root = install_root();
         let exec = root.join("mingw64").join("libexec").join("git-core");
+        assert_eq!(git_root_from_exec_path(&exec), Some(root.clone()));
         assert_eq!(
-            git_sh_candidates(&exec),
+            git_sh_candidates(&root),
             [
                 root.join("bin").join("sh.exe"),
                 root.join("usr").join("bin").join("sh.exe")
             ]
         );
-        assert!(git_sh_candidates(Path::new("git-core")).is_empty());
-        assert!(git_sh_candidates(Path::new("libexec/git-core/x")).is_empty());
+        let relative = Path::new("Git")
+            .join("mingw64")
+            .join("libexec")
+            .join("git-core");
+        assert_eq!(git_root_from_exec_path(&relative), None);
+        // Too short to have a root three levels up: `C:\git-core` or `/git-core`.
+        let top = root.ancestors().last().unwrap_or(&root).join("git-core");
+        assert_eq!(git_root_from_exec_path(&top), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// MSYS2's and Cygwin's Git print a POSIX exec path, which has no drive and
+    /// is not a Windows path; drive and UNC exec paths are.
+    fn windows_exec_path_needs_a_drive_or_share() {
+        assert_eq!(
+            git_root_from_exec_path(Path::new("/usr/lib/git-core")),
+            None
+        );
+        assert_eq!(
+            git_root_from_exec_path(Path::new(r"\mingw64\libexec\git-core")),
+            None
+        );
+        assert_eq!(
+            git_root_from_exec_path(Path::new("C:/Program Files/Git/mingw64/libexec/git-core")),
+            Some(PathBuf::from("C:/Program Files/Git"))
+        );
+        assert_eq!(
+            git_root_from_exec_path(Path::new(r"\\host\tools\Git\mingw64\libexec\git-core")),
+            Some(PathBuf::from(r"\\host\tools\Git"))
+        );
     }
 
     #[cfg(unix)]

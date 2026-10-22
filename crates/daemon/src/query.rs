@@ -261,9 +261,9 @@ impl Inner {
                 let dir = self
                     .opts
                     .logs
-                    .join(project.name())
+                    .join(devlanes_core::paths::disk_name(&project.name()))
                     .join(index.to_string())
-                    .join(unit.replace('/', "_"));
+                    .join(devlanes_core::paths::disk_name(unit));
                 query_log_dir(dir, unit.to_owned(), query).await
             }
         }
@@ -880,7 +880,9 @@ impl Inner {
                 json!({"lane": reference, "unit": name, "items": items, "truncated": false, "next_cursor": null}),
             );
         }
-        Ok(json!({"lane": reference, "unit": name, "env": env.values}))
+        // What the user's shell takes over (`env`, `--export`, `shell`): without
+        // the variables only devlanes' own shell needs.
+        Ok(json!({"lane": reference, "unit": name, "env": env.exportable()}))
     }
 
     /// `url`: the public URL of a service (internal URL without hosts).

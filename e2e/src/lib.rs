@@ -4,17 +4,17 @@
 //! private slice of the port pool and proxy ports, and a deadline. Dropping it stops the
 //! daemon and kills only processes the test saw (identified by PID and start time).
 //!
-//! Unix only for now: ports are locked under `/tmp`, and processes are inspected with
-//! `ps` and `lsof` and killed with signals. On other platforms the crate is empty.
-
-#![cfg(unix)]
+//! On Unix, ports are locked under `/tmp`, and processes are inspected with `ps` and
+//! `lsof` and killed with signals. On Windows, ports are locked under the user's temp
+//! directory, slots overlapping the TCP excluded port ranges are skipped, and
+//! processes are inspected and terminated through `devlanes-sys`.
 
 use std::{
+    env::consts::EXE_SUFFIX,
     fmt,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
-    os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Mutex, OnceLock, mpsc},
@@ -122,10 +122,11 @@ fn locate_bins() -> Result<PathBuf> {
 /// Both binaries must exist before any lab starts.
 fn check_bins(dir: &Path) -> Result<()> {
     for name in ["devlanes", "fixture-server"] {
-        if !dir.join(name).is_file() {
+        let path = dir.join(format!("{name}{EXE_SUFFIX}"));
+        if !path.is_file() {
             return Err(Error::Setup(format!(
                 "{} is missing; build with cargo build -p devlanes -p devlanes-testing",
-                dir.join(name).display()
+                path.display()
             )));
         }
     }
@@ -151,15 +152,12 @@ struct PortSlot {
 impl PortSlot {
     /// Takes the first free slot; the lock is released when the file closes, even on a crash.
     fn acquire() -> Result<Self> {
-        let dir = Path::new("/tmp").join(format!(
-            "devlanes-e2e-ports-{}",
-            rustix::process::geteuid().as_raw()
-        ));
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&dir)?;
+        let dir = os::ports_dir()?;
         for slot in 0..SLOTS {
+            let base = SLOT_BASE + slot * SLOT_SIZE;
+            if !os::ports_usable(base, base + SLOT_SIZE - 1) {
+                continue;
+            }
             let file = OpenOptions::new()
                 .create(true)
                 .truncate(false)
@@ -167,7 +165,6 @@ impl PortSlot {
                 .open(dir.join(format!("{slot}.lock")))?;
             match file.try_lock() {
                 Ok(()) => {
-                    let base = SLOT_BASE + slot * SLOT_SIZE;
                     // An earlier run that died before its cleanup may have left these.
                     reap_fixture_listeners(base, base + SLOT_SIZE - 1);
                     return Ok(Self { base, _lock: file });
@@ -394,16 +391,16 @@ impl Lab {
     /// A `devlanes` command with the lab's isolated environment and `DEVLANES_OUTPUT=json`.
     pub fn command(&self, cwd: &Path, args: &[&str]) -> Result<Command> {
         let bins = bin_dir()?;
-        let mut command = Command::new(bins.join("devlanes"));
+        let mut command = Command::new(bins.join(format!("devlanes{EXE_SUFFIX}")));
         command.env_clear();
-        for key in ["TMPDIR", "USER", "LOGNAME", "LANG"] {
+        for &key in os::PASSED_ENV {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
         }
         let mut path = std::ffi::OsString::from(bins);
         if let Some(system) = std::env::var_os("PATH") {
-            path.push(":");
+            path.push(os::PATH_SEPARATOR);
             path.push(system);
         }
         command.env("PATH", path);
@@ -750,75 +747,333 @@ fn copy_dir(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Start time as `ps` reports it; `None` once the process is gone.
+/// Start time of `pid`, compared only for equality; `None` once the process is gone.
 pub fn start_time(pid: i32) -> Option<String> {
-    let output = Command::new("ps")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (output.status.success() && !text.is_empty()).then_some(text)
+    os::start_time(pid)
 }
 
-/// True while `pid` exists (zombies included).
+/// True while `pid` exists. Unix counts zombies; Windows does not count a process
+/// that exited while someone still holds its handle.
 pub fn alive(pid: i32) -> bool {
-    rustix::process::Pid::from_raw(pid)
-        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+    os::alive(pid)
 }
 
-/// Sends SIGKILL; a missing process is not an error.
+/// Kills `pid` at once (SIGKILL, `TerminateProcess`); a missing process is not an
+/// error.
 pub fn kill(pid: i32) {
-    if let Some(pid) = rustix::process::Pid::from_raw(pid) {
-        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-    }
+    os::kill(pid);
 }
 
-/// SIGKILL to `pid` and, when it leads a process group (every unit does), to
-/// the whole group, so a unit's children die with it.
+/// Kills `pid` with its unit's other processes: the process group it leads on Unix
+/// (every unit leads one), its descendants on Windows.
 pub fn kill_tree(pid: i32) {
-    if let Some(leader) = rustix::process::Pid::from_raw(pid)
-        && rustix::process::getpgid(Some(leader)).ok() == Some(leader)
-    {
-        let _ = rustix::process::kill_process_group(leader, rustix::process::Signal::KILL);
-    }
-    kill(pid);
+    os::kill_tree(pid);
 }
 
 /// Kills `fixture-server` processes listening on ports `first..=last`. A test
 /// that failed before cleaning up (or a daemon's orphan) must not hold the
 /// slot's ports for later runs; nothing but the fixture is ever touched.
 fn reap_fixture_listeners(first: u16, last: u16) {
-    let Ok(output) = Command::new("lsof")
-        .args([
-            "-nP",
-            "-t",
-            &format!("-iTCP:{first}-{last}"),
-            "-sTCP:LISTEN",
-        ])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return;
+    for pid in os::fixture_listeners(first, last) {
+        kill_tree(pid);
+    }
+}
+
+/// `ps`, `lsof` and signals.
+#[cfg(unix)]
+mod os {
+    use std::{
+        fs,
+        os::unix::fs::DirBuilderExt,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
     };
-    for pid in String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<i32>().ok())
-    {
-        let command = Command::new("ps")
-            .args(["-o", "comm=", "-p", &pid.to_string()])
+
+    /// What commands keep of the outer environment besides `PATH`.
+    pub const PASSED_ENV: &[&str] = &["TMPDIR", "USER", "LOGNAME", "LANG"];
+
+    pub const PATH_SEPARATOR: &str = ":";
+
+    /// `/tmp/devlanes-e2e-ports-<euid>`, private to the user.
+    pub fn ports_dir() -> std::io::Result<PathBuf> {
+        let dir = Path::new("/tmp").join(format!(
+            "devlanes-e2e-ports-{}",
+            rustix::process::geteuid().as_raw()
+        ));
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)?;
+        Ok(dir)
+    }
+
+    /// Every slot is usable; the slots stay below the ephemeral ranges.
+    pub fn ports_usable(_first: u16, _last: u16) -> bool {
+        true
+    }
+
+    /// Start time as `ps` reports it.
+    pub fn start_time(pid: i32) -> Option<String> {
+        let output = Command::new("ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-            .unwrap_or_default();
-        if Path::new(&command)
-            .file_name()
-            .is_some_and(|name| name == "fixture-server")
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        (output.status.success() && !text.is_empty()).then_some(text)
+    }
+
+    /// True while `pid` exists (zombies included).
+    pub fn alive(pid: i32) -> bool {
+        rustix::process::Pid::from_raw(pid)
+            .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+    }
+
+    /// Sends SIGKILL.
+    pub fn kill(pid: i32) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+
+    /// SIGKILL to the group `pid` leads, if any, then to `pid`.
+    pub fn kill_tree(pid: i32) {
+        if let Some(leader) = rustix::process::Pid::from_raw(pid)
+            && rustix::process::getpgid(Some(leader)).ok() == Some(leader)
         {
-            kill_tree(pid);
+            let _ = rustix::process::kill_process_group(leader, rustix::process::Signal::KILL);
+        }
+        kill(pid);
+    }
+
+    /// `fixture-server` PIDs that `lsof` sees listening on `first..=last`.
+    pub fn fixture_listeners(first: u16, last: u16) -> Vec<i32> {
+        let Ok(output) = Command::new("lsof")
+            .args([
+                "-nP",
+                "-t",
+                &format!("-iTCP:{first}-{last}"),
+                "-sTCP:LISTEN",
+            ])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            return Vec::new();
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<i32>().ok())
+            .filter(|pid| {
+                let command = Command::new("ps")
+                    .args(["-o", "comm=", "-p", &pid.to_string()])
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null())
+                    .output()
+                    .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+                    .unwrap_or_default();
+                Path::new(&command)
+                    .file_name()
+                    .is_some_and(|name| name == "fixture-server")
+            })
+            .collect()
+    }
+}
+
+/// `devlanes-sys` process table, verified termination and the TCP table.
+#[cfg(windows)]
+mod os {
+    use std::{
+        path::PathBuf,
+        process::{Command, Stdio},
+        sync::OnceLock,
+        time::Duration,
+    };
+
+    use devlanes_sys::{ProcessInfo, windows::proc::terminate_verified};
+
+    /// What commands keep of the outer environment besides `PATH`: what Windows
+    /// programs need to start (Winsock fails without `SystemRoot`), to find
+    /// programs (`PATHEXT`) and temp files, plus `DEVLANES_ALLOW_ELEVATED` because
+    /// CI runners are elevated. `APPDATA` and `LOCALAPPDATA` stay out, so nothing
+    /// reads the developer's real profile.
+    pub const PASSED_ENV: &[&str] = &[
+        "SystemRoot",
+        "SystemDrive",
+        "windir",
+        "ComSpec",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "USERNAME",
+        "USERDOMAIN",
+        "COMPUTERNAME",
+        "ProgramData",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "CommonProgramFiles",
+        "CommonProgramFiles(x86)",
+        "CommonProgramW6432",
+        "OS",
+        "PROCESSOR_ARCHITECTURE",
+        "NUMBER_OF_PROCESSORS",
+        "DEVLANES_ALLOW_ELEVATED",
+    ];
+
+    pub const PATH_SEPARATOR: &str = ";";
+
+    /// Exit code of processes the harness terminates.
+    const KILLED: u32 = 1;
+
+    /// `%TEMP%\devlanes-e2e-ports`; the temp directory is already per user.
+    pub fn ports_dir() -> std::io::Result<PathBuf> {
+        let dir = std::env::temp_dir().join("devlanes-e2e-ports");
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    /// False when `first..=last` overlaps a TCP excluded port range (Hyper-V, WSL
+    /// and Docker reserve blocks inside the default pool, 27339 among them on
+    /// some machines); binding there fails with access denied.
+    pub fn ports_usable(first: u16, last: u16) -> bool {
+        !excluded_ranges()
+            .iter()
+            .any(|&(start, end)| start <= last && first <= end)
+    }
+
+    /// IPv4 and IPv6 excluded ranges, read once per test process. A failing
+    /// `netsh` leaves the list empty, which only risks a bind error later.
+    fn excluded_ranges() -> &'static [(u16, u16)] {
+        static RANGES: OnceLock<Vec<(u16, u16)>> = OnceLock::new();
+        RANGES.get_or_init(|| {
+            let mut ranges = Vec::new();
+            for family in ["ipv4", "ipv6"] {
+                let mut command = Command::new("netsh");
+                command
+                    .args(["interface", family, "show", "excludedportrange"])
+                    .arg("protocol=tcp")
+                    .stdin(Stdio::null());
+                if let Ok(output) = crate::run_bounded(command, Duration::from_secs(10))
+                    && output.success()
+                {
+                    ranges.extend(parse_excluded(&output.stdout));
+                }
+            }
+            ranges
+        })
+    }
+
+    /// Rows of `netsh ... show excludedportrange`: two port numbers, maybe followed
+    /// by `*` for administered exclusions. Headers are localized, so every line
+    /// that does not start with two numbers is skipped.
+    fn parse_excluded(text: &str) -> Vec<(u16, u16)> {
+        text.lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let start = fields.next()?.parse().ok()?;
+                let end = fields.next()?.parse().ok()?;
+                Some((start, end))
+            })
+            .collect()
+    }
+
+    /// The process, when it is visible to this user.
+    fn info(pid: i32) -> Option<ProcessInfo> {
+        devlanes_sys::process(u32::try_from(pid).ok()?)
+            .ok()
+            .flatten()
+    }
+
+    /// Creation time from the process table, as text.
+    pub fn start_time(pid: i32) -> Option<String> {
+        info(pid).map(|info| info.start_time.to_string())
+    }
+
+    /// True while `pid` runs. An exited process whose handle someone (the daemon)
+    /// still holds is not alive.
+    pub fn alive(pid: i32) -> bool {
+        info(pid).is_some_and(|info| !info.zombie)
+    }
+
+    /// `TerminateProcess`, only if the PID still names the process just looked up.
+    pub fn kill(pid: i32) {
+        if let Some(info) = info(pid) {
+            let _ = terminate_verified(&info.identity(), KILLED);
+        }
+    }
+
+    /// Terminates `pid` and every descendant. Windows has no process groups, and
+    /// the unit's job cannot be reopened once its daemon is gone, so descendants
+    /// come from parent PIDs; a child must have started after its parent, which
+    /// rules out a recycled parent PID.
+    pub fn kill_tree(pid: i32) {
+        let Some(root) = info(pid) else {
+            return;
+        };
+        let table = devlanes_sys::processes().unwrap_or_default();
+        let mut victims = vec![root];
+        let mut next = 0;
+        while let Some(parent) = victims.get(next).cloned() {
+            next += 1;
+            let children: Vec<ProcessInfo> = table
+                .iter()
+                .filter(|p| {
+                    p.ppid == parent.pid
+                        && p.start_time >= parent.start_time
+                        && !victims.iter().any(|v| v.pid == p.pid)
+                })
+                .cloned()
+                .collect();
+            victims.extend(children);
+        }
+        for victim in victims {
+            let _ = terminate_verified(&victim.identity(), KILLED);
+        }
+    }
+
+    /// `fixture-server.exe` PIDs listening on `first..=last`.
+    pub fn fixture_listeners(first: u16, last: u16) -> Vec<i32> {
+        let fixtures: Vec<u32> = devlanes_sys::processes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.name.eq_ignore_ascii_case("fixture-server.exe"))
+            .map(|p| p.pid)
+            .collect();
+        let mut pids: Vec<i32> = devlanes_sys::listening_tcp(&fixtures)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|socket| (first..=last).contains(&socket.addr.port()))
+            .filter_map(|socket| i32::try_from(socket.pid).ok())
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        pids
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Data rows are read whatever the header language; `*` marks are ignored.
+        #[test]
+        fn parses_excluded_ranges() {
+            let text = "
+Protocol tcp Port Exclusion Ranges
+
+Start Port    End Port
+----------    --------
+      5357        5357
+     27339       27339
+     50000       50059     *
+
+* - Administered port exclusions.
+";
+            assert_eq!(
+                parse_excluded(text),
+                [(5357, 5357), (27339, 27339), (50000, 50059)]
+            );
         }
     }
 }

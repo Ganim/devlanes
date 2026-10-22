@@ -432,7 +432,8 @@ fn valid_host(host: &str) -> bool {
 /// `$DEVLANES_HOME/sync/<host>/<project>/<lane>/<leaf>` for a box sync entry.
 ///
 /// Every component is a single validated path name, so nothing the box sends can
-/// point the destination elsewhere; the box's own `to` is never used.
+/// point the destination elsewhere; the box's own `to` is never used. The project
+/// is checked as sent, then stored under its disk name, as everywhere else.
 fn sync_destination(home: &Path, host: &str, entry: &SyncEntry) -> Result<PathBuf, String> {
     let host = host.replace('/', "_");
     let mut path = home.join("sync");
@@ -446,7 +447,11 @@ fn sync_destination(home: &Path, host: &str, entry: &SyncEntry) -> Result<PathBu
         if !valid {
             return Err(format!("the box sent an unusable {what} name {part:?}"));
         }
-        path.push(part);
+        if what == "project" {
+            path.push(devlanes_core::paths::disk_name(part));
+        } else {
+            path.push(part);
+        }
     }
     Ok(path)
 }

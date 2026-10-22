@@ -227,7 +227,9 @@ pub(crate) fn escape(text: &str) -> String {
 }
 
 /// Hands out valid, unique unit names: `[a-z0-9][a-z0-9_-]*`, where `_` and `-` count as the
-/// same character because devlanes expressions treat them as aliases.
+/// same character because devlanes expressions treat them as aliases. Names are also unique
+/// as stored on disk ([`devlanes_core::paths::disk_name`], ignoring case), which config
+/// validation requires.
 #[derive(Debug, Default)]
 pub(crate) struct Names {
     taken: HashSet<String>,
@@ -239,7 +241,12 @@ impl Names {
         let base = sanitize(raw);
         let mut name = base.clone();
         let mut n = 2;
-        while !self.taken.insert(name.replace('_', "-")) {
+        let key = |name: &str| {
+            devlanes_core::paths::disk_name(name)
+                .to_ascii_lowercase()
+                .replace('_', "-")
+        };
+        while !self.taken.insert(key(&name)) {
             name = format!("{base}-{n}");
             n += 1;
         }
@@ -267,7 +274,9 @@ fn sanitize(raw: &str) -> String {
     }
 }
 
-/// The project name devlanes accepts (`[a-z0-9][a-z0-9._-]*`), from a directory name.
+/// The project name devlanes accepts (`[a-z0-9][a-z0-9._-]*`), from a directory name. A
+/// trailing `.` is dropped too: the name is valid, but Windows would drop the dot from its
+/// directories, so devlanes would store it as `acme_`.
 pub(crate) fn project_name(dir: &Path) -> String {
     let raw = dir
         .file_name()
@@ -284,7 +293,7 @@ pub(crate) fn project_name(dir: &Path) -> String {
     }
     let trimmed = out
         .trim_start_matches(['.', '_', '-'])
-        .trim_end_matches('-');
+        .trim_end_matches(['-', '.']);
     if trimmed.is_empty() {
         "app".to_owned()
     } else {
@@ -303,22 +312,21 @@ pub(crate) fn relative_dir(
     raw: &str,
     home: Option<&Path>,
 ) -> Result<Option<String>, String> {
-    let expanded: PathBuf =
-        if let Some(rest) = raw.strip_prefix("~/").or((raw == "~").then_some("")) {
-            match home {
-                Some(home) => home.join(rest),
-                None => return Err(format!("{raw} depends on the home directory")),
-            }
-        } else {
-            PathBuf::from(raw)
-        };
+    let expanded: PathBuf = if let Some(rest) = below_home(raw) {
+        match home {
+            Some(home) => home.join(rest),
+            None => return Err(format!("{raw} depends on the home directory")),
+        }
+    } else {
+        PathBuf::from(raw)
+    };
     // `has_root`, not `is_absolute`: imported configs come from Unix tools, and
     // on Windows `/srv/x` has a root but no drive, yet still points outside.
-    // On Unix the two are the same.
+    // On Unix the two are the same. The prefix check ignores case on Windows.
     let relative = if expanded.has_root() {
-        match expanded.strip_prefix(project) {
-            Ok(inside) => inside.to_path_buf(),
-            Err(_) => {
+        match devlanes_core::paths::strip_path_prefix(&expanded, project) {
+            Some(inside) => inside,
+            None => {
                 return Err(format!(
                     "{raw} is outside the project; every lane runs in its own worktree"
                 ));
@@ -341,6 +349,21 @@ pub(crate) fn relative_dir(
         }
     }
     Ok((!parts.is_empty()).then(|| parts.join("/")))
+}
+
+/// The part of `raw` below the home directory for `~` and `~/...`.
+#[cfg(unix)]
+fn below_home(raw: &str) -> Option<&str> {
+    raw.strip_prefix("~/").or((raw == "~").then_some(""))
+}
+
+/// The part of `raw` below the home directory for `~`, `~/...` and, as Windows
+/// tools write it, `~\...`.
+#[cfg(windows)]
+fn below_home(raw: &str) -> Option<&str> {
+    raw.strip_prefix("~/")
+        .or_else(|| raw.strip_prefix("~\\"))
+        .or((raw == "~").then_some(""))
 }
 
 /// Stop signals devlanes accepts.
@@ -401,4 +424,93 @@ pub(crate) fn duration_text(raw: &str) -> Option<String> {
         && digits.bytes().all(|b| b.is_ascii_digit())
         && matches!(unit, "ms" | "s" | "m" | "h" | "d"))
     .then(|| raw.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    /// Claimed names are unique as devlanes stores them: `_` and `-` are one
+    /// character, and device names keep their spelling without colliding.
+    fn claimed_names_do_not_collide_on_disk() {
+        let mut names = Names::default();
+        let claimed: Vec<String> = [
+            "db:migrate",
+            "db_migrate",
+            "DB-Migrate",
+            "aux",
+            "AUX",
+            "aux_",
+        ]
+        .into_iter()
+        .map(|raw| names.claim(raw).0)
+        .collect();
+        assert_eq!(
+            claimed,
+            [
+                "db-migrate",
+                "db_migrate-2",
+                "db-migrate-3",
+                "aux",
+                "aux-2",
+                "aux-3"
+            ]
+        );
+        let stored: HashSet<String> = claimed
+            .iter()
+            .map(|name| devlanes_core::paths::disk_name(name).to_ascii_lowercase())
+            .collect();
+        assert_eq!(stored.len(), claimed.len());
+    }
+
+    #[test]
+    /// A trailing `.` or `-` is dropped from the project name.
+    fn project_names_drop_a_trailing_dot() {
+        assert_eq!(project_name(Path::new("acme.")), "acme");
+        assert_eq!(project_name(Path::new("Acme App.-")), "acme-app");
+        assert_eq!(project_name(Path::new("acme.web")), "acme.web");
+        assert_eq!(project_name(Path::new("...")), "app");
+    }
+
+    #[test]
+    /// `~` and absolute paths count only inside the project; relative ones
+    /// start from `base`.
+    fn relative_dirs_stay_inside_the_project() {
+        let project = std::env::temp_dir().join("acme");
+        let home = std::env::temp_dir();
+        assert_eq!(
+            relative_dir(&project, "apps", "web", None),
+            Ok(Some("apps/web".to_owned()))
+        );
+        assert_eq!(
+            relative_dir(&project, "", "~/acme/api", Some(&home)),
+            Ok(Some("api".to_owned()))
+        );
+        let inside = project.join("srv").display().to_string();
+        assert_eq!(
+            relative_dir(&project, "", &inside, None),
+            Ok(Some("srv".to_owned()))
+        );
+        assert!(relative_dir(&project, "", "~/other", Some(&home)).is_err());
+        assert!(relative_dir(&project, "", "/srv/x", None).is_err());
+        assert!(relative_dir(&project, "", "~/x", None).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// On Windows `~\` is home-relative and the project prefix ignores case.
+    fn windows_relative_dirs_ignore_case_and_take_backslash_home() {
+        let project = Path::new(r"C:\Users\acme\code\Acme");
+        let home = Path::new(r"C:\Users\acme");
+        assert_eq!(
+            relative_dir(project, "", r"~\code\acme\web", Some(home)),
+            Ok(Some("web".to_owned()))
+        );
+        assert_eq!(
+            relative_dir(project, "", r"c:\users\ACME\code\acme\api", None),
+            Ok(Some("api".to_owned()))
+        );
+        assert!(relative_dir(project, "", r"D:\code\acme", None).is_err());
+    }
 }

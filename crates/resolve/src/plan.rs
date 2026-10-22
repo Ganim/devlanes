@@ -11,7 +11,7 @@ use devlanes_config::{
     Templated,
 };
 use devlanes_core::{
-    StopPolicy,
+    StopPolicy, StopSignal,
     color::unit_color,
     contrib::{
         ContribCx, ContribMemo, Contributor, DetectCx, DraftCommand, LaunchDraft, ScriptInfo,
@@ -28,7 +28,7 @@ use crate::{
     ResolvedLane, ResolvedService, ResolvedTask, ServiceLayout, SyncSpec,
     layout::{self, Namespaces, env_namespace, replica_value},
     select::{active_profiles, merge_options},
-    util::{cmd_quote, shell_quote, signal_number},
+    util::{cmd_quote, shell_quote},
 };
 
 /// Plans every service replica, task and infra command of a lane.
@@ -342,7 +342,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
             }
             None => None,
         };
-        let launch = self
+        let mut launch = self
             .launch(
                 LaunchInput {
                     kind: UnitKind::Service,
@@ -372,6 +372,8 @@ impl<E: Extensions> Planner<'_, '_, E> {
             &path,
         )?;
         let stop = stop_policy(service.stop.as_ref(), &context, &path)?;
+        // Nothing on Unix; on Windows it names the substitute for a signal it lacks.
+        launch.notes.extend(stop.signal.mapped_note());
         let sync = self.sync(service.sync.as_deref().unwrap_or_default(), &context, &path)?;
         Ok(ResolvedService {
             name: layout.name.clone(),
@@ -676,6 +678,9 @@ impl<E: Extensions> Planner<'_, '_, E> {
         let mut shell_env = BTreeMap::new();
         let (argv, cwd) = match drafted {
             DraftCommand::Shell(text) => {
+                if shell.kind == ShellKind::Cmd {
+                    single_line_for_cmd(&text, &run_path)?;
+                }
                 let text = if args.is_empty() {
                     text
                 } else {
@@ -734,7 +739,9 @@ impl<E: Extensions> Planner<'_, '_, E> {
         }
         let mut devlanes = self.devlanes.clone();
         // What the shell itself needs (MSYS_NO_PATHCONV for Git's sh) sits with
-        // the devlanes variables, so `env --explain` shows where it came from.
+        // the devlanes variables, so `env --explain` shows where it came from;
+        // `shell_env` keeps it out of what `devlanes env` exports.
+        let shell_names: BTreeSet<String> = shell_env.keys().cloned().collect();
         devlanes.extend(shell_env);
         if let (UnitKind::Service, Some(layout)) = (spec.kind, spec.layout) {
             devlanes.insert("PORT".into(), layout.port.to_string());
@@ -745,7 +752,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
             }
             devlanes.insert("DEVLANES_ORIGINS".into(), self.origins.clone());
         }
-        let env = assemble([
+        let mut env = assemble([
             (EnvLayer::Client, client),
             (EnvLayer::Contributor, contributed),
             (EnvLayer::Secrets, secrets.set.clone()),
@@ -755,6 +762,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
             (EnvLayer::Profile, profile),
             (EnvLayer::Override, input.overrides.clone()),
         ]);
+        env.shell_env = shell_names;
         Ok(Launch {
             program: program.clone(),
             args: rest.to_vec(),
@@ -845,7 +853,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
                     })?;
                     home()?
                         .join("devlanes/sync")
-                        .join(&self.input.config.project)
+                        .join(devlanes_core::paths::disk_name(&self.input.config.project))
                         .join(&facts.name)
                         .join(leaf)
                 }
@@ -941,7 +949,17 @@ fn duration(
 }
 
 /// Launch note for `run:` strings that go through the `cmd.exe` fallback.
-const CMD_FALLBACK_NOTE: &str = "runs with cmd.exe because Git for Windows' sh.exe was not found; run strings use POSIX shell syntax that cmd.exe may not understand. Install Git for Windows";
+const CMD_FALLBACK_NOTE: &str = "runs with cmd.exe: Git for Windows' sh.exe was not found, and POSIX syntax may fail there. Install Git for Windows, then run `devlanes daemon restart`.";
+
+/// Fails shell text with more than one line under the `cmd.exe` fallback:
+/// `cmd /c` runs only the first line, and arguments appended to the text
+/// would land on the last one, so the rest would silently never run.
+fn single_line_for_cmd(text: &str, path: &str) -> Result<(), ResolveError> {
+    if text.trim_end().contains(['\r', '\n']) {
+        return Err(ResolveError::invalid(path, crate::shell::CMD_MULTILINE));
+    }
+    Ok(())
+}
 
 /// Quotes one argument appended to shell text for `kind`. `cmd.exe` cannot take
 /// some characters safely, so those fail the unit instead of running something else.
@@ -966,9 +984,15 @@ fn shell_line(
     path: &str,
 ) -> Result<String, ResolveError> {
     match run {
-        Run::Shell(text) => text
-            .evaluate(context)
-            .map_err(|e| ResolveError::expression(path, e)),
+        Run::Shell(text) => {
+            let text = text
+                .evaluate(context)
+                .map_err(|e| ResolveError::expression(path, e))?;
+            if kind == ShellKind::Cmd {
+                single_line_for_cmd(&text, path)?;
+            }
+            Ok(text)
+        }
         Run::Argv(items) => {
             let mut words = Vec::new();
             for item in items {
@@ -1136,7 +1160,7 @@ fn stop_policy(
         return Ok(policy);
     };
     if let Some(signal) = &stop.signal {
-        policy.signal = signal_number(signal).ok_or_else(|| {
+        policy.signal = StopSignal::from_config_name(signal).ok_or_else(|| {
             ResolveError::invalid(
                 format!("{path}.stop.signal"),
                 format!("unsupported signal `{signal}`"),

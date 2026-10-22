@@ -118,7 +118,7 @@ pub(crate) fn port_override<E: Extensions>(
             "must be a port number between 1 and 65535",
         )
     };
-    match service.env.get("PORT") {
+    match devlanes_config::env_value(&service.env, "PORT") {
         None => Ok(PortOverride::None),
         Some(Templated::Expression(_)) => Ok(PortOverride::Expression),
         Some(Templated::Literal(Scalar::Integer(port))) => u16::try_from(*port)
@@ -164,7 +164,8 @@ pub(crate) fn service_port_names<E: Extensions>(
     contributors: &[Arc<dyn Contributor>],
 ) -> Result<BTreeSet<String>, ResolveError> {
     let mut names = BTreeSet::new();
-    if !service.env.contains_key("PORT") {
+    let sets_port = devlanes_config::env_value(&service.env, "PORT").is_some();
+    if !sets_port {
         names.insert(DEFAULT_PORT.to_owned());
     }
     if let Some(preset) = &service.preset {
@@ -209,7 +210,7 @@ pub(crate) fn service_port_names<E: Extensions>(
         }
     }
     // `self.port` already covers it; a literal PORT means there is nothing to allocate.
-    if service.env.contains_key("PORT") {
+    if sets_port {
         names.remove(DEFAULT_PORT);
     }
     Ok(names)

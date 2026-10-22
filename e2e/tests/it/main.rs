@@ -1,7 +1,7 @@
 //! End-to-end tests: every test drives the real `devlanes` binary in its own [`Lab`].
-
-// The harness is Unix only until it learns Windows processes and ports.
-#![cfg(unix)]
+//!
+//! On Windows, tests that need a later porting step are ignored with the step in
+//! the reason; the others need only pipe-mode units.
 
 mod cli;
 mod diagnostics;

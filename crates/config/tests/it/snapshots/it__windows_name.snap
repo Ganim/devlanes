@@ -2,11 +2,12 @@
 source: crates/config/tests/it/main.rs
 expression: output
 ---
-  × services.aux: `aux` is a reserved device name on Windows and cannot name a file, and
-  │ configs are shared across operating systems; pick another name
+  × services.db_migrate: `db:migrate` and `db_migrate` would share the file name
+  │ `db_migrate` on disk (Windows ignores case and does not allow some characters in
+  │ file names, and configs are shared across operating systems); rename one of them
    ╭─[devlanes.yaml:6:5]
- 5 │   aux:
+ 5 │   db_migrate:
  6 │     run: worker
    ·     ┬
-   ·     ╰── services.aux: `aux` is a reserved device name on Windows and cannot name a file, and configs are shared across operating systems; pick another name
+   ·     ╰── services.db_migrate: `db:migrate` and `db_migrate` would share the file name `db_migrate` on disk (Windows ignores case and does not allow some characters in file names, and configs are shared across operating systems); rename one of them
    ╰────

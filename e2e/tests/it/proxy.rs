@@ -10,6 +10,7 @@ use crate::{BUDGET, need};
 /// Every routed hostname of two lanes answers 200 over HTTPS with the lab's CA, and the
 /// answer comes from that lane's process.
 #[test]
+#[cfg_attr(windows, ignore = "needs the HTTPS proxy on Windows, step 6")]
 fn https_reaches_each_lane_by_hostname() -> Result<()> {
     if Command::new("curl")
         .arg("--version")

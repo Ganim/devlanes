@@ -2,7 +2,7 @@
 
 End-to-end tests that run the real `devlanes` binary as separate processes against the projects in `fixtures/`. The library in `src/` is the harness; the tests are in `tests/it/`. The SSH tests under `e2e/ssh` are separate (see its README).
 
-The harness and tests are Unix only for now. On Windows the crate compiles to nothing and runs no tests.
+On Windows, tests that need a later porting step (ConPTY, HTTPS, Docker) are ignored with the step in the reason.
 
 ## Usage
 
@@ -35,11 +35,11 @@ DEVLANES_E2E_BIN_DIR="$PWD/target/debug" cargo nextest run --profile e2e
 
 ## Isolation
 
-Each lab has a short `DEVLANES_HOME` under `/tmp` (the socket path must fit), a Git repository with a local identity and `commit.gpgsign=false`, an empty file as the global Git config, and an environment cleared down to `PATH` (with the binary directory first), `DEVLANES_AGENT=0` and `DEVLANES_OUTPUT=json`. Commands never see CI or agent markers from the outer shell.
+Each lab has a short `DEVLANES_HOME` under `/tmp` (the socket path must fit; on Windows the user's temp directory), a Git repository with a local identity and `commit.gpgsign=false`, an empty file as the global Git config, and an environment cleared down to `PATH` (with the binary directory first), `DEVLANES_AGENT=0` and `DEVLANES_OUTPUT=json`. On Windows the system variables programs need to start (`SystemRoot`, `PATHEXT`, `TEMP` and similar) and `DEVLANES_ALLOW_ELEVATED` are kept too. Commands never see CI or agent markers from the outer shell.
 
-Labs lock one of 60 slots of 100 ports, starting at 26000, through files in `/tmp/devlanes-e2e-ports-<uid>`. The slot holds the lane port pool and the proxy's HTTP and HTTPS ports, written to `$DEVLANES_HOME/config.yaml`, so parallel tests and a developer's own daemon never compete for 443 or 8443.
+Labs lock one of 60 slots of 100 ports, starting at 26000, through files in `/tmp/devlanes-e2e-ports-<uid>` (`%TEMP%\devlanes-e2e-ports` on Windows). The slot holds the lane port pool and the proxy's HTTP and HTTPS ports, written to `$DEVLANES_HOME/config.yaml`, so parallel tests and a developer's own daemon never compete for 443 or 8443. On Windows, slots that overlap a TCP excluded port range (`netsh interface ipv4 show excludedportrange protocol=tcp`, IPv6 too) are skipped.
 
-Dropping a lab runs `devlanes daemon stop --yes`, then sends SIGKILL to every PID the test saw in JSON output whose start time still matches. Docker labs also run `docker compose -p <project> down --volumes` for each of their Compose projects, before the test as well, so a run that died cannot leave data behind.
+Dropping a lab runs `devlanes daemon stop --yes`, then kills every PID the test saw in JSON output whose start time still matches, with its process group on Unix or its descendants on Windows. Docker labs also run `docker compose -p <project> down --volumes` for each of their Compose projects, before the test as well, so a run that died cannot leave data behind.
 
 ## License
 

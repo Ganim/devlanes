@@ -76,7 +76,8 @@ fn started(status: &Value, name: &str) -> Result<u64> {
 /// and seed ran in order; then exit 3 is passed through and seed (`lane.create`) does not
 /// run again.
 #[test]
-#[ignore = "needs docker"]
+#[cfg_attr(not(windows), ignore = "needs docker")]
+#[cfg_attr(windows, ignore = "needs docker and Docker support on Windows, step 7")]
 fn docker_with_full_fixture() -> Result<()> {
     let lab = Lab::docker("full", COMPOSE_PROJECT, Duration::from_secs(900))?;
     lab.write(".env", &format!("FULL_PG_PORT={}\n", lab.spare_port(0)))?;

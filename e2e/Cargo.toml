@@ -16,6 +16,13 @@ serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 
-# The harness is Unix only for now; see the crate docs.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
+
+# Process table, verified termination and listeners; Unix uses `ps` and `lsof`.
+[target.'cfg(windows)'.dependencies]
+devlanes-sys = { path = "../crates/sys" }
+
+# The fake daemon of `protocol_mismatch_exits_4` serves a named pipe.
+[target.'cfg(windows)'.dev-dependencies]
+tokio.workspace = true

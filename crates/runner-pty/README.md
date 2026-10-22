@@ -2,7 +2,7 @@
 
 Runs daemon-owned units in a PTY or with pipes and implements the `Runner` and `Unit` traits from `devlanes-core`. The daemon registers it in the composition root and uses `devlanes-sys` to track and signal unit processes.
 
-Unix only. On Windows the crate compiles to an empty library; Windows units will use a separate runner.
+Unix only. On Windows the crate compiles to an empty library; Windows units run through `devlanes-runner-windows`.
 
 ## Usage
 

@@ -45,10 +45,17 @@ mod os {
 mod os {
     use std::path::Path;
 
-    /// Length of a leading `C:\` or `C:/` drive letter and colon, else 0.
+    /// Length of a leading `C:\` or `C:/` drive letter and colon, or of a
+    /// verbatim `\\?\C:\` drive, else 0. Other verbatim forms (`\\?\UNC\`,
+    /// `\\?\Volume{...}`) have no drive colon and need nothing skipped.
     pub(super) fn drive_prefix_len(input: &str) -> usize {
         match input.as_bytes() {
             [letter, b':', b'\\' | b'/', ..] if letter.is_ascii_alphabetic() => 2,
+            [b'\\', b'\\', b'?', b'\\', letter, b':', b'\\', ..]
+                if letter.is_ascii_alphabetic() =>
+            {
+                6
+            }
             _ => 0,
         }
     }
@@ -519,6 +526,10 @@ mod tests {
                 Some((some("demo"), some(r"C:\src\acme"), "+api".into())),
             ),
             (r".\acme:web", Some((None, some(r".\acme"), "web".into()))),
+            (
+                r"\\?\C:\src\acme:web",
+                Some((None, some(r"\\?\C:\src\acme"), "web".into())),
+            ),
             (r"C:\src\acme", None),
             (r"C:\src:acme:web", None),
             // Drive-relative `C:web` is not a lane path form: lane `C`, unit `web`.
@@ -547,7 +558,9 @@ mod tests {
             ("c:/work/MAIN", 0),
             (r".\main", 0),
             (r"~\main", 0),
+            (r"\\?\C:\work\Main", 0),
             (r"\\server\share\feature", 1),
+            (r"\\?\UNC\SERVER\share\feature", 1),
         ] {
             let reference = input.parse().expect("valid reference");
             assert_eq!(

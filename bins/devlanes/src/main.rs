@@ -8,6 +8,7 @@ mod choose;
 mod commands;
 mod completion;
 mod daemon;
+mod daemon_log;
 mod driver;
 mod hosts;
 mod local;

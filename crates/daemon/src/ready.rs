@@ -569,6 +569,20 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
+    /// Unix probes still run `/bin/sh -c <text>` and add no variables of the
+    /// shell's own.
+    #[cfg(unix)]
+    #[test]
+    fn unix_probe_runs_bin_sh_without_shell_env() {
+        let sh = Shell::posix();
+        assert!(sh.env.is_empty());
+        let process = os::shell_command(&sh, "test -n x");
+        let process = process.as_std();
+        assert_eq!(process.get_program(), "/bin/sh");
+        assert_eq!(process.get_args().collect::<Vec<_>>(), ["-c", "test -n x"]);
+        assert_eq!(process.get_envs().count(), 0);
+    }
+
     /// The unit's env on Windows: what Windows processes need, without the
     /// daemon's own variables.
     #[cfg(windows)]
@@ -601,6 +615,32 @@ mod tests {
         assert!(cmd_succeeds(&sh, r#"test "$DL_READY" = 'a "b" c'"#, &cwd, &env, soon).await);
         assert!(cmd_succeeds(&sh, r#"test "$MSYS_NO_PATHCONV" = 1"#, &cwd, &env, soon).await);
         assert!(!cmd_succeeds(&sh, "test -n \"$DL_NOT_SET\"", &cwd, &env, soon).await);
+    }
+
+    /// Git for Windows' MSYS rewrites POSIX-looking environment values for the
+    /// native programs `sh.exe` starts, not only arguments: `X=/api` reaches
+    /// `cmd.exe` as `C:/Program Files/Git/api` unless `MSYS_NO_PATHCONV` is
+    /// set, which the detected shell does. Needs Git for Windows.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn git_sh_keeps_env_values_for_native_children() {
+        let sh = crate::integrations::detect_shell().await;
+        assert_eq!(sh.kind, devlanes_core::shell::ShellKind::Posix, "{sh:?}");
+        let cwd = std::env::temp_dir();
+        let env = windows_env(&[("DL_URL_PATH", "/api")]);
+        let soon = Instant::now() + Duration::from_secs(20);
+        // `cmd.exe` prints the value it received; `tr` drops its `\r`.
+        let probe = r#"test "$(cmd.exe /d /c echo %DL_URL_PATH% | tr -d '\r')" = /api"#;
+        assert!(cmd_succeeds(&sh, probe, &cwd, &env, soon).await);
+        let bare = Shell {
+            env: BTreeMap::new(),
+            ..sh.clone()
+        };
+        // Without the variables the arguments `/d /c` would be rewritten too,
+        // so the native child reads its command from standard input instead.
+        let converted =
+            r#"echo 'echo %DL_URL_PATH%' | cmd.exe | tr -d '\r' | grep -qx '[A-Za-z]:/.*/api'"#;
+        assert!(cmd_succeeds(&bare, converted, &cwd, &env, soon).await);
     }
 
     /// The cmd.exe fallback receives the text verbatim, quotes included.

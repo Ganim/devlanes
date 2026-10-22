@@ -55,9 +55,9 @@ fn read(pid: u32) -> Result<Option<ProcessInfo>, Error> {
     Ok(Some(ProcessInfo {
         pid: stat.pid,
         ppid: stat.ppid,
-        pgid: stat.pgid,
+        pgid: Some(stat.pgid),
         sid: Some(stat.sid),
-        uid: metadata.uid(),
+        uid: Some(metadata.uid()),
         start_time: stat.start_time,
         // X (dead) is transient but equally unsignalable.
         zombie: matches!(stat.state, 'Z' | 'X'),

@@ -7,8 +7,8 @@
 //!
 //! Requires a tokio runtime with IO, time and signal drivers enabled.
 //!
-//! Unix only: on other platforms this crate is empty, and Windows units will run
-//! through a separate runner. See [`PtyRunner`] for an example.
+//! Unix only: on other platforms this crate is empty, and Windows units run
+//! through `devlanes-runner-windows`. See [`PtyRunner`] for an example.
 
 // Sessions, PTYs and signals have no Windows equivalent here, so the whole crate is
 // compiled out there. rustdoc still collects crate-level doc tests from a crate that
@@ -25,36 +25,15 @@ use async_trait::async_trait;
 use devlanes_core::{Error, LaunchSpec, Runner, Unit};
 
 mod output;
-mod snapshot;
 #[allow(unsafe_code)]
 mod spawn;
 mod unit;
 
+// The runner options live in core so every OS's runner takes the same ones; the
+// re-export keeps existing imports working.
+pub use devlanes_core::{ExitSweep, StderrMode};
 pub use devlanes_sys::{ListeningSocket, ProcessInfo};
 pub use unit::{ExitReport, PtyUnit, StopOutcome};
-
-/// How pipe-mode units (`pty: false`) deliver stderr.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum StderrMode {
-    /// Separate pipes; chunks are tagged `Stdout` or `Stderr`.
-    #[default]
-    Separate,
-    /// One shared pipe preserving write order; every chunk is tagged `Stdout`.
-    Merged,
-}
-
-/// What happens to processes still running after a unit's leader exits on its own.
-/// An explicit stop always kills every tracked process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ExitSweep {
-    /// SIGKILL every tracked leftover; for services and ad-hoc commands.
-    #[default]
-    KillAll,
-    /// Kill leftovers inside the unit's session, but leave descendants that moved to
-    /// their own session running and list them in [`ExitReport::left_running`]. For
-    /// setup tasks that start daemons (`pg_ctl start`, `redis-server --daemonize yes`).
-    KeepDaemonized,
-}
 
 /// Spawns units in PTYs or pipes. Cheap to clone; holds only tuning values.
 ///

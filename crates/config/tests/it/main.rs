@@ -151,7 +151,7 @@ fn broken_diagnostics() {
         ),
         (
             "windows_name",
-            "project: demo\nservices:\n  api:\n    run: server\n  aux:\n    run: worker\n",
+            "project: demo\nservices:\n  db:migrate:\n    run: server\n  db_migrate:\n    run: worker\n",
         ),
     ];
     for (name, yaml) in cases {
@@ -278,6 +278,49 @@ fn cross_project_default() {
     );
 }
 
+/// Names that work on Unix stay valid on every OS, even when Windows cannot use
+/// them as file names as written: devlanes stores them under an encoded name.
+#[test]
+fn names_windows_cannot_store_as_written_are_accepted() {
+    for yaml in [
+        "project: aux",
+        "project: nul.d",
+        "project: demo.",
+        "project: demo\nservices: { 'db:migrate': { run: a }, CON: { run: a }, 'a|b': { run: a }, 'api ': { run: a } }",
+        "project: demo\ntasks: { 'build:css': { run: a }, lpt1: { run: a }, 'db\\seed': { run: a }, \"a\\tb\": { run: a } }",
+        // A service and a task may share a name, as before.
+        "project: demo\nservices: { web: { run: a } }\ntasks: { Web: { run: a } }",
+    ] {
+        if let Err(error) = parse_project(yaml, None) {
+            panic!("{yaml}\nrejected: {}", error.message);
+        }
+    }
+}
+
+/// `env.PORT` is found under another spelling on Windows, where variable names
+/// ignore case, and only there.
+#[test]
+fn port_lookup_follows_the_os_case_rules() {
+    let result = parse_project(
+        "project: demo\nservices: { api: { run: a, env: { Port: banana } } }",
+        None,
+    );
+    #[cfg(windows)]
+    assert!(
+        result.as_ref().is_err_and(|error| error
+            .message
+            .contains("services.api.env.PORT: must be a port number")),
+        "{:?}",
+        result.err().map(|error| error.message)
+    );
+    #[cfg(unix)]
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result.err().map(|error| error.message)
+    );
+}
+
 /// Invalid lifecycle, infra, and command references must fail before runtime.
 #[test]
 fn structural_validation() {
@@ -335,46 +378,23 @@ fn structural_validation() {
             "project: demo\nservices: { api: { tags: [x] } }",
             "services.api: service requires run or run_script",
         ),
-        // Names that cannot be Windows file names fail on every OS.
+        // Two names of one kind stored under the same file name fail on every
+        // OS: Windows-invalid characters become `_` and case does not count.
         (
-            "project: nul.d",
-            "project: `nul.d` is a reserved device name on Windows",
+            "project: demo\nservices: { web: { run: a }, Web: { run: a } }",
+            "services.Web: `web` and `Web` would share the file name `Web` on disk (Windows ignores case and does not allow some characters in file names, and configs are shared across operating systems); rename one of them",
         ),
         (
-            "project: demo.",
-            "project: `demo.` ends with `.`, which Windows drops from file names, and configs are shared across operating systems; did you mean `demo`?",
+            "project: demo\ntasks: { 'db:migrate': { run: a }, db_migrate: { run: a } }",
+            "tasks.db_migrate: `db:migrate` and `db_migrate` would share the file name `db_migrate`",
         ),
         (
-            "project: demo\nservices: { CON: { run: a } }",
-            "services.CON: `CON` is a reserved device name on Windows",
+            "project: demo\ntasks: { 'seed?': { run: a }, 'SEED*': { run: a } }",
+            "tasks.SEED*: `seed?` and `SEED*` would share the file name `SEED_`",
         ),
         (
-            "project: demo\nservices: { com7.log: { run: a } }",
-            "services.com7.log: `com7.log` is a reserved device name",
-        ),
-        (
-            "project: demo\nservices: { 'api ': { run: a } }",
-            "`api ` ends with a space, which Windows drops from file names, and configs are shared across operating systems; did you mean `api`?",
-        ),
-        (
-            "project: demo\nservices: { 'a|b': { run: a } }",
-            "services.a|b: `a|b` contains `|`, which Windows does not allow in file names",
-        ),
-        (
-            "project: demo\ntasks: { 'seed?': { run: a } }",
-            "tasks.seed?: `seed?` contains `?`",
-        ),
-        (
-            "project: demo\ntasks: { 'db\\seed': { run: a } }",
-            r"tasks.db\seed: `db\seed` contains `\`",
-        ),
-        (
-            "project: demo\ntasks: { \"a\\tb\": { run: a } }",
-            "contains a control character",
-        ),
-        (
-            "project: demo\ntasks: { lpt1: { run: a } }",
-            "tasks.lpt1: `lpt1` is a reserved device name on Windows and cannot name a file, and configs are shared across operating systems; pick another name",
+            "project: demo\nservices: { aux: { run: a }, AUX_: { run: a } }",
+            "services.AUX_: `aux` and `AUX_` would share the file name `AUX_`",
         ),
     ] {
         let error = parse_project(yaml, None).expect_err(yaml);

@@ -551,13 +551,25 @@ impl ProcessTable for SysProcesses {
         let _ = tokio::task::spawn_blocking(move || signal_all(devlanes_sys::Signal::KILL)).await;
     }
 
-    /// Not implemented on Windows yet: orphans are reported but left running.
+    /// Terminates the recorded process if its identity still verifies. A crashed
+    /// daemon's job objects cannot be reopened, so each recorded member arrives here
+    /// on its own (see `track_escaped`). Asking it to exit first with a console
+    /// control event, honouring `grace`, comes with graceful stop.
     #[cfg(windows)]
     async fn terminate(&self, identity: ProcessIdentity, _grace: Duration) {
-        tracing::warn!(
-            pid = identity.pid,
-            "terminating an orphaned process is not supported on Windows yet"
-        );
+        let ended = tokio::task::spawn_blocking(move || {
+            devlanes_sys::windows::proc::terminate_verified(&identity, 1)
+        })
+        .await;
+        match ended {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, pid = identity.pid, "terminating an orphan failed")
+            }
+            Err(error) => {
+                tracing::warn!(%error, pid = identity.pid, "terminating an orphan failed")
+            }
+        }
     }
 }
 
@@ -637,10 +649,63 @@ pub async fn detect_shell() -> Shell {
 }
 
 /// Finds the shell for `run:` strings once, at daemon startup: Git for Windows'
-/// `sh.exe` next to the `git` on `PATH`, else `cmd.exe`, which `config check`
-/// and launch notes warn about.
+/// `sh.exe`, else `cmd.exe`, which `config check` and launch notes warn about.
+/// It runs before the daemon answers, so the usual case starts no process: a
+/// `git.exe` on the daemon's `PATH` in a Git for Windows layout gives the
+/// install root. Only when that finds nothing does it ask `git --exec-path`,
+/// for at most [`EXEC_PATH_TIMEOUT`].
 #[cfg(windows)]
 pub async fn detect_shell() -> Shell {
+    let path = std::env::var_os("PATH");
+    let on_path = tokio::task::spawn_blocking(move || git_sh_on_path(path.as_deref()))
+        .await
+        .ok()
+        .flatten();
+    let found = match on_path {
+        Some(sh) => Some(sh),
+        None => git_sh_from_exec_path().await,
+    };
+    if let Some(sh) = found {
+        tracing::info!(shell = %sh.display(), "run strings use Git for Windows' sh");
+        return Shell::git_sh(&sh);
+    }
+    let fallback = Shell::default();
+    tracing::warn!(
+        shell = %fallback.program,
+        "Git for Windows' sh.exe was not found; run strings fall back to cmd.exe"
+    );
+    fallback
+}
+
+/// Upper bound for `git --exec-path`, well below the client's wait for a
+/// starting daemon, which also covers this detection.
+#[cfg(windows)]
+const EXEC_PATH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The first `sh.exe` of a Git for Windows install whose `git.exe` is in a
+/// directory of `path`, in `PATH` order. Checks files only; blocking.
+#[cfg(windows)]
+fn git_sh_on_path(path: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    std::env::split_paths(path?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("git.exe"))
+        .filter(|git| git.is_file())
+        .filter_map(|git| devlanes_core::shell::git_root_from_exe(&git))
+        .find_map(|root| first_file(&root))
+}
+
+/// The first `sh.exe` candidate under a Git for Windows `root` that exists.
+#[cfg(windows)]
+fn first_file(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    devlanes_core::shell::git_sh_candidates(root)
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+/// `sh.exe` from the install root `git --exec-path` reports, for a `git` the
+/// `PATH` scan did not recognise (a shim, a custom layout).
+#[cfg(windows)]
+async fn git_sh_from_exec_path() -> Option<std::path::PathBuf> {
     use std::process::Stdio;
     /// `CREATE_NO_WINDOW`: the daemon has no console, so a console program
     /// would otherwise open a window.
@@ -652,42 +717,34 @@ pub async fn detect_shell() -> Shell {
         .creation_flags(CREATE_NO_WINDOW)
         .kill_on_drop(true)
         .output();
-    let exec_path = match tokio::time::timeout(Duration::from_secs(10), output).await {
-        Ok(Ok(output)) if output.status.success() => {
-            // Git prints `C:/Program Files/Git/mingw64/libexec/git-core`.
-            Some(
-                String::from_utf8_lossy(&output.stdout)
-                    .trim()
-                    .replace('/', "\\"),
-            )
-        }
+    let exec_path = match tokio::time::timeout(EXEC_PATH_TIMEOUT, output).await {
+        // Git for Windows prints `C:/Program Files/Git/mingw64/libexec/git-core`.
+        Ok(Ok(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .replace('/', "\\"),
         Ok(Ok(output)) => {
             tracing::debug!(status = %output.status, "git --exec-path failed");
-            None
+            return None;
         }
         Ok(Err(error)) => {
             tracing::debug!(%error, "cannot run git --exec-path");
-            None
+            return None;
         }
         Err(_) => {
             tracing::debug!("git --exec-path timed out");
-            None
+            return None;
         }
     };
-    if let Some(exec_path) = exec_path {
-        for candidate in devlanes_core::shell::git_sh_candidates(std::path::Path::new(&exec_path)) {
-            if tokio::fs::try_exists(&candidate).await.unwrap_or(false) {
-                tracing::info!(shell = %candidate.display(), "run strings use Git for Windows' sh");
-                return Shell::git_sh(&candidate);
-            }
-        }
-    }
-    let fallback = Shell::default();
-    tracing::warn!(
-        shell = %fallback.program,
-        "Git for Windows' sh.exe was not found; run strings fall back to cmd.exe"
-    );
-    fallback
+    let Some(root) =
+        devlanes_core::shell::git_root_from_exec_path(std::path::Path::new(&exec_path))
+    else {
+        tracing::debug!(exec_path, "git --exec-path is not a Windows path");
+        return None;
+    };
+    tokio::task::spawn_blocking(move || first_file(&root))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Reports whether the OS forwards the devlanes TLD to the embedded DNS server.
@@ -795,5 +852,43 @@ impl Integrations {
             resolver_files: None,
             shell: Shell::default(),
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// Creates an empty file and its directories.
+    fn touch(path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("directories");
+        }
+        std::fs::write(path, b"").expect("file");
+    }
+
+    #[test]
+    /// The `PATH` scan finds `sh.exe` from a `git.exe` in a Git for Windows
+    /// layout, preferring the `bin` launcher, and skips other `git.exe` files.
+    fn path_scan_finds_git_sh_from_the_layout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("Git");
+        let shim = dir.path().join("shims");
+        touch(&shim.join("git.exe"));
+        touch(&root.join("cmd").join("git.exe"));
+        touch(&root.join("usr").join("bin").join("sh.exe"));
+        let path = std::env::join_paths([shim.clone(), root.join("cmd")]).expect("PATH");
+        assert_eq!(
+            git_sh_on_path(Some(path.as_os_str())),
+            Some(root.join("usr").join("bin").join("sh.exe"))
+        );
+        touch(&root.join("bin").join("sh.exe"));
+        assert_eq!(
+            git_sh_on_path(Some(path.as_os_str())),
+            Some(root.join("bin").join("sh.exe"))
+        );
+        let only_shim = std::env::join_paths([shim]).expect("PATH");
+        assert_eq!(git_sh_on_path(Some(only_shim.as_os_str())), None);
+        assert_eq!(git_sh_on_path(None), None);
     }
 }

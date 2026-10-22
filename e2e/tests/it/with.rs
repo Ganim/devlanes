@@ -65,6 +65,7 @@ fn assert_logs(logs: &Path) -> Result<Vec<u16>> {
 /// Without a daemon: exit 0 from a command that curls the API, logs written, and the
 /// auto-spawned daemon stopped afterwards.
 #[test]
+#[cfg_attr(windows, ignore = "curls the API over HTTPS through the proxy, step 6")]
 fn with_runs_the_command_and_stops_the_daemon_it_spawned() -> Result<()> {
     let lab = Lab::new("two-services", BUDGET)?;
     let logs = lab.home().join("artifacts-ok");
@@ -132,6 +133,7 @@ fn with_never_ready_service_skips_the_command() -> Result<()> {
 /// With a running daemon: the command's exit code 3 is kept, logs are written, the lane
 /// is stopped and the daemon `with` did not spawn keeps running.
 #[test]
+#[cfg_attr(windows, ignore = "curls the API over HTTPS through the proxy, step 6")]
 fn with_keeps_the_exit_code_and_stops_the_lane() -> Result<()> {
     let lab = Lab::new("two-services", BUDGET)?;
     // Any command but `daemon status` starts the daemon.

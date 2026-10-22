@@ -42,14 +42,14 @@ In the daemon the block and offsets come from `devlanes-state`, and `ResolveInpu
 - `lane_layout`: ports, URLs, routes and `lane_env()` without contributors or secrets, for idle lanes and lane 0's `svc_namespace()`.
 - `resolve_lane`: the full `ResolvedLane` with a `Launch` per unit.
 - `fixed_block_start`: block start from `lanes.vars.port` or a matrix row.
-- `shell_warnings`: the `config check` warning when `run:` strings fall back to `cmd.exe` on Windows.
+- `shell_warnings`: the `config check` warnings when `run:` strings fall back to `cmd.exe` on Windows (one for all of them, one per multi-line text).
 - `detect_platform`: the platform for a unit without `platform:`, from contributor claims (highest confidence, then higher priority, then smaller id). resolve has no built-in file rules.
 
 ## Behaviour
 
 Environment layers, lowest first: client env, contributors, secrets, `DEVLANES_*`/`PORT`/`HOST` and CA variables, `global_env`, the unit's `env`, the profile's `env`, `--env`. Each value keeps its layer for `env --explain`. `.env` files only feed `${{ env.X }}`, which reads the client env, then secrets, then `.env`. On Windows a higher layer replaces a variable spelled differently below it (`PATH` over the client's `Path`) and keeps the lower spelling.
 
-`run:` strings run as `<shell> <args> <text>` with `ResolveInput::shell`; arguments contributors append are quoted for that shell. Under the `cmd.exe` fallback an argument with `"`, `%`, `!` or a line break fails the unit, and each such launch gets a note.
+`run:` strings run as `<shell> <args> <text>` with `ResolveInput::shell`; arguments contributors append are quoted for that shell. Under the `cmd.exe` fallback every launch of a `run:` string gets a note, and a unit fails when an appended argument has `"`, `%`, `!` or a line break, or when its `run:` or `ready.cmd` text has more than one line.
 
 A unit that fails to plan, including one whose fnox profile is locked, is recorded in `ResolvedLane::errors` and does not fail the lane. Call `check_services` for the selection before spawning. `Launch`'s `Debug` output lists env keys and layers only.
 

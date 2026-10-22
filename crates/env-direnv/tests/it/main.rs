@@ -1,8 +1,8 @@
-//! `DirenvContributor` against fake `direnv` scripts, plus an opt-in real-binary test.
+//! `DirenvContributor` against fake `direnv` programs, plus an opt-in real-binary test.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -10,15 +10,11 @@ use devlanes_core::contrib::{
     ContribCx, ContribMemo, Contributor, DraftCommand, LaunchDraft, UnitKind,
 };
 use devlanes_env_direnv::DirenvContributor;
+use devlanes_testing::fake_tool::Behaviour;
 
-/// Writes an executable shell script and returns its path.
-#[cfg(unix)]
-fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    path
+/// Installs a `fake-tool` copy called `name` in `dir` and returns its path.
+fn fake(dir: &Path, name: &str, behaviour: Behaviour) -> PathBuf {
+    devlanes_testing::fake_tool::install(dir, name, &behaviour).expect("install fake")
 }
 
 /// Applies `contributor` once for a task in `lane` with `client` as the client env.
@@ -63,19 +59,24 @@ async fn apply(
     Ok(draft)
 }
 
-#[cfg(unix)]
 #[tokio::test]
 /// Sets and unsets reach the draft; the client env is what direnv diffs against.
 async fn applies_export_diff() {
     let lane = tempfile::tempdir().expect("tempdir");
     std::fs::write(lane.path().join(".envrc"), "export A=1\n").expect("write");
     let bin = tempfile::tempdir().expect("tempdir");
-    let fake = script(
+    let fake = fake(
         bin.path(),
         "direnv",
-        r#"[ "$1 $2" = "export json" ] || exit 2
-echo 'direnv: loading .envrc' >&2
-printf '{"A":"1","FROM_CLIENT":"%s","GONE":null,"DIRENV_DIR":"-x"}' "$CLIENT_MARK""#,
+        Behaviour::new()
+            .args(["export", "json"])
+            .stderr("direnv: loading .envrc\n")
+            .stdout_json(serde_json::json!({
+                "A": "1",
+                "FROM_CLIENT": "{env:CLIENT_MARK}",
+                "GONE": null,
+                "DIRENV_DIR": "-x",
+            })),
     );
     let client = BTreeMap::from([
         ("CLIENT_MARK".to_owned(), "seen".to_owned()),
@@ -103,52 +104,58 @@ async fn blocked_missing_and_failures() {
     let draft = apply(&missing, lane.path(), &client).await.expect("apply");
     assert!(draft.env.is_empty() && draft.notes.is_empty());
 
-    // The fake direnv is a `#!/bin/sh` script, which Windows cannot run.
-    #[cfg(unix)]
-    {
-        std::fs::write(lane.path().join(".envrc"), "export A=1\n").expect("write");
-        let bin = tempfile::tempdir().expect("tempdir");
-        let blocked = script(
-            bin.path(),
-            "blocked",
-            "echo 'direnv: error /w/.envrc is blocked. Run `direnv allow` to approve its content' >&2; exit 1",
-        );
-        let draft = apply(
-            &DirenvContributor::new(blocked, Duration::from_secs(5)),
-            lane.path(),
-            &client,
-        )
-        .await
-        .expect("apply");
-        assert!(draft.notes[0].contains("direnv allow"));
-        assert!(draft.env.is_empty());
+    std::fs::write(lane.path().join(".envrc"), "export A=1\n").expect("write");
+    let bin = tempfile::tempdir().expect("tempdir");
+    let blocked = fake(
+        bin.path(),
+        "blocked",
+        Behaviour::new()
+            .stderr(
+                "direnv: error /w/.envrc is blocked. Run `direnv allow` to approve its content\n",
+            )
+            .exit(1),
+    );
+    let draft = apply(
+        &DirenvContributor::new(blocked, Duration::from_secs(5)),
+        lane.path(),
+        &client,
+    )
+    .await
+    .expect("apply");
+    assert!(draft.notes[0].contains("direnv allow"));
+    assert!(draft.env.is_empty());
 
-        let broken = script(
-            bin.path(),
-            "broken",
-            "echo 'direnv: loading .envrc' >&2; echo 'direnv: error exit status 1' >&2; exit 1",
-        );
-        let error = apply(
-            &DirenvContributor::new(broken, Duration::from_secs(5)),
-            lane.path(),
-            &client,
-        )
-        .await
-        .err()
-        .expect("fails");
-        assert!(error.to_string().contains("direnv: error exit status 1"));
+    let broken = fake(
+        bin.path(),
+        "broken",
+        Behaviour::new()
+            .stderr("direnv: loading .envrc\ndirenv: error exit status 1\n")
+            .exit(1),
+    );
+    let error = apply(
+        &DirenvContributor::new(broken, Duration::from_secs(5)),
+        lane.path(),
+        &client,
+    )
+    .await
+    .err()
+    .expect("fails");
+    assert!(error.to_string().contains("direnv: error exit status 1"));
 
-        let slow = script(bin.path(), "slow", "exec /bin/sleep 5");
-        let error = apply(
-            &DirenvContributor::new(slow, Duration::from_millis(200)),
-            lane.path(),
-            &client,
-        )
-        .await
-        .err()
-        .expect("times out");
-        assert!(error.to_string().contains("timed out"));
-    }
+    let slow = fake(
+        bin.path(),
+        "slow",
+        Behaviour::new().sleep(Duration::from_secs(5)),
+    );
+    let error = apply(
+        &DirenvContributor::new(slow, Duration::from_millis(200)),
+        lane.path(),
+        &client,
+    )
+    .await
+    .err()
+    .expect("times out");
+    assert!(error.to_string().contains("timed out"));
 }
 
 #[tokio::test]

@@ -427,7 +427,7 @@ impl Inner {
                 .opts
                 .home
                 .join("infra")
-                .join(project.name())
+                .join(devlanes_core::paths::disk_name(&project.name()))
                 .join(format!("lane{index}")),
         })
     }

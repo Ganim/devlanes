@@ -5,7 +5,6 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, c_void};
 use std::io;
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr;
@@ -18,11 +17,13 @@ use windows_sys::Win32::System::Threading::{
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, INFINITE,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject,
 };
 
 use super::job::Job;
 use super::proc::{creation_time, exited};
+use super::security::wide;
 use super::token::{owned, raw};
 
 /// Where one of the child's standard streams goes.
@@ -42,10 +43,14 @@ pub struct Spawn<'a> {
     /// The whole command line, `argv[0]` included, quoted for `CommandLineToArgvW`
     /// or for `cmd.exe`, as the caller decided.
     pub command_line: &'a OsStr,
-    /// The environment, or `None` to inherit this process's.
+    /// The environment, or `None` to inherit this process's. Names must be unique
+    /// ignoring case, as Windows treats them.
     pub environment: Option<&'a BTreeMap<String, String>>,
+    /// The working directory the child starts in.
     pub cwd: &'a Path,
+    /// Where the child's standard output goes.
     pub stdout: Stdio<'a>,
+    /// Where the child's standard error goes; may be the same handle as `stdout`.
     pub stderr: Stdio<'a>,
     /// The job the child runs in from its first instruction.
     pub job: Option<&'a Job>,
@@ -105,6 +110,8 @@ impl Child {
 /// after; a `std::process` spawn on another thread in that moment could inherit
 /// them too, which only delays end of file on a unit's pipe until that helper exits.
 pub fn spawn(spec: &Spawn<'_>) -> io::Result<Child> {
+    // Checked first, so a bad variable fails before anything is created.
+    let environment = spec.environment.map(environment_block).transpose()?;
     let null = std::fs::File::options()
         .read(true)
         .write(true)
@@ -118,8 +125,8 @@ pub fn spawn(spec: &Spawn<'_>) -> io::Result<Child> {
     let stderr = inheritable(handle_of(spec.stderr))?;
     let inherited = [raw(&stdin), raw(&stdout), raw(&stderr)];
 
-    let attributes = AttributeList::new(if spec.job.is_some() { 2 } else { 1 })?;
-    // SAFETY: the list is initialised; `inherited` outlives the list's use below.
+    let mut attributes = AttributeList::new(if spec.job.is_some() { 2 } else { 1 })?;
+    // `inherited` outlives the list's use below.
     attributes.update(
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
         inherited.as_ptr().cast(),
@@ -141,13 +148,12 @@ pub fn spawn(spec: &Spawn<'_>) -> io::Result<Child> {
     info.StartupInfo.hStdInput = inherited[0];
     info.StartupInfo.hStdOutput = inherited[1];
     info.StartupInfo.hStdError = inherited[2];
-    info.lpAttributeList = attributes.as_ptr();
+    info.lpAttributeList = attributes.as_mut_ptr();
 
     let program = wide(spec.program.as_os_str());
     // CreateProcessW may write into the command line, so it gets its own buffer.
     let mut command_line = wide(spec.command_line);
     let cwd = wide(spec.cwd.as_os_str());
-    let environment = spec.environment.map(environment_block);
     // SAFETY: an all-zero value is valid for this plain C struct.
     let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: every pointer refers to a live, NUL-terminated buffer or structure
@@ -177,7 +183,16 @@ pub fn spawn(spec: &Spawn<'_>) -> io::Result<Child> {
     // The primary thread's handle is not needed; the process handle is kept.
     drop(owned(process.hThread));
     let handle = owned(process.hProcess)?;
-    let start_time = creation_time(&handle)?;
+    let start_time = match creation_time(&handle) {
+        Ok(start_time) => start_time,
+        Err(error) => {
+            // Without its identity the child could never be tracked or stopped
+            // safely, so it must not keep running.
+            // SAFETY: `handle` is the new process's handle, with all access.
+            unsafe { TerminateProcess(raw(&handle), 1) };
+            return Err(error);
+        }
+    };
     Ok(Child {
         handle,
         pid: process.dwProcessId,
@@ -207,10 +222,12 @@ fn inheritable(handle: HANDLE) -> io::Result<OwnedHandle> {
     owned(duplicate)
 }
 
-/// A `PROC_THREAD_ATTRIBUTE_LIST` in an owned, aligned buffer.
+/// A `PROC_THREAD_ATTRIBUTE_LIST` in an owned, aligned buffer. Every access that
+/// can write to it goes through `&mut self`.
 struct AttributeList(Vec<usize>);
 
 impl AttributeList {
+    /// An initialised list with room for `count` attributes.
     fn new(count: u32) -> io::Result<Self> {
         let mut size = 0;
         // SAFETY: a size query with a null list; it fails and reports the size.
@@ -226,16 +243,17 @@ impl AttributeList {
         Ok(Self(buffer))
     }
 
-    fn as_ptr(&self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
-        self.0.as_ptr().cast_mut().cast()
+    /// The list for Win32 calls, which may write to it.
+    fn as_mut_ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+        self.0.as_mut_ptr().cast()
     }
 
     /// Sets one attribute. `value` must stay valid until the process is created.
-    fn update(&self, attribute: usize, value: *const c_void, size: usize) -> io::Result<()> {
+    fn update(&mut self, attribute: usize, value: *const c_void, size: usize) -> io::Result<()> {
         // SAFETY: the list was initialised in `new`; the caller keeps `value` alive.
         let ok = unsafe {
             UpdateProcThreadAttribute(
-                self.as_ptr(),
+                self.as_mut_ptr(),
                 0,
                 attribute,
                 value,
@@ -254,17 +272,39 @@ impl AttributeList {
 impl Drop for AttributeList {
     fn drop(&mut self) {
         // SAFETY: the list was initialised in `new` and is not used after this.
-        unsafe { DeleteProcThreadAttributeList(self.as_ptr()) };
+        unsafe { DeleteProcThreadAttributeList(self.as_mut_ptr()) };
     }
 }
 
 /// A Unicode environment block: `KEY=VALUE\0` entries sorted by key without
 /// regard to case, as Windows expects, then an extra `\0`.
-fn environment_block(environment: &BTreeMap<String, String>) -> Vec<u16> {
+///
+/// Refuses what would corrupt the block or make a variable ambiguous: a NUL
+/// anywhere (a value `x\0EVIL=1` would add a variable), an empty name or one with
+/// `=` after its first character, and two names that differ only in case.
+fn environment_block(environment: &BTreeMap<String, String>) -> io::Result<Vec<u16>> {
+    let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidInput, message);
     let mut entries: Vec<(&String, &String)> = environment.iter().collect();
     entries.sort_by_key(|(key, _)| key.to_uppercase());
+    for pair in entries.windows(2) {
+        if pair[0].0.eq_ignore_ascii_case(pair[1].0) {
+            return Err(invalid(format!(
+                "environment variables {} and {} are one variable on Windows",
+                pair[0].0, pair[1].0
+            )));
+        }
+    }
     let mut block = Vec::new();
     for (key, value) in entries {
+        if key.is_empty()
+            || key.chars().skip(1).any(|c| c == '=')
+            || key.contains('\0')
+            || value.contains('\0')
+        {
+            return Err(invalid(format!(
+                "environment variable {key:?} cannot be passed"
+            )));
+        }
         block.extend(key.encode_utf16());
         block.push(u16::from(b'='));
         block.extend(value.encode_utf16());
@@ -274,12 +314,7 @@ fn environment_block(environment: &BTreeMap<String, String>) -> Vec<u16> {
         block.push(0);
     }
     block.push(0);
-    block
-}
-
-/// A NUL-terminated UTF-16 copy.
-fn wide(text: &OsStr) -> Vec<u16> {
-    text.encode_wide().chain(std::iter::once(0)).collect()
+    Ok(block)
 }
 
 #[cfg(test)]
@@ -318,12 +353,35 @@ mod tests {
 
     /// Keys are ordered without case, which Windows requires of the block.
     #[test]
-    fn environment_blocks_sort_without_case() {
+    fn environment_blocks_sort_without_case() -> io::Result<()> {
         let block = environment_block(&BTreeMap::from([
             ("b".to_owned(), "2".to_owned()),
             ("A".to_owned(), "1".to_owned()),
-        ]));
+        ]))?;
         assert_eq!(String::from_utf16_lossy(&block), "A=1\0b=2\0\0");
-        assert_eq!(environment_block(&BTreeMap::new()), [0, 0]);
+        assert_eq!(environment_block(&BTreeMap::new())?, [0, 0]);
+        // Drive-current-directory variables legitimately start with `=`.
+        environment_block(&BTreeMap::from([("=C:".to_owned(), r"C:\x".to_owned())]))?;
+        Ok(())
+    }
+
+    /// Anything that would corrupt the block or duplicate a variable is refused.
+    #[test]
+    fn environment_blocks_refuse_ambiguity() {
+        for (key, value) in [
+            ("", "x"),
+            ("A=B", "x"),
+            ("A\0B", "x"),
+            ("A", "x\0EVIL=1"),
+            ("ÿ=", "x"),
+        ] {
+            let refused = environment_block(&BTreeMap::from([(key.to_owned(), value.to_owned())]));
+            assert!(refused.is_err(), "{key:?}={value:?}");
+        }
+        let duplicated = environment_block(&BTreeMap::from([
+            ("Path".to_owned(), "a".to_owned()),
+            ("PATH".to_owned(), "b".to_owned()),
+        ]));
+        assert!(duplicated.is_err());
     }
 }

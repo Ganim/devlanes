@@ -1080,34 +1080,33 @@ async fn open_url(url: &str) -> Result<(), RpcError> {
 }
 
 /// Reads the daemon's own log file directly; works even when the daemon is wedged.
-#[cfg(unix)]
+/// A follow runs until Ctrl-C ends the process or stdout closes.
 async fn daemon_logs(follow: bool, tail: usize) -> Result<u8, RpcError> {
     let paths = paths()?;
     let path = paths.logs.join("daemon.log");
-    let mut args = vec!["-n".to_owned(), tail.to_string()];
-    if follow {
-        args.push("-F".into());
+    let printed = tokio::task::spawn_blocking(move || {
+        let mut stdout = std::io::stdout().lock();
+        crate::daemon_log::print(
+            &path,
+            tail,
+            follow,
+            crate::daemon_log::POLL,
+            &mut stdout,
+            || true,
+        )
+    })
+    .await
+    .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
+    match printed {
+        Ok(()) => Ok(0),
+        // `daemon logs -f | head` closing the pipe is a normal way to stop.
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(0),
+        Err(error) => Err(RpcError::new(
+            "io",
+            json!({"message": error.to_string()}),
+            1,
+        )),
     }
-    let status = tokio::process::Command::new("tail")
-        .args(&args)
-        .arg(&path)
-        .status()
-        .await
-        .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
-    Ok(status
-        .code()
-        .and_then(|code| u8::try_from(code).ok())
-        .unwrap_or(1))
-}
-
-/// `daemon logs` runs `tail`, which Windows lacks; refused until it reads the file itself.
-#[cfg(windows)]
-async fn daemon_logs(_follow: bool, _tail: usize) -> Result<u8, RpcError> {
-    Err(RpcError::new(
-        "not_supported_yet",
-        json!({"feature": "daemon logs on Windows"}),
-        1,
-    ))
 }
 
 /// Opens the TUI; it is just another client of the same daemon.

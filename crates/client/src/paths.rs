@@ -48,11 +48,7 @@ impl Paths {
         if home.as_os_str().is_empty() {
             return Err(Error::MissingHome);
         }
-        let home = if home.is_absolute() {
-            home.to_owned()
-        } else {
-            env::current_dir()?.join(home)
-        };
+        let home = absolute_home(home)?;
         let run = home.join("run");
         let socket = socket_path(&home, &run, _runtime, temporary);
         Ok(Self {
@@ -103,6 +99,25 @@ fn socket_path(home: &Path, run: &Path, _runtime: Option<&Path>, temporary: &Pat
         }
     }
     socket
+}
+
+/// A relative home resolved against the current directory.
+#[cfg(unix)]
+fn absolute_home(home: &Path) -> Result<PathBuf> {
+    Ok(if home.is_absolute() {
+        home.to_owned()
+    } else {
+        env::current_dir()?.join(home)
+    })
+}
+
+/// A relative home resolved the way Windows opens paths: `C:foo` against drive
+/// C's current directory and `\foo` against the current drive. Joining those onto
+/// the current directory would leave them relative, and the daemon, started in
+/// the home, would then resolve them to another place and another pipe.
+#[cfg(windows)]
+fn absolute_home(home: &Path) -> Result<PathBuf> {
+    Ok(std::path::absolute(home)?)
 }
 
 /// A named pipe per home, so isolated homes (tests, `DEVLANES_HOME`) never share a

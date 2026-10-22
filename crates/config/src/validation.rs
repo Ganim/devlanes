@@ -4,14 +4,15 @@ use crate::{
 };
 use indexmap::IndexMap;
 use serde::Serialize;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A problem that does not stop loading, such as an unused template or an ignored setting.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigWarning {
     /// Dotted field path, such as `templates.api` or `tls.trust.0`.
     pub path: String,
-    /// Human-readable explanation, without the path.
+    /// Human-readable explanation, without the path unless the sentence needs
+    /// it (the daemon's `shell_fallback` warnings name it and how many more).
     pub message: String,
 }
 
@@ -120,47 +121,29 @@ fn literal_port(value: &crate::Scalar) -> bool {
     }
 }
 
-/// Device names Windows reserves in every directory, with or without an extension.
-const WINDOWS_RESERVED_NAMES: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-];
-
-/// Characters Windows refuses in file names (besides control characters).
-const WINDOWS_INVALID_CHARACTERS: &[char] = &['<', '>', ':', '"', '|', '?', '*', '\\'];
-
-/// Rejects project, service and task names that cannot be file names on Windows,
-/// where logs and state files are named after them. Checked on every OS because
-/// one config is shared by machines running different ones.
-fn windows_file_name(path: &str, name: &str) -> Result<(), ConfigError> {
-    let mut suggestion = "pick another name".to_owned();
-    let problem = if let Some(found) = name
-        .chars()
-        .find(|c| WINDOWS_INVALID_CHARACTERS.contains(c))
-    {
-        format!("`{name}` contains `{found}`, which Windows does not allow in file names")
-    } else if name.chars().any(char::is_control) {
-        format!("`{name}` contains a control character, which Windows does not allow in file names")
-    } else if let Some(last @ ('.' | ' ')) = name.chars().last() {
-        let trimmed = name.trim_end_matches(['.', ' ']);
-        if !trimmed.is_empty() {
-            suggestion = format!("did you mean `{trimmed}`?");
+/// Rejects two names of one kind (`services`, `tasks`) that devlanes would
+/// store under the same file or directory name. Logs and state are named with
+/// [`devlanes_core::paths::disk_name`], which replaces what Windows refuses in
+/// file names (`db:migrate` becomes `db_migrate`), and Windows ignores case
+/// (`Web` and `web`). Checked on every OS because one config is shared by
+/// machines running different ones.
+fn distinct_on_disk<'a>(
+    kind: &str,
+    names: impl IntoIterator<Item = &'a String>,
+) -> Result<(), ConfigError> {
+    let mut seen: HashMap<String, &str> = HashMap::new();
+    for name in names {
+        let stored = devlanes_core::paths::disk_name(name);
+        if let Some(other) = seen.insert(stored.to_ascii_lowercase(), name) {
+            return Err(fail(
+                &format!("{kind}.{name}"),
+                format!(
+                    "`{other}` and `{name}` would share the file name `{stored}` on disk (Windows ignores case and does not allow some characters in file names, and configs are shared across operating systems); rename one of them"
+                ),
+            ));
         }
-        let shown = if last == '.' { "`.`" } else { "a space" };
-        format!("`{name}` ends with {shown}, which Windows drops from file names")
-    } else if name.split('.').next().is_some_and(|stem| {
-        WINDOWS_RESERVED_NAMES
-            .iter()
-            .any(|reserved| stem.eq_ignore_ascii_case(reserved))
-    }) {
-        format!("`{name}` is a reserved device name on Windows and cannot name a file")
-    } else {
-        return Ok(());
-    };
-    Err(fail(
-        path,
-        format!("{problem}, and configs are shared across operating systems; {suggestion}"),
-    ))
+    }
+    Ok(())
 }
 
 /// Check executable declarations uniformly for services, tasks, and infra commands.
@@ -285,7 +268,6 @@ fn validate_inner<E: Extensions>(
     {
         return Err(fail("project", "expected [a-z0-9][a-z0-9._-]* (no @ or :)"));
     }
-    windows_file_name("project", name)?;
     if config.lanes.matrix.is_some() && !config.lanes.vars.is_empty() {
         return Err(fail(
             "lanes.matrix",
@@ -311,7 +293,7 @@ fn validate_inner<E: Extensions>(
                 ));
             }
         }
-        if let Some(Templated::Literal(port)) = template.env.get("PORT")
+        if let Some(Templated::Literal(port)) = crate::env_value(&template.env, "PORT")
             && !literal_port(port)
         {
             return Err(fail(
@@ -321,7 +303,6 @@ fn validate_inner<E: Extensions>(
         }
     }
     for name in config.services.keys() {
-        windows_file_name(&format!("services.{name}"), name)?;
         if !aliases.insert(name.replace('-', "_")) {
             return Err(fail(
                 &format!("services.{name}"),
@@ -329,6 +310,8 @@ fn validate_inner<E: Extensions>(
             ));
         }
     }
+    distinct_on_disk("services", config.services.keys())?;
+    distinct_on_disk("tasks", config.tasks.keys())?;
     for (name, service) in &config.services {
         let path = format!("services.{name}");
         if service.run.is_none() && service.run_script.is_none() {
@@ -350,7 +333,7 @@ fn validate_inner<E: Extensions>(
                 ),
             ));
         }
-        if let Some(Templated::Literal(port)) = service.env.get("PORT")
+        if let Some(Templated::Literal(port)) = crate::env_value(&service.env, "PORT")
             && !literal_port(port)
         {
             return Err(fail(
@@ -390,7 +373,6 @@ fn validate_inner<E: Extensions>(
     let mut task_graph = IndexMap::new();
     for (name, task) in &config.tasks {
         let path = format!("tasks.{name}");
-        windows_file_name(&path, name)?;
         command(&path, &task.run, &task.run_script, task.steps.is_some())?;
         if task.when.is_some()
             && matches!(
@@ -599,7 +581,7 @@ fn validate_port_capacity<E: Extensions>(
     };
     let mut ports = BTreeSet::new();
     for (name, service) in &config.services {
-        if !service.env.contains_key("PORT") {
+        if crate::env_value(&service.env, "PORT").is_none() {
             ports.insert((name.clone(), "default".to_owned()));
         }
         if let Some(preset) = &service.preset

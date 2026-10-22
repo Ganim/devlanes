@@ -92,14 +92,28 @@ pub struct TokenFacts {
     pub restricted: bool,
 }
 
+/// The medium integrity level, what a normal unelevated process runs at.
+pub const MEDIUM_INTEGRITY: u32 = 0x2000;
+
 impl TokenFacts {
     /// Whether a peer with these facts is trusted as much as `own`: the same user,
-    /// not sandboxed, and at least the same integrity level.
+    /// not sandboxed, and at least the same integrity level. The daemon's rule for
+    /// its clients.
     pub fn as_trusted_as(&self, own: &Self) -> bool {
         self.user == own.user
             && !self.app_container
             && !self.restricted
             && self.integrity >= own.integrity
+    }
+
+    /// Whether a daemon with these facts may serve a client with `own`: the same
+    /// user, not sandboxed, at least medium integrity. An elevated client may use
+    /// an unelevated daemon, which only takes away rights it did not need.
+    pub fn may_serve(&self, own: &Self) -> bool {
+        self.user == own.user
+            && !self.app_container
+            && !self.restricted
+            && self.integrity >= MEDIUM_INTEGRITY
     }
 }
 
@@ -124,13 +138,14 @@ pub(crate) fn token_facts(token: &OwnedHandle) -> io::Result<TokenFacts> {
         let label = &*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>();
         Sid::copy_from(label.Label.Sid)
     }?;
-    // The level is the label SID's last sub-authority, as in `S-1-16-8192`.
+    // The level is the label SID's last sub-authority, as in `S-1-16-8192`. A
+    // level that cannot be read is an error: reading it as 0 for this process
+    // would make every peer look trusted.
+    let label = label.to_sddl()?;
     let integrity = label
-        .to_sddl()?
-        .rsplit('-')
-        .next()
+        .strip_prefix("S-1-16-")
         .and_then(|rid| rid.parse().ok())
-        .unwrap_or(0);
+        .ok_or_else(|| io::Error::other(format!("unexpected integrity label {label}")))?;
     let container = token_information(token, TokenIsAppContainer)?;
     // SAFETY: the token is open with query rights.
     let restricted = unsafe { IsTokenRestricted(raw(token)) } != 0;

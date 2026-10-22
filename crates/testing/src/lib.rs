@@ -13,6 +13,8 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Output};
 
+pub mod fake_tool;
+
 /// Failures creating isolated test resources or invoking Git.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -22,6 +24,12 @@ pub enum Error {
     /// Git rejected a command; stderr is retained for test diagnostics.
     #[error("git failed: {0}")]
     Git(String),
+    /// A fake tool's behaviour could not be written.
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    /// The `fake-tool` binary is missing and could not be built.
+    #[error("fake-tool: {0}")]
+    FakeTool(String),
 }
 
 /// A short, private home removed on drop. Stop owned processes before dropping it.

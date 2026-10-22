@@ -440,11 +440,23 @@ fn write_private(path: &Path, bytes: &[u8], replace: bool) -> Result<(), Error> 
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
-    if replace {
-        file.persist(path).map_err(|error| error.error)?;
-    } else {
-        file.persist_noclobber(path).map_err(|error| error.error)?;
-    }
+    // On Windows a scanner reading the fresh temp file, or a tool reading the
+    // old key, briefly blocks the rename; a failed persist hands the temp back.
+    let mut temp = Some(file.into_temp_path());
+    devlanes_sys::retrying(|| {
+        let current = temp
+            .take()
+            .ok_or_else(|| io::Error::other("temporary file already persisted"))?;
+        let persisted = if replace {
+            current.persist(path)
+        } else {
+            current.persist_noclobber(path)
+        };
+        persisted.map_err(|error| {
+            temp = Some(error.path);
+            error.error
+        })
+    })?;
     Ok(())
 }
 

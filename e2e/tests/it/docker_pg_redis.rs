@@ -88,7 +88,8 @@ fn start(lab: &Lab, cwd: &Path) -> Result<()> {
 /// Two lanes each get their own Postgres and data; `lane clean 1` removes lane 1's
 /// containers and volume and leaves lane 0's data and the shared Redis running.
 #[test]
-#[ignore = "needs docker"]
+#[cfg_attr(not(windows), ignore = "needs docker")]
+#[cfg_attr(windows, ignore = "needs docker and Docker support on Windows, step 7")]
 fn docker_lanes_get_their_own_postgres_and_clean_drops_only_theirs() -> Result<()> {
     let lab = Lab::docker_projects(
         "compose-pg-redis",

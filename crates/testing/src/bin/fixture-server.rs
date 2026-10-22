@@ -25,6 +25,12 @@ struct Args {
     #[arg(long)]
     setsid_grandchild: bool,
     #[arg(long)]
+    detached_grandchild: bool,
+    #[arg(long)]
+    breakaway_grandchild: bool,
+    #[arg(long)]
+    print_console_width: bool,
+    #[arg(long)]
     log_line: Vec<String>,
     #[arg(long, value_parser = humantime::parse_duration)]
     exit_after: Option<Duration>,
@@ -51,6 +57,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for line in &args.log_line {
         println!("{line}");
     }
+    if args.print_console_width {
+        match platform::console_width() {
+            Some(width) => println!("CONSOLE_WIDTH {width}"),
+            None => println!("CONSOLE_WIDTH none"),
+        }
+    }
     if args.print_env {
         let env: BTreeMap<_, _> = std::env::vars_os()
             .map(|(key, value)| {
@@ -71,7 +83,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut child = if args.descendant.as_deref() == Some("child") {
         Some(spawn_descendant(&args, "grandchild")?)
-    } else if args.descendant.is_none() && (args.spawn_grandchild || args.setsid_grandchild) {
+    } else if args.descendant.is_none()
+        && (args.spawn_grandchild
+            || args.setsid_grandchild
+            || args.detached_grandchild
+            || args.breakaway_grandchild)
+    {
         Some(spawn_descendant(&args, "child")?)
     } else {
         None
@@ -110,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         result = server => result?,
         () = deadline => {},
         () = shutdown => {},
-        result = tokio::signal::ctrl_c() => result?,
+        result = platform::interrupt() => result?,
     }
     // Descendants intentionally survive parent termination for supervisor cleanup tests.
     // A supplied exit deadline is inherited so failed tests can bound their lifetime.
@@ -127,10 +144,32 @@ mod platform {
 
     use super::Args;
 
-    /// Every flag works on Unix.
-    pub fn check(_args: &Args) -> Result<(), String> {
+    /// Refuses the Windows-only flags, before anything is spawned.
+    pub fn check(args: &Args) -> Result<(), String> {
+        for (set, flag) in [
+            (args.detached_grandchild, "--detached-grandchild"),
+            (args.breakaway_grandchild, "--breakaway-grandchild"),
+            (args.print_console_width, "--print-console-width"),
+        ] {
+            if set {
+                return Err(format!("{flag} needs a Windows console or job"));
+            }
+        }
         Ok(())
     }
+
+    /// SIGINT ends the server even with `--ignore-sigterm`.
+    pub async fn interrupt() -> std::io::Result<()> {
+        tokio::signal::ctrl_c().await
+    }
+
+    /// Unreachable: [`check`] rejects `--print-console-width` first.
+    pub fn console_width() -> Option<u16> {
+        None
+    }
+
+    /// Nothing to add: `--setsid-grandchild` acts in the grandchild itself.
+    pub fn configure_grandchild(_command: &mut tokio::process::Command, _args: &Args) {}
 
     /// SIGTERM deliveries, subscribed before anything else runs so an early stop
     /// isn't lost.
@@ -164,10 +203,18 @@ mod platform {
     }
 }
 
-/// Windows stand-ins until the fixture gets console-event and job flags.
+/// Windows console control events and process creation flags.
 #[cfg(windows)]
 mod platform {
+    use tokio::signal::windows::{CtrlBreak, CtrlC, ctrl_break, ctrl_c};
+
     use super::Args;
+
+    /// `DETACHED_PROCESS`: the grandchild gets no console at all.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    /// `CREATE_BREAKAWAY_FROM_JOB`: the grandchild leaves the unit's job, which
+    /// fails with access denied unless the job allows breakaway.
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
     /// Refuses flags that need Unix sessions, before anything is spawned.
     pub fn check(args: &Args) -> Result<(), String> {
@@ -177,19 +224,59 @@ mod platform {
         Ok(())
     }
 
-    /// Never fires: Windows has no SIGTERM, so `--ignore-sigterm` has nothing to
-    /// ignore and Ctrl-C remains the way to stop the server.
-    pub struct Terminate;
+    /// Ctrl-Break and Ctrl-C, the console events a graceful stop sends; they are
+    /// what `--ignore-sigterm` ignores here. While these listeners live, tokio's
+    /// handler reports the events as handled, so the default handler never ends
+    /// the process. Ctrl-C only arrives when the process does not inherit the
+    /// "ignore Ctrl-C" flag (`CREATE_NEW_PROCESS_GROUP` sets it).
+    pub struct Terminate {
+        ctrl_c: CtrlC,
+        ctrl_break: CtrlBreak,
+    }
 
     impl Terminate {
-        /// Nothing to subscribe to.
+        /// Subscribes to both events before anything else runs.
         pub fn new() -> std::io::Result<Self> {
-            Ok(Self)
+            Ok(Self {
+                ctrl_c: ctrl_c()?,
+                ctrl_break: ctrl_break()?,
+            })
         }
 
-        /// Waits forever.
+        /// Waits for the next Ctrl-C or Ctrl-Break.
         pub async fn recv(&mut self) {
-            std::future::pending::<()>().await;
+            tokio::select! {
+                _ = self.ctrl_c.recv() => {}
+                _ = self.ctrl_break.recv() => {}
+            }
+        }
+    }
+
+    /// Never fires: [`Terminate`] already owns Ctrl-C, so `--ignore-sigterm`
+    /// covers it too.
+    pub async fn interrupt() -> std::io::Result<()> {
+        std::future::pending().await
+    }
+
+    /// Columns of the attached console's window, read through `CONOUT$` so a piped
+    /// stdout still reports the console (a ConPTY or a hidden one); `None` without
+    /// a console, as under `DETACHED_PROCESS`.
+    pub fn console_width() -> Option<u16> {
+        crossterm::terminal::size().ok().map(|(columns, _)| columns)
+    }
+
+    /// Applies `--detached-grandchild` and `--breakaway-grandchild` to the spawn of
+    /// the grandchild.
+    pub fn configure_grandchild(command: &mut tokio::process::Command, args: &Args) {
+        let mut flags = 0;
+        if args.detached_grandchild {
+            flags |= DETACHED_PROCESS;
+        }
+        if args.breakaway_grandchild {
+            flags |= CREATE_BREAKAWAY_FROM_JOB;
+        }
+        if flags != 0 {
+            command.creation_flags(flags);
         }
     }
 
@@ -208,8 +295,17 @@ mod platform {
 fn spawn_descendant(args: &Args, role: &str) -> std::io::Result<tokio::process::Child> {
     let mut command = Command::new(std::env::current_exe()?);
     command.args(["--descendant", role]);
-    if args.setsid_grandchild {
-        command.arg("--setsid-grandchild");
+    for (set, flag) in [
+        (args.setsid_grandchild, "--setsid-grandchild"),
+        (args.detached_grandchild, "--detached-grandchild"),
+        (args.breakaway_grandchild, "--breakaway-grandchild"),
+    ] {
+        if set {
+            command.arg(flag);
+        }
+    }
+    if role == "grandchild" {
+        platform::configure_grandchild(&mut command, args);
     }
     if args.ignore_sigterm {
         command.arg("--ignore-sigterm");

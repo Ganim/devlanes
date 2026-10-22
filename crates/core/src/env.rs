@@ -6,9 +6,9 @@
 //! [`contains_key`] and [`remove`] instead of the map methods. On Unix they are
 //! the plain map operations.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-pub use os::other_spelling;
+pub use os::{other_spelling, upper_alias};
 
 /// Looks up `name`, matching another spelling on Windows (`Path` for `PATH`).
 pub fn get<'a, V>(map: &'a BTreeMap<String, V>, name: &str) -> Option<&'a V> {
@@ -49,6 +49,12 @@ mod os {
     ) -> Option<&'a String> {
         None
     }
+
+    /// A second spelling `name` is reachable under where lookups cannot go
+    /// through [`super::get`] (`${{ env.X }}` expressions). Unix has none.
+    pub fn upper_alias(_name: &str) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -62,6 +68,15 @@ mod os {
     ) -> Option<&'a String> {
         keys.into_iter()
             .find(|key| key.as_str() != name && key.eq_ignore_ascii_case(name))
+    }
+
+    /// A second spelling `name` is reachable under where lookups cannot go
+    /// through [`super::get`] (`${{ env.X }}` expressions): its ASCII upper
+    /// case, the spelling configs shared with Unix use (`PATH` for a client
+    /// `Path`). `None` when `name` already is upper case.
+    pub fn upper_alias(name: &str) -> Option<String> {
+        let upper = name.to_ascii_uppercase();
+        (upper != name).then_some(upper)
     }
 }
 
@@ -84,6 +99,23 @@ pub enum EnvLayer {
 pub struct Environment {
     pub values: BTreeMap<String, String>,
     pub sources: BTreeMap<String, EnvLayer>,
+    /// Names the shell running a `run:` string needs (Git for Windows'
+    /// `MSYS_NO_PATHCONV`). They belong to the launch and show in
+    /// `env --explain`, but not in what [`Environment::exportable`] hands to
+    /// the user's own shell, where they would change how it behaves.
+    pub shell_env: BTreeSet<String>,
+}
+
+impl Environment {
+    /// The values without [`Environment::shell_env`], for `devlanes env` and
+    /// its export: what a user's shell or program may take over.
+    pub fn exportable(&self) -> BTreeMap<String, String> {
+        let mut values = self.values.clone();
+        for name in &self.shell_env {
+            remove(&mut values, name);
+        }
+        values
+    }
 }
 
 /// Assembles layers by precedence regardless of caller order. Within a layer,
@@ -131,6 +163,24 @@ mod tests {
         assert_eq!(env.sources["PORT"], EnvLayer::Override);
     }
 
+    #[test]
+    /// Shell variables stay in the values but not in the exportable map.
+    fn exportable_leaves_out_shell_variables() {
+        let mut env = assemble([(
+            EnvLayer::Devlanes,
+            BTreeMap::from([
+                ("DEVLANES".into(), "1".into()),
+                ("MSYS_NO_PATHCONV".into(), "1".into()),
+            ]),
+        )]);
+        env.shell_env.insert("MSYS_NO_PATHCONV".into());
+        assert_eq!(env.values.len(), 2);
+        assert_eq!(
+            env.exportable(),
+            BTreeMap::from([("DEVLANES".to_owned(), "1".to_owned())])
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     /// Unix names are case-sensitive: `Path` and `PATH` stay two variables.
@@ -148,6 +198,7 @@ mod tests {
         assert_eq!(env.values.len(), 2);
         assert_eq!(get(&env.values, "PATH").map(String::as_str), Some("mise"));
         assert_eq!(get(&env.values, "path"), None);
+        assert_eq!(upper_alias("Path"), None);
     }
 
     #[cfg(windows)]
@@ -192,5 +243,19 @@ mod tests {
         assert_eq!(map.len(), 1);
         insert(&mut map, "Force_Color".into(), "0".into());
         assert_eq!(map["FORCE_COLOR"], "0");
+        assert_eq!(upper_alias("Path").as_deref(), Some("PATH"));
+        assert_eq!(upper_alias("PATH"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// A shell variable leaves the export under any spelling.
+    fn windows_exportable_ignores_case() {
+        let mut env = assemble([(
+            EnvLayer::Client,
+            BTreeMap::from([("Msys_No_PathConv".into(), "1".into())]),
+        )]);
+        env.shell_env.insert("MSYS_NO_PATHCONV".into());
+        assert!(env.exportable().is_empty());
     }
 }

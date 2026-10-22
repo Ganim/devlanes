@@ -5,6 +5,15 @@ use serde::{Deserialize, Serialize};
 
 pub type Env = IndexMap<String, Templated<Scalar>>;
 
+/// The value of variable `name` in a config `env` map. Windows treats variable
+/// names without case, so there a `Port` key answers for `PORT`; elsewhere the
+/// lookup is exact.
+pub fn env_value<'a>(env: &'a Env, name: &str) -> Option<&'a Templated<Scalar>> {
+    env.get(name).or_else(|| {
+        devlanes_core::env::other_spelling(env.keys(), name).and_then(|key| env.get(key))
+    })
+}
+
 /// Fully merged project configuration. Map order is declaration order.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, bound = "E: Extensions")]

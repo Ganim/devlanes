@@ -1,13 +1,6 @@
 //! Ad-hoc units, config errors, daemon protocol skew and agent output wording.
 
 use std::{
-    fs,
-    io::{Read, Write},
-    os::unix::{
-        fs::DirBuilderExt,
-        net::{UnixListener, UnixStream},
-    },
-    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -206,7 +199,7 @@ fn doctor_without_a_daemon_checks_locally() -> Result<()> {
 #[test]
 fn protocol_mismatch_exits_4() -> Result<()> {
     let lab = Lab::new("two-services", BUDGET)?;
-    let _fake = FakeDaemon::serve(&lab.home().join("run"), 999, 3)?;
+    let _fake = FakeDaemon::serve(&lab, 999, 3)?;
     for args in [&["status"][..], &["start"][..]] {
         let mut command = lab.command(lab.repo(), args)?;
         command.env("DEVLANES_OUTPUT", "plain");
@@ -237,36 +230,48 @@ fn protocol_mismatch_exits_4() -> Result<()> {
     Ok(())
 }
 
-/// A Unix socket at the daemon's path that answers every hello with a fixed
-/// protocol and closes. Dropping it stops the thread and removes the socket.
+/// The daemon's endpoint (a Unix socket or a named pipe) served by a thread that
+/// answers every hello with a fixed protocol and closes. Dropping it stops the
+/// thread and removes the endpoint.
 struct FakeDaemon {
-    socket: PathBuf,
+    #[cfg(unix)]
+    socket: std::path::PathBuf,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
+/// The hello frame (kind byte 0, then JSON) a daemon of `protocol` sends.
+fn hello_frame(protocol: u32, managed_processes: usize) -> Result<Vec<u8>> {
+    let hello = serde_json::json!({
+        "type": "hello",
+        "body": {
+            "protocol": protocol,
+            "version": "0.0.0-fake",
+            "build_id": "fake",
+            "features": [],
+            "managed_processes": managed_processes,
+        },
+    });
+    let mut frame = vec![0u8];
+    frame.extend_from_slice(&serde_json::to_vec(&hello)?);
+    Ok(frame)
+}
+
+#[cfg(unix)]
 impl FakeDaemon {
-    /// Listens on `<run>/daemon.sock` (`run` is created private, as the client expects).
-    fn serve(run: &Path, protocol: u32, managed_processes: usize) -> Result<Self> {
-        fs::DirBuilder::new()
+    /// Listens on `<home>/run/daemon.sock` (`run` is created private, as the client
+    /// expects).
+    fn serve(lab: &Lab, protocol: u32, managed_processes: usize) -> Result<Self> {
+        use std::{os::unix::fs::DirBuilderExt, os::unix::net::UnixListener};
+        let run = lab.home().join("run");
+        std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(run)?;
+            .create(&run)?;
         let socket = run.join("daemon.sock");
         let listener = UnixListener::bind(&socket)?;
         listener.set_nonblocking(true)?;
-        let hello = serde_json::json!({
-            "type": "hello",
-            "body": {
-                "protocol": protocol,
-                "version": "0.0.0-fake",
-                "build_id": "fake",
-                "features": [],
-                "managed_processes": managed_processes,
-            },
-        });
-        let mut frame = vec![0u8];
-        frame.extend_from_slice(&serde_json::to_vec(&hello)?);
+        let frame = hello_frame(protocol, managed_processes)?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let thread = thread::spawn(move || {
@@ -288,19 +293,100 @@ impl FakeDaemon {
     }
 }
 
+#[cfg(windows)]
+impl FakeDaemon {
+    /// Serves the named pipe the client derives from the lab's home; `daemon
+    /// status` reports its name without starting a daemon.
+    fn serve(lab: &Lab, protocol: u32, managed_processes: usize) -> Result<Self> {
+        use tokio::net::windows::named_pipe::ServerOptions;
+        let status = lab.devlanes(lab.repo(), &["daemon", "status", "--json"])?;
+        let name = need(status.json()?["socket"].as_str(), "pipe name")?.to_owned();
+        let frame = hello_frame(protocol, managed_processes)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        // The first instance exists before this returns, so the client never finds
+        // the pipe missing and spawns a real daemon.
+        let first = {
+            let _context = runtime.enter();
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&name)?
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = thread::spawn(move || {
+            runtime.block_on(async move {
+                let deadline = Instant::now() + BUDGET;
+                let mut server = first;
+                while !flag.load(Ordering::Relaxed) && Instant::now() < deadline {
+                    let connected =
+                        tokio::time::timeout(Duration::from_millis(20), server.connect()).await;
+                    let Ok(connected) = connected else {
+                        continue;
+                    };
+                    // The next instance is created before this one goes away, for
+                    // the same reason as the first.
+                    let Ok(next) = ServerOptions::new().create(&name) else {
+                        break;
+                    };
+                    if connected.is_ok() {
+                        let _ = answer_pipe(&mut server, &frame).await;
+                    }
+                    server = next;
+                }
+            });
+        });
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
 impl Drop for FakeDaemon {
-    /// Stops accepting and removes the socket.
+    /// Stops accepting and removes the endpoint.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        let _ = fs::remove_file(&self.socket);
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(&self.socket);
     }
 }
 
+/// Reads the client's hello frame (u32 length, then the payload), sends `frame` and
+/// waits up to two seconds for the client to hang up, so closing the pipe cannot
+/// discard the answer before it is read.
+#[cfg(windows)]
+async fn answer_pipe(
+    pipe: &mut tokio::net::windows::named_pipe::NamedPipeServer,
+    frame: &[u8],
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let exchange = async {
+        let mut length = [0u8; 4];
+        pipe.read_exact(&mut length).await?;
+        let mut hello = vec![0u8; u32::from_be_bytes(length).min(1 << 20) as usize];
+        pipe.read_exact(&mut hello).await?;
+        let size = u32::try_from(frame.len()).map_err(std::io::Error::other)?;
+        pipe.write_all(&size.to_be_bytes()).await?;
+        pipe.write_all(frame).await?;
+        pipe.flush().await
+    };
+    tokio::time::timeout(Duration::from_secs(5), exchange)
+        .await
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+    let mut rest = [0u8; 64];
+    let _ = tokio::time::timeout(Duration::from_secs(2), pipe.read(&mut rest)).await;
+    Ok(())
+}
+
 /// Reads the client's hello frame (u32 length, then the payload) and sends `frame`.
-fn answer(mut stream: UnixStream, frame: &[u8]) -> std::io::Result<()> {
+#[cfg(unix)]
+fn answer(mut stream: std::os::unix::net::UnixStream, frame: &[u8]) -> std::io::Result<()> {
+    use std::io::{Read, Write};
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;

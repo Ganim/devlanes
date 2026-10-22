@@ -7,7 +7,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::Error;
+use crate::{Error, StopSignal};
 
 /// Complete launch input. Deliberately neither serializable nor debug-printable:
 /// the environment can contain secrets and must stay in memory.
@@ -40,7 +40,7 @@ impl Default for TerminalSize {
 /// Signal and escalation delay for an explicit stop request.
 #[derive(Debug, Clone, Copy)]
 pub struct StopPolicy {
-    pub signal: i32,
+    pub signal: StopSignal,
     pub timeout: Duration,
 }
 
@@ -48,10 +48,34 @@ impl Default for StopPolicy {
     /// Requests SIGTERM followed by SIGKILL after ten seconds.
     fn default() -> Self {
         Self {
-            signal: 15,
+            signal: StopSignal::Terminate,
             timeout: Duration::from_secs(10),
         }
     }
+}
+
+/// What happens to processes still running after a unit's leader exits on its own.
+/// An explicit stop always kills every tracked process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExitSweep {
+    /// Kill every tracked leftover; for services and ad-hoc commands.
+    #[default]
+    KillAll,
+    /// Kill leftovers that still belong to the unit, but leave descendants that
+    /// detached from it (their own session on Unix) running and report them as
+    /// left running. For setup tasks that start daemons (`pg_ctl start`,
+    /// `redis-server --daemonize yes`).
+    KeepDaemonized,
+}
+
+/// How pipe-mode units (`pty: false`) deliver stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StderrMode {
+    /// Separate pipes; chunks are tagged `Stdout` or `Stderr`.
+    #[default]
+    Separate,
+    /// One shared pipe preserving write order; every chunk is tagged `Stdout`.
+    Merged,
 }
 
 /// OS identity used to reject PID reuse during reconciliation and signalling.
@@ -59,6 +83,12 @@ impl Default for StopPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ProcessIdentity {
     pub pid: u32,
+    /// The unit's group token; 0 means unknown. On Unix it is the session ID,
+    /// shared by the leader and every member that stayed in its session. Windows
+    /// has no group a process can be found or stopped by after a daemon crash, so
+    /// it is the process's own PID: every job member then differs from the
+    /// leader and is recorded on its own for orphan cleanup, which compares this
+    /// field with the leader's.
     pub sid: u32,
     pub start_time: u64,
 }

@@ -78,7 +78,7 @@ pub fn client_is_current_user(server: &NamedPipeServer) -> io::Result<bool> {
 pub fn server_is_current_user(client: &NamedPipeClient) -> io::Result<bool> {
     let own = token::current_facts()?;
     match server_facts(client) {
-        Ok(facts) => Ok(facts.as_trusted_as(&own)),
+        Ok(facts) => Ok(facts.may_serve(&own)),
         // Another account's process refuses the query; that is the answer.
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(false),
         Err(error) => Err(error),

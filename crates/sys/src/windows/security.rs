@@ -78,6 +78,13 @@ impl SecurityDescriptor {
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
+        // Applying a missing or null DACL would grant everyone full access.
+        if present == 0 || dacl.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "security descriptor has no access list",
+            ));
+        }
         Ok(dacl)
     }
 }
@@ -152,7 +159,7 @@ pub enum PrivateDir {
     Created,
     /// It existed and was private already.
     Present,
-    /// It existed, was this user's, and others had access; it now has the
+    /// It existed empty, was this user's, and others had access; it now has the
     /// private access list.
     Tightened,
 }
@@ -170,8 +177,13 @@ pub fn check_private_dir(path: &Path) -> io::Result<Result<(), DirProblem>> {
 }
 
 /// Creates `path` private when missing (its parent must exist) and checks it.
-/// With `tighten`, an own directory that others can open gets the private access
-/// list instead of being refused, the Windows counterpart of `chmod 700`.
+/// With `tighten`, an own empty directory that others can open gets the private
+/// access list instead of being refused, the Windows counterpart of `chmod 700`.
+///
+/// A non-empty one is refused even with `tighten`. Changing a DACL through a
+/// handle does not reach existing entries, which keep their old inherited grants
+/// and stay reachable by full path (everyone may traverse); only a recursive
+/// change by the user (`icacls ... /T`) fixes those.
 ///
 /// The check and the change go through one handle opened without following links,
 /// so the path cannot be swapped for a junction in between.
@@ -195,14 +207,22 @@ pub fn ensure_private_dir(
         Err(problem) => return Ok(Err(problem)),
     };
     let private = private_descriptor()?;
+    let replace = (tighten && is_empty(path, &directory)?).then_some(&private);
     // SAFETY: the handle stays open for the call; `private` lives across it.
-    let verdict = unsafe { inspect(&directory, tighten.then_some(&private)) }?;
+    let verdict = unsafe { inspect(&directory, replace) }?;
     Ok(match verdict {
         Ok(()) if created => Ok(PrivateDir::Created),
         Ok(()) => Ok(PrivateDir::Present),
-        Err(DirProblem::Acl(_)) if tighten => Ok(PrivateDir::Tightened),
+        Err(DirProblem::Acl(_)) if replace.is_some() => Ok(PrivateDir::Tightened),
         Err(problem) => Err(problem),
     })
+}
+
+/// Whether the directory open as `directory` has no entries. The listing goes by
+/// path, so it only counts when `path` still names the same directory afterwards.
+fn is_empty(path: &Path, directory: &File) -> io::Result<bool> {
+    let empty = std::fs::read_dir(path)?.next().is_none();
+    Ok(empty && crate::path_identity(path)? == crate::file_identity(directory)?)
 }
 
 /// The protected access list of a private directory, inherited by everything
@@ -414,6 +434,21 @@ mod tests {
         assert_eq!(ensure_private_dir(&open, false)?, Err(everyone));
         assert_eq!(ensure_private_dir(&open, true)?, Ok(PrivateDir::Tightened));
         assert_eq!(check_private_dir(&open)?, Ok(()), "tightened");
+        Ok(())
+    }
+
+    /// A non-empty directory is never tightened: its entries would keep the old
+    /// grants.
+    #[test]
+    fn non_empty_directories_are_not_tightened() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let open = temp.path().join("open");
+        std::fs::create_dir(&open)?;
+        std::fs::write(open.join("state.db"), "x")?;
+        icacls(&open, &["/grant", "*S-1-1-0:(OI)(CI)R"])?;
+        let everyone = DirProblem::Acl(vec!["S-1-1-0".to_owned()]);
+        assert_eq!(ensure_private_dir(&open, true)?, Err(everyone.clone()));
+        assert_eq!(check_private_dir(&open)?, Err(everyone), "left unchanged");
         Ok(())
     }
 

@@ -1,0 +1,28 @@
+[package]
+name = "devlanes-runner-windows"
+description = "Job-object runner for daemon-owned units on Windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# `command` (program resolution and command lines) is pure and builds everywhere,
+# so its tests run on every CI OS; the runner itself is Windows-only.
+[dependencies]
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+devlanes-core = { path = "../core" }
+devlanes-sys = { path = "../sys" }
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

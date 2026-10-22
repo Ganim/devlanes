@@ -26,7 +26,8 @@ All functions block. Call them from `spawn_blocking` in async code.
 
 - `processes`, `process`, `identity`, `start_time`: read the process table. `process` still returns unreaped zombies.
 - `matches`, `signal_verified`: compare PID and start time before acting.
-- `DescendantTracker`: builds up a unit's process tree from repeated snapshots and keeps processes that later call `setsid`.
+- `shared_processes`: a snapshot no older than a given age, with concurrent callers sharing one scan, for runners that track many units.
+- `DescendantTracker`: builds up a unit's process tree from repeated snapshots and keeps processes that later call `setsid`. `adopt` adds members known by other means, such as Windows job membership.
 - `session_members`: the leader and members of a recorded session, for reconciliation. Empty once the leader is gone, since its session ID may then belong to another session.
 - `session_members_known`: the same, but a recorded member still in the session also proves it is ours, because a PID in use as a session ID is never reassigned. For a supervisor that reaped the leader itself.
 - `boot_id`: an opaque token for the current boot, so records from before a reboot are never matched against live PIDs.
@@ -34,7 +35,8 @@ All functions block. Call them from `spawn_blocking` in async code.
 - `open_file`, `holders`: find processes that still hold a PTY slave or pipe open.
 - `raise_nofile_limit`, `child_nofile_limit`: raise the daemon's open-file limit and keep the original for children. Both report no limit on Windows.
 - `file_identity`, `path_identity`: device and inode on Unix, volume serial and 128-bit file id on Windows, for noticing that a path now names a different file.
-- `windows` (Windows only): safe wrappers for the endpoint, daemon and runner crates. `token` (user SIDs, elevation), `security` (user-only security descriptors, private-directory checks and tightening), `pipe` (user-only pipe instances, checks of the account on the other end), `process` (spawn flags, waiting on a PID, the job this process runs in, Ctrl-C delivery, the stdout swap and stdio inheritance for the daemon).
+- `rename_retrying`, `remove_file_retrying`, `retrying`: on Windows, retry for up to about 0.6 s while another process holds the file without delete sharing (sharing, lock or access-denied errors); a single attempt on Unix. Blocking.
+- `windows` (Windows only): safe wrappers for the endpoint, daemon and runner crates. `token` (user SIDs, elevation), `security` (user-only security descriptors, private-directory checks and tightening), `pipe` (user-only pipe instances, checks of the account on the other end), `process` (spawn flags, waiting on a PID, the job this process runs in, Ctrl-C delivery, the stdout swap and stdio inheritance for the daemon), `proc` (the process table backend and verified terminate), `job` (job objects), `spawn` (starting a unit's leader inside its job with only its stdio inherited).
 - `macos` (macOS only): safe rusage, mach time, host CPU and sysctl readings for `devlanes-metrics-macos`.
 
 ## Behaviour

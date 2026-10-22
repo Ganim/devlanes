@@ -46,9 +46,9 @@ fn zombie_info(pid: libc::pid_t) -> Option<ProcessInfo> {
     Some(ProcessInfo {
         pid: u32::try_from(pid).ok()?,
         ppid: 0,
-        pgid: 0,
+        pgid: None,
         sid: None,
-        uid: 0,
+        uid: None,
         start_time,
         zombie: true,
         name: String::new(),
@@ -155,9 +155,9 @@ fn bsd_info(pid: libc::pid_t) -> Option<ProcessInfo> {
     Some(ProcessInfo {
         pid: info.pbi_pid,
         ppid: info.pbi_ppid,
-        pgid: info.pbi_pgid,
+        pgid: Some(info.pbi_pgid),
         sid,
-        uid: info.pbi_uid,
+        uid: Some(info.pbi_uid),
         start_time: info
             .pbi_start_tvsec
             .saturating_mul(1_000_000)

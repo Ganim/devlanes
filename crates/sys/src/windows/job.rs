@@ -21,6 +21,10 @@ use windows_sys::Win32::System::JobObjects::{
 use super::security::SecurityAttributes;
 use super::token::{owned, raw};
 
+// `members` reads the process ID list header as one usize holding two u32 counts.
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("devlanes supports 64-bit Windows (x64 and arm64) only");
+
 /// A job object that only the current user can open.
 #[derive(Debug)]
 pub struct Job(OwnedHandle);

@@ -14,7 +14,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_core::{
-    Error, ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, TerminalSize, Unit,
+    Error, ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopSignal, TerminalSize, Unit,
 };
 use devlanes_sys::{
     DescendantTracker, ListeningSocket, OpenFile, ProcessInfo, Signal, SignalOutcome,
@@ -28,7 +28,7 @@ use tokio::{
     time::{self, Instant, MissedTickBehavior},
 };
 
-use crate::{ExitSweep, PtyRunner, output, snapshot, spawn};
+use crate::{ExitSweep, PtyRunner, output, spawn};
 
 /// Poll period while waiting for session members to exit after the leader.
 const EXIT_POLL: Duration = Duration::from_millis(50);
@@ -370,6 +370,20 @@ fn raw_pid(pid: u32) -> Option<rustix::process::Pid> {
     rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)
 }
 
+/// The POSIX signal for a configured stop signal; libc supplies the per-OS
+/// numbers (SIGUSR1 and SIGUSR2 differ between Linux and macOS).
+fn posix_signal(signal: StopSignal) -> Signal {
+    match signal {
+        StopSignal::Hangup => Signal::HUP,
+        StopSignal::Interrupt => Signal::INT,
+        StopSignal::Quit => Signal::QUIT,
+        StopSignal::Kill => Signal::KILL,
+        StopSignal::Terminate => Signal::TERM,
+        StopSignal::User1 => Signal::USR1,
+        StopSignal::User2 => Signal::USR2,
+    }
+}
+
 /// Locks a std mutex, ignoring poisoning: the guarded data stays consistent per call.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -438,7 +452,7 @@ impl Inner {
     /// Updates the tracker from a snapshot at most `max_age` old and returns all tracked
     /// processes. Blocking.
     fn refresh_blocking(&self, max_age: Duration) -> Result<Vec<ProcessInfo>, Error> {
-        let snapshot = snapshot::processes(max_age)?;
+        let snapshot = devlanes_sys::shared_processes(max_age)?;
         let mut tracker = lock(&self.tracker);
         tracker.update(&snapshot);
         Ok(tracker.processes().cloned().collect())
@@ -494,7 +508,7 @@ impl Inner {
         for process in processes.iter().filter(|p| !p.zombie) {
             // Group members already got the signal; a second delivery trips the
             // "press again to force quit" handlers of many dev servers.
-            if group_alive && process.pgid == leader {
+            if group_alive && process.pgid == Some(leader) {
                 continue;
             }
             let identity = process.identity();
@@ -564,10 +578,10 @@ impl Inner {
             let uid = devlanes_sys::current_uid();
             // The daemon holds the master and the pipe read ends itself.
             let me = std::process::id();
-            let candidates: Vec<ProcessInfo> = snapshot::processes(Duration::ZERO)?
+            let candidates: Vec<ProcessInfo> = devlanes_sys::shared_processes(Duration::ZERO)?
                 .iter()
                 .filter(|p| {
-                    p.uid == uid
+                    p.uid == Some(uid)
                         && !p.zombie
                         && p.pid != me
                         && p.start_time >= started
@@ -721,8 +735,7 @@ impl PtyUnit {
         &self,
         policy: devlanes_core::StopPolicy,
     ) -> Result<ExitReport, Error> {
-        let signal = Signal::from_named_raw(policy.signal)
-            .ok_or_else(|| Error::InvalidInput(format!("unknown signal {}", policy.signal)))?;
+        let signal = posix_signal(policy.signal);
         let request = StopRequest {
             signal,
             timeout: policy.timeout,
@@ -941,6 +954,17 @@ mod tests {
         }
     }
 
+    /// Stop signals map to the numbers their config names had before they were typed.
+    #[test]
+    fn stop_signals_keep_their_numbers() {
+        #[cfg(target_os = "linux")]
+        const USR: (i32, i32) = (10, 12);
+        #[cfg(not(target_os = "linux"))]
+        const USR: (i32, i32) = (30, 31);
+        let numbers = StopSignal::ALL.map(|signal| posix_signal(signal).as_raw());
+        assert_eq!(numbers, [1, 2, 3, 9, 15, USR.0, USR.1]);
+    }
+
     /// With the supervisor gone, stop still signals the processes and reaps the leader
     /// instead of returning the crash placeholder as if the unit had ended.
     #[tokio::test]
@@ -959,7 +983,7 @@ mod tests {
 
             let report = unit
                 .stop_with_report(StopPolicy {
-                    signal: 15,
+                    signal: StopSignal::Terminate,
                     timeout: Duration::from_secs(2),
                 })
                 .await
@@ -1014,14 +1038,14 @@ mod tests {
             let _kill = Kill(unit.identity());
             // Let the supervisor's immediate first tick finish its scan.
             time::sleep(Duration::from_millis(200)).await;
-            let before = snapshot::scans_started();
+            let before = devlanes_sys::scans_started();
             for _ in 0..50 {
                 let subjects = unit.subjects().await.expect("subjects");
                 assert!(subjects.iter().any(|s| s.pid == unit.identity().pid));
             }
             // Other tests in this process may scan meanwhile, but not within a loop
             // this short.
-            assert!(snapshot::scans_started() - before < 5);
+            assert!(devlanes_sys::scans_started() - before < 5);
         })
         .await
         .expect("bounded");

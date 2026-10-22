@@ -926,6 +926,7 @@ dependencies = [
  "devlanes-run-script-npm",
  "devlanes-run-script-python",
  "devlanes-runner-pty",
+ "devlanes-runner-windows",
  "devlanes-secrets-fnox",
  "devlanes-start-gate",
  "devlanes-state",
@@ -995,6 +996,7 @@ dependencies = [
 name = "devlanes-config"
 version = "0.1.0"
 dependencies = [
+ "devlanes-core",
  "devlanes-preset-next",
  "devlanes-preset-tauri",
  "devlanes-preset-vite",
@@ -1077,11 +1079,13 @@ dependencies = [
 name = "devlanes-e2e"
 version = "0.1.0"
 dependencies = [
+ "devlanes-sys",
  "devlanes-testing",
  "rustix",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -1090,6 +1094,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
+ "devlanes-testing",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -1102,6 +1107,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
+ "devlanes-testing",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -1175,6 +1181,7 @@ name = "devlanes-logs"
 version = "0.1.0"
 dependencies = [
  "devlanes-proto",
+ "devlanes-sys",
  "grep-regex",
  "grep-searcher",
  "jiff",
@@ -1244,6 +1251,7 @@ name = "devlanes-migrate"
 version = "0.1.0"
 dependencies = [
  "devlanes-config",
+ "devlanes-core",
  "globset",
  "indexmap",
  "insta",
@@ -1260,6 +1268,7 @@ dependencies = [
 name = "devlanes-pki"
 version = "0.1.0"
 dependencies = [
+ "devlanes-sys",
  "fs2",
  "rcgen",
  "rustls",
@@ -1555,11 +1564,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "devlanes-runner-windows"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "devlanes-core",
+ "devlanes-sys",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "devlanes-secrets-fnox"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
+ "devlanes-testing",
  "serde",
  "serde_json",
  "tempfile",
@@ -1678,9 +1702,11 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "crossterm",
  "futures-util",
  "humantime",
  "rustix",
+ "serde",
  "serde_json",
  "socket2",
  "tempfile",
