@@ -377,6 +377,45 @@ mod tests {
         assert_eq!(Request::parse("42 kill"), None);
     }
 
+    /// Not a test of its own: this binary as the helper when started with a
+    /// request. Without one it does nothing.
+    #[test]
+    fn helper_entry() {
+        if std::env::var_os(REQUEST_VAR).is_some() {
+            std::process::exit(i32::from(console_ctrl_main()));
+        }
+    }
+
+    /// An anchor attaches to a process's console, lists it and sends to it; its
+    /// errors are shown whole, since they differ between machines (CI runners).
+    #[test]
+    fn anchor_lists_and_signals_a_console() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut ping = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()?;
+        let helper = ConsoleHelper {
+            program: std::env::current_exe()?,
+            args: ["--exact", "ctrl::tests::helper_entry", "--nocapture"]
+                .map(Into::into)
+                .into(),
+        };
+        let result = (|| -> Result<(), HelperError> {
+            let mut anchor = helper.anchor(ping.id())?;
+            let pids = anchor.list()?;
+            assert!(pids.contains(&ping.id()), "{pids:?} lacks {}", ping.id());
+            anchor.send(Request::CtrlC)?;
+            Ok(())
+        })();
+        let _ = ping.kill();
+        let _ = ping.wait();
+        result.map_err(|error| format!("{error:?}: {error}"))?;
+        Ok(())
+    }
+
     /// Answers are found inside other output, and PID lists parse strictly.
     #[test]
     fn answers_parse_from_noisy_output() {
