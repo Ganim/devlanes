@@ -3,7 +3,7 @@
 //! environments exist only here.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
@@ -603,6 +603,9 @@ pub(crate) struct StartCtl {
     /// Task units the start runs right now (hook tasks, their steps, setup
     /// entries), counted.
     tasks: Mutex<BTreeMap<String, usize>>,
+    /// Task units the start may still run, known once it resolved the lane. A
+    /// stop can name them before (or while) they spawn.
+    planned: Mutex<BTreeSet<String>>,
 }
 
 impl StartCtl {
@@ -613,7 +616,21 @@ impl StartCtl {
             services_done: CancellationToken::new(),
             withdrawn: Mutex::new(BTreeMap::new()),
             tasks: Mutex::new(BTreeMap::new()),
+            planned: Mutex::new(BTreeSet::new()),
         }
+    }
+
+    /// Records task units the start may run.
+    pub(crate) fn plan_tasks(&self, units: impl IntoIterator<Item = String>) {
+        lock(&self.planned).extend(units);
+    }
+
+    /// Task units a stop may name: those the start runs or still plans to run,
+    /// including one whose process exists but is not recorded on the lane yet.
+    pub(crate) fn task_units(&self) -> BTreeSet<String> {
+        let mut units = lock(&self.planned).clone();
+        units.extend(lock(&self.tasks).keys().cloned());
+        units
     }
 
     /// Takes `units` out of the start on behalf of `by`.
