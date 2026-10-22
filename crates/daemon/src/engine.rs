@@ -17,7 +17,6 @@ use bytes::Bytes;
 use devlanes_config::UserConfig;
 use devlanes_core::{
     LaneId, ProjectId,
-    paths::path_starts_with,
     refs::{LaneCandidate, LaneRef, ReferenceError, ResolveContext, UnitRef},
 };
 use devlanes_proto::{Context, Method, Request, RpcError};
@@ -88,6 +87,9 @@ pub(crate) struct Inner {
     pub started: Instant,
     pub background: AtomicBool,
     pub attach: Mutex<crate::attach::AttachTable>,
+    /// One PTY resize at a time, so a closing stream and a reopening one
+    /// cannot apply their sizes out of order.
+    pub attach_resize: tokio::sync::Mutex<()>,
     pub metrics: Mutex<crate::sampler::MetricsState>,
     pub next_stream: AtomicU64,
     /// Next `start_id` for `lane.phase` events and start results.
@@ -132,6 +134,7 @@ impl Engine {
                 started: Instant::now(),
                 background: AtomicBool::new(false),
                 attach: Mutex::new(crate::attach::AttachTable::default()),
+                attach_resize: tokio::sync::Mutex::new(()),
                 metrics: Mutex::new(crate::sampler::MetricsState::default()),
                 next_stream: AtomicU64::new(1),
                 next_start: AtomicU64::new(1),
@@ -417,15 +420,29 @@ impl Inner {
             let name = project.name();
             let st = lane.st();
             let Some(record) = &st.record else { continue };
-            candidates.push(LaneCandidate {
-                id: record.id,
-                project_id: project.id,
-                project: name,
-                index: record.index,
-                branch: st.branch.clone(),
-                name: record.name.clone(),
-                path: st.path.clone(),
-            });
+            // An extra lane of a folder answers to its index and its own name;
+            // the branch and the folder keep naming the folder's first lane.
+            let candidate = match st.alias() {
+                Some((_, alias)) => LaneCandidate {
+                    id: record.id,
+                    project_id: project.id,
+                    project: name,
+                    index: record.index,
+                    branch: None,
+                    name: alias.to_owned(),
+                    path: PathBuf::new(),
+                },
+                None => LaneCandidate {
+                    id: record.id,
+                    project_id: project.id,
+                    project: name,
+                    index: record.index,
+                    branch: st.branch.clone(),
+                    name: record.name.clone(),
+                    path: st.path.clone(),
+                },
+            };
+            candidates.push(candidate);
             drop(st);
             if let Some(candidate) = candidates.last() {
                 map.insert(candidate.id, (project.clone(), lane.clone()));
@@ -461,15 +478,45 @@ impl Inner {
                 .as_ref()
                 .and_then(devlanes_core::paths::client_home),
         };
-        let found = devlanes_core::refs::resolve_lane(&parsed, &candidates, &resolve)
-            .map_err(reference_error)
-            .map_err(|error| self.renamed_hint(error, &parsed))?;
+        let found = match devlanes_core::refs::resolve_lane(&parsed, &candidates, &resolve) {
+            Ok(found) => found,
+            Err(error) => {
+                // `project@<dir>` names a worktree without a lane (as older output
+                // listed them); stop and clean still reach it.
+                if let Some(pair) = self.unassigned_by_dir(&parsed, scope) {
+                    return Ok(pair);
+                }
+                return Err(self.renamed_hint(reference_error(error), &parsed));
+            }
+        };
         map.get(&found.id).cloned().ok_or_else(|| {
             reference_error(ReferenceError::NotFound {
                 reference: reference.into(),
                 candidates: Vec::new(),
             })
         })
+    }
+
+    /// The one worktree without a lane whose directory name is the reference's
+    /// selector, in its project (or the cwd's).
+    fn unassigned_by_dir(
+        &self,
+        parsed: &LaneRef,
+        scope: Option<devlanes_core::ProjectId>,
+    ) -> Option<LanePair> {
+        let mut found = self.all_lanes().into_iter().filter(|(project, lane)| {
+            let st = lane.st();
+            let in_scope = match &parsed.project {
+                Some(name) => project.name() == *name,
+                None => scope.is_none_or(|id| project.id == id),
+            };
+            in_scope
+                && st.record.is_none()
+                && st.alias().is_none()
+                && crate::model::dir_name(&st.path) == parsed.selector
+        });
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
     }
 
     /// A `not_found` for `<old>@<lane>` after `project:` was renamed gains
@@ -539,17 +586,9 @@ impl Inner {
         context: &Context,
     ) -> Result<LanePair, RpcError> {
         if let Some(project) = self.project_for_cwd(&context.cwd).await? {
-            let mut best: Option<(usize, Arc<LaneRt>)> = None;
-            for lane in project.lanes() {
-                let st = lane.st();
-                if st.present && path_starts_with(&context.cwd, &st.path) {
-                    let depth = st.path.components().count();
-                    if best.as_ref().is_none_or(|(d, _)| depth > *d) {
-                        best = Some((depth, lane.clone()));
-                    }
-                }
-            }
-            if let Some((_, lane)) = best {
+            if let Some(lane) = Self::lane_at(&project, &context.cwd) {
+                // Running devlanes in a worktree is what makes it a lane.
+                self.claim_lane(&project, &lane).await;
                 return Ok((project, lane));
             }
         } else if !context.cwd.as_os_str().is_empty() {

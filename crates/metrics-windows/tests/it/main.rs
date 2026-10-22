@@ -225,6 +225,12 @@ mod windows {
             .expect("memory status")
             .expect("reported");
         assert!(available > 0);
+        let total = runtime
+            .block_on(async { tokio::time::timeout(TIMEOUT, pressure.total_memory()).await })
+            .expect("read in time")
+            .expect("memory status")
+            .expect("reported");
+        assert!(total >= available, "{total} {available}");
         assert_eq!(pressure.name(), "windows");
     }
 }

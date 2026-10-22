@@ -1136,7 +1136,7 @@
               "type": "null"
             }
           ],
-          "description": "Action for newly discovered worktrees; defaults to register.",
+          "description": "What happens when a worktree gets its lane; defaults to register. A worktree\nbecomes a lane the first time devlanes runs in it (or `lane new` creates it),\nnot because it exists; only the primary worktree gets one on its own.",
           "examples": [
             "register",
             "setup",
@@ -1162,7 +1162,7 @@
               "type": "null"
             }
           ],
-          "description": "Stop processes or also clean lane data when a worktree disappears.",
+          "description": "What happens to a running lane whose worktree folder disappears; defaults to\nstop. A lane whose folder is gone and that runs nothing is cleaned; its logs\nstay until log retention removes them.",
           "examples": [
             "stop",
             "clean"
@@ -1203,7 +1203,7 @@
       "type": "object"
     },
     "NewWorktrees": {
-      "description": "Action when a new worktree appears; defaults to register.",
+      "description": "Action when a worktree gets its lane; defaults to register.",
       "examples": [
         "register",
         "setup",
@@ -1212,7 +1212,7 @@
       "oneOf": [
         {
           "const": "register",
-          "description": "Reserve a lane without running setup or services.",
+          "description": "Only reserve the lane: its index, ports and domain.",
           "examples": [
             "register"
           ],
@@ -1220,7 +1220,7 @@
         },
         {
           "const": "setup",
-          "description": "Run infrastructure setup and lane.create tasks, leaving services stopped.",
+          "description": "Also run infrastructure setup and lane.create tasks, leaving services stopped.",
           "examples": [
             "setup"
           ],
@@ -1228,7 +1228,7 @@
         },
         {
           "const": "start",
-          "description": "Start the worktree with the default profile.",
+          "description": "Also start the lane with the default profile.",
           "examples": [
             "start"
           ],
@@ -1543,7 +1543,7 @@
       ]
     },
     "RemovedWorktrees": {
-      "description": "Action when a worktree disappears; defaults to stop and retain its data.",
+      "description": "Action when a running lane's worktree folder disappears; defaults to stop.",
       "examples": [
         "stop",
         "clean"
@@ -1551,7 +1551,7 @@
       "oneOf": [
         {
           "const": "stop",
-          "description": "Stop the lane's processes but keep its data.",
+          "description": "Stop the lane's processes; once nothing runs, the lane is cleaned.",
           "examples": [
             "stop"
           ],
@@ -1559,7 +1559,7 @@
         },
         {
           "const": "clean",
-          "description": "Stop processes, run teardown, and free the lane.",
+          "description": "Clean the lane right away: stop processes, run teardown, and free the lane.",
           "examples": [
             "clean"
           ],
@@ -1909,6 +1909,17 @@
           },
           "type": [
             "array",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Display name shown in the TUI and human output instead of the service key;\nany text, spaces allowed. Commands, references and `svc.<key>` keep using the key.",
+          "examples": [
+            "Admin API",
+            "Storefront (web)"
+          ],
+          "type": [
+            "string",
             "null"
           ]
         },

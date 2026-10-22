@@ -396,6 +396,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
             sync,
             literal_port: layout.literal_port,
             preset: service.preset.clone(),
+            display_name: layout.display_name.clone(),
         })
     }
 

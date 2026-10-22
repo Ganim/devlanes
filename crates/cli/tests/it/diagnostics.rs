@@ -66,7 +66,7 @@ fn missing_program_is_named_in_every_mode() {
         &data,
     );
     assert!(
-        human.contains("api  could not start: fixture-server: command not found on PATH"),
+        human.contains("api  couldn't start: fixture-server: command not found on PATH"),
         "{human}"
     );
     assert!(
@@ -85,7 +85,7 @@ fn missing_program_is_named_in_every_mode() {
     assert_eq!(
         agent,
         "acme@0 (main): not ready, 1 failed\n\
-failed api\n  could not start: fixture-server: command not found on PATH\n  \
+failed api\n  couldn't start: fixture-server: command not found on PATH\n  \
 hint: check the lane's PATH: devlanes env show api --lane acme@0\n"
     );
     // The same error on its own (exec, run) keeps the unit and the hint.
@@ -96,7 +96,7 @@ hint: check the lane's PATH: devlanes env show api --lane acme@0\n"
         .error(&error, None);
     assert_eq!(
         rendered.stderr,
-        "error: api could not start: fixture-server: command not found on PATH\n\
+        "error: api couldn't start: fixture-server: command not found on PATH\n\
 hint: check the lane's PATH: devlanes env show api --lane acme@0\n"
     );
 }
@@ -116,7 +116,7 @@ fn other_spawn_causes() {
         json!({"unit": "api", "program": "./bin/api", "reason": "not_executable", "resolved": "/w/bin/api"}),
     );
     assert!(
-        text.contains("api could not start: ./bin/api is not executable"),
+        text.contains("api couldn't start: ./bin/api is not executable"),
         "{text}"
     );
     assert!(text.contains("hint: chmod +x /w/bin/api"), "{text}");
@@ -141,7 +141,7 @@ fn other_spawn_causes() {
     // An older daemon's shape still reads.
     let text = error(json!({"unit": "api", "message": "I/O failure: boom"}));
     assert!(
-        text.contains("api could not start: I/O failure: boom"),
+        text.contains("api couldn't start: I/O failure: boom"),
         "{text}"
     );
     // `with -- COMMAND` keeps its own wording.

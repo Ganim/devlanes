@@ -118,6 +118,14 @@ impl PressureSource for WindowsPressure {
             .map_err(|error| devlanes_core::Error::Integration(error.to_string()))?
             .map_err(devlanes_core::Error::Io)
     }
+
+    /// Installed physical memory (`ullTotalPhys`).
+    async fn total_memory(&self) -> Result<Option<u64>, devlanes_core::Error> {
+        tokio::task::spawn_blocking(|| memory_status().map(|status| Some(status.total_physical)))
+            .await
+            .map_err(|error| devlanes_core::Error::Integration(error.to_string()))?
+            .map_err(devlanes_core::Error::Io)
+    }
 }
 
 #[cfg(test)]

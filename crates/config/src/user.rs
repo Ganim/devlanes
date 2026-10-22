@@ -49,11 +49,15 @@ pub struct UserConfig {
 /// Terminal UI behaviour of the CLI.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-#[schemars(extend("examples" = [{"open_on_start":false}]))]
+#[schemars(extend("examples" = [{"open_on_start":false},{"theme":"light","glyphs":"ascii"}]))]
 pub struct TuiConfig {
     /// Run `start`, `restart`, `lane resume` and `lane new --start` inside the TUI when typed at a terminal; defaults to true. false prints them as text, like `--no-ui` or DEVLANES_NO_UI=1.
     #[schemars(extend("examples" = [true,false]))]
     pub open_on_start: bool,
+    /// Colors of the TUI; defaults to auto. NO_COLOR always turns colors off.
+    pub theme: TuiTheme,
+    /// Symbols the TUI draws states and markers with; defaults to auto.
+    pub glyphs: TuiGlyphs,
 }
 
 impl Default for TuiConfig {
@@ -61,6 +65,68 @@ impl Default for TuiConfig {
     fn default() -> Self {
         Self {
             open_on_start: true,
+            theme: TuiTheme::Auto,
+            glyphs: TuiGlyphs::Auto,
+        }
+    }
+}
+
+/// Colors of the TUI.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(extend("examples" = ["auto","dark","light","ansi"]))]
+pub enum TuiTheme {
+    /// The terminal's 16 colors, or the dark or light palette when the terminal reports true color and its background.
+    #[default]
+    #[schemars(extend("examples" = ["auto"]))]
+    Auto,
+    /// The true-color palette for a dark background.
+    #[schemars(extend("examples" = ["dark"]))]
+    Dark,
+    /// The true-color palette for a light background.
+    #[schemars(extend("examples" = ["light"]))]
+    Light,
+    /// The terminal's own 16 colors, which follow its theme.
+    #[schemars(extend("examples" = ["ansi"]))]
+    Ansi,
+}
+
+impl TuiTheme {
+    /// The word the TUI reads: `auto`, `dark`, `light` or `ansi`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Dark => "dark",
+            Self::Light => "light",
+            Self::Ansi => "ansi",
+        }
+    }
+}
+
+/// Symbols the TUI draws with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(extend("examples" = ["auto","unicode","ascii"]))]
+pub enum TuiGlyphs {
+    /// Unicode when the locale is UTF-8, else ASCII.
+    #[default]
+    #[schemars(extend("examples" = ["auto"]))]
+    Auto,
+    /// Unicode symbols such as ● ✕ ▾.
+    #[schemars(extend("examples" = ["unicode"]))]
+    Unicode,
+    /// Plain ASCII, for fonts or terminals that draw Unicode symbols badly.
+    #[schemars(extend("examples" = ["ascii"]))]
+    Ascii,
+}
+
+impl TuiGlyphs {
+    /// The word the TUI reads: `auto`, `unicode` or `ascii`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Unicode => "unicode",
+            Self::Ascii => "ascii",
         }
     }
 }

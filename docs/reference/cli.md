@@ -246,7 +246,7 @@ devlanes lane [OPTIONS] <COMMAND>
 
 ### devlanes lane ls
 
-List every worktree lane, including moved, unassigned and missing ones
+List lanes, including moved, unassigned and missing ones
 
 ```text
 devlanes lane ls [OPTIONS]
@@ -254,13 +254,18 @@ devlanes lane ls [OPTIONS]
 
 ### devlanes lane new
 
-Create a git worktree for a branch under lanes.worktree_dir and register its lane
+Create a git worktree for a branch under lanes.worktree_dir and register its lane.
+
+Without a branch, add another lane for the current folder: it has its own index, ports
+and domain, and `--lane <name>` or `--lane <index>` addresses it. Commands run in the
+folder keep using the folder's first lane.
 
 ```text
-devlanes lane new [OPTIONS] <BRANCH>
+devlanes lane new [OPTIONS] [BRANCH]
 ```
 
-- `<BRANCH>`: Branch to check out in the new worktree
+- `[BRANCH]`: Branch to check out in the new worktree [default: another lane for this folder]
+- `--name <NAME>`: Name of the extra lane for this folder, used by `--lane` [default: <folder>-<n>]
 - `--start`: Start the new lane right away
 - `--no-ui`: With --start, print the start as text instead of running it in the TUI
 
@@ -500,35 +505,6 @@ Validate this worktree's devlanes.yaml, including preset options
 
 ```text
 devlanes config check [OPTIONS]
-```
-
-### devlanes migrate
-
-Write devlanes.yaml from an existing process-manager setup.
-
-Looks in the repository root (or the current directory outside Git) for mprocs,
-dekit, process-compose, Procfile (foreman, overmind, hivemind, honcho), pm2,
-tmuxinator, tmuxp, package.json scripts that run concurrently or npm-run-all,
-and mise tasks. Several setups are merged when their names do not clash. The
-result is checked like devlanes config check before it is written; what could
-not be carried over is printed and left as comments in the file. Runs without
-the daemon.
-
-```text
-devlanes migrate [OPTIONS]
-```
-
-- `--from <SOURCE>`: Setup to convert; aliases name the tool (overmind is procfile) [default: auto, every setup found]
-  Values: `auto`, `mprocs`, `dekit`, `process-compose`, `procfile`, `pm2`, `tmuxinator`, `tmuxp`, `package-json`, `mise`, `foreman`, `overmind`, `hivemind`, `honcho`, `concurrently`, `npm-run-all`.
-- `--dry-run`: Print the generated YAML instead of writing it
-- `--force`: Replace an existing devlanes.yaml
-- `--to <PATH>`: Write to this file instead of devlanes.yaml next to the setup
-
-```text
-Examples:
-  devlanes migrate --dry-run           print what would be written
-  devlanes migrate --from overmind     only the Procfile setup
-  devlanes migrate --force             replace an existing devlanes.yaml
 ```
 
 ### devlanes certs

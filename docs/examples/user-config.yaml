@@ -67,5 +67,10 @@ updates:
   check: true
 # On a terminal, start, restart, lane resume and lane new --start run inside the TUI.
 # false prints them as text instead, like --no-ui or DEVLANES_NO_UI=1.
+# theme: auto uses the terminal's 16 colors, or a true-color palette when the
+# terminal says it supports one and reports its background; dark, light or ansi pick one.
+# glyphs: auto draws Unicode on a UTF-8 locale and ASCII otherwise.
 tui:
   open_on_start: true
+  theme: auto
+  glyphs: auto

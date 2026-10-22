@@ -478,7 +478,7 @@ services:
   backend: { run: b, tags: [api] }
   web: { run: w, preset: vite }
   thing: { run: t }
-  sms-stub: { run: s, replicas: 2 }
+  stub-sms: { run: s, replicas: 2 }
 tasks:
   seed: { run: s }
 "#,
@@ -496,8 +496,9 @@ tasks:
     assert_eq!(color("catalog"), "bright-yellow");
     assert_eq!(color("backend"), "blue");
     assert_eq!(color("web"), "green");
-    assert_eq!(color("sms-stub.1"), "gray");
-    assert_eq!(color("sms-stub.2"), "gray");
+    // Colored by the name's first segment, so replicas match their service.
+    assert_eq!(color("stub-sms.1"), "gray");
+    assert_eq!(color("stub-sms.2"), "gray");
     let hashed = devlanes_core::color::unit_color(&[], "thing", None, &BTreeMap::new());
     assert_eq!(color("thing"), hashed);
     assert_ne!(hashed, "red");

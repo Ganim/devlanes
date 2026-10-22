@@ -1,6 +1,6 @@
 ---
 name: devlanes
-description: Start, stop, inspect and test dev services with the devlanes CLI. Use in repositories that have a devlanes.yaml, or whenever you would otherwise start a dev server, watcher or other long-running command in the background with `&`.
+description: Start, stop, inspect and test dev services with the devlanes CLI. Use in repositories that have a devlanes.yaml, whenever you would otherwise start a dev server, watcher or other long-running command in the background with `&`, and when writing or fixing a devlanes.yaml or migrating to devlanes from mprocs, dekit, process-compose, a Procfile, pm2, tmuxinator, tmuxp, concurrently, npm-run-all, mise or Docker Compose.
 ---
 
 # devlanes
@@ -8,6 +8,11 @@ description: Start, stop, inspect and test dev services with the devlanes CLI. U
 devlanes runs each Git worktree of a project as a lane with its own ports, hostnames and data. A per-user daemon owns every process. The CLI sends it requests and prints a result, so a dev server keeps running after your shell command returns, and its logs stay queryable.
 
 When the CLI detects an agent it prints terse, size-capped text and never prompts. Add `--json` to any command for complete structured output.
+
+This page covers daily use. Read a reference first when the task is about the config itself:
+
+- [references/configuration.md](references/configuration.md) before creating or editing `devlanes.yaml`, or when a failure comes from the config (a service never ready, wrong port, missing hostname, a task in the wrong place).
+- [references/migration.md](references/migration.md) when the user asks to move an mprocs, dekit, process-compose, Procfile, pm2, tmuxinator, tmuxp, package.json or mise setup to devlanes.
 
 ## Rules
 
@@ -79,7 +84,17 @@ idle acme@3 fix/login
 unassigned acme spike/xyz reason="pool full"
 ```
 
-The first word of a status line is the state: `ready`, `starting`, `queued` (waiting for a start slot), `running`, `failed`, `stopping`, `stopped`, `exited` (a task or exec that ended), `idle` or `orphaned`. `orphaned` means a previous daemon left the process running and nothing supervises it: run `devlanes stop UNIT --lane LANE`, then start it again. Failures come first, each with its last log lines and the command that shows more. URLs are printed in full.
+Failures come first, each with its last log lines and the command that shows more. URLs are printed in full. The first word of a status line is the state:
+
+| State | Meaning and next step |
+|---|---|
+| `ready` | Up and passing its ready check. Use it. |
+| `starting`, `queued` | Starting, or waiting for a start slot. `devlanes wait UNIT --timeout 180s`. |
+| `running` | A task or exec in progress. Wait for it or read its logs. |
+| `failed` | Exited or never got ready. Read the printed tail, then `devlanes logs UNIT --tail 200` and `devlanes debug why UNIT`; fix the code or config and `devlanes restart UNIT`. A service that keeps failing its ready check usually has the wrong port or check: see references/configuration.md. |
+| `exited` | A task or exec that ended. `devlanes logs UNIT --tail 50` shows how. |
+| `stopping`, `stopped`, `idle` | Not running. `devlanes start UNIT` when you need it. |
+| `orphaned` | A previous daemon left the process running and nothing supervises it. `devlanes stop UNIT --lane LANE`, then start it again. |
 
 An error ends with a `hint:` line naming the command that fixes it. Ask the user before running a hint that stops services this session did not start. Examples are `devlanes stop --lane LANE` when `lane clean` refuses a lane that still runs, and `devlanes daemon restart` when the running daemon is another devlanes version (`protocol_mismatch` in JSON), which stops every service the daemon runs.
 

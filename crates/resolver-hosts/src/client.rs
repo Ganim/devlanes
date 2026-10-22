@@ -369,6 +369,17 @@ impl HostsClient {
             Backend::Service(service) => service.version(self.timeout).await,
         }
     }
+
+    /// Whether the writer is installed, for retrying a missing one only once it
+    /// appears: the helper's `lstat`, no sudo. The service has no cheaper probe
+    /// than a request, which fails fast when it is missing, so it always counts.
+    pub fn helper_installed(&self) -> bool {
+        match &self.backend {
+            Backend::Sudo(sudo) => sudo.helper_installed(),
+            #[cfg(windows)]
+            Backend::Service(_) => true,
+        }
+    }
 }
 
 /// One name per line, the helper's stdin format.
@@ -436,6 +447,11 @@ impl Sudo {
             });
         }
         Ok(version)
+    }
+
+    /// Whether the helper is installed: one `lstat`, no sudo.
+    fn helper_installed(&self) -> bool {
+        self.ensure_installed().is_ok()
     }
 
     /// Fails with [`HostsError::HelperMissing`] unless the helper is a regular file.

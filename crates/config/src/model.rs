@@ -68,9 +68,13 @@ pub struct LanesConfig {
     /// Branch assigned lane zero; defaults to the remote default branch, main, or master.
     #[schemars(extend("examples" = ["main"]))]
     pub primary: Option<String>,
-    /// Action for newly discovered worktrees; defaults to register.
+    /// What happens when a worktree gets its lane; defaults to register. A worktree
+    /// becomes a lane the first time devlanes runs in it (or `lane new` creates it),
+    /// not because it exists; only the primary worktree gets one on its own.
     pub new_worktrees: Option<NewWorktrees>,
-    /// Stop processes or also clean lane data when a worktree disappears.
+    /// What happens to a running lane whose worktree folder disappears; defaults to
+    /// stop. A lane whose folder is gone and that runs nothing is cleaned; its logs
+    /// stay until log retention removes them.
     pub removed_worktrees: Option<RemovedWorktrees>,
     /// Directory for newly created worktrees, relative to the project.
     #[schemars(extend("examples" = ["../${{ project.name }}-lanes"]))]
@@ -95,15 +99,15 @@ pub struct LanesConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(extend("examples" = ["register","setup","start"]))]
-/// Action when a new worktree appears; defaults to register.
+/// Action when a worktree gets its lane; defaults to register.
 pub enum NewWorktrees {
-    /// Reserve a lane without running setup or services.
+    /// Only reserve the lane: its index, ports and domain.
     #[schemars(extend("examples" = ["register"]))]
     Register,
-    /// Run infrastructure setup and lane.create tasks, leaving services stopped.
+    /// Also run infrastructure setup and lane.create tasks, leaving services stopped.
     #[schemars(extend("examples" = ["setup"]))]
     Setup,
-    /// Start the worktree with the default profile.
+    /// Also start the lane with the default profile.
     #[schemars(extend("examples" = ["start"]))]
     Start,
 }
@@ -111,12 +115,12 @@ pub enum NewWorktrees {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(extend("examples" = ["stop","clean"]))]
-/// Action when a worktree disappears; defaults to stop and retain its data.
+/// Action when a running lane's worktree folder disappears; defaults to stop.
 pub enum RemovedWorktrees {
-    /// Stop the lane's processes but keep its data.
+    /// Stop the lane's processes; once nothing runs, the lane is cleaned.
     #[schemars(extend("examples" = ["stop"]))]
     Stop,
-    /// Stop processes, run teardown, and free the lane.
+    /// Clean the lane right away: stop processes, run teardown, and free the lane.
     #[schemars(extend("examples" = ["clean"]))]
     Clean,
 }

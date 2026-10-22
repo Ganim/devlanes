@@ -449,6 +449,13 @@ fn service_layout<E: Extensions>(
         autostart: flag(&entry.service.autostart, "autostart", true)?,
         tags: entry.service.tags.clone().unwrap_or_default(),
         color: entry.color.to_owned(),
+        display_name: entry.service.name.as_ref().map(|display| {
+            if entry.replicas > 1 {
+                format!("{display} #{replica}")
+            } else {
+                display.clone()
+            }
+        }),
     })
 }
 

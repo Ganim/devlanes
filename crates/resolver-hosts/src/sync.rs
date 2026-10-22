@@ -127,6 +127,9 @@ async fn run(
     let mut seen_retry = 0;
     let mut blocked_until: Option<Instant> = None;
     let mut version_checked = false;
+    // The code of the failure in effect: a repeat is not logged again, and the
+    // doctor check keeps showing it.
+    let mut failing: Option<&'static str> = None;
     loop {
         let pending = {
             let current = desired.borrow();
@@ -162,20 +165,31 @@ async fn run(
             blocked_until = None;
             applied = None;
             version_checked = false;
+            failing = None;
         }
-        let blocked = blocked_until.is_some_and(|until| Instant::now() < until);
+        let blocked = blocked_until.is_some_and(|until| Instant::now() < until)
+            // A missing helper waits until it is installed: nothing to try before.
+            || (failing == Some("helper_missing") && !client.helper_installed());
         if let Some(names) = current
             .names
             .filter(|names| !blocked && applied.as_ref() != Some(names))
         {
             match attempt(&client, &names, &mut version_checked).await {
                 Ok(next) => {
+                    if let Some(code) = failing.take() {
+                        tracing::info!(previous = code, "updating /etc/hosts works again");
+                    }
                     blocked_until = None;
                     applied = Some(names);
                     state.send_replace(next);
                 }
                 Err(error) => {
-                    tracing::warn!(code = error.code(), %error, "updating /etc/hosts failed");
+                    if failing == Some(error.code()) {
+                        tracing::debug!(code = error.code(), %error, "updating the hosts file still fails");
+                    } else {
+                        tracing::warn!(code = error.code(), %error, "updating the hosts file failed");
+                    }
+                    failing = Some(error.code());
                     if error.is_denied()
                         || matches!(error, HostsError::Outdated { .. } | HostsError::Unsupported)
                     {
@@ -356,6 +370,35 @@ mod tests {
                 changed: true
             }
         );
+        sync.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    /// A missing helper is not tried again until it is installed, and route
+    /// changes meanwhile cost no commands; once installed the next change applies.
+    async fn a_missing_helper_waits_until_it_is_installed() {
+        let executor = executor(Arc::default());
+        let fs = Arc::new(FakeFs::standard());
+        let client = HostsClient::new(executor.clone(), fs.clone(), None).expect("client");
+        let sync = HostsSync::spawn(client, SyncConfig::default());
+        sync.update(names(&["a.localhost"]));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let state = sync.state().borrow().clone();
+        assert!(
+            matches!(&state, SyncState::Failed(error) if error.code() == "helper_missing"),
+            "{state:?}"
+        );
+        for i in 0..5 {
+            sync.update(names(&[&format!("n{i}.localhost")]));
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        assert!(executor.calls().is_empty(), "nothing ran without a helper");
+        assert!(matches!(&*sync.state().borrow(), SyncState::Failed(_)));
+
+        fs.set(INSTALL_PATH, FileKind::File, 0, 0o755);
+        sync.update(names(&["b.localhost"]));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(applies(&executor), ["b.localhost\n"]);
         sync.shutdown().await;
     }
 

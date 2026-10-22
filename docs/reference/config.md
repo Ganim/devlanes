@@ -84,9 +84,9 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | `lanes.hosts_file` | `auto` or `never` or `always` | Project-specific host-file hint, overriding the user's policy. | `auto` |
 | `lanes.matrix` | list of map of scalar (templated) | Explicit lane values; entry N describes lane N. Mutually exclusive with vars. | `[{"domain":"acme.localhost","port":20000},{"domain":"acme-1.localhost","port":20100}]` |
 | `lanes.max` | integer (templated) | Maximum assigned lanes; existing lanes are retained if this is lowered. | `6` |
-| `lanes.new_worktrees` | `register` or `setup` or `start` | Action for newly discovered worktrees; defaults to register. | `register` |
+| `lanes.new_worktrees` | `register` or `setup` or `start` | What happens when a worktree gets its lane; defaults to register. A worktree becomes a lane the first time devlanes runs in it (or `lane new` creates it), not because it exists; only the primary worktree gets one on its own. | `register` |
 | `lanes.primary` | string | Branch assigned lane zero; defaults to the remote default branch, main, or master. | `main` |
-| `lanes.removed_worktrees` | `stop` or `clean` | Stop processes or also clean lane data when a worktree disappears. | `stop` |
+| `lanes.removed_worktrees` | `stop` or `clean` | What happens to a running lane whose worktree folder disappears; defaults to stop. A lane whose folder is gone and that runs nothing is cleaned; its logs stay until log retention removes them. | `stop` |
 | `lanes.vars` | map of scalar (templated) | Scalar lane values available through the lane expression namespace. | `{"db_name":"acme_${{ lane.name }}"}` |
 | `lanes.worktree_dir` | string (templated) | Directory for newly created worktrees, relative to the project. | `../${{ project.name }}-lanes` |
 
@@ -124,6 +124,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | `services.<name>.hosts[].host` | string (templated) | Exact hostname or `*.` wildcard pattern, evaluated for the current lane. Labels hold letters, digits and inner hyphens; case and a trailing dot are ignored. | `api.${{ lane.domain }}` |
 | `services.<name>.hosts[].host_header` | `preserve` or `upstream` | Preserve the browser's Host header by default, or rewrite it for the upstream. | `preserve` |
 | `services.<name>.hosts[].port` | string | Named port to route to; uses the unit's primary port when omitted. | `inspector` |
+| `services.<name>.name` | string | Display name shown in the TUI and human output instead of the service key; any text, spaces allowed. Commands, references and `svc.<key>` keep using the key. | `Admin API` |
 | `services.<name>.next` | object | Options under the service's `next:` key. | `{"args":["--turbo"]}` |
 | `services.<name>.next.args` | list of string | Extra arguments appended after the preset's flags. | `["--turbo"]` |
 | `services.<name>.platform` | string | Platform: node, bun, deno, python or rust; detected from project files when omitted. | `node` |
@@ -210,6 +211,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | `templates.<name>.hosts[].host` | string (templated) | Exact hostname or `*.` wildcard pattern, evaluated for the current lane. Labels hold letters, digits and inner hyphens; case and a trailing dot are ignored. | `api.${{ lane.domain }}` |
 | `templates.<name>.hosts[].host_header` | `preserve` or `upstream` | Preserve the browser's Host header by default, or rewrite it for the upstream. | `preserve` |
 | `templates.<name>.hosts[].port` | string | Named port to route to; uses the unit's primary port when omitted. | `inspector` |
+| `templates.<name>.name` | string | Display name shown in the TUI and human output instead of the service key; any text, spaces allowed. Commands, references and `svc.<key>` keep using the key. | `Admin API` |
 | `templates.<name>.next` | object | Options under the service's `next:` key. | `{"args":["--turbo"]}` |
 | `templates.<name>.next.args` | list of string | Extra arguments appended after the preset's flags. | `["--turbo"]` |
 | `templates.<name>.platform` | string | Platform: node, bun, deno, python or rust; detected from project files when omitted. | `node` |
@@ -346,7 +348,9 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | Path | Type | Description | Example |
 | --- | --- | --- | --- |
 | `tui` | object | How commands use the terminal UI. | `{"open_on_start":false}` |
+| `tui.glyphs` | `auto` or `unicode` or `ascii` | Symbols the TUI draws states and markers with; defaults to auto. | `auto` |
 | `tui.open_on_start` | boolean | Run `start`, `restart`, `lane resume` and `lane new --start` inside the TUI when typed at a terminal; defaults to true. false prints them as text, like `--no-ui` or DEVLANES_NO_UI=1. | `true` |
+| `tui.theme` | `auto` or `dark` or `light` or `ansi` | Colors of the TUI; defaults to auto. NO_COLOR always turns colors off. | `auto` |
 
 ### updates
 

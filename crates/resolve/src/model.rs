@@ -169,6 +169,8 @@ pub struct ServiceLayout {
     pub tags: Vec<String>,
     /// Palette name from [`devlanes_core::color::unit_color`].
     pub color: String,
+    /// `services.<name>.name`, with ` #<replica>` when there are several replicas.
+    pub display_name: Option<String>,
 }
 
 impl ServiceLayout {
@@ -361,6 +363,8 @@ pub struct ResolvedService {
     /// Same port in every lane; refuse to start while another lane runs it.
     pub literal_port: bool,
     pub preset: Option<String>,
+    /// See [`ServiceLayout::display_name`].
+    pub display_name: Option<String>,
 }
 
 /// One task. Steps-only tasks have no launch.

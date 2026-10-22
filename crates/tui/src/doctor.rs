@@ -89,23 +89,34 @@ fn listener(proxy: &Value, name: &'static str) -> Option<Check> {
                 CheckState::Warn,
                 format!("{name} on fallback port {port}: {}", clean(reason)),
             )
-            .fix("free the standard port or set proxy ports in ~/.devlanes/config.yaml"),
+            .fix(format!(
+                "free port {}, or set proxy ports in ~/.devlanes/config.yaml",
+                if name == "https" { 443 } else { 80 }
+            )),
             None => Check::new("proxy", CheckState::Ok, format!("{name} on port {port}")),
         });
     }
     if entry.get("reason").and_then(Value::as_str) == Some("no_ca") {
         return Some(
-            Check::new("proxy", CheckState::Warn, format!("{name} off: no CA"))
-                .fix("devlanes certs trust"),
+            Check::new(
+                "proxy",
+                CheckState::Warn,
+                format!("{name} off: no local CA yet"),
+            )
+            .fix("devlanes certs trust"),
         );
     }
     Some(
         Check::new(
             "proxy",
             CheckState::Fail,
-            format!("{name} not bound: {}", fact(entry, "error")),
+            format!(
+                "{name} can't bind port {}: {}",
+                fact(entry, "port"),
+                fact(entry, "error")
+            ),
         )
-        .fix("stop the process holding the port, then devlanes daemon restart"),
+        .fix("stop whatever holds the port, then run devlanes daemon restart"),
     )
 }
 
@@ -120,20 +131,20 @@ pub fn checks(data: &Value) -> Vec<Check> {
             Check::new(
                 "state",
                 CheckState::Fail,
-                format!("state schema {found} is newer than this devlanes ({supported})"),
+                format!("state database is schema {found}; this devlanes reads up to {supported}"),
             )
             .fix("upgrade devlanes"),
         ),
         (Some(found), _) => checks.push(Check::new(
             "state",
             CheckState::Ok,
-            format!("schema {found} at {}", fact(data, "db_path")),
+            format!("schema {found}, {}", fact(data, "db_path")),
         )),
         (None, _) => checks.push(
             Check::new(
                 "state",
                 CheckState::Fail,
-                "state database schema is unreadable",
+                "can't read the state database schema",
             )
             .fix("devlanes daemon reset-state --yes"),
         ),
@@ -150,7 +161,7 @@ pub fn checks(data: &Value) -> Vec<Check> {
                 CheckState::Warn,
                 format!("daemon runs inside a sandbox ({})", sandboxed.join(", ")),
             )
-            .fix("devlanes daemon install, so the daemon starts outside the sandbox"),
+            .fix("run devlanes daemon install so the daemon starts outside the sandbox"),
         );
     }
     let docker = &data["infra"]["docker"];
@@ -162,8 +173,8 @@ pub fn checks(data: &Value) -> Vec<Check> {
             format!("Docker {}", fact(docker, "version")),
         )
     } else {
-        Check::new("docker", CheckState::Warn, "Docker is not reachable")
-            .fix("start Docker; only projects with infra need it")
+        Check::new("docker", CheckState::Warn, "Docker not reachable")
+            .fix("start Docker (only projects with infra need it)")
     });
     let compose = &data["infra"]["compose"];
     if compose.get("version").is_some() {
@@ -176,7 +187,7 @@ pub fn checks(data: &Value) -> Vec<Check> {
                 "docker",
                 CheckState::Warn,
                 format!(
-                    "Compose {} cannot apply per-lane overrides",
+                    "Compose {} can't apply per-lane overrides",
                     fact(compose, "version")
                 ),
             )
@@ -212,22 +223,32 @@ pub fn checks(data: &Value) -> Vec<Check> {
             CheckState::Ok,
             format!("CA at {}", fact(ca, "path")),
         ));
+        // A CA that exists but is not trusted, or about to expire.
+        if let Some(hint) = ca.get("hint").and_then(Value::as_str) {
+            let mut check = Check::new("tls", CheckState::Warn, clean(hint));
+            if let Some(fix) = ca.get("fix").and_then(Value::as_str) {
+                check = check.fix(clean(fix));
+            }
+            checks.push(check);
+        }
     } else if ca.is_object() {
-        checks.push(
-            Check::new(
-                "tls",
-                CheckState::Fail,
-                format!("no CA: {}", fact(ca, "error")),
-            )
-            .fix("devlanes certs trust"),
-        );
+        let error = fact(ca, "error");
+        let text = if error.contains("no CA") || error.contains("not created") {
+            "no local CA yet".to_owned()
+        } else {
+            format!("CA error: {error}")
+        };
+        checks.push(Check::new("tls", CheckState::Fail, text).fix("devlanes certs trust"));
     }
     let hosts = &data["hosts"];
     if hosts.is_object() {
         let mode = fact(hosts, "mode");
         let probe = hosts.get("probe").and_then(Value::as_str).map_or_else(
-            || "not probed".to_owned(),
-            |probe| format!("resolver {}", clean(probe).replace('_', " ")),
+            || "resolver not checked".to_owned(),
+            |probe| match probe {
+                "localhost_resolves" => ".localhost resolves".to_owned(),
+                other => format!("resolver {}", clean(other).replace('_', " ")),
+            },
         );
         if let Some(error) = hosts.get("last_error").filter(|e| e.is_object()) {
             let check = Check::new(
@@ -246,15 +267,15 @@ pub fn checks(data: &Value) -> Vec<Check> {
                 hosts.get("state").and_then(Value::as_str),
                 int(hosts, "names"),
             ) {
-                (Some("applied"), Some(names)) => format!("{names} names written"),
-                (Some("idle"), _) => "nothing written".into(),
+                (Some("applied"), Some(names)) => format!("{names} names"),
+                (Some("idle"), _) => "no names written".into(),
                 (Some(other), _) => clean(other),
                 (None, _) => "unknown".into(),
             };
             checks.push(Check::new(
                 "hosts",
                 CheckState::Ok,
-                format!("/etc/hosts fallback {mode}, {probe}, {state}"),
+                format!("{probe}; /etc/hosts fallback {mode}, {state}"),
             ));
         }
         if let Some(error) = hosts.get("tld_error").filter(|e| e.is_object()) {

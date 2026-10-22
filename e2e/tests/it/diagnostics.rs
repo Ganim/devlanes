@@ -75,7 +75,7 @@ fn spawn_failure_names_the_program_and_reaches_the_log() -> Result<()> {
     assert!(
         plain
             .stdout
-            .contains("could not start: devlanes-no-such-program: command not found on PATH"),
+            .contains("couldn't start: devlanes-no-such-program: command not found on PATH"),
         "{plain}"
     );
     assert!(

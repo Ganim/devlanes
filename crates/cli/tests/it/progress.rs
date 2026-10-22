@@ -236,8 +236,8 @@ fn phase_detail_replaces_the_running_line() {
         rewritten(&runtime(&["devlanes"], true, false), &events),
         format!(
             "\u{2026} infra: starting containers, waiting until they are healthy\n\
-{erase}\u{2026} infra: creating postgres (healthy 1 of 2)\n\
-{erase}\u{2026} infra: waiting for postgres (healthy 1 of 2)\n\
+{erase}\u{2026} infra: creating postgres (1 of 2 healthy)\n\
+{erase}\u{2026} infra: waiting for postgres (1 of 2 healthy)\n\
 {erase}\u{2713} infra\n\
 \u{2026} setup: running infra.setup\n\
 {erase}\u{2026} setup: database (1 of 2)\n\

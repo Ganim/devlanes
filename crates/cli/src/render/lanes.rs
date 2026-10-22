@@ -23,9 +23,24 @@ fn queue_place(unit: &UnitSummary) -> Option<String> {
     })
 }
 
-/// The state word, with the queue place for queued units (`queued 6/40`).
-fn state_label(unit: &UnitSummary) -> String {
-    let state = clean(&unit.state.to_lowercase());
+/// The unit's display name for people, its key for everything else.
+fn unit_label(unit: &UnitSummary, cx: &Ctx<'_>) -> String {
+    if cx.human() {
+        clean(unit.label())
+    } else {
+        clean(&unit.name)
+    }
+}
+
+/// The state word, with the queue place for queued units (`queued 6/40`). People
+/// see `running` for a unit that is ready only because its process started.
+fn state_label(unit: &UnitSummary, cx: &Ctx<'_>) -> String {
+    let word = if cx.human() {
+        unit.shown_state()
+    } else {
+        &unit.state
+    };
+    let state = clean(&word.to_lowercase());
     match queue_place(unit).filter(|_| state == "queued") {
         Some(place) => format!("{state} {place}"),
         None => state,
@@ -266,6 +281,11 @@ fn start_warnings(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
         .collect()
 }
 
+/// A start that found every selected unit up: it spawned nothing and ran no task.
+fn nothing_started(result: &StartResult) -> bool {
+    result.started.is_empty() && !result.already_running.is_empty() && result.failures.is_empty()
+}
+
 /// The cli-design 3.5 start summary.
 fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
     let view = StartView::new(result);
@@ -291,6 +311,9 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
         }
         if result.timed_out {
             header.push_str(", timed out");
+        }
+        if nothing_started(result) {
+            header.push_str(", already running (nothing started)");
         }
         if !result.skipped_tasks.is_empty() {
             let names: Vec<String> = result.skipped_tasks.iter().map(|t| clean(t)).collect();
@@ -321,7 +344,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
             );
         }
         for unit in &view.pending {
-            let label = state_label(unit);
+            let label = state_label(unit, cx);
             let (word, place) = label.split_once(' ').unwrap_or((label.as_str(), ""));
             let place = if place.is_empty() {
                 String::new()
@@ -381,6 +404,12 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
     } else if result.ready {
         lines.push(format!("{} nothing to start", cx.mark(Outcome::Ok)));
     }
+    if nothing_started(result) {
+        lines.push(format!(
+            "{} already running; nothing was started",
+            cx.mark(Outcome::Ok)
+        ));
+    }
     let mut rows = Vec::new();
     for (name, failure, unit) in &view.failed {
         let mut detail = match failure_exit(*failure, *unit) {
@@ -406,7 +435,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
     for unit in &view.pending {
         rows.push(vec![
             cx.state(&clean(&unit.state)),
-            clean(&unit.name),
+            unit_label(unit, cx),
             queue_place(unit)
                 .map(|place| cx.paint(&format!("{place} in line"), "2"))
                 .unwrap_or_default(),
@@ -415,7 +444,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
     for unit in &shown {
         rows.push(vec![
             cx.mark(Outcome::Ok),
-            clean(&unit.name),
+            unit_label(unit, cx),
             display_url(&unit.urls).map_or_else(String::new, |url| clean(url)),
         ]);
     }
@@ -461,7 +490,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
 /// is already named.
 fn row_reason(reason: &RpcError) -> String {
     if reason.code == "spawn_failed" && reason.data.get("unit").is_some() {
-        format!("could not start: {}", words::spawn_cause(&reason.data))
+        format!("couldn't start: {}", words::spawn_cause(&reason.data))
     } else {
         words::error_message(reason).0
     }
@@ -879,7 +908,7 @@ fn unit_table(lane: &LaneSummary, cx: &Ctx<'_>) -> Vec<String> {
     let mut extra = Vec::new();
     for unit in &units {
         let ports: Vec<String> = unit.ports.values().map(u16::to_string).collect();
-        let mut state = state_label(unit);
+        let mut state = state_label(unit, cx);
         if let Some(code) = unit.exit_code.filter(|_| unit.state == "failed") {
             if ctrl_c_exit(code) {
                 state.push_str(" (Ctrl-C)");
@@ -888,7 +917,7 @@ fn unit_table(lane: &LaneSummary, cx: &Ctx<'_>) -> Vec<String> {
             }
         }
         rows.push(vec![
-            cx.unit_name(&clean(&unit.name), &unit.state, unit.color.as_deref()),
+            cx.unit_name(&unit_label(unit, cx), &unit.state, unit.color.as_deref()),
             cx.state_text(&unit.state, &state),
             if ports.is_empty() {
                 "–".into()
@@ -952,6 +981,10 @@ pub(super) fn lane_new(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         return tree(data);
     };
     let mut line = format!("created {}", clean(&lane.reference));
+    // Another lane for an existing folder answers to its name too.
+    if let Some(name) = data.get("name").and_then(Value::as_str) {
+        line.push_str(&format!(" named {}", clean(name)));
+    }
     if let Some(branch) = &lane.branch {
         line.push_str(&format!(" ({})", clean(branch)));
     }

@@ -10,8 +10,9 @@ use serde_json::Value;
 
 use crate::{api::ApiError, text};
 
-/// Lines kept from a long stderr in the details pane; the error list shows all.
-pub const STDERR_TAIL: usize = 8;
+/// Lines kept from a long stderr in the details pane: as many as the daemon
+/// keeps of a failed unit's log.
+pub const STDERR_TAIL: usize = 20;
 
 /// An error ready to show: a one-line summary, further cleaned lines (stderr
 /// for failed commands), the failed command and a hint.
@@ -46,7 +47,7 @@ impl Worded {
         for detail in &self.detail {
             let detail = detail.trim();
             if !detail.is_empty() {
-                line.push_str(" · ");
+                line.push_str("; ");
                 line.push_str(detail);
             }
         }
@@ -60,14 +61,14 @@ pub fn api(error: &ApiError) -> Worded {
         ApiError::Rpc(error) => rpc(error),
         ApiError::Disconnected(message) => Worded {
             code: None,
-            summary: "daemon unreachable".into(),
+            summary: "can't reach the daemon".into(),
             detail: text::clean_lines(message),
             command: None,
             hint: Some("devlanes daemon status".into()),
         },
         ApiError::Decode(message) => Worded {
             code: None,
-            summary: "unexpected response from the daemon".into(),
+            summary: "the daemon's reply didn't parse; daemon and TUI versions may differ".into(),
             detail: text::clean_lines(message),
             command: None,
             hint: Some("devlanes doctor".into()),
@@ -147,6 +148,16 @@ pub fn exited_with(code: impl Into<i64>) -> String {
     }
 }
 
+/// `exit <code>` for state details, or `Ctrl-C` for a Windows Ctrl-C exit.
+pub fn exit_short(code: impl Into<i64>) -> String {
+    let code = code.into();
+    if ctrl_c_exit(code) {
+        "Ctrl-C".into()
+    } else {
+        format!("exit {code}")
+    }
+}
+
 /// `logs` hint for errors that name a unit.
 fn logs_hint(data: &Value) -> Option<String> {
     let found = target(data);
@@ -182,6 +193,8 @@ fn command_detail(
     what: &str,
     (command, status, stderr): (String, String, String),
 ) -> (String, Vec<String>, String) {
+    // `exit status: 1` reads as `exit status 1`.
+    let status = status.replacen(": ", " ", 1);
     let summary = if status.is_empty() {
         format!("{what} failed")
     } else {
@@ -201,6 +214,27 @@ fn message_lines(data: &Value) -> (String, Vec<String>) {
     (lines.next().unwrap_or_default(), lines.collect())
 }
 
+/// `devlanes.yaml is invalid at line 2, column 1: unknown field`, the CLI's
+/// wording of `config_error` (`devlanes-cli` `render/words.rs`). Line 0
+/// means the file could not be read, so it is left out.
+fn config_invalid(data: &Value, message: &str) -> String {
+    let file = field(data, "file");
+    let path = field(data, "path");
+    let file = match (file.is_empty(), path.is_empty()) {
+        (false, _) => file,
+        (true, false) => format!("devlanes.yaml in {path}"),
+        (true, true) => "devlanes.yaml".into(),
+    };
+    let number = |key| data.get(key).and_then(Value::as_u64).filter(|n| *n > 0);
+    match (number("line"), number("column")) {
+        (Some(line), Some(column)) => {
+            format!("{file} is invalid at line {line}, column {column}: {message}")
+        }
+        (Some(line), None) => format!("{file} is invalid at line {line}: {message}"),
+        _ => format!("{file} is invalid: {message}"),
+    }
+}
+
 /// Words a daemon error from its code and data.
 pub fn rpc(error: &RpcError) -> Worded {
     let data = &error.data;
@@ -218,7 +252,7 @@ pub fn rpc(error: &RpcError) -> Worded {
     let (summary, detail, hint): (String, Vec<String>, Option<String>) = match code.as_str() {
         "compose_failed" | "docker_failed" => {
             let what = if code == "compose_failed" {
-                "compose"
+                "docker compose"
             } else {
                 "docker"
             };
@@ -241,27 +275,29 @@ pub fn rpc(error: &RpcError) -> Worded {
         }
         "compose_unsupported" => (message, rest, Some("devlanes doctor".into())),
         "container_name_conflict" => (
-            "a container name is already taken".into(),
+            "another container already has this name".into(),
             text::clean_lines(&field_raw(data, "message")),
             None,
         ),
         "docker_unavailable" => (
-            "Docker is not reachable".into(),
+            "Docker isn't running or can't be reached".into(),
             text::clean_lines(&field_raw(data, "message")),
             Some("devlanes doctor".into()),
         ),
         "not_found" => (
-            format!(
-                "{} not found; candidates: {}",
-                reference(),
-                candidates(data)
-            ),
+            match candidates(data) {
+                list if list == "none" => format!("no lane or unit named {}", reference()),
+                list => format!(
+                    "no lane or unit named {}; close matches: {list}",
+                    reference()
+                ),
+            },
             Vec::new(),
             Some("devlanes lane ls".into()),
         ),
         "ambiguous" => (
             format!(
-                "{} matches several lanes: {}",
+                "{} matches more than one lane: {}",
                 reference(),
                 candidates(data)
             ),
@@ -270,31 +306,37 @@ pub fn rpc(error: &RpcError) -> Worded {
         ),
         "not_running" => (format!("{} is not running", target(data)), Vec::new(), None),
         // Start refuses a unit a previous daemon left running; stopping it is the way out.
-        "unit_orphaned" => (
-            format!(
-                "{} is still running as pid {}, left by a previous daemon; x stops it",
-                target(data),
-                known(data, "pid")
-            ),
-            Vec::new(),
-            Some(field(data, "command")).filter(|command| !command.is_empty()),
-        ),
+        "unit_orphaned" => {
+            command = Some(field(data, "command")).filter(|command| !command.is_empty());
+            (
+                format!(
+                    "{} is already running as pid {}, started by an earlier daemon; x stops it",
+                    target(data),
+                    known(data, "pid")
+                ),
+                Vec::new(),
+                None,
+            )
+        }
         "confirmation_required" => (
-            "this needs confirmation; run it from the CLI with --yes".into(),
+            "needs a confirmation the TUI can't give; run it from the CLI with --yes".into(),
             vec![compact_fields(data)],
             None,
         ),
-        "terminal_required" => (
-            match field(data, "task") {
-                task if !task.is_empty() => format!("task {task} is interactive"),
-                _ => "this needs an interactive terminal".into(),
-            },
-            Vec::new(),
-            Some(field(data, "command")).filter(|command| !command.is_empty()),
-        ),
+        "terminal_required" => {
+            command = Some(field(data, "command")).filter(|command| !command.is_empty());
+            (
+                match field(data, "task") {
+                    task if !task.is_empty() => format!("{task} needs an interactive terminal"),
+                    _ => "needs an interactive terminal".into(),
+                },
+                Vec::new(),
+                None,
+            )
+        }
         "project_running_elsewhere" => (
             format!(
-                "project {} is already running from {}",
+                "{} is already running from {}",
                 known(data, "project"),
                 known(data, "path")
             ),
@@ -303,7 +345,7 @@ pub fn rpc(error: &RpcError) -> Worded {
         ),
         "port_in_use" => (
             format!(
-                "port {} is in use by PID {}",
+                "port {} is taken by pid {}",
                 known(data, "port"),
                 known(data, "pid")
             ),
@@ -312,10 +354,10 @@ pub fn rpc(error: &RpcError) -> Worded {
         ),
         "port_in_use_by_lane" => (
             format!(
-                "port {} is used by {} in lane {}",
+                "port {} is taken by {}:{}",
                 known(data, "port"),
-                known(data, "unit"),
-                known(data, "lane")
+                known(data, "lane"),
+                known(data, "unit")
             ),
             Vec::new(),
             None,
@@ -326,7 +368,7 @@ pub fn rpc(error: &RpcError) -> Worded {
             Some("devlanes secrets unlock".into()),
         ),
         "needs_env" => (
-            "the daemon restarted and has no shell environment for this lane".into(),
+            "the daemon restarted and lost this lane's shell environment".into(),
             Vec::new(),
             Some(match field(data, "lane") {
                 lane if lane.is_empty() => "devlanes lane resume".into(),
@@ -342,7 +384,7 @@ pub fn rpc(error: &RpcError) -> Worded {
             None,
         ),
         "config_error" => (
-            format!("invalid config: {message}"),
+            config_invalid(data, &message),
             rest,
             Some("devlanes config check".into()),
         ),
@@ -352,7 +394,7 @@ pub fn rpc(error: &RpcError) -> Worded {
             Some("devlanes config check".into()),
         ),
         "worktree_missing" => (
-            format!("worktree {} is missing", known(data, "path")),
+            format!("worktree {} is gone", known(data, "path")),
             Vec::new(),
             Some("devlanes lane gc".into()),
         ),
@@ -362,19 +404,19 @@ pub fn rpc(error: &RpcError) -> Worded {
             Some("devlanes lane gc".into()),
         ),
         "pool_exhausted" => (
-            "the port pool is full".into(),
+            "no free port blocks left".into(),
             Vec::new(),
             Some("devlanes lane gc".into()),
         ),
         "units_required" => ("name at least one unit".into(), Vec::new(), None),
         "unit_failed" => (format!("{} failed", target(data)), rest, logs_hint(data)),
         "ready_timeout" => (
-            format!("{} did not become ready in time", target(data)),
+            format!("{} wasn't ready in time", target(data)),
             rest,
             logs_hint(data),
         ),
         "spawn_failed" => (
-            format!("{} could not start: {message}", target(data)),
+            format!("{} couldn't start: {message}", target(data)),
             rest,
             logs_hint(data),
         ),
@@ -392,7 +434,10 @@ pub fn rpc(error: &RpcError) -> Worded {
         ),
         "git_failed" => (format!("git failed: {message}"), rest, None),
         "unsupported" | "unsupported_method" => (
-            format!("daemon does not support {}", known(data, "method")),
+            format!(
+                "the daemon is too old for {}; upgrade and restart it",
+                known(data, "method")
+            ),
             Vec::new(),
             None,
         ),
@@ -439,7 +484,7 @@ mod tests {
             1,
         );
         let worded = rpc(&error);
-        assert_eq!(worded.summary, "compose failed (exit status: 1)");
+        assert_eq!(worded.summary, "docker compose failed (exit status 1)");
         assert_eq!(
             worded.detail,
             [
@@ -454,7 +499,7 @@ mod tests {
         assert_eq!(worded.code.as_deref(), Some("compose_failed"));
         assert_eq!(
             worded.one_line(),
-            "compose failed (exit status: 1) · open /work/acme/compose.yaml: no such file · retry later"
+            "docker compose failed (exit status 1); open /work/acme/compose.yaml: no such file; retry later"
         );
     }
 
@@ -473,7 +518,7 @@ mod tests {
         ));
         assert_eq!(worded.summary, "bad thing: port=80");
         let worded = api(&ApiError::Disconnected("client I/O: broken pipe".into()));
-        assert_eq!(worded.summary, "daemon unreachable");
+        assert_eq!(worded.summary, "can't reach the daemon");
         assert_eq!(worded.detail, ["client I/O: broken pipe"]);
     }
 
@@ -499,6 +544,6 @@ mod tests {
     #[test]
     fn one_line_collapses_detail() {
         let worded = Worded::local("could not open\nsecond line");
-        assert_eq!(worded.one_line(), "could not open · second line");
+        assert_eq!(worded.one_line(), "could not open; second line");
     }
 }

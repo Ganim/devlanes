@@ -874,9 +874,23 @@
       "examples": [
         {
           "open_on_start": false
+        },
+        {
+          "glyphs": "ascii",
+          "theme": "light"
         }
       ],
       "properties": {
+        "glyphs": {
+          "$ref": "#/$defs/TuiGlyphs",
+          "default": "auto",
+          "description": "Symbols the TUI draws states and markers with; defaults to auto.",
+          "examples": [
+            "auto",
+            "unicode",
+            "ascii"
+          ]
+        },
         "open_on_start": {
           "default": true,
           "description": "Run `start`, `restart`, `lane resume` and `lane new --start` inside the TUI when typed at a terminal; defaults to true. false prints them as text, like `--no-ui` or DEVLANES_NO_UI=1.",
@@ -885,9 +899,97 @@
             false
           ],
           "type": "boolean"
+        },
+        "theme": {
+          "$ref": "#/$defs/TuiTheme",
+          "default": "auto",
+          "description": "Colors of the TUI; defaults to auto. NO_COLOR always turns colors off.",
+          "examples": [
+            "auto",
+            "dark",
+            "light",
+            "ansi"
+          ]
         }
       },
       "type": "object"
+    },
+    "TuiGlyphs": {
+      "description": "Symbols the TUI draws with.",
+      "examples": [
+        "auto",
+        "unicode",
+        "ascii"
+      ],
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Unicode when the locale is UTF-8, else ASCII.",
+          "examples": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "unicode",
+          "description": "Unicode symbols such as ● ✕ ▾.",
+          "examples": [
+            "unicode"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "ascii",
+          "description": "Plain ASCII, for fonts or terminals that draw Unicode symbols badly.",
+          "examples": [
+            "ascii"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TuiTheme": {
+      "description": "Colors of the TUI.",
+      "examples": [
+        "auto",
+        "dark",
+        "light",
+        "ansi"
+      ],
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "The terminal's 16 colors, or the dark or light palette when the terminal reports true color and its background.",
+          "examples": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "dark",
+          "description": "The true-color palette for a dark background.",
+          "examples": [
+            "dark"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "light",
+          "description": "The true-color palette for a light background.",
+          "examples": [
+            "light"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "ansi",
+          "description": "The terminal's own 16 colors, which follow its theme.",
+          "examples": [
+            "ansi"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "UpdatesConfig": {
       "additionalProperties": false,
@@ -1097,12 +1199,18 @@
     "tui": {
       "$ref": "#/$defs/TuiConfig",
       "default": {
-        "open_on_start": true
+        "glyphs": "auto",
+        "open_on_start": true,
+        "theme": "auto"
       },
       "description": "How commands use the terminal UI.",
       "examples": [
         {
           "open_on_start": false
+        },
+        {
+          "glyphs": "ascii",
+          "theme": "light"
         }
       ]
     },

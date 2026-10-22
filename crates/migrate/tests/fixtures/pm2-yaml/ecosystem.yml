@@ -1,7 +1,0 @@
-apps:
-  - name: api
-    script: server.js
-    interpreter: bun
-    args: --hot
-  - name: jobs
-    script: ./jobs.sh

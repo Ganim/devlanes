@@ -24,27 +24,16 @@ pub const PALETTE: &[&str] = &[
 /// Reserved for failed units; inference never returns it.
 pub const FAILURE_COLOR: &str = "red";
 
-/// Colors the hash fallback picks from: the palette without the reds, which
-/// clients use for failures.
-const HASHED: &[&str] = &[
-    "green",
-    "yellow",
-    "blue",
-    "magenta",
-    "cyan",
-    "white",
-    "gray",
-    "bright-green",
-    "bright-yellow",
-    "bright-blue",
-    "bright-magenta",
-    "bright-cyan",
-];
+/// Colors the hash fallback picks from. Not red (failures), yellow (focus and
+/// attention), white and gray (they vanish on light or read as disabled) or a
+/// bright variant, which differs from its base only in lightness on most
+/// themes, so two families would read as one.
+const HASHED: &[&str] = &["green", "blue", "magenta", "cyan"];
 
 /// Category words and their colors, checked against tags, the preset and name
 /// tokens. Categories that often run side by side get different hues: admin
-/// next to api is white rather than bright-blue, desktop next to web is
-/// bright-cyan rather than bright-green.
+/// next to api is bright-magenta rather than bright-blue, desktop next to web
+/// is bright-cyan rather than bright-green.
 const CATEGORIES: &[(&[&str], &str)] = &[
     (&["api", "server", "backend", "gateway"], "blue"),
     (
@@ -56,6 +45,8 @@ const CATEGORIES: &[(&[&str], &str)] = &[
     (
         &[
             "worker",
+            "workers",
+            "wrk",
             "queue",
             "consumer",
             "job",
@@ -69,31 +60,33 @@ const CATEGORIES: &[(&[&str], &str)] = &[
         &[
             "db", "database", "postgres", "pg", "redis", "mysql", "mongo",
         ],
-        "yellow",
+        "cyan",
     ),
     (&["docs", "doc"], "cyan"),
-    (&["admin"], "white"),
+    (&["admin"], "bright-magenta"),
     (
         &["desktop", "mobile", "tauri", "electron", "ios", "android"],
         "bright-cyan",
     ),
-    (&["stub", "mock", "fake"], "gray"),
+    // Gray reads as "support service" in the TUI's bar, never as disabled.
+    (&["stub", "stubs", "mock", "fake"], "gray"),
 ];
 
 /// Picks a unit's color.
 ///
 /// In order: the first of `tags` with a configured color in `overrides` (tag to
 /// palette name; unknown names are ignored); the first tag in the category table;
-/// the preset in the table; the first name token (split on `-`, `_`, `.`) in the
-/// table; else an FNV-1a hash of the first tag, or of `name` without tags, into
-/// the palette minus the reds. Matching ignores case.
+/// the preset in the table; the name's first segment (split on `-`, `_`, `.`) in
+/// the table; else an FNV-1a hash of the first tag, or of that first segment
+/// without tags, into green, blue, magenta and cyan. Matching ignores case. Units
+/// named with a shared prefix (`wrk-email`, `wrk-index`) so share a color.
 ///
 /// ```
 /// use devlanes_core::color::unit_color;
 /// use std::collections::BTreeMap;
 /// let none = BTreeMap::new();
 /// assert_eq!(unit_color(&["api".into()], "catalog", None, &none), "blue");
-/// assert_eq!(unit_color(&[], "user-web", None, &none), "green");
+/// assert_eq!(unit_color(&[], "web-user", None, &none), "green");
 /// ```
 pub fn unit_color(
     tags: &[String],
@@ -106,19 +99,21 @@ pub fn unit_color(
             return color;
         }
     }
-    let candidates = tags
-        .iter()
-        .map(String::as_str)
-        .chain(preset)
-        .chain(std::iter::once(name));
+    // Only the name's first segment: a family such as `wrk-*` must not split
+    // when one member's later word happens to be a category (`wrk-cron`).
+    let prefix = name.split(['-', '_', '.']).next().unwrap_or(name);
+    let candidates = tags.iter().map(String::as_str).chain(preset);
     for word in candidates {
         if let Some(color) = word.split(['-', '_', '.']).find_map(category) {
             return color;
         }
     }
-    let seed = tags.first().map_or(name, String::as_str);
+    if let Some(color) = category(prefix) {
+        return color;
+    }
+    let seed = tags.first().map_or(prefix, String::as_str);
     let index = fnv1a(seed.to_ascii_lowercase().as_bytes()) % HASHED.len() as u64;
-    // The modulo keeps the index in range; `usize` holds any value below 12.
+    // The modulo keeps the index in range; `usize` holds any value below 4.
     HASHED[usize::try_from(index).unwrap_or_default()]
 }
 
@@ -164,19 +159,22 @@ mod tests {
             (&["api", "essential"], "catalog", None, "blue"),
             (&["essential", "web"], "x", None, "green"),
             (&["Worker"], "x", None, "magenta"),
-            (&["db"], "x", None, "yellow"),
+            (&["workers"], "x", None, "magenta"),
+            (&[], "wrk-email", None, "magenta"),
+            (&["stubs"], "x", None, "gray"),
+            (&["db"], "x", None, "cyan"),
             (&[], "docs", None, "cyan"),
-            (&[], "admin-panel", None, "white"),
+            (&[], "admin-panel", None, "bright-magenta"),
             (&["desktop"], "x", None, "bright-cyan"),
-            (&[], "sms-stub", None, "gray"),
+            (&[], "stub-sms", None, "gray"),
             (&[], "user-web", Some("vite"), "green"),
             (&[], "shop", Some("next"), "green"),
             (&[], "shell", Some("tauri"), "bright-cyan"),
             (&[], "api_gateway", None, "blue"),
             (&[], "jobs.cron", None, "magenta"),
-            (&[], "postgres", None, "yellow"),
+            (&[], "postgres", None, "cyan"),
             // A category tag beats the preset and the name.
-            (&["db"], "web", Some("vite"), "yellow"),
+            (&["db"], "web", Some("vite"), "cyan"),
             // The preset beats the name.
             (&[], "api", Some("vite"), "green"),
         ];
@@ -187,6 +185,25 @@ mod tests {
                 "{tags:?} {name} {preset:?}"
             );
         }
+    }
+
+    #[test]
+    /// Units sharing a name prefix share a color, whatever their other words;
+    /// a tag still decides first.
+    fn a_name_prefix_is_one_color() {
+        for family in [
+            ["wrk-email", "wrk-index", "wrk-cron"],
+            ["api-gateway", "api-users", "api_admin"],
+            ["acme.ledger", "acme.docs", "acme-web"],
+        ] {
+            let colors: Vec<&str> = family.iter().map(|name| plain(&[], name, None)).collect();
+            assert!(
+                colors.windows(2).all(|pair| pair[0] == pair[1]),
+                "{family:?}: {colors:?}"
+            );
+        }
+        assert_eq!(plain(&[], "api-gateway", None), "blue");
+        assert_eq!(plain(&["web"], "wrk-email", None), "green");
     }
 
     #[test]
@@ -212,12 +229,12 @@ mod tests {
         assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
         let pinned: &[(&[&str], &str, &str)] = &[
             // The first tag is hashed, not the name.
-            (&["essential"], "anything", "magenta"),
-            (&["Essential"], "other", "magenta"),
-            (&[], "realtime", "bright-yellow"),
-            (&[], "extension", "blue"),
-            (&[], "temis", "yellow"),
-            (&[], "catalog", "cyan"),
+            (&["essential"], "anything", "cyan"),
+            (&["Essential"], "other", "cyan"),
+            (&[], "realtime", "green"),
+            (&[], "extension", "magenta"),
+            (&[], "temis", "blue"),
+            (&[], "catalog", "green"),
         ];
         for (tags, name, expected) in pinned {
             assert_eq!(plain(tags, name, None), *expected, "{tags:?} {name}");
@@ -225,13 +242,18 @@ mod tests {
     }
 
     #[test]
-    /// Inference never returns red or bright-red, whatever the input.
-    fn red_is_never_inferred() {
+    /// The hash never returns red, yellow, white, gray or a bright variant,
+    /// whatever the input.
+    fn the_hash_avoids_reserved_and_faint_colors() {
         for index in 0..5_000 {
-            let name = format!("unit-{index}");
+            let name = format!("u{index}-x");
             let color = plain(&[], &name, None);
-            assert!(color != FAILURE_COLOR && color != "bright-red", "{name}");
+            assert!(
+                matches!(color, "green" | "blue" | "magenta" | "cyan"),
+                "{name}: {color}"
+            );
             assert!(palette_entry(color).is_some());
         }
+        assert_ne!(plain(&[], "unit-9", None), FAILURE_COLOR);
     }
 }

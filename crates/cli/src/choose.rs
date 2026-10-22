@@ -157,14 +157,19 @@ fn items(data: &Value) -> impl Iterator<Item = &Value> {
         .flatten()
 }
 
-/// The lane of `lanes` whose worktree holds `cwd` (the deepest one).
+/// The lane of `lanes` whose worktree holds `cwd` (the deepest one). Paths
+/// compare ignoring case on Windows, where a shell may report another casing
+/// than Git does.
 pub fn lane_for_cwd<'a>(
     lanes: &'a [LaneSummary],
     cwd: &std::path::Path,
 ) -> Option<&'a LaneSummary> {
     lanes
         .iter()
-        .filter(|lane| !lane.path.as_os_str().is_empty() && cwd.starts_with(&lane.path))
+        .filter(|lane| {
+            !lane.path.as_os_str().is_empty()
+                && devlanes_core::paths::path_starts_with(cwd, &lane.path)
+        })
         .max_by_key(|lane| lane.path.as_os_str().len())
 }
 

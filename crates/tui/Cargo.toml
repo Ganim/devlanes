@@ -13,6 +13,7 @@ base64 = "0.22"
 bytes.workspace = true
 crossterm = { version = "0.29", features = ["event-stream"] }
 devlanes-client = { path = "../client" }
+devlanes-core = { path = "../core" }
 devlanes-proto = { path = "../proto" }
 devlanes-sys = { path = "../sys" }
 devlanes-term = { path = "../term" }
@@ -28,7 +29,10 @@ unicode-width = "0.2"
 vt100 = "0.18"
 
 [dev-dependencies]
+# The `screens` example draws every TUI page to PNG for design review.
+ab_glyph = "0.2"
 insta = "1"
+png = "0.17"
 tempfile.workspace = true
 
 [lints]

@@ -1,2 +1,0 @@
-procs:
-  web: "npm run dev"

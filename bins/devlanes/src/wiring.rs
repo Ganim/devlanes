@@ -62,9 +62,14 @@ fn preferred_terminal(paths: &Paths) -> Option<String> {
     value.as_str().map(str::to_owned)
 }
 
-/// The TUI's launchers, terminal app and progress bar from the user config.
+/// The TUI's launchers, terminal app, progress bar, colors and glyphs from the
+/// user config.
 pub fn tui_options(paths: &Paths) -> devlanes_tui::Options {
     use std::io::IsTerminal;
+    // A config that does not load leaves the TUI on its detected defaults.
+    let tui = devlanes_config::load_user(paths.home.join("config.yaml"))
+        .map(|config| config.tui)
+        .unwrap_or_default();
     devlanes_tui::Options {
         launchers: launchers(),
         terminal: preferred_terminal(paths),
@@ -73,6 +78,8 @@ pub fn tui_options(paths: &Paths) -> devlanes_tui::Options {
             crate::progress::configured_mode(paths),
             std::io::stdout().is_terminal(),
         ),
+        theme: Some(tui.theme.as_str().to_owned()),
+        glyphs: Some(tui.glyphs.as_str().to_owned()),
     }
 }
 
@@ -149,6 +156,7 @@ pub async fn engine(
         .await
         .map(Arc::new);
     integ.pressure = pressure_source();
+    integ.system_pressure = pressure_source();
     integ.start_gate = Some(start_gate(&user.startup, integ.pressure.clone()));
     integ.resolver_files = Some(Arc::new(OsResolverFiles));
     let mut options = EngineOptions::new(&paths.home, &paths.socket);
@@ -1573,26 +1581,32 @@ impl ContainerInfra {
         }
     }
 
-    /// Stats targets for compose services, one per running replica.
+    /// Stats targets for compose services, one per running replica, with the
+    /// state `docker compose ps` reported for the service.
     fn compose_targets(
         targets: &mut Vec<InfraContainer>,
         containers: &BTreeMap<String, Vec<String>>,
+        health: &BTreeMap<String, devlanes_infra_compose::Health>,
         shared: bool,
     ) {
         for (service, names) in containers {
+            let state = health.get(service).map(compose_state);
             targets.extend(names.iter().map(|docker| InfraContainer {
                 name: service.clone(),
                 docker: docker.clone(),
                 shared,
+                state: state.clone(),
             }));
         }
     }
 
     /// Stats targets for plain containers. Their names are deterministic, so no
     /// engine call is needed; a container that is not running yields no sample.
+    /// `state` is what the caller knows, such as `running` right after `ensure`.
     fn plain_targets(
         targets: &mut Vec<InfraContainer>,
         containers: &[devlanes_infra_docker::ContainerSpec],
+        state: Option<&str>,
     ) {
         targets.extend(containers.iter().map(|container| InfraContainer {
             name: container.name.clone(),
@@ -1602,6 +1616,7 @@ impl ContainerInfra {
                 container.scope,
             ),
             shared: container.scope == devlanes_infra_docker::Scope::Shared,
+            state: state.map(str::to_owned),
         }));
     }
 
@@ -1647,11 +1662,16 @@ impl ContainerInfra {
                     .ok()
                     .and_then(|v| v.get("kind").and_then(Value::as_str).map(str::to_owned))
                     .unwrap_or_default();
+                let exit_code = match &event.kind {
+                    devlanes_infra_docker::EventKind::Died { exit_code } => *exit_code,
+                    _ => None,
+                };
                 let _ = sender.send(InfraEvent {
                     project: project.clone(),
                     lane,
                     container: event.container_name.clone(),
                     state,
+                    exit_code,
                 });
             }
         });
@@ -1713,7 +1733,7 @@ impl InfraProvider for ContainerInfra {
                 .await
                 .map_err(compose_error)?;
             Self::compose_namespace(&mut namespace, &shared.endpoints);
-            Self::compose_targets(&mut targets, &shared.containers, true);
+            Self::compose_targets(&mut targets, &shared.containers, &shared.health, true);
             report.insert("shared".into(), json!(shared));
             self.watch_events(&shared.project);
         }
@@ -1747,7 +1767,12 @@ impl InfraProvider for ContainerInfra {
                 .await
                 .map_err(compose_error)?;
             Self::compose_namespace(&mut namespace, &lane_report.endpoints);
-            Self::compose_targets(&mut targets, &lane_report.containers, false);
+            Self::compose_targets(
+                &mut targets,
+                &lane_report.containers,
+                &lane_report.health,
+                false,
+            );
             report.insert("lane".into(), json!(lane_report));
         }
         let containers = Self::containers(spec)?;
@@ -1766,7 +1791,8 @@ impl InfraProvider for ContainerInfra {
                 );
             }
             Self::container_namespace(&mut namespace, &containers);
-            Self::plain_targets(&mut targets, &containers);
+            // `ensure` returned, so each one runs; events refine it from here.
+            Self::plain_targets(&mut targets, &containers, Some("running"));
             report.insert("containers".into(), json!(ensured));
             self.watch_events(&spec.project);
         }
@@ -1786,17 +1812,17 @@ impl InfraProvider for ContainerInfra {
             && let Ok(shared) = self.compose.shared_status(&Self::shared(spec)).await
         {
             Self::compose_namespace(&mut namespace, &shared.endpoints);
-            Self::compose_targets(&mut targets, &shared.containers, true);
+            Self::compose_targets(&mut targets, &shared.containers, &shared.health, true);
         }
         if Self::has_lane_services(spec)
             && let Ok(lane) = self.compose.lane_status(&Self::lane(spec)).await
         {
             Self::compose_namespace(&mut namespace, &lane.endpoints);
-            Self::compose_targets(&mut targets, &lane.containers, false);
+            Self::compose_targets(&mut targets, &lane.containers, &lane.health, false);
         }
         if let Ok(containers) = Self::containers(spec) {
             Self::container_namespace(&mut namespace, &containers);
-            Self::plain_targets(&mut targets, &containers);
+            Self::plain_targets(&mut targets, &containers, None);
         }
         Ok(InfraUp {
             namespace: Value::Object(namespace),
@@ -2070,6 +2096,20 @@ impl InfraProvider for ContainerInfra {
             }
         }
         progress
+    }
+}
+
+/// A compose service's health as `ContainerSummary.state`.
+fn compose_state(health: &devlanes_infra_compose::Health) -> String {
+    use devlanes_infra_compose::Health;
+    match health {
+        Health::Running => "running".into(),
+        Health::Starting => "starting".into(),
+        Health::Healthy => "healthy".into(),
+        Health::Unhealthy => "unhealthy".into(),
+        Health::Exited { code } => format!("exited {code}"),
+        Health::Other { state } => state.clone(),
+        Health::Missing => "missing".into(),
     }
 }
 

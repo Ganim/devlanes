@@ -20,7 +20,7 @@ use crate::{
     Session,
     engine::{Inner, LanePair, carries_env, confirmation, params, required},
     lifecycle::{SpawnRequest, StartOptions},
-    model::{EnvMap, Kind, lane_summary, lock, unit_summary},
+    model::{EnvMap, Kind, ProjectRt, lane_summary, lock, unit_summary},
     registry::{internal, store_error},
     stream::LaneEvents,
 };
@@ -42,7 +42,12 @@ struct ResumeParams {
 /// `lane.new` parameters.
 #[derive(Debug, Deserialize)]
 struct LaneNewParams {
-    branch: String,
+    /// Without one, another lane for the cwd's folder.
+    #[serde(default)]
+    branch: Option<String>,
+    /// Name of that extra lane.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     start: bool,
     /// Stream the start's lane events on the request.
@@ -293,58 +298,30 @@ impl Inner {
         let Some(project) = self.project_for_cwd(&context.cwd).await? else {
             return Err(crate::engine::no_config(&context.cwd).await);
         };
-        if !project.git {
-            return Err(RpcError::new(
-                "not_a_git_project",
-                json!({"project": project.name()}),
-                1,
-            ));
-        }
-        let primary = self.primary_path(&project);
-        let config = project
-            .lanes()
-            .iter()
-            .find_map(|lane| lane.st().config.loaded().cloned())
-            .ok_or_else(|| RpcError::new("no_config", json!({}), 1))?;
+        let (lane, extra) = match &args.branch {
+            Some(branch) => {
+                if args.name.is_some() {
+                    return Err(RpcError::new(
+                        "bad_request",
+                        json!({"message": "--name names another lane for this folder; leave out the branch"}),
+                        2,
+                    ));
+                }
+                (self.worktree_lane(&project, branch).await?, None)
+            }
+            None => {
+                let (lane, name) = self
+                    .extra_lane(&project, context, args.name.as_deref())
+                    .await?;
+                (lane, Some(name))
+            }
+        };
         let name = project.name();
-        let context_ns = ExpressionContext {
-            project: json!({"name": name, "primary_path": primary.display().to_string()}),
-            ..ExpressionContext::default()
-        };
-        let dir = match &config.lanes.worktree_dir {
-            Some(value) => value.evaluate(&context_ns).map_err(|error| {
-                RpcError::new(
-                    "config_error",
-                    json!({"path": "lanes.worktree_dir", "message": error.message}),
-                    1,
-                )
-            })?,
-            None => format!("../{name}-lanes"),
-        };
-        let base = primary.join(&project.config_dir).join(dir);
-        let destination = base.join(devlanes_resolve::branch_label(&args.branch));
-        let root = project.st().root.clone();
-        devlanes_git::add(&root, &destination, &args.branch)
-            .await
-            .map_err(|error| {
-                RpcError::new("git_failed", json!({"message": error.to_string()}), 1)
-            })?;
-        let canonical = tokio::task::spawn_blocking({
-            let destination = destination.clone();
-            // dunce: Git lists `C:\...`, never the verbatim `\\?\C:\...` form.
-            move || dunce::canonicalize(&destination).unwrap_or(destination)
-        })
-        .await
-        .unwrap_or(destination);
-        let report = self.relist(&project).await?;
-        drop(report);
-        let lane = project
-            .lanes()
-            .into_iter()
-            .find(|lane| devlanes_core::paths::same_path(&lane.st().path, &canonical))
-            .ok_or_else(|| RpcError::new("not_found", json!({"reference": canonical}), 3))?;
         let summary = lane_summary(&name, &lane.st());
         let mut result = json!({"lane": summary});
+        if let Some(extra) = extra {
+            result["name"] = json!(extra);
+        }
         if args.start {
             let env = carries_env(context).or_else(|| project.st().last_env.clone());
             let start_id = self.new_start_id();
@@ -374,6 +351,186 @@ impl Inner {
         Ok(result)
     }
 
+    /// Another lane for the cwd's folder (`lane new` without a branch): its own
+    /// worktree row, `<base identity>#lane=<name>`, so it gets its own index,
+    /// ports and domain while the folder's first lane stays the default.
+    async fn extra_lane(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        context: &Context,
+        name: Option<&str>,
+    ) -> Result<(Arc<crate::model::LaneRt>, String), RpcError> {
+        let base = Self::lane_at(project, &context.cwd)
+            .ok_or_else(|| RpcError::new("not_found", json!({"reference": context.cwd}), 3))?;
+        self.claim_lane(project, &base).await;
+        let (identity, path, branch, reason) = {
+            let st = base.st();
+            let reason = st.unassigned.clone().or_else(|| match &st.config {
+                crate::model::ConfigState::Invalid(error) => Some(error.clone()),
+                _ => None,
+            });
+            (
+                st.identity.clone(),
+                st.path.clone(),
+                st.branch.clone(),
+                reason,
+            )
+        };
+        if base.st().record.is_none() {
+            // The folder's first lane comes first; it could not get one.
+            return Err(reason.unwrap_or_else(|| {
+                RpcError::new(
+                    "unassigned",
+                    json!({"lane": base.st().reference(&project.name())}),
+                    1,
+                )
+            }));
+        }
+        let taken = |candidate: &str| {
+            project.lanes().iter().any(|lane| {
+                let st = lane.st();
+                st.alias().is_some_and(|(_, alias)| alias == candidate)
+                    || st.record.as_ref().is_some_and(|r| r.name == candidate)
+                    || st.branch.as_deref() == Some(candidate)
+            })
+        };
+        let name = match name {
+            Some(name) => {
+                let valid = !name.is_empty()
+                    && name.len() <= 64
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+                    && !name.bytes().all(|b| b.is_ascii_digit());
+                if !valid {
+                    return Err(RpcError::new(
+                        "invalid_reference",
+                        json!({"reference": name, "message": "a lane name uses letters, digits, `-`, `_` and `.`, and is not a number"}),
+                        2,
+                    ));
+                }
+                if taken(name) {
+                    return Err(RpcError::new(
+                        "name_taken",
+                        json!({"name": name, "project": project.name()}),
+                        1,
+                    ));
+                }
+                name.to_owned()
+            }
+            None => {
+                let dir = crate::model::dir_name(&path);
+                (2..)
+                    .map(|n| format!("{dir}-{n}"))
+                    .find(|candidate| !taken(candidate))
+                    .unwrap_or_else(|| format!("{dir}-extra"))
+            }
+        };
+        let identity = format!("{identity}{}{name}", crate::model::ALIAS_MARK);
+        let record = self
+            .store
+            .upsert_worktree(devlanes_state::WorktreeInput {
+                project_id: project.id,
+                identity: identity.clone(),
+                path: path.clone(),
+                branch: branch.clone(),
+                present: true,
+            })
+            .await
+            .map_err(store_error)?;
+        let existing = project.st().lanes.get(&record.id).cloned();
+        let lane = match existing {
+            Some(lane) => lane,
+            None => {
+                let lane = crate::registry::new_lane(
+                    record.id,
+                    crate::model::LaneSt::new(identity, path, branch, true),
+                );
+                project.st().lanes.insert(record.id, lane.clone());
+                lane
+            }
+        };
+        self.reload_config(project, &lane).await;
+        self.claim_lane(project, &lane).await;
+        if lane.st().record.is_none() {
+            let st = lane.st();
+            return Err(st.unassigned.clone().unwrap_or_else(|| {
+                RpcError::new(
+                    "unassigned",
+                    json!({"lane": st.reference(&project.name())}),
+                    1,
+                )
+            }));
+        }
+        Ok((lane, name))
+    }
+
+    /// `lane new <branch>`: `git worktree add` under `lanes.worktree_dir`, then
+    /// the new worktree's lane.
+    async fn worktree_lane(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        branch: &str,
+    ) -> Result<Arc<crate::model::LaneRt>, RpcError> {
+        let project = project.clone();
+        if !project.git {
+            return Err(RpcError::new(
+                "not_a_git_project",
+                json!({"project": project.name()}),
+                1,
+            ));
+        }
+        let primary = self.primary_path(&project);
+        let config = project
+            .lanes()
+            .iter()
+            .find_map(|lane| lane.st().config.loaded().cloned())
+            .ok_or_else(|| RpcError::new("no_config", json!({}), 1))?;
+        let name = project.name();
+        let context_ns = ExpressionContext {
+            project: json!({"name": name, "primary_path": primary.display().to_string()}),
+            ..ExpressionContext::default()
+        };
+        let dir = match &config.lanes.worktree_dir {
+            Some(value) => value.evaluate(&context_ns).map_err(|error| {
+                RpcError::new(
+                    "config_error",
+                    json!({"path": "lanes.worktree_dir", "message": error.message}),
+                    1,
+                )
+            })?,
+            None => format!("../{name}-lanes"),
+        };
+        let base = primary.join(&project.config_dir).join(dir);
+        let destination = base.join(devlanes_resolve::branch_label(branch));
+        let root = project.st().root.clone();
+        devlanes_git::add(&root, &destination, branch)
+            .await
+            .map_err(|error| {
+                RpcError::new("git_failed", json!({"message": error.to_string()}), 1)
+            })?;
+        let canonical = tokio::task::spawn_blocking({
+            let destination = destination.clone();
+            // dunce: Git lists `C:\...`, never the verbatim `\\?\C:\...` form.
+            move || dunce::canonicalize(&destination).unwrap_or(destination)
+        })
+        .await
+        .unwrap_or(destination);
+        let report = self.relist(&project).await?;
+        drop(report);
+        let lane = project
+            .lanes()
+            .into_iter()
+            .find(|lane| {
+                let st = lane.st();
+                devlanes_core::paths::same_path(&st.path, &canonical) && st.alias().is_none()
+            })
+            .ok_or_else(|| RpcError::new("not_found", json!({"reference": canonical}), 3))?;
+        // Made by devlanes, so it is a lane like one devlanes ran in.
+        self.claim_lane(&project, &lane).await;
+        Ok(lane)
+    }
+
     /// `lane.clean` (requires `yes`).
     pub(crate) async fn lane_clean_method(
         self: &Arc<Self>,
@@ -398,7 +555,7 @@ impl Inner {
     /// confirmation lists them under `lanes`.
     pub(crate) async fn lane_gc(self: &Arc<Self>, context: &Context) -> Result<Value, RpcError> {
         if let Some(project) = self.project_for_cwd(&context.cwd).await? {
-            let _ = self.relist(&project).await;
+            let _ = self.relist_only(&project).await;
         }
         if !context.yes {
             let lanes: Vec<String> = self
@@ -407,7 +564,9 @@ impl Inner {
                 .filter_map(|(project, lane)| {
                     let st = lane.st();
                     let running = st.any_running() || st.busy.is_some();
-                    (!st.present && !running).then(|| st.reference(&project.name()))
+                    // A gone worktree that never was a lane is dropped unasked.
+                    (!st.present && !running && st.record.is_some())
+                        .then(|| st.reference(&project.name()))
                 })
                 .collect();
             if !lanes.is_empty() {
@@ -435,17 +594,17 @@ impl Inner {
                 kept_running.push(reference);
                 continue;
             }
+            if !assigned {
+                project.st().lanes.remove(&lane.worktree);
+                lane.watch.cancel();
+                continue;
+            }
             // Gone only after the check above: it was not confirmed.
             if !context.yes {
                 continue;
             }
-            if assigned {
-                self.clean_lane(&project, &lane, Some(&context.actor))
-                    .await?;
-            } else {
-                project.st().lanes.remove(&lane.worktree);
-                lane.watch.cancel();
-            }
+            self.clean_lane(&project, &lane, Some(&context.actor))
+                .await?;
             cleaned.push(reference);
         }
         let mut removed = 0;
@@ -596,6 +755,10 @@ impl Inner {
             preset: None,
             color: None,
             sync: Vec::new(),
+            display_name: None,
+            // An exec unit has no readiness probe: alive is ready.
+            ready_check: Some("started"),
+            role: "exec",
         };
         // Held until the unit is recorded, so a clean or reset that begins meanwhile
         // waits and then stops it, or refuses it once the lane is released.
@@ -788,6 +951,11 @@ impl Inner {
                 .ok_or_else(|| RpcError::new("no_config", json!({"path": st.path}), 1))?;
             (config, st.path.join(&project.config_dir))
         };
+        let lane_id = lane.st().record.as_ref().map(|record| record.id);
+        let runs = match lane_id {
+            Some(id) => self.store.last_task_runs(id).await.map_err(store_error)?,
+            None => Vec::new(),
+        };
         let mut items = Vec::new();
         let mut sources: BTreeSet<String> = BTreeSet::new();
         for (name, task) in &config.tasks {
@@ -796,7 +964,24 @@ impl Inner {
             {
                 sources.insert(source.to_owned());
             }
+            // Never-run tasks get `null`, so clients can say so.
+            let last_run = runs.iter().find(|run| &run.task == name).map(|run| {
+                let state = match (run.ended_at, run.exit_code) {
+                    (None, _) => "running",
+                    (Some(_), Some(0)) => "done",
+                    (Some(_), Some(_)) => "failed",
+                    (Some(_), None) => "interrupted",
+                };
+                json!({
+                    "state": state,
+                    "trigger": run.trigger,
+                    "started_at_ms": run.started_at,
+                    "finished_at_ms": run.ended_at,
+                    "exit_code": run.exit_code,
+                })
+            });
             items.push(json!({
+                "last_run": last_run,
                 "name": name,
                 "when": task.when,
                 "after": task.after,

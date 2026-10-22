@@ -1,9 +1,0 @@
-{
-  "session_name": "acme",
-  "windows": [
-    {
-      "window_name": "api",
-      "panes": ["cargo watch -x run"]
-    }
-  ]
-}

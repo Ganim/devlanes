@@ -56,13 +56,10 @@ async fn the_header_follows_the_start_and_the_failure_lands_on_its_unit() -> Tes
     // The first frames arrive before the lanes are listed.
     app.update(Msg::Start(phase("infra", "started")));
     app.update(Msg::Status(api.status().await));
-    assert!(header(&app)?.contains("start acme@1 · infra"));
-    // The started lane is selected and expanded, even though it is idle.
-    assert_eq!(app.selected, Some(Selected::Lane("acme@1".into())));
-    assert!(
-        app.selected_lane()
-            .is_some_and(|lane| app.is_expanded(lane))
-    );
+    assert!(header(&app)?.contains("starting acme@1: containers"));
+    // The started lane shows on its whole-lane row, with the phase list.
+    assert_eq!(app.selected, Some(Selected::lane("acme@1")));
+    assert!(app.phases.contains_key("acme@1"));
     app.update(Msg::Start(phase("infra", "done")));
     app.update(Msg::Start(StartFrame::Event(Event {
         seq: 2,
@@ -70,10 +67,10 @@ async fn the_header_follows_the_start_and_the_failure_lands_on_its_unit() -> Tes
         data: json!({"lane": "acme@1", "task": "schema", "state": "started"}),
     })));
     app.update(Msg::Start(phase("setup", "started")));
-    assert!(header(&app)?.contains("start acme@1 · setup"));
+    assert!(header(&app)?.contains("starting acme@1: setup"));
     app.update(Msg::Start(phase("setup", "done")));
     app.update(Msg::Start(phase("services", "started")));
-    assert!(header(&app)?.contains("start acme@1 · services 0 of 1 ready"));
+    assert!(header(&app)?.contains("starting acme@1: 0 of 1 services ready"));
     assert_eq!(app.start_exit(), Some(StartExit::Pending));
 
     app.update(Msg::Start(StartFrame::Done(Ok(failed_result()))));
@@ -93,17 +90,11 @@ async fn the_header_follows_the_start_and_the_failure_lands_on_its_unit() -> Tes
             .contains(&"error: DATABASE_URL is not set".to_owned())
     );
     // The selection had not moved, so the failed unit is shown.
-    assert_eq!(
-        app.selected,
-        Some(Selected::Unit {
-            lane: "acme@1".into(),
-            unit: "api".into()
-        })
-    );
+    assert_eq!(app.selected, Some(Selected::unit("acme@1", "api")));
     // The result line stays once the error notice is gone.
     app.notice = None;
     assert!(
-        header(&app)?.contains("acme@1: api failed · 0 of 1 ready"),
+        header(&app)?.contains("✕ acme@1: api failed, 0 of 1 services ready"),
         "{}",
         header(&app)?
     );
@@ -144,7 +135,7 @@ async fn a_ctrl_c_exit_reads_as_interrupted() -> TestResult {
     assert!(
         screen
             .iter()
-            .any(|line| line.contains("api  failed (Ctrl-C)")),
+            .any(|line| line.contains("api") && line.contains("failed, Ctrl-C")),
         "{screen:#?}"
     );
     assert!(
@@ -166,7 +157,7 @@ async fn a_successful_start_ends_ready() -> TestResult {
          "exit_code": null, "ports": {}, "urls": [], "actor": {"kind": "human"}, "reason": null}]});
     app.update(Msg::Start(StartFrame::Done(Ok(ready))));
     assert_eq!(app.start_exit(), Some(StartExit::Ready));
-    assert!(header(&app)?.contains("acme@1 ready · 1 services"));
+    assert!(header(&app)?.contains("acme@1 up: 1 of 1 services ready"));
     assert!(app.errors.is_empty());
     Ok(())
 }

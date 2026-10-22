@@ -297,6 +297,24 @@ impl Store {
         })
         .await
     }
+    /// The newest run of each task of `lane`, in task name order.
+    pub async fn last_task_runs(&self, lane: LaneId) -> Result<Vec<TaskRun>, Error> {
+        self.call(move |c| {
+            let rows = task_runs::table
+                .filter(task_runs::lane_id.eq(lane.0))
+                .order(task_runs::id.desc())
+                .select(TaskRow::as_select())
+                .load::<TaskRow>(c)?;
+            let mut newest: std::collections::BTreeMap<String, TaskRun> =
+                std::collections::BTreeMap::new();
+            for row in rows {
+                let run = TaskRun::try_from(row)?;
+                newest.entry(run.task.clone()).or_insert(run);
+            }
+            Ok(newest.into_values().collect())
+        })
+        .await
+    }
     /// Ends every unfinished task run with no exit code. Call at daemon startup:
     /// a task's bookkeeping lives in the daemon that started it, so nothing can
     /// finish these rows later, and they would block lane clean forever.

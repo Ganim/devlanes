@@ -66,6 +66,9 @@ pub struct UnitInfo {
     pub started_at_ms: u64,
     pub log_dir: PathBuf,
     pub retention: LogRetention,
+    /// Runs in a PTY. A pipe unit has no terminal to resize, and its bare `\n`
+    /// line ends need a carriage return for the screen model.
+    pub pty: bool,
 }
 
 /// Disk bounds from the user's `logs.retention`, applied to every unit's log.
@@ -157,6 +160,8 @@ struct Inner {
     /// Claimed by whoever publishes the exit first: the waiter, or a stop whose bound
     /// expired after the process was already gone.
     exit_claimed: std::sync::atomic::AtomicBool,
+    /// When the exit was published (Unix ms); 0 while the run lasts.
+    ended_at_ms: AtomicU64,
 }
 
 /// How long the exit waits for remaining output to reach the log after the leader died.
@@ -215,6 +220,7 @@ impl UnitHost {
                 first_seq,
                 log_done,
                 exit_claimed: std::sync::atomic::AtomicBool::new(false),
+                ended_at_ms: AtomicU64::new(0),
             }),
         };
         host.spawn_pump();
@@ -299,6 +305,11 @@ impl UnitHost {
     /// True when both handles refer to the same run.
     pub fn same_run(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// When the run ended (Unix ms), once it has.
+    pub fn ended_at_ms(&self) -> Option<u64> {
+        Some(self.inner.ended_at_ms.load(Ordering::SeqCst)).filter(|ms| *ms > 0)
     }
 
     /// True while the process (leader) has not exited.
@@ -392,11 +403,15 @@ impl UnitHost {
     }
 
     /// Resizes both the PTY and the screen model so snapshots match what the app drew.
+    /// A pipe unit has no PTY: only its screen model changes, which is never an error.
     pub async fn resize(&self, size: TerminalSize) -> Result<(), RpcError> {
         if let Ok(mut screen) = self.inner.screen.lock() {
             screen
                 .screen_mut()
                 .set_size(cells(size.rows), cells(size.columns));
+        }
+        if !self.inner.info.pty {
+            return Ok(());
         }
         self.inner
             .unit
@@ -536,6 +551,9 @@ impl UnitHost {
             // Set after lost chunks: attached viewers then get a full redraw instead
             // of raw bytes that assume a screen they never received.
             let mut stale = false;
+            // Whether the last pipe byte was `\r`, so a `\r\n` split across chunks
+            // gets no second carriage return.
+            let mut after_cr = false;
             while !closed {
                 let mut batch = Vec::new();
                 match output.recv().await {
@@ -565,7 +583,16 @@ impl UnitHost {
                 // vt100 parsing is CPU work proportional to output; keep it off the
                 // executor. Awaiting each batch keeps screen and live order intact.
                 let screen = inner.clone();
-                let fed = batch.clone();
+                // A terminal's line discipline turns `\n` into `\r\n`; pipes have none,
+                // so without it every line would start where the previous one ended.
+                let fed: Vec<Bytes> = if inner.info.pty {
+                    batch.clone()
+                } else {
+                    batch
+                        .iter()
+                        .map(|bytes| crlf(bytes, &mut after_cr))
+                        .collect()
+                };
                 let redraw = std::mem::take(&mut stale);
                 let _ = tokio::task::spawn_blocking(move || screen.feed_screen(&fed, redraw)).await;
                 for bytes in batch {
@@ -650,6 +677,8 @@ impl Inner {
             *state = next;
             true
         });
+        // Before the exit goes out, so whoever sees it also sees the time.
+        self.ended_at_ms.store(now_ms(), Ordering::SeqCst);
         self.exit.send_replace(Some(outcome));
         // The flag finishes the log once the queue drains if this send finds it full.
         self.log_signals.finish.store(true, Ordering::SeqCst);
@@ -861,6 +890,35 @@ fn snapshot_bytes(parser: &vt100::Parser) -> Bytes {
     Bytes::from(bytes)
 }
 
+/// `bytes` with a `\r` before every `\n` that lacks one; `after_cr` carries the
+/// last byte's state to the next chunk.
+fn crlf(bytes: &Bytes, after_cr: &mut bool) -> Bytes {
+    let mut previous_cr = *after_cr;
+    if let Some(last) = bytes.last() {
+        *after_cr = *last == b'\r';
+    }
+    let bare = bytes
+        .iter()
+        .scan(previous_cr, |cr, byte| {
+            let lone = *byte == b'\n' && !*cr;
+            *cr = *byte == b'\r';
+            Some(lone)
+        })
+        .any(|lone| lone);
+    if !bare {
+        return bytes.clone();
+    }
+    let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 16 + 1);
+    for &byte in bytes.iter() {
+        if byte == b'\n' && !previous_cr {
+            out.push(b'\r');
+        }
+        out.push(byte);
+        previous_cr = byte == b'\r';
+    }
+    Bytes::from(out)
+}
+
 /// vt100 rejects zero-sized screens; a client reporting 0 rows still gets one.
 fn cells(value: u16) -> std::num::NonZeroU16 {
     std::num::NonZeroU16::new(value).unwrap_or(std::num::NonZeroU16::MIN)
@@ -961,8 +1019,9 @@ mod tests {
         async fn input(&self, _: Bytes) -> Result<(), Error> {
             Ok(())
         }
+        /// As a pipe runner answers; PTY hosts in these tests never resize.
         async fn resize(&self, _: TerminalSize) -> Result<(), Error> {
-            Ok(())
+            Err(Error::Unsupported("pipe units have no terminal".into()))
         }
         async fn stop(&self, policy: StopPolicy) -> Result<(), Error> {
             self.end(None, Some(signal_number(policy.signal)));
@@ -990,8 +1049,13 @@ mod tests {
         }
     }
 
-    /// A host for `unit` logging into its own directory under `dir`.
+    /// A PTY host for `unit` logging into its own directory under `dir`.
     async fn host(unit: Arc<ScriptedUnit>, dir: &tempfile::TempDir) -> UnitHost {
+        host_with(unit, dir, true).await
+    }
+
+    /// [`host`] for a PTY (`pty`) or pipe unit.
+    async fn host_with(unit: Arc<ScriptedUnit>, dir: &tempfile::TempDir, pty: bool) -> UnitHost {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let run = NEXT.fetch_add(1, Ordering::Relaxed);
         let info = UnitInfo {
@@ -1002,6 +1066,7 @@ mod tests {
             started_at_ms: 0,
             log_dir: dir.path().join(run.to_string()),
             retention: LogRetention::default(),
+            pty,
         };
         let identity = Some(unit.identity);
         UnitHost::start(info, unit, identity)
@@ -1199,5 +1264,59 @@ mod tests {
             .expect("live open");
         assert!(redraw.starts_with(b"\x1b[H\x1b[2J"), "{redraw:?}");
         assert!(String::from_utf8_lossy(&redraw).contains("line19"));
+    }
+
+    /// Bare `\n` gains a `\r`, also across chunks, and `\r\n` is left alone.
+    #[test]
+    fn crlf_adds_carriage_returns_once() {
+        let mut cr = false;
+        assert_eq!(
+            crlf(&Bytes::from_static(b"a\nb\r\nc\r"), &mut cr),
+            "a\r\nb\r\nc\r"
+        );
+        assert!(cr);
+        assert_eq!(crlf(&Bytes::from_static(b"\nd\n"), &mut cr), "\nd\r\n");
+        assert!(!cr);
+        assert_eq!(crlf(&Bytes::from_static(b"plain"), &mut cr), "plain");
+    }
+
+    /// A pipe unit's lines start at the left edge of the attach screen, its log
+    /// keeps the raw bytes, and resizing it is a no-op instead of an error.
+    #[tokio::test]
+    async fn pipe_units_render_lines_and_ignore_resizes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let unit = ScriptedUnit::start(None, gone_identity_cached());
+        let output = unit
+            .output
+            .lock()
+            .expect("output lock")
+            .clone()
+            .expect("output open");
+        let host = host_with(unit, &dir, false).await;
+        output
+            .send(OutputChunk {
+                stream: OutputStream::Stdout,
+                bytes: Bytes::from_static(b"line 1\nline 2\n"),
+            })
+            .expect("send");
+        let deadline = Instant::now() + STEP;
+        while host.tail(10).await != ["line 1", "line 2"] {
+            assert!(Instant::now() < deadline, "output never logged");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (snapshot, _) = host.attach();
+        let mut parser = vt100::Parser::new(cells(5), cells(20), 0);
+        parser.process(&snapshot);
+        assert_eq!(parser.screen().contents(), "line 1\nline 2");
+        host.resize(TerminalSize {
+            columns: 30,
+            rows: 6,
+        })
+        .await
+        .expect("a pipe resize is a no-op");
+        tokio::time::timeout(STEP, host.stop(StopPolicy::default()))
+            .await
+            .expect("stop is bounded")
+            .expect("stop succeeds");
     }
 }

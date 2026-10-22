@@ -4,25 +4,25 @@ expression: output
 ---
 error: acme@9 not found; did you mean acme@0?; options: acme@0, acme@2
 hint: devlanes lane ls
-error: feat matches several lanes: acme@feat, shop@feat
+error: feat matches more than one lane: acme@feat, shop@feat
 hint: devlanes status acme@feat
 error: this removes lane acme@2 and its data; rerun with --yes
 error: task reset asks: Drop the database?; rerun with --yes
 error: task console is interactive; run it from a terminal
-error: project acme is already running from /work/other-acme
+error: acme is already running from /work/other-acme
 hint: devlanes stop --project acme
-error: port 5173 is used by web in lane shop@1
+error: port 5173 is taken by shop@1:web
 hint: devlanes stop shop@1:web
 error: secrets for fnox profile dev are locked
 hint: devlanes secrets unlock
-error: Docker is not reachable
+error: Docker isn't running or can't be reached
 hint: devlanes doctor
 error: timed out waiting for acme@2:api
 hint: devlanes debug why acme@2:api
 error: remote unlock is not supported yet
-error: invalid config: devlanes.yaml:2:1: unknown field `serivces`
+error: devlanes.yaml is invalid at line 2, column 1: unknown field `serivces`
 hint: devlanes config check
-error: the daemon restarted and has no shell environment for this lane
+error: the daemon restarted and lost this lane's shell environment
 hint: devlanes start --lane acme@2
 error: the running daemon is devlanes 0.2.0 (protocol 7, this CLI speaks 8) and cannot serve this CLI; restarting it stops its 6 managed processes
 hint: devlanes daemon restart

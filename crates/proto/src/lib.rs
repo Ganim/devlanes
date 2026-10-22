@@ -402,7 +402,7 @@ pub struct LogLine {
 /// reads `running`. `stop`, lane stop, `restart` and `lane clean` terminate it;
 /// `start` refuses it with `unit_orphaned`. A stop result lists a terminated
 /// orphan as `stopped` and keeps `orphaned_since_ms`, so clients can say so.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnitSummary {
     pub name: String,
     pub lane: String,
@@ -428,6 +428,10 @@ pub struct UnitSummary {
     pub color: Option<String>,
     #[serde(default)]
     pub started_at_ms: Option<u64>,
+    /// When the run ended (Unix ms), with `exit_code`; for "done 3m ago".
+    /// Absent while it runs and for units this daemon did not supervise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
     /// Filled by the metrics sampler when it has a recent sample for the unit.
     #[serde(default)]
     pub cpu_percent: Option<f64>,
@@ -444,6 +448,85 @@ pub struct UnitSummary {
     /// the unit's terminal or output pipe.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escaped: Vec<LeftProcess>,
+    /// `services.<name>.name`: what the TUI and human output show instead of
+    /// `name`. Everything else (references, selectors, JSON consumers) uses `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// The readiness check of a service run: `started`, `tcp`, `http`, `log` or
+    /// `cmd`. With `started` a live process counts as `ready` without any probe,
+    /// so human clients show such a unit as `running`; `state` stays `ready`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_check: Option<String>,
+    /// The run has a PTY. Pipe units (tasks by default, `pty: false`) have no
+    /// terminal, so clients never resize them. Sent only when `false`: absent
+    /// means `true`, which is also what a daemon that predates the field meant.
+    #[serde(default = "pty_default", skip_serializing_if = "is_true")]
+    pub pty: bool,
+    /// What the unit is: `service`, `task`, `setup` or `teardown` (an
+    /// `infra.setup` or `infra.teardown` entry, listed as kind `task`), or `exec`.
+    /// Absent from older daemons; clients then fall back to `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+/// Older daemons sized every attached unit, so a missing `pty` keeps doing that.
+fn pty_default() -> bool {
+    true
+}
+
+/// Leaves the common case out of the JSON.
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+impl Default for UnitSummary {
+    /// An empty summary; `pty` is `true`, as for a summary without the field.
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            lane: String::new(),
+            state: String::new(),
+            pid: None,
+            exit_code: None,
+            ports: BTreeMap::new(),
+            urls: Vec::new(),
+            actor: Actor::default(),
+            reason: None,
+            kind: String::new(),
+            autostart: false,
+            hidden: false,
+            tags: Vec::new(),
+            color: None,
+            started_at_ms: None,
+            finished_at_ms: None,
+            cpu_percent: None,
+            memory_bytes: None,
+            orphaned_since_ms: None,
+            left_running: Vec::new(),
+            escaped: Vec::new(),
+            display_name: None,
+            ready_check: None,
+            pty: true,
+            role: None,
+        }
+    }
+}
+
+impl UnitSummary {
+    /// The state word for people: `running` for a `ready` unit whose readiness
+    /// is only that its process started, else [`UnitSummary::state`].
+    pub fn shown_state(&self) -> &str {
+        if self.state == "ready" && self.ready_check.as_deref() == Some("started") {
+            "running"
+        } else {
+            &self.state
+        }
+    }
+
+    /// [`UnitSummary::display_name`] when set, else the unit name.
+    pub fn label(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// A process that outlived its unit, by pid and process name.
@@ -537,6 +620,13 @@ pub struct ContainerSummary {
     pub cpu_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes: Option<u64>,
+    /// Container state from the infra provider: `created`, `starting` (running,
+    /// health check not passed yet), `running` (no health check), `healthy`,
+    /// `unhealthy`, `exited`, `exited <code>`, `oom`, `removed`, `missing` (no
+    /// container), or Docker's own word for other states. Of several replicas,
+    /// the worst. Absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 /// Opens a terminal stream. The daemon answers with [`AttachResult`], then sends a

@@ -28,8 +28,8 @@ use devlanes_core::{
     StopSignal, TerminalSize, Unit,
 };
 use devlanes_daemon::integrations::{
-    ExitDetails, InfraContainer, InfraError, InfraPortNeed, InfraProvider, InfraSpec, InfraUp,
-    ManagedUnit, PortScope, ProcessTable, UnitRunner,
+    ExitDetails, InfraContainer, InfraError, InfraEvent, InfraPortNeed, InfraProvider, InfraSpec,
+    InfraUp, ManagedUnit, PortScope, ProcessTable, UnitRunner,
 };
 use devlanes_proto::{LeftProcess, PhaseContainer};
 use serde_json::{Value, json};
@@ -481,9 +481,20 @@ pub struct FakeInfra {
     pub progress: Arc<Mutex<std::collections::VecDeque<Vec<PhaseContainer>>>>,
     /// Fired when `progress` handed out the last snapshot.
     pub progress_read: Arc<tokio::sync::Notify>,
+    /// Container events, sent with [`FakeInfra::emit`].
+    events: Arc<std::sync::OnceLock<broadcast::Sender<InfraEvent>>>,
 }
 
 impl FakeInfra {
+    /// Sends a container event to the engine.
+    pub fn emit(&self, event: InfraEvent) {
+        let _ = self.sender().send(event);
+    }
+
+    /// The event channel, made on first use.
+    fn sender(&self) -> &broadcast::Sender<InfraEvent> {
+        self.events.get_or_init(|| broadcast::channel(16).0)
+    }
     /// Records a call.
     fn record(&self, call: String) {
         if let Ok(mut calls) = self.calls.0.lock() {
@@ -504,11 +515,13 @@ impl FakeInfra {
                 name: "db".into(),
                 docker: format!("{}-lane{}-db-1", spec.project, spec.lane),
                 shared: false,
+                state: Some("healthy".into()),
             },
             InfraContainer {
                 name: "cache".into(),
                 docker: format!("{}-cache-1", spec.project),
                 shared: true,
+                state: None,
             },
         ]
     }
@@ -549,6 +562,9 @@ impl InfraProvider for FakeInfra {
     }
     async fn status(&self, _: &InfraSpec) -> Result<Value, InfraError> {
         Ok(json!({"db": "healthy"}))
+    }
+    fn events(&self) -> Option<broadcast::Receiver<InfraEvent>> {
+        Some(self.sender().subscribe())
     }
     async fn down(&self, _: &InfraSpec) -> Result<Value, InfraError> {
         self.record("down".into());

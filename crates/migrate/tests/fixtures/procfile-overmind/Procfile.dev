@@ -1,8 +1,0 @@
-# Development processes for acme.
-web: bin/rails server -p $PORT -b 127.0.0.1
-css: bin/rails tailwindcss:watch
-worker: bundle exec sidekiq -C config/sidekiq.yml
-proxy: ngrok http --url acme.example.invalid $OVERMIND_PROCESS_web_PORT
-npm_install: npm install
-mail: mailcatcher --foreground --http-port 1080
-not a process line

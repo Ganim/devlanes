@@ -28,9 +28,10 @@ templates:
 lanes:
   # Branch whose worktree is lane 0.
   primary: main
-  # New worktrees only get a lane; setup also runs infra and lane.create tasks, start also starts services.
+  # A worktree gets its lane when devlanes first runs in it. register only reserves the lane;
+  # setup also runs infra and lane.create tasks, start also starts services.
   new_worktrees: register
-  # Stop a deleted worktree's processes; clean also removes its lane data.
+  # Stop a deleted worktree's processes; its lane is cleaned once nothing runs. clean cleans at once.
   removed_worktrees: stop
   # Where new worktrees are created, relative to the project.
   worktree_dir: ../${{ project.name }}-lanes
@@ -184,6 +185,8 @@ services:
     tags: [api, essential]
   crm-api:
     extends: fastify-api
+    # Shown in the TUI and human output instead of the key; commands keep using crm-api.
+    name: CRM API
     run: pnpm --silent -F @acme/crm dev
     # Extra variables for this service, above global_env.
     env:

@@ -289,6 +289,9 @@ pub struct InfraContainer {
     pub docker: String,
     /// Shared project infra rather than the lane's own container.
     pub shared: bool,
+    /// `ContainerSummary.state` as the provider last saw it; container events
+    /// keep it current. `None` when the provider cannot tell.
+    pub state: Option<String>,
 }
 
 /// A container lifecycle change for the event bus.
@@ -296,8 +299,28 @@ pub struct InfraContainer {
 pub struct InfraEvent {
     pub project: String,
     pub lane: Option<u32>,
+    /// The Docker container name.
     pub container: String,
+    /// `started`, `health_starting`, `healthy`, `unhealthy`, `died`, `stopped`,
+    /// `out_of_memory` or `removed`.
     pub state: String,
+    /// The main process's exit code with `died`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+}
+
+impl InfraEvent {
+    /// The `ContainerSummary.state` this event leaves the container in.
+    pub fn container_state(&self) -> String {
+        match (self.state.as_str(), self.exit_code) {
+            ("started", _) => "running".into(),
+            ("health_starting", _) => "starting".into(),
+            ("died", Some(code)) => format!("exited {code}"),
+            ("died" | "stopped", _) => "exited".into(),
+            ("out_of_memory", _) => "oom".into(),
+            (other, _) => other.into(),
+        }
+    }
 }
 
 /// Containers: shared and per-lane Compose services plus plain Docker containers.
@@ -656,6 +679,10 @@ pub struct Integrations {
     pub start_gate: Option<Arc<dyn devlanes_core::gate::StartGate>>,
     /// System pressure, for the upfront memory warning.
     pub pressure: Option<Arc<dyn devlanes_core::gate::PressureSource>>,
+    /// System CPU and memory for `metrics.system`, read by the sampler. Its own
+    /// instance: a source measures CPU since its previous reading, so sharing
+    /// the gate's would split that interval between two readers.
+    pub system_pressure: Option<Arc<dyn devlanes_core::gate::PressureSource>>,
     /// Checks the OS resolver file for the `resolver` hostname strategy.
     pub resolver_files: Option<Arc<dyn ResolverFiles>>,
     /// Runs `run:` strings and `ready.cmd` probes. Defaults to
@@ -870,6 +897,7 @@ impl Integrations {
             hosts: None,
             start_gate: None,
             pressure: None,
+            system_pressure: None,
             resolver_files: None,
             shell: Shell::default(),
         }

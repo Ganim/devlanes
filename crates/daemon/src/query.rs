@@ -149,6 +149,11 @@ impl Inner {
             }
             return Ok(lanes);
         }
+        if let Some(project) = &cwd_project
+            && let Some(lane) = Self::lane_at(project, &context.cwd)
+        {
+            self.claim_lane(project, &lane).await;
+        }
         match cwd_project {
             Some(project) => Ok(project
                 .lanes()
@@ -168,6 +173,9 @@ impl Inner {
         let mut items = Vec::new();
         let gate = self.gate_snapshot();
         for (project, lane) in lanes {
+            if !lane.st().listed() {
+                continue;
+            }
             let mut summary = lane_summary(&project.name(), &lane.st());
             self.fill_queued_with(gate.as_ref(), &mut summary);
             if let Some(caller) = mine {

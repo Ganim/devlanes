@@ -85,6 +85,8 @@ pub(crate) struct ServiceInfo {
     pub autostart: bool,
     /// Palette name from the layout.
     pub color: String,
+    /// `services.<name>.name`, for `UnitSummary.display_name`.
+    pub display_name: Option<String>,
 }
 
 /// One `infra.hosts` route to a container's published host port.
@@ -139,6 +141,12 @@ pub(crate) struct UnitRec {
     pub managed: Arc<dyn crate::integrations::ManagedUnit>,
     /// `services.<name>.sync` entries mirrored while this run lasts.
     pub syncs: Vec<crate::local_sync::LocalSync>,
+    /// `services.<name>.name` of a service run.
+    pub display_name: Option<String>,
+    /// The readiness check word of a service run (`started`, `tcp`, ...).
+    pub ready_check: Option<&'static str>,
+    /// `UnitSummary.role`.
+    pub role: &'static str,
 }
 
 impl UnitRec {
@@ -243,7 +251,18 @@ pub(crate) struct LaneSt {
     /// Set while an explicit daemon shutdown runs this lane's `lane.stop`
     /// tasks: their spawns pass the refusal that starts with the shutdown.
     pub shutdown_hooks: bool,
+    /// devlanes ran in this worktree (or `lane new` made it), so it gets a lane.
+    /// Worktrees that merely exist get none, except the primary one.
+    pub wanted: bool,
+    /// A clean of this lane, whose worktree is gone, is under way or scheduled.
+    pub sweeping: bool,
+    /// When a sweep first saw the folder gone; cleared once it is back.
+    pub missing_since: Option<std::time::Instant>,
 }
+
+/// Marks a worktree identity as an extra lane of another worktree's folder:
+/// `<base identity>#lane=<name>`.
+pub(crate) const ALIAS_MARK: &str = "#lane=";
 
 impl LaneSt {
     /// A lane in its initial, unassigned state.
@@ -290,7 +309,24 @@ impl LaneSt {
             closing: false,
             config_stamp: None,
             shutdown_hooks: false,
+            wanted: false,
+            sweeping: false,
+            missing_since: None,
         }
+    }
+
+    /// For an extra lane of another worktree's folder (`lane new --name`): the
+    /// base worktree's identity and this lane's name.
+    pub(crate) fn alias(&self) -> Option<(&str, &str)> {
+        self.identity.rsplit_once(ALIAS_MARK)
+    }
+
+    /// Whether status, lane lists and events show this lane: it has a lane
+    /// record, or devlanes ran in its present worktree and it waits for one
+    /// (`lanes.max`, a full port pool, a config error). A worktree that merely
+    /// exists, or whose folder is gone without a lane, is not a lane.
+    pub(crate) fn listed(&self) -> bool {
+        self.record.is_some() || (self.present && self.wanted)
     }
 
     /// Lane index while assigned.
@@ -792,12 +828,17 @@ pub(crate) fn unit_summary(lane: &str, name: &str, unit: &UnitRec) -> UnitSummar
         hidden: unit.hidden,
         tags: unit.tags.clone(),
         started_at_ms: Some(info.started_at_ms),
+        finished_at_ms: unit.host.ended_at_ms(),
         cpu_percent: None,
         memory_bytes: None,
         color: unit.color.clone(),
         orphaned_since_ms: None,
         left_running: leftovers.left_running,
         escaped: leftovers.escaped,
+        display_name: unit.display_name.clone(),
+        ready_check: unit.ready_check.map(str::to_owned),
+        pty: info.pty,
+        role: Some(unit.role.to_owned()),
     }
 }
 
@@ -820,10 +861,18 @@ pub(crate) fn orphan_summary(
                 .config
                 .loaded()
                 .is_some_and(|config| config.tasks.contains_key(name));
+            let kind = if task { "task" } else { "exec" };
+            // A previous daemon's setup or teardown entry is known only by its name.
+            let role = match name.split_once('.') {
+                Some(("setup", _)) => "setup",
+                Some(("teardown", _)) => "teardown",
+                _ => kind,
+            };
             UnitSummary {
                 name: name.to_owned(),
                 lane: reference.to_owned(),
-                kind: if task { "task" } else { "exec" }.into(),
+                role: Some(role.into()),
+                kind: kind.into(),
                 color: Some(derived_color(lane, name)),
                 ..UnitSummary::default()
             }
@@ -854,6 +903,8 @@ pub(crate) fn idle_summary(lane: &str, service: &ServiceInfo) -> UnitSummary {
         hidden: service.hidden,
         tags: service.tags.clone(),
         color: Some(service.color.clone()),
+        display_name: service.display_name.clone(),
+        role: Some("service".into()),
         ..UnitSummary::default()
     }
 }
@@ -979,9 +1030,24 @@ fn container_summaries(lane: &LaneSt) -> Vec<devlanes_proto::ContainerSummary> {
                     .any(|container| &container.name == name && container.shared),
                 cpu_percent: None,
                 memory_bytes: None,
+                state: lane
+                    .infra_containers
+                    .iter()
+                    .filter(|container| &container.name == name)
+                    .filter_map(|container| container.state.clone())
+                    .max_by_key(|state| state_badness(state)),
             }
         })
         .collect()
+}
+
+/// How bad a container state is, so a service's replicas report the worst.
+fn state_badness(state: &str) -> u8 {
+    match state.split(' ').next().unwrap_or_default() {
+        "running" | "healthy" => 0,
+        "starting" | "created" | "restarting" | "paused" => 1,
+        _ => 2,
+    }
 }
 
 /// Shapes a config failure for clients, keeping its source location.

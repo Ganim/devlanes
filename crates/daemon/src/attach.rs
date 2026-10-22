@@ -48,11 +48,11 @@ struct Stream {
 
 impl AttachTable {
     /// After `(session, stream)` left `key`: the newest remaining interactive
-    /// viewer becomes active. Returns the size to apply, the default when nobody
-    /// is left, or `None` when the leaver was not the active viewer.
-    fn hand_over(&mut self, key: &UnitKey, session: u64, stream: u64) -> Option<TerminalSize> {
+    /// viewer becomes active. True when the leaver was the active viewer, so
+    /// the unit's size changes.
+    fn hand_over(&mut self, key: &UnitKey, session: u64, stream: u64) -> bool {
         if self.active.get(key) != Some(&(session, stream)) {
-            return None;
+            return false;
         }
         // Stream ids grow with every attach, so the largest is the most recent.
         let next = self
@@ -60,17 +60,22 @@ impl AttachTable {
             .iter()
             .filter(|(_, s)| s.interactive && &s.key == key)
             .max_by_key(|((_, id), _)| *id)
-            .map(|(owner, s)| (*owner, s.size));
+            .map(|(owner, _)| *owner);
         match next {
-            Some((owner, size)) => {
-                self.active.insert(key.clone(), owner);
-                Some(size.unwrap_or_default())
-            }
-            None => {
-                self.active.remove(key);
-                Some(TerminalSize::default())
-            }
-        }
+            Some(owner) => self.active.insert(key.clone(), owner),
+            None => self.active.remove(key),
+        };
+        true
+    }
+
+    /// The size `key` should have now: its active viewer's last request, or
+    /// the default when nobody owns it.
+    fn owner_size(&self, key: &UnitKey) -> TerminalSize {
+        self.active
+            .get(key)
+            .and_then(|owner| self.streams.get(owner))
+            .and_then(|stream| stream.size)
+            .unwrap_or_default()
     }
 }
 
@@ -139,10 +144,8 @@ impl Inner {
                 table.active.insert(key.clone(), (session.id(), stream_id));
             }
         }
-        if args.interactive
-            && let Some(size) = size
-        {
-            let _ = host.resize(size).await;
+        if args.interactive && size.is_some() {
+            let _ = self.apply_owner_size(&key, &host).await;
         }
         let (snapshot, live) = host.attach();
         let engine = self.clone();
@@ -169,13 +172,28 @@ impl Inner {
             };
             table
                 .hand_over(&entry.key, session, stream)
-                .map(|size| (entry.host, size))
+                .then_some((entry.key, entry.host))
         };
-        if let Some((host, size)) = restore
+        if let Some((key, host)) = restore
             && host.is_alive()
         {
-            let _ = host.resize(size).await;
+            let _ = self.apply_owner_size(&key, &host).await;
         }
+    }
+
+    /// Resizes `host` to whatever its owner wants at the moment of applying.
+    /// A client that reopens a stream closes the old one while attaching the
+    /// new one; computing the size inside the turn means the last resize is
+    /// always the current owner's, never the stale 120x40 of the closed one.
+    async fn apply_owner_size(
+        &self,
+        key: &UnitKey,
+        host: &UnitHost,
+    ) -> Result<TerminalSize, RpcError> {
+        let _turn = self.attach_resize.lock().await;
+        let size = lock(&self.attach).owner_size(key);
+        host.resize(size).await?;
+        Ok(size)
     }
 
     /// Terminal input on a stream this session opened.
@@ -213,7 +231,7 @@ impl Inner {
             columns: args.columns,
             rows: args.rows,
         });
-        let host = {
+        let owned = {
             let mut table = lock(&self.attach);
             let owner = (session.id(), args.stream_id);
             let stream = table.streams.get_mut(&owner).ok_or_else(|| {
@@ -222,12 +240,12 @@ impl Inner {
             // Remembered even while another viewer owns the unit, for a later handover.
             stream.size = Some(size);
             let (key, host) = (stream.key.clone(), stream.host.clone());
-            (table.active.get(&key) == Some(&owner)).then_some(host)
+            (table.active.get(&key) == Some(&owner)).then_some((key, host))
         };
-        let Some(host) = host else {
+        let Some((key, host)) = owned else {
             return Ok(json!({"applied": false}));
         };
-        host.resize(size).await?;
+        let size = self.apply_owner_size(&key, &host).await?;
         Ok(json!({"applied": true, "columns": size.columns, "rows": size.rows}))
     }
 }

@@ -3,15 +3,15 @@
 //! units run, so CI summaries still get per-start peaks. Monitoring only.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use devlanes_core::{ProcessIdentity, UnitRunId};
 use devlanes_metrics::{
-    COARSE_CAPACITY, COARSE_INTERVAL_MS, ContainerTarget, History, RunTracker, Sample,
-    SampleRequest, Series, Subject, UnitKey, UnitTarget, aggregate,
+    COARSE_CAPACITY, COARSE_INTERVAL_MS, ContainerTarget, History, RAW_CAPACITY, RunTracker,
+    Sample, SampleRequest, Series, Subject, UnitKey, UnitTarget, Window, aggregate,
 };
 use devlanes_proto::{Context, LaneSummary, RpcError, UnitPeak};
 use devlanes_state::{RollupRow, RunSummaryRow};
@@ -26,8 +26,6 @@ use crate::{
 
 /// How long a `metrics` call keeps the fast tick on.
 const INTEREST: Duration = Duration::from_secs(15);
-/// Points of history returned per unit.
-const HISTORY_POINTS: usize = 120;
 /// The in-memory history horizon (the coarse ring, 6 hours). Series idle longer
 /// hold nothing a client can still be shown, so they are dropped with the
 /// per-unit entries that point at them; otherwise every removed lane or unit
@@ -59,6 +57,24 @@ pub(crate) struct MetricsState {
     pub interest_until: Option<Instant>,
     /// When the sampler last pruned (Unix ms).
     pub last_prune_ms: u64,
+    /// The machine as of the last tick, for `metrics.system`.
+    pub system: Option<SystemReading>,
+    /// `(ts_ms, cpu_percent, available_memory_bytes)` per tick, newest last,
+    /// at most [`RAW_CAPACITY`] entries.
+    pub system_history: VecDeque<(u64, Option<f64>, Option<u64>)>,
+    /// Physical memory, read once.
+    pub memory_total: Option<u64>,
+}
+
+/// One reading of the whole machine.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SystemReading {
+    /// Busy share of all CPUs, 0-100.
+    pub cpu_percent: Option<f64>,
+    pub memory_pressure: Option<&'static str>,
+    pub available_memory_bytes: Option<u64>,
+    /// Linux PSI `cpu some avg10`.
+    pub cpu_stall_percent: Option<f64>,
 }
 
 impl MetricsState {
@@ -103,7 +119,23 @@ pub(crate) struct ContainerRow {
 struct MetricsParams {
     #[serde(default)]
     peaks: bool,
+    /// How far back histories reach; default [`DEFAULT_RANGE_MS`], at most
+    /// [`HISTORY_HORIZON`].
+    #[serde(default)]
+    range_ms: Option<u64>,
+    /// History points per row: buckets of the range, with the highest CPU and the
+    /// average memory of each. Without it, every point of the range.
+    #[serde(default)]
+    points: Option<usize>,
+    /// Also send `windows` (min/avg/max) per row; always on past the raw ring.
+    #[serde(default)]
+    windows: bool,
 }
+
+/// The raw ring: 15 minutes at one point per second.
+const RAW_RANGE_MS: u64 = RAW_CAPACITY as u64 * 1000;
+/// Default `range_ms`.
+const DEFAULT_RANGE_MS: u64 = RAW_RANGE_MS;
 
 /// One unit CPU and footprint reading, for the start gate's slot holders.
 #[derive(Debug, Clone, Copy)]
@@ -257,9 +289,22 @@ impl Inner {
             .iter()
             .map(|target| (target.reference.clone(), target.name.clone()))
             .collect();
+        let system = self.read_system().await;
         let now = now_ms();
         let (rollups, finished) = {
             let mut state = lock(&self.metrics);
+            if let Some((reading, total)) = system {
+                state.memory_total = state.memory_total.or(total);
+                if state.system_history.len() >= RAW_CAPACITY {
+                    state.system_history.pop_front();
+                }
+                state.system_history.push_back((
+                    now,
+                    reading.cpu_percent,
+                    reading.available_memory_bytes,
+                ));
+                state.system = Some(reading);
+            }
             state.history.record_all(&totals);
             state.history.record_all(&container_samples);
             state.containers = containers;
@@ -362,6 +407,29 @@ impl Inner {
         }
     }
 
+    /// Reads the machine's CPU, memory pressure and memory, plus total memory the
+    /// first time; `None` without a system source.
+    async fn read_system(&self) -> Option<(SystemReading, Option<u64>)> {
+        let source = self.integ.system_pressure.as_ref()?;
+        let sample = source.sample().await.ok().unwrap_or_default();
+        let available = source.available_memory().await.ok().flatten();
+        let known = lock(&self.metrics).memory_total.is_some();
+        let total = if known {
+            None
+        } else {
+            source.total_memory().await.ok().flatten()
+        };
+        Some((
+            SystemReading {
+                cpu_percent: sample.cpu_percent,
+                memory_pressure: sample.memory.map(|level| level.word()),
+                available_memory_bytes: available,
+                cpu_stall_percent: sample.cpu_stall_percent,
+            },
+            total,
+        ))
+    }
+
     /// Adds the latest CPU and memory to a lane summary's units.
     pub(crate) fn fill_metrics(&self, summary: &mut LaneSummary) {
         let state = lock(&self.metrics);
@@ -434,8 +502,20 @@ impl Inner {
                 .collect();
             return Ok(json!({"lane": st.reference(&project.name()), "peaks": peaks}));
         }
+        let range_ms = args
+            .range_ms
+            .unwrap_or(DEFAULT_RANGE_MS)
+            .clamp(1000, HISTORY_HORIZON.as_millis() as u64);
+        let now = now_ms();
+        let view = View {
+            since_ms: now.saturating_sub(range_ms),
+            range_ms,
+            points: args.points.filter(|points| *points > 0),
+            windows: args.windows || range_ms > RAW_RANGE_MS,
+        };
         let state = lock(&self.metrics);
         let mut units = Vec::new();
+        let mut lanes = Vec::new();
         for (project, lane) in self.all_lanes() {
             let st = lane.st();
             let reference = st.reference(&project.name());
@@ -445,23 +525,75 @@ impl Inner {
                 }
                 let key = (reference.clone(), name.clone());
                 let latest = state.latest.get(&key).copied();
-                let history = recent_points(
-                    state
-                        .subjects
-                        .get(&key)
-                        .and_then(|subject| state.history.series(subject)),
-                );
-                units.push(json!({
+                let series = state
+                    .subjects
+                    .get(&key)
+                    .and_then(|subject| state.history.series(subject));
+                let peak = st.peaks.get(name).copied().unwrap_or((None, None));
+                let mut row = json!({
                     "lane": reference,
                     "unit": name,
+                    "kind": rec.kind.word(),
+                    "role": rec.role,
                     "cpu_percent": latest.map(|l| l.0),
                     "memory_bytes": latest.map(|l| l.1),
-                    "history": history,
-                }));
+                    "peak_cpu_percent": peak.1,
+                    "peak_memory_bytes": peak.0,
+                    "history": view.history(series),
+                });
+                if view.windows {
+                    row["windows"] = json!(view.windows(series));
+                }
+                units.push(row);
             }
+            let Some(record) = &st.record else { continue };
+            let series = state.history.series(&Subject::Lane {
+                project: project.id,
+                lane: record.id,
+            });
+            let Some(series) = series else { continue };
+            let latest = series.latest();
+            let peak = st
+                .started_at_ms
+                .map(|started| peak_since(series, started))
+                .unwrap_or_default();
+            let mut row = json!({
+                "lane": reference,
+                "cpu_percent": latest.map(|p| p.cpu_percent),
+                "memory_bytes": latest.map(|p| p.footprint_bytes),
+                "peak_cpu_percent": peak.0,
+                "peak_memory_bytes": peak.1,
+                "history": view.history(Some(series)),
+            });
+            if view.windows {
+                row["windows"] = json!(view.windows(Some(series)));
+            }
+            lanes.push(row);
         }
-        units.extend(container_entries(&state));
-        Ok(json!({"units": units}))
+        units.extend(container_entries(&state, &view));
+        let system = self.integ.system_pressure.is_some().then(|| {
+            let reading = state.system.clone().unwrap_or_default();
+            let history: Vec<Value> = state
+                .system_history
+                .iter()
+                .filter(|(ts, _, _)| *ts >= view.since_ms)
+                .map(|(ts, cpu, available)| json!([ts, cpu, available]))
+                .collect();
+            json!({
+                "cpus": std::thread::available_parallelism().map(usize::from).ok(),
+                "memory_total_bytes": state.memory_total,
+                "available_memory_bytes": reading.available_memory_bytes,
+                "cpu_percent": reading.cpu_percent,
+                "memory_pressure": reading.memory_pressure,
+                "cpu_stall_percent": reading.cpu_stall_percent,
+                "history": history,
+            })
+        });
+        let mut result = json!({"units": units, "lanes": lanes, "range_ms": range_ms});
+        if let Some(system) = system {
+            result["system"] = system;
+        }
+        Ok(result)
     }
 }
 
@@ -480,23 +612,153 @@ fn unit_sessions(_leader: Option<ProcessIdentity>) -> Vec<u32> {
     Vec::new()
 }
 
-/// The newest [`HISTORY_POINTS`] raw points as `[ts_ms, cpu, memory]`.
-fn recent_points(series: Option<&Series>) -> Vec<Value> {
-    let Some(series) = series else {
-        return Vec::new();
-    };
-    let skip = series.points().len().saturating_sub(HISTORY_POINTS);
-    series
-        .points()
-        .skip(skip)
-        .map(|p| json!([p.ts_ms, p.cpu_percent, p.footprint_bytes]))
-        .collect()
+/// Highest `(cpu, memory)` of a series since `started_ms`, from its raw points
+/// and, for what the raw ring no longer holds, its 10 s windows.
+fn peak_since(series: &Series, started_ms: u64) -> (Option<f64>, Option<u64>) {
+    let mut cpu: Option<f64> = None;
+    let mut memory: Option<u64> = None;
+    for point in series.points().filter(|p| p.ts_ms >= started_ms) {
+        cpu = Some(cpu.map_or(point.cpu_percent, |c| c.max(point.cpu_percent)));
+        memory = Some(memory.map_or(point.footprint_bytes, |m| m.max(point.footprint_bytes)));
+    }
+    for window in series.windows().filter(|w| w.start_ms >= started_ms) {
+        cpu = Some(cpu.map_or(window.cpu.max, |c| c.max(window.cpu.max)));
+        memory = Some(memory.map_or(window.footprint.max, |m| m.max(window.footprint.max)));
+    }
+    (cpu, memory)
+}
+
+/// What one `metrics` call asks of every history.
+struct View {
+    since_ms: u64,
+    range_ms: u64,
+    /// Bucket count; `None` sends every point of the range.
+    points: Option<usize>,
+    /// Send `windows` too.
+    windows: bool,
+}
+
+impl View {
+    /// The bucket of a timestamp inside the range.
+    fn bucket(&self, ts_ms: u64, points: usize) -> usize {
+        let offset = ts_ms.saturating_sub(self.since_ms);
+        let index =
+            (u128::from(offset) * points as u128 / u128::from(self.range_ms.max(1))) as usize;
+        index.min(points - 1)
+    }
+
+    /// The start of bucket `index`.
+    fn bucket_start(&self, index: usize, points: usize) -> u64 {
+        self.since_ms + (u128::from(self.range_ms) * index as u128 / points as u128) as u64
+    }
+
+    /// `[ts_ms, cpu, memory]` over the range: raw points while the range fits
+    /// the raw ring, else 10 s windows (highest CPU, average memory). With
+    /// `points`, buckets keep the highest CPU and the average memory.
+    fn history(&self, series: Option<&Series>) -> Vec<Value> {
+        let Some(series) = series else {
+            return Vec::new();
+        };
+        let samples: Vec<(u64, f64, u64)> = if self.range_ms <= RAW_RANGE_MS {
+            series
+                .points()
+                .filter(|p| p.ts_ms >= self.since_ms)
+                .map(|p| (p.ts_ms, p.cpu_percent, p.footprint_bytes))
+                .collect()
+        } else {
+            self.windows_in(series)
+                .iter()
+                .map(|w| (w.start_ms, w.cpu.max, w.footprint.avg))
+                .collect()
+        };
+        let Some(points) = self.points else {
+            return samples
+                .into_iter()
+                .map(|(ts, cpu, memory)| json!([ts, cpu, memory]))
+                .collect();
+        };
+        let mut buckets: BTreeMap<usize, (f64, u128, u64)> = BTreeMap::new();
+        for (ts, cpu, memory) in samples {
+            let bucket = buckets
+                .entry(self.bucket(ts, points))
+                .or_insert((0.0, 0, 0));
+            bucket.0 = bucket.0.max(cpu);
+            bucket.1 += u128::from(memory);
+            bucket.2 += 1;
+        }
+        buckets
+            .into_iter()
+            .map(|(index, (cpu, memory, count))| {
+                let average = (memory / u128::from(count.max(1))) as u64;
+                json!([self.bucket_start(index, points), cpu, average])
+            })
+            .collect()
+    }
+
+    /// Closed 10 s windows inside the range, plus the one still filling.
+    fn windows_in(&self, series: &Series) -> Vec<Window> {
+        series
+            .windows()
+            .cloned()
+            .chain(series.open_window())
+            .filter(|w| w.start_ms >= self.since_ms)
+            .collect()
+    }
+
+    /// `[start_ms, cpu_min, cpu_avg, cpu_max, mem_min, mem_avg, mem_max]` per
+    /// 10 s window of the range, merged into `points` buckets when asked.
+    fn windows(&self, series: Option<&Series>) -> Vec<Value> {
+        let Some(series) = series else {
+            return Vec::new();
+        };
+        let windows = self.windows_in(series);
+        let row = |start: u64, w: &Window| {
+            json!([
+                start,
+                w.cpu.min,
+                w.cpu.avg,
+                w.cpu.max,
+                w.footprint.min,
+                w.footprint.avg,
+                w.footprint.max
+            ])
+        };
+        let Some(points) = self.points else {
+            return windows.iter().map(|w| row(w.start_ms, w)).collect();
+        };
+        let mut buckets: BTreeMap<usize, Window> = BTreeMap::new();
+        for window in windows {
+            let index = self.bucket(window.start_ms, points);
+            match buckets.get_mut(&index) {
+                None => {
+                    buckets.insert(index, window);
+                }
+                Some(merged) => {
+                    let (a, b) = (f64::from(merged.samples), f64::from(window.samples));
+                    let total = (a + b).max(1.0);
+                    merged.cpu.min = merged.cpu.min.min(window.cpu.min);
+                    merged.cpu.max = merged.cpu.max.max(window.cpu.max);
+                    merged.cpu.avg = (merged.cpu.avg * a + window.cpu.avg * b) / total;
+                    merged.footprint.min = merged.footprint.min.min(window.footprint.min);
+                    merged.footprint.max = merged.footprint.max.max(window.footprint.max);
+                    merged.footprint.avg = ((merged.footprint.avg as f64 * a
+                        + window.footprint.avg as f64 * b)
+                        / total) as u64;
+                    merged.samples = merged.samples.saturating_add(window.samples);
+                }
+            }
+        }
+        buckets
+            .iter()
+            .map(|(index, w)| row(self.bucket_start(*index, points), w))
+            .collect()
+    }
 }
 
 /// Running infra containers as `metrics` rows with `kind: container`, grouped
 /// under their lane or `<project> (shared)`. Replicas of one service are told
 /// apart by their container name.
-fn container_entries(state: &MetricsState) -> Vec<Value> {
+fn container_entries(state: &MetricsState, view: &View) -> Vec<Value> {
     let running: Vec<(&Subject, &ContainerRow)> = state
         .containers
         .iter()
@@ -510,16 +772,22 @@ fn container_entries(state: &MetricsState) -> Vec<Value> {
                 .filter(|(_, other)| other.group == row.group && other.name == row.name)
                 .count();
             let unit = if replicas > 1 { &row.docker } else { &row.name };
-            json!({
+            let series = state.history.series(subject);
+            let mut entry = json!({
                 "lane": row.group,
                 "unit": unit,
                 "kind": "container",
                 "container": row.docker,
                 "shared": row.shared,
+                "lanes": row.lanes,
                 "cpu_percent": row.latest.map(|l| l.0),
                 "memory_bytes": row.latest.map(|l| l.1),
-                "history": recent_points(state.history.series(subject)),
-            })
+                "history": view.history(series),
+            });
+            if view.windows {
+                entry["windows"] = json!(view.windows(series));
+            }
+            entry
         })
         .collect()
 }

@@ -6,7 +6,7 @@ use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
 use devlanes_proto::RpcError;
 use devlanes_tui::{
     ApiError, DaemonApi, Options,
-    app::{App, Dialog, Effect, Msg, Tab, Target},
+    app::{App, Dialog, Effect, Msg, Target, View},
     drive,
     logfile::{LogChunk, LogPosition},
 };
@@ -23,13 +23,6 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// Shift+letter as crossterm reports it.
 pub fn shifted(c: char) -> Msg {
     Msg::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT))
-}
-
-/// Types `text` one key at a time.
-fn type_text(app: &mut App, text: &str) -> Vec<Effect> {
-    text.chars()
-        .flat_map(|c| app.update(key(KeyCode::Char(c))))
-        .collect()
 }
 
 /// Log lines as tracing writes them, with one very long line, colors and a tab.
@@ -52,8 +45,8 @@ async fn daemon_app(width: u16, height: u16) -> Result<App, Box<dyn std::error::
     let mut app = App::new(width, height);
     app.update(Msg::Status(api.status().await));
     app.update(Msg::Subscribed(Ok(())));
-    let effects = app.update(key(KeyCode::Char('3')));
-    assert_eq!(app.tab, Tab::Daemon);
+    let effects = app.update(shifted('D'));
+    assert_eq!(app.view, View::Daemon);
     assert!(
         effects.iter().any(|e| matches!(e, Effect::FetchDaemon)),
         "{effects:?}"
@@ -85,15 +78,15 @@ async fn daemon_tab_at_80x24() -> TestResult {
     assert_clean(&buffer, "daemon tab");
     let text = screen(&buffer);
     for expected in [
-        "0.1.0 · pid 4242 · up 2h 5m",
-        "3 managed · 4 event subscribers · 2 projects",
+        "0.1.0  pid 4242  up 2h 5m",
+        "3 processes  2 projects  4 clients",
         "https on fallback port 8443: port 443 needs root",
-        "fix: devlanes certs trust",
+        "fix  devlanes certs trust",
         "Compose 2.29.1",
-        "following",
-        // The long log lines wrap instead of running past the border.
+        "live",
+        // The long log lines wrap instead of running past the edge.
         "lifecycle: compose failed",
-        "│lane=acme@1",
+        "lane=acme@1",
     ] {
         assert!(text.contains(expected), "missing {expected:?}:\n{text}");
     }
@@ -120,7 +113,7 @@ async fn daemon_log_pauses_when_scrolled_and_follows_again() -> TestResult {
         "a paused view stays on the same lines"
     );
     let text = screen(&render(&app)?);
-    assert!(text.contains("paused 3 lines up · G follows"), "{text}");
+    assert!(text.contains("3 lines up  G jumps to newest"), "{text}");
     app.update(key(KeyCode::Char('G')));
     assert_eq!(app.daemon.scroll, 0);
     // Every tick reads the log; every third also refreshes the facts.
@@ -153,11 +146,8 @@ async fn restart_and_stop_ask_first_and_enter_does_not_confirm() -> TestResult {
     else {
         return Err(format!("no confirm dialog: {:?}", app.dialog).into());
     };
-    assert_eq!(prompt, "restart the daemon?");
-    assert!(
-        detail[0].contains("stops 3 managed processes"),
-        "{detail:?}"
-    );
+    assert_eq!(prompt, "Restart the daemon?");
+    assert!(detail[0].contains("It stops 3 processes"), "{detail:?}");
     assert!(detail[0].contains("devlanes lane resume"), "{detail:?}");
     assert!(*strict);
     insta::assert_snapshot!("restart_confirm_80x24", screen(&render(&app)?));
@@ -183,7 +173,7 @@ async fn restart_and_stop_ask_first_and_enter_does_not_confirm() -> TestResult {
         [Effect::ScheduleReconnect { .. }]
     ));
     assert!(app.errors.is_empty(), "{:?}", app.errors);
-    assert!(row(&render(&app)?, 0).contains("daemon: restarting"));
+    assert!(row(&render(&app)?, 0).contains("daemon restarting…"));
     let effects = app.update(Msg::DaemonRestarted(Ok(daemon_status())));
     assert!(matches!(
         effects.as_slice(),
@@ -208,14 +198,14 @@ async fn restart_and_stop_ask_first_and_enter_does_not_confirm() -> TestResult {
         row(&buffer, 0)
     );
     assert!(
-        row(&buffer, 23).contains("s start daemon"),
+        row(&buffer, 23).contains("S start daemon"),
         "{}",
         row(&buffer, 23)
     );
-    // Restart and stop refuse while stopped; s starts it again.
+    // Restart refuses while stopped; S starts it again.
     assert!(app.update(shifted('R')).is_empty());
     assert!(app.dialog.is_none());
-    let effects = app.update(key(KeyCode::Char('s')));
+    let effects = app.update(shifted('S'));
     assert!(matches!(effects.as_slice(), [Effect::StartDaemon]));
     app.update(Msg::DaemonStarted(Ok(daemon_status())));
     assert!(!app.daemon.stopped);
@@ -227,19 +217,59 @@ async fn restart_and_stop_ask_first_and_enter_does_not_confirm() -> TestResult {
 }
 
 #[tokio::test]
-async fn a_small_window_keeps_the_dialog_input_and_esc_hint() -> TestResult {
+async fn a_small_window_keeps_the_dialog_keys() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
-    let mut app = App::new(50, 9);
+    let mut app = App::new(50, 8);
     app.update(Msg::Status(api.status().await));
     app.update(shifted('C'));
-    type_text(&mut app, "acme@0");
     let buffer = render(&app)?;
     let text = screen(&buffer);
-    // The explanation is cut; what the user types and how to leave are not.
-    for expected in ["clean acme@0?", "> acme@0", "esc cancels", "…"] {
+    // The explanation is cut; the keys that confirm and cancel are not.
+    for expected in [
+        "clean acme@0",
+        "Clean main (acme@0)?",
+        "enter clean",
+        "esc cancel",
+        "…",
+    ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    insta::assert_snapshot!("clean_confirm_50x9", text);
+    insta::assert_snapshot!("clean_confirm_50x8", text);
+    Ok(())
+}
+
+#[tokio::test]
+async fn daemon_log_lines_can_be_selected_and_copied() -> TestResult {
+    let mut app = daemon_app(100, 30).await?;
+    let lines = app.daemon.log.len();
+    assert!(app.update(key(KeyCode::Char('c'))).is_empty());
+    assert_eq!(
+        app.daemon.copy.map(|c| c.cursor),
+        Some(lines - 1),
+        "starts on the newest line"
+    );
+    let text = screen(&render(&app)?);
+    assert!(text.contains("v mark"), "{text}");
+    app.update(key(KeyCode::Char('k')));
+    app.update(key(KeyCode::Char('v')));
+    app.update(key(KeyCode::Char('k')));
+    let effects = app.update(key(KeyCode::Char('y')));
+    let [Effect::Copy(copied)] = effects.as_slice() else {
+        return Err(format!("unexpected {effects:?}").into());
+    };
+    let expected: Vec<String> = app
+        .daemon
+        .log
+        .range(lines - 3..lines - 1)
+        .cloned()
+        .collect();
+    assert_eq!(copied, &expected.join("\n"));
+    assert!(!copied.contains('\x1b'), "colors are not copied");
+    assert!(app.daemon.copy.is_none());
+    // Esc leaves without copying; q there does not quit.
+    app.update(key(KeyCode::Char('c')));
+    assert!(app.update(key(KeyCode::Char('q'))).is_empty());
+    assert!(app.daemon.copy.is_none());
     Ok(())
 }
 
@@ -252,7 +282,7 @@ async fn lane_gc_asks_first() -> TestResult {
     assert_eq!(app.daemon.scroll, app.daemon.log.len());
     assert!(app.update(shifted('X')).is_empty());
     assert!(
-        matches!(&app.dialog, Some(Dialog::Confirm { prompt, .. }) if prompt == "run lane gc?")
+        matches!(&app.dialog, Some(Dialog::Confirm { prompt, .. }) if prompt == "Clean every lane whose worktree is gone?")
     );
     assert!(app.update(key(KeyCode::Esc)).is_empty());
     app.update(shifted('X'));
@@ -262,46 +292,44 @@ async fn lane_gc_asks_first() -> TestResult {
     assert!(matches!(effects.as_slice(), [Effect::Refresh]));
     assert_eq!(
         app.notice.as_ref().map(|n| n.text.as_str()),
-        Some("lane gc: cleaned acme@4")
+        Some("cleaned acme@4")
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn clean_requires_typing_the_lane_name() -> TestResult {
+async fn clean_asks_y_or_enter() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let mut app = App::new(80, 24);
     app.update(Msg::Status(api.status().await));
-    // From a unit row, C cleans the unit's lane.
-    app.update(key(KeyCode::Char('j')));
+    // From a unit row (the lane opens on its failed worker), C cleans the lane.
     assert!(app.selected_unit().is_some());
     assert!(app.update(shifted('C')).is_empty());
-    let Some(Dialog::TypeConfirm {
-        expected, detail, ..
+    let Some(Dialog::Confirm {
+        prompt,
+        detail,
+        strict,
+        ..
     }) = &app.dialog
     else {
         return Err(format!("no clean dialog: {:?}", app.dialog).into());
     };
-    assert_eq!(expected, "acme@0");
+    assert_eq!(prompt, "Clean main (acme@0)?");
+    assert!(!strict, "Enter confirms too");
     assert!(
         detail
             .iter()
-            .any(|d| d == "worktree files are not touched.")
+            .any(|d| d == "Files in /work/acme/main stay as they are.")
     );
-    // `y` alone is text here, not a confirmation.
-    assert!(type_text(&mut app, "y").is_empty());
-    assert!(app.update(key(KeyCode::Enter)).is_empty());
-    assert!(matches!(
-        app.dialog,
-        Some(Dialog::TypeConfirm { mismatch: true, .. })
-    ));
-    app.update(key(KeyCode::Backspace));
-    assert!(type_text(&mut app, "acme@0").is_empty());
+    // n and Esc cancel without cleaning.
+    assert!(app.update(key(KeyCode::Char('n'))).is_empty());
+    assert!(app.dialog.is_none());
+    app.update(shifted('C'));
     insta::assert_snapshot!("clean_confirm_80x24", screen(&render(&app)?));
     let effects = app.update(key(KeyCode::Enter));
     assert!(matches!(effects.as_slice(), [Effect::CleanLane { lane }] if lane == "acme@0"));
     assert!(app.is_cleaning("acme@0"));
-    assert!(screen(&render(&app)?).contains("@0 main  cleaning…"));
+    assert!(screen(&render(&app)?).contains("cleaning…"));
 
     // A failure lands on the lane like a failed start.
     let failure = RpcError::new(
@@ -319,11 +347,11 @@ async fn clean_requires_typing_the_lane_name() -> TestResult {
         app.errors.front().map(|e| e.what.as_str()),
         Some("clean acme@0")
     );
-    assert!(screen(&render(&app)?).contains("! clean failed"));
+    select_lane(&mut app, "acme@0");
+    assert!(screen(&render(&app)?).contains("clean failed"));
 
     app.update(shifted('C'));
-    type_text(&mut app, "acme@0");
-    app.update(key(KeyCode::Enter));
+    app.update(key(KeyCode::Char('y')));
     let effects = app.update(Msg::CleanDone {
         lane: "acme@0".into(),
         result: api.clean_lane("acme@0".into()).await,
@@ -332,23 +360,29 @@ async fn clean_requires_typing_the_lane_name() -> TestResult {
     assert!(app.target_error(&Target::Lane("acme@0".into())).is_none());
     assert_eq!(
         app.notice.as_ref().map(|n| n.text.as_str()),
-        Some("clean acme@0: done, stopped 4 units")
+        Some("cleaned acme@0, stopped 4 units")
     );
     Ok(())
 }
 
+/// Shows the whole-lane row of `lane`.
+fn select_lane(app: &mut App, lane: &str) {
+    let mut effects = Vec::new();
+    app.select(devlanes_tui::app::Selected::lane(lane), &mut effects);
+}
+
 #[tokio::test]
-async fn help_lists_clean_and_the_daemon_tab() -> TestResult {
-    let mut app = App::new(80, 24);
+async fn help_lists_clean_and_the_daemon_page() -> TestResult {
+    let mut app = App::new(100, 60);
     app.update(key(KeyCode::Char('?')));
     let text = screen(&render(&app)?);
     for expected in [
-        "clean the lane (asks you to type its name)",
-        "daemon tab: restart / stop the daemon",
-        "daemon tab: lane gc",
-        "shift+tab is reserved for focus",
-        "hide the release or version notice",
-        "next tab, or lanes / monitor / daemon",
+        "clean the lane (asks first)",
+        "select log lines, open the log in less",
+        "restart, stop or start the daemon",
+        "clean every lane whose worktree is gone",
+        "hide the hint strip or version notice",
+        "monitor, daemon; again or esc returns",
     ] {
         assert!(text.contains(expected), "missing {expected:?}:\n{text}");
     }
@@ -427,7 +461,7 @@ async fn drive_cleans_only_after_the_name_is_typed() -> TestResult {
         "refresh after clean: {calls:?}"
     );
     let header = row(terminal.backend().buffer(), 0);
-    assert!(header.contains("clean acme@0: done"), "{header}");
+    assert!(header.contains("cleaned acme@0"), "{header}");
     Ok(())
 }
 
@@ -442,7 +476,7 @@ async fn drive_tails_the_daemon_log_file() -> TestResult {
     let mut fake = FakeApi::with_lanes(mixed_lanes());
     fake.log_path = Some(path);
     let api = Arc::new(fake);
-    let terminal = run_keys(Arc::clone(&api), vec![key(KeyCode::Char('3'))]).await?;
+    let terminal = run_keys(Arc::clone(&api), vec![shifted('D')]).await?;
     let text = screen(terminal.backend().buffer());
     assert!(text.contains("lifecycle: compose failed"), "{text}");
     assert!(text.contains("Compose 2.29.1"), "{text}");

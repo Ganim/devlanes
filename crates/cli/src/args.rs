@@ -47,12 +47,6 @@ Examples:
   devlanes logs api -f --timeout 30s
   devlanes logs --all --since start";
 
-const MIGRATE_AFTER: &str = "\
-Examples:
-  devlanes migrate --dry-run           print what would be written
-  devlanes migrate --from overmind     only the Procfile setup
-  devlanes migrate --force             replace an existing devlanes.yaml";
-
 const WITH_AFTER: &str = "\
 Examples:
   devlanes with -- pnpm test
@@ -205,19 +199,6 @@ The daemon owns the process: logs, stop, attach and status work on it by its\n\
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Convert mprocs, dekit, Procfile, pm2 and similar setups into devlanes.yaml
-    #[command(
-        long_about = "Write devlanes.yaml from an existing process-manager setup.\n\n\
-Looks in the repository root (or the current directory outside Git) for mprocs,\n\
-dekit, process-compose, Procfile (foreman, overmind, hivemind, honcho), pm2,\n\
-tmuxinator, tmuxp, package.json scripts that run concurrently or npm-run-all,\n\
-and mise tasks. Several setups are merged when their names do not clash. The\n\
-result is checked like devlanes config check before it is written; what could\n\
-not be carried over is printed and left as comments in the file. Runs without\n\
-the daemon.",
-        after_help = MIGRATE_AFTER
-    )]
-    Migrate(MigrateArgs),
     /// Trust the devlanes CA and install the hosts file writer
     Certs {
         #[command(subcommand)]
@@ -577,13 +558,22 @@ pub enum RemoteCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum LaneCommand {
-    /// List every worktree lane, including moved, unassigned and missing ones
+    /// List lanes, including moved, unassigned and missing ones
     Ls,
-    /// Create a git worktree for a branch under lanes.worktree_dir and register its lane
+    /// Create a worktree and lane for a branch, or another lane for this folder
+    #[command(
+        long_about = "Create a git worktree for a branch under lanes.worktree_dir and register its lane.\n\n\
+Without a branch, add another lane for the current folder: it has its own index, ports\n\
+and domain, and `--lane <name>` or `--lane <index>` addresses it. Commands run in the\n\
+folder keep using the folder's first lane."
+    )]
     New {
-        /// Branch to check out in the new worktree
+        /// Branch to check out in the new worktree [default: another lane for this folder]
         #[arg(value_name = "BRANCH")]
-        branch: String,
+        branch: Option<String>,
+        /// Name of the extra lane for this folder, used by `--lane` [default: <folder>-<n>]
+        #[arg(long, conflicts_with = "branch")]
+        name: Option<String>,
         /// Start the new lane right away
         #[arg(long)]
         start: bool,
@@ -630,53 +620,6 @@ pub enum InfraCommand {
 pub enum ConfigCommand {
     /// Validate this worktree's devlanes.yaml, including preset options
     Check,
-}
-
-/// Names `--from` accepts; `devlanes-migrate` owns the list and a binary test keeps the
-/// two equal.
-pub const MIGRATE_SOURCES: [&str; 16] = [
-    "auto",
-    "mprocs",
-    "dekit",
-    "process-compose",
-    "procfile",
-    "pm2",
-    "tmuxinator",
-    "tmuxp",
-    "package-json",
-    "mise",
-    "foreman",
-    "overmind",
-    "hivemind",
-    "honcho",
-    "concurrently",
-    "npm-run-all",
-];
-
-#[derive(Debug, Args)]
-pub struct MigrateArgs {
-    /// Setup to convert; aliases name the tool (overmind is procfile) [default: auto, every setup found]
-    #[arg(long, value_name = "SOURCE", value_parser = clap::builder::PossibleValuesParser::new(MIGRATE_SOURCES))]
-    pub from: Option<String>,
-    /// Print the generated YAML instead of writing it
-    #[arg(long)]
-    pub dry_run: bool,
-    /// Replace an existing devlanes.yaml
-    #[arg(long)]
-    pub force: bool,
-    /// Write to this file instead of devlanes.yaml next to the setup
-    #[arg(long, value_name = "PATH")]
-    pub to: Option<PathBuf>,
-}
-
-/// `devlanes migrate`, resolved: the flags and the directory it ran in.
-#[derive(Debug, Clone)]
-pub struct MigratePlan {
-    pub from: Option<String>,
-    pub dry_run: bool,
-    pub force: bool,
-    pub to: Option<PathBuf>,
-    pub cwd: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
@@ -753,8 +696,6 @@ pub enum Action {
     Completions(clap_complete::Shell),
     Tunnel,
     Askpass(Option<String>),
-    /// `devlanes migrate`; handled in the client without the daemon.
-    Migrate(MigratePlan),
     /// `devlanes debug bundle`: never spawns a daemon.
     DebugBundle {
         to: Option<PathBuf>,
@@ -1005,9 +946,14 @@ impl Cli {
                     json!({"timeout_ms": timeout_ms, "all_at_once": all_at_once, "events": start_events}),
                 ),
                 LaneCommand::Ls => (Method::LaneList, json!({})),
-                LaneCommand::New { branch, start, .. } => (
+                LaneCommand::New {
+                    branch,
+                    name,
+                    start,
+                    ..
+                } => (
                     Method::LaneNew,
-                    json!({"branch": branch, "start": start, "events": *start && start_events}),
+                    json!({"branch": branch, "name": name, "start": start, "events": *start && start_events}),
                 ),
                 LaneCommand::Clean { lane } => {
                     context.lane.clone_from(lane);
@@ -1025,15 +971,6 @@ impl Cli {
             ),
             Some(Command::Config { .. }) => (Method::ConfigCheck, json!({})),
             Some(Command::Doctor) => (Method::Doctor, json!({})),
-            Some(Command::Migrate(args)) => {
-                return Ok(Action::Migrate(MigratePlan {
-                    from: args.from.clone(),
-                    dry_run: args.dry_run,
-                    force: args.force,
-                    to: args.to.clone(),
-                    cwd: context.cwd.clone(),
-                }));
-            }
             Some(Command::Certs { command }) => match command {
                 CertsCommand::Trust { hosts, resolver } => {
                     return Ok(Action::Trust {

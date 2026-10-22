@@ -1,3 +1,0 @@
-procs:
-  web: "npm run dev"
-  docs: "mkdocs serve"

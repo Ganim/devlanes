@@ -51,7 +51,7 @@ const ERASE_LINE: &str = "\x1b[1A\x1b[2K";
 
 /// Turns a human start's `… phase` line into its outcome in place: the line
 /// printed when a phase began is replaced by each newer detail on it
-/// (`… infra: waiting for postgres (healthy 1 of 2)`), then by `✓ phase` (or
+/// (`… infra: waiting for postgres (1 of 2 healthy)`), then by `✓ phase` (or
 /// erased when the phase had nothing to do), as long as nothing was printed in
 /// between.
 pub struct PhaseLines {

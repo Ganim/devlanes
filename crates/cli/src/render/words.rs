@@ -95,22 +95,25 @@ fn candidates(data: &Value) -> String {
     }
 }
 
-/// `file:line:col: message` for `config_error` data.
-fn config_location(data: &Value) -> String {
+/// `devlanes.yaml is invalid at line 2, column 1: unknown field`, the TUI's
+/// wording of `config_error` (`devlanes-tui` `words.rs`). Line 0 means the
+/// file could not be read, so it is left out.
+fn config_invalid(data: &Value) -> String {
     let message = text(data, "message");
     let file = text(data, "file");
-    if file.is_empty() {
-        let path = text(data, "path");
-        return if path.is_empty() {
-            message
-        } else {
-            format!("{path}: {message}")
-        };
-    }
-    match (int(data, "line"), int(data, "column")) {
-        (Some(line), Some(column)) => format!("{file}:{line}:{column}: {message}"),
-        (Some(line), None) => format!("{file}:{line}: {message}"),
-        _ => format!("{file}: {message}"),
+    let path = text(data, "path");
+    let file = match (file.is_empty(), path.is_empty()) {
+        (false, _) => file,
+        (true, false) => format!("devlanes.yaml in {path}"),
+        (true, true) => "devlanes.yaml".into(),
+    };
+    let number = |key| int(data, key).filter(|n| *n > 0);
+    match (number("line"), number("column")) {
+        (Some(line), Some(column)) => {
+            format!("{file} is invalid at line {line}, column {column}: {message}")
+        }
+        (Some(line), None) => format!("{file} is invalid at line {line}: {message}"),
+        _ => format!("{file} is invalid: {message}"),
     }
 }
 
@@ -169,7 +172,7 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
         }
         "ambiguous" => (
             format!(
-                "{} matches several lanes: {}",
+                "{} matches more than one lane: {}",
                 reference(),
                 candidates(data)
             ),
@@ -229,7 +232,7 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
         }
         "project_running_elsewhere" => (
             format!(
-                "project {} is already running from {}",
+                "{} is already running from {}",
                 field(data, "project"),
                 field(data, "path")
             ),
@@ -239,7 +242,7 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
         ),
         "port_in_use" => (
             format!(
-                "port {} is in use by PID {}",
+                "port {} is taken by pid {}",
                 field(data, "port"),
                 field(data, "pid")
             ),
@@ -247,10 +250,10 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
         ),
         "port_in_use_by_lane" => (
             format!(
-                "port {} is used by {} in lane {}",
+                "port {} is taken by {}:{}",
                 field(data, "port"),
-                field(data, "unit"),
-                field(data, "lane")
+                field(data, "lane"),
+                field(data, "unit")
             ),
             Some(Hint::command(["stop", &target(data)])),
         ),
@@ -262,14 +265,14 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             Some(Hint::command(["secrets", "unlock"])),
         ),
         "needs_env" => (
-            "the daemon restarted and has no shell environment for this lane".into(),
+            "the daemon restarted and lost this lane's shell environment".into(),
             Some(match data.get("lane").and_then(Value::as_str) {
                 Some(lane) => Hint::command(["start", "--lane", lane]),
                 None => Hint::command(["lane", "resume"]),
             }),
         ),
         "docker_unavailable" => (
-            "Docker is not reachable".into(),
+            "Docker isn't running or can't be reached".into(),
             Some(Hint::command(["doctor"])),
         ),
         "timeout" => (
@@ -294,7 +297,7 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             (format!("{feature} is not supported yet"), None)
         }
         "config_error" => (
-            format!("invalid config: {}", config_location(data)),
+            config_invalid(data),
             Some(Hint::command(["config", "check"])),
         ),
         "no_config" => no_config(data),
@@ -317,7 +320,7 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
         // The unit alone: start summaries list it under its lane already.
         "spawn_failed" => (
             format!(
-                "{} could not start: {}",
+                "{} couldn't start: {}",
                 text(data, "unit"),
                 spawn_cause(data)
             ),
@@ -327,8 +330,8 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             match error.code.as_str() {
                 "unit_failed" => format!("{} failed", target(data)),
                 // Without a target it sits on the unit's own row.
-                "ready_timeout" if target(data).is_empty() => "did not become ready in time".into(),
-                _ => format!("{} did not become ready in time", target(data)),
+                "ready_timeout" if target(data).is_empty() => "wasn't ready in time".into(),
+                _ => format!("{} wasn't ready in time", target(data)),
             },
             logs_hint(data),
         ),
@@ -352,7 +355,10 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
         ),
         "git_failed" => (format!("git failed: {}", text(data, "message")), None),
         "unsupported" | "unsupported_method" => (
-            format!("daemon does not support {}", field(data, "method")),
+            format!(
+                "the daemon is too old for {}; upgrade and restart it",
+                field(data, "method")
+            ),
             None,
         ),
         "start_cancelled" => (
@@ -1099,7 +1105,7 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
             Some(start_unit()),
         ),
         "needs_env" => (
-            "the daemon restarted and has no shell environment for this lane".into(),
+            "the daemon restarted and lost this lane's shell environment".into(),
             Some(Hint::command(["start", "--lane", lane])),
         ),
         "secrets_locked" => (
@@ -1107,7 +1113,7 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
             Some(Hint::command(["secrets", "unlock"])),
         ),
         "config_error" => (
-            format!("invalid config: {}", config_location(data)),
+            config_invalid(data),
             Some(Hint::command(["config", "check"])),
         ),
         "port_in_use" => (
@@ -1123,10 +1129,10 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
         ),
         "port_in_use_by_lane" => (
             format!(
-                "port {} is used by {} in lane {}",
+                "port {} is taken by {}:{}",
                 field(data, "port"),
-                field(data, "unit"),
-                field(data, "lane")
+                field(data, "lane"),
+                field(data, "unit")
             ),
             Some(Hint::command(["stop", &target(data)])),
         ),
@@ -1188,7 +1194,7 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
             Some(Hint::command(["config", "check"])),
         ),
         "spawn_failed" => (
-            format!("could not start: {}", spawn_cause(data)),
+            format!("couldn't start: {}", spawn_cause(data)),
             Some(spawn_hint(data).unwrap_or_else(|| Hint::logs(lane, unit, 200))),
         ),
         "helper_missing"

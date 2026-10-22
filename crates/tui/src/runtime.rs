@@ -45,6 +45,8 @@ use crate::{
 /// One frame at ~60 Hz; bursts of output within a frame are drawn once.
 const FRAME: Duration = Duration::from_millis(16);
 const MESSAGE_QUEUE: usize = 1024;
+/// One spinner frame.
+const SPIN: Duration = Duration::from_millis(150);
 const ATTACH_INPUT_QUEUE: usize = 256;
 /// Queued messages applied per frame before drawing again.
 const MAX_DRAIN: usize = 512;
@@ -210,6 +212,10 @@ where
 {
     let size = terminal.size().map_err(backend_error)?;
     let mut app = App::new(size.width, size.height);
+    app.theme = options.theme();
+    if let Ok(cwd) = std::env::current_dir() {
+        app.prefer_path(cwd);
+    }
     let (sender, mut receiver) = mpsc::channel(MESSAGE_QUEUE);
     let mut executor = Executor::new(api, sender, options, clipboard);
     for effect in app.start() {
@@ -232,6 +238,8 @@ where
     let panicked = PANICKED.get_or_init(Notify::new);
     let mut tick = interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut spin = interval(SPIN);
+    spin.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut dirty = true;
     let mut last_draw = Instant::now() - FRAME;
     loop {
@@ -252,6 +260,8 @@ where
             msg = receiver.recv() => msg,
             frame = next_start(&mut start_stream) => Some(Msg::Start(frame)),
             _ = tick.tick() => Some(Msg::Tick),
+            // Spinners advance between ticks only while one is on screen.
+            _ = spin.tick(), if app.spinning() => Some(Msg::Spin),
             _ = sleep_until(next_frame), if dirty => None,
             // The panic hook already restored the terminal; a UI drawing over
             // the shell afterwards would only make things worse.
@@ -495,11 +505,17 @@ impl Executor {
                     deliver(&sender, msg).await;
                 });
             }
-            Effect::Run { lane, params } => {
+            Effect::Run { lane, params, yes } => {
                 tokio::spawn(async move {
                     let task = params.task.clone();
-                    let result = api.run_task(lane.clone(), params).await;
+                    let result = api.run_task(lane.clone(), params, yes).await;
                     deliver(&sender, Msg::RunDone { lane, task, result }).await;
+                });
+            }
+            Effect::FetchTasks { lane } => {
+                tokio::spawn(async move {
+                    let result = api.task_list(lane.clone()).await;
+                    deliver(&sender, Msg::Tasks { lane, result }).await;
                 });
             }
             Effect::FetchLogs {
@@ -518,7 +534,7 @@ impl Executor {
                     deliver(&sender, msg).await;
                 });
             }
-            Effect::FetchMetrics => {
+            Effect::FetchMetrics(query) => {
                 // A slow daemon must not pile up one request per tick.
                 if self
                     .metrics
@@ -528,7 +544,7 @@ impl Executor {
                     return true;
                 }
                 self.metrics = Some(tokio::spawn(async move {
-                    deliver(&sender, Msg::Metrics(api.metrics().await)).await;
+                    deliver(&sender, Msg::Metrics(api.metrics(query).await)).await;
                 }));
             }
             Effect::OpenUrl(url) => {
@@ -830,6 +846,7 @@ async fn pump_attach(
                 let msg = match event {
                     Some(AttachEvent::Output(bytes)) => Msg::AttachOutput { generation, bytes: bytes.to_vec() },
                     Some(AttachEvent::Error(error)) => Msg::StreamError { generation, error },
+                    Some(AttachEvent::ResizeRefused(error)) => Msg::ResizeRefused { generation, error },
                     None => break,
                 };
                 if !deliver(&sender, msg).await {

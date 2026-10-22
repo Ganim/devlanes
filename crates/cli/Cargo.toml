@@ -12,6 +12,7 @@ async-trait.workspace = true
 base64.workspace = true
 clap.workspace = true
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
+devlanes-core = { path = "../core" }
 devlanes-proto = { path = "../proto" }
 devlanes-term = { path = "../term" }
 is-ai-agent = "0.7"

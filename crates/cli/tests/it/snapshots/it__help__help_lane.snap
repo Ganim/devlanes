@@ -7,8 +7,8 @@ Create, list, clean and resume worktree lanes
 Usage: devlanes lane [OPTIONS] <COMMAND>
 
 Commands:
-  ls      List every worktree lane, including moved, unassigned and missing ones
-  new     Create a git worktree for a branch under lanes.worktree_dir and register its lane
+  ls      List lanes, including moved, unassigned and missing ones
+  new     Create a worktree and lane for a branch, or another lane for this folder
   clean   Stop a lane, run its clean tasks and teardown, and free its ports (needs --yes)
   gc      Clean lanes whose worktrees are gone and drop unused port offsets (needs --yes)
   resume  Start the lanes that were running before a reboot or daemon restart

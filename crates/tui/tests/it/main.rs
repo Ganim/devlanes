@@ -3,6 +3,9 @@
 mod daemon;
 mod errors;
 mod fake;
+mod interaction;
+mod monitor;
+mod navigation;
 mod orphans;
 mod progress;
 mod release;
@@ -15,7 +18,7 @@ use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
 use devlanes_proto::{Method, events};
 use devlanes_tui::{
     DaemonApi, Options, UnitMetrics,
-    app::{App, Connection, Dialog, Effect, Focus, Msg, Tab, Target},
+    app::{App, Connection, Dialog, Effect, Focus, Msg, Selected, Target, View},
     drive, ui,
 };
 use fake::{FakeApi, mixed_lanes};
@@ -50,25 +53,42 @@ fn ctrl(c: char) -> Msg {
     Msg::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
 }
 
-/// Shift+Tab, the focus key; crossterm reports it as `BackTab`.
+/// Shift+Tab, the previous project; crossterm reports it as `BackTab`.
 fn shift_tab() -> Msg {
     Msg::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
 }
 
-/// Presses `j` until the selected unit is `name`; returns the last attach generation.
+/// Shift+`c`.
+fn shifted(c: char) -> Msg {
+    Msg::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT))
+}
+
+/// Selects `target` as a click or `n` would; returns the effects.
+fn select(app: &mut App, target: Selected) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    app.select(target, &mut effects);
+    effects
+}
+
+/// Selects unit `name`, in the shown lane when it has one; returns the
+/// generation of the stream attached to it.
 fn select_unit(app: &mut App, name: &str) -> Option<u64> {
-    let mut generation = None;
-    for _ in 0..20 {
-        if app.selected_unit().is_some_and(|u| u.name == name) {
-            return generation;
-        }
-        for effect in app.update(key(KeyCode::Char('j'))) {
-            if let Effect::Attach { generation: g, .. } = effect {
-                generation = Some(g);
-            }
-        }
-    }
-    None
+    let has = |lane: &devlanes_proto::LaneSummary| lane.units.iter().any(|u| u.name == name);
+    let lane = app
+        .selected_lane()
+        .filter(|lane| has(lane))
+        .or_else(|| app.lanes.iter().find(|lane| has(lane)))?
+        .reference
+        .clone();
+    let effects = select(app, Selected::unit(&lane, name));
+    attach_in(&effects)
+        .map(|(generation, _)| generation)
+        .or_else(|| {
+            app.attached
+                .as_ref()
+                .filter(|a| a.unit == name)
+                .map(|a| a.generation)
+        })
 }
 
 /// The generation and role of the attach in `effects`, if any.
@@ -83,10 +103,10 @@ fn attach_in(effects: &[Effect]) -> Option<(u64, bool)> {
     })
 }
 
-/// Shift+Tab onto a watched unit: the stream reopens as interactive, and the
-/// terminal takes focus once that stream is open. Returns its generation.
+/// Enter on a watched unit: the stream reopens as interactive, and typing
+/// starts once that stream is open. Returns its generation.
 fn focus_terminal(app: &mut App, bytes: &[u8]) -> Option<u64> {
-    let effects = app.update(shift_tab());
+    let effects = app.update(key(KeyCode::Enter));
     let (generation, interactive) = attach_in(&effects)?;
     assert!(interactive, "focus reopens the stream as interactive");
     assert_eq!(app.focus, Focus::List, "focus waits for the stream");
@@ -145,14 +165,7 @@ async fn snapshot_failed_unit() -> TestResult {
 async fn snapshot_idle_lane_details() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 100, 20).await;
-    for _ in 0..20 {
-        if app.selected_lane().is_some_and(|l| l.reference == "acme@2")
-            && app.selected_unit().is_none()
-        {
-            break;
-        }
-        app.update(key(KeyCode::Char('j')));
-    }
+    select(&mut app, Selected::lane("acme@2"));
     insta::assert_snapshot!("lane_details", draw(&app)?.backend());
     Ok(())
 }
@@ -177,16 +190,16 @@ async fn snapshot_tiny_terminal() -> TestResult {
 #[tokio::test]
 async fn snapshot_monitor_tab() -> TestResult {
     let mut api = FakeApi::with_lanes(mixed_lanes());
-    api.metrics = vec![
+    api.metrics.units = vec![
         UnitMetrics {
             lane: "acme@0".into(),
             unit: "api".into(),
             cpu_percent: Some(42.0),
             memory_bytes: Some(3 * 1024 * 1024 * 1024),
             history: (0..200)
-                .map(|i| (i, (i % 10) as f64 * 10.0, (1000 + i * 4) << 20))
+                .map(|i| (i * 1000, (i % 10) as f64 * 10.0, (1000 + i * 4) << 20))
                 .collect(),
-            baseline_memory_bytes: Some(1500 << 20),
+            ..UnitMetrics::default()
         },
         UnitMetrics {
             lane: "acme@0".into(),
@@ -197,12 +210,19 @@ async fn snapshot_monitor_tab() -> TestResult {
         },
     ];
     let (mut app, _) = loaded(&api, 100, 20).await;
-    app.update(key(KeyCode::Tab));
-    assert_eq!(app.tab, Tab::Monitor);
+    app.update(Msg::Subscribed(Ok(())));
+    let effects = app.update(shifted('M'));
+    assert_eq!(app.view, View::Monitor);
+    // The default range is 15 minutes.
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::FetchMetrics(q) if q.range_ms == 900_000)),
+        "{effects:?}"
+    );
     let effects = app.update(Msg::Tick);
-    assert!(matches!(effects.as_slice(), [Effect::FetchMetrics]));
-    app.update(Msg::Metrics(api.metrics().await));
-    // Row 0 is the lane total; the graph belongs to a unit.
+    assert!(effects.iter().any(|e| matches!(e, Effect::FetchMetrics(_))));
+    app.update(Msg::Metrics(api.metrics(app.metrics_query()).await));
     app.update(key(KeyCode::Char('j')));
     let terminal = draw(&app)?;
     let text: String = terminal
@@ -212,12 +232,7 @@ async fn snapshot_monitor_tab() -> TestResult {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(text.contains("total"), "lane totals row");
     assert!(text.contains("3.9G"), "3G + 900M summed: {text}");
-    assert!(
-        text.contains("baseline 1.5G"),
-        "baseline in the graph title"
-    );
     insta::assert_snapshot!("monitor", terminal.backend());
     Ok(())
 }
@@ -226,8 +241,8 @@ async fn snapshot_monitor_tab() -> TestResult {
 async fn snapshot_monitor_without_metrics_uses_status_numbers() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 80, 12).await;
-    app.update(key(KeyCode::Tab));
-    app.update(Msg::Metrics(api.metrics().await));
+    app.update(shifted('M'));
+    app.update(Msg::Metrics(api.metrics(app.metrics_query()).await));
     insta::assert_snapshot!("monitor_fallback", draw(&app)?.backend());
     Ok(())
 }
@@ -236,8 +251,8 @@ async fn snapshot_monitor_without_metrics_uses_status_numbers() -> TestResult {
 async fn snapshot_run_confirm_and_reconnecting() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 80, 16).await;
-    select_unit(&mut app, "migrate").ok_or("migrate not reachable")?;
-    app.update(key(KeyCode::Char('t')));
+    select(&mut app, Selected::lane("acme@1"));
+    app.update(shifted('C'));
     app.update(Msg::EventsEnded(None));
     insta::assert_snapshot!("confirm_reconnecting", draw(&app)?.backend());
     Ok(())
@@ -246,72 +261,119 @@ async fn snapshot_run_confirm_and_reconnecting() -> TestResult {
 // ---- keys ----------------------------------------------------------------------
 
 #[tokio::test]
-async fn shift_tab_toggles_focus_only_with_a_unit() -> TestResult {
+async fn enter_types_into_a_running_unit_and_esc_returns() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 100, 24).await;
-    app.update(shift_tab());
-    assert_eq!(app.focus, Focus::List, "a lane row has no terminal");
-    assert!(app.notice.is_some());
+    select(&mut app, Selected::lane("acme@0"));
+    assert!(app.update(key(KeyCode::Enter)).is_empty());
+    assert_eq!(app.focus, Focus::List, "the whole-lane row has no terminal");
     let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
     feed(&mut app, generation, b"$ ");
     focus_terminal(&mut app, b"$ ").ok_or("no interactive attach")?;
-    // In terminal focus, list keys go to the unit instead.
+    // While typing, list keys go to the unit instead.
     let effects = app.update(key(KeyCode::Char('q')));
     assert!(matches!(effects.as_slice(), [Effect::Input(bytes)] if bytes == b"q"));
-    // Shift+Tab is consumed: it switches focus and sends nothing to the unit.
-    assert!(app.update(shift_tab()).is_empty());
+    // Esc is consumed: it ends typing and sends nothing to the unit.
+    assert!(app.update(key(KeyCode::Esc)).is_empty());
     assert_eq!(app.focus, Focus::List);
-    // The stream is interactive already, so focusing again needs no reattach.
-    assert!(app.update(shift_tab()).is_empty());
+    // The stream is interactive already, so typing again needs no reattach.
+    assert!(app.update(key(KeyCode::Enter)).is_empty());
     assert_eq!(app.focus, Focus::Terminal);
+    // Ctrl+] always returns; crossterm may report it as Ctrl+5.
+    app.update(ctrl(']'));
+    assert_eq!(app.focus, Focus::List);
+    app.update(key(KeyCode::Enter));
+    app.update(ctrl('5'));
+    assert_eq!(app.focus, Focus::List);
     Ok(())
 }
 
 #[tokio::test]
-async fn help_says_shift_tab_is_reserved() -> TestResult {
+async fn esc_reaches_full_screen_programs() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
-    let (mut app, _) = loaded(&api, 100, 30).await;
-    app.update(key(KeyCode::Char('?')));
-    let terminal = draw(&app)?;
-    let text: String = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(text.contains("switch between list and terminal"), "{text}");
-    assert!(
-        text.contains("shift+tab is reserved for focus; apps in the pane don't receive it"),
-        "{text}"
-    );
-    assert!(!text.contains("C-a"), "{text}");
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
+    feed(&mut app, generation, b"");
+    // vim switches to the alternate screen.
+    focus_terminal(&mut app, b"\x1b[?1049h").ok_or("no interactive attach")?;
+    let effects = app.update(key(KeyCode::Esc));
+    assert!(matches!(effects.as_slice(), [Effect::Input(b)] if b == b"\x1b"));
+    assert_eq!(app.focus, Focus::Terminal);
+    let text = draw(&app)?.backend().to_string();
+    assert!(text.contains("ctrl+] returns to the list"), "{text}");
+    app.update(ctrl(']'));
+    assert_eq!(app.focus, Focus::List);
     Ok(())
 }
 
 #[tokio::test]
-async fn tab_and_ctrl_a_reach_the_unit_in_terminal_focus() -> TestResult {
+async fn help_lists_every_key_with_this_screen_first() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 60).await;
+    app.update(key(KeyCode::Char('?')));
+    let text = draw(&app)?.backend().to_string();
+    for expected in [
+        "type into the unit",
+        "esc  ctrl+]",
+        "next, previous project",
+        "previous, next lane",
+        "next, previous problem",
+        "filter by name or +tag",
+        "reverse the sort",
+        "clean every lane whose worktree is gone",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    let list = text.find("list").ok_or("no list section")?;
+    let monitor = text.find("monitor (M)").ok_or("no monitor section")?;
+    assert!(list < monitor, "the project view's keys come first");
+    // On the monitor its own keys come first.
+    app.update(key(KeyCode::Esc));
+    app.update(shifted('M'));
+    app.update(key(KeyCode::Char('?')));
+    let text = draw(&app)?.backend().to_string();
+    let monitor = text.find("monitor (M)").ok_or("no monitor section")?;
+    let list = text.find("  j k  up down").ok_or("no list keys")?;
+    assert!(monitor < list, "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn tab_switches_projects_and_reaches_the_unit_while_typing() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 100, 24).await;
     let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
     feed(&mut app, generation, b"$ ");
-    // In the list, Tab cycles lanes, monitor, daemon.
+    // While watching, Tab and Shift+Tab switch projects, digits jump to one.
     app.update(key(KeyCode::Tab));
-    assert_eq!(app.tab, Tab::Monitor);
-    let effects = app.update(key(KeyCode::Tab));
-    assert_eq!(app.tab, Tab::Daemon);
-    assert!(effects.iter().any(|e| matches!(e, Effect::FetchDaemon)));
-    app.update(key(KeyCode::Tab));
-    assert_eq!(app.tab, Tab::Lanes);
+    assert_eq!(app.project(), Some("shop"));
+    app.update(shift_tab());
+    assert_eq!(app.project(), Some("acme"));
+    assert_eq!(
+        app.selected_unit().map(|u| u.name.as_str()),
+        Some("api"),
+        "a project comes back on the row selected there last"
+    );
+    app.update(key(KeyCode::Char('2')));
+    assert_eq!(app.project(), Some("shop"));
+    app.update(key(KeyCode::Char('1')));
+    let generation = app
+        .attached
+        .as_ref()
+        .map(|a| a.generation)
+        .ok_or("detached")?;
+    feed(&mut app, generation, b"$ ");
     app.update(ctrl('a'));
-    assert_eq!(app.focus, Focus::List, "C-a no longer switches focus");
+    assert_eq!(app.focus, Focus::List, "C-a does not switch focus");
     focus_terminal(&mut app, b"$ ").ok_or("no interactive attach")?;
     let effects = app.update(key(KeyCode::Tab));
     assert!(matches!(effects.as_slice(), [Effect::Input(b)] if b == b"\t"));
+    let effects = app.update(shift_tab());
+    assert!(matches!(effects.as_slice(), [Effect::Input(b)] if b == b"\x1b[Z"));
     assert_eq!(
-        app.tab,
-        Tab::Lanes,
-        "Tab completes in the shell, the tab stays"
+        app.project(),
+        Some("acme"),
+        "the project stays while typing"
     );
     let effects = app.update(ctrl('a'));
     assert!(matches!(effects.as_slice(), [Effect::Input(b)] if b == &[1]));
@@ -320,9 +382,34 @@ async fn tab_and_ctrl_a_reach_the_unit_in_terminal_focus() -> TestResult {
 }
 
 #[tokio::test]
+async fn monitor_and_daemon_open_from_anywhere_and_esc_returns() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    app.update(shifted('M'));
+    assert_eq!(app.view, View::Monitor);
+    let effects = app.update(shifted('D'));
+    assert_eq!(app.view, View::Daemon);
+    assert!(effects.iter().any(|e| matches!(e, Effect::FetchDaemon)));
+    app.update(shifted('D'));
+    assert_eq!(app.view, View::Project, "D again returns");
+    app.update(shifted('M'));
+    app.update(key(KeyCode::Esc));
+    assert_eq!(app.view, View::Project);
+    app.update(shifted('D'));
+    app.update(key(KeyCode::Char('2')));
+    assert_eq!(
+        (app.view, app.project()),
+        (View::Project, Some("shop")),
+        "a project number returns too"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn start_stop_restart_dispatch_lane_and_unit_refs() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 100, 24).await;
+    select(&mut app, Selected::lane("acme@0"));
     let effects = app.update(key(KeyCode::Char('s')));
     let [
         Effect::Control {
@@ -385,10 +472,9 @@ async fn start_stop_restart_dispatch_lane_and_unit_refs() -> TestResult {
 async fn idle_lane_starts_with_one_key() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 100, 24).await;
-    while app.selected_lane().is_some_and(|l| l.reference != "acme@1") {
-        app.update(key(KeyCode::Char('j')));
-    }
-    assert!(app.selected_unit().is_none(), "idle lanes start collapsed");
+    // `]` shows the next lane, on its whole-lane row since it is stopped.
+    app.update(key(KeyCode::Char(']')));
+    assert_eq!(app.selected, Some(Selected::lane("acme@1")));
     let effects = app.update(key(KeyCode::Char('s')));
     assert!(matches!(
         effects.as_slice(),
@@ -438,27 +524,51 @@ async fn paste_respects_bracketed_mode_and_focus() -> TestResult {
 }
 
 #[tokio::test]
-async fn task_runs_only_after_confirmation() -> TestResult {
+async fn tasks_run_with_s_and_ask_only_when_their_config_does() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 100, 24).await;
-    // From a lane row, `t` offers the lane's tasks.
-    assert!(app.update(key(KeyCode::Char('t'))).is_empty());
-    assert!(matches!(&app.dialog, Some(Dialog::Tasks { tasks, .. }) if tasks == &["migrate"]));
-    assert!(app.update(key(KeyCode::Enter)).is_empty());
+    app.update(Msg::Tasks {
+        lane: "acme@0".into(),
+        result: Ok(vec![
+            devlanes_tui::api::TaskInfo {
+                name: "migrate".into(),
+                ..Default::default()
+            },
+            devlanes_tui::api::TaskInfo {
+                name: "reset-db".into(),
+                confirm: true,
+                ..Default::default()
+            },
+        ]),
+    });
+    // A task that never ran is listed from task.list, and asks first.
+    select(
+        &mut app,
+        Selected {
+            lane: "acme@0".into(),
+            row: devlanes_tui::app::RowId::Task("reset-db".into()),
+        },
+    );
+    assert!(app.update(key(KeyCode::Char('s'))).is_empty());
     assert!(
-        matches!(&app.dialog, Some(Dialog::Confirm { prompt, .. }) if prompt == "run migrate in acme@0?")
+        matches!(&app.dialog, Some(Dialog::Confirm { prompt, .. }) if prompt == "Run reset-db in acme@0?")
     );
     assert!(app.update(key(KeyCode::Char('n'))).is_empty());
     assert!(app.dialog.is_none());
-
-    app.update(key(KeyCode::Char('t')));
-    app.update(key(KeyCode::Enter));
-    let effects = app.update(key(KeyCode::Char('y')));
-    let [Effect::Run { lane, params }] = effects.as_slice() else {
+    app.update(key(KeyCode::Char('s')));
+    let effects = app.update(key(KeyCode::Enter));
+    assert!(
+        matches!(effects.as_slice(), [Effect::Run { params, yes: true, .. }] if params.task == "reset-db"),
+        "the confirmed run answers the config's confirm: {effects:?}"
+    );
+    // One without `confirm` runs at once; r on a task runs it again.
+    select_unit(&mut app, "migrate");
+    let effects = app.update(key(KeyCode::Char('r')));
+    let [Effect::Run { lane, params, yes }] = effects.as_slice() else {
         return Err(format!("unexpected {effects:?}").into());
     };
     assert_eq!((lane.as_str(), params.task.as_str()), ("acme@0", "migrate"));
-    assert!(params.terminal && params.detach);
+    assert!(params.terminal && params.detach && !yes);
 
     // An interactive task gets the terminal once it starts.
     let effects = app.update(Msg::RunDone {
@@ -491,7 +601,8 @@ async fn zoom_resizes_the_pty() -> TestResult {
         if app.selected_unit().is_some_and(|u| u.name == "api") {
             break;
         }
-        browsing.extend(app.update(key(KeyCode::Char('j'))));
+        // The lane opens on its failed worker; api is above it.
+        browsing.extend(app.update(key(KeyCode::Char('k'))));
     }
     // Moving through the list only watches: no stream takes the PTY size.
     let (generation, interactive) = attach_in(&browsing).ok_or("no attach")?;
@@ -536,7 +647,9 @@ async fn zoom_resizes_the_pty() -> TestResult {
     else {
         return Err(format!("unexpected {effects:?}").into());
     };
-    assert_eq!((*columns, *rows), (98, 20));
+    // 100x24 zoomed: the pane box takes the body, less its borders and the
+    // column of margin inside it.
+    assert_eq!((*columns, *rows), (97, 19));
     assert!(*columns > before.0);
     // Another viewer may have resized it meanwhile, so the size is sent again once open.
     let effects = opened(&mut app, *generation);
@@ -544,8 +657,8 @@ async fn zoom_resizes_the_pty() -> TestResult {
         matches!(
             effects.as_slice(),
             [Effect::ResizePty {
-                columns: 98,
-                rows: 20
+                columns: 97,
+                rows: 19
             }]
         ),
         "{effects:?}"
@@ -802,9 +915,9 @@ async fn keys_in_a_dead_terminal_never_reach_list_shortcuts() -> TestResult {
     assert!(
         app.notice
             .as_ref()
-            .is_some_and(|n| n.text.contains("shift+tab returns to the list"))
+            .is_some_and(|n| n.text.contains("esc goes back to the list"))
     );
-    app.update(shift_tab());
+    app.update(key(KeyCode::Esc));
     assert_eq!(app.focus, Focus::List);
     Ok(())
 }
@@ -823,7 +936,7 @@ async fn focus_needs_a_live_stream() -> TestResult {
             1,
         ))),
     });
-    assert!(app.update(shift_tab()).is_empty());
+    assert!(app.update(key(KeyCode::Enter)).is_empty());
     assert_eq!(app.focus, Focus::List);
     assert!(
         app.notice
@@ -835,21 +948,12 @@ async fn focus_needs_a_live_stream() -> TestResult {
     feed(&mut app, generation, b"");
     app.update(unit_changed("web", "exited"));
     app.update(Msg::AttachClosed { generation });
-    assert!(app.update(shift_tab()).is_empty());
+    assert!(app.update(key(KeyCode::Enter)).is_empty());
     assert_eq!(app.focus, Focus::List);
     assert!(
         app.notice
             .as_ref()
-            .is_some_and(|n| n.text.contains("reopens when the unit runs again"))
-    );
-    // Off the lanes tab there is no terminal to focus.
-    app.update(key(KeyCode::Tab));
-    app.update(shift_tab());
-    assert_eq!(app.focus, Focus::List);
-    assert!(
-        app.notice
-            .as_ref()
-            .is_some_and(|n| n.text == "the terminal is on the lanes tab")
+            .is_some_and(|n| n.text.contains("comes back when the unit runs again"))
     );
     Ok(())
 }
@@ -1077,11 +1181,13 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
                     KeyModifiers::NONE,
                 )))
             };
-            backend.wait_for("@0 main").await;
-            keys_tx.send(press('j')).await.ok();
+            backend.wait_for("main @0").await;
+            // The lane opens on its failed worker; api is two rows up.
+            keys_tx.send(press('k')).await.ok();
+            keys_tx.send(press('k')).await.ok();
             // Quit only once the attached pane is on screen: `q` ends the loop
             // without another frame.
-            backend.wait_for("acme@0:api · ready").await;
+            backend.wait_for("┌ api  ready").await;
             keys_tx.send(press('q')).await.ok();
         }
     };
@@ -1113,6 +1219,19 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
             .any(|c| c.starts_with("Stop") || c.starts_with("Restart")),
         "quitting must not stop anything: {calls:?}"
     );
-    insta::assert_snapshot!("drive_after_resync", *backend.lock());
+    // The spinner advances with real time; any frame reads as `⠋`.
+    let screen: String = backend
+        .lock()
+        .to_string()
+        .chars()
+        .map(|c| {
+            if "⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c) {
+                '⠋'
+            } else {
+                c
+            }
+        })
+        .collect();
+    insta::assert_snapshot!("drive_after_resync", screen);
     Ok(())
 }

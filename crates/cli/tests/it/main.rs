@@ -720,7 +720,7 @@ fn errors_are_stderr_in_every_mode_and_keep_exit_status() {
         assert_eq!(result.exit_code, 3);
         assert_eq!(
             result.stderr,
-            "error: port 20000 is in use by PID 42\n  api could not bind\nhint: devlanes debug why acme@2:api\n"
+            "error: port 20000 is taken by pid 42\n  api could not bind\nhint: devlanes debug why acme@2:api\n"
         );
     }
 }

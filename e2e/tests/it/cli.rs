@@ -63,28 +63,28 @@ fn exec_unit_logs_and_stop() -> Result<()> {
     Ok(())
 }
 
-/// A broken `devlanes.yaml` fails `config check` and `start` with exit 1, a
-/// `devlanes.yaml:<line>:<column>` location and, for a misspelt key, the key it
-/// probably meant.
+/// A broken `devlanes.yaml` fails `config check` and `start` with exit 1, an
+/// `<path>/devlanes.yaml is invalid at line <line>` location and, for a misspelt
+/// key, the key it probably meant.
 #[test]
 fn config_errors_point_at_the_line() -> Result<()> {
     let cases = [
         // Line 5: a misspelt service key.
         (
             "project: broken\nservices:\n  api:\n    run: [fixture-server]\n    raedy: { http: { path: /healthz } }\n",
-            "devlanes.yaml:5:",
+            "devlanes.yaml is invalid at line 5",
             Some("unknown key `raedy`; did you mean `ready`?"),
         ),
         // Line 2: a misspelt top-level key.
         (
             "project: broken\nservces:\n  api:\n    run: [fixture-server]\n",
-            "devlanes.yaml:2:",
+            "devlanes.yaml is invalid at line 2",
             Some("unknown key `servces`; did you mean `services`?"),
         ),
         // Line 4: a port that is not a number.
         (
             "project: broken\nservices:\n  api:\n    env: { PORT: [1] }\n    run: [fixture-server]\n",
-            "devlanes.yaml:4:",
+            "devlanes.yaml is invalid at line 4",
             None,
         ),
     ];

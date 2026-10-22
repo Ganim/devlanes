@@ -41,10 +41,21 @@ async fn newer_release_shows_until_dismissed() -> TestResult {
     assert_eq!(notice, "update:99.0.0");
     assert_eq!(
         text,
-        "devlanes 99.0.0 is available: brew upgrade devlanes-run/tap/devlanes"
+        "99.0.0 available: brew upgrade devlanes-run/tap/devlanes"
     );
-    let header = format!("{:?}", draw(&app)?.backend());
-    assert!(header.contains("devlanes 99.0.0 is available"), "{header}");
+    // The top bar marks the daemon button; the daemon page says what to run.
+    let screen = draw(&app)?.backend().to_string();
+    let top = screen.lines().next().unwrap_or_default();
+    assert!(top.contains("D daemon !"), "{top}");
+    app.update(Msg::Key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('D'),
+        crossterm::event::KeyModifiers::SHIFT,
+    )));
+    let page = draw(&app)?.backend().to_string();
+    assert!(
+        page.contains("update    99.0.0 available: brew upgrade devlanes-run/tap/devlanes"),
+        "{page}"
+    );
 
     let effects = app.update(key(KeyCode::Char('u')));
     assert!(
@@ -75,14 +86,14 @@ async fn older_or_equal_release_and_matching_daemon_show_nothing() -> TestResult
     let (mut app, _) = loaded(&api, 140, 24).await;
     app.update(Msg::Notices {
         method: InstallMethod::Npm,
-        dismissed: Vec::new(),
+        dismissed: vec![devlanes_tui::app::FIRST_RUN_KEY.into()],
     });
     app.update(Msg::DaemonInfo {
         status: Ok(status(env!("CARGO_PKG_VERSION"), Some("0.0.1"))),
         doctor: Ok(json!({})),
     });
     assert_eq!(app.release_badge(), None);
-    // Without a notice, `u` does nothing here.
+    // Without a notice or the first-run strip, `u` does nothing here.
     let effects = app.update(key(KeyCode::Char('u')));
     assert!(
         !effects
@@ -90,6 +101,29 @@ async fn older_or_equal_release_and_matching_daemon_show_nothing() -> TestResult
             .any(|e| matches!(e, Effect::DismissNotice(_))),
         "{effects:?}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_first_run_strip_shows_until_used_or_hidden() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 120, 30).await;
+    assert!(!app.first_run_strip(), "not before the dismissals load");
+    app.update(Msg::Notices {
+        method: InstallMethod::Npm,
+        dismissed: Vec::new(),
+    });
+    assert!(app.first_run_strip());
+    let screen = draw(&app)?.backend().to_string();
+    assert!(screen.contains("enter types into a service"), "{screen}");
+    let effects = app.update(key(KeyCode::Char('u')));
+    assert!(
+        effects.iter().any(
+            |e| matches!(e, Effect::DismissNotice(k) if k == devlanes_tui::app::FIRST_RUN_KEY)
+        ),
+        "{effects:?}"
+    );
+    assert!(!app.first_run_strip());
     Ok(())
 }
 
@@ -103,7 +137,7 @@ async fn daemon_on_another_version_is_reported() -> TestResult {
     });
     let (notice, text) = app.release_badge().ok_or("no notice")?;
     assert_eq!(notice, format!("skew:0.0.9:{}", env!("CARGO_PKG_VERSION")));
-    assert!(text.starts_with("daemon runs 0.0.9, this TUI"), "{text}");
-    assert!(text.contains("it stops services"), "{text}");
+    assert!(text.starts_with("daemon 0.0.9, TUI"), "{text}");
+    assert!(text.contains("(stops units)"), "{text}");
     Ok(())
 }
