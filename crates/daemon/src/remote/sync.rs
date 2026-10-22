@@ -219,7 +219,7 @@ fn leaf_key(leaf: &str) -> String {
 /// under its disk name and without letter case, so `dist` and `Dist` share one.
 #[cfg(windows)]
 fn leaf_key(leaf: &str) -> String {
-    devlanes_core::paths::disk_name(leaf).to_uppercase()
+    devlanes_sync::fold_case(&devlanes_core::paths::disk_name(leaf))
 }
 
 /// Lists the box's entries over a `list` sync subscription.
@@ -269,11 +269,14 @@ async fn send_manifest(
     let mut sent: Result<(), String> = Ok(());
     while let Some(batch) = walk.next().await {
         let count = batch.len() as u64;
-        for file in &batch {
-            names.hold(&file.path);
-        }
         let batch = ManifestBatch {
-            files: batch.into_iter().map(sync_file).collect(),
+            files: batch
+                .into_iter()
+                .map(|mut file| {
+                    file.path = names.hold(&file.path);
+                    sync_file(file)
+                })
+                .collect(),
         };
         let delivered = match serde_json::to_value(&batch) {
             Ok(value) => subscription.send(value).await.map_err(|e| e.to_string()),
@@ -347,14 +350,14 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
     status.publish(&conn, &key);
     // Box paths that this file system would merge into one file (Windows
     // ignores letter case): the first one written wins, the others are skipped.
-    let mut names = CaseCollisions::new();
+    let mut names = KeptNames::take(&conn, &key);
     if let Err(error) = send_manifest(
         &conn,
         &key,
         &target,
         &mut subscription,
         &mut status,
-        &mut names,
+        &mut names.names,
     )
     .await
     {
@@ -378,18 +381,8 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
                         rejected = Some(path);
                         continue;
                     }
-                    // Names this OS cannot hold fail in `begin_file`; only then
-                    // is the path recorded as held.
                     let begun = match RelPath::new(path.clone()) {
-                        Ok(rel) => match target.begin_file(&rel, mode).await {
-                            Ok(file) => match names.admit(&rel) {
-                                Ok(()) => Ok(file),
-                                Err(held) => Err(format!(
-                                    "{path}: not synced, it differs from {held} only in letter case, which this file system does not tell apart"
-                                )),
-                            },
-                            Err(error) => Err(error.to_string()),
-                        },
+                        Ok(rel) => begin(&target, &mut names.names, &rel, mode).await,
                         Err(error) => Err(error.to_string()),
                     };
                     match begun {
@@ -443,7 +436,7 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
             Ok(SyncMessage::Delete { path }) => match RelPath::new(path) {
                 // A path skipped for its letter case: the file on disk is the
                 // other spelling's, so it stays.
-                Ok(rel) if !names.release(&rel) => {}
+                Ok(rel) if !names.names.release(&rel) => {}
                 // Deletions of the initial pass remove what the source lacks.
                 Ok(rel) => match target.remove(&rel).await {
                     Ok(()) if status.state == "watching" => status.removed += 1,
@@ -465,6 +458,58 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
     }
     status.publish(&conn, &key);
     failed
+}
+
+/// Starts receiving `rel` from the box. Names this OS cannot hold and paths
+/// that collide by letter case with a held file or folder are refused first,
+/// because `begin_file` already changes the disk: it replaces a file standing
+/// where `rel` needs a folder.
+async fn begin(
+    target: &LocalTarget,
+    names: &mut CaseCollisions,
+    rel: &RelPath,
+    mode: u32,
+) -> Result<PartialFile, String> {
+    devlanes_sync::refuse_unusable(rel).map_err(|error| error.to_string())?;
+    names.admit(rel).map_err(|held| {
+        format!(
+            "{rel}: not synced, it clashes with {held}, whose name differs only in letter case, which this file system does not tell apart"
+        )
+    })?;
+    target
+        .begin_file(rel, mode)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// One entry's names, taken from the host for a subscription and put back when
+/// it ends (an abort included), so the next connection reports files under the
+/// spellings the box used.
+struct KeptNames {
+    conn: Arc<HostConn>,
+    key: String,
+    names: CaseCollisions,
+}
+
+impl KeptNames {
+    /// The names kept for `key`, with the files of the last listing forgotten.
+    fn take(conn: &Arc<HostConn>, key: &str) -> Self {
+        let mut names = lock(&conn.names).remove(key).unwrap_or_default();
+        names.forget_files();
+        Self {
+            conn: conn.clone(),
+            key: key.to_owned(),
+            names,
+        }
+    }
+}
+
+impl Drop for KeptNames {
+    /// Hands the names back to the host.
+    fn drop(&mut self) {
+        let names = std::mem::take(&mut self.names);
+        lock(&self.conn.names).insert(self.key.clone(), names);
+    }
 }
 
 /// Marks a sync whose task was aborted (the session ended) as interrupted, so
@@ -633,5 +678,49 @@ mod tests {
                 && message.contains("`dist`"),
             "{message}"
         );
+        // Folded one to one, like the sync names: `ß` is not `SS`.
+        let eszett = duplicate_leaves(&[
+            entry("app@5", "web", "/box/web/straße"),
+            entry("app@5", "admin", "/box/admin/STRASSE"),
+        ]);
+        assert!(eszett.is_empty(), "{eszett:?}");
+    }
+
+    fn rel(path: &str) -> RelPath {
+        RelPath::new(path).expect("path")
+    }
+
+    /// On Windows a box folder `dist/` next to a box file `Dist` is refused
+    /// before anything on disk changes, so the file stays; a name Windows cannot
+    /// hold is refused without being recorded. Unix keeps both and takes every
+    /// name.
+    #[tokio::test]
+    async fn collisions_are_refused_before_the_disk_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("out");
+        let target = LocalTarget::owned(&root).await.expect("claim");
+        let mut names = CaseCollisions::new();
+        let mut file = begin(&target, &mut names, &rel("Dist"), 0o644)
+            .await
+            .expect("begin");
+        file.append(bytes::Bytes::from_static(b"file"))
+            .await
+            .expect("append");
+        file.commit().await.expect("commit");
+        let folder = begin(&target, &mut names, &rel("dist/x.js"), 0o644).await;
+        let unusable = begin(&target, &mut names, &rel("aux.js"), 0o644).await;
+        #[cfg(windows)]
+        {
+            let error = folder.err().unwrap_or_default();
+            assert!(error.contains("letter case"), "{error}");
+            assert_eq!(std::fs::read(root.join("Dist")).expect("read"), b"file");
+            assert!(unusable.is_err());
+            assert_eq!(names.admit(&rel("AUX.js")), Ok(()), "aux.js was recorded");
+        }
+        #[cfg(unix)]
+        {
+            assert!(folder.is_ok());
+            assert!(unusable.is_ok());
+        }
     }
 }

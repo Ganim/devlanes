@@ -262,9 +262,8 @@ impl ConsoleHelper {
         match status.code() {
             // The helper is attached to the console it signals, and Windows
             // delivers the event on a thread of its own that can race the
-            // helper's exit and end it. Being ended by the event proves it went
-            // out (the ignoring handler is installed before attaching, so no
-            // other event can do it), so this is success.
+            // helper's exit and end it. Being ended by an event this soon after
+            // sending one means it went out, so this is success.
             Some(0 | ENDED_BY_EVENT) => Ok(()),
             Some(code) => Err(exit_error(code)),
             None => Err(HelperError::Exit(-1)),
@@ -314,11 +313,8 @@ impl ConsoleHelper {
         match anchor.next_answer() {
             Ok(answer) if answer == "attached" => Ok(anchor),
             Ok(_) => Err(HelperError::Output),
-            // No answer: it exited, most likely failing to attach.
-            Err(_) => {
-                let code = anchor.wait_exit();
-                Err(code.map_or(HelperError::Timeout, exit_error))
-            }
+            // Most likely it exited, failing to attach.
+            Err(error) => Err(error),
         }
     }
 }
@@ -364,11 +360,16 @@ impl Anchor {
         self.next_answer()
     }
 
-    /// The next answer line, within [`HELPER_TIMEOUT`].
-    fn next_answer(&self) -> Result<String, HelperError> {
-        self.answers
-            .recv_timeout(HELPER_TIMEOUT)
-            .map_err(|_| HelperError::Timeout)
+    /// The next answer line, within [`HELPER_TIMEOUT`]. When the helper's output
+    /// ends first, the error is what its exit code stands for.
+    fn next_answer(&mut self) -> Result<String, HelperError> {
+        match self.answers.recv_timeout(HELPER_TIMEOUT) {
+            Ok(answer) => Ok(answer),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(HelperError::Timeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(self.wait_exit().map_or(HelperError::Timeout, exit_error))
+            }
+        }
     }
 
     /// The helper's exit code once it exited, ending it if it does not within
@@ -447,12 +448,16 @@ mod tests {
         }
     }
 
-    /// An anchor attaches to a process's console, lists it and sends to it; its
-    /// errors are shown whole, since they differ between machines (CI runners).
+    /// An anchor attaches to a process's console, lists it and sends to it, and
+    /// outlives the events on that console, its own and others'. Its errors are
+    /// shown whole, since they differ between machines (CI runners).
     #[test]
     fn anchor_lists_and_signals_a_console() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // Ping inherits the "ignore Ctrl-C" flag from a Git Bash parent; the
+        // daemon clears it the same way.
+        devlanes_sys::windows::process::accept_ctrl_c()?;
         let mut ping = std::process::Command::new("ping")
             .args(["-n", "30", "127.0.0.1"])
             .stdout(Stdio::null())
@@ -469,7 +474,19 @@ mod tests {
             let mut anchor = helper.anchor(ping.id(), CONSOLE_SETUP)?;
             let pids = anchor.list()?;
             assert!(pids.contains(&ping.id()), "{pids:?} lacks {}", ping.id());
-            anchor.send(Request::CtrlC)?;
+            // Ctrl-C from another helper ends ping; once it has, the event has
+            // reached the console and the anchor must still answer.
+            helper.send(anchor.child.id(), Request::CtrlC, Duration::ZERO)?;
+            let ended = devlanes_sys::windows::process::wait_exit(ping.id(), HELPER_TIMEOUT)
+                .map_err(HelperError::Spawn)?;
+            assert!(ended, "Ctrl-C did not end ping");
+            anchor.list()?;
+            // Its own event reaches the anchor too, on a thread of its own. Ping
+            // would print statistics on Ctrl-Break and go on, so it was not used
+            // above.
+            anchor.send(Request::CtrlBreak)?;
+            std::thread::sleep(Duration::from_millis(200));
+            anchor.list()?;
             Ok(())
         })();
         let _ = ping.kill();

@@ -166,30 +166,37 @@ struct Markers {
     run_wsl: bool,
 }
 
-/// WSL when any distro marker is present. The kernel release alone is not
+/// WSL when a distro marker is present. The kernel release alone is not
 /// enough: Docker Desktop's containers run on a WSL kernel without being a
-/// distro (no interop, no drive mounts). WSL 1 reports a fake kernel whose
-/// release ends in `-Microsoft`; anything else is WSL 2, custom kernels included.
+/// distro (no interop, no drive mounts). `WSL_DISTRO_NAME` alone is not enough
+/// either, as copied environments carry it to other machines (`ssh` with
+/// `SendEnv`, `env` dumps), so it counts only on a kernel whose release names
+/// Microsoft.
+/// WSL 1 reports a fake kernel whose release ends in `-Microsoft`; anything
+/// else is WSL 2, custom kernels included.
+///
+/// Interop follows the binfmt entry when WSL registered one, so a disabled
+/// entry wins over a leftover `WSL_INTEROP`. WSL 1 runs Windows programs
+/// without binfmt_misc, so there a missing entry still means on.
 #[cfg(any(target_os = "linux", test))]
 fn classify(markers: Markers) -> Option<WslInfo> {
+    let release = markers.osrelease.trim();
+    let microsoft_kernel = release.to_ascii_lowercase().contains("microsoft");
     let present = markers.binfmt.is_some()
-        || markers.distro.is_some()
         || markers.interop_socket
-        || markers.run_wsl;
+        || markers.run_wsl
+        || (markers.distro.is_some() && microsoft_kernel);
     if !present {
         return None;
     }
-    let release = markers.osrelease.trim();
     let wsl2 = release.contains("WSL2") || release.contains("microsoft-standard");
-    let version = if !wsl2 && release.to_ascii_lowercase().contains("microsoft") {
-        1
-    } else {
-        2
-    };
+    let version = if !wsl2 && microsoft_kernel { 1 } else { 2 };
     Some(WslInfo {
         distro: markers.distro,
         version,
-        interop: markers.binfmt == Some(true) || markers.interop_socket,
+        interop: markers
+            .binfmt
+            .unwrap_or(markers.interop_socket || version == 1),
         system32: None,
     })
 }
@@ -318,6 +325,51 @@ mod tests {
             ..Markers::default()
         };
         assert!(classify(socket_only).expect("wsl").interop);
+        // A disabled entry wins over a WSL_INTEROP left in the environment.
+        let disabled_with_socket = Markers {
+            osrelease: "6.6.36.6-microsoft-standard-WSL2".into(),
+            binfmt: Some(false),
+            interop_socket: true,
+            ..Markers::default()
+        };
+        assert!(!classify(disabled_with_socket).expect("wsl").interop);
+    }
+
+    /// WSL 1 has no binfmt entry and no interop socket but runs Windows
+    /// programs; a registered, disabled entry still turns interop off.
+    #[test]
+    fn wsl1_interop_without_binfmt() {
+        let wsl1 = Markers {
+            osrelease: "4.4.0-22621-Microsoft".into(),
+            distro: Some("Ubuntu".into()),
+            ..Markers::default()
+        };
+        let info = classify(wsl1.clone()).expect("wsl");
+        assert_eq!(info.version, 1);
+        assert!(info.interop);
+        let off = Markers {
+            binfmt: Some(false),
+            ..wsl1
+        };
+        assert!(!classify(off).expect("wsl").interop);
+    }
+
+    /// A `WSL_DISTRO_NAME` copied into a process on another Linux machine (an
+    /// SSH session started from WSL) is not WSL.
+    #[test]
+    fn a_leaked_distro_name_alone_is_not_wsl() {
+        let leaked = Markers {
+            osrelease: "6.8.0-45-generic".into(),
+            distro: Some("Ubuntu".into()),
+            ..Markers::default()
+        };
+        assert_eq!(classify(leaked), None);
+        let wsl2 = Markers {
+            osrelease: "6.6.36.6-microsoft-standard-WSL2".into(),
+            distro: Some("Ubuntu".into()),
+            ..Markers::default()
+        };
+        assert_eq!(classify(wsl2).expect("wsl").version, 2);
     }
 
     /// Drive mounts come from `9p` with `aname=drvfs`; other 9p mounts and

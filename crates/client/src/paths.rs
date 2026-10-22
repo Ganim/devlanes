@@ -188,13 +188,37 @@ fn publish_socket(paths: &Paths) -> Result<()> {
 }
 
 /// Replaces `run/daemon.socket` atomically with `target` and a newline.
+///
+/// Every client and daemon of a home writes the same text, and several do at
+/// once when commands race to spawn the daemon. On Windows a replace fails with
+/// access denied while another process's replace of the same file is under way,
+/// so a pointer that already holds the text is left alone, and a refused
+/// replace is retried briefly and counts once the pointer holds the text.
 fn write_pointer(run: &Path, target: &[u8]) -> Result<()> {
+    const ATTEMPTS: usize = 10;
+    let path = run.join("daemon.socket");
+    let mut wanted = target.to_vec();
+    wanted.push(b'\n');
+    let current = || fs::read(&path).is_ok_and(|text| text == wanted);
+    if current() {
+        return Ok(());
+    }
     let mut pointer = tempfile::NamedTempFile::new_in(run)?;
-    pointer.write_all(target)?;
-    pointer.write_all(b"\n")?;
-    pointer
-        .persist(run.join("daemon.socket"))
-        .map_err(|error| error.error)?;
+    pointer.write_all(&wanted)?;
+    for attempt in 1.. {
+        match pointer.persist(&path) {
+            Ok(_) => break,
+            Err(_) if current() => break,
+            Err(error)
+                if error.error.kind() == std::io::ErrorKind::PermissionDenied
+                    && attempt < ATTEMPTS =>
+            {
+                pointer = error.file;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => return Err(error.error.into()),
+        }
+    }
     Ok(())
 }
 
@@ -350,6 +374,39 @@ mod windows_tests {
             fs::read_to_string(paths.run.join("daemon.socket"))?,
             format!("{}\n", paths.socket.display())
         );
+        Ok(())
+    }
+
+    /// Commands racing to spawn the daemon prepare a new home at the same time,
+    /// as `start` in the background and `status` right after it do; none fails.
+    #[test]
+    fn concurrent_prepares_all_succeed() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        for round in 0..20 {
+            let paths = Paths::with_environment(
+                &directory.path().join(format!("home{round}")),
+                None,
+                directory.path(),
+            )?;
+            let barrier = std::sync::Barrier::new(8);
+            std::thread::scope(|scope| {
+                let racers: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            paths.prepare()
+                        })
+                    })
+                    .collect();
+                racers
+                    .into_iter()
+                    .try_for_each(|racer| racer.join().expect("racer panicked"))
+            })?;
+            assert_eq!(
+                fs::read_to_string(paths.run.join("daemon.socket"))?,
+                format!("{}\n", paths.socket.display())
+            );
+        }
         Ok(())
     }
 }

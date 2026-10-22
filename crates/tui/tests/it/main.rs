@@ -1188,6 +1188,10 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
             // Quit only once the attached pane is on screen: `q` ends the loop
             // without another frame.
             backend.wait_for("┌ api  ready").await;
+            // The daemon button's `!` needs doctor, which the first tick after
+            // the TUI is online fetches: at once or a second later, depending
+            // on whether status answered before the loop's first tick.
+            backend.wait_for("D daemon !2").await;
             keys_tx.send(press('q')).await.ok();
         }
     };

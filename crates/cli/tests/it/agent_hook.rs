@@ -222,6 +222,112 @@ fn powershell_backgrounding_is_blocked_in_projects_only() {
     );
 }
 
+/// Script blocks, nested shells, `iex`, comments, here-strings and the smaller
+/// PowerShell forms, for the PowerShell tool.
+#[test]
+fn powershell_script_blocks_nested_shells_and_comments() {
+    let lab = Lab::new();
+    let (p, o) = (lab.sub(), lab.other());
+    let (p, o) = (p.as_path(), o.as_path());
+    let typed = lab.typed();
+    let job_into = format!("Start-Job {{ Set-Location '{typed}/project'; pnpm dev }}");
+    let job_out = format!("Start-Job {{ Set-Location '{typed}/other'; pnpm dev }}");
+    let job_stays = format!("Start-Job {{ Set-Location '{typed}/project' }}; pnpm dev &");
+    let pwsh_wd = format!("pwsh -wd '{typed}/project' -c \"Start-Process pnpm dev\"");
+    let start_into = format!("start /d {typed}/project pnpm dev");
+    let start_out = format!("start /d {typed}/other pnpm dev");
+    check(
+        "PowerShell",
+        &[
+            (Block, o, &job_into, false),
+            (Block, p, "Start-Job { & pnpm dev }", false),
+            (
+                Block,
+                p,
+                "$job = Start-Job { npm run dev | Out-File dev.log }",
+                false,
+            ),
+            (Block, p, "$job=Start-Job { pnpm dev }", false),
+            (
+                Block,
+                p,
+                "Start-Job -Name web -ScriptBlock {\n  Set-Location ..\n  pnpm dev\n}",
+                false,
+            ),
+            (
+                Block,
+                p,
+                "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Start-Process pnpm dev\"",
+                false,
+            ),
+            (
+                Block,
+                p,
+                "pwsh -nop -ep Bypass -w Hidden -c \"& { Start-Process pnpm dev }\"",
+                false,
+            ),
+            (
+                Block,
+                p,
+                "powershell.exe -ExecutionPolicy:Bypass -c Start-Process pnpm dev",
+                false,
+            ),
+            (Block, o, &pwsh_wd, false),
+            (Block, p, "iex \"Start-Process pnpm dev\"", false),
+            (Block, p, "Invoke-Expression -Command 'pnpm dev &'", false),
+            (Block, p, "& { Start-Process pnpm dev }", false),
+            (
+                Block,
+                p,
+                "Start-Process pnpm -ArgumentList @('run','dev')",
+                false,
+            ),
+            (Block, p, "Start-Process pnpm dev -Wait:$false", false),
+            (Block, o, &start_into, false),
+            (Block, p, "pnpm dev & # start in the background", false),
+            (Block, p, "<# a comment #> pnpm dev &", false),
+            (Allow, p, &job_out, false),
+            (Allow, o, &job_stays, false),
+            (Allow, p, "Start-Job { pnpm build; pnpm test }", false),
+            (Allow, p, "pwsh -EncodedCommand ZQBjAGgAbwA=", false),
+            (
+                Allow,
+                p,
+                "powershell -ExecutionPolicy Bypass -Command \"Start-Process pnpm dev -Wait\"",
+                false,
+            ),
+            (Allow, p, "Start-Process pnpm dev -Wait:$true", false),
+            (Allow, p, &start_out, false),
+            (Allow, p, "$m = @'\nDon't start & stop\n'@", false),
+            (
+                Allow,
+                p,
+                "$m = @\"\npnpm dev &\n\"@; Write-Output $m",
+                false,
+            ),
+            (Allow, p, "pnpm build # then pnpm dev &", false),
+            (Allow, p, "<# Start-Process pnpm dev #> pnpm build", false),
+            (Allow, p, "Start-Process code server.js", false),
+            (Allow, p, "Start-Process notepad server.js", false),
+        ],
+    );
+}
+
+/// Editors started in the background open a file, they don't serve it.
+#[test]
+fn bash_editors_in_the_background_pass() {
+    let lab = Lab::new();
+    let p = lab.sub();
+    check(
+        "Bash",
+        &[
+            (Allow, &p, "code server.js &", false),
+            (Allow, &p, "cursor server.ts &", false),
+            (Block, &p, "node server.js &", false),
+        ],
+    );
+}
+
 /// Windows `Bash` calls also carry PowerShell (Codex runs PowerShell but names
 /// the tool `Bash`) and Git Bash's `start`, `/c/...` paths and `.cmd` shims.
 #[cfg(windows)]
@@ -251,6 +357,64 @@ fn windows_bash_calls_also_check_windows_launchers() {
             (Allow, p, "start https://web.acme-2.localhost", false),
             (Allow, p, "Start-Process pnpm dev -Wait", false),
             (Allow, p, "devlanes.exe logs web -f &", false),
+        ],
+    );
+}
+
+/// What Codex sends as `Bash` on Windows is often PowerShell: assignments, the
+/// call operator, script blocks, nested shells and `\` paths in double quotes
+/// get the same verdicts under both tool names.
+#[cfg(windows)]
+#[test]
+fn windows_powershell_text_gets_the_same_verdict_from_both_tools() {
+    let lab = Lab::new();
+    let (p, o) = (lab.sub(), lab.other());
+    let (p, o) = (p.as_path(), o.as_path());
+    let native = lab.root.display().to_string();
+    let typed = lab.typed();
+    let cd_into = format!("cd \"{native}\\project\\\"; pnpm dev &");
+    let cd_out = format!("cd \"{native}\\other\\\"; pnpm dev &");
+    let job_into = format!("Start-Job {{ Set-Location {native}\\project; pnpm dev }}");
+    let start_into = format!("start /d {native}\\project pnpm dev");
+    let cases: &[(Verdict, &Path, &str, bool)] = &[
+        (Block, o, &cd_into, false),
+        (Block, o, &job_into, false),
+        (Block, o, &start_into, false),
+        (Block, p, "$job = Start-Job { pnpm dev }", false),
+        (Block, p, "$job=Start-Job { pnpm dev }", false),
+        (Block, p, "& pnpm dev &", false),
+        (Block, p, "Start-Job { & pnpm dev }", false),
+        (
+            Block,
+            p,
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Start-Process pnpm dev\"",
+            false,
+        ),
+        (
+            Block,
+            p,
+            "Start-Process pnpm -ArgumentList @('run','dev')",
+            false,
+        ),
+        (Block, p, "Start-Process pnpm dev -Wait:$false", false),
+        (Allow, p, &cd_out, false),
+        (Allow, p, "$m = @'\nDon't start & stop\n'@", false),
+        (Allow, p, "Start-Process code server.js", false),
+        (Allow, p, "& pnpm dev", false),
+    ];
+    check("PowerShell", cases);
+    check("Bash", cases);
+    // Git Bash text keeps POSIX quoting: `\"` inside an ordinary string escapes.
+    check(
+        "Bash",
+        &[
+            (Allow, p, "echo \"say \\\"pnpm dev &\\\" later\"", false),
+            (
+                Block,
+                o,
+                &format!("cd {typed}/project && pnpm dev &"),
+                false,
+            ),
         ],
     );
 }

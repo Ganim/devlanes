@@ -21,12 +21,12 @@ mod target;
 pub use held::{HeldFile, HeldWalk};
 pub use ignore::IgnoreRules;
 pub use mode::READ_ONLY_MODES;
-pub use names::CaseCollisions;
+pub use names::{CaseCollisions, fold_case};
 pub use path::RelPath;
 pub use syncer::{SyncHandle, SyncIssue, SyncOptions, SyncState, SyncStatus, Syncer};
 pub use target::{
     ContentHash, HashCache, LocalTarget, MODE_MASK, Manifest, ManifestEntry, OWNER_MARKER,
-    PartialFile, SyncTarget, TEMP_PREFIX,
+    PartialFile, SyncTarget, TEMP_PREFIX, refuse_unusable,
 };
 
 use std::path::PathBuf;

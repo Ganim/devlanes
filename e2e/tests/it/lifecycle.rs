@@ -1,9 +1,15 @@
 //! The daemon owns lanes: a client that disappears mid-start, a daemon that dies,
 //! waits that time out and config edits picked up by the next start.
 
-use std::time::{Duration, Instant};
+use std::{
+    io::Read,
+    process::Child,
+    time::{Duration, Instant},
+};
 
-use devlanes_e2e::{Lab, Result, alive, fixture_yaml, http_get, kill, lane, pid, port, unit};
+use devlanes_e2e::{
+    Error, Lab, Result, alive, fixture_yaml, http_get, kill, lane, pid, port, unit,
+};
 
 use crate::{BUDGET, need, units_in};
 
@@ -16,19 +22,69 @@ services:
     ready: { http: { path: /healthz } }
 ";
 
+/// Polls `status` until `name` in lane `reference` is in one of `states` and
+/// returns that state. A `start` client in the background that exited first
+/// never starts the lane, so that ends the wait at once, with what it printed.
+fn background_unit_state(
+    lab: &Lab,
+    client: &mut Child,
+    reference: &str,
+    name: &str,
+    states: &[&str],
+) -> Result<String> {
+    lab.eventually(
+        &format!("{name} to be {}", states.join(" or ")),
+        Duration::from_secs(30),
+        || {
+            if let Some(status) = client.try_wait()? {
+                return Ok(Some(Err(Error::Unexpected(format!(
+                    "the background start exited with {status} before {name} started:\n{}",
+                    drain(client)
+                )))));
+            }
+            let lanes = lab.lanes(lab.repo())?;
+            let state = lane(&lanes, reference)
+                .and_then(|l| unit(l, name))
+                .and_then(|u| u["state"].as_str().map(str::to_owned));
+            Ok(state.filter(|s| states.contains(&s.as_str())).map(Ok))
+        },
+    )?
+}
+
+/// The output of an exited client, read on a thread so a pipe some leftover
+/// process still holds costs a few seconds, not the test.
+fn drain(client: &mut Child) -> String {
+    let (stdout, stderr) = (client.stdout.take(), client.stderr.take());
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(mut stdout) = stdout {
+            let _ = stdout.read_to_string(&mut text);
+        }
+        text.push_str("\nstderr:\n");
+        if let Some(mut stderr) = stderr {
+            let _ = stderr.read_to_string(&mut text);
+        }
+        let _ = sender.send(text);
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| "(its output did not end)".into())
+}
+
 /// Killing the CLI during `start` only detaches it: the daemon brings the lane up.
 #[test]
 fn killed_client_during_start_still_brings_the_lane_up() -> Result<()> {
     let lab = Lab::with_config(SLOW, BUDGET)?;
     let mut client = lab.spawn(lab.command(lab.repo(), &["start"])?)?;
 
-    let state = lab.eventually("slow to be starting", Duration::from_secs(30), || {
-        let lanes = lab.lanes(lab.repo())?;
-        let state = lane(&lanes, "fixture-slow@0")
-            .and_then(|l| unit(l, "slow"))
-            .and_then(|u| u["state"].as_str().map(str::to_owned));
-        Ok(state.filter(|s| s == "starting" || s == "queued"))
-    })?;
+    let state = background_unit_state(
+        &lab,
+        &mut client,
+        "fixture-slow@0",
+        "slow",
+        &["starting", "queued"],
+    )?;
     assert!(
         client.try_wait()?.is_none(),
         "start returned before the service was ready"
@@ -156,13 +212,7 @@ fn wait_timeout_on_a_never_ready_unit_exits_124() -> Result<()> {
     let lab = Lab::with_config(NEVER_READY, BUDGET)?;
     let mut client = lab.spawn(lab.command(lab.repo(), &["start"])?)?;
     let waited = (|| {
-        lab.eventually("stuck to be starting", Duration::from_secs(30), || {
-            let lanes = lab.lanes(lab.repo())?;
-            Ok(lane(&lanes, "fixture-wait@0")
-                .and_then(|l| unit(l, "stuck"))
-                .filter(|u| u["state"] == "starting")
-                .cloned())
-        })?;
+        background_unit_state(&lab, &mut client, "fixture-wait@0", "stuck", &["starting"])?;
         let begun = Instant::now();
         let mut command = lab.command(lab.repo(), &["wait", "stuck", "--timeout", "1s"])?;
         command.env("DEVLANES_OUTPUT", "plain");

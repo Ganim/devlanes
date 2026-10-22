@@ -224,22 +224,37 @@ fn targets(paths: &Paths) -> Vec<TrustTarget> {
         })
         .collect();
     if configured.is_empty() {
-        default_targets(devlanes_sys::wsl())
+        default_targets(windows_store_reachable())
     } else {
         configured
     }
 }
 
 /// The targets of an unset `tls.trust`: the system store, plus the Windows user
-/// store inside WSL with interop, because a browser on Windows is the usual
-/// client of a daemon in the distro. Without interop that store is out of
-/// reach, and `doctor` says why.
-fn default_targets(wsl: Option<&devlanes_sys::WslInfo>) -> Vec<TrustTarget> {
-    if wsl.is_some_and(|wsl| wsl.interop) {
+/// store when this Linux is a WSL distro that can run Windows' `certutil.exe`,
+/// because a browser on Windows is the usual client of a daemon in the distro.
+/// Without interop or a mounted System32 that store is out of reach, and
+/// `doctor` says why.
+fn default_targets(windows_reachable: bool) -> Vec<TrustTarget> {
+    if windows_reachable {
         vec![TrustTarget::System, TrustTarget::Windows]
     } else {
         vec![TrustTarget::System]
     }
+}
+
+/// Whether the `windows` target can work here: WSL with interop on and the
+/// Windows system drive mounted. Blocking on the first call (WSL detection).
+#[cfg(target_os = "linux")]
+fn windows_store_reachable() -> bool {
+    devlanes_trust_linux::WindowsInterop::detect().is_ok()
+}
+
+/// Outside Linux the Windows store is never an extra target: on Windows it is
+/// the system store.
+#[cfg(not(target_os = "linux"))]
+fn windows_store_reachable() -> bool {
+    false
 }
 
 /// The OS decides the store implementation at compile time. `own_ca` lets the
@@ -910,20 +925,16 @@ mod tests {
     use super::*;
 
     #[test]
-    /// An unset `tls.trust` adds the Windows store only inside WSL with interop.
-    fn default_targets_add_windows_inside_wsl() {
-        let wsl = |interop| devlanes_sys::WslInfo {
-            distro: Some("Ubuntu".into()),
-            version: 2,
-            interop,
-            system32: None,
-        };
-        assert_eq!(default_targets(None), [TrustTarget::System]);
+    /// An unset `tls.trust` adds the Windows store only where it is reachable,
+    /// which is never outside Linux.
+    fn default_targets_add_windows_when_reachable() {
+        assert_eq!(default_targets(false), [TrustTarget::System]);
         assert_eq!(
-            default_targets(Some(&wsl(true))),
+            default_targets(true),
             [TrustTarget::System, TrustTarget::Windows]
         );
-        assert_eq!(default_targets(Some(&wsl(false))), [TrustTarget::System]);
+        #[cfg(not(target_os = "linux"))]
+        assert!(!windows_store_reachable());
     }
 
     #[test]

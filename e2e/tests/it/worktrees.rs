@@ -130,7 +130,10 @@ fn worktree_add_move_and_remove_reach_the_running_daemon() -> Result<()> {
     assert_eq!(two["state"], "idle", "{two}");
     assert_ne!(two["port_block"], one["port_block"], "{two}");
 
-    // Move: the same lane, now at the new path.
+    // Move: the same lane, now at the new path. The watcher may see the old
+    // folder's config go missing before it learns the new path, and reads the
+    // config there only after that, so the lane can show the new path without
+    // ports for a moment.
     let moved = lab.worktrees_dir().join("moved");
     lab.git(&[
         "worktree",
@@ -139,7 +142,7 @@ fn worktree_add_move_and_remove_reach_the_running_daemon() -> Result<()> {
         &moved.to_string_lossy(),
     ])?;
     let one_moved = lane_where(&lab, "lane 1 at its new path", "fixture-two@1", |l| {
-        same_path(l, &moved)
+        same_path(l, &moved) && !l["port_block"].is_null()
     })?;
     assert_eq!(one_moved["branch"], "feat/watch", "{one_moved}");
     assert_eq!(one_moved["port_block"], one["port_block"], "{one_moved}");
@@ -169,15 +172,19 @@ fn worktree_add_move_and_remove_reach_the_running_daemon() -> Result<()> {
     assert_eq!(one_pids.len(), 2, "{running}");
     remove_running_worktree(&lab, &moved)?;
 
+    // Idle, not just without ready units: the stop may still be finishing after
+    // the processes exit, and a re-list only cleans a lane that runs nothing and
+    // is not busy.
     let stopped = lab.eventually("lane 1 to stop", Duration::from_secs(20), || {
         let lanes = watched(&lab)?;
         let done = one_pids.iter().all(|p| !alive(*p))
             && one_ports.iter().all(|p| !listening(*p))
-            && lane(&lanes, "fixture-two@1").is_some_and(|l| units_in(l, "ready").is_empty());
+            && lane(&lanes, "fixture-two@1")
+                .is_some_and(|l| units_in(l, "ready").is_empty() && l["state"] == "idle");
         Ok(done.then_some(lanes))
     })?;
     let gone = need(lane(&stopped, "fixture-two@1"), "lane 1 after removal")?;
-    assert_ne!(gone["state"], "running", "{gone}");
+    assert_eq!(gone["state"], "idle", "{gone}");
     // What Git could not delete on Windows goes once the units stopped.
     #[cfg(windows)]
     lab.eventually("the leftover worktree directory to delete", DETECT, || {

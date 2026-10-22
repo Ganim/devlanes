@@ -62,7 +62,7 @@ tls:
 
 `devlanes url open` and the TUI's `o` open the Windows default browser: through `wslview` when wslu is installed, else Windows' `rundll32.exe url.dll,FileProtocolHandler`, so neither needs a Linux browser.
 
-`terminal: windows-terminal` makes the TUI's `O` open a Windows Terminal tab that runs `wsl.exe -d <distro> --cd <worktree> --exec devlanes attach <unit>` in the same distro. When `terminal` is unset and the TUI runs in Windows Terminal, it picks Windows Terminal by itself, because Windows Terminal adds `WT_SESSION` to `WSLENV` and the variable reaches the distro. The same variable turns on the tab progress bar. A shell started another way (VS Code's terminal, `wsl.exe` from another console) has no `WT_SESSION`; set `terminal: windows-terminal` and `terminal.progress: always` in the user config there. Linux terminals installed in the distro also work through WSLg.
+`terminal: windows-terminal` makes the TUI's `O` open a Windows Terminal tab that runs `wsl.exe -d <distro> -u <user> --cd <worktree> --exec devlanes attach <unit>` in the same distro, as the same user. When `terminal` is unset and the TUI runs in Windows Terminal, it picks Windows Terminal by itself, because Windows Terminal adds `WT_SESSION` to `WSLENV` and the variable reaches the distro. The same variable turns on the tab progress bar. A shell started another way (VS Code's terminal, `wsl.exe` from another console) has no `WT_SESSION`; set `terminal: windows-terminal` and `terminal.progress: always` in the user config there. Linux terminals installed in the distro also work through WSLg.
 
 ## Worktrees belong on the Linux filesystem
 
@@ -78,6 +78,6 @@ The `/etc/hosts` fallback writes the distro's file, which WSL rewrites when the 
 
 ## Limitations
 
-- `certs trust` and `untrust` for `windows` need someone at the Windows desktop to answer the dialog.
+- `certs trust` and `untrust` for `windows` need someone at the Windows desktop to answer the dialog. After 5 minutes without an answer the command stops and says a dialog may be waiting; `doctor` gives up on a Windows store lookup after 20 seconds and reports the store as unknown.
 - Older wslu releases fail on WSL versions that name the interop entry `WSLInterop-late`; devlanes then falls back to `rundll32.exe`.
 - With interop off (`[interop] enabled=false` in `/etc/wsl.conf`), the `windows` target, Windows Terminal tabs and opening URLs in Windows are unavailable; `doctor` says so.

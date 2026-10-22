@@ -172,12 +172,19 @@ mod tests {
             Err(CheckError::Location { .. })
         ));
         let temp = tempfile::tempdir().expect("tempdir");
+        let user = devlanes_sys::windows::token::current_user()
+            .and_then(|user| user.to_sddl())
+            .expect("user");
+        // Elevated, a new directory is owned by Administrators, and the user's
+        // grant inherited from %TEMP% is what an unelevated process could use.
+        let expected = if devlanes_sys::windows::token::elevated().expect("elevation") {
+            AdminOnlyProblem::Writers(vec![user])
+        } else {
+            AdminOnlyProblem::Owner(user)
+        };
         assert!(matches!(
             admin_only(temp.path(), true),
-            Err(CheckError::Unsafe {
-                problem: AdminOnlyProblem::Owner(_),
-                ..
-            })
+            Err(CheckError::Unsafe { problem, .. }) if problem == expected
         ));
     }
 

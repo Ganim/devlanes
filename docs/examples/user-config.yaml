@@ -18,7 +18,7 @@ tls:
   ca: devlanes
   # Stores that devlanes certs trust installs the CA into: system, firefox, chrome, or
   # windows (the Windows user store, for Windows browsers when devlanes runs inside WSL).
-  # Unset means system, plus windows inside WSL.
+  # Unset means system, plus windows inside WSL with interop on.
   trust: [system, firefox]
 # Ports the HTTPS proxy listens on; lan: true also accepts other machines.
 proxy:

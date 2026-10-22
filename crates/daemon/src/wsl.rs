@@ -39,13 +39,22 @@ fn on_windows_drives(lanes: Vec<(String, PathBuf)>) -> Vec<LaneWarning> {
 }
 
 /// Runs [`on_windows_drives`] off the async threads; nothing when the task fails.
+/// WSL detection happens there too: its first call stats the drive mounts,
+/// which goes through the 9P file server.
 async fn check(lanes: Vec<(String, PathBuf)>) -> Vec<LaneWarning> {
-    if devlanes_sys::wsl().is_none() || lanes.is_empty() {
+    if lanes.is_empty() {
         return Vec::new();
     }
     tokio::task::spawn_blocking(move || on_windows_drives(lanes))
         .await
         .unwrap_or_default()
+}
+
+/// Whether the daemon runs inside WSL, detected off the async threads.
+async fn in_wsl() -> bool {
+    tokio::task::spawn_blocking(|| devlanes_sys::wsl().is_some())
+        .await
+        .unwrap_or(false)
 }
 
 impl Inner {
@@ -65,7 +74,7 @@ impl Inner {
     /// `doctor`'s `windows_drive_worktrees`: `[{lane, path, drive}]` for every
     /// known worktree on a Windows drive; `null` outside WSL.
     pub(crate) async fn windows_drive_doctor(&self) -> Value {
-        if devlanes_sys::wsl().is_none() {
+        if !in_wsl().await {
             return Value::Null;
         }
         let lanes = self

@@ -790,7 +790,7 @@
         },
         "trust": {
           "default": [],
-          "description": "Trust stores that should accept the local CA; unset means system, plus windows inside WSL. Mobile targets are ignored with a warning for now.",
+          "description": "Trust stores that should accept the local CA; unset means system, plus windows inside WSL with interop on. Mobile targets are ignored with a warning for now.",
           "examples": [
             [
               "system",

@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use devlanes_trust::{
@@ -32,6 +33,19 @@ pub(crate) const NOT_WSL: &str = "it needs WSL or Windows; this Linux is not a W
 
 /// Shown when `wslpath` is missing, which only happens outside WSL.
 const WSLPATH_HINT: &str = "wslpath comes with WSL; run devlanes inside a WSL distro";
+
+/// How long a lookup (`certutil -store`, `wslpath`) may take. Interop starts a
+/// Windows process for each call, which takes about a second when Windows is
+/// busy; `doctor` waits on these.
+const READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long an add or delete may take: the `Root` dialog waits for someone at
+/// the Windows desktop.
+const CHANGE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// Shown when a lookup times out.
+const READ_TIMEOUT_HINT: &str = "Windows did not answer through WSL interop; check that \
+     Windows programs start from the distro (`cmd.exe /c ver`)";
 
 /// `certutil.exe` under WSL and the store it changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,12 +147,52 @@ impl WindowsInteropStore {
         Ok(CommandLine::new(path_arg(&self.interop.certutil)?).args(args.iter().copied()))
     }
 
-    /// Runs `command`, mapping a `certutil.exe` that cannot start to the interop hint.
+    /// Runs a lookup, mapping a `certutil.exe` that cannot start to the interop
+    /// hint and one that hangs to [`TrustError::TimedOut`] after [`READ_TIMEOUT`].
     async fn run(&self, command: &CommandLine) -> Result<CommandOutput, TrustError> {
-        run(self.executor.as_ref(), command, INTEROP_HINT).await
+        within(
+            READ_TIMEOUT,
+            command,
+            READ_TIMEOUT_HINT,
+            run(self.executor.as_ref(), command, INTEROP_HINT),
+        )
+        .await
+    }
+
+    /// Runs `change`, which may wait on the Windows dialog for up to
+    /// [`CHANGE_TIMEOUT`].
+    async fn run_change(
+        &self,
+        change: Change,
+        command: &CommandLine,
+    ) -> Result<CommandOutput, TrustError> {
+        within(
+            CHANGE_TIMEOUT,
+            command,
+            &self.change_hint(change),
+            run(self.executor.as_ref(), command, INTEROP_HINT),
+        )
+        .await
+    }
+
+    /// What may hold up `change`: the `Root` dialog, else interop itself.
+    fn change_hint(&self, change: Change) -> String {
+        if self.prompts() {
+            format!(
+                "a Windows {} dialog may be waiting on the Windows desktop; answer it, then \
+                 run `{}` again",
+                change.dialog(),
+                change.command()
+            )
+        } else {
+            READ_TIMEOUT_HINT.to_owned()
+        }
     }
 
     /// Whether the user's own store holds `ca`; `Err` carries why it is unknown.
+    /// `-user` opens only the user's physical store: a root that is only in the
+    /// machine store is not found here (checked on Windows 11 26300 with a
+    /// Microsoft root listed under HKLM and not HKCU).
     async fn in_user_store(&self, ca: &CaCertificate) -> Result<Result<bool, String>, TrustError> {
         let thumbprint = ca.sha1_hex();
         let command = self.certutil(&["-user", "-store", &self.interop.store, &thumbprint])?;
@@ -167,9 +221,14 @@ impl WindowsInteropStore {
             }
         })?;
         let command = CommandLine::new(path_arg(&wslpath)?).args(["-w", linux]);
-        let output = run(self.executor.as_ref(), &command, WSLPATH_HINT)
-            .await?
-            .into_checked(&command)?;
+        let output = within(
+            READ_TIMEOUT,
+            &command,
+            READ_TIMEOUT_HINT,
+            run(self.executor.as_ref(), &command, WSLPATH_HINT),
+        )
+        .await?
+        .into_checked(&command)?;
         let path = output.stdout.trim();
         if path.is_empty() {
             return Err(TrustError::CommandFailed {
@@ -295,7 +354,7 @@ impl TrustStore for WindowsInteropStore {
         }
         args.extend(["-user", "-addstore", &self.interop.store, &file]);
         let command = self.certutil(&args)?;
-        let output = self.run(&command).await;
+        let output = self.run_change(Change::Add, &command).await;
         pem.close().await;
         self.changed(Change::Add, &command, output?)
     }
@@ -308,7 +367,7 @@ impl TrustStore for WindowsInteropStore {
         }
         let thumbprint = ca.sha1_hex();
         let command = self.certutil(&["-user", "-delstore", &self.interop.store, &thumbprint])?;
-        let output = self.run(&command).await?;
+        let output = self.run_change(Change::Delete, &command).await?;
         self.changed(Change::Delete, &command, output)
     }
 
@@ -329,6 +388,24 @@ impl TrustStore for WindowsInteropStore {
             Err(error) => unknown(error.to_string()),
         }
     }
+}
+
+/// Waits for `run` up to `limit`. The executor kills the child when its future
+/// is dropped, which ends the interop relay; a Windows dialog stays open until
+/// someone answers it.
+async fn within(
+    limit: Duration,
+    command: &CommandLine,
+    hint: &str,
+    run: impl Future<Output = Result<CommandOutput, TrustError>>,
+) -> Result<CommandOutput, TrustError> {
+    tokio::time::timeout(limit, run)
+        .await
+        .map_err(|_| TrustError::TimedOut {
+            command: command.to_string(),
+            seconds: limit.as_secs(),
+            hint: hint.to_owned(),
+        })?
 }
 
 /// Reads a `certutil -store <store> <thumbprint>` answer: found when it succeeds
@@ -403,6 +480,43 @@ mod tests {
         let reason = found(&denied, HASH).expect_err("unknown");
         assert!(reason.contains("error_access_denied"), "{reason}");
         assert!(reason.contains("exit code 5"), "{reason}");
+    }
+
+    /// A command that does not finish in time is a typed timeout naming it,
+    /// and for `Root` the hint points at the dialog.
+    #[tokio::test]
+    async fn slow_commands_time_out_with_a_hint() {
+        let command = CommandLine::new("/mnt/c/Windows/System32/certutil.exe").arg("-user");
+        let error = within(
+            Duration::from_millis(20),
+            &command,
+            "the hint",
+            std::future::pending(),
+        )
+        .await
+        .expect_err("timed out");
+        assert!(
+            matches!(&error, TrustError::TimedOut { command, hint, .. }
+                if command.ends_with("certutil.exe -user") && hint == "the hint"),
+            "{error}"
+        );
+        let executor: Arc<dyn CommandExecutor> =
+            Arc::new(devlanes_trust::fake::FakeExecutor::new(|_| {
+                Ok(CommandOutput::ok(""))
+            }));
+        let interop = WindowsInterop {
+            certutil: "/mnt/c/Windows/System32/certutil.exe".into(),
+            store: WINDOWS_ROOT.into(),
+        };
+        let root = WindowsInteropStore::new(executor.clone(), interop.clone());
+        let hint = root.change_hint(Change::Add);
+        assert!(
+            hint.contains("dialog may be waiting on the Windows desktop"),
+            "{hint}"
+        );
+        assert!(hint.contains("devlanes certs trust"), "{hint}");
+        let scratch = WindowsInteropStore::new(executor, interop.with_store("devlanes-test-1"));
+        assert_eq!(scratch.change_hint(Change::Delete), READ_TIMEOUT_HINT);
     }
 
     #[test]

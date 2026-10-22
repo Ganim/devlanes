@@ -341,7 +341,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | --- | --- | --- | --- |
 | `tls` | object | Certificate authority and explicitly requested trust targets. | `{"ca":"devlanes","trust":["system","firefox"]}` |
 | `tls.ca` | `devlanes` or `mkcert` | Use devlanes' own CA by default, or reuse mkcert's CA. | `devlanes` |
-| `tls.trust` | list of `system` or `firefox` or `chrome` or `windows` or `ios-simulator` or `android-emulator` | Trust stores that should accept the local CA; unset means system, plus windows inside WSL. Mobile targets are ignored with a warning for now. | `["system","firefox"]` |
+| `tls.trust` | list of `system` or `firefox` or `chrome` or `windows` or `ios-simulator` or `android-emulator` | Trust stores that should accept the local CA; unset means system, plus windows inside WSL with interop on. Mobile targets are ignored with a warning for now. | `["system","firefox"]` |
 
 ### tui
 

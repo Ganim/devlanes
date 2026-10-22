@@ -564,10 +564,13 @@ async fn remote_box_end_to_end() {
         })
         .await;
         assert!(down.is_some(), "link reports reconnecting");
-        assert_eq!(
-            client.route_state("web.boxapp.localhost").await.as_deref(),
-            Some("reconnecting")
-        );
+        // The mirror task republishes routes after it sees the link state change.
+        let rerouted = eventually(SOON, || async {
+            let state = client.route_state("web.boxapp.localhost").await?;
+            (state == "reconnecting").then_some(())
+        })
+        .await;
+        assert!(rerouted.is_some(), "routes say reconnecting");
         assert!(
             TcpStream::connect((Ipv6Addr::LOCALHOST, echo_port))
                 .await

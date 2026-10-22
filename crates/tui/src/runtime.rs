@@ -549,7 +549,9 @@ impl Executor {
             }
             Effect::OpenUrl(url) => {
                 tokio::task::spawn_blocking(move || {
-                    if let Err(error) = devlanes_term::open_url(&url) {
+                    // A child writing to the terminal would corrupt the TUI.
+                    if let Err(error) = devlanes_term::open_url(&url, devlanes_term::Output::Hidden)
+                    {
                         let msg = Msg::Failed {
                             what: format!("open {url}"),
                             message: error.to_string(),

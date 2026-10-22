@@ -392,7 +392,7 @@ impl PortsConfig {
 pub struct TlsConfig {
     /// Use devlanes' own CA by default, or reuse mkcert's CA.
     pub ca: CaKind,
-    /// Trust stores that should accept the local CA; unset means system, plus windows inside WSL. Mobile targets are ignored with a warning for now.
+    /// Trust stores that should accept the local CA; unset means system, plus windows inside WSL with interop on. Mobile targets are ignored with a warning for now.
     #[schemars(extend("examples" = [["system","firefox"],["chrome"],["system","windows"]]))]
     pub trust: Vec<TrustTarget>,
 }

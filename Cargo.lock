@@ -1812,6 +1812,7 @@ dependencies = [
  "devlanes-sys",
  "devlanes-testing",
  "devlanes-transport",
+ "getrandom 0.3.4",
  "openssh",
  "serde",
  "serde_json",

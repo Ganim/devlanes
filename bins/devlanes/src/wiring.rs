@@ -147,7 +147,6 @@ pub async fn engine(
     integ.remote = Arc::new(SshConnector {
         home: paths.home.clone(),
         exe: std::env::current_exe().ok(),
-        ssh_options: ssh_options_from_env(),
     });
     integ.hosts = hosts_file(hosts_policy, hosts_tld, hosts_probe)
         .await
@@ -999,27 +998,6 @@ struct SshConnector {
     home: PathBuf,
     /// This binary, which ssh runs as `askpass`; without it ssh runs in batch mode.
     exe: Option<PathBuf>,
-    /// Extra `-o` options for every ssh run, from [`SSH_OPTIONS_ENV`].
-    ssh_options: Vec<String>,
-}
-
-/// Extra ssh options for every box, one `-o` option per line (`Port=2222`,
-/// `IdentityFile=...`). For setups that cannot use `~/.ssh/config`, such as
-/// tests against a throwaway box; read once when the daemon starts.
-const SSH_OPTIONS_ENV: &str = "DEVLANES_SSH_OPTIONS";
-
-/// The options in [`SSH_OPTIONS_ENV`], blank lines skipped.
-fn ssh_options_from_env() -> Vec<String> {
-    std::env::var(SSH_OPTIONS_ENV)
-        .map(|value| {
-            value
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 impl RemoteConnector for SshConnector {
@@ -1032,7 +1010,6 @@ impl RemoteConnector for SshConnector {
         connect: ConnectOptions,
     ) -> Result<Arc<dyn devlanes_transport::Transport>, RpcError> {
         let mut options = devlanes_transport_ssh::SshOptions::new(&self.home);
-        options.ssh_options = self.ssh_options.clone();
         // A box without devlanes gets this client's own release, and only with
         // `remote connect --install`; otherwise the plan is reported.
         options.manifest_url = Some(format!(

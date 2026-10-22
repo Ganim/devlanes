@@ -21,12 +21,14 @@ impl TerminalLauncher for WindowsTerminal {
         native_invocation(request)
     }
 
-    /// Inside WSL with interop, plans [`wsl_invocation`] for this distro;
-    /// elsewhere on Linux there is no Windows Terminal.
+    /// Inside WSL with interop, plans [`wsl_invocation`] for this distro and
+    /// user; elsewhere on Linux there is no Windows Terminal.
     #[cfg(target_os = "linux")]
     fn invocation(&self, request: &LaunchRequest) -> Result<Invocation, LaunchError> {
         match devlanes_sys::wsl() {
-            Some(wsl) if wsl.interop => wsl_invocation(request, wsl.distro.as_deref()),
+            Some(wsl) if wsl.interop => {
+                wsl_invocation(request, wsl.distro.as_deref(), user_name().as_deref())
+            }
             _ => Err(LaunchError::Unsupported {
                 terminal: "Windows Terminal",
             }),
@@ -96,18 +98,21 @@ fn native_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError>
 }
 
 /// The tab for a request made inside WSL: `wt.exe -w 0 new-tab [--title <title>]
-/// -- wsl.exe [-d <distro>] --cd <cwd> --exec [env K=V...] <command>`.
+/// -- wsl.exe [-d <distro>] [-u <user>] --cd <cwd> --exec [env K=V...] <command>`.
 ///
 /// `--exec` runs the command without the distro's shell, which would split
 /// and expand the words again (`wsl.exe -- <command>` joins them for
 /// `$SHELL -c`). The working directory is the Linux path, which `--cd` takes as
 /// is. Without a distro name (`WSL_DISTRO_NAME` unset) the tab opens the
-/// default distro. The request's `env` reaches the command through `env`,
-/// because Windows does not pass its environment into WSL.
+/// default distro. `-u` makes the tab run as the caller rather than the
+/// distro's default user, so it reaches the caller's daemon and files. The
+/// request's `env` reaches the command through `env`, because Windows does not
+/// pass its environment into WSL.
 #[cfg(any(target_os = "linux", test))]
 fn wsl_invocation(
     request: &LaunchRequest,
     distro: Option<&str>,
+    user: Option<&str>,
 ) -> Result<Invocation, LaunchError> {
     let command = request.require_command()?;
     let mut args: Vec<String> = ["-w", "0", "new-tab"].map(str::to_owned).to_vec();
@@ -118,6 +123,9 @@ fn wsl_invocation(
     args.extend(["--".into(), "wsl.exe".into()]);
     if let Some(distro) = distro {
         args.extend(["-d".into(), escape(distro)]);
+    }
+    if let Some(user) = user {
+        args.extend(["-u".into(), escape(user)]);
     }
     args.extend(["--cd".into(), escape(&request.cwd_arg()), "--exec".into()]);
     if !request.env.is_empty() {
@@ -131,6 +139,36 @@ fn wsl_invocation(
     }
     args.extend(command.iter().map(|word| escape(word)));
     Ok(Invocation::new("wt.exe", args, true))
+}
+
+/// The name of the user this process runs as: the `/etc/passwd` entry for the
+/// owner of `/proc/self` (the effective uid), else `$USER`. `None` when neither
+/// says, and the tab then opens as the distro's default user. Blocking, like
+/// every launch.
+#[cfg(target_os = "linux")]
+fn user_name() -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let from_passwd = || {
+        let uid = std::fs::metadata("/proc/self").ok()?.uid();
+        let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+        passwd_name(&passwd, uid)
+    };
+    from_passwd().or_else(|| {
+        std::env::var("USER")
+            .ok()
+            .filter(|name| !name.is_empty() && !name.contains(char::is_whitespace))
+    })
+}
+
+/// The name of `uid` in `/etc/passwd` text (`name:x:uid:gid:...`).
+#[cfg(any(target_os = "linux", test))]
+fn passwd_name(passwd: &str, uid: u32) -> Option<String> {
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        let found = fields.nth(1)?.parse::<u32>().ok()? == uid;
+        (found && !name.is_empty()).then(|| name.to_owned())
+    })
 }
 
 /// Escapes `;` as `\;`. wt.exe splits its arguments into subcommands at every
@@ -177,11 +215,12 @@ mod tests {
         }
     }
 
-    /// The tab runs `wsl.exe` in this distro at the Linux directory, without a
-    /// shell, after `--` so wt does not take `-d` and `--cd` as its own.
+    /// The tab runs `wsl.exe` in this distro as this user at the Linux
+    /// directory, without a shell, after `--` so wt does not take `-d`, `-u`
+    /// and `--cd` as its own.
     #[test]
     fn wsl_plans_a_tab_in_the_same_distro() -> Result<(), LaunchError> {
-        let invocation = wsl_invocation(&wsl_request(), Some("Ubuntu"))?;
+        let invocation = wsl_invocation(&wsl_request(), Some("Ubuntu"), Some("acme"))?;
         assert_eq!(invocation.program, "wt.exe");
         assert!(invocation.wait);
         assert!(invocation.env.is_empty());
@@ -197,6 +236,8 @@ mod tests {
                 "wsl.exe",
                 "-d",
                 "Ubuntu",
+                "-u",
+                "acme",
                 "--cd",
                 "/home/acme/src/acme lanes",
                 "--exec",
@@ -210,7 +251,7 @@ mod tests {
         Ok(())
     }
 
-    /// Without a distro name the default distro opens; variables in `env` go
+    /// Without a distro or user name the defaults open; variables in `env` go
     /// through `env`, and `;` is escaped everywhere.
     #[test]
     fn wsl_without_distro_with_env_and_semicolons() -> Result<(), LaunchError> {
@@ -221,6 +262,7 @@ mod tests {
                 title: None,
                 env: vec![("DEVLANES_HOME".into(), "/x;y".into())],
             },
+            None,
             None,
         )?;
         assert_eq!(
@@ -247,11 +289,23 @@ mod tests {
                     command: Vec::new(),
                     ..wsl_request()
                 },
+                None,
                 None
             ),
             Err(LaunchError::EmptyCommand)
         ));
         Ok(())
+    }
+
+    /// The user name comes from the passwd line whose uid matches.
+    #[test]
+    fn passwd_names_by_uid() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\n\
+                      broken line\n\
+                      acme:x:1000:1000:Acme,,,:/home/acme:/bin/bash\n";
+        assert_eq!(passwd_name(passwd, 0).as_deref(), Some("root"));
+        assert_eq!(passwd_name(passwd, 1000).as_deref(), Some("acme"));
+        assert_eq!(passwd_name(passwd, 1001), None);
     }
 
     #[test]

@@ -26,7 +26,7 @@ use devlanes_proto::{
     Event, RpcError,
     remote::{self as wire, RemoteClient, SyncEntry},
 };
-use devlanes_sync::{HashCache, RelPath};
+use devlanes_sync::{CaseCollisions, HashCache, RelPath};
 use devlanes_transport::{ClientRegistry, Link, LinkState, Session as BoxSession, SessionOptions};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -197,6 +197,9 @@ pub(crate) struct HostConn {
     syncs: Mutex<BTreeMap<String, Value>>,
     /// Destination hashes by sync key, reused while files keep size and mtime.
     hashes: Mutex<HashMap<String, HashCache>>,
+    /// Destination names by sync key, kept across reconnects so files are
+    /// reported under the box's spelling where Windows merged case variants.
+    names: Mutex<HashMap<String, CaseCollisions>>,
     /// Version and linger findings about the box, by code.
     warnings: Mutex<BTreeMap<&'static str, String>>,
 }
@@ -571,6 +574,7 @@ impl Inner {
             mirror_task: Mutex::new(None),
             syncs: Mutex::new(BTreeMap::new()),
             hashes: Mutex::new(HashMap::new()),
+            names: Mutex::new(HashMap::new()),
             warnings: Mutex::new(BTreeMap::new()),
         });
         tokio::spawn(watch_link(Arc::downgrade(self), conn.clone()));

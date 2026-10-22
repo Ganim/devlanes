@@ -607,6 +607,11 @@ const DAEMON_ENV: &[&str] = &[
 /// CLI's settings and devlanes' own.
 const DAEMON_ENV_PREFIXES: &[&str] = &["LC_", "XDG_", "DOCKER_", "DEVLANES_"];
 
+/// devlanes variables that match a prefix above but never reach an auto-spawned
+/// daemon. The askpass pair belongs to one ssh run: a daemon spawned from a
+/// shell that has them would hand them to every unit.
+const DAEMON_ENV_DENIED: &[&str] = &["DEVLANES_ASKPASS", "DEVLANES_ASKPASS_SOCKET"];
+
 /// Nothing extra on Unix.
 #[cfg(unix)]
 const PLATFORM_ENV: &[&str] = &[];
@@ -683,7 +688,10 @@ fn daemon_env(
         let Some(name) = name.to_str() else {
             return false;
         };
-        !remove.iter().any(|removed| same_name(name, removed))
+        !remove
+            .iter()
+            .chain(DAEMON_ENV_DENIED)
+            .any(|removed| same_name(name, removed))
             && (DAEMON_ENV
                 .iter()
                 .chain(PLATFORM_ENV)
@@ -721,7 +729,8 @@ mod tests {
 
     use super::daemon_env;
 
-    /// Allowlisted names and prefixes pass, secrets and removed names do not.
+    /// Allowlisted names and prefixes pass; secrets, removed names and the
+    /// denied devlanes variables do not.
     #[test]
     fn daemon_env_is_allowlisted() {
         let vars = [
@@ -731,6 +740,8 @@ mod tests {
             ("LC_ALL", "C"),
             ("DOCKER_HOST", "unix:///var/run/docker.sock"),
             ("DEVLANES_HOME", "/tmp/dl"),
+            ("DEVLANES_ASKPASS", "1"),
+            ("DEVLANES_ASKPASS_SOCKET", "/tmp/dl/run/ssh/a.sock"),
             ("XDG_CONFIG_HOME", "/tmp/xdg"),
             ("https_proxy", "http://proxy.example.invalid"),
             ("CI", "true"),
@@ -767,6 +778,7 @@ mod tests {
             ("SystemRoot", r"C:\Windows"),
             ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
             ("devlanes_home", r"C:\dl"),
+            ("devlanes_askpass_socket", r"\\.\pipe\devlanes-askpass-1-0"),
             ("GITHUB_TOKEN", "secret"),
         ]
         .map(|(name, value)| (OsString::from(name), OsString::from(value)));

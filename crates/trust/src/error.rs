@@ -77,6 +77,16 @@ pub enum TrustError {
         /// Captured standard error.
         stderr: String,
     },
+    /// A command did not finish in time and was stopped.
+    #[error("`{command}` did not finish within {seconds} s; {hint}")]
+    TimedOut {
+        /// The command line.
+        command: String,
+        /// The limit it ran into.
+        seconds: u64,
+        /// What may be holding it up.
+        hint: String,
+    },
     /// Local I/O around a command failed (temp files, reading stores).
     #[error("{context}: {source}")]
     Io {

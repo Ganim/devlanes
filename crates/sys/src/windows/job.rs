@@ -5,7 +5,8 @@
 //! the job too: the runner's jobs refuse breakaway (see `Job::create`). The job
 //! is only for grouping and
 //! killing: no memory, CPU or process-count limits are set, and closing the last
-//! handle does not kill the members, so units outlive a daemon crash.
+//! handle does not kill the members, so units outlive a daemon crash. Helper
+//! jobs from [`Job::create_kill_on_close`] do the opposite.
 
 use std::io;
 use std::os::windows::io::OwnedHandle;
@@ -17,10 +18,11 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
-    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
-    JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
-    SetInformationJobObject, TerminateJobObject,
+    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
@@ -44,18 +46,31 @@ impl Job {
     /// `DIE_ON_UNHANDLED_EXCEPTION` keeps a crashed member from waiting on an
     /// invisible Windows Error Reporting dialog.
     pub fn create(breakaway: bool) -> io::Result<Self> {
+        Self::with_limits(if breakaway {
+            JOB_OBJECT_LIMIT_BREAKAWAY_OK
+        } else {
+            0
+        })
+    }
+
+    /// Creates an unnamed job, without breakaway, that ends every member when
+    /// its last handle closes: when the owner drops it, and when the owning
+    /// process dies, crash included. For a helper whose whole tree must not
+    /// outlive devlanes, such as `ssh.exe` and the `ProxyCommand` it starts.
+    pub fn create_kill_on_close() -> io::Result<Self> {
+        Self::with_limits(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+    }
+
+    /// Creates the job with `DIE_ON_UNHANDLED_EXCEPTION` plus `flags`.
+    fn with_limits(flags: u32) -> io::Result<Self> {
         let mut attributes = SecurityAttributes::current_user_only()?;
         // SAFETY: `attributes` outlives the call; a null name makes an unnamed job.
         let handle = unsafe { CreateJobObjectW(attributes.as_mut_ptr(), ptr::null()) };
         let job = Self(owned(handle)?);
         // SAFETY: an all-zero value is valid for this plain C struct.
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
-            | if breakaway {
-                JOB_OBJECT_LIMIT_BREAKAWAY_OK
-            } else {
-                0
-            };
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION | flags;
         // SAFETY: `job` is open; `limits` matches the information class and size.
         let ok = unsafe {
             SetInformationJobObject(
@@ -307,6 +322,43 @@ mod tests {
             .map_err(|_| io::Error::other("the helper outlived its job"))??;
         assert_eq!(status.code(), Some(7));
         assert_eq!(job.0.active_count()?, 0);
+        Ok(())
+    }
+
+    /// Dropping a kill-on-close job ends the helper and the grandchild it
+    /// started, which a kill of the helper alone would leave running.
+    #[tokio::test]
+    async fn kill_on_close_jobs_end_the_tree_when_dropped() -> io::Result<()> {
+        let job = Job::create_kill_on_close()?;
+        let mut command = tokio::process::Command::new("cmd.exe");
+        command
+            .args(["/d", "/c", "ping -n 30 127.0.0.1 >NUL"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = job.spawn_helper(&mut command)?;
+        let pid = child.id().ok_or_else(|| io::Error::other("no pid"))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let grandchild = loop {
+            if let Some(&other) = job.members()?.iter().find(|&&member| member != pid) {
+                break other;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(io::Error::other("the grandchild never joined the job"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        drop(job);
+        let ended = tokio::task::spawn_blocking(move || {
+            crate::windows::process::wait_exit(grandchild, std::time::Duration::from_secs(10))
+        })
+        .await
+        .map_err(io::Error::other)??;
+        assert!(ended, "the grandchild outlived the job");
+        tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+            .await
+            .map_err(|_| io::Error::other("the helper outlived its job"))??;
         Ok(())
     }
 }

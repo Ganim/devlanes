@@ -1,24 +1,27 @@
-//! Opening a URL in the user's browser, shared by the CLI (`devlanes open`) and
-//! the TUI. The browser is always started by the client, never the daemon, which
-//! may run on a remote or headless machine.
+//! Opening a URL in the user's browser, shared by the CLI (`devlanes url open`)
+//! and the TUI. The browser is always started by the client, never the daemon,
+//! which may run on a remote or headless machine.
 
 #[cfg(any(target_os = "linux", test))]
 use crate::Invocation;
-use crate::LaunchError;
+use crate::{LaunchError, Output};
 
 /// Opens `url` in the default browser with `open` and waits for it to hand the
-/// URL over. Blocking, so async callers use `spawn_blocking`.
+/// URL over; a non-zero exit is [`LaunchError::Failed`]. Blocking, so async
+/// callers use `spawn_blocking`.
 #[cfg(target_os = "macos")]
-pub fn open_url(url: &str) -> Result<(), LaunchError> {
-    crate::Invocation::new("open", vec![url.to_owned()], true).run()
+pub fn open_url(url: &str, output: Output) -> Result<(), LaunchError> {
+    crate::Invocation::new("open", vec![url.to_owned()], true).run_with(output)
 }
 
 /// Opens `url` in the default browser; blocking. Outside WSL this runs
 /// `xdg-open`. Inside WSL with interop the Windows browser is the one to use,
 /// so it tries `wslview`, then Windows' `rundll32.exe url.dll,FileProtocolHandler`,
-/// then `xdg-open`, until one succeeds. No opener runs through a shell.
+/// then `xdg-open`, until one succeeds. No opener runs through a shell. Only
+/// the last opener gets `output`; the ones before it stay hidden, so a
+/// fallback that works is not preceded by the failed one's messages.
 #[cfg(target_os = "linux")]
-pub fn open_url(url: &str) -> Result<(), LaunchError> {
+pub fn open_url(url: &str, output: Output) -> Result<(), LaunchError> {
     let openers = match devlanes_sys::wsl() {
         Some(info) if info.interop => {
             wsl_openers(url, info.system32.as_deref(), crate::on_path(WSLVIEW))
@@ -26,8 +29,14 @@ pub fn open_url(url: &str) -> Result<(), LaunchError> {
         _ => vec![xdg_open(url)],
     };
     let mut failure = LaunchError::EmptyCommand;
-    for opener in openers {
-        match opener.run() {
+    let last = openers.len().saturating_sub(1);
+    for (index, opener) in openers.into_iter().enumerate() {
+        let output = if index == last {
+            output
+        } else {
+            Output::Hidden
+        };
+        match opener.run_with(output) {
             Ok(()) => return Ok(()),
             Err(error) => failure = error,
         }
@@ -37,9 +46,10 @@ pub fn open_url(url: &str) -> Result<(), LaunchError> {
 
 /// Opens `url` in the default browser through the shell (`ShellExecuteExW`),
 /// which takes the URL as one string, so `&` is never a command separator.
+/// No helper process writes to the terminal, so `output` changes nothing.
 /// Blocking.
 #[cfg(windows)]
-pub fn open_url(url: &str) -> Result<(), LaunchError> {
+pub fn open_url(url: &str, _output: Output) -> Result<(), LaunchError> {
     devlanes_sys::windows::shell::open_url(url).map_err(|source| LaunchError::Spawn {
         program: "the default browser".into(),
         source,
@@ -48,8 +58,8 @@ pub fn open_url(url: &str) -> Result<(), LaunchError> {
 
 /// Opens `url` with the freedesktop opener, as Linux does outside WSL. Blocking.
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
-pub fn open_url(url: &str) -> Result<(), LaunchError> {
-    crate::Invocation::new("xdg-open", vec![url.to_owned()], true).run()
+pub fn open_url(url: &str, output: Output) -> Result<(), LaunchError> {
+    crate::Invocation::new("xdg-open", vec![url.to_owned()], true).run_with(output)
 }
 
 /// wslu's opener, which hands the URL to the Windows default browser.

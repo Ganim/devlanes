@@ -25,6 +25,8 @@ mod windows;
 pub(crate) use unix::AskpassServer;
 #[cfg(windows)]
 pub(crate) use windows::AskpassServer;
+#[cfg(windows)]
+pub use windows::relay_process_id;
 
 /// Environment variable carrying the relay endpoint to the askpass process: a
 /// socket path on Unix, a pipe name on Windows.
@@ -120,6 +122,11 @@ pub enum AskpassError {
     /// `DEVLANES_ASKPASS_SOCKET` is not set, so this was not started by devlanes' ssh.
     #[error("askpass was not started by a devlanes ssh connection")]
     NotConfigured,
+    /// The relay name is not one devlanes creates, so it is never opened: a UNC
+    /// name such as `\\host\pipe\x` would send the user's NTLM credentials there.
+    #[cfg(windows)]
+    #[error("{0:?} is not a devlanes askpass relay")]
+    UnknownRelay(String),
     /// The user declined or nobody was attached to answer.
     #[error("prompt cancelled")]
     Cancelled,

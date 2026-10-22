@@ -1108,22 +1108,25 @@ fn confirm(runtime: &Runtime, question: &str) -> Result<bool, RpcError> {
 
 /// The browser is launched by the client, never the daemon (it may be remote or
 /// headless); [`devlanes_term::open_url`] picks the opener, the Windows browser
-/// under WSL included.
+/// under WSL included. The opener shares the terminal, so a text browser or the
+/// opener's own messages show, and its exit status is checked.
 async fn open_url(url: &str) -> Result<(), RpcError> {
     if url.is_empty() {
         return Err(RpcError::new("no_url", Value::Null, 3));
     }
     let owned = url.to_owned();
-    tokio::task::spawn_blocking(move || devlanes_term::open_url(&owned))
-        .await
-        .map_err(|error| RpcError::new("open_failed", json!({"message": error.to_string()}), 1))?
-        .map_err(|error| {
-            RpcError::new(
-                "open_failed",
-                json!({"message": error.to_string(), "url": url}),
-                1,
-            )
-        })
+    tokio::task::spawn_blocking(move || {
+        devlanes_term::open_url(&owned, devlanes_term::Output::Terminal)
+    })
+    .await
+    .map_err(|error| RpcError::new("open_failed", json!({"message": error.to_string()}), 1))?
+    .map_err(|error| {
+        RpcError::new(
+            "open_failed",
+            json!({"message": error.to_string(), "url": url}),
+            1,
+        )
+    })
 }
 
 /// Reads the daemon's own log file directly; works even when the daemon is wedged.

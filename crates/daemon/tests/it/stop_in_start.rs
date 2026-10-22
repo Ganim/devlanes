@@ -272,8 +272,12 @@ async fn stopping_the_running_task_interrupts_the_start() {
             json!({"profiles": ["slow"], "timeout_ms": 60_000}),
             cx(&main),
         );
+        // The runner journals the spawn before the lane records the task, and
+        // only a recorded task can be stopped by name.
         let hung = eventually(Duration::from_secs(5), || async {
-            (h.runner.journal.entries() == ["nap 1500", "sleep"]).then_some(())
+            (h.runner.journal.entries() == ["nap 1500", "sleep"]
+                && lane(&h, &main).await.units.iter().any(|u| u.name == "hang"))
+            .then_some(())
         })
         .await;
         assert!(

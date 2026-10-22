@@ -952,7 +952,7 @@ mod tests {
     }
 
     /// Windows' own program directories pass the admin-only check; what this
-    /// user creates fails it on the owner, and an extra grant names the writer.
+    /// user owns fails it on the owner, and an extra grant names the writer.
     #[test]
     fn admin_only_checks() -> io::Result<()> {
         let program_files = super::super::dirs::program_files()?;
@@ -965,10 +965,23 @@ mod tests {
         );
         let user = token::current_user()?.to_sddl()?;
         let temp = tempfile::tempdir()?;
+        // Owned by this user whether or not the process is elevated.
+        let private = temp.path().join("private");
+        ensure_private_dir(&private, false)?.map_err(|p| io::Error::other(format!("{p:?}")))?;
         assert_eq!(
-            check_admin_only(temp.path(), true)?,
+            check_admin_only(&private, true)?,
             Err(AdminOnlyProblem::Owner(user.clone()))
         );
+        // A plain new directory has the token's default owner: this user, or
+        // Administrators when elevated (as on CI runners). Then the user's grant
+        // inherited from %TEMP% is what makes it unsafe, since the same user
+        // can write it unelevated.
+        let expected = if token::elevated()? {
+            AdminOnlyProblem::Writers(vec![user.clone()])
+        } else {
+            AdminOnlyProblem::Owner(user.clone())
+        };
+        assert_eq!(check_admin_only(temp.path(), true)?, Err(expected));
         // The verdict on an admin-owned object with an extra writer.
         let security = Security {
             owner: Some(ADMINISTRATORS.to_owned()),

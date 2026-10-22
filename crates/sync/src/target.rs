@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::mode::{mode_of, persist_with_mode};
-use crate::names::unusable_name;
+use crate::names::{stored_elsewhere, unusable_name};
 use crate::{RelPath, SyncError};
 
 /// Prefix of in-flight temp files; manifests skip them so a crash never syncs one.
@@ -298,10 +298,28 @@ impl PartialFile {
         })?;
         let (dest, mode, owned) = (self.dest.clone(), self.mode, self.owned);
         blocking(format!("writing {}", self.dest.display()), move || {
+            refuse_other_entry(&dest)?;
             clear_directory(&dest, owned)?;
             persist_with_mode(temp, &dest, mode)
         })
         .await
+    }
+}
+
+/// Refuses to write `dest` when the entry it reaches is stored under another
+/// name (on Windows an 8.3 short name, or the same name in another case),
+/// since the write would replace that other file.
+fn refuse_other_entry(dest: &Path) -> io::Result<()> {
+    match stored_elsewhere(dest)? {
+        Some(stored) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "{} reaches the existing {} on this file system; not replaced",
+                dest.display(),
+                stored.to_string_lossy()
+            ),
+        )),
+        None => Ok(()),
     }
 }
 
@@ -376,8 +394,8 @@ fn clear_directory(dest: &Path, owned: bool) -> io::Result<()> {
 }
 
 /// Refuses a path with a name this OS cannot hold, such as `aux.js` or `a:b`
-/// on Windows, before it reaches the file system.
-fn refuse_unusable(path: &RelPath) -> Result<(), SyncError> {
+/// on Windows, before it reaches the file system. Every path passes on Unix.
+pub fn refuse_unusable(path: &RelPath) -> Result<(), SyncError> {
     if unusable_name(path) {
         return Err(SyncError::InvalidPath {
             path: path.to_string(),
@@ -504,6 +522,7 @@ fn write_local(
 ) -> io::Result<()> {
     let parent = prepare_parents(root, rel)?;
     let dest = rel.to_path(root);
+    refuse_other_entry(&dest)?;
     // The source turned this directory into a file.
     clear_directory(&dest, owned)?;
     let mut temp = tempfile::Builder::new()
@@ -527,6 +546,10 @@ fn remove_local(root: &Path, rel: &RelPath) -> io::Result<()> {
         }
     }
     let dest = rel.to_path(root);
+    // Another file answers to this name (an 8.3 short name); it is not this one.
+    if stored_elsewhere(&dest)?.is_some() {
+        return Ok(());
+    }
     match fs::symlink_metadata(&dest) {
         Ok(meta) if !meta.is_dir() => match fs::remove_file(&dest) {
             Ok(()) => {}
@@ -666,6 +689,49 @@ mod tests {
             b"kept"
         );
         assert_eq!(target.files().await.expect("files"), vec![rel("keep")]);
+    }
+
+    /// A box path that is another file's 8.3 short name never reaches that
+    /// file: writing it is refused either way, and removing it leaves the file.
+    /// Skipped when the volume makes no short names.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn short_names_never_reach_other_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("out");
+        let target = LocalTarget::owned(&root).await.expect("claim");
+        target
+            .write_file(&rel("readme-long.md"), Bytes::from_static(b"long"), 0o644)
+            .await
+            .expect("write");
+        if !root.join("README~1.MD").exists() {
+            eprintln!("8.3 names are off on this volume; nothing to check");
+            return;
+        }
+        let written = target
+            .write_file(&rel("README~1.MD"), Bytes::from_static(b"short"), 0o644)
+            .await;
+        assert!(written.is_err(), "{written:?}");
+        let mut file = target
+            .begin_file(&rel("README~1.MD"), 0o644)
+            .await
+            .expect("begin");
+        file.append(Bytes::from_static(b"short"))
+            .await
+            .expect("append");
+        assert!(file.commit().await.is_err(), "the commit is refused");
+        target
+            .remove(&rel("README~1.MD"))
+            .await
+            .expect("removing is a no-op");
+        assert_eq!(
+            fs::read(root.join("readme-long.md")).expect("read"),
+            b"long"
+        );
+        assert_eq!(
+            target.files().await.expect("files"),
+            vec![rel("readme-long.md")]
+        );
     }
 
     #[cfg(unix)]

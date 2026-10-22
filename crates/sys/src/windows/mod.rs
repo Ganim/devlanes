@@ -12,6 +12,7 @@ pub mod ctrl;
 pub mod dirs;
 pub mod handles;
 pub mod job;
+pub mod names;
 pub mod net;
 pub mod pipe;
 pub mod proc;

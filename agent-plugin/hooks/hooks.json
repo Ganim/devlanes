@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "devlanes __agent-hook",
+            "command": "devlanes __agent-hook #|| exit 0\nexit 0",
             "timeout": 10,
             "onFailure": "continue"
           }

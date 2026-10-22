@@ -7,17 +7,21 @@
 //! execs `devlanes tunnel --stdio`, and everything after the sentinel is mux
 //! traffic. Installing devlanes and the standalone [`SshTransport::probe`] are
 //! separate ssh runs.
+//!
+//! Every `ssh.exe` starts in a job that ends its whole tree when the job's handle
+//! closes, so a `ProxyCommand` it started dies with the session, and with the
+//! daemon if the daemon crashes.
 
-use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use devlanes_sys::NoWindow as _;
+use devlanes_sys::windows::job::Job;
 use devlanes_transport::{BoxDuplex, Transport, TransportError};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
@@ -44,9 +48,6 @@ const EXIT_GRACE: Duration = Duration::from_secs(5);
 
 /// ssh's own exit status for connection and authentication failures.
 const SSH_FAILED: i32 = 255;
-
-/// Distinguishes sentinels of sessions started by one process.
-static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 
 /// [`Transport`] that runs `devlanes tunnel --stdio` on a box over system OpenSSH.
 ///
@@ -172,38 +173,35 @@ impl SshTransport {
 
     /// Runs the session script: probe, sentinel, tunnel.
     async fn start(&self) -> Result<Started, SshError> {
-        let unique = RandomState::new().hash_one(NEXT_SESSION.fetch_add(1, Ordering::Relaxed));
-        let sentinel = format!("devlanes-tunnel-ready-{unique:016x}");
-        let script = bootstrap::session_script(&self.options.remote_program, &sentinel);
+        let token = crate::random_token()?;
+        let start = format!("devlanes-probe-{token}");
+        let end = format!("devlanes-tunnel-ready-{token}");
+        let script = bootstrap::session_script(&self.options.remote_program, &start, &end);
         let (mut command, program, askpass) = self.command().await?;
         command
             .arg(remote_shell(&script))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|error| spawn_error(&program, error))?;
+        let (mut child, job) = spawn_in_job(&mut command, &program)?;
         let missing = || SshError::Io(io::Error::other("ssh stdio was not piped"));
         let stdin = child.stdin.take().ok_or_else(missing)?;
         let stdout = child.stdout.take().ok_or_else(missing)?;
         let stderr = tokio::spawn(collect_tail(child.stderr.take().ok_or_else(missing)?));
         let mut stdout = BufReader::new(stdout);
-        let header = tokio::time::timeout(
-            self.options.auth_timeout,
-            read_header(&mut stdout, &sentinel),
-        )
-        .await;
+        let header =
+            tokio::time::timeout(self.options.auth_timeout, read_header(&mut stdout, &end)).await;
         // Prompts end with authentication; the box has answered by now.
         drop(askpass);
-        // Returning early drops `child`, whose kill_on_drop ends ssh.
+        // Returning early drops `child`, whose kill_on_drop ends ssh, and `job`,
+        // which ends whatever ssh started.
         let lines = match header {
             Err(_) => return Err(SshError::AuthTimeout(self.destination.clone())),
             Ok(Err(error)) => return Err(SshError::Io(error)),
             Ok(Ok(Some(lines))) => lines,
             Ok(Ok(None)) => return Err(self.ended_early(child, stderr).await),
         };
-        let probe = bootstrap::parse_session_header(&lines)
+        let probe = bootstrap::parse_session_header(&lines, &start)
             .ok_or_else(|| SshError::Probe(lines.join("\n")))?;
         self.remember(Some(probe.clone()));
         if probe.program.is_none() {
@@ -217,6 +215,8 @@ impl SshTransport {
             .unwrap_or_else(PoisonError::into_inner)
             .child_token();
         tokio::spawn(async move {
+            // Ends ssh's remaining tree whichever way this task finishes.
+            let _job = job;
             let waiting = async move {
                 let status = child.wait().await;
                 let stderr = stderr.await.unwrap_or_default();
@@ -240,8 +240,12 @@ impl SshTransport {
         )))
     }
 
-    /// The error for a session whose output ended before the sentinel: ssh's
-    /// own failure (classified from its stderr) or a box that printed no probe.
+    /// The error for a session whose output ended before the sentinel. Exit
+    /// status 255 is ssh's own failure, classified from its stderr. Any other
+    /// end came from the box: ssh's stderr also carries the box's, so a shell
+    /// startup file printing "Permission denied" or a missing `sh` (exit 127)
+    /// must not read as rejected credentials, which would stop reconnecting for
+    /// good; those are temporary errors carrying the stderr tail.
     async fn ended_early(&self, mut child: Child, stderr: JoinHandle<Vec<u8>>) -> SshError {
         let status = tokio::time::timeout(EXIT_GRACE, child.wait()).await;
         let log = match tokio::time::timeout(EXIT_GRACE, stderr).await {
@@ -249,14 +253,25 @@ impl SshTransport {
             _ => Vec::new(),
         };
         let log = String::from_utf8_lossy(&log);
-        match status {
-            Ok(Ok(status)) if status.success() => SshError::Probe(format!(
-                "the box ended the session before the probe finished: {}",
-                log.trim()
-            )),
-            Ok(Ok(status)) => master_error(&self.destination, status, &log, self.first()),
-            Ok(Err(error)) => master_error(&self.destination, error, &log, self.first()),
-            Err(_) => master_error(&self.destination, "no exit status", &log, self.first()),
+        let status = match status {
+            Ok(Ok(status)) if status.success() => {
+                return SshError::Probe(format!(
+                    "the box ended the session before the probe finished: {}",
+                    log.trim()
+                ));
+            }
+            Ok(Ok(status)) if status.code() == Some(SSH_FAILED) => {
+                return master_error(&self.destination, status, &log, self.first());
+            }
+            Ok(Ok(status)) => status.to_string(),
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => "no exit status".to_owned(),
+        };
+        SshError::Master {
+            destination: self.destination.clone(),
+            status,
+            log: tail(log.as_bytes()),
+            permanent: false,
         }
     }
 
@@ -269,11 +284,11 @@ impl SshTransport {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let child = command
-            .spawn()
-            .map_err(|error| spawn_error(&program, error))?;
+        let (child, job) = spawn_in_job(&mut command, &program)?;
         let output = tokio::time::timeout(limit, child.wait_with_output()).await;
         drop(askpass);
+        // Anything ssh left running (a ProxyCommand) ends here.
+        drop(job);
         match output {
             Ok(output) => Ok(Some(output?)),
             Err(_) => Ok(None),
@@ -377,11 +392,37 @@ fn remote_shell(script: &str) -> String {
     format!("sh -c {}", sh_quote(script))
 }
 
-/// Resolves a bare `ssh` to the system OpenSSH client
-/// (`%SystemRoot%\System32\OpenSSH`), else the first match on `PATH`. Git for
-/// Windows ships an MSYS `ssh` that also works, but it reads its own
-/// `/etc/ssh` and `~/.ssh` through MSYS paths, so the system client goes first.
-/// Paths with a directory are used as given. Blocking.
+/// Starts `command` inside a new job that ends the whole tree when the job is
+/// dropped or this process dies. When no job can be made or joined, ssh starts
+/// the usual way and the tree is not covered; that is logged.
+fn spawn_in_job(command: &mut Command, program: &Path) -> Result<(Child, Option<Job>), SshError> {
+    match Job::create_kill_on_close() {
+        Ok(job) => match job.spawn_helper(command) {
+            Ok(child) => return Ok((child, Some(job))),
+            // The same failure would follow without the job.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(spawn_error(program, error));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "ssh runs outside a job; a ProxyCommand may outlive it");
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "ssh runs outside a job; a ProxyCommand may outlive it");
+        }
+    }
+    let child = command
+        .spawn()
+        .map_err(|error| spawn_error(program, error))?;
+    Ok((child, None))
+}
+
+/// Resolves a bare `ssh` to the system OpenSSH client (`System32\OpenSSH`,
+/// found through the API rather than `%SystemRoot%`, which the environment
+/// controls), else the first match on `PATH`. Git for Windows ships an MSYS
+/// `ssh` that also works, but it reads its own `/etc/ssh` and `~/.ssh` through
+/// MSYS paths, so the system client goes first. Paths with a directory are used
+/// as given. Blocking.
 fn locate_program(program: &Path) -> PathBuf {
     if program
         .parent()
@@ -394,8 +435,9 @@ fn locate_program(program: &Path) -> PathBuf {
     } else {
         program.to_path_buf()
     };
-    let system = std::env::var_os("SystemRoot")
-        .map(|root| PathBuf::from(root).join("System32").join("OpenSSH"));
+    let system = devlanes_sys::windows::dirs::system_directory()
+        .ok()
+        .map(|system| system.join("OpenSSH"));
     let path = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -489,13 +531,22 @@ mod tests {
 
     /// A transport whose ssh is a fake that prints `stderr` and exits like ssh.
     fn fake(dir: &Path, stderr: &str) -> Result<SshTransport, Box<dyn std::error::Error>> {
+        fake_exiting(dir, stderr, 255)
+    }
+
+    /// A transport whose ssh is a fake that prints `stderr` and exits with `code`.
+    fn fake_exiting(
+        dir: &Path,
+        stderr: &str,
+        code: u8,
+    ) -> Result<SshTransport, Box<dyn std::error::Error>> {
         let ssh = install(
             dir,
             "ssh",
             &Behaviour::new()
                 .record(dir.join("args"))
                 .stderr(stderr)
-                .exit(255),
+                .exit(code),
         )?;
         let mut options = SshOptions::new(dir);
         options.ssh_program = ssh;
@@ -535,7 +586,7 @@ mod tests {
                 .position(|arg| arg == "--")
                 .ok_or("no -- before the destination")?;
             assert_eq!(args[at + 1], "box");
-            assert!(args[at + 2].starts_with("sh -c 'uname -s;"), "{args:?}");
+            assert!(args[at + 2].starts_with("sh -c 'printf "), "{args:?}");
             assert!(args.contains(&"-T".to_owned()), "{args:?}");
             assert!(!args.contains(&"BatchMode=yes".to_owned()), "{args:?}");
             Ok(())
@@ -558,6 +609,34 @@ mod tests {
             assert!(!error.is_permanent(), "{error}");
             let args = std::fs::read_to_string(dir.path().join("args"))?;
             assert!(args.contains("BatchMode=yes"), "{args}");
+            Ok(())
+        })
+        .await?
+    }
+
+    /// A session that ends with a status other than ssh's own 255 failed on the
+    /// box, even when the box's stderr (which ssh passes on) says "Permission
+    /// denied": the link keeps retrying and the error carries that stderr.
+    #[tokio::test]
+    async fn box_failures_before_the_tunnel_are_transient() -> TestResult {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempfile::tempdir()?;
+            for code in [1, 127] {
+                let run = dir.path().join(code.to_string());
+                std::fs::create_dir(&run)?;
+                let transport = fake_exiting(
+                    &run,
+                    "bash: /home/acme/.bashrc: Permission denied\nsh: devlanes: not found\n",
+                    code,
+                )?;
+                let Err(error) = transport.connect().await else {
+                    panic!("fake ssh unexpectedly connected");
+                };
+                assert!(!error.is_permanent(), "exit {code}: {error}");
+                let message = error.to_string();
+                assert!(message.contains(".bashrc: Permission denied"), "{message}");
+                assert!(message.contains(&code.to_string()), "{message}");
+            }
             Ok(())
         })
         .await?
@@ -611,8 +690,9 @@ mod tests {
             found.file_name().and_then(|name| name.to_str()),
             Some("ssh.exe")
         );
-        let system = std::env::var_os("SystemRoot")
-            .map(|root| PathBuf::from(root).join(r"System32\OpenSSH\ssh.exe"));
+        let system = devlanes_sys::windows::dirs::system_directory()
+            .ok()
+            .map(|system| system.join(r"OpenSSH\ssh.exe"));
         if let Some(system) = system.filter(|path| path.is_file()) {
             assert_eq!(found, system);
         }

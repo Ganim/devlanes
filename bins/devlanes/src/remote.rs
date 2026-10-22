@@ -53,20 +53,22 @@ async fn tunnel() -> Result<u8, RpcError> {
 }
 
 /// Answers ssh's prompt when this process was started as `SSH_ASKPASS` on
-/// Windows: the marker variable and the relay pipe are set and the prompt is the
-/// only argument (ssh runs `<program> <prompt>`, and Windows has no wrapper
-/// script to add the subcommand). `None` means a normal command line, run as usual.
+/// Windows: the marker variable is `1`, the relay variable holds a pipe name of
+/// the shape the daemon creates, and there is exactly one argument, the prompt
+/// (ssh runs `<program> <prompt>`, and Windows has no wrapper script to add the
+/// subcommand). `None` means a normal command line, run as usual.
 ///
-/// ssh's other children (a `ProxyCommand`) inherit the environment too, which is
-/// why the shape of the command line counts as well: one argument that is not a
-/// flag, as no ssh prompt starts with `-`.
+/// The argument is taken as the prompt even when it starts with `-`, since
+/// nothing limits what ssh may ask. ssh's other children (a `ProxyCommand`)
+/// inherit the same environment, so a single-argument `devlanes` call from one
+/// of them is answered as a prompt too.
 #[cfg(windows)]
 pub fn askpass_from_env() -> Option<u8> {
     use devlanes_transport_ssh::askpass::{MARKER_ENV, SOCKET_ENV};
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let prompt = askpass_prompt(
         std::env::var_os(MARKER_ENV).as_deref(),
-        std::env::var_os(SOCKET_ENV).is_some(),
+        std::env::var_os(SOCKET_ENV).as_deref(),
         &args,
     )?;
     match tokio::runtime::Builder::new_current_thread()
@@ -86,17 +88,17 @@ pub fn askpass_from_env() -> Option<u8> {
 #[cfg(windows)]
 fn askpass_prompt(
     marker: Option<&std::ffi::OsStr>,
-    relay: bool,
+    relay: Option<&std::ffi::OsStr>,
     args: &[std::ffi::OsString],
 ) -> Option<String> {
-    if marker.is_none_or(|marker| marker != "1") || !relay {
+    use devlanes_transport_ssh::askpass::relay_process_id;
+    if marker.is_none_or(|marker| marker != "1") || relay.and_then(relay_process_id).is_none() {
         return None;
     }
     let [prompt] = args else {
         return None;
     };
-    let prompt = prompt.to_string_lossy();
-    (!prompt.starts_with('-')).then(|| prompt.into_owned())
+    Some(prompt.to_string_lossy().into_owned())
 }
 
 /// Asks the daemon that launched ssh, which relays to the CLI running `connect`.
@@ -128,27 +130,41 @@ mod tests {
 
     use super::askpass_prompt;
 
-    /// Only the marker, the relay and a single non-flag argument together mean
-    /// ssh's askpass; anything else is an ordinary command line.
+    /// The marker, a relay name of the daemon's shape and a single argument
+    /// together mean ssh's askpass, whatever the argument looks like; anything
+    /// else (no marker, a missing or foreign relay name, other argument counts)
+    /// is an ordinary command line.
     #[test]
     fn askpass_needs_marker_relay_and_one_prompt() {
         let prompt = [OsString::from("Enter passphrase for key 'C:\\k': ")];
         let on = Some(OsStr::new("1"));
+        let relay = Some(OsStr::new(
+            r"\\.\pipe\devlanes-askpass-42-0123456789abcdef0123456789abcdef",
+        ));
+        let unc = Some(OsStr::new(
+            r"\\example.invalid\pipe\devlanes-askpass-42-0123456789abcdef0123456789abcdef",
+        ));
         assert_eq!(
-            askpass_prompt(on, true, &prompt).as_deref(),
+            askpass_prompt(on, relay, &prompt).as_deref(),
             Some("Enter passphrase for key 'C:\\k': ")
         );
-        assert_eq!(askpass_prompt(None, true, &prompt), None);
-        assert_eq!(askpass_prompt(Some(OsStr::new("0")), true, &prompt), None);
-        assert_eq!(askpass_prompt(on, false, &prompt), None);
         assert_eq!(
-            askpass_prompt(on, true, &[OsString::from("--version")]),
+            askpass_prompt(on, relay, &[OsString::from("-x")]).as_deref(),
+            Some("-x")
+        );
+        assert_eq!(askpass_prompt(None, relay, &prompt), None);
+        assert_eq!(askpass_prompt(Some(OsStr::new("0")), relay, &prompt), None);
+        assert_eq!(askpass_prompt(on, None, &prompt), None);
+        assert_eq!(askpass_prompt(on, unc, &prompt), None);
+        // `DEVLANES_ASKPASS=1 devlanes --version` without a relay runs normally.
+        assert_eq!(
+            askpass_prompt(on, None, &[OsString::from("--version")]),
             None
         );
         assert_eq!(
-            askpass_prompt(on, true, &[OsString::from("remote"), OsString::from("ls")]),
+            askpass_prompt(on, relay, &[OsString::from("remote"), OsString::from("ls")]),
             None
         );
-        assert_eq!(askpass_prompt(on, true, &[]), None);
+        assert_eq!(askpass_prompt(on, relay, &[]), None);
     }
 }

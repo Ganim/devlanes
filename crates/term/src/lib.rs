@@ -63,8 +63,28 @@ pub enum LaunchError {
         program: String,
         source: std::io::Error,
     },
-    #[error("{program} exited with status {code:?}")]
-    Failed { program: String, code: Option<i32> },
+    #[error(
+        "{program} exited with status {code:?}{}",
+        .detail.as_deref().map(|detail| format!(": {detail}")).unwrap_or_default()
+    )]
+    Failed {
+        program: String,
+        code: Option<i32>,
+        /// The last line the helper wrote to stderr, when it was captured.
+        detail: Option<String>,
+    },
+}
+
+/// Where a helper's output goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Output {
+    /// The helper shares the caller's terminal, as for `devlanes url open`: a
+    /// text browser can draw there and the opener's own messages show.
+    Terminal,
+    /// Nothing reaches the terminal, as for the TUI, which a child writing to
+    /// it would corrupt. A helper that is waited for has its stderr captured
+    /// for [`LaunchError::Failed`].
+    Hidden,
 }
 
 /// Opens a new terminal window or tab at a directory running a command.
@@ -172,6 +192,11 @@ impl Invocation {
 
     /// Runs the helper with no inherited stdio, so it cannot draw over the TUI.
     pub fn run(&self) -> Result<(), LaunchError> {
+        self.run_with(Output::Hidden)
+    }
+
+    /// Runs the helper with its output going where `output` says.
+    pub fn run_with(&self, output: Output) -> Result<(), LaunchError> {
         let mut command = Command::new(&self.program);
         // Windows Terminal (`wt.exe`) and `wezterm-gui` are GUI programs, which
         // the flag does not affect; it only keeps a console launcher such as
@@ -179,20 +204,37 @@ impl Invocation {
         command
             .no_window()
             .args(&self.args)
-            .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .envs(self.env.iter().map(|(key, value)| (key, value)));
+        match output {
+            // Set explicitly: `Command::output` would capture unset streams.
+            Output::Terminal => command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit()),
+            Output::Hidden => {
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(if self.wait {
+                        Stdio::piped()
+                    } else {
+                        Stdio::null()
+                    })
+            }
+        };
         let spawn_error = |source| LaunchError::Spawn {
             program: self.program.clone(),
             source,
         };
         if self.wait {
-            let status = command.status().map_err(spawn_error)?;
-            if !status.success() {
+            // `output` reads the piped stderr while waiting; inherited and null
+            // streams stay as set.
+            let result = command.output().map_err(spawn_error)?;
+            if !result.status.success() {
                 return Err(LaunchError::Failed {
                     program: self.program.clone(),
-                    code: status.code(),
+                    code: result.status.code(),
+                    detail: last_line(&result.stderr),
                 });
             }
             return Ok(());
@@ -203,6 +245,15 @@ impl Invocation {
         std::thread::spawn(move || child.wait());
         Ok(())
     }
+}
+
+/// The last non-empty line of a helper's stderr, trimmed.
+fn last_line(stderr: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .map(str::to_owned)
 }
 
 impl LaunchRequest {
@@ -307,6 +358,60 @@ mod tests {
         let output = child.wait_with_output()?;
         assert_eq!(String::from_utf8(output.stdout)?, "it's|a b");
         Ok(())
+    }
+
+    /// A hidden helper that fails reports its last stderr line; one sharing the
+    /// terminal reports only its status.
+    #[test]
+    fn failed_helpers_report_the_last_stderr_line_when_hidden() {
+        #[cfg(unix)]
+        let failing = Invocation::new(
+            "sh",
+            vec![
+                "-c".into(),
+                "echo first >&2; echo 'no browser found' >&2; echo >&2; exit 3".into(),
+            ],
+            true,
+        );
+        #[cfg(windows)]
+        let failing = Invocation::new(
+            "cmd.exe",
+            vec![
+                "/d".into(),
+                "/c".into(),
+                "echo first 1>&2 & echo no browser found 1>&2 & exit /b 3".into(),
+            ],
+            true,
+        );
+        match failing.run_with(Output::Hidden) {
+            Err(LaunchError::Failed { code, detail, .. }) => {
+                assert_eq!(code, Some(3));
+                assert_eq!(detail.as_deref(), Some("no browser found"));
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        #[cfg(unix)]
+        let quiet = Invocation::new("sh", vec!["-c".into(), "exit 4".into()], true);
+        #[cfg(windows)]
+        let quiet = Invocation::new(
+            "cmd.exe",
+            vec!["/d".into(), "/c".into(), "exit /b 4".into()],
+            true,
+        );
+        let error = quiet.run_with(Output::Terminal).expect_err("fails");
+        assert!(
+            matches!(
+                &error,
+                LaunchError::Failed {
+                    code: Some(4),
+                    detail: None,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(last_line(b"one\n  two  \n\n"), Some("two".into()));
+        assert_eq!(last_line(b""), None);
     }
 
     #[test]

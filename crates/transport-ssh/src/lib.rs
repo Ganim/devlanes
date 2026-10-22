@@ -24,6 +24,15 @@ pub(crate) fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+/// 128 bits from the OS random source as 32 lowercase hex digits, for names
+/// another process must not be able to predict (relay pipes, session sentinels).
+#[cfg(windows)]
+pub(crate) fn random_token() -> std::io::Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

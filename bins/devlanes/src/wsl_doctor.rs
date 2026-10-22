@@ -21,15 +21,17 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// configured proxy ports below `net.ipv4.ip_unprivileged_port_start`, which the
 /// proxy cannot bind as a normal user.
 pub async fn annotate(paths: &devlanes_client::Paths, data: &mut Value) {
-    let Some(info) = devlanes_sys::wsl() else {
-        return;
-    };
     if !data.is_object() {
         return;
     }
     let config_path = paths.home.join("config.yaml");
-    let local = tokio::task::spawn_blocking(move || local_facts(&config_path)).await;
-    let Ok(local) = local else {
+    // The first WSL detection stats the drive mounts through the 9P file
+    // server, so it runs off the async threads with the file reads.
+    let local = tokio::task::spawn_blocking(move || {
+        devlanes_sys::wsl().map(|info| (info, local_facts(&config_path)))
+    })
+    .await;
+    let Ok(Some((info, local))) = local else {
         return;
     };
     let (mode, source) = networking_mode(info).await;
@@ -100,13 +102,24 @@ async fn networking_mode(info: &WslInfo) -> (Option<String>, Option<&'static str
     let Some(wslconfig) = wslconfig_path(system32).await else {
         return (None, None);
     };
-    let text = tokio::fs::read_to_string(&wslconfig)
-        .await
-        .unwrap_or_default();
-    // NAT is WSL's default when the file or the key is missing.
-    let mode = ini_value(&text, "wsl2", "networkingMode")
-        .map_or_else(|| "nat".to_owned(), |mode| mode.to_ascii_lowercase());
-    (Some(mode), Some("wslconfig"))
+    let mode = wslconfig_mode(tokio::fs::read_to_string(&wslconfig).await);
+    let source = mode.is_some().then_some("wslconfig");
+    (mode, source)
+}
+
+/// The networking mode `.wslconfig` selects. NAT is WSL's default when the
+/// file or the key is missing; a file that exists but cannot be read leaves
+/// the mode unknown.
+fn wslconfig_mode(text: std::io::Result<String>) -> Option<String> {
+    let text = match text {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return None,
+    };
+    Some(
+        ini_value(&text, "wsl2", "networkingMode")
+            .map_or_else(|| "nat".to_owned(), |mode| mode.to_ascii_lowercase()),
+    )
 }
 
 /// `%USERPROFILE%\.wslconfig` as a Linux path: `cmd.exe` reports the Windows
@@ -210,6 +223,29 @@ NetworkingMode=\"Mirrored\"
         );
         assert_eq!(ini_value(text, "boot", "hostname"), None);
         assert_eq!(ini_value("", "wsl2", "networkingMode"), None);
+    }
+
+    /// A missing `.wslconfig` means NAT; one that cannot be read is unknown.
+    #[test]
+    fn wslconfig_mode_defaults_to_nat_only_when_missing() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            wslconfig_mode(Ok("[wsl2]\nnetworkingMode=Mirrored\n".into())).as_deref(),
+            Some("mirrored")
+        );
+        assert_eq!(
+            wslconfig_mode(Ok("[wsl2]\nmemory=8GB\n".into())).as_deref(),
+            Some("nat")
+        );
+        assert_eq!(
+            wslconfig_mode(Err(Error::from(ErrorKind::NotFound))).as_deref(),
+            Some("nat")
+        );
+        assert_eq!(
+            wslconfig_mode(Err(Error::from(ErrorKind::PermissionDenied))),
+            None
+        );
+        assert_eq!(wslconfig_mode(Err(Error::other("9P timed out"))), None);
     }
 
     #[test]
