@@ -156,6 +156,13 @@ pub fn helper_check(result: &Result<HelperVersion, HostsError>, expected: &str) 
                 path.display()
             ),
         ),
+        Err(HostsError::ServiceMissing { .. }) => warn(
+            "missing",
+            None,
+            format!(
+                "The devlanes hosts service is not installed or not running. Run `{REINSTALL}` to install it."
+            ),
+        ),
         Err(error) => warn(
             "unrunnable",
             None,
@@ -310,7 +317,8 @@ impl HostsFile {
     }
 
     /// A `why` reason when `hosts` should be in the block but the helper cannot
-    /// write it: `helper_missing`, `sudo_denied`, `helper_outdated` or (any failure
+    /// write it: `helper_missing`, `sudo_denied`, `helper_outdated` (on Windows
+    /// `service_missing`, `service_denied`, `service_untrusted`) or (any failure
     /// with an installed helper of another version) `helper_version_mismatch`,
     /// each fixed by `devlanes certs trust --hosts`.
     pub fn reason(&self, hosts: &[String]) -> Option<(&'static str, Value)> {
@@ -321,12 +329,9 @@ impl HostsFile {
         let failure = self.failure_value(&error);
         let mismatch = failure["code"] == "helper_version_mismatch";
         if !mismatch
-            && !matches!(
-                error,
-                HostsError::HelperMissing { .. }
-                    | HostsError::SudoDenied { .. }
-                    | HostsError::Outdated { .. }
-            )
+            && !error.is_missing()
+            && !error.is_denied()
+            && !matches!(error, HostsError::Outdated { .. })
         {
             return None;
         }
@@ -692,6 +697,18 @@ mod tests {
             "0.4.0",
         );
         assert_eq!(missing["state"], "missing");
+        let no_service = helper_check(
+            &Err(HostsError::ServiceMissing {
+                pipe: r"\\.\pipe\devlanes-hosts".into(),
+            }),
+            "0.4.0",
+        );
+        assert_eq!(no_service["state"], "missing");
+        assert!(
+            no_service["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("hosts service"))
+        );
         let broken = helper_check(
             &Err(HostsError::HelperFailed {
                 code: None,

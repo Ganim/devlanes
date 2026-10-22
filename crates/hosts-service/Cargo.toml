@@ -1,0 +1,37 @@
+[package]
+name = "devlanes-hosts-service"
+description = "Windows service that writes devlanes hostnames to a marked block in the hosts file."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Runs as LocalSystem on Windows and answers one user's daemon over a named pipe.
+# Everything that runs privileged is in this crate, `devlanes-hosts-helper` (names,
+# block, protocol) and the `devlanes-sys` wrappers it calls. See README.md.
+[lib]
+name = "devlanes_hosts_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "devlanes-hosts-service"
+path = "src/main.rs"
+
+[dependencies]
+devlanes-hosts-helper = { path = "../hosts-helper" }
+
+[target.'cfg(windows)'.dependencies]
+devlanes-sys = { path = "../sys" }
+thiserror.workspace = true
+tokio.workspace = true
+windows-service.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

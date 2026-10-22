@@ -32,6 +32,8 @@ devlanes-transport-ssh = { path = "../../crates/transport-ssh" }
 rustix = { version = "1", features = ["process", "termios"] }
 
 [target.'cfg(windows)'.dependencies]
+# The elevated `__install-hosts-service` subcommand installs and removes it.
+devlanes-hosts-service = { path = "../../crates/hosts-service" }
 devlanes-runner-windows = { path = "../../crates/runner-windows" }
 devlanes-term-windows-terminal = { path = "../../crates/term-windows-terminal" }
 devlanes-trust-windows = { path = "../../crates/trust-windows" }
@@ -82,6 +84,7 @@ devlanes-metrics = { path = "../../crates/metrics" }
 devlanes-metrics-docker = { path = "../../crates/metrics-docker" }
 devlanes-metrics-linux = { path = "../../crates/metrics-linux" }
 devlanes-metrics-macos = { path = "../../crates/metrics-macos" }
+devlanes-metrics-windows = { path = "../../crates/metrics-windows" }
 devlanes-platform-node = { path = "../../crates/platform-node" }
 devlanes-platform-python = { path = "../../crates/platform-python" }
 devlanes-run-script-cargo = { path = "../../crates/run-script-cargo" }

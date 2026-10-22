@@ -35,6 +35,9 @@ webpki-root-certs = "1"
 # Win32 bindings for the `sys` crate's Windows modules; crates enable only the API
 # features they call.
 windows-sys = "0.61"
+# Service main, control handler and service manager calls for the Windows hosts
+# service and its installer; its own unsafe stays inside it.
+windows-service = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

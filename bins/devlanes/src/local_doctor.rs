@@ -261,8 +261,29 @@ async fn ca(paths: &Paths) -> Value {
     ca
 }
 
+/// `{helper}` as in the daemon's hosts status, when the hosts service answers
+/// (or refuses) on its pipe; `null` when it is not installed.
+#[cfg(windows)]
+async fn hosts_helper() -> Value {
+    use devlanes_resolver_hosts::HostsClient;
+    use devlanes_resolver_hosts::pipe::PipeHostsClient;
+    let Ok(client) = HostsClient::service(PipeHostsClient::system(), None) else {
+        return Value::Null;
+    };
+    let version = client
+        .with_timeout(std::time::Duration::from_secs(5))
+        .version()
+        .await;
+    if matches!(&version, Err(error) if error.is_missing()) {
+        return Value::Null;
+    }
+    let check = devlanes_daemon::hosts::helper_check(&version, env!("CARGO_PKG_VERSION"));
+    json!({"helper": check})
+}
+
 /// `{helper}` as in the daemon's hosts status, when the /etc/hosts helper is
 /// installed; `null` otherwise (most machines never need it).
+#[cfg(unix)]
 async fn hosts_helper() -> Value {
     use devlanes_resolver_hosts::{
         FileKind, FsProbe, HostsClient, INSTALL_PATH, SystemExecutor, SystemFs,

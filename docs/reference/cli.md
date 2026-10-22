@@ -533,7 +533,7 @@ Examples:
 
 ### devlanes certs
 
-Trust the devlanes CA and install the /etc/hosts helper
+Trust the devlanes CA and install the hosts file writer
 
 ```text
 devlanes certs [OPTIONS] <COMMAND>
@@ -547,7 +547,7 @@ Trust the devlanes CA in the system and browser stores
 devlanes certs trust [OPTIONS]
 ```
 
-- `--hosts`: Also install the /etc/hosts helper for programs that cannot resolve *.localhost
+- `--hosts`: Also install the hosts file writer (a sudo helper on macOS and Linux, a service on Windows) for programs that cannot resolve *.localhost
 - `--resolver`: Also send lookups for hostnames.tld to the devlanes DNS server (/etc/resolver on macOS, systemd-resolved on Linux)
 
 ### devlanes certs untrust
@@ -558,7 +558,7 @@ Remove the devlanes CA from the trust stores
 devlanes certs untrust [OPTIONS]
 ```
 
-- `--hosts`: Also remove the /etc/hosts helper, its sudo rule and the devlanes block in /etc/hosts
+- `--hosts`: Also remove the hosts file writer (its sudo rule, or the Windows service) and the devlanes block in the hosts file
 - `--resolver`: Also remove the OS resolver file for hostnames.tld
 - `--keep-ca`: Keep the CA trusted; with --hosts or --resolver, remove only those
 

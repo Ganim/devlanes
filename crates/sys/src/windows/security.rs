@@ -396,31 +396,9 @@ unsafe fn inspect(
     replace: Option<&SecurityDescriptor>,
 ) -> io::Result<Result<(), DirProblem>> {
     let handle = directory.as_raw_handle();
-    let mut owner: PSID = ptr::null_mut();
-    let mut dacl: *mut ACL = ptr::null_mut();
-    let mut descriptor = ptr::null_mut();
-    // SAFETY: the handle is open with READ_CONTROL; on success `owner` and `dacl`
-    // point into `descriptor`, which is freed below after their last use.
-    let status = unsafe {
-        GetSecurityInfo(
-            handle,
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &raw mut owner,
-            ptr::null_mut(),
-            &raw mut dacl,
-            ptr::null_mut(),
-            &raw mut descriptor,
-        )
-    };
-    if status != 0 {
-        return Err(io::Error::from_raw_os_error(status as i32));
-    }
-    // SAFETY: `owner` and `dacl` point into `descriptor`, alive until freed below.
-    let verdict = unsafe { judge(owner, dacl) };
-    // SAFETY: allocated by GetSecurityInfo.
-    unsafe { LocalFree(descriptor) };
-    let verdict = verdict?;
+    // SAFETY: the caller opened the handle with READ_CONTROL.
+    let security = unsafe { read_security(handle, SE_FILE_OBJECT) }?;
+    let verdict = judge(&security)?;
     if let (Err(DirProblem::Acl(_)), Some(replace)) = (&verdict, replace) {
         let dacl = replace.dacl()?;
         // SAFETY: the handle is open with WRITE_DAC; `dacl` lives in `replace`.
@@ -443,24 +421,113 @@ unsafe fn inspect(
 }
 
 /// Compares the owner and walks the access list.
+fn judge(security: &Security) -> io::Result<Result<(), DirProblem>> {
+    let user = token::current_user()?.to_sddl()?;
+    // Volumes without security (FAT) report no owner.
+    let Some(owner) = &security.owner else {
+        return Ok(Err(DirProblem::Owner));
+    };
+    if *owner != user && owner != ADMINISTRATORS {
+        return Ok(Err(DirProblem::Owner));
+    }
+    // A null access list grants everyone full access.
+    let Some(dacl) = &security.dacl else {
+        return Ok(Err(DirProblem::Acl(Vec::new())));
+    };
+    let mut others: Vec<String> = Vec::new();
+    for entry in &dacl.allowed {
+        if entry.sid != user
+            && !TRUSTED.contains(&entry.sid.as_str())
+            && !others.contains(&entry.sid)
+        {
+            others.push(entry.sid.clone());
+        }
+    }
+    if others.is_empty() && !dacl.unjudged {
+        Ok(Ok(()))
+    } else {
+        Ok(Err(DirProblem::Acl(others)))
+    }
+}
+
+/// The owner and access list of an object, as SID strings.
+struct Security {
+    /// `None` on volumes without security (FAT).
+    owner: Option<String>,
+    /// `None` for a null access list, which grants everyone everything.
+    dacl: Option<Dacl>,
+}
+
+/// The parts of an access list the checks judge.
+struct Dacl {
+    /// Allowed and allowed-callback entries.
+    allowed: Vec<Allowed>,
+    /// Whether an entry of another layout (object or compound grants) is present,
+    /// which these checks cannot read and so must not pass.
+    unjudged: bool,
+}
+
+/// One grant of an access list.
+struct Allowed {
+    sid: String,
+    mask: u32,
+    /// Inherit-only entries apply to children, not to the object itself.
+    inherit_only: bool,
+}
+
+/// `INHERIT_ONLY_ACE`.
+const INHERIT_ONLY: u8 = 0x08;
+
+/// Reads the owner and access list of the object behind `handle`.
+///
+/// # Safety
+///
+/// `handle` must be open with `READ_CONTROL` and be an object of `kind`.
+unsafe fn read_security(
+    handle: std::os::windows::io::RawHandle,
+    kind: windows_sys::Win32::Security::Authorization::SE_OBJECT_TYPE,
+) -> io::Result<Security> {
+    let mut owner: PSID = ptr::null_mut();
+    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    // SAFETY: the caller guarantees the handle and its access; on success `owner`
+    // and `dacl` point into `descriptor`, which is freed below after their last use.
+    let status = unsafe {
+        GetSecurityInfo(
+            handle,
+            kind,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &raw mut owner,
+            ptr::null_mut(),
+            &raw mut dacl,
+            ptr::null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    // SAFETY: `owner` and `dacl` point into `descriptor`, alive until freed below.
+    let security = unsafe { parse_security(owner, dacl) };
+    // SAFETY: allocated by GetSecurityInfo.
+    unsafe { LocalFree(descriptor) };
+    security
+}
+
+/// Copies the owner and the readable entries of `dacl`.
 ///
 /// # Safety
 ///
 /// `owner` and `dacl` must be null or valid for the call.
-unsafe fn judge(owner: PSID, dacl: *const ACL) -> io::Result<Result<(), DirProblem>> {
-    let user = token::current_user()?.to_sddl()?;
-    // Volumes without security (FAT) report no owner.
-    if owner.is_null() {
-        return Ok(Err(DirProblem::Owner));
-    }
-    // SAFETY: the caller guarantees a non-null `owner` is valid.
-    let owner = unsafe { Sid::copy_from(owner) }?.to_sddl()?;
-    if owner != user && owner != ADMINISTRATORS {
-        return Ok(Err(DirProblem::Owner));
-    }
-    // A null access list grants everyone full access.
+unsafe fn parse_security(owner: PSID, dacl: *const ACL) -> io::Result<Security> {
+    let owner = if owner.is_null() {
+        None
+    } else {
+        // SAFETY: the caller guarantees a non-null `owner` is valid.
+        Some(unsafe { Sid::copy_from(owner) }?.to_sddl()?)
+    };
     if dacl.is_null() {
-        return Ok(Err(DirProblem::Acl(Vec::new())));
+        return Ok(Security { owner, dacl: None });
     }
     let mut size = ACL_SIZE_INFORMATION {
         AceCount: 0,
@@ -479,7 +546,7 @@ unsafe fn judge(owner: PSID, dacl: *const ACL) -> io::Result<Result<(), DirProbl
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    let mut others = Vec::new();
+    let mut allowed = Vec::new();
     let mut unjudged = false;
     for index in 0..size.AceCount {
         let mut ace: *mut c_void = ptr::null_mut();
@@ -488,20 +555,24 @@ unsafe fn judge(owner: PSID, dacl: *const ACL) -> io::Result<Result<(), DirProbl
             return Err(io::Error::last_os_error());
         }
         // SAFETY: every ACE starts with an ACE_HEADER.
-        let kind = unsafe { (*ace.cast::<ACE_HEADER>()).AceType };
-        match kind {
+        let header = unsafe { *ace.cast::<ACE_HEADER>() };
+        match header.AceType {
             // Allowed and allowed-callback entries share the layout with the SID
             // at `SidStart`.
             0 | 9 => {
                 // SAFETY: as stated for these two types.
-                let sid = unsafe {
-                    let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
-                    Sid::copy_from((&raw mut (*allowed).SidStart).cast())
-                }?
-                .to_sddl()?;
-                if sid != user && !TRUSTED.contains(&sid.as_str()) && !others.contains(&sid) {
-                    others.push(sid);
-                }
+                let (sid, mask) = unsafe {
+                    let entry = ace.cast::<ACCESS_ALLOWED_ACE>();
+                    (
+                        Sid::copy_from((&raw mut (*entry).SidStart).cast())?,
+                        (*entry).Mask,
+                    )
+                };
+                allowed.push(Allowed {
+                    sid: sid.to_sddl()?,
+                    mask,
+                    inherit_only: header.AceFlags & INHERIT_ONLY != 0,
+                });
             }
             // Deny entries only take access away.
             1 | 6 | 10 | 12 => {}
@@ -510,11 +581,179 @@ unsafe fn judge(owner: PSID, dacl: *const ACL) -> io::Result<Result<(), DirProbl
             _ => unjudged = true,
         }
     }
-    if others.is_empty() && !unjudged {
-        Ok(Ok(()))
-    } else {
-        Ok(Err(DirProblem::Acl(others)))
+    Ok(Security {
+        owner,
+        dacl: Some(Dacl { allowed, unjudged }),
+    })
+}
+
+/// `NT SERVICE\TrustedInstaller`, owner of Windows' own program directories.
+const TRUSTED_INSTALLER: &str = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+
+/// Accounts that may own and write a privileged program and its directory:
+/// SYSTEM, Administrators and TrustedInstaller.
+const ADMIN_WRITERS: [&str; 3] = ["S-1-5-18", ADMINISTRATORS, TRUSTED_INSTALLER];
+
+/// Rights that change a file or directory, its entries, or who may access it:
+/// write and append data (add file and add subdirectory on directories),
+/// extended attributes, delete child, attributes, delete, change the access list
+/// or owner, and the generic write and all rights.
+const WRITE_RIGHTS: u32 =
+    0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x4000_0000 | 0x1000_0000;
+
+/// Why a privileged program or its directory could be changed by others.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminOnlyProblem {
+    /// A symlink or junction, which could point anywhere.
+    ReparsePoint,
+    /// A directory where a file was expected, or the other way round.
+    WrongKind,
+    /// Owned by this account, not SYSTEM, Administrators or TrustedInstaller.
+    Owner(String),
+    /// These accounts may change it; empty when the access list cannot be judged
+    /// (missing, or with entries of an unknown layout).
+    Writers(Vec<String>),
+}
+
+impl std::fmt::Display for AdminOnlyProblem {
+    /// What is wrong, naming accounts by SID.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReparsePoint => f.write_str("is a symlink or junction"),
+            Self::WrongKind => f.write_str("is not the expected kind of file system entry"),
+            Self::Owner(owner) => write!(
+                f,
+                "is owned by {}, not SYSTEM, Administrators or TrustedInstaller",
+                account_label(owner)
+            ),
+            Self::Writers(writers) if writers.is_empty() => {
+                f.write_str("has an access list that cannot be checked")
+            }
+            Self::Writers(writers) => {
+                let names: Vec<String> = writers.iter().map(|sid| account_label(sid)).collect();
+                write!(f, "can be changed by {}", names.join(", "))
+            }
+        }
     }
+}
+
+/// Checks that `path` (a directory when `directory`, else a regular file) is
+/// owned by SYSTEM, Administrators or TrustedInstaller and that nobody else may
+/// change it: the Windows counterpart of "root-owned, not group or world
+/// writable" for a program that runs as SYSTEM. The entry itself is opened,
+/// never a link's target. Grants that only apply to children (inherit-only) are
+/// not counted. A missing path is an error of kind `NotFound`.
+pub fn check_admin_only(path: &Path, directory: bool) -> io::Result<Result<(), AdminOnlyProblem>> {
+    let entry = File::options()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = entry.metadata()?;
+    if metadata.file_attributes() & REPARSE_POINT != 0 {
+        return Ok(Err(AdminOnlyProblem::ReparsePoint));
+    }
+    let kind_matches = if directory {
+        metadata.is_dir()
+    } else {
+        metadata.is_file()
+    };
+    if !kind_matches {
+        return Ok(Err(AdminOnlyProblem::WrongKind));
+    }
+    // SAFETY: the handle is open with READ_CONTROL for the call.
+    let security = unsafe { read_security(entry.as_raw_handle(), SE_FILE_OBJECT) }?;
+    Ok(judge_admin_only(&security))
+}
+
+/// The verdict of [`check_admin_only`] on an object's security.
+fn judge_admin_only(security: &Security) -> Result<(), AdminOnlyProblem> {
+    match &security.owner {
+        Some(owner) if ADMIN_WRITERS.contains(&owner.as_str()) => {}
+        Some(owner) => return Err(AdminOnlyProblem::Owner(owner.clone())),
+        None => return Err(AdminOnlyProblem::Owner("nobody".into())),
+    }
+    let Some(dacl) = &security.dacl else {
+        return Err(AdminOnlyProblem::Writers(Vec::new()));
+    };
+    if dacl.unjudged {
+        return Err(AdminOnlyProblem::Writers(Vec::new()));
+    }
+    let mut writers: Vec<String> = Vec::new();
+    for entry in &dacl.allowed {
+        if entry.inherit_only
+            || entry.mask & WRITE_RIGHTS == 0
+            || ADMIN_WRITERS.contains(&entry.sid.as_str())
+            || writers.contains(&entry.sid)
+        {
+            continue;
+        }
+        writers.push(entry.sid.clone());
+    }
+    if writers.is_empty() {
+        Ok(())
+    } else {
+        Err(AdminOnlyProblem::Writers(writers))
+    }
+}
+
+/// The access list of a directory for programs that run as SYSTEM: owned by
+/// Administrators, full control for SYSTEM and Administrators, read and execute
+/// for Users, inherited by everything created inside.
+pub const ADMIN_ONLY_DIR_SDDL: &str =
+    "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
+
+/// Creates `path` (its parent must exist) with [`ADMIN_ONLY_DIR_SDDL`]. Returns
+/// `false` when it already existed, untouched; check it with
+/// [`check_admin_only`]. Needs an elevated process, since only one can name
+/// Administrators as owner.
+pub fn create_admin_only_dir(path: &Path) -> io::Result<bool> {
+    let mut attributes =
+        SecurityAttributes::new(SecurityDescriptor::from_sddl(ADMIN_ONLY_DIR_SDDL)?);
+    let wide_path = wide(path.as_os_str());
+    // SAFETY: `wide_path` is NUL-terminated and `attributes` outlives the call.
+    if unsafe { CreateDirectoryW(wide_path.as_ptr(), attributes.as_mut_ptr()) } != 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+/// Makes Administrators the owner of `file`, which must be open with
+/// `WRITE_OWNER`. An elevated process may do this; its files are otherwise owned
+/// by its user when the "default owner" policy says so.
+pub fn set_owner_administrators(file: &File) -> io::Result<()> {
+    let administrators = Sid::administrators();
+    // SAFETY: the handle is owned by `file` and stays open for the call; the SID
+    // lives in `administrators` across it.
+    let status = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            administrators.as_psid(),
+            ptr::null_mut(),
+            ptr::null(),
+            ptr::null(),
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    Ok(())
+}
+
+/// The owner of the kernel object behind `handle` (a pipe, for instance), which
+/// must be open with `READ_CONTROL`.
+pub(crate) fn kernel_object_owner(
+    handle: std::os::windows::io::RawHandle,
+) -> io::Result<Option<String>> {
+    use windows_sys::Win32::Security::Authorization::SE_KERNEL_OBJECT;
+    // SAFETY: the caller guarantees an open handle with READ_CONTROL.
+    Ok(unsafe { read_security(handle, SE_KERNEL_OBJECT) }?.owner)
 }
 
 /// A NUL-terminated UTF-16 copy for Win32 string parameters.
@@ -637,6 +876,72 @@ mod tests {
         Ok(())
     }
 
+    /// Windows' own program directories pass the admin-only check; what this
+    /// user creates fails it on the owner, and an extra grant names the writer.
+    #[test]
+    fn admin_only_checks() -> io::Result<()> {
+        let program_files = super::super::dirs::program_files()?;
+        assert_eq!(check_admin_only(&program_files, true)?, Ok(()));
+        let system = super::super::dirs::system_directory()?;
+        assert_eq!(check_admin_only(&system.join("cmd.exe"), false)?, Ok(()));
+        assert_eq!(
+            check_admin_only(&system, false)?,
+            Err(AdminOnlyProblem::WrongKind)
+        );
+        let user = token::current_user()?.to_sddl()?;
+        let temp = tempfile::tempdir()?;
+        assert_eq!(
+            check_admin_only(temp.path(), true)?,
+            Err(AdminOnlyProblem::Owner(user.clone()))
+        );
+        // The verdict on an admin-owned object with an extra writer.
+        let security = Security {
+            owner: Some(ADMINISTRATORS.to_owned()),
+            dacl: Some(Dacl {
+                allowed: vec![
+                    Allowed {
+                        sid: "S-1-5-18".into(),
+                        mask: 0x1f01ff,
+                        inherit_only: false,
+                    },
+                    Allowed {
+                        sid: "S-1-5-32-545".into(),
+                        mask: 0x1200a9,
+                        inherit_only: false,
+                    },
+                    // CREATOR OWNER full control applies to children only.
+                    Allowed {
+                        sid: "S-1-3-0".into(),
+                        mask: 0x1000_0000,
+                        inherit_only: true,
+                    },
+                    Allowed {
+                        sid: user.clone(),
+                        mask: 0x2,
+                        inherit_only: false,
+                    },
+                ],
+                unjudged: false,
+            }),
+        };
+        assert_eq!(
+            judge_admin_only(&security),
+            Err(AdminOnlyProblem::Writers(vec![user]))
+        );
+        let unjudged = Security {
+            owner: Some("S-1-5-18".into()),
+            dacl: Some(Dacl {
+                allowed: Vec::new(),
+                unjudged: true,
+            }),
+        };
+        assert_eq!(
+            judge_admin_only(&unjudged),
+            Err(AdminOnlyProblem::Writers(Vec::new()))
+        );
+        Ok(())
+    }
+
     /// A junction is refused, never followed. Junctions need no privilege to create.
     #[test]
     fn junctions_are_refused() -> io::Result<()> {
@@ -652,6 +957,10 @@ mod tests {
             .status()?;
         assert!(status.success(), "mklink /J failed");
         assert_eq!(check_private_dir(&link)?, Err(DirProblem::ReparsePoint));
+        assert_eq!(
+            check_admin_only(&link, true)?,
+            Err(AdminOnlyProblem::ReparsePoint)
+        );
         assert_eq!(
             ensure_private_dir(&link, true)?,
             Err(DirProblem::ReparsePoint)

@@ -372,7 +372,7 @@ pub struct PressureSample {
 /// and must not block the async executor.
 #[async_trait]
 pub trait PressureSource: Send + Sync {
-    /// Short identifier for diagnostics (`macos`, `linux`).
+    /// Short identifier for diagnostics (`macos`, `linux`, `windows`).
     fn name(&self) -> &'static str;
 
     /// Reads CPU and memory pressure.

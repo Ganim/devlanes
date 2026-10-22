@@ -2,7 +2,7 @@
 //! per-run summaries and baselines. Monitoring only; nothing here limits or
 //! signals processes.
 //!
-//! Collectors (`devlanes-metrics-macos`, `-linux`, `-docker`) implement
+//! Collectors (`devlanes-metrics-macos`, `-linux`, `-windows`, `-docker`) implement
 //! [`MetricsSource`] and emit leaf samples ([`Subject::Process`],
 //! [`Subject::Container`], [`Subject::DockerVm`]). The daemon rolls leaves up with
 //! [`aggregate`], records everything in [`History`], feeds unit totals to
@@ -144,8 +144,8 @@ impl Subject {
 /// convention shared by `ps`, `top` and `docker stats`.
 ///
 /// `footprint_bytes` is the primary memory number: `phys_footprint` on macOS, PSS
-/// (RSS until PSS is read) on Linux, and the docker CLI's cache-free usage for
-/// containers. `rss_bytes` is for detail views only; it double counts shared pages.
+/// (RSS until PSS is read) on Linux, the private working set on Windows, and the
+/// docker CLI's cache-free usage for containers. `rss_bytes` is for detail views only; it double counts shared pages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
     pub subject: Subject,
@@ -163,6 +163,7 @@ pub struct UnitTarget {
     pub unit: UnitKey,
     /// Session ids whose members belong to the unit (normally the leader's).
     /// Collectors ignore 0 and 1 so a bad id cannot sweep in system sessions.
+    /// Empty on Windows, which has no sessions; `processes` lists the job's members.
     pub sessions: Vec<u32>,
     /// Leader and tracked descendants. Entries whose start time no longer
     /// matches are skipped because the PID was reused.
@@ -210,7 +211,7 @@ pub enum Error {
 /// `spawn_blocking`.
 #[async_trait]
 pub trait MetricsSource: Send + Sync {
-    /// Short identifier for diagnostics (`macos`, `linux`, `docker`).
+    /// Short identifier for diagnostics (`macos`, `linux`, `windows`, `docker`).
     fn name(&self) -> &'static str;
 
     /// Samples the request's subjects this source understands and returns leaf

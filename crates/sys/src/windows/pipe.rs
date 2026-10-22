@@ -12,7 +12,7 @@ use windows_sys::Win32::Security::{RevertToSelf, TOKEN_QUERY};
 use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, ImpersonateNamedPipeClient};
 use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
-use super::security::SecurityAttributes;
+use super::security::{SecurityAttributes, SecurityDescriptor};
 use super::token::{self, Sid};
 
 /// Creates one instance of the pipe `name`, readable and writable only by the
@@ -40,6 +40,17 @@ impl PipeFactory {
             name: name.to_owned(),
             attributes: SecurityAttributes::current_user_only()?,
         })
+    }
+
+    /// Prepares instances of the pipe `name` with `descriptor` instead of the
+    /// current-user-only one. The descriptor must grant this process
+    /// `FILE_CREATE_PIPE_INSTANCE` (part of `GA`), or only the first instance can
+    /// be created; clients should get [`CLIENT_RIGHTS`], which lacks it.
+    pub fn with_descriptor(name: &OsStr, descriptor: SecurityDescriptor) -> Self {
+        Self {
+            name: name.to_owned(),
+            attributes: SecurityAttributes::new(descriptor),
+        }
     }
 
     /// Creates one instance, as [`create_server`] describes.
@@ -90,14 +101,65 @@ pub fn server_user(client: &NamedPipeClient) -> io::Result<Sid> {
     Ok(server_facts(client)?.user)
 }
 
-/// Token facts of the process serving `client`'s pipe.
-fn server_facts(client: &NamedPipeClient) -> io::Result<token::TokenFacts> {
+/// Rights a client needs to talk over a pipe and check who serves it: read and
+/// write data, read attributes, read the security descriptor, synchronize.
+///
+/// `GENERIC_WRITE` would also grant `FILE_APPEND_DATA`, which for pipes is
+/// `FILE_CREATE_PIPE_INSTANCE`: a client holding it can create server instances
+/// of the same pipe and answer the next client in the server's place. Grant this
+/// mask instead and open with [`open_client`].
+pub const CLIENT_RIGHTS: u32 = 0x0012_0083;
+
+/// `ERROR_PIPE_BUSY`: every instance of the pipe is serving another client.
+pub const ERROR_PIPE_BUSY: i32 = 231;
+
+/// Opens the client end of the pipe `name` with exactly [`CLIENT_RIGHTS`], for
+/// pipes whose access list grants clients no more than that (tokio's client
+/// asks for `GENERIC_WRITE`). The server may identify the caller but not act as
+/// it (`SECURITY_IDENTIFICATION`). Must run inside a tokio runtime with I/O
+/// enabled. A busy pipe fails with [`ERROR_PIPE_BUSY`]; retrying is the caller's.
+pub fn open_client(name: &OsStr) -> io::Result<NamedPipeClient> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, SECURITY_IDENTIFICATION};
+    let file = std::fs::OpenOptions::new()
+        .access_mode(CLIENT_RIGHTS)
+        .custom_flags(FILE_FLAG_OVERLAPPED)
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(name)?;
+    // SAFETY: the handle was just opened for overlapped I/O on a pipe and its
+    // ownership moves into the client; tokio registers it with the runtime.
+    unsafe { NamedPipeClient::from_raw_handle(file.into_raw_handle()) }
+}
+
+/// The owner of the pipe `client` is connected to, as a SID string. Only the
+/// account itself (or an administrator) can create an object owned by an
+/// account, so a pipe owned by `S-1-5-18` was created by a SYSTEM process.
+/// `None` when the pipe has no owner.
+pub fn server_owner(client: &NamedPipeClient) -> io::Result<Option<String>> {
+    super::security::kernel_object_owner(client.as_raw_handle())
+}
+
+/// The process ID of the server end of `client`'s pipe.
+pub fn server_process_id(client: &NamedPipeClient) -> io::Result<u32> {
     let mut pid = 0;
     // SAFETY: the handle belongs to `client`, which outlives the call.
     if unsafe { GetNamedPipeServerProcessId(client.as_raw_handle(), &raw mut pid) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    token::process_facts(pid)
+    Ok(pid)
+}
+
+/// Token facts (user, integrity, sandboxing) of the client connected to
+/// `server`. As with [`client_is_current_user`], call it after the first read;
+/// the impersonation starts and ends inside this call.
+pub fn client_token_facts(server: &NamedPipeServer) -> io::Result<token::TokenFacts> {
+    client_facts(server.as_raw_handle())
+}
+
+/// Token facts of the process serving `client`'s pipe.
+fn server_facts(client: &NamedPipeClient) -> io::Result<token::TokenFacts> {
+    token::process_facts(server_process_id(client)?)
 }
 
 /// Token facts of the client on `pipe`, read by impersonating it for the moment
@@ -159,6 +221,47 @@ mod tests {
         let mut buffer = [0; 2];
         server.read_exact(&mut buffer).await?;
         assert!(client_is_current_user(&server)?);
+        Ok(())
+    }
+
+    /// A pipe with an explicit descriptor: the client opens it with only
+    /// `CLIENT_RIGHTS`, reads its owner, and the server reads the client's token.
+    /// A client granted only `CLIENT_RIGHTS` cannot create another server
+    /// instance.
+    #[tokio::test]
+    async fn explicit_descriptor_and_limited_clients() -> io::Result<()> {
+        let name = name();
+        let user = token::current_user()?.to_sddl()?;
+        // The owner may create instances; the client ACE is what the hosts
+        // service grants its user. Same account here, so the owner ACE carries it.
+        let descriptor = SecurityDescriptor::from_sddl(&format!(
+            "O:{user}D:P(A;;GA;;;{user})(A;;{CLIENT_RIGHTS:#x};;;S-1-5-18)"
+        ))?;
+        let mut factory = PipeFactory::with_descriptor(OsStr::new(&name), descriptor);
+        let server = factory.create(true)?;
+        let _second = factory.create(false)?;
+        let mut client = open_client(OsStr::new(&name))?;
+        server.connect().await?;
+        let mut server = server;
+        assert_eq!(server_owner(&client)?.as_deref(), Some(user.as_str()));
+        assert_eq!(server_process_id(&client)?, std::process::id());
+        client.write_all(b"hi").await?;
+        let mut buffer = [0; 2];
+        server.read_exact(&mut buffer).await?;
+        let facts = client_token_facts(&server)?;
+        assert_eq!(facts.user.to_sddl()?, user);
+
+        // A pipe that grants this user only CLIENT_RIGHTS: opening as a client
+        // works, creating a server instance is refused.
+        let limited = format!("{name}-limited");
+        let descriptor = SecurityDescriptor::from_sddl(&format!(
+            "D:P(A;;GA;;;S-1-5-18)(A;;{CLIENT_RIGHTS:#x};;;{user})"
+        ))?;
+        let mut factory = PipeFactory::with_descriptor(OsStr::new(&limited), descriptor);
+        let _first = factory.create(true)?;
+        let _client = open_client(OsStr::new(&limited))?;
+        let error = factory.create(false).err().map(|error| error.kind());
+        assert_eq!(error, Some(io::ErrorKind::PermissionDenied));
         Ok(())
     }
 }

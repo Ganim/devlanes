@@ -32,6 +32,39 @@ pub fn system_directory() -> io::Result<PathBuf> {
     }
 }
 
+/// The 64-bit Program Files directory (`C:\Program Files`), from the known-folder
+/// API rather than `%ProgramFiles%`, which the caller's environment controls.
+pub fn program_files() -> io::Result<PathBuf> {
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{
+        FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+    };
+    let mut path: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: the folder id is a static GUID; on success `path` receives a
+    // CoTaskMemAlloc'ed NUL-terminated string, freed below on every path (the API
+    // asks for that even on failure).
+    let status = unsafe {
+        SHGetKnownFolderPath(
+            &FOLDERID_ProgramFiles,
+            KF_FLAG_DEFAULT as u32,
+            std::ptr::null_mut(),
+            &raw mut path,
+        )
+    };
+    let result = if status < 0 || path.is_null() {
+        Err(io::Error::from_raw_os_error(status))
+    } else {
+        // SAFETY: `path` is NUL-terminated per the API contract.
+        let len = unsafe { (0..).take_while(|&i| *path.add(i) != 0).count() };
+        // SAFETY: `len` units before the terminator are readable.
+        let units = unsafe { std::slice::from_raw_parts(path, len) };
+        Ok(PathBuf::from(OsString::from_wide(units)))
+    };
+    // SAFETY: allocated by SHGetKnownFolderPath (null is allowed).
+    unsafe { CoTaskMemFree(path.cast()) };
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,5 +74,12 @@ mod tests {
         let dir = system_directory().expect("system directory");
         assert!(dir.is_absolute(), "{}", dir.display());
         assert!(dir.join("cmd.exe").is_file(), "{}", dir.display());
+    }
+
+    #[test]
+    fn program_files_is_an_absolute_directory() {
+        let dir = program_files().expect("program files");
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert!(dir.is_dir(), "{}", dir.display());
     }
 }

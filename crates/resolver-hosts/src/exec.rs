@@ -244,7 +244,7 @@ impl FsProbe for SystemFs {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
-                "cannot check {}: the hosts file fallback is not supported on Windows yet",
+                "cannot check {}: the sudo hosts helper does not exist on Windows (the hosts service replaces it)",
                 path.display()
             ),
         ))

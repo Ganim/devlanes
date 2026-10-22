@@ -17,11 +17,13 @@ pub mod pipe;
 pub mod proc;
 pub mod process;
 pub mod registry;
+pub mod replace;
 pub mod security;
 pub mod session;
 pub mod shell;
 pub mod spawn;
 pub mod token;
+pub mod usage;
 pub mod window;
 
 pub(crate) use proc::{boot_id, listening_tcp, process, processes};

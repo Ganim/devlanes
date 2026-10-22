@@ -485,13 +485,23 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             helper_mismatch(data.get("helper").unwrap_or(data)),
             Some(Hint::command(["certs", "trust", "--hosts"])),
         ),
+        // Windows: the elevated installer's prompt got a No.
+        "elevation_cancelled" => (
+            "the administrator prompt was declined; nothing was changed".into(),
+            None,
+        ),
         "helper_missing"
         | "sudo_denied"
         | "helper_outdated"
         | "helper_source_missing"
         | "helper_source_rejected"
         | "sudo_rule_inactive"
-        | "hosts_unsafe_directory" => (
+        | "hosts_unsafe_directory"
+        | "service_missing"
+        | "service_denied"
+        | "service_untrusted"
+        | "service_source_missing"
+        | "service_source_rejected" => (
             data.get("message")
                 .and_then(Value::as_str)
                 .map(super::clean)
@@ -1181,13 +1191,25 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
             format!("could not start: {}", spawn_cause(data)),
             Some(spawn_hint(data).unwrap_or_else(|| Hint::logs(lane, unit, 200))),
         ),
-        "helper_missing" | "sudo_denied" | "helper_outdated" | "helper_version_mismatch" => {
+        "helper_missing"
+        | "sudo_denied"
+        | "helper_outdated"
+        | "helper_version_mismatch"
+        | "service_missing"
+        | "service_denied"
+        | "service_untrusted" => {
             let hosts: Vec<String> = list(data, "hosts").iter().map(display_value).collect();
             let problem = match code {
                 "helper_missing" => "the /etc/hosts helper is not installed",
                 "sudo_denied" => "sudo will not run the /etc/hosts helper without a password",
                 "helper_version_mismatch" => {
                     "the installed /etc/hosts helper does not match this devlanes"
+                }
+                // Windows: the devlanes-hosts service writes the hosts file.
+                "service_missing" => "the devlanes hosts service is not installed or not running",
+                "service_denied" => "the devlanes hosts service serves another user, not this one",
+                "service_untrusted" => {
+                    "the hosts service's pipe is held by another program, not the devlanes service"
                 }
                 _ => "the installed /etc/hosts helper is outdated",
             };

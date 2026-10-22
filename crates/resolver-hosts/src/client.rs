@@ -1,8 +1,10 @@
-//! Daemon-side calls to the installed helper through `sudo -n`.
+//! Daemon-side calls to the hosts writer: the installed helper through `sudo -n`
+//! on Unix, the `devlanes-hosts` service over its pipe on Windows. Both answer
+//! with the helper's exit codes, so failures map to the same [`HostsError`]s.
 
 use std::collections::BTreeSet;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -74,9 +76,35 @@ pub enum HostsError {
     /// The helper did not finish in time.
     #[error("the hosts helper did not finish within {0:?}")]
     Timeout(Duration),
-    /// This platform has no hosts helper (Windows, for now).
-    #[error("the hosts file fallback is not supported on Windows yet")]
+    /// This platform has no hosts writer.
+    #[error("the hosts file fallback is not supported on this platform")]
     Unsupported,
+    /// Windows: nothing serves the hosts service's pipe (not installed, or stopped).
+    #[error(
+        "the devlanes hosts service is not running ({pipe} does not exist); run `devlanes certs trust --hosts`"
+    )]
+    ServiceMissing {
+        /// The pipe looked for.
+        pipe: String,
+    },
+    /// Windows: the hosts service refused this account, which is not the user
+    /// who installed it (or is a sandboxed or low-integrity process of that user).
+    #[error(
+        "the devlanes hosts service refused this account ({message}); it serves the user who ran `devlanes certs trust --hosts`"
+    )]
+    ServiceDenied {
+        /// The service's or the system's message.
+        message: String,
+    },
+    /// Windows: the pipe is served by something other than a SYSTEM process, so
+    /// it is not the hosts service; nothing was sent to it.
+    #[error(
+        "the process serving the hosts service's pipe runs as {owner}, not SYSTEM; refusing to use it (another program took the name; restart the devlanes-hosts service or reboot)"
+    )]
+    ServiceUntrusted {
+        /// The account that owns the pipe.
+        owner: String,
+    },
 }
 
 impl HostsError {
@@ -92,7 +120,27 @@ impl HostsError {
             Self::HelperFailed { .. } => "helper_failed",
             Self::Timeout(_) => "helper_timeout",
             Self::Unsupported => "hosts_unsupported",
+            Self::ServiceMissing { .. } => "service_missing",
+            Self::ServiceDenied { .. } => "service_denied",
+            Self::ServiceUntrusted { .. } => "service_untrusted",
         }
+    }
+
+    /// Whether the writer is not installed (`helper_missing`, `service_missing`).
+    pub fn is_missing(&self) -> bool {
+        matches!(
+            self,
+            Self::HelperMissing { .. } | Self::ServiceMissing { .. }
+        )
+    }
+
+    /// Whether the writer refused this user, so retrying soon only repeats the
+    /// refusal (and, on Unix, fills the auth log).
+    pub fn is_denied(&self) -> bool {
+        matches!(
+            self,
+            Self::SudoDenied { .. } | Self::ServiceDenied { .. } | Self::ServiceUntrusted { .. }
+        )
     }
 
     /// From a helper-side validation error on the TLD.
@@ -142,26 +190,55 @@ impl HelperVersion {
     }
 }
 
-/// Runs the installed helper. Cheap to clone.
+/// Runs the hosts writer: the installed helper through sudo, or on Windows the
+/// hosts service over its pipe. Cheap to clone.
 #[derive(Clone)]
 pub struct HostsClient {
-    executor: Arc<dyn Executor>,
-    fs: Arc<dyn FsProbe>,
-    helper: PathBuf,
-    sudo: String,
+    backend: Backend,
     tld: Option<String>,
     suffixes: Suffixes,
     timeout: Duration,
 }
 
+/// How requests reach the writer.
+#[derive(Clone)]
+enum Backend {
+    /// `sudo -n <helper> ...`.
+    Sudo(Sudo),
+    /// The `devlanes-hosts` service's pipe.
+    #[cfg(windows)]
+    Service(crate::pipe::PipeHostsClient),
+}
+
+/// The helper through sudo.
+#[derive(Clone)]
+struct Sudo {
+    executor: Arc<dyn Executor>,
+    fs: Arc<dyn FsProbe>,
+    helper: PathBuf,
+    sudo: String,
+}
+
 impl std::fmt::Debug for HostsClient {
     /// Paths and TLD; the executor is opaque.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HostsClient")
-            .field("helper", &self.helper)
-            .field("sudo", &self.sudo)
-            .field("tld", &self.tld)
-            .finish_non_exhaustive()
+        let mut debug = f.debug_struct("HostsClient");
+        match &self.backend {
+            Backend::Sudo(sudo) => debug
+                .field("helper", &sudo.helper)
+                .field("sudo", &sudo.sudo),
+            #[cfg(windows)]
+            Backend::Service(service) => debug.field("service", service),
+        };
+        debug.field("tld", &self.tld).finish_non_exhaustive()
+    }
+}
+
+/// The suffixes for `tld`, failing like the writer would.
+fn suffixes_for(tld: Option<&str>) -> Result<Suffixes, HostsError> {
+    match tld {
+        Some(tld) => Suffixes::new(Some(tld)).map_err(|error| HostsError::tld(tld, error)),
+        None => Suffixes::new(None).map_err(|error| HostsError::tld("localhost", error)),
     }
 }
 
@@ -176,25 +253,43 @@ impl HostsClient {
         fs: Arc<dyn FsProbe>,
         tld: Option<&str>,
     ) -> Result<Self, HostsError> {
-        let suffixes = match tld {
-            Some(tld) => Suffixes::new(Some(tld)).map_err(|error| HostsError::tld(tld, error))?,
-            None => Suffixes::new(None).map_err(|error| HostsError::tld("localhost", error))?,
-        };
         Ok(Self {
-            executor,
-            fs,
-            helper: PathBuf::from(INSTALL_PATH),
-            sudo: SUDO.to_owned(),
+            backend: Backend::Sudo(Sudo {
+                executor,
+                fs,
+                helper: PathBuf::from(INSTALL_PATH),
+                sudo: SUDO.to_owned(),
+            }),
             tld: tld.filter(|tld| *tld != "localhost").map(str::to_owned),
-            suffixes,
+            suffixes: suffixes_for(tld)?,
             timeout: DEFAULT_TIMEOUT,
         })
     }
 
-    /// Uses another helper path (tests).
+    /// A client for the `devlanes-hosts` Windows service through `pipe`
+    /// ([`crate::pipe::PipeHostsClient::system`] for the real one), allowing
+    /// `.localhost` plus `tld` as [`HostsClient::new`] does.
+    #[cfg(windows)]
+    pub fn service(
+        pipe: crate::pipe::PipeHostsClient,
+        tld: Option<&str>,
+    ) -> Result<Self, HostsError> {
+        Ok(Self {
+            backend: Backend::Service(pipe),
+            tld: tld.filter(|tld| *tld != "localhost").map(str::to_owned),
+            suffixes: suffixes_for(tld)?,
+            timeout: DEFAULT_TIMEOUT,
+        })
+    }
+
+    /// Uses another helper path (tests). Only the sudo client has one.
     #[must_use]
     pub fn with_helper(mut self, path: impl Into<PathBuf>) -> Self {
-        self.helper = path.into();
+        match &mut self.backend {
+            Backend::Sudo(sudo) => sudo.helper = path.into(),
+            #[cfg(windows)]
+            Backend::Service(_) => {}
+        }
         self
     }
 
@@ -210,42 +305,10 @@ impl HostsClient {
         &self.suffixes
     }
 
-    /// Helper path.
-    pub fn helper(&self) -> &Path {
-        &self.helper
-    }
-
-    /// `sudo -n <helper> apply [--tld <tld>]` with one name per line on stdin.
-    pub fn apply_command(&self, names: &BTreeSet<String>) -> CommandSpec {
-        let mut stdin = Vec::new();
-        for name in names {
-            stdin.extend_from_slice(name.as_bytes());
-            stdin.push(b'\n');
-        }
-        let mut command = self.sudo_command("apply");
-        if let Some(tld) = &self.tld {
-            command = command.args(["--tld", tld.as_str()]);
-        }
-        command.stdin(stdin)
-    }
-
-    /// `sudo -n <helper> clear`.
-    pub fn clear_command(&self) -> CommandSpec {
-        self.sudo_command("clear")
-    }
-
-    /// `sudo -n <helper> <subcommand>`; `-n` makes sudo fail instead of prompting,
-    /// since the daemon has no terminal.
-    fn sudo_command(&self, subcommand: &str) -> CommandSpec {
-        CommandSpec::new(&self.sudo)
-            .arg("-n")
-            .arg(self.helper.to_string_lossy())
-            .arg(subcommand)
-    }
-
     /// Sets the block to `names`, which must already be filtered.
     ///
-    /// Invalid names fail before sudo runs, so a bug never reaches the helper.
+    /// Invalid names fail before sudo runs (or anything is sent to the service),
+    /// so a bug never reaches the writer.
     pub async fn apply(&self, names: &BTreeSet<String>) -> Result<Applied, HostsError> {
         if names.len() > MAX_NAMES {
             return Err(HostsError::InvalidNames {
@@ -260,19 +323,93 @@ impl HostsClient {
                 message: error.to_string(),
             });
         }
-        self.privileged(&self.apply_command(names)).await
+        match &self.backend {
+            Backend::Sudo(sudo) => {
+                let command = sudo.apply_command(names, self.tld.as_deref());
+                sudo.privileged(&command, self.timeout).await
+            }
+            #[cfg(windows)]
+            Backend::Service(service) => {
+                let request = devlanes_hosts_helper::protocol::Request::Apply {
+                    tld: self.tld.clone(),
+                    names: name_lines(names),
+                };
+                service.applied(&request, self.timeout).await
+            }
+        }
     }
 
     /// Removes the block.
     pub async fn clear(&self) -> Result<Applied, HostsError> {
-        self.privileged(&self.clear_command()).await
+        match &self.backend {
+            Backend::Sudo(sudo) => sudo.privileged(&sudo.clear_command(), self.timeout).await,
+            #[cfg(windows)]
+            Backend::Service(service) => {
+                let request = devlanes_hosts_helper::protocol::Request::Clear;
+                service.applied(&request, self.timeout).await
+            }
+        }
     }
 
     /// The current block as printed by `devlanes-hosts status`; no sudo needed.
     pub async fn status(&self) -> Result<String, HostsError> {
+        match &self.backend {
+            Backend::Sudo(sudo) => sudo.status(self.timeout).await,
+            #[cfg(windows)]
+            Backend::Service(service) => service.status(self.timeout).await,
+        }
+    }
+
+    /// Asks the writer for its version and checks the protocol: the helper's
+    /// `version` without sudo, or the service's `version` request.
+    pub async fn version(&self) -> Result<HelperVersion, HostsError> {
+        match &self.backend {
+            Backend::Sudo(sudo) => sudo.version(self.timeout).await,
+            #[cfg(windows)]
+            Backend::Service(service) => service.version(self.timeout).await,
+        }
+    }
+}
+
+/// One name per line, the helper's stdin format.
+fn name_lines(names: &BTreeSet<String>) -> Vec<u8> {
+    let mut lines = Vec::new();
+    for name in names {
+        lines.extend_from_slice(name.as_bytes());
+        lines.push(b'\n');
+    }
+    lines
+}
+
+impl Sudo {
+    /// `sudo -n <helper> apply [--tld <tld>]` with one name per line on stdin.
+    fn apply_command(&self, names: &BTreeSet<String>, tld: Option<&str>) -> CommandSpec {
+        let mut command = self.sudo_command("apply");
+        if let Some(tld) = tld {
+            command = command.args(["--tld", tld]);
+        }
+        command.stdin(name_lines(names))
+    }
+
+    /// `sudo -n <helper> clear`.
+    fn clear_command(&self) -> CommandSpec {
+        self.sudo_command("clear")
+    }
+
+    /// `sudo -n <helper> <subcommand>`; `-n` makes sudo fail instead of prompting,
+    /// since the daemon has no terminal.
+    fn sudo_command(&self, subcommand: &str) -> CommandSpec {
+        CommandSpec::new(&self.sudo)
+            .arg("-n")
+            .arg(self.helper.to_string_lossy())
+            .arg(subcommand)
+    }
+
+    /// `devlanes-hosts status`.
+    async fn status(&self, timeout: Duration) -> Result<String, HostsError> {
         self.ensure_installed()?;
         let command = CommandSpec::new(self.helper.to_string_lossy()).arg("status");
-        let output = self.run(&command).await?;
+        let output = self.run(&command, timeout).await?;
         if output.success() {
             Ok(output.stdout)
         } else {
@@ -281,10 +418,10 @@ impl HostsClient {
     }
 
     /// Runs `devlanes-hosts version` without sudo and checks the protocol.
-    pub async fn version(&self) -> Result<HelperVersion, HostsError> {
+    async fn version(&self, timeout: Duration) -> Result<HelperVersion, HostsError> {
         self.ensure_installed()?;
         let command = CommandSpec::new(self.helper.to_string_lossy()).arg("version");
-        let output = self.run(&command).await?;
+        let output = self.run(&command, timeout).await?;
         let found = output.stdout.trim();
         let version = HelperVersion::parse(found).ok_or_else(|| HostsError::Outdated {
             found: if found.is_empty() {
@@ -320,16 +457,24 @@ impl HostsClient {
     }
 
     /// Checks installation, runs `command` and classifies the result.
-    async fn privileged(&self, command: &CommandSpec) -> Result<Applied, HostsError> {
+    async fn privileged(
+        &self,
+        command: &CommandSpec,
+        timeout: Duration,
+    ) -> Result<Applied, HostsError> {
         self.ensure_installed()?;
-        let output = self.run(command).await?;
+        let output = self.run(command, timeout).await?;
         classify(&output)
     }
 
-    /// Runs `command` under the timeout.
-    async fn run(&self, command: &CommandSpec) -> Result<CommandOutput, HostsError> {
-        match tokio::time::timeout(self.timeout, self.executor.run(command)).await {
-            Err(_) => Err(HostsError::Timeout(self.timeout)),
+    /// Runs `command` under `timeout`.
+    async fn run(
+        &self,
+        command: &CommandSpec,
+        timeout: Duration,
+    ) -> Result<CommandOutput, HostsError> {
+        match tokio::time::timeout(timeout, self.executor.run(command)).await {
+            Err(_) => Err(HostsError::Timeout(timeout)),
             Ok(Ok(output)) => Ok(output),
             Ok(Err(error)) if error.kind() == io::ErrorKind::NotFound => {
                 Err(if command.program == self.sudo {
@@ -390,7 +535,7 @@ pub fn classify(output: &CommandOutput) -> Result<Applied, HostsError> {
 }
 
 /// Parses `changed names=N` or `unchanged names=N`.
-fn parse_applied(stdout: &str) -> Option<Applied> {
+pub(crate) fn parse_applied(stdout: &str) -> Option<Applied> {
     let line = stdout.lines().next()?;
     let (word, count) = line.split_once(' ')?;
     let changed = match word {
@@ -465,11 +610,12 @@ mod tests {
         for tld in [None, Some("localhost")] {
             let client = client(executor.clone(), tld);
             client.clear().await.expect("clear");
-            assert_eq!(
-                client.apply_command(&BTreeSet::new()).argv(),
-                ["sudo", "-n", "/usr/local/libexec/devlanes-hosts", "apply"]
-            );
+            client.apply(&BTreeSet::new()).await.expect("apply");
         }
+        assert_eq!(
+            executor.argvs()[1],
+            ["sudo", "-n", "/usr/local/libexec/devlanes-hosts", "apply"]
+        );
         assert_eq!(
             executor.argvs()[0],
             ["sudo", "-n", "/usr/local/libexec/devlanes-hosts", "clear"]

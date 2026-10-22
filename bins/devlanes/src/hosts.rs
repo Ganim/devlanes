@@ -3,31 +3,39 @@
 //!
 //! The commands and their checks live in `devlanes_resolver_hosts::install`; this
 //! module picks the helper binary, decides whether sudo may prompt, and reports.
+//! Windows installs the `devlanes-hosts` service instead (`crate::hosts_service`).
 
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
+#[cfg(unix)]
+use std::{ffi::OsString, path::PathBuf};
 
 use async_trait::async_trait;
-use devlanes_cli::{Rendered, Runtime};
+#[cfg(unix)]
+use devlanes_cli::Rendered;
+use devlanes_cli::Runtime;
 use devlanes_client::{Client, Paths};
 use devlanes_proto::{Context, Method, RpcError};
+use devlanes_resolver_hosts::{CommandOutput, CommandSpec, Executor, SystemExecutor};
+#[cfg(unix)]
 use devlanes_resolver_hosts::{
-    CommandOutput, CommandSpec, Executor, FileKind, FsProbe, INSTALL_PATH, InstallError,
-    SystemExecutor, SystemFs,
+    FileKind, FsProbe, INSTALL_PATH, InstallError, SystemFs,
     install::{self, HELPER_SOURCE_ENV},
 };
 use serde_json::{Value, json};
 
+#[cfg(unix)]
 use crate::output::emit;
 
+#[cfg(windows)]
+pub use crate::hosts_service::{install, uninstall};
+
 /// Marker the helper writes first; its presence means a block exists.
+#[cfg(unix)]
 const BLOCK_BEGIN: &str = "# devlanes begin";
 
 /// Installs the helper and its sudo rule, then asks a running daemon to reapply.
+#[cfg(unix)]
 pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
-    privileged_supported("the hosts file fallback on Windows")?;
     let source = helper_source(
         &SystemFs,
         std::env::var_os(HELPER_SOURCE_ENV),
@@ -76,8 +84,8 @@ pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
 }
 
 /// Clears the block, removes the rule and the helper, and prints what could not be done.
+#[cfg(unix)]
 pub async fn uninstall(runtime: &Runtime) -> Result<u8, RpcError> {
-    privileged_supported("the hosts file fallback on Windows")?;
     let had_helper = matches!(
         SystemFs.lstat(Path::new(INSTALL_PATH)),
         Ok(Some(info)) if info.kind == FileKind::File
@@ -108,6 +116,7 @@ pub async fn uninstall(runtime: &Runtime) -> Result<u8, RpcError> {
 
 /// The helper to install: `DEVLANES_HOSTS_HELPER` when set, else `devlanes-hosts`
 /// next to this binary (also next to the target of a symlinked `devlanes`).
+#[cfg(unix)]
 pub fn helper_source(
     fs: &dyn FsProbe,
     override_path: Option<OsString>,
@@ -132,8 +141,9 @@ pub(crate) fn privileged_supported(_feature: &str) -> Result<(), RpcError> {
     Ok(())
 }
 
-/// Windows has no sudo; the hosts file and resolver installs need their own
-/// elevated paths there, which do not exist yet. `feature` names what was refused.
+/// Windows has no sudo; the resolver install needs its own elevated path there,
+/// which does not exist yet (the hosts file has `crate::hosts_service`).
+/// `feature` names what was refused.
 #[cfg(windows)]
 pub(crate) fn privileged_supported(feature: &str) -> Result<(), RpcError> {
     Err(RpcError::new(
@@ -196,6 +206,7 @@ fn non_interactive(command: &CommandSpec) -> CommandSpec {
 }
 
 /// Maps installer failures to the CLI's error shape, keeping their stable codes.
+#[cfg(unix)]
 fn install_error(error: InstallError) -> RpcError {
     let exit = match error {
         InstallError::Unsupported => 2,
@@ -205,6 +216,7 @@ fn install_error(error: InstallError) -> RpcError {
 }
 
 /// Whether `/etc/hosts` (world-readable) still holds a devlanes block.
+#[cfg(unix)]
 async fn block_present() -> bool {
     tokio::fs::read_to_string("/etc/hosts")
         .await
@@ -213,7 +225,7 @@ async fn block_present() -> bool {
 
 /// Asks a running daemon to reapply now; a stopped daemon applies at its next start.
 /// Returns the daemon's `hosts` status after the attempt.
-async fn retry_daemon() -> Option<Value> {
+pub(crate) async fn retry_daemon() -> Option<Value> {
     let paths = Paths::discover().ok()?;
     let mut client = Client::connect(&paths).await.ok()?;
     let reply = client
@@ -223,7 +235,8 @@ async fn retry_daemon() -> Option<Value> {
     reply.get("hosts").filter(|hosts| !hosts.is_null()).cloned()
 }
 
-#[cfg(test)]
+// The sudo helper is Unix only; `crate::hosts_service` has the Windows tests.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

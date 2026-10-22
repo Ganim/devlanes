@@ -1,6 +1,6 @@
 # devlanes-start-gate
 
-The start gates that pace service starts: `AllAtOnce`, `FixedWindow` and `AdaptiveGate`, all implementing `devlanes_core::gate::StartGate`. The binary builds one gate from the user config's `startup` block and the daemon asks it for a slot before every service spawn. `AdaptiveGate` and the binary's `FixedWindow` read a `PressureSource` from `devlanes-metrics-macos` or `devlanes-metrics-linux`.
+The start gates that pace service starts: `AllAtOnce`, `FixedWindow` and `AdaptiveGate`, all implementing `devlanes_core::gate::StartGate`. The binary builds one gate from the user config's `startup` block and the daemon asks it for a slot before every service spawn. `AdaptiveGate` and the binary's `FixedWindow` read a `PressureSource` from `devlanes-metrics-macos`, `devlanes-metrics-linux` or `devlanes-metrics-windows`.
 
 ## Usage
 

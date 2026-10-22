@@ -898,6 +898,7 @@ dependencies = [
  "devlanes-daemon",
  "devlanes-env-direnv",
  "devlanes-env-mise",
+ "devlanes-hosts-service",
  "devlanes-infra-compose",
  "devlanes-infra-docker",
  "devlanes-ipc",
@@ -905,6 +906,7 @@ dependencies = [
  "devlanes-metrics-docker",
  "devlanes-metrics-linux",
  "devlanes-metrics-macos",
+ "devlanes-metrics-windows",
  "devlanes-migrate",
  "devlanes-pki",
  "devlanes-platform-bun",
@@ -1144,6 +1146,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "devlanes-hosts-service"
+version = "0.1.0"
+dependencies = [
+ "devlanes-hosts-helper",
+ "devlanes-sys",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "windows-service",
+]
+
+[[package]]
 name = "devlanes-infra-compose"
 version = "0.1.0"
 dependencies = [
@@ -1266,6 +1280,18 @@ dependencies = [
  "libc",
  "rustix",
  "tokio",
+]
+
+[[package]]
+name = "devlanes-metrics-windows"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "devlanes-core",
+ "devlanes-metrics",
+ "devlanes-sys",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1485,6 +1511,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "devlanes-hosts-helper",
+ "devlanes-hosts-service",
+ "devlanes-sys",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -5488,6 +5516,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5523,6 +5557,17 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-service"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "857224b3b211c6f3616921f081ee54721ee3ad2ace2fac6a6337e032f7b4dcf2"
+dependencies = [
+ "bitflags 2.13.2",
+ "widestring",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "windows-sys"

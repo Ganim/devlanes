@@ -1,6 +1,6 @@
 # devlanes-metrics
 
-Platform-neutral resource monitoring for devlanes: the `MetricsSource` trait, samples, roll-ups from processes to units, lanes and projects, in-memory history, per-run summaries and baselines. The daemon drives it; `devlanes-metrics-macos`, `-linux` and `-docker` implement the trait, and the binary registers them.
+Platform-neutral resource monitoring for devlanes: the `MetricsSource` trait, samples, roll-ups from processes to units, lanes and projects, in-memory history, per-run summaries and baselines. The daemon drives it; `devlanes-metrics-macos`, `-linux`, `-windows` and `-docker` implement the trait, and the binary registers them.
 
 ## Usage
 

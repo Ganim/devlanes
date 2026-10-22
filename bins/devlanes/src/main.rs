@@ -11,6 +11,8 @@ mod daemon;
 mod daemon_log;
 mod driver;
 mod hosts;
+#[cfg(windows)]
+mod hosts_service;
 mod local;
 mod local_doctor;
 mod migrate;
@@ -37,6 +39,17 @@ fn main() -> ExitCode {
         .is_some_and(|arg| arg == devlanes_runner_windows::ctrl::HELPER_ARG)
     {
         return ExitCode::from(devlanes_runner_windows::console_ctrl_main());
+    }
+    // The elevated hosts service installer that `certs trust --hosts` starts
+    // through the UAC prompt: hidden, so not a listed command.
+    #[cfg(windows)]
+    {
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        if let Some(subcommand) = args.first().filter(|arg| {
+            *arg == hosts_service::INSTALL_ARG || *arg == hosts_service::UNINSTALL_ARG
+        }) {
+            return hosts_service::elevated_main(subcommand, &args[1..]);
+        }
     }
     // CompleteEnv must run before any thread exists; it exits when completing.
     completion::install();

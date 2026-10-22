@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use devlanes_core::UnitRunId;
+use devlanes_core::{ProcessIdentity, UnitRunId};
 use devlanes_metrics::{
     COARSE_CAPACITY, COARSE_INTERVAL_MS, ContainerTarget, History, RunTracker, Sample,
     SampleRequest, Series, Subject, UnitKey, UnitTarget, aggregate,
@@ -211,7 +211,7 @@ impl Inner {
                 }
                 request.units.push(UnitTarget {
                     unit: key.clone(),
-                    sessions: identity.map(|i| vec![i.sid]).unwrap_or_default(),
+                    sessions: unit_sessions(identity),
                     processes,
                 });
                 targets.push(Target {
@@ -463,6 +463,20 @@ impl Inner {
         units.extend(container_entries(&state));
         Ok(json!({"units": units}))
     }
+}
+
+/// Sessions whose members belong to a unit: the leader's, which also catches
+/// members the runner has not tracked yet.
+#[cfg(unix)]
+fn unit_sessions(leader: Option<ProcessIdentity>) -> Vec<u32> {
+    leader.map(|leader| vec![leader.sid]).unwrap_or_default()
+}
+
+/// None: Windows has no sessions to group by (an identity's `sid` is its own
+/// PID). The unit's job members arrive as tracked processes instead.
+#[cfg(windows)]
+fn unit_sessions(_leader: Option<ProcessIdentity>) -> Vec<u32> {
+    Vec::new()
 }
 
 /// The newest [`HISTORY_POINTS`] raw points as `[ts_ms, cpu, memory]`.

@@ -1666,3 +1666,62 @@ fn daemon_errors_are_worded_with_hints() {
     }
     insta::assert_snapshot!("render_daemon_errors", output);
 }
+
+/// The Windows hosts service's codes: errors carry the daemon's or installer's
+/// message and point at `certs trust --hosts`; `why` names the affected hosts.
+#[test]
+fn hosts_service_codes_are_worded() {
+    for code in [
+        "service_missing",
+        "service_denied",
+        "service_untrusted",
+        "service_source_missing",
+        "service_source_rejected",
+        "elevation_cancelled",
+    ] {
+        assert!(has_wording(code), "{code}");
+    }
+    let reporter = runtime(OutputMode::Plain).reporter();
+    let missing = reporter.error(
+        &RpcError::new(
+            "service_missing",
+            json!({"message": "the devlanes hosts service is not running"}),
+            1,
+        ),
+        None,
+    );
+    assert!(
+        missing
+            .stderr
+            .contains("the devlanes hosts service is not running"),
+        "{missing:?}"
+    );
+    assert!(
+        missing.stderr.contains("devlanes certs trust --hosts"),
+        "{missing:?}"
+    );
+    let cancelled = reporter.error(&RpcError::new("elevation_cancelled", json!({}), 1), None);
+    assert!(
+        cancelled
+            .stderr
+            .contains("administrator prompt was declined"),
+        "{cancelled:?}"
+    );
+    let why = json!({
+        "lane": "acme@2", "unit": "web", "state": "running",
+        "reasons": [
+            {"code": "service_missing", "data": {"hosts": ["web.acme-2.localhost"], "message": "m"}},
+            {"code": "service_denied", "data": {"hosts": ["web.acme-2.localhost"], "message": "m"}},
+            {"code": "service_untrusted", "data": {"hosts": ["web.acme-2.localhost"], "message": "m"}},
+        ],
+    });
+    let text = render_text(Method::Why, &why);
+    for line in [
+        "the devlanes hosts service is not installed or not running, so web.acme-2.localhost may not resolve",
+        "the devlanes hosts service serves another user, not this one, so web.acme-2.localhost may not resolve",
+        "the hosts service's pipe is held by another program, not the devlanes service, so web.acme-2.localhost may not resolve",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    assert!(text.contains("devlanes certs trust --hosts"), "{text}");
+}

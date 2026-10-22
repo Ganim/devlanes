@@ -22,8 +22,9 @@ pub struct SyncConfig {
     pub debounce: Duration,
     /// Longest an update waits under a constant stream of changes.
     pub max_delay: Duration,
-    /// Pause after `sudo_denied` or `helper_outdated` before trying sudo again, so a
-    /// missing rule does not fill the auth log on every route change.
+    /// Pause after `sudo_denied` (`service_denied`, `service_untrusted` on
+    /// Windows) or `helper_outdated` before trying again, so a missing rule does
+    /// not fill the auth log on every route change.
     pub denied_backoff: Duration,
 }
 
@@ -175,12 +176,9 @@ async fn run(
                 }
                 Err(error) => {
                     tracing::warn!(code = error.code(), %error, "updating /etc/hosts failed");
-                    if matches!(
-                        error,
-                        HostsError::SudoDenied { .. }
-                            | HostsError::Outdated { .. }
-                            | HostsError::Unsupported
-                    ) {
+                    if error.is_denied()
+                        || matches!(error, HostsError::Outdated { .. } | HostsError::Unsupported)
+                    {
                         blocked_until = Some(Instant::now() + config.denied_backoff);
                     }
                     state.send_replace(SyncState::Failed(error));

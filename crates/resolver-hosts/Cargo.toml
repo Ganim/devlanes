@@ -21,9 +21,17 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+# The hosts service's pipe client: pipe opening and server checks.
+[target.'cfg(windows)'.dependencies]
+devlanes-sys = { path = "../sys" }
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+# The pipe client against the service's real server code, as the current user.
+[target.'cfg(windows)'.dev-dependencies]
+devlanes-hosts-service = { path = "../hosts-service" }
 
 [lints]
 workspace = true

@@ -2,7 +2,7 @@
 source: crates/cli/tests/it/help.rs
 expression: long_help(path)
 ---
-Trust the devlanes CA and install the /etc/hosts helper
+Trust the devlanes CA and install the hosts file writer
 
 Usage: devlanes certs [OPTIONS] <COMMAND>
 

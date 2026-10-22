@@ -211,27 +211,55 @@ async fn hosts_file(
     ))
 }
 
-/// No hosts file fallback on Windows: it needs a privileged writer, which comes
-/// with the hosts service. `None` leaves the hosts file alone whatever the policy.
+/// The hosts file fallback through the `devlanes-hosts` Windows service. It
+/// counts as installed when anything answers its pipe other than "no such pipe",
+/// as the helper counts as installed when its file exists; a refusal or an old
+/// protocol is then reported by the first update.
 #[cfg(windows)]
 async fn hosts_file(
     policy: devlanes_resolver_hosts::HostsFilePolicy,
-    _tld: Option<String>,
+    tld: Option<String>,
     probe: Option<tokio::task::JoinHandle<devlanes_resolver_hosts::LocalhostResolution>>,
 ) -> Option<devlanes_daemon::hosts::HostsFile> {
-    if let Some(probe) = probe {
-        probe.abort();
-    }
-    let mode = policy.user_mode();
-    // Only `always` is an explicit request; `auto` is the default and would warn on
-    // every start, and `never` opted out.
-    if mode == devlanes_resolver_hosts::HostsFileMode::Always {
-        tracing::warn!(%mode, "hosts file fallback is not supported on Windows yet");
-    } else {
-        tracing::debug!(%mode, "hosts file fallback is not supported on Windows yet");
-    }
-    None
+    use devlanes_resolver_hosts::pipe::PipeHostsClient;
+    use devlanes_resolver_hosts::{HostsClient, LocalhostResolution};
+    let resolution = match probe {
+        // A panicked probe proves nothing about the resolver; treat it like a failure.
+        Some(probe) => Some(probe.await.unwrap_or(LocalhostResolution::Fails)),
+        None => None,
+    };
+    tracing::info!(mode = %policy.user_mode(), ?resolution, "hosts file policy");
+    let pipe = PipeHostsClient::system();
+    let (client, tld_error) = match HostsClient::service(pipe.clone(), tld.as_deref()) {
+        Ok(client) => (client, None),
+        Err(error) => match HostsClient::service(pipe, None) {
+            Ok(client) => (client, Some(error)),
+            Err(error) => {
+                tracing::warn!(%error, "hosts file fallback unavailable");
+                return None;
+            }
+        },
+    };
+    let check = client.clone().with_timeout(HOSTS_SERVICE_CHECK_TIMEOUT);
+    let installed = !matches!(check.version().await, Err(error) if error.is_missing());
+    Some(devlanes_daemon::hosts::HostsFile::spawn(
+        client,
+        devlanes_daemon::hosts::HostsOptions {
+            policy,
+            resolution,
+            installed,
+            tld_error,
+            sync: devlanes_resolver_hosts::SyncConfig::default(),
+            // Shipped together: the service next to this binary has this version.
+            expected_version: env!("CARGO_PKG_VERSION").into(),
+        },
+    ))
 }
+
+/// Bound on the startup question to the hosts service; it answers in
+/// milliseconds when it runs.
+#[cfg(windows)]
+const HOSTS_SERVICE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `~/.devlanes/config.yaml`, or defaults when absent or invalid (logged).
 async fn load_user_config(home: &Path) -> (devlanes_config::UserConfig, Vec<Value>) {
@@ -337,7 +365,10 @@ fn pressure_source() -> Option<Arc<dyn devlanes_core::gate::PressureSource>> {
     #[cfg(target_os = "linux")]
     let source: Option<Arc<dyn devlanes_core::gate::PressureSource>> =
         Some(Arc::new(devlanes_metrics_linux::LinuxPressure::new()));
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    let source: Option<Arc<dyn devlanes_core::gate::PressureSource>> =
+        Some(Arc::new(devlanes_metrics_windows::WindowsPressure::new()));
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     let source = None;
     source
 }
@@ -392,6 +423,8 @@ fn metrics_sources() -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
     }
     #[cfg(target_os = "linux")]
     sources.push(Arc::new(devlanes_metrics_linux::LinuxSource::new()));
+    #[cfg(windows)]
+    sources.push(Arc::new(devlanes_metrics_windows::WindowsSource::new()));
     match devlanes_metrics_docker::DockerSource::connect() {
         Ok(source) => sources.push(Arc::new(source)),
         Err(error) => tracing::debug!(%error, "container metrics unavailable"),

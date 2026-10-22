@@ -1,4 +1,4 @@
-//! Real install against this machine's `/etc/hosts` and sudo.
+//! Unix: real install against this machine's `/etc/hosts` and sudo.
 //!
 //! Run explicitly with a release helper, from a terminal where sudo can prompt:
 //!
@@ -7,21 +7,33 @@
 //! DEVLANES_HOSTS_HELPER=$PWD/target/release/devlanes-hosts \
 //!   cargo test -p devlanes-resolver-hosts --test it -- --ignored --nocapture
 //! ```
+//!
+//! Windows: the pipe client against the hosts service's server code (`service`).
 
 // The helper and its sudo rule only exist on Unix.
-#![cfg(unix)]
-
+#[cfg(unix)]
 use std::collections::BTreeSet;
+#[cfg(unix)]
 use std::net::ToSocketAddrs as _;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use devlanes_resolver_hosts::install::{self, HELPER_SOURCE_ENV};
+#[cfg(unix)]
 use devlanes_resolver_hosts::{HostsClient, SystemExecutor, SystemFs};
 
+#[cfg(windows)]
+mod service;
+
+#[cfg(unix)]
 const LIMIT: Duration = Duration::from_secs(120);
 
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "needs sudo: installs into /usr/local/libexec and /etc/sudoers.d"]
 async fn installs_applies_and_uninstalls() {

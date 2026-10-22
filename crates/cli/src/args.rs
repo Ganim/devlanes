@@ -218,7 +218,7 @@ the daemon.",
         after_help = MIGRATE_AFTER
     )]
     Migrate(MigrateArgs),
-    /// Trust the devlanes CA and install the /etc/hosts helper
+    /// Trust the devlanes CA and install the hosts file writer
     Certs {
         #[command(subcommand)]
         command: CertsCommand,
@@ -519,7 +519,7 @@ pub enum UrlCommand {
 pub enum CertsCommand {
     /// Trust the devlanes CA in the system and browser stores
     Trust {
-        /// Also install the /etc/hosts helper for programs that cannot resolve *.localhost
+        /// Also install the hosts file writer (a sudo helper on macOS and Linux, a service on Windows) for programs that cannot resolve *.localhost
         #[arg(long)]
         hosts: bool,
         /// Also send lookups for hostnames.tld to the devlanes DNS server (/etc/resolver on
@@ -530,7 +530,7 @@ pub enum CertsCommand {
     /// Remove the devlanes CA from the trust stores
     #[command(group(clap::ArgGroup::new("removal").args(["hosts", "resolver"]).multiple(true)))]
     Untrust {
-        /// Also remove the /etc/hosts helper, its sudo rule and the devlanes block in /etc/hosts
+        /// Also remove the hosts file writer (its sudo rule, or the Windows service) and the devlanes block in the hosts file
         #[arg(long)]
         hosts: bool,
         /// Also remove the OS resolver file for hostnames.tld

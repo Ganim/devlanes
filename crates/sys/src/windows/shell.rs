@@ -1,4 +1,5 @@
-//! Opening web URLs with the user's default browser.
+//! Opening web URLs with the user's default browser, and running a program as
+//! administrator through the UAC prompt.
 
 use std::ffi::OsStr;
 use std::io;
@@ -55,6 +56,68 @@ pub fn open_url(url: &str) -> io::Result<()> {
         ),
         _ => io::Error::other(format!("the shell could not open the URL: {error}")),
     })
+}
+
+/// `ERROR_CANCELLED`: the user answered No at the UAC prompt.
+pub const ERROR_CANCELLED: i32 = 1223;
+
+/// Runs `program` with the command line `parameters` as administrator, the way
+/// "Run as administrator" does: Windows shows the UAC prompt (on the secure
+/// desktop), then starts the program elevated and hidden. Waits for it to exit
+/// and returns its exit code. Blocks the calling thread, prompt included, so
+/// call it off async executors.
+///
+/// A No at the prompt fails with raw OS error [`ERROR_CANCELLED`]. The prompt
+/// needs a visible desktop; check `cert::interactive_desktop` first. `parameters`
+/// is passed as is, so quote arguments the way the program parses them.
+pub fn run_elevated(program: &std::path::Path, parameters: &str) -> io::Result<u32> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, INFINITE, WaitForSingleObject,
+    };
+    use windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    let _com = Com::init();
+    let verb = wide(OsStr::new("runas"));
+    let file = wide(program.as_os_str());
+    let parameters = wide(OsStr::new(parameters));
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        // NOCLOSEPROCESS: hand back the process to wait on. NOASYNC: the call
+        // returns once the process exists. NO_UI: errors come back as codes.
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: verb.as_ptr(),
+        lpFile: file.as_ptr(),
+        lpParameters: parameters.as_ptr(),
+        nShow: SW_HIDE,
+        ..SHELLEXECUTEINFOW::default()
+    };
+    // SAFETY: `info` is a correctly sized SHELLEXECUTEINFOW whose string fields
+    // point to NUL-terminated UTF-16 that outlives the call; on success with
+    // NOCLOSEPROCESS, `hProcess` is a process handle this function now owns.
+    if unsafe { ShellExecuteExW(&raw mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.hProcess.is_null() {
+        return Err(io::Error::other(
+            "the elevated program did not start a process",
+        ));
+    }
+    // SAFETY: the handle was just returned to us and is closed once, on drop.
+    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
+    // SAFETY: `process` is a valid process handle with SYNCHRONIZE access.
+    if unsafe { WaitForSingleObject(info.hProcess, INFINITE) } != WAIT_OBJECT_0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut code = 0u32;
+    // SAFETY: `process` has PROCESS_QUERY_LIMITED_INFORMATION; `code` is writable.
+    if unsafe { GetExitCodeProcess(info.hProcess, &raw mut code) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    drop(process);
+    Ok(code)
 }
 
 /// Accepts only `http` and `https` URLs made of printable ASCII other than space

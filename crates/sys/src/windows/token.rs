@@ -6,7 +6,7 @@ use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
-use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW};
 use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, IsValidSid, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
     TokenElevation, TokenUser,
@@ -41,6 +41,54 @@ impl Sid {
     /// The SID in the form Win32 APIs take.
     pub(crate) fn as_psid(&self) -> PSID {
         self.0.as_ptr().cast_mut().cast()
+    }
+
+    /// Parses the string form, such as `S-1-5-18`. Anything that is not a plain
+    /// SID is refused, so the result's [`Sid::to_sddl`] is safe to paste into SDDL
+    /// even when `text` came from a file or the registry. SDDL aliases such as
+    /// `SY` are refused too.
+    pub fn parse(text: &str) -> io::Result<Self> {
+        let plain = text.len() <= 256
+            && text.strip_prefix("S-1-").is_some_and(|rest| {
+                rest.split('-')
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+            });
+        if !plain {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{text:?} is not a security identifier"),
+            ));
+        }
+        let wide = super::security::wide(std::ffi::OsStr::new(text));
+        let mut sid: PSID = ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated; on success `sid` receives a LocalAlloc'ed
+        // SID that is copied and freed below.
+        if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &raw mut sid) } == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{text:?} is not a security identifier: {}",
+                    io::Error::last_os_error()
+                ),
+            ));
+        }
+        // SAFETY: the call succeeded, so `sid` is a valid SID until freed.
+        let copied = unsafe { Self::copy_from(sid) };
+        // SAFETY: allocated by ConvertStringSidToSidW with LocalAlloc.
+        unsafe { LocalFree(sid) };
+        copied
+    }
+
+    /// `NT AUTHORITY\SYSTEM` (`S-1-5-18`), the account services run as by default.
+    pub fn local_system() -> Self {
+        // S-1-5-18: revision 1, one sub-authority, authority 5 (NT), RID 18.
+        Self(vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0])
+    }
+
+    /// `BUILTIN\Administrators` (`S-1-5-32-544`).
+    pub fn administrators() -> Self {
+        // Revision 1, two sub-authorities, authority 5, RIDs 32 and 544.
+        Self(vec![1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 0x02, 0, 0])
     }
 
     /// The string form, such as `S-1-5-21-...`, used in SDDL and for display.
@@ -309,6 +357,34 @@ mod tests {
             ..facts.clone()
         };
         assert!(!lower.as_trusted_as(&facts));
+        Ok(())
+    }
+
+    /// SIDs parse from their string form; aliases and anything that could carry
+    /// SDDL syntax are refused.
+    #[test]
+    fn sids_parse_strictly() -> io::Result<()> {
+        let me = current_user()?;
+        assert_eq!(Sid::parse(&me.to_sddl()?)?, me);
+        assert_eq!(Sid::parse("S-1-5-18")?, Sid::local_system());
+        assert_eq!(Sid::local_system().to_sddl()?, "S-1-5-18");
+        assert_eq!(Sid::administrators().to_sddl()?, "S-1-5-32-544");
+        for bad in [
+            "",
+            "SY",
+            "BA",
+            "S-1-5-21)(A;;GA;;;WD",
+            "S-1-5-18 ",
+            "s-1-5-18",
+            "S-1-",
+            "S-1-5-18-",
+        ] {
+            assert_eq!(
+                Sid::parse(bad).err().map(|error| error.kind()),
+                Some(io::ErrorKind::InvalidInput),
+                "{bad:?}"
+            );
+        }
         Ok(())
     }
 }

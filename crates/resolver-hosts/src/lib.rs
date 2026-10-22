@@ -13,15 +13,20 @@
 //! filters names exactly the way the helper checks them. The helper's README
 //! explains why the fallback exists and its security model.
 //!
-//! Windows has no helper yet: [`SystemFs`] reports `Unsupported` there, so a
-//! [`HostsClient`] built on it fails with [`HostsError::Unsupported`], and
-//! [`install::install`] and [`install::uninstall`] refuse to run.
+//! Windows has no sudo helper: there [`HostsClient::service`] talks to the
+//! `devlanes-hosts` service over its pipe (`pipe`), with the same operations and
+//! errors. [`SystemFs`] reports `Unsupported`, so a sudo [`HostsClient`] built on it
+//! fails with [`HostsError::Unsupported`], and [`install::install`] and
+//! [`install::uninstall`] refuse to run; the service has its own installer in
+//! `devlanes-hosts-service`.
 
 pub mod client;
 pub mod exec;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 pub mod install;
+#[cfg(windows)]
+pub mod pipe;
 pub mod policy;
 pub mod sync;
 

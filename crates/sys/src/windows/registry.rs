@@ -1,7 +1,10 @@
 //! String and binary values under `HKEY_CURRENT_USER`, for `daemon install`'s
 //! logon entry (`Software\Microsoft\Windows\CurrentVersion\Run`) and its Task
 //! Manager state (`...\Explorer\StartupApproved\Run`). Only the current user's
-//! hive is reachable, so nothing here needs elevation.
+//! hive is reachable through these, so nothing here needs elevation.
+//!
+//! [`machine`] reads `HKEY_LOCAL_MACHINE` for the hosts service (where the hosts
+//! file lives, which user it serves) and writes there for its elevated installer.
 
 use std::ffi::OsStr;
 use std::io;
@@ -10,9 +13,10 @@ use std::ptr;
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_BINARY, REG_OPTION_NON_VOLATILE, REG_ROUTINE_FLAGS,
-    REG_SZ, REG_VALUE_TYPE, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
-    RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_BINARY,
+    REG_OPTION_NON_VOLATILE, REG_ROUTINE_FLAGS, REG_SZ, REG_VALUE_TYPE, RRF_RT_REG_BINARY,
+    RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW,
+    RegSetValueExW,
 };
 
 use super::security::wide;
@@ -29,7 +33,80 @@ fn check(status: WIN32_ERROR) -> io::Result<()> {
 /// The `REG_SZ` value `name` of `HKCU\<subkey>`, or `None` when the key or the
 /// value does not exist. Other value types are an error.
 pub fn read_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
-    let Some(bytes) = read_raw(subkey, name, RRF_RT_REG_SZ)? else {
+    read_string_in(HKEY_CURRENT_USER, subkey, name)
+}
+
+/// The `REG_BINARY` value `name` of `HKCU\<subkey>`, or `None` when the key or
+/// the value does not exist. Other value types are an error.
+pub fn read_binary(subkey: &str, name: &str) -> io::Result<Option<Vec<u8>>> {
+    read_raw(HKEY_CURRENT_USER, subkey, name, RRF_RT_REG_BINARY)
+}
+
+/// Writes `value` as the `REG_SZ` value `name` of `HKCU\<subkey>`, creating the
+/// key when it is missing.
+pub fn write_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
+    write_string_in(HKEY_CURRENT_USER, subkey, name, value)
+}
+
+/// Writes `value` as the `REG_BINARY` value `name` of `HKCU\<subkey>`, creating
+/// the key when it is missing.
+pub fn write_binary(subkey: &str, name: &str, value: &[u8]) -> io::Result<()> {
+    write_raw(HKEY_CURRENT_USER, subkey, name, REG_BINARY, value)
+}
+
+/// Deletes the value `name` of `HKCU\<subkey>`; `false` when there was none.
+pub fn delete_value(subkey: &str, name: &str) -> io::Result<bool> {
+    delete_value_in(HKEY_CURRENT_USER, subkey, name)
+}
+
+/// Deletes `HKCU\<subkey>` with everything under it; a missing key is fine.
+/// For tests that created a scratch key. An empty `subkey` is refused, since it
+/// would empty the whole hive.
+pub fn delete_tree(subkey: &str) -> io::Result<()> {
+    delete_tree_in(HKEY_CURRENT_USER, subkey)
+}
+
+/// Values under `HKEY_LOCAL_MACHINE`. Reading most keys needs no elevation;
+/// writing and deleting need an elevated process (or SYSTEM).
+pub mod machine {
+    use super::*;
+
+    /// The string value `name` of `HKLM\<subkey>`, or `None` when the key or the
+    /// value does not exist. A `REG_EXPAND_SZ` value comes back expanded with
+    /// this process's environment (`RegGetValueW` does that for `RRF_RT_REG_SZ`).
+    pub fn read_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
+        read_string_in(HKEY_LOCAL_MACHINE, subkey, name)
+    }
+
+    /// Writes `value` as the `REG_SZ` value `name` of `HKLM\<subkey>`, creating
+    /// the key when it is missing. The key inherits its parent's access list.
+    pub fn write_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
+        write_string_in(HKEY_LOCAL_MACHINE, subkey, name, value)
+    }
+
+    /// Deletes the value `name` of `HKLM\<subkey>`; `false` when there was none.
+    pub fn delete_value(subkey: &str, name: &str) -> io::Result<bool> {
+        delete_value_in(HKEY_LOCAL_MACHINE, subkey, name)
+    }
+
+    /// Deletes `HKLM\<subkey>` with everything under it; a missing key is fine.
+    /// Keys with fewer than three levels (such as `SYSTEM\CurrentControlSet`)
+    /// are refused, so a caller bug cannot empty a hive or a top-level branch.
+    pub fn delete_tree(subkey: &str) -> io::Result<()> {
+        let levels = subkey.split('\\').filter(|level| !level.is_empty()).count();
+        if levels < 3 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("refusing to delete HKEY_LOCAL_MACHINE\\{subkey}"),
+            ));
+        }
+        delete_tree_in(HKEY_LOCAL_MACHINE, subkey)
+    }
+}
+
+/// The string value `name` of `<hive>\<subkey>`.
+fn read_string_in(hive: HKEY, subkey: &str, name: &str) -> io::Result<Option<String>> {
+    let Some(bytes) = read_raw(hive, subkey, name, RRF_RT_REG_SZ)? else {
         return Ok(None);
     };
     let text: Vec<u16> = bytes
@@ -49,15 +126,14 @@ pub fn read_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "value is not Unicode"))
 }
 
-/// The `REG_BINARY` value `name` of `HKCU\<subkey>`, or `None` when the key or
-/// the value does not exist. Other value types are an error.
-pub fn read_binary(subkey: &str, name: &str) -> io::Result<Option<Vec<u8>>> {
-    read_raw(subkey, name, RRF_RT_REG_BINARY)
-}
-
 /// The bytes of a value whose type `flags` allows, or `None` when the key or the
 /// value does not exist.
-fn read_raw(subkey: &str, name: &str, flags: REG_ROUTINE_FLAGS) -> io::Result<Option<Vec<u8>>> {
+fn read_raw(
+    hive: HKEY,
+    subkey: &str,
+    name: &str,
+    flags: REG_ROUTINE_FLAGS,
+) -> io::Result<Option<Vec<u8>>> {
     let key = wide(OsStr::new(subkey));
     let name = wide(OsStr::new(name));
     let mut bytes: u32 = 0;
@@ -65,7 +141,7 @@ fn read_raw(subkey: &str, name: &str, flags: REG_ROUTINE_FLAGS) -> io::Result<Op
     // asks only for the size, written to `bytes`.
     let status = unsafe {
         RegGetValueW(
-            HKEY_CURRENT_USER,
+            hive,
             key.as_ptr(),
             name.as_ptr(),
             flags,
@@ -78,15 +154,16 @@ fn read_raw(subkey: &str, name: &str, flags: REG_ROUTINE_FLAGS) -> io::Result<Op
         return Ok(None);
     }
     check(status)?;
-    // The value may grow between the two calls; one retry with the new size is
-    // enough for a value nobody else writes in a loop.
+    // The value may grow between the two calls (and an expanded value may need
+    // more than the size query said); one retry with the new size is enough for a
+    // value nobody else writes in a loop.
     for _ in 0..2 {
         let mut buffer = vec![0u8; bytes as usize];
         let mut size = bytes;
         // SAFETY: `buffer` holds `size` writable bytes; the strings outlive the call.
         let status = unsafe {
             RegGetValueW(
-                HKEY_CURRENT_USER,
+                hive,
                 key.as_ptr(),
                 name.as_ptr(),
                 flags,
@@ -109,30 +186,29 @@ fn read_raw(subkey: &str, name: &str, flags: REG_ROUTINE_FLAGS) -> io::Result<Op
     Err(io::Error::other("registry value kept changing size"))
 }
 
-/// Writes `value` as the `REG_SZ` value `name` of `HKCU\<subkey>`, creating the
-/// key when it is missing.
-pub fn write_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
+/// Writes `value` as a `REG_SZ` value.
+fn write_string_in(hive: HKEY, subkey: &str, name: &str, value: &str) -> io::Result<()> {
     let data = wide(OsStr::new(value));
     let bytes: Vec<u8> = data.iter().flat_map(|unit| unit.to_le_bytes()).collect();
     // `data` ends with the terminating NUL that REG_SZ needs.
-    write_raw(subkey, name, REG_SZ, &bytes)
-}
-
-/// Writes `value` as the `REG_BINARY` value `name` of `HKCU\<subkey>`, creating
-/// the key when it is missing.
-pub fn write_binary(subkey: &str, name: &str, value: &[u8]) -> io::Result<()> {
-    write_raw(subkey, name, REG_BINARY, value)
+    write_raw(hive, subkey, name, REG_SZ, &bytes)
 }
 
 /// Writes `data` as a value of type `kind`, creating the key when it is missing.
-fn write_raw(subkey: &str, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> io::Result<()> {
+fn write_raw(
+    hive: HKEY,
+    subkey: &str,
+    name: &str,
+    kind: REG_VALUE_TYPE,
+    data: &[u8],
+) -> io::Result<()> {
     let key_name = wide(OsStr::new(subkey));
     let name = wide(OsStr::new(name));
     let mut key: HKEY = ptr::null_mut();
     // SAFETY: the key name outlives the call; `key` receives an open handle.
     check(unsafe {
         RegCreateKeyExW(
-            HKEY_CURRENT_USER,
+            hive,
             key_name.as_ptr(),
             0,
             ptr::null(),
@@ -158,30 +234,29 @@ fn write_raw(subkey: &str, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> io:
     check(status)
 }
 
-/// Deletes the value `name` of `HKCU\<subkey>`; `false` when there was none.
-pub fn delete_value(subkey: &str, name: &str) -> io::Result<bool> {
+/// Deletes one value; `false` when there was none.
+fn delete_value_in(hive: HKEY, subkey: &str, name: &str) -> io::Result<bool> {
     let key = wide(OsStr::new(subkey));
     let name = wide(OsStr::new(name));
     // SAFETY: both strings are NUL-terminated and outlive the call.
-    match unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr()) } {
+    match unsafe { RegDeleteKeyValueW(hive, key.as_ptr(), name.as_ptr()) } {
         ERROR_FILE_NOT_FOUND => Ok(false),
         status => check(status).map(|()| true),
     }
 }
 
-/// Deletes `HKCU\<subkey>` with everything under it; a missing key is fine.
-/// For tests that created a scratch key. An empty `subkey` is refused, since it
-/// would empty the whole hive.
-pub fn delete_tree(subkey: &str) -> io::Result<()> {
+/// Deletes a key with everything under it; a missing key is fine, an empty
+/// `subkey` (the whole hive) is refused.
+fn delete_tree_in(hive: HKEY, subkey: &str) -> io::Result<()> {
     if subkey.trim_matches('\\').is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "refusing to delete HKEY_CURRENT_USER itself",
+            "refusing to delete a whole registry hive",
         ));
     }
     let key = wide(OsStr::new(subkey));
     // SAFETY: the key name is NUL-terminated and outlives the call.
-    match unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) } {
+    match unsafe { RegDeleteTreeW(hive, key.as_ptr()) } {
         ERROR_FILE_NOT_FOUND => Ok(()),
         status => check(status),
     }
@@ -266,6 +341,42 @@ mod tests {
         delete_tree(&scratch.0)?;
         delete_tree(&scratch.0)?;
         assert!(delete_tree(r"\").is_err());
+        Ok(())
+    }
+
+    /// The hosts file directory comes from a `REG_EXPAND_SZ` value under HKLM,
+    /// readable without elevation and expanded on read. Read-only.
+    #[test]
+    fn machine_values_read_expanded() -> io::Result<()> {
+        let directory = machine::read_string(
+            r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+            "DataBasePath",
+        )?
+        .expect("DataBasePath");
+        assert!(!directory.contains('%'), "{directory}");
+        assert!(
+            directory
+                .to_ascii_lowercase()
+                .ends_with(r"\system32\drivers\etc"),
+            "{directory}"
+        );
+        assert_eq!(
+            machine::read_string(
+                r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+                "devlanes-missing"
+            )?,
+            None
+        );
+        // Refused before any call, so nothing is ever deleted here.
+        for shallow in ["", r"\", "SYSTEM", r"SYSTEM\CurrentControlSet"] {
+            assert_eq!(
+                machine::delete_tree(shallow)
+                    .err()
+                    .map(|error| error.kind()),
+                Some(io::ErrorKind::InvalidInput),
+                "{shallow:?}"
+            );
+        }
         Ok(())
     }
 }
