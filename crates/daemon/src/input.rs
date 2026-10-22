@@ -217,8 +217,8 @@ mod tests {
             lock(&self.0).push((stream_id, data));
             Ok(())
         }
-        async fn shutdown(&self) -> Result<(), RpcError> {
-            Ok(())
+        async fn shutdown(&self, _: crate::Shutdown) -> Result<Value, RpcError> {
+            Ok(Value::Null)
         }
     }
 

@@ -214,13 +214,18 @@ pub(crate) async fn spawn_unit(
     let exited = wait_for_exit(Arc::clone(&child));
 
     let (stops, requests) = mpsc::unbounded_channel();
+    let mut tracker = DescendantTracker::new(identity);
+    // `child` keeps the leader's PID from reuse for as long as the tracker
+    // lives, so breakaway children it started just before exiting are still
+    // found by parent once snapshots stop listing it.
+    tracker.hold_root(true);
     let inner = Arc::new(Inner {
         identity,
         job: launched.job,
         child,
         sender,
         first: Mutex::new(Some(first)),
-        tracker: Mutex::new(DescendantTracker::new(identity)),
+        tracker: Mutex::new(tracker),
         pty: launched.terminal.is_some(),
         terminal: Mutex::new(launched.terminal),
         last_output,

@@ -886,7 +886,7 @@ impl Inner {
         for (_, lane) in &lanes {
             closed.push(lane.close_adhoc().await);
         }
-        let stopped = Self::stop_lanes_locked(&lanes).await;
+        let stopped = Self::stop_lanes_locked(&lanes).await.len();
         // The reset would erase the only record of orphans (of known and unknown
         // lanes) and their escaped descendants, so they are terminated first.
         let terminated = self.end_recorded_runs().await?;

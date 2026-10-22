@@ -6,7 +6,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 
 ## Project config
 
-`devlanes.yaml` at the repository root (or a subdirectory, in a monorepo), with optional overrides in `devlanes.local.yaml` next to it. Schema: `https://devlanes.run/schema/v1.json`.
+`devlanes.yaml` at the repository root (or a subdirectory, in a monorepo), with optional overrides in `devlanes.local.yaml` next to it. Schema: `https://devlanes.run/v1/schema.json`.
 
 ### fnox
 
@@ -251,7 +251,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 
 ## User config
 
-`config.yaml` in the devlanes home (`~/.devlanes`, or `$DEVLANES_HOME`), for settings of this machine. Schema: `https://devlanes.run/schema/user-v1.json`.
+`config.yaml` in the devlanes home (`~/.devlanes`, or `$DEVLANES_HOME`), for settings of this machine. Schema: `https://devlanes.run/v1/user-schema.json`.
 
 ### history
 

@@ -92,6 +92,13 @@ impl DescendantTracker {
             .values()
             .map(|p| (p.pid, p.start_time))
             .collect();
+        // Snapshots can omit an exited leader whose PID is still held (Windows
+        // drops exited processes, macOS may drop zombies). Its PID cannot be
+        // reused meanwhile, so children it started just before exiting are still
+        // its own.
+        if !root_present && self.root_held {
+            pending.push((self.root.pid, self.root.start_time));
+        }
         while let Some((parent, parent_start)) = pending.pop() {
             for child in children.get(&parent).into_iter().flatten() {
                 // A child older than its supposed parent means the parent PID was recycled.
@@ -284,6 +291,21 @@ mod tests {
         tracker.hold_root(true);
         tracker.update(&[proc(301, 1, 100, 31)]);
         assert_eq!(pids(&tracker), [301]);
+    }
+
+    /// A held root missing from the snapshot still brings in children it started
+    /// before exiting; once released, its PID may be a stranger's.
+    #[test]
+    fn held_root_absent_from_the_snapshot_keeps_its_children() {
+        let mut tracker = DescendantTracker::new(root());
+        tracker.update(&[proc(100, 1, 100, 10)]);
+        tracker.hold_root(true);
+        tracker.update(&[proc(500, 100, 500, 12)]);
+        assert_eq!(pids(&tracker), [500]);
+        let mut released = DescendantTracker::new(root());
+        released.update(&[proc(100, 1, 100, 10)]);
+        released.update(&[proc(500, 100, 500, 12)]);
+        assert!(pids(&released).is_empty());
     }
 
     /// A recycled root PID is never adopted, and zombies are excluded from live members.

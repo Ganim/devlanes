@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://devlanes.run/schema/v1.json
+# yaml-language-server: $schema=https://devlanes.run/v1/schema.json
 #
 # Config-check fixture modelled on a Tauri desktop app backed by local wrangler workers
 # and a per-lane policy container. Everything is plain http://127.0.0.1:<port>; no

@@ -973,7 +973,59 @@ impl Inner {
             "dns": self.dns_doctor().await,
             "state": self.state_doctor().await,
             "user_config": self.user_config_doctor().await,
+            // The CLI compares them with the service manager's stop window.
+            "stop_timeouts": self.stop_timeouts(),
         }))
+    }
+
+    /// `doctor`'s `stop_timeouts`: the longest stop timeout of each service of
+    /// each project, `[{project, unit, timeout_ms}]`, from running services and
+    /// the loaded configs. A timeout written as an expression counts once a run
+    /// resolved it.
+    fn stop_timeouts(&self) -> Vec<Value> {
+        use devlanes_config::Templated;
+        let mut longest: std::collections::BTreeMap<(String, String), Duration> =
+            std::collections::BTreeMap::new();
+        let mut note = |project: &str, unit: &str, timeout: Duration| {
+            let entry = longest
+                .entry((project.to_owned(), unit.to_owned()))
+                .or_default();
+            *entry = (*entry).max(timeout);
+        };
+        for (project, lane) in self.all_lanes() {
+            let name = project.name();
+            let st = lane.st();
+            for (unit, rec) in &st.units {
+                if rec.kind == crate::model::Kind::Service {
+                    note(&name, unit, rec.stop.timeout);
+                }
+            }
+            let Some(config) = st.config.loaded() else {
+                continue;
+            };
+            for (service, service_config) in &config.services {
+                let written = service_config
+                    .stop
+                    .as_ref()
+                    .and_then(|stop| stop.timeout.as_ref());
+                let timeout = match written {
+                    None => devlanes_core::StopPolicy::default().timeout,
+                    Some(Templated::Literal(timeout)) => timeout.0,
+                    Some(Templated::Expression(_)) => continue,
+                };
+                note(&name, service, timeout);
+            }
+        }
+        longest
+            .into_iter()
+            .map(|((project, unit), timeout)| {
+                json!({
+                    "project": project,
+                    "unit": unit,
+                    "timeout_ms": u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                })
+            })
+            .collect()
     }
 
     /// The proxy's listener status; a listener that fell back from its

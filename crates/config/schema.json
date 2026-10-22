@@ -2738,7 +2738,7 @@
         },
         {
           "const": "lane.stop",
-          "description": "Run when the lane stops, but not on daemon shutdown.",
+          "description": "Run when the whole lane stops, on `devlanes daemon stop` and on `daemon restart`; skipped when a signal (logout, system shutdown) stops the daemon.",
           "examples": [
             "lane.stop"
           ],
@@ -2903,7 +2903,7 @@
       ]
     }
   },
-  "$id": "https://devlanes.run/schema/v1.json",
+  "$id": "https://devlanes.run/v1/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Fully merged project configuration. Map order is declaration order.",

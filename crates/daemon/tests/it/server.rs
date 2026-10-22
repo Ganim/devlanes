@@ -285,6 +285,61 @@ async fn a_unit_that_never_reads_does_not_stall_the_connection() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+/// `daemon.shutdown` answers after the units stopped, with the units and the
+/// `lane.stop` tasks it ran.
+async fn daemon_shutdown_reports_units_and_tasks() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config = "project: bye\nservices:\n  api: { run: sleep }\ntasks:\n  bye: { run: echo bye, when: lane.stop }\n";
+        let main = repo(&tmp.path, "r", config);
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        let options = Options {
+            home: tmp.path.join("srv"),
+            socket: tmp.path.join("srv/run/d.sock"),
+        };
+        let socket = options.socket.clone();
+        let server = Server::bind(options).await.expect("bind");
+        let handler: Arc<dyn Handler> = Arc::new(h.engine.clone());
+        let running = tokio::spawn(server.run(handler, || Ok(())));
+        let mut connection = client(&socket).await;
+        let context = Context {
+            yes: true,
+            ..Context::default()
+        };
+        let Outcome::Ok { data } = request(
+            &mut connection,
+            1,
+            Method::DaemonShutdown,
+            json!({}),
+            context,
+        )
+        .await
+        else {
+            panic!("daemon.shutdown answers");
+        };
+        assert_eq!(data["reason"], "explicit", "{data}");
+        assert_eq!(data["stopping"], true, "{data}");
+        assert_eq!(data["processes"], 1, "{data}");
+        assert_eq!(
+            data["stopped"],
+            json!([{"lane": "bye@0", "unit": "api"}]),
+            "{data}"
+        );
+        assert_eq!(
+            data["tasks"],
+            json!([{"lane": "bye@0", "task": "bye", "exit_code": 0}]),
+            "{data}"
+        );
+        running.await.expect("join").expect("clean shutdown");
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 /// Another protocol still gets the frozen `daemon.status` and `daemon.shutdown`
 /// and a structured refusal for the rest; unknown frame types are skipped and
 /// unknown methods answer `unknown_method`, all without closing the connection.

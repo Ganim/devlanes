@@ -36,7 +36,7 @@ The package ships the JSON Schemas of the config files, exported as `devlanes/sc
 # yaml-language-server: $schema=./node_modules/devlanes/schema.json
 ```
 
-yaml-language-server resolves the path from the YAML file's directory, so it fits a `devlanes.yaml` next to `node_modules`.
+yaml-language-server resolves the path from the YAML file's directory, so it fits a `devlanes.yaml` next to `node_modules`. This copy matches the installed version. Without the package in the project, use `https://devlanes.run/v1/schema.json` and `https://devlanes.run/v1/user-schema.json`, which follow the latest stable release.
 
 ## Behaviour
 

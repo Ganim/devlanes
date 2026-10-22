@@ -254,12 +254,7 @@ async fn supervise(
 
     let outcome = loop {
         // Checked every wakeup: SIGCHLD coalesces and may belong to other children.
-        if exited_unreaped(inner.identity.pid) {
-            // Last scan while the zombie leader still owns its PID and session ID, so
-            // session members forked since the previous tick are adopted safely.
-            inner.refresh_logged(Duration::ZERO).await;
-        }
-        if let Some(outcome) = inner.reap_leader() {
+        if let Some(outcome) = inner.reap_leader_async().await {
             break outcome;
         }
         let deadline = stopping.filter(|s| !s.escalated).map(|s| s.deadline);
@@ -389,19 +384,33 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Reports whether the leader has exited, without reaping it (`WNOWAIT`).
-fn exited_unreaped(pid: u32) -> bool {
+/// Leader state seen without reaping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaderState {
+    Running,
+    /// Exited and still a zombie, so its PID and session ID are still ours.
+    Exited,
+    /// The kernel could not say, e.g. the status was already taken.
+    Unknown,
+}
+
+/// Checks the leader with `waitid(WNOWAIT)`, which leaves its status in place.
+fn peek_leader(pid: u32) -> LeaderState {
     use rustix::process::{WaitId, WaitIdOptions};
     let Some(raw) = raw_pid(pid) else {
-        return false;
+        return LeaderState::Unknown;
     };
-    matches!(
-        rustix::process::waitid(
+    loop {
+        match rustix::process::waitid(
             WaitId::Pid(raw),
             WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-        ),
-        Ok(Some(_))
-    )
+        ) {
+            Ok(Some(_)) => return LeaderState::Exited,
+            Ok(None) => return LeaderState::Running,
+            Err(Errno::INTR) => {}
+            Err(_) => return LeaderState::Unknown,
+        }
+    }
 }
 
 /// One non-blocking waitpid for the leader; never waits for any other PID.
@@ -430,18 +439,47 @@ fn waitpid(pid: u32) -> Option<ExitOutcome> {
 
 impl Inner {
     /// Collects the leader's status once and keeps it, so the supervisor and an
-    /// overdue stop can both ask without either losing it.
+    /// overdue stop can both ask without either losing it. Blocking: it scans.
+    ///
+    /// Before reaping, the process table is scanned once more while the leader is
+    /// a zombie that still owns its PID and session ID, so every session member
+    /// alive at that moment is adopted even if no periodic tick saw it. The scan
+    /// and the reap are one step: checking for the exit and reaping separately
+    /// let a leader that exited in between be reaped without that scan.
     fn reap_leader(&self) -> Option<ExitOutcome> {
         let mut reaped = lock(&self.reaped);
         if let Some(outcome) = *reaped {
             return Some(outcome);
         }
-        let outcome = waitpid(self.identity.pid)?;
+        let pid = self.identity.pid;
+        match peek_leader(pid) {
+            LeaderState::Running => return None,
+            // Only this process reaps the leader, so it stays a zombie until the
+            // waitpid below and the scan cannot miss a member that existed at exit.
+            LeaderState::Exited => {
+                if let Err(error) = self.refresh_blocking(Duration::ZERO) {
+                    tracing::warn!(%error, pid, "final process snapshot failed");
+                }
+            }
+            // waitpid below reports a lost status (ECHILD) itself.
+            LeaderState::Unknown => {}
+        }
+        let outcome = waitpid(pid)?;
         *reaped = Some(outcome);
         self.leader_reaped.store(true, Ordering::Release);
         // The PID is free now; its session ID may be reused by a stranger.
         lock(&self.tracker).hold_root(false);
         Some(outcome)
+    }
+
+    /// [`Inner::reap_leader`] on the blocking pool. A failed pool task counts as
+    /// "not yet"; the next wakeup retries.
+    async fn reap_leader_async(self: &Arc<Self>) -> Option<ExitOutcome> {
+        if let Some(outcome) = self.reaped_outcome() {
+            return Some(outcome);
+        }
+        let inner = Arc::clone(self);
+        blocking(move || inner.reap_leader()).await.ok().flatten()
     }
 
     /// The stored status, without calling waitpid.
@@ -758,7 +796,7 @@ impl PtyUnit {
     /// left behind; a leader still running is an error. The supervisor's full report
     /// replaces the placeholder if it arrives later.
     async fn settle_overdue_stop(&self, signal: Signal) -> Result<ExitReport, Error> {
-        let Some(outcome) = self.inner.reap_leader() else {
+        let Some(outcome) = self.inner.reap_leader_async().await else {
             return Err(Error::Integration(format!(
                 "unit {} still running after stop",
                 self.inner.identity.pid
@@ -788,7 +826,7 @@ impl PtyUnit {
             let live = blocking(move || inner.signal_without_supervisor(signal)).await?;
             // The leader is our child; reap it as soon as it exits so it is not
             // reported as live forever.
-            self.inner.reap_leader();
+            self.inner.reap_leader_async().await;
             if live.is_empty() || (escalated && Instant::now() >= give_up) {
                 break live;
             }
@@ -798,7 +836,7 @@ impl PtyUnit {
             }
             time::sleep(EXIT_POLL).await;
         };
-        let outcome = self.inner.reap_leader().unwrap_or(UNKNOWN);
+        let outcome = self.inner.reap_leader_async().await.unwrap_or(UNKNOWN);
         self.publish_placeholder(outcome, request.signal, escalated, survivors);
         self.inner.release_output();
         self.wait_report().await
@@ -945,12 +983,36 @@ mod tests {
         }
     }
 
-    /// Kills the leader if a test fails before stopping it.
+    /// Kills a process and everything in its session on drop, so nothing outlives a
+    /// test. Members are found with the session's live tracked or registered
+    /// identities as anchors, so the sweep still works once the leader is reaped.
+    /// A shell that forks its command instead of exec'ing it (Debian's dash) would
+    /// otherwise leave the command running.
     struct Kill(ProcessIdentity);
 
     impl Drop for Kill {
         fn drop(&mut self) {
-            let _ = devlanes_sys::signal_verified(&self.0, Signal::KILL);
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            let mut known = vec![self.0];
+            while std::time::Instant::now() < deadline {
+                let snapshot = devlanes_sys::processes().unwrap_or_default();
+                let mut targets: Vec<ProcessIdentity> =
+                    devlanes_sys::session_members_known(&snapshot, &self.0, &known)
+                        .iter()
+                        .map(ProcessInfo::identity)
+                        .collect();
+                if devlanes_sys::matches(&self.0).unwrap_or(false) {
+                    targets.push(self.0);
+                }
+                if targets.is_empty() {
+                    return;
+                }
+                known.extend(targets.iter().copied());
+                for identity in &targets {
+                    let _ = devlanes_sys::signal_verified(identity, Signal::KILL);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 
@@ -1011,7 +1073,9 @@ mod tests {
                 .await
                 .expect("spawn");
             // Wait for the exit; whichever side reaps first, the status must survive.
-            while !exited_unreaped(unit.identity().pid) && unit.inner.reaped_outcome().is_none() {
+            while peek_leader(unit.identity().pid) != LeaderState::Exited
+                && unit.inner.reaped_outcome().is_none()
+            {
                 time::sleep(Duration::from_millis(5)).await;
             }
             let report = unit
@@ -1021,6 +1085,50 @@ mod tests {
             assert_eq!(report.outcome.code, Some(3));
             let last = unit.wait_report().await.expect("report");
             assert_eq!(last.outcome.code, Some(3));
+        })
+        .await
+        .expect("bounded");
+    }
+
+    /// Regression for a CI race: a session member forked after the last periodic
+    /// scan, whose leader then exits, must be tracked by the time the leader is
+    /// reaped. The supervisor is stopped so no tick can see the member; only the
+    /// scan built into reaping can.
+    #[tokio::test]
+    async fn reaping_adopts_session_members_no_tick_saw() {
+        tokio::time::timeout(LIMIT, async {
+            let unit = PtyRunner::default()
+                .with_track_interval(Duration::from_secs(60))
+                .spawn_unit(shell("sleep 0.3; sleep 30 & echo child=$!; exit 0"))
+                .await
+                .expect("spawn");
+            let mut output = unit.output();
+            lock(&unit.inner.supervisor).take().expect("handle").abort();
+            let mut seen = String::new();
+            while !seen.contains('\n') {
+                let chunk = output.recv().await.expect("child line");
+                seen.push_str(&String::from_utf8_lossy(&chunk.bytes));
+            }
+            let child: u32 = seen
+                .trim()
+                .trim_start_matches("child=")
+                .parse()
+                .expect("child pid");
+            let child_identity = devlanes_sys::identity(child)
+                .expect("lookup")
+                .expect("child alive");
+            let _kill = Kill(child_identity);
+            assert!(!unit.tracked().iter().any(|p| p.pid == child));
+            while peek_leader(unit.identity().pid) != LeaderState::Exited {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+            let outcome = unit.inner.reap_leader_async().await.expect("reaped");
+            assert_eq!(outcome.code, Some(0));
+            assert!(
+                unit.tracked().contains(&child_identity),
+                "{:?}",
+                unit.tracked()
+            );
         })
         .await
         .expect("bounded");

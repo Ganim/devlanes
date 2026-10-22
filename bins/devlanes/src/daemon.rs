@@ -100,8 +100,11 @@ pub fn run() -> ExitCode {
             pid = std::process::id(),
             "daemon started"
         );
-        watch_signals(server.shutdown_token());
-        let _ = session_slot.set(SessionEnd::watch(server.shutdown_token()));
+        watch_signals(server.shutdown_token(), server.interrupt_token());
+        let _ = session_slot.set(SessionEnd::watch(
+            server.shutdown_token(),
+            server.interrupt_token(),
+        ));
         // Taken by whichever comes first: readiness, or a failed reconcile.
         let readiness = std::sync::Mutex::new(Some(readiness));
         let take = || readiness.lock().ok().and_then(|mut slot| slot.take());
@@ -132,7 +135,8 @@ pub fn run() -> ExitCode {
 
 /// Logoff and shutdown on Windows: a detached daemon gets no console events, so
 /// a hidden window (`devlanes_sys::windows::session`) hears `WM_ENDSESSION`
-/// and starts the same graceful shutdown as `daemon stop`. Windows ends the
+/// and shuts down as on a signal: units stop, no `lane.stop` tasks, and those
+/// of a `daemon stop` already running are interrupted. Windows ends the
 /// process soon after that message is answered, so the answer waits until the
 /// shutdown finished, at most [`SessionEnd::WAIT`].
 #[cfg(windows)]
@@ -150,12 +154,13 @@ impl SessionEnd {
 
     /// Starts the window; without one, logoff ends the daemon without a shutdown
     /// and the next start reconciles.
-    fn watch(shutdown: CancellationToken) -> Self {
+    fn watch(shutdown: CancellationToken, interrupt: CancellationToken) -> Self {
         let finished =
             std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let waiting = std::sync::Arc::clone(&finished);
         let watch = devlanes_sys::windows::session::watch(move |end| {
             tracing::info!(reason = ?end, "the session ends; shutting down");
+            interrupt.cancel();
             shutdown.cancel();
             let (done, changed) = &*waiting;
             let Ok(guard) = done.lock() else {
@@ -193,7 +198,7 @@ struct SessionEnd;
 #[cfg(unix)]
 impl SessionEnd {
     /// Nothing to watch.
-    fn watch(_: CancellationToken) -> Self {
+    fn watch(_: CancellationToken, _: CancellationToken) -> Self {
         Self
     }
 
@@ -202,52 +207,74 @@ impl SessionEnd {
 }
 
 /// SIGTERM and SIGINT (a service manager, logout, `kill`) shut the daemon down
-/// like `devlanes daemon stop`: units stop, exits are recorded, state.db closes.
+/// like `devlanes daemon stop` without its `lane.stop` tasks: units stop, exits
+/// are recorded, state.db closes. A signal during an explicit shutdown
+/// interrupts its `lane.stop` tasks (`interrupt`), so the units still stop
+/// before the service manager's SIGKILL.
 #[cfg(unix)]
-fn watch_signals(shutdown: CancellationToken) {
+fn watch_signals(shutdown: CancellationToken, interrupt: CancellationToken) {
     use tokio::signal::unix::{SignalKind, signal};
-    let (mut term, mut interrupt) = match (
+    let (mut term, mut int) = match (
         signal(SignalKind::terminate()),
         signal(SignalKind::interrupt()),
     ) {
-        (Ok(term), Ok(interrupt)) => (term, interrupt),
+        (Ok(term), Ok(int)) => (term, int),
         (Err(error), _) | (_, Err(error)) => {
             tracing::warn!(%error, "signal handlers not installed; signals end the daemon without a shutdown");
             return;
         }
     };
+    // Runs until the process exits: once tokio handles a signal its default
+    // action never comes back, so a later signal must still be acted on here.
     tokio::spawn(async move {
-        let name = tokio::select! {
-            _ = term.recv() => "SIGTERM",
-            _ = interrupt.recv() => "SIGINT",
-            () = shutdown.cancelled() => return,
-        };
-        tracing::info!(signal = name, "shutting down");
-        shutdown.cancel();
+        loop {
+            let name = tokio::select! {
+                Some(()) = term.recv() => "SIGTERM",
+                Some(()) = int.recv() => "SIGINT",
+                else => return,
+            };
+            if shutdown.is_cancelled() {
+                tracing::info!(signal = name, "interrupting lane.stop tasks");
+            } else {
+                tracing::info!(signal = name, "shutting down");
+            }
+            interrupt.cancel();
+            shutdown.cancel();
+        }
     });
 }
 
-/// Ctrl-C and Ctrl-Break shut down a daemon run by hand in a console, like
-/// `devlanes daemon stop`. A detached daemon has no console and gets neither;
-/// it stops through `daemon stop`.
+/// Ctrl-C and Ctrl-Break shut down a daemon run by hand in a console the way
+/// SIGTERM does on Unix: no `lane.stop` tasks, and those of a `daemon stop`
+/// already running are interrupted. A detached daemon has no console and gets
+/// neither; logoff reaches it through [`SessionEnd`].
 #[cfg(windows)]
-fn watch_signals(shutdown: CancellationToken) {
+fn watch_signals(shutdown: CancellationToken, interrupt: CancellationToken) {
     use tokio::signal::windows::{ctrl_break, ctrl_c};
-    let (mut interrupt, mut brk) = match (ctrl_c(), ctrl_break()) {
-        (Ok(interrupt), Ok(brk)) => (interrupt, brk),
+    let (mut int, mut brk) = match (ctrl_c(), ctrl_break()) {
+        (Ok(int), Ok(brk)) => (int, brk),
         (Err(error), _) | (_, Err(error)) => {
             tracing::warn!(%error, "console handlers not installed; Ctrl-C ends the daemon without a shutdown");
             return;
         }
     };
+    // Runs until the process exits: while these listeners exist, Ctrl-C no
+    // longer ends the process, so a later press must still be acted on here.
     tokio::spawn(async move {
-        let name = tokio::select! {
-            _ = interrupt.recv() => "Ctrl-C",
-            _ = brk.recv() => "Ctrl-Break",
-            () = shutdown.cancelled() => return,
-        };
-        tracing::info!(signal = name, "shutting down");
-        shutdown.cancel();
+        loop {
+            let name = tokio::select! {
+                Some(()) = int.recv() => "Ctrl-C",
+                Some(()) = brk.recv() => "Ctrl-Break",
+                else => return,
+            };
+            if shutdown.is_cancelled() {
+                tracing::info!(signal = name, "interrupting lane.stop tasks");
+            } else {
+                tracing::info!(signal = name, "shutting down");
+            }
+            interrupt.cancel();
+            shutdown.cancel();
+        }
     });
 }
 
@@ -293,45 +320,333 @@ pub async fn ui(paths: &Paths) -> Result<u8, RpcError> {
     crate::wiring::ui(paths).await
 }
 
-/// Installs a per-user service so the daemon starts outside agent sandboxes and at login.
+/// How long the installed service gives the daemon between SIGTERM and SIGKILL
+/// (launchd `ExitTimeOut`, systemd `TimeoutStopSec`). Units stop at the same
+/// time, so a shutdown takes about the longest unit stop timeout (10s unless
+/// configured) plus a few seconds to record exits and close state.db; 60s
+/// covers stop timeouts up to about 55s.
+#[cfg(unix)]
+const STOP_WINDOW_S: u64 = 60;
+
+/// launchd's window for a job without `ExitTimeOut`. launchd.plist(5) calls it
+/// system-defined; `launchctl print` shows `exit timeout = 5` for such agents
+/// on macOS 26 (old manuals said 20s).
+#[cfg(unix)]
+const LAUNCHD_DEFAULT_WINDOW_S: u64 = 5;
+
+/// systemd's `DefaultTimeoutStopSec`, 90s in the user manager (systemd-system.conf(5)).
+#[cfg(unix)]
+const SYSTEMD_DEFAULT_WINDOW_S: u64 = 90;
+
+/// The launchd job label, also the plist's file name.
+#[cfg(unix)]
+const LAUNCHD_LABEL: &str = "run.devlanes.daemon";
+
+/// The per-user service manager: launchd on macOS, systemd elsewhere. Windows
+/// has no service for the daemon; `daemon install` writes a logon entry
+/// instead (`logon`).
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Manager {
+    Launchd,
+    Systemd,
+}
+
+/// A service manager command of `daemon install`.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+struct Step {
+    argv: Vec<String>,
+    /// Failing is expected at times (a bootout of a job that is gone) and ignored.
+    may_fail: bool,
+    /// Retried for a while: launchd may still be removing the job a bootout ended.
+    retry: bool,
+}
+
+#[cfg(unix)]
+impl Step {
+    /// A command that must succeed the first time.
+    fn new(argv: &[&str]) -> Self {
+        Self {
+            argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
+            may_fail: false,
+            retry: false,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Manager {
+    /// This platform's manager.
+    fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Launchd
+        } else {
+            Self::Systemd
+        }
+    }
+
+    /// Where `daemon install` writes the definition, under the user's `home`.
+    fn path(self, home: &Path) -> PathBuf {
+        match self {
+            Self::Launchd => home.join(format!("Library/LaunchAgents/{LAUNCHD_LABEL}.plist")),
+            Self::Systemd => home.join(".config/systemd/user/devlanes.service"),
+        }
+    }
+
+    /// The service's name in messages.
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Launchd => "launchd agent",
+            Self::Systemd => "systemd user unit",
+        }
+    }
+
+    /// The stop window when the definition sets none.
+    fn default_window(self) -> u64 {
+        match self {
+            Self::Launchd => LAUNCHD_DEFAULT_WINDOW_S,
+            Self::Systemd => SYSTEMD_DEFAULT_WINDOW_S,
+        }
+    }
+
+    /// The definition that runs `exe daemon run` with `DEVLANES_HOME=devlanes_home`.
+    fn definition(self, exe: &Path, devlanes_home: &Path) -> String {
+        match self {
+            Self::Launchd => format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key><array><string>{exe}</string><string>daemon</string><string>run</string></array>
+  <key>EnvironmentVariables</key><dict><key>DEVLANES_HOME</key><string>{home}</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>ExitTimeOut</key><integer>{STOP_WINDOW_S}</integer>
+</dict></plist>
+"#,
+                exe = xml_escape(&exe.display().to_string()),
+                home = xml_escape(&devlanes_home.display().to_string()),
+            ),
+            // KillMode=process: systemd signals only the daemon, never the lanes'
+            // processes (decision 16); its SIGTERM is a graceful shutdown that stops
+            // units by policy within TimeoutStopSec.
+            Self::Systemd => format!(
+                "[Unit]\nDescription=devlanes daemon\n\n[Service]\nExecStart={exe} daemon run\nEnvironment=DEVLANES_HOME={home}\nKillMode=process\nTimeoutStopSec={STOP_WINDOW_S}\n\n[Install]\nWantedBy=default.target\n",
+                exe = exe.display(),
+                home = devlanes_home.display(),
+            ),
+        }
+    }
+
+    /// The stop window, in seconds, a definition sets; `None` when it sets none
+    /// (one written before devlanes set it) or one this does not read.
+    fn window(self, contents: &str) -> Option<u64> {
+        match self {
+            Self::Launchd => {
+                let (_, after) = contents.split_once("<key>ExitTimeOut</key>")?;
+                let value = after.trim_start().strip_prefix("<integer>")?;
+                value.split_once("</integer>")?.0.trim().parse().ok()
+            }
+            Self::Systemd => contents.lines().rev().find_map(|line| {
+                let line = line.trim();
+                let value = line
+                    .strip_prefix("TimeoutStopSec=")
+                    .or_else(|| line.strip_prefix("TimeoutSec="))?
+                    .trim();
+                match value.strip_suffix("min") {
+                    Some(minutes) => minutes.trim().parse::<u64>().ok()?.checked_mul(60),
+                    None => value.strip_suffix('s').unwrap_or(value).trim().parse().ok(),
+                }
+            }),
+        }
+    }
+
+    /// Commands that make the manager run the definition at `path`. launchd reads
+    /// a plist only when the job loads, so a `changed` definition of a `loaded`
+    /// job is booted out and in again; systemd rereads its units on
+    /// `daemon-reload`, and a running unit keeps running.
+    fn activate(self, path: &Path, uid: u32, loaded: bool, changed: bool) -> Vec<Step> {
+        let path = path.display().to_string();
+        let domain = format!("gui/{uid}");
+        match self {
+            Self::Launchd if loaded && !changed => Vec::new(),
+            Self::Launchd => {
+                let mut steps = Vec::new();
+                if loaded {
+                    steps.push(Step {
+                        may_fail: true,
+                        ..Step::new(&["launchctl", "bootout", &domain, &path])
+                    });
+                }
+                steps.push(Step {
+                    retry: loaded,
+                    ..Step::new(&["launchctl", "bootstrap", &domain, &path])
+                });
+                steps
+            }
+            Self::Systemd => vec![
+                Step::new(&["systemctl", "--user", "daemon-reload"]),
+                Step::new(&["systemctl", "--user", "enable", "--now", "devlanes.service"]),
+            ],
+        }
+    }
+
+    /// Commands that stop the manager from starting the daemon.
+    fn deactivate(self, path: &Path, uid: u32) -> Vec<Vec<String>> {
+        match self {
+            Self::Launchd => vec![vec![
+                "launchctl".into(),
+                "bootout".into(),
+                format!("gui/{uid}"),
+                path.display().to_string(),
+            ]],
+            Self::Systemd => vec![vec![
+                "systemctl".into(),
+                "--user".into(),
+                "disable".into(),
+                "devlanes.service".into(),
+            ]],
+        }
+    }
+}
+
+/// The user's home directory, under which the service definition lives.
+#[cfg(unix)]
+fn user_home() -> Result<PathBuf, RpcError> {
+    devlanes_client::user_home().ok_or_else(|| RpcError::new("no_home", json!({}), 1))
+}
+
+/// Whether launchd has the devlanes job loaded in the user's GUI domain.
+#[cfg(unix)]
+async fn launchd_loaded(uid: u32) -> bool {
+    tokio::process::Command::new("launchctl")
+        .args(["print", &format!("gui/{uid}/{LAUNCHD_LABEL}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
+}
+
+/// Runs one install step; a retried step tries again until the old job's stop
+/// window (and a margin) has passed.
+#[cfg(unix)]
+async fn run_step(step: &Step) -> Result<(), RpcError> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(STOP_WINDOW_S + 5);
+    loop {
+        let output = tokio::process::Command::new(&step.argv[0])
+            .args(&step.argv[1..])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .map_err(io)?;
+        if output.status.success() || step.may_fail {
+            return Ok(());
+        }
+        if !step.retry || tokio::time::Instant::now() >= deadline {
+            return Err(RpcError::new(
+                "service_install_failed",
+                json!({
+                    "command": step.argv.join(" "),
+                    "message": String::from_utf8_lossy(&output.stderr).trim(),
+                }),
+                1,
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// Installs a per-user service so the daemon starts outside agent sandboxes and
+/// at login. Running it again rewrites a definition that differs (another
+/// binary, an older one without a stop window) and has the manager reload it.
 #[cfg(unix)]
 pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
     let exe = std::env::current_exe().map_err(io)?;
     let paths = Paths::discover()
         .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
-    let (path, contents, enable): (std::path::PathBuf, String, Vec<Vec<String>>) =
-        service_definition(&exe, &paths)?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(io)?;
-    }
-    tokio::fs::write(&path, contents).await.map_err(io)?;
-    for command in enable {
-        let status = tokio::process::Command::new(&command[0])
-            .args(&command[1..])
-            .status()
-            .await
-            .map_err(io)?;
-        if !status.success() {
-            return Err(RpcError::new(
-                "service_install_failed",
-                json!({"command": command.join(" ")}),
-                1,
-            ));
+    let manager = Manager::current();
+    let path = manager.path(&user_home()?);
+    let contents = manager.definition(&exe, &paths.home);
+    let previous = tokio::fs::read_to_string(&path).await.ok();
+    let changed = previous.as_deref() != Some(contents.as_str());
+    if changed {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(io)?;
         }
+        tokio::fs::write(&path, contents).await.map_err(io)?;
+    }
+    let uid = rustix::process::getuid().as_raw();
+    let loaded = manager == Manager::Launchd && launchd_loaded(uid).await;
+    for step in manager.activate(&path, uid, loaded, changed) {
+        run_step(&step).await?;
     }
     let _ = runtime;
-    println!("installed {}", path.display());
+    let verb = match (changed, previous.is_some()) {
+        (false, _) => "up to date",
+        (true, true) => "updated",
+        (true, false) => "installed",
+    };
+    println!(
+        "{} {verb}: {}; the daemon gets {STOP_WINDOW_S}s to stop",
+        manager.noun(),
+        path.display()
+    );
+    if changed && loaded {
+        println!(
+            "reloaded the agent; a daemon it ran was stopped with its units and started again"
+        );
+    }
     Ok(0)
+}
+
+/// `doctor`'s `service`: `{manager, path, installed, stop_window_s,
+/// window_source, recommended_window_s}`, where `stop_window_s` is how long the
+/// service manager waits between SIGTERM and SIGKILL. `window_source` is
+/// `installed` when the definition sets it and `default` when the manager's
+/// default applies (nothing installed, or a definition from before devlanes set
+/// one).
+#[cfg(unix)]
+pub async fn service_report() -> serde_json::Value {
+    let manager = Manager::current();
+    let Ok(home) = user_home() else {
+        return serde_json::Value::Null;
+    };
+    let path = manager.path(&home);
+    let contents = tokio::fs::read_to_string(&path).await.ok();
+    service_facts(manager, &path, contents.as_deref())
+}
+
+/// `doctor`'s `service` on Windows: none. The logon entry (`autostart`) has no
+/// stop window to report; Windows waits for the daemon's logoff handling
+/// instead, which `SessionEnd` bounds.
+#[cfg(windows)]
+pub async fn service_report() -> serde_json::Value {
+    serde_json::Value::Null
+}
+
+/// [`service_report`] for a definition read from `path` (`None`: not installed).
+#[cfg(unix)]
+fn service_facts(manager: Manager, path: &Path, contents: Option<&str>) -> serde_json::Value {
+    let set = contents.and_then(|contents| manager.window(contents));
+    json!({
+        "manager": manager.noun(),
+        "path": path,
+        "installed": contents.is_some(),
+        "stop_window_s": set.unwrap_or(manager.default_window()),
+        "window_source": if set.is_some() { "installed" } else { "default" },
+        "recommended_window_s": STOP_WINDOW_S,
+    })
 }
 
 /// Removes the per-user service definition (the running daemon keeps running).
 #[cfg(unix)]
 pub async fn uninstall(runtime: &Runtime) -> Result<u8, RpcError> {
-    let exe = std::env::current_exe().map_err(io)?;
-    let paths = Paths::discover()
-        .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
-    let (path, _, _) = service_definition(&exe, &paths)?;
-    for command in disable_commands(&path) {
+    let manager = Manager::current();
+    let path = manager.path(&user_home()?);
+    for command in manager.deactivate(&path, rustix::process::getuid().as_raw()) {
         let _ = tokio::process::Command::new(&command[0])
             .args(&command[1..])
             .status()
@@ -348,7 +663,7 @@ pub async fn uninstall(runtime: &Runtime) -> Result<u8, RpcError> {
 }
 
 /// Whether the daemon starts at login, for `daemon status` and `doctor`; `None`
-/// on Unix, where `daemon install` writes a service file those do not check.
+/// on Unix, where `doctor` reports the service file as `service`.
 #[cfg(unix)]
 pub async fn autostart(_paths: &Paths) -> Option<serde_json::Value> {
     None
@@ -603,94 +918,8 @@ mod logon {
     }
 }
 
-/// Unloads the launchd agent at `path`.
-#[cfg(target_os = "macos")]
-fn disable_commands(path: &Path) -> Vec<Vec<String>> {
-    vec![vec![
-        "launchctl".into(),
-        "bootout".into(),
-        format!("gui/{}", rustix::process::getuid().as_raw()),
-        path.display().to_string(),
-    ]]
-}
-
-/// Disables the systemd user unit; `path` is the unit file, removed afterwards.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn disable_commands(_path: &Path) -> Vec<Vec<String>> {
-    vec![vec![
-        "systemctl".into(),
-        "--user".into(),
-        "disable".into(),
-        "devlanes.service".into(),
-    ]]
-}
-
-/// launchd agent on macOS, systemd user unit on Linux (compile-time choice).
-#[cfg(unix)]
-fn service_definition(
-    exe: &std::path::Path,
-    paths: &Paths,
-) -> Result<(std::path::PathBuf, String, Vec<Vec<String>>), RpcError> {
-    let home =
-        devlanes_client::user_home().ok_or_else(|| RpcError::new("no_home", json!({}), 1))?;
-    #[cfg(target_os = "macos")]
-    {
-        let path = home.join("Library/LaunchAgents/run.devlanes.daemon.plist");
-        let plist = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>run.devlanes.daemon</string>
-  <key>ProgramArguments</key><array><string>{exe}</string><string>daemon</string><string>run</string></array>
-  <key>EnvironmentVariables</key><dict><key>DEVLANES_HOME</key><string>{home}</string></dict>
-  <key>RunAtLoad</key><true/>
-  <key>ProcessType</key><string>Interactive</string>
-</dict></plist>
-"#,
-            exe = xml_escape(&exe.display().to_string()),
-            home = xml_escape(&paths.home.display().to_string()),
-        );
-        let domain = format!("gui/{}", rustix::process::getuid().as_raw());
-        Ok((
-            path.clone(),
-            plist,
-            vec![vec![
-                "launchctl".into(),
-                "bootstrap".into(),
-                domain,
-                path.display().to_string(),
-            ]],
-        ))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let path = home.join(".config/systemd/user/devlanes.service");
-        // KillMode=process: systemd signals only the daemon, never the lanes' processes
-        // (decision 16); its SIGTERM is a graceful shutdown that stops units by policy.
-        let unit = format!(
-            "[Unit]\nDescription=devlanes daemon\n\n[Service]\nExecStart={exe} daemon run\nEnvironment=DEVLANES_HOME={home}\nKillMode=process\n\n[Install]\nWantedBy=default.target\n",
-            exe = exe.display(),
-            home = paths.home.display(),
-        );
-        Ok((
-            path,
-            unit,
-            vec![
-                vec!["systemctl".into(), "--user".into(), "daemon-reload".into()],
-                vec![
-                    "systemctl".into(),
-                    "--user".into(),
-                    "enable".into(),
-                    "--now".into(),
-                    "devlanes.service".into(),
-                ],
-            ],
-        ))
-    }
-}
-
 /// Minimal escaping for plist string values.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -810,7 +1039,7 @@ mod tests {
     /// SIGTERM cancels the server's shutdown token, the path `daemon stop` takes.
     async fn sigterm_starts_the_graceful_shutdown() {
         let shutdown = CancellationToken::new();
-        watch_signals(shutdown.clone());
+        watch_signals(shutdown.clone(), CancellationToken::new());
         rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)
             .expect("signal");
         tokio::time::timeout(std::time::Duration::from_secs(5), shutdown.cancelled())
@@ -818,14 +1047,16 @@ mod tests {
             .expect("shutdown requested");
     }
 
-    /// Logoff starts the graceful shutdown, and the answer to Windows waits until
-    /// the daemon says the shutdown finished.
+    /// Logoff starts the graceful shutdown as a signal does (interrupting
+    /// `lane.stop` tasks), and the answer to Windows waits until the daemon says
+    /// the shutdown finished.
     #[cfg(windows)]
     #[test]
     fn session_end_shuts_down_and_waits() {
         use std::time::{Duration, Instant};
         let shutdown = CancellationToken::new();
-        let session = SessionEnd::watch(shutdown.clone());
+        let interrupt = CancellationToken::new();
+        let session = SessionEnd::watch(shutdown.clone(), interrupt.clone());
         let window = session._watch.as_ref().expect("session window");
         std::thread::scope(|scope| {
             let answer = scope.spawn(|| {
@@ -840,6 +1071,10 @@ mod tests {
             }
             assert!(shutdown.is_cancelled(), "logoff did not start the shutdown");
             assert!(
+                interrupt.is_cancelled(),
+                "logoff left lane.stop tasks running"
+            );
+            assert!(
                 !answer.is_finished(),
                 "answered before the shutdown finished"
             );
@@ -849,6 +1084,104 @@ mod tests {
                 .expect("answer thread")
                 .expect("the window answered");
         });
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    /// SIGTERM during an explicit shutdown interrupts its `lane.stop` tasks.
+    async fn sigterm_during_a_shutdown_interrupts_its_tasks() {
+        let shutdown = CancellationToken::new();
+        let interrupt = CancellationToken::new();
+        watch_signals(shutdown.clone(), interrupt.clone());
+        shutdown.cancel();
+        rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)
+            .expect("signal");
+        tokio::time::timeout(std::time::Duration::from_secs(5), interrupt.cancelled())
+            .await
+            .expect("tasks interrupted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    /// Both definitions set the stop window and read it back; definitions from
+    /// before it was set fall back to the manager's default.
+    fn service_definitions_set_the_stop_window() {
+        let exe = Path::new("/opt/acme & co/devlanes");
+        let home = Path::new("/home/acme/.devlanes");
+        for manager in [Manager::Launchd, Manager::Systemd] {
+            let definition = manager.definition(exe, home);
+            assert_eq!(
+                manager.window(&definition),
+                Some(STOP_WINDOW_S),
+                "{definition}"
+            );
+            let path = manager.path(Path::new("/home/acme"));
+            let facts = service_facts(manager, &path, Some(&definition));
+            assert_eq!(facts["installed"], true);
+            assert_eq!(facts["stop_window_s"], STOP_WINDOW_S);
+            assert_eq!(facts["window_source"], "installed");
+        }
+        let plist = Manager::Launchd.definition(exe, home);
+        assert!(
+            plist.contains("<string>/opt/acme &amp; co/devlanes</string>"),
+            "{plist}"
+        );
+        assert!(
+            plist.contains("<key>ExitTimeOut</key><integer>60</integer>"),
+            "{plist}"
+        );
+        let unit = Manager::Systemd.definition(exe, home);
+        assert!(
+            unit.contains("KillMode=process\nTimeoutStopSec=60\n"),
+            "{unit}"
+        );
+
+        let old_plist = plist.replace("  <key>ExitTimeOut</key><integer>60</integer>\n", "");
+        let facts = service_facts(Manager::Launchd, Path::new("/p"), Some(&old_plist));
+        assert_eq!(facts["stop_window_s"], LAUNCHD_DEFAULT_WINDOW_S);
+        assert_eq!(facts["window_source"], "default");
+        let facts = service_facts(Manager::Systemd, Path::new("/p"), None);
+        assert_eq!(facts["installed"], false);
+        assert_eq!(facts["stop_window_s"], SYSTEMD_DEFAULT_WINDOW_S);
+        assert_eq!(Manager::Systemd.window("TimeoutStopSec=2min\n"), Some(120));
+        assert_eq!(Manager::Systemd.window("TimeoutSec=45s\n"), Some(45));
+        assert_eq!(Manager::Systemd.window("TimeoutStopSec=infinity\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    /// launchd reloads a changed plist of a loaded job (bootout, then a retried
+    /// bootstrap), leaves an unchanged one alone and bootstraps a missing job;
+    /// systemd always reloads and enables.
+    fn install_reloads_a_changed_definition() {
+        let path = Path::new("/u/Library/LaunchAgents/run.devlanes.daemon.plist");
+        let argv = |steps: &[Step]| -> Vec<String> {
+            steps.iter().map(|step| step.argv.join(" ")).collect()
+        };
+        let reload = Manager::Launchd.activate(path, 501, true, true);
+        assert_eq!(
+            argv(&reload),
+            [
+                format!("launchctl bootout gui/501 {}", path.display()),
+                format!("launchctl bootstrap gui/501 {}", path.display()),
+            ]
+        );
+        assert!(reload[0].may_fail && !reload[0].retry);
+        assert!(!reload[1].may_fail && reload[1].retry);
+        assert!(Manager::Launchd.activate(path, 501, true, false).is_empty());
+        let fresh = Manager::Launchd.activate(path, 501, false, true);
+        assert_eq!(
+            argv(&fresh),
+            [format!("launchctl bootstrap gui/501 {}", path.display())]
+        );
+        assert!(!fresh[0].retry);
+        assert_eq!(
+            argv(&Manager::Systemd.activate(path, 1000, false, false)),
+            [
+                "systemctl --user daemon-reload",
+                "systemctl --user enable --now devlanes.service"
+            ]
+        );
     }
 
     #[test]

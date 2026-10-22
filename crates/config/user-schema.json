@@ -911,7 +911,7 @@
       "type": "object"
     }
   },
-  "$id": "https://devlanes.run/schema/user-v1.json",
+  "$id": "https://devlanes.run/v1/user-schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Per-user machine settings, separate from project configuration.",

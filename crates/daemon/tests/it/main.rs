@@ -24,6 +24,7 @@ mod remote;
 mod resolver;
 mod retention;
 mod server;
+mod shutdown;
 mod stop_in_start;
 mod stream;
 mod update;
@@ -282,10 +283,15 @@ impl Harness {
         Session::local(self.next_id.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// Stops everything (test-owned cleanup).
+    /// Stops everything (test-owned cleanup), as a signal would: no `lane.stop` tasks.
     pub async fn close(&self) {
-        let _ = self.engine.shutdown().await;
+        let _ = self.engine.shutdown(signal_shutdown()).await;
     }
+}
+
+/// The shutdown SIGTERM asks for.
+pub fn signal_shutdown() -> devlanes_daemon::Shutdown {
+    devlanes_daemon::Shutdown::new(devlanes_daemon::ShutdownReason::Signal)
 }
 
 /// Events of a frame stream until it is empty.

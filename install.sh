@@ -2,7 +2,7 @@
 # Installs devlanes and devlanes-hosts from a GitHub release after checking the
 # archive against the release's SHA256SUMS.
 #
-#   curl -fsSL https://raw.githubusercontent.com/devlanes-run/devlanes/main/install.sh | sh
+#   curl -fsSL https://devlanes.run/install.sh | sh
 #
 # DEVLANES_VERSION=0.1.0 pins a release (default: the latest one).
 # DEVLANES_INSTALL_DIR sets the target directory (default: ~/.local/bin).

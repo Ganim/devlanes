@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Handler, Session,
+    Handler, Session, Shutdown, ShutdownReason,
     bus::EventBus,
     integrations::Integrations,
     model::{LaneRt, ProjectRt, lock},
@@ -184,20 +184,33 @@ impl Handler for Engine {
         self.inner.input(stream_id, data, &session).await
     }
 
-    /// Stops every unit with its stop policy; containers keep running. Records
-    /// the exits, then closes state.db so its WAL is checkpointed before exit.
-    async fn shutdown(&self) -> Result<(), RpcError> {
+    /// Stops every unit with its stop policy; containers keep running. An
+    /// explicit shutdown first runs the `lane.stop` tasks of each lane with live
+    /// units. Records the exits, then closes state.db so its WAL is checkpointed
+    /// before exit. Returns `{reason, stopped: [{lane, unit}], tasks: [{lane,
+    /// task, exit_code | error}]}`.
+    async fn shutdown(&self, request: Shutdown) -> Result<Value, RpcError> {
         // Usually the server's token already fired; an embedder may call this
         // directly. Either way, new mutations and spawns are refused from here on.
         self.inner.shutdown.cancel();
         self.inner.remote_shutdown().await;
-        let stopped = self.inner.stop_everything().await;
-        tracing::info!(stopped, "daemon shutdown stopped units");
+        let hooks = (request.reason == ShutdownReason::Explicit).then_some(&request.interrupt);
+        let (stopped, tasks) = self.inner.stop_everything(hooks).await;
+        tracing::info!(
+            reason = request.reason.as_str(),
+            stopped = stopped.len(),
+            tasks = tasks.len(),
+            "daemon shutdown stopped units"
+        );
         self.inner.finish_stopped_runs().await;
         if let Err(error) = self.inner.store.close().await {
             tracing::warn!(%error, "state.db did not close cleanly");
         }
-        Ok(())
+        Ok(json!({
+            "reason": request.reason.as_str(),
+            "stopped": stopped,
+            "tasks": tasks,
+        }))
     }
 }
 

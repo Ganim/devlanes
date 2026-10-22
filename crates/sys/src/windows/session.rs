@@ -22,10 +22,11 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, ENDSESSION_CLOSEAPP, ENDSESSION_LOGOFF,
-    GetMessageW, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SMTO_ABORTIFHUNG,
-    SendMessageTimeoutW, TranslateMessage, WM_CLOSE, WM_DESTROY, WM_ENDSESSION, WM_QUERYENDSESSION,
-    WNDCLASSW, WS_OVERLAPPED,
+    EnumWindows, GetClassNameW, GetMessageW, GetWindowThreadProcessId, MSG, PostMessageW,
+    PostQuitMessage, RegisterClassW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, TranslateMessage,
+    WM_CLOSE, WM_DESTROY, WM_ENDSESSION, WM_QUERYENDSESSION, WNDCLASSW, WS_OVERLAPPED,
 };
+use windows_sys::core::BOOL;
 
 use super::security::wide;
 
@@ -121,33 +122,91 @@ impl SessionWatch {
     /// would send for `end` and returns once both are answered, or fails after
     /// `timeout` per message. For tests of what `on_end` does.
     pub fn simulate(&self, end: SessionEnd, timeout: std::time::Duration) -> io::Result<()> {
-        let flags = match end {
-            SessionEnd::Logoff => ENDSESSION_LOGOFF,
-            SessionEnd::Shutdown => 0,
-            SessionEnd::CloseApp => ENDSESSION_CLOSEAPP,
-        } as LPARAM;
-        let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
-        for (message, wparam) in [(WM_QUERYENDSESSION, 0), (WM_ENDSESSION, 1)] {
-            let mut result = 0;
-            // SAFETY: the window lives on the watcher's thread; the call waits at
-            // most `millis` for the answer, which `result` receives.
-            let ok = unsafe {
-                SendMessageTimeoutW(
-                    self.window as HWND,
-                    message,
-                    wparam,
-                    flags,
-                    SMTO_ABORTIFHUNG,
-                    millis,
-                    &raw mut result,
-                )
-            };
-            if ok == 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-        Ok(())
+        send_end(self.window as HWND, end, timeout)
     }
+}
+
+/// [`SessionWatch::simulate`] for the watcher window of another process `pid`,
+/// so end-to-end tests can log a running daemon off. `NotFound` when `pid` has
+/// no such window.
+pub fn simulate_for(pid: u32, end: SessionEnd, timeout: std::time::Duration) -> io::Result<()> {
+    let mut search = Search {
+        pid,
+        class: wide(OsStr::new(CLASS)),
+        found: None,
+    };
+    // SAFETY: the callback only runs during this call, so the pointer to
+    // `search` stays valid; a FALSE return only means enumeration stopped.
+    unsafe { EnumWindows(Some(visit), (&raw mut search) as LPARAM) };
+    match search.found {
+        Some(window) => send_end(window as HWND, end, timeout),
+        None => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("process {pid} has no session-end window"),
+        )),
+    }
+}
+
+/// What [`simulate_for`]'s enumeration looks for and finds.
+struct Search {
+    pid: u32,
+    /// [`CLASS`] as a NUL-terminated wide string.
+    class: Vec<u16>,
+    found: Option<isize>,
+}
+
+/// Stops at the first window of `search.pid` with the watcher class.
+extern "system" fn visit(window: HWND, state: LPARAM) -> BOOL {
+    // SAFETY: `state` is the `Search` that `simulate_for` passed, alive and not
+    // used elsewhere while the enumeration runs.
+    let search = unsafe { &mut *(state as *mut Search) };
+    let mut pid = 0;
+    // SAFETY: `window` comes from the enumeration; `pid` is writable.
+    unsafe { GetWindowThreadProcessId(window, &raw mut pid) };
+    if pid != search.pid {
+        return 1;
+    }
+    let mut name = [0_u16; 64];
+    // SAFETY: `name` holds the 64 characters the call may write.
+    let length = unsafe { GetClassNameW(window, name.as_mut_ptr(), name.len() as i32) };
+    let length = usize::try_from(length).unwrap_or(0);
+    // `class` ends with its NUL, which the copied name does not include.
+    if name[..length] == search.class[..search.class.len() - 1] {
+        search.found = Some(window as isize);
+        return 0;
+    }
+    1
+}
+
+/// Sends `window` the `WM_QUERYENDSESSION` and `WM_ENDSESSION` pair for `end`,
+/// waiting at most `timeout` for each answer.
+fn send_end(window: HWND, end: SessionEnd, timeout: std::time::Duration) -> io::Result<()> {
+    let flags = match end {
+        SessionEnd::Logoff => ENDSESSION_LOGOFF,
+        SessionEnd::Shutdown => 0,
+        SessionEnd::CloseApp => ENDSESSION_CLOSEAPP,
+    } as LPARAM;
+    let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+    for (message, wparam) in [(WM_QUERYENDSESSION, 0), (WM_ENDSESSION, 1)] {
+        let mut result = 0;
+        // SAFETY: a window that is gone only makes the call fail; it waits at most
+        // `millis` for the answer, which `result` receives.
+        let ok = unsafe {
+            SendMessageTimeoutW(
+                window,
+                message,
+                wparam,
+                flags,
+                SMTO_ABORTIFHUNG,
+                millis,
+                &raw mut result,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 impl Drop for SessionWatch {
@@ -327,6 +386,31 @@ mod tests {
         let first = watch(|_| {})?;
         let second = watch(|_| {})?;
         assert_ne!(first.window, second.window);
+        Ok(())
+    }
+
+    /// A process's watcher window is found by its PID; a process without one
+    /// is `NotFound`.
+    #[test]
+    fn simulates_for_a_process() -> io::Result<()> {
+        let (sender, receiver) = mpsc::channel();
+        let _watch = watch(move |end| {
+            let _ = sender.send(end);
+        })?;
+        simulate_for(
+            std::process::id(),
+            SessionEnd::Logoff,
+            Duration::from_secs(5),
+        )?;
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(5)),
+            Ok(SessionEnd::Logoff)
+        );
+        let missing = simulate_for(u32::MAX - 1, SessionEnd::Logoff, Duration::from_secs(1));
+        assert_eq!(
+            missing.map_err(|error| error.kind()),
+            Err(io::ErrorKind::NotFound)
+        );
         Ok(())
     }
 }

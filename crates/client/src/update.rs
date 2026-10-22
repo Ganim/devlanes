@@ -11,9 +11,8 @@ use serde::{Deserialize, Serialize};
 
 /// The repository that `cargo binstall --git` and `cargo install --git` build from.
 const REPOSITORY: &str = "https://github.com/devlanes-run/devlanes";
-/// `install.sh` on the default branch.
-const INSTALL_SCRIPT: &str =
-    "https://raw.githubusercontent.com/devlanes-run/devlanes/main/install.sh";
+/// `install.sh` of the latest stable release, served by the website.
+const INSTALL_SCRIPT: &str = "https://devlanes.run/install.sh";
 /// The notice log under `$DEVLANES_HOME`.
 const NOTICES_FILE: &str = "notices.json";
 /// A notice repeats at most once per day.
@@ -364,11 +363,11 @@ mod tests {
         );
         assert_eq!(
             InstallMethod::Script(PathBuf::from("/Users/a/.local/bin")).upgrade_command("0.3.0"),
-            "curl -fsSL https://raw.githubusercontent.com/devlanes-run/devlanes/main/install.sh | DEVLANES_INSTALL_DIR=/Users/a/.local/bin sh"
+            "curl -fsSL https://devlanes.run/install.sh | DEVLANES_INSTALL_DIR=/Users/a/.local/bin sh"
         );
         assert_eq!(
             InstallMethod::Script(PathBuf::from("/Users/a/My Tools")).upgrade_command("0.3.0"),
-            "curl -fsSL https://raw.githubusercontent.com/devlanes-run/devlanes/main/install.sh | DEVLANES_INSTALL_DIR='/Users/a/My Tools' sh"
+            "curl -fsSL https://devlanes.run/install.sh | DEVLANES_INSTALL_DIR='/Users/a/My Tools' sh"
         );
     }
 

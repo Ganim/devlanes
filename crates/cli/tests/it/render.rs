@@ -901,6 +901,86 @@ fn logon_entry_in_status_and_doctor() {
 }
 
 #[test]
+/// `daemon stop` names what it stopped and the `lane.stop` tasks that failed.
+fn daemon_stop_reports_units_and_failed_tasks() {
+    let data = json!({
+        "stopping": true, "processes": 2, "reason": "explicit",
+        "stopped": [{"lane": "acme@0", "unit": "api"}, {"lane": "acme@0", "unit": "web"}],
+        "tasks": [
+            {"lane": "acme@0", "task": "flush", "exit_code": 0},
+            {"lane": "acme@0", "task": "notify", "exit_code": 3},
+            {"lane": "acme@1", "task": "slow", "error": {"code": "cancelled", "data": null}},
+        ],
+    });
+    let text = render_text(Method::DaemonShutdown, &data);
+    assert!(text.contains("stopped the daemon and 2 units"), "{text}");
+    assert!(text.contains("ran 3 lane.stop tasks"), "{text}");
+    assert!(text.contains("acme@0 notify: exit 3"), "{text}");
+    assert!(text.contains("acme@1 slow: cancelled"), "{text}");
+    assert!(!text.contains("flush"), "{text}");
+    let idle = json!({"stopping": true, "processes": 0, "stopped": [], "tasks": []});
+    let text = render_text(Method::DaemonShutdown, &idle);
+    assert!(text.contains("stopped the daemon\n"), "{text}");
+    assert!(!text.contains("lane.stop"), "{text}");
+}
+
+#[test]
+/// A stop timeout that does not fit in the service manager's stop window is a
+/// warning naming the unit and the fix; doctor still exits 0.
+fn doctor_warns_about_stop_timeouts_past_the_service_window() {
+    let service = |installed: bool, window: u64| {
+        json!({
+            "manager": "launchd agent", "path": "/u/Library/LaunchAgents/run.devlanes.daemon.plist",
+            "installed": installed, "stop_window_s": window,
+            "window_source": if window == 60 { "installed" } else { "default" },
+            "recommended_window_s": 60,
+        })
+    };
+    let timeouts = json!([
+        {"project": "acme", "unit": "api", "timeout_ms": 10_000},
+        {"project": "acme", "unit": "db", "timeout_ms": 90_000},
+    ]);
+    // `running: false` keeps the daemon's own checks (schema) out of the exit code.
+    let data = json!({"running": false, "service": service(true, 60), "stop_timeouts": timeouts});
+    let text = render_text(Method::Doctor, &data);
+    assert!(text.contains("--- plain (exit 0)"), "{text}");
+    assert!(text.contains("the daemon gets 60s to stop"), "{text}");
+    assert!(
+        text.contains("1 unit with a stop timeout longer than the 60s the launchd agent gives the daemon to stop: acme:db (90s)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("lower services.<name>.stop.timeout to 55s or less"),
+        "{text}"
+    );
+    assert!(!text.contains("acme:api"), "{text}");
+
+    let data = json!({"service": service(false, 5), "stop_timeouts": timeouts});
+    let text = render_text(Method::Doctor, &data);
+    assert!(
+        text.contains("2 units with a stop timeout longer than the 5s a launchd agent gets by default (devlanes is not installed as a service): acme:api (10s), acme:db (90s)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "devlanes daemon install, and lower services.<name>.stop.timeout to 55s or less"
+        ),
+        "{text}"
+    );
+
+    let data = json!({"service": service(true, 5), "stop_timeouts": [timeouts[0].clone()]});
+    let text = render_text(Method::Doctor, &data);
+    assert!(
+        text.contains("gives the daemon 5s to stop, its default; devlanes now installs 60s"),
+        "{text}"
+    );
+    assert!(
+        text.contains("devlanes daemon install, which gives the daemon 60s"),
+        "{text}"
+    );
+}
+
+#[test]
 fn doctor_says_how_to_recreate_an_unconstrained_ca() {
     let data = json!({
         "ca": {

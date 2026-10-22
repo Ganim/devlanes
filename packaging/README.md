@@ -17,7 +17,7 @@ Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula an
 | Homebrew | `brew install devlanes-run/tap/devlanes` |
 | npm | `npm install -g devlanes` |
 | cargo binstall | `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes` |
-| Script | `curl -fsSL https://raw.githubusercontent.com/devlanes-run/devlanes/main/install.sh \| sh` |
+| Script | `curl -fsSL https://devlanes.run/install.sh \| sh` |
 | Source | `cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes devlanes-hosts-helper` |
 
 Every channel except the source build installs the release archives.
@@ -35,6 +35,7 @@ The workflow then runs these jobs:
 | `build` | Builds `devlanes` and `devlanes-hosts` for each target, fails if the committed config schemas differ from the generated ones, and packs the archive |
 | `release` | Writes `SHA256SUMS`, `release-manifest.json` and the formula, copies `schema.json` and `user-schema.json`, attests the archives' build provenance, and uploads everything to a draft release. A rerun refills the draft and refuses to touch a published release |
 | `publish` | Publishes the draft |
+| `website` | Stable versions only. Triggers a rebuild of `devlanes-run/website`, which copies `install.sh`, `schema.json` and `user-schema.json` from the latest stable release to `https://devlanes.run/install.sh`, `https://devlanes.run/v1/schema.json` and `https://devlanes.run/v1/user-schema.json` |
 | `homebrew-verify` | Stable versions only. Installs the rendered formula on macOS from the published release, then runs `brew audit` and `brew test` |
 | `homebrew-publish` | Commits `Formula/devlanes.rb` to `devlanes-run/homebrew-tap`. It keeps the tap's formula when that one belongs to a newer version |
 | `npm` | Builds the npm packages from the archives and publishes the platform packages, then `devlanes`. Stable versions go to the `latest` dist-tag, prereleases to `next`. Versions already on the registry are skipped |
@@ -62,7 +63,7 @@ gh attestation verify devlanes-0.1.0-aarch64-apple-darwin.tar.gz --repo devlanes
 
 ## Credentials
 
-`homebrew-publish` pushes to the tap with the repository secret `HOMEBREW_TAP_TOKEN`, a fine-grained token with Contents read and write on `devlanes-run/homebrew-tap` only. It expires on the date set when it was created; replace the secret before then.
+`homebrew-publish` pushes to the tap with the repository secret `HOMEBREW_TAP_TOKEN`, a fine-grained token with Contents read and write on `devlanes-run/homebrew-tap` only. It expires on the date set when it was created; replace the secret before then. `website` sends its dispatch with `WEBSITE_DISPATCH_TOKEN`, a fine-grained token with Contents write on `devlanes-run/website` only.
 
 The `npm` job has no npm secret. Each package (`devlanes` and the `@devlanes/*` platform packages) trusts `devlanes-run/devlanes`, workflow `release.yml`, no environment, so npm exchanges the job's OIDC token for a short-lived publish token and adds provenance. Renaming `release.yml` breaks publishing until each package's trusted publisher names the new file. The `0.0.0` versions of the `@devlanes/*` packages are empty placeholders; the launcher pins its optional dependencies to its own version, so nothing installs them.
 
@@ -85,7 +86,7 @@ The `npm` job has no npm secret. Each package (`devlanes` and the `@devlanes/*` 
 }
 ```
 
-A binary cannot embed the checksums of its own release archives, because they are computed after it is built. The manifest is therefore a release asset. The client can download the manifest for its own version from `https://github.com/devlanes-run/devlanes/releases/download/vVERSION/release-manifest.json` when it needs to bootstrap a box, which trusts HTTPS to GitHub for the manifest and the manifest for the archive. Embedding the manifest at build time would need a second build after the archives exist, which changes the archives again. Nothing in the client reads the manifest yet.
+A binary cannot embed the checksums of its own release archives, because they are computed after it is built. The manifest is therefore a release asset. `devlanes remote connect --install` downloads the manifest for its own version from `https://github.com/devlanes-run/devlanes/releases/download/vVERSION/release-manifest.json` to bootstrap a box, which trusts HTTPS to GitHub for the manifest and the manifest for the archive. Embedding the manifest at build time would need a second build after the archives exist, which changes the archives again. The daemon's update check reads only the `version` of `releases/latest/download/release-manifest.json`.
 
 ## crates.io and cargo binstall
 
@@ -106,7 +107,7 @@ cargo install --locked --git https://github.com/devlanes-run/devlanes --tag v0.1
 
 ## install.sh
 
-`install.sh` picks the archive for the host (macOS or Linux, arm64 or x86_64; an arm64 Mac under Rosetta gets the arm64 build), reads `SHA256SUMS` from the latest release or from `DEVLANES_VERSION`, checks the archive's SHA-256 and its exact entries, and copies `devlanes` and `devlanes-hosts` to `DEVLANES_INSTALL_DIR` (default `~/.local/bin`). When that directory is not writable it stops, unless `DEVLANES_INSTALL_SUDO=1` allows sudo. Downloads use HTTPS with TLS 1.2 or later only. It refuses musl systems, does not edit shell profiles and does not update itself. `DEVLANES_INSTALL_BASE_URL` points it at a local directory of fake releases for testing.
+`install.sh` picks the archive for the host (macOS or Linux, arm64 or x86_64; an arm64 Mac under Rosetta gets the arm64 build), reads `SHA256SUMS` from the latest release or from `DEVLANES_VERSION`, checks the archive's SHA-256 and its exact entries, and copies `devlanes` and `devlanes-hosts` to `DEVLANES_INSTALL_DIR` (default `~/.local/bin`). When that directory is not writable it stops, unless `DEVLANES_INSTALL_SUDO=1` allows sudo. Downloads use HTTPS with TLS 1.2 or later only. It refuses musl systems, does not edit shell profiles and does not update itself. `DEVLANES_INSTALL_BASE_URL` points it at a local directory of fake releases for testing. `https://devlanes.run/install.sh` serves the copy attached to the latest stable release, so changes on `main` reach users with the next release.
 
 ## npm
 
@@ -116,7 +117,8 @@ The `devlanes` package follows the esbuild and Biome layout. It contains a Node 
 
 ## JSON Schemas
 
-`crates/config/schema.json` and `crates/config/user-schema.json` are generated by `cargo build -p devlanes` and kept in Git. The project schema includes the registered preset options. Config tests reject stale generated files. Their `$id`s are `https://devlanes.run/schema/v1.json` and `https://devlanes.run/schema/user-v1.json`. They ship in:
+`crates/config/schema.json` and `crates/config/user-schema.json` are generated by `cargo build -p devlanes` and kept in Git. The project schema includes the registered preset options. Config tests reject stale generated files. Their `$id`s are `https://devlanes.run/v1/schema.json` and `https://devlanes.run/v1/user-schema.json`, the URLs that serve them. They ship in:
 
 - every GitHub release, as `schema.json` and `user-schema.json`;
+- the website, which serves the latest stable release's copies at their `$id`s. The `v1` path is fixed on the website, not derived from the release version;
 - the `devlanes` npm package root, exported as `devlanes/schema.json` and `devlanes/user-schema.json`, so a project with devlanes installed can start `devlanes.yaml` with `# yaml-language-server: $schema=./node_modules/devlanes/schema.json`.
