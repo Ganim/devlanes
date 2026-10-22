@@ -2,3 +2,6 @@
 devlanes.local.yaml
 .devlanes/
 .DS_Store
+# insta leftovers from failed or unreviewed snapshot runs
+*.pending-snap
+*.snap.new
