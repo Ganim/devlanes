@@ -17,9 +17,9 @@ The connection belongs to your local daemon, not to the terminal. Ctrl-C on `rem
 
 devlanes uses the system `ssh` with one ControlMaster per box, so `~/.ssh/config`, agents, ProxyJump and certificates apply. Passphrase, OTP and host-key prompts appear in the terminal that runs `remote connect`, prefixed with the box's name. An idle master exits after 10 minutes. Over that master devlanes runs `devlanes tunnel --stdio` on the box, which needs only a session channel: `AllowTcpForwarding no` on the box is fine.
 
-devlanes must be on the box's `PATH` or in `~/.devlanes/bin`. Without it, `remote connect` explains what `--install` would download; with `--install` it fetches this machine's own release over HTTPS, checks its SHA-256 and places it in `~/.devlanes/bin`, never over an existing binary. A running box is never upgraded. A protocol mismatch fails with instructions, and a different release on the box is shown as a warning. On Linux, run `loginctl enable-linger` (or `devlanes daemon install`) on the box so its daemon survives logout; `remote ls` warns when linger is off.
+devlanes must be on the box's `PATH` or in `~/.devlanes/bin`. Without it, `remote connect` explains what `--install` would download; with `--install` it fetches this machine's own release over HTTPS, checks its SHA-256 and places it in `~/.devlanes/bin`, never over an existing binary. A running box is never upgraded. A protocol mismatch fails with instructions, and a different release on the box is shown as a warning. On Linux, run `sudo loginctl enable-linger "$USER"` on the box so its daemon survives logout; `remote ls` warns when linger is off. `devlanes daemon install` adds a user unit for boot, but a user unit is also stopped with the session unless linger is on. [Remote setup](guides/remote-setup.md) walks through preparing a box.
 
-`devlanes status` on the box lists the clients connected to it.
+`devlanes status --json` on the box lists the clients connected to it under `clients`.
 
 ## Mirroring
 

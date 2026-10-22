@@ -33,14 +33,7 @@ devlanes gives every service a port from the lane's block and passes it as `PORT
 
 ### Coming from another process manager
 
-If the repository already runs its dev processes with mprocs, dekit, process-compose, a Procfile (foreman, overmind, hivemind, honcho), pm2, tmuxinator, tmuxp, `concurrently` or `npm-run-all` in package.json, or mise tasks, `devlanes migrate` writes a first `devlanes.yaml` from it:
-
-```sh
-devlanes migrate --dry-run   # print the result
-devlanes migrate             # write devlanes.yaml at the repository root
-```
-
-Fixed ports become each lane's own port, and anything devlanes cannot express (restart policies, dependencies between services, `.env` loading) is listed and left as a `# migrated from` comment in the file. It never replaces an existing `devlanes.yaml` without `--force`.
+If the repository already runs its dev processes with mprocs, dekit, process-compose, a Procfile (foreman, overmind, hivemind, honcho), pm2, tmuxinator, tmuxp, `concurrently` or `npm-run-all` in package.json, mise tasks or Docker Compose, install the [devlanes skill](../agent-plugin/README.md) and ask your coding agent to migrate it. The skill's [references/migration.md](../agent-plugin/skills/devlanes/references/migration.md) maps each tool to `devlanes.yaml`: fixed ports become each lane's own port, one-shot commands become tasks, containers become infra, and the agent tells you what devlanes cannot express (restart policies, dependencies between services, `.env` loading).
 
 ## Start and inspect
 
@@ -67,7 +60,9 @@ cd ../acme-checkout
 devlanes start
 ```
 
-The daemon notices new, moved and removed worktrees by itself. `devlanes lane ls` lists every lane, and commands take a lane reference such as `2`, `feat/checkout` or `acme@2:api` from any directory. Removing a worktree stops its lane; `devlanes lane clean <lane> --yes` also removes its data and frees its ports.
+A worktree becomes a lane the first time devlanes runs in it (here, `start`), or when `devlanes lane new <branch>` creates it; a worktree that only exists gets no lane, except the one on the primary branch. The daemon follows moved and removed worktrees by itself. `devlanes lane ls` lists every lane, and commands take a lane reference such as `2`, `feat/checkout` or `acme@2:api` from any directory. Removing a worktree stops its lane, and a lane whose folder is gone is cleaned once nothing runs in it; its logs stay until log retention removes them. `devlanes lane clean <lane> --yes` removes a lane's data and frees its ports by hand.
+
+To run a folder twice, for example with two profiles, `devlanes lane new --name review` in it adds a second lane with its own index, ports and domain. `--lane review` addresses it; commands run in the folder keep using its first lane.
 
 ## HTTPS and certificates
 
@@ -125,6 +120,7 @@ For more detail in the daemon's log, restart it with a level: `DEVLANES_LOG=debu
 
 - [CLI reference](reference/cli.md): every command and option.
 - [Config reference](reference/config.md): every field of `devlanes.yaml` and the user `config.yaml`.
+- Guides: [run and run_script](guides/run-scripts.md), [languages](guides/languages.md), [framework presets](guides/presets.md), [ports and environment](guides/ports-and-env.md), [hostnames and HTTPS](guides/https.md), [infra](guides/infra.md), [service patterns](guides/services.md), [terminals](guides/terminals.md), [remote setup](guides/remote-setup.md).
 - [Remote boxes](remote.md): run lanes on another machine and use them locally.
 - [Design](design.md): lanes, ports, the daemon and startup order.
 - [Observability](observability.md): the daemon's spans and diagnostics, and plans for tracing and benchmarks.
