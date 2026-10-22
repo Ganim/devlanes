@@ -77,7 +77,10 @@ pub enum TrustError {
         /// Captured standard error.
         stderr: String,
     },
-    /// A command did not finish in time and was stopped.
+    /// A command did not finish in time, and the process devlanes started for
+    /// it was stopped. Under WSL that is only the Linux side of the interop
+    /// call: Windows' `certutil.exe` and the dialog it shows keep running, so
+    /// the change may still happen once someone answers.
     #[error("`{command}` did not finish within {seconds} s; {hint}")]
     TimedOut {
         /// The command line.

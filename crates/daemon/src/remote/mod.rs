@@ -202,6 +202,8 @@ pub(crate) struct HostConn {
     names: Mutex<HashMap<String, CaseCollisions>>,
     /// Version and linger findings about the box, by code.
     warnings: Mutex<BTreeMap<&'static str, String>>,
+    /// The link's transport, for its own warnings.
+    transport: Arc<dyn devlanes_transport::Transport>,
 }
 
 impl HostConn {
@@ -289,6 +291,7 @@ impl HostConn {
         let view = lock(&self.view).clone();
         let syncs: Vec<Value> = lock(&self.syncs).values().cloned().collect();
         let mut warnings: Vec<String> = lock(&self.warnings).values().cloned().collect();
+        warnings.extend(self.transport.warnings());
         warnings.extend(view.warnings());
         if let Some(map) = value.as_object_mut() {
             map.insert("transport".into(), json!(self.kind));
@@ -560,7 +563,7 @@ impl Inner {
         });
         let transport = self.integ.remote.transport(host, prompter, options)?;
         let options = SessionOptions::new(format!("devlanes {}", env!("CARGO_PKG_VERSION")));
-        let link = Link::spawn(transport, options, self.integ.remote.backoff());
+        let link = Link::spawn(transport.clone(), options, self.integ.remote.backoff());
         let conn = Arc::new(HostConn {
             name: host.to_owned(),
             kind: self.integ.remote.kind(),
@@ -576,6 +579,7 @@ impl Inner {
             hashes: Mutex::new(HashMap::new()),
             names: Mutex::new(HashMap::new()),
             warnings: Mutex::new(BTreeMap::new()),
+            transport,
         });
         tokio::spawn(watch_link(Arc::downgrade(self), conn.clone()));
         let mirror = tokio::spawn(mirror::run(Arc::downgrade(self), conn.clone()));

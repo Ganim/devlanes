@@ -581,9 +581,14 @@ pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
     let manager = Manager::current();
     // WSL distros run without systemd unless wsl.conf turns it on; systemctl would
     // fail later with a message about the bus, after the unit file was written.
+    // The first WSL detection stats the drive mounts, so it runs off the async
+    // threads.
     if manager == Manager::Systemd
-        && devlanes_sys::wsl().is_some()
-        && !Path::new("/run/systemd/system").is_dir()
+        && tokio::task::spawn_blocking(|| {
+            devlanes_sys::wsl().is_some() && !Path::new("/run/systemd/system").is_dir()
+        })
+        .await
+        .unwrap_or(false)
     {
         return Err(RpcError::new("wsl_systemd_off", json!({}), 1));
     }

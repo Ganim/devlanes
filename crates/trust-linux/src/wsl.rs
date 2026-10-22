@@ -313,13 +313,26 @@ impl TrustStore for WindowsInteropStore {
     }
 
     /// The dialog `install` or `uninstall` is about to show: none when the CA is
-    /// already trusted, or when the user's store has nothing to delete.
+    /// already trusted, when the user's store has nothing to delete, or when a
+    /// lookup fails to run, as the change then stops at the same lookup before
+    /// it starts.
     async fn pending_approval(&self, ca: &CaCertificate, install: bool) -> Option<String> {
         if !self.prompts() {
             return None;
         }
+        // The lookups `install` and `uninstall` make first, read the same way:
+        // no change starts when the store already is as `done` says or when the
+        // lookup could not run. A lookup certutil answered with an error lets
+        // the change go ahead.
+        let no_change = |found: &Result<Result<bool, String>, TrustError>, done: bool| match found {
+            Ok(Ok(held)) => *held == done,
+            Ok(Err(_)) => false,
+            Err(_) => true,
+        };
         if install {
-            if let Ok(TrustStatus::Installed) = self.status(ca).await {
+            if no_change(&self.in_user_store(ca).await, true)
+                || no_change(&self.in_machine_root(ca).await, true)
+            {
                 return None;
             }
             return Some(format!(
@@ -328,7 +341,7 @@ impl TrustStore for WindowsInteropStore {
                 Change::Add.dialog()
             ));
         }
-        if let Ok(Ok(false)) = self.in_user_store(ca).await {
+        if no_change(&self.in_user_store(ca).await, false) {
             return None;
         }
         Some(format!(
@@ -341,9 +354,12 @@ impl TrustStore for WindowsInteropStore {
     /// Adds the CA to the user's store unless a root store already trusts it.
     /// `certutil` reads the PEM from a temp file through its `\\wsl.localhost`
     /// path. A store other than `Root` may not exist yet, and `certutil` only
-    /// creates one with `-f`.
+    /// creates one with `-f`. A lookup that cannot run or times out ends the
+    /// call before the change, which would hang on the same interop for
+    /// [`CHANGE_TIMEOUT`].
     async fn install(&self, ca: &CaCertificate) -> Result<(), TrustError> {
-        if let Ok(TrustStatus::Installed) = self.status(ca).await {
+        if self.in_user_store(ca).await? == Ok(true) || self.in_machine_root(ca).await? == Ok(true)
+        {
             return Ok(());
         }
         let pem = TempPem::create(ca).await?;

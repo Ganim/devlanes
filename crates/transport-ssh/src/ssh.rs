@@ -198,14 +198,28 @@ async fn bootstrap_plan(
     }
 }
 
+/// ssh's wording for rejected credentials. The Unix master log holds only
+/// ssh's own lines.
+#[cfg(unix)]
+const DENIED: &str = "Permission denied";
+
+/// ssh's wording for rejected credentials, as in `user@box: Permission denied
+/// (publickey).`. On Windows the log is ssh's stderr, which also carries the
+/// box's, where a bare "Permission denied" names a file.
+#[cfg(windows)]
+const DENIED: &str = "Permission denied (";
+
 /// Classifies a failed connection from ssh's log.
 ///
 /// A name that does not resolve is permanent only before the first successful
-/// connection (a typo); afterwards it is a network change that will pass.
+/// connection (a typo); afterwards it is a network change that will pass. The
+/// other patterns are ssh's own messages; on Windows a box would print them
+/// only from an ssh it runs itself, and runs in which the box wrote to stdout
+/// do not come here.
 fn master_error(destination: &str, status: impl fmt::Display, log: &str, first: bool) -> SshError {
     // These need new credentials or known_hosts changes, not time.
     const PERMANENT: [&str; 3] = [
-        "Permission denied",
+        DENIED,
         "Host key verification failed",
         "REMOTE HOST IDENTIFICATION HAS CHANGED",
     ];

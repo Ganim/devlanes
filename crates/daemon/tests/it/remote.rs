@@ -30,7 +30,7 @@ use devlanes_proto::{
 };
 use devlanes_state::Store;
 use devlanes_transport::{
-    Backoff, RpcCallError, ServeOptions, SessionOptions, Transport,
+    Backoff, RpcCallError, ServeOptions, SessionOptions, Transport, TransportError,
     memory::{MemoryTransport, memory_transport},
     serve,
 };
@@ -196,6 +196,36 @@ impl RemoteConnector for MemoryConnector {
     /// Fast retries keep the reconnect checks short.
     fn backoff(&self) -> Backoff {
         Backoff::new(Duration::from_millis(50), Duration::from_millis(200))
+    }
+}
+
+/// A transport that never connects and carries a warning of its own.
+struct Warned;
+
+#[async_trait::async_trait]
+impl Transport for Warned {
+    /// Refuses for good, so `connect` returns at once.
+    async fn connect(&self) -> Result<devlanes_transport::BoxDuplex, TransportError> {
+        Err(TransportError::permanent(std::io::Error::other(
+            "acme refuses",
+        )))
+    }
+
+    /// One fixed warning.
+    fn warnings(&self) -> Vec<String> {
+        vec!["acme transport warning".to_owned()]
+    }
+}
+
+impl RemoteConnector for Warned {
+    /// Hands out the warned transport.
+    fn transport(
+        &self,
+        _host: &str,
+        _prompts: Arc<dyn RemotePrompter>,
+        _options: ConnectOptions,
+    ) -> Result<Arc<dyn Transport>, RpcError> {
+        Ok(Arc::new(Warned))
     }
 }
 
@@ -385,6 +415,48 @@ async fn http_get(port: u16, host: &str) -> Option<String> {
         .await
         .ok()
         .flatten()
+}
+
+/// A transport's own warnings (on Windows, ssh running outside its job) show
+/// with the connection in `remote ls`, a failed one included.
+#[tokio::test(flavor = "multi_thread")]
+async fn transport_warnings_show_in_host_ls() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let h = engine_with(
+            &tmp.path.join("client"),
+            "27500-27599",
+            Some(Arc::new(Warned)),
+            None,
+        )
+        .await;
+        let connected = h
+            .call(
+                Method::Connect,
+                json!({"host": "box", "background": true}),
+                Context::default(),
+            )
+            .await;
+        assert!(connected.is_err(), "{connected:?}");
+        let list = h
+            .call(Method::HostList, json!({}), Context::default())
+            .await
+            .expect("host ls");
+        let host = list["items"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["host"] == "box"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        assert!(
+            host["warnings"]
+                .as_array()
+                .is_some_and(|w| w.iter().any(|m| m == "acme transport warning")),
+            "{host}"
+        );
+        h.close().await;
+    })
+    .await
+    .expect("in time");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use devlanes_trust::fake::FakeExecutor;
 use devlanes_trust::{
-    CaCertificate, CommandOutput, TrustError, TrustStatus, TrustStore as _, TrustTarget,
+    CaCertificate, CommandExecutor, CommandLine, CommandOutput, TrustError, TrustStatus,
+    TrustStore as _, TrustTarget,
 };
 use devlanes_trust_linux::{
     CHROMIUM_ID, CaStoreLayout, FIREFOX_ID, LinuxTrust, Privilege, SYSTEM_ID, SystemStore,
@@ -468,6 +469,62 @@ async fn windows_declined_dialog_is_cancelled() {
         store.install(&ca()).await,
         Err(TrustError::Cancelled { detail }) if detail.contains("devlanes certs trust")
     ));
+}
+
+/// Answers like [`windows_executor`], except that `certutil.exe -store`
+/// lookups never finish, like a hung WSL interop.
+struct HungLookups(Arc<FakeExecutor>);
+
+#[async_trait::async_trait]
+impl CommandExecutor for HungLookups {
+    async fn run(&self, command: &CommandLine) -> std::io::Result<CommandOutput> {
+        let output = self.0.run(command).await;
+        if command.argv().contains(&"-store") {
+            std::future::pending::<()>().await;
+        }
+        output
+    }
+
+    fn find_program(
+        &self,
+        name: &str,
+        extra_dirs: &[std::path::PathBuf],
+    ) -> Option<std::path::PathBuf> {
+        self.0.find_program(name, extra_dirs)
+    }
+
+    fn is_executable(&self, path: &std::path::Path) -> bool {
+        self.0.is_executable(path)
+    }
+}
+
+/// A lookup that times out ends `certs trust` and `untrust` before any change
+/// starts: no dialog is announced, and neither `wslpath` nor an add or delete
+/// runs.
+#[tokio::test(start_paused = true)]
+async fn windows_lookup_timeout_stops_before_the_change() {
+    let recorded = windows_executor(false, CommandOutput::ok("added"));
+    let store = WindowsInteropStore::new(
+        Arc::new(HungLookups(recorded.clone())),
+        interop(WINDOWS_ROOT),
+    );
+    let ca = ca();
+    for install in [true, false] {
+        assert_eq!(store.pending_approval(&ca, install).await, None);
+    }
+    let timed_out = |result: Result<(), TrustError>| {
+        matches!(&result, Err(TrustError::TimedOut { seconds: 20, hint, .. })
+            if hint.contains("Windows did not answer"))
+    };
+    assert!(timed_out(store.install(&ca).await));
+    assert!(timed_out(store.uninstall(&ca).await));
+    let argvs = recorded.argvs();
+    assert!(
+        argvs
+            .iter()
+            .all(|argv| argv[0] == CERTUTIL_EXE && argv.contains(&"-store".to_owned())),
+        "{argvs:?}"
+    );
 }
 
 #[tokio::test]

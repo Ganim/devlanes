@@ -308,8 +308,77 @@ fn powershell_script_blocks_nested_shells_and_comments() {
             (Allow, p, "pnpm build # then pnpm dev &", false),
             (Allow, p, "<# Start-Process pnpm dev #> pnpm build", false),
             (Allow, p, "Start-Process code server.js", false),
-            (Allow, p, "Start-Process notepad server.js", false),
         ],
+    );
+}
+
+/// `` ` `` still escapes inside a double-quoted Windows path, `#` starts a
+/// comment right after `{`, `(` and `|`, and `iex` runs in the caller's
+/// scope, so its `Set-Location` moves the commands after it.
+#[test]
+fn powershell_escapes_comments_and_iex_scope() {
+    let lab = Lab::new();
+    let (p, o) = (lab.sub(), lab.other());
+    let (p, o) = (p.as_path(), o.as_path());
+    let typed = lab.typed();
+    let iex_into = format!("iex 'cd {typed}/project'; pnpm dev &");
+    let invoke_into = format!("Invoke-Expression \"Set-Location {typed}/project\"; pnpm dev &");
+    let iex_out = format!("iex 'cd {typed}/other'; pnpm dev &");
+    check(
+        "PowerShell",
+        &[
+            (Block, o, &iex_into, false),
+            (Block, o, &invoke_into, false),
+            (Block, p, "& {# start it\n Start-Process pnpm dev }", false),
+            (Allow, p, &iex_out, false),
+            (Allow, p, "Write-Output \"C:\\acme`\"; pnpm dev &\"", false),
+            (
+                Allow,
+                p,
+                "& {# don't\n pnpm build }; Write-Output 'pnpm dev &'",
+                false,
+            ),
+            (
+                Allow,
+                p,
+                "(# don't\n pnpm build); Write-Output 'pnpm dev &'",
+                false,
+            ),
+            (
+                Allow,
+                p,
+                "Start-Job { pnpm build |# don't\n Out-Null }; Write-Output 'pnpm dev &'",
+                false,
+            ),
+        ],
+    );
+}
+
+/// Editors whose names mean other programs elsewhere count only on their OS:
+/// Nix's `devenv up` starts services, and Linux `open` (Debian's `openvt`)
+/// runs the command it is given.
+#[test]
+fn os_specific_editors_count_only_on_their_os() {
+    let lab = Lab::new();
+    let p = lab.sub();
+    let p = p.as_path();
+    let editor = |is: bool| if is { Allow } else { Block };
+    let windows = cfg!(windows);
+    let macos = cfg!(target_os = "macos");
+    for tool in ["Bash", "PowerShell"] {
+        check(
+            tool,
+            &[
+                (editor(windows), p, "devenv up &", false),
+                (editor(windows), p, "notepad server.js &", false),
+                (editor(macos), p, "open server.js &", false),
+                (Allow, p, "code server.js &", false),
+            ],
+        );
+    }
+    check(
+        "PowerShell",
+        &[(editor(windows), p, "Start-Process notepad server.js", false)],
     );
 }
 
@@ -404,11 +473,24 @@ fn windows_powershell_text_gets_the_same_verdict_from_both_tools() {
     ];
     check("PowerShell", cases);
     check("Bash", cases);
-    // Git Bash text keeps POSIX quoting: `\"` inside an ordinary string escapes.
+    // Git Bash text keeps POSIX quoting: `\"` inside an ordinary string escapes,
+    // and PowerShell-looking text inside quotes does not make a call PowerShell.
     check(
         "Bash",
         &[
             (Allow, p, "echo \"say \\\"pnpm dev &\\\" later\"", false),
+            (
+                Allow,
+                p,
+                "git commit -m \"Fix Get-Started: say \\\"pnpm dev &\\\" later\"",
+                false,
+            ),
+            (
+                Allow,
+                p,
+                "awk '{ n++; $2 = \"x\"; print }' f; echo \"say \\\"pnpm dev &\\\" later\"",
+                false,
+            ),
             (
                 Block,
                 o,

@@ -79,8 +79,57 @@ jobs:
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12 "$RUNNER_TEMP"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - run: actionlint
-      - run: shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh e2e/ssh/run.sh
+      - run: shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh packaging/scoop/render.sh packaging/winget/render.sh e2e/ssh/run.sh
+      # Runs package.ps1 under the runner's pwsh for the Windows archives.
       - run: sh packaging/scripts/check.sh
+  # install.ps1 and package.ps1 on Windows: lint, then an install from a local release
+  # of freshly built binaries, including a reinstall while a daemon runs from them.
+  packaging-windows:
+    runs-on: windows-latest
+    # Windows compiles kache from git on a cold cache (see the kache action).
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $findings = 'install.ps1', 'packaging/scripts/package.ps1', 'packaging/scripts/check.ps1' |
+            ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Settings packaging/PSScriptAnalyzerSettings.psd1 }
+          $findings | Format-Table -AutoSize -Wrap | Out-String -Width 200
+          if ($findings) { throw "PSScriptAnalyzer: $(@($findings).Count) findings" }
+      # Fake binaries, in Windows PowerShell 5.1, which `irm | iex` often runs in.
+      - name: Windows PowerShell dry run
+        shell: powershell
+        run: ./packaging/scripts/check.ps1
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      # The same debug build of devlanes as the Windows e2e job, so it only reads that store.
+      - uses: ./.github/actions/kache
+        with:
+          store: e2e
+          save: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key: ${{ secrets.KACHE_S3_ACCESS_KEY }}
+          s3-secret-key: ${{ secrets.KACHE_S3_SECRET_KEY }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-targets: "false"
+      - run: cargo build -p devlanes -p devlanes-logon-launcher -p devlanes-hosts-service --locked
+      - name: Package and install the built binaries
+        shell: pwsh
+        run: ./packaging/scripts/check.ps1 -BinDir target/debug
+        env:
+          # GitHub's Windows runners only run as administrator, which the daemon
+          # refuses outside tests.
+          DEVLANES_ALLOW_ELEVATED: "1"
+      - name: kache stats
+        if: ${{ !cancelled() }}
+        run: |
+          kache stats
+          # Lets the daemon finish its queued uploads before the runner goes away.
+          kache daemon stop
   # On Windows, tests that need a later porting step are ignored.
   e2e:
     strategy:

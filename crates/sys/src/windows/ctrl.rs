@@ -98,9 +98,11 @@ impl Attached {
                 _ => CtrlError::Io(error),
             });
         }
-        // After the attach, not before: AttachConsole drops the handlers this
-        // process registered earlier, and the next event (even its own, sent
-        // from here) would then end it with STATUS_CONTROL_C_EXIT.
+        // After the attach, not before: on Windows 11 build 26300 a handler
+        // registered before AttachConsole no longer ran after it, and the next
+        // event (even one this process sent) ended it with
+        // STATUS_CONTROL_C_EXIT. `anchor_lists_and_signals_a_console` in
+        // devlanes-runner-windows pins this.
         // SAFETY: `ignore` is a valid handler for the life of the process.
         if unsafe { SetConsoleCtrlHandler(Some(ignore), 1) } == 0 {
             let error = io::Error::last_os_error();

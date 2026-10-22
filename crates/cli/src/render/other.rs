@@ -1638,6 +1638,37 @@ fn release_checks(release: &Value) -> Vec<Check> {
             how => format!("devlanes {version} ({build}), installed with {how}"),
         },
     )];
+    // `{removed, in_use}`: executables install.ps1 renamed while they ran.
+    let old = &release["old_copies"];
+    let removed = list(old, "removed");
+    if !removed.is_empty() {
+        checks.push(Check::new(
+            "release",
+            Outcome::Ok,
+            format!(
+                "deleted {} left by an upgrade",
+                plural(removed.len(), "old executable")
+            ),
+        ));
+    }
+    let in_use: Vec<String> = list(old, "in_use")
+        .iter()
+        .filter_map(Value::as_str)
+        .map(clean)
+        .collect();
+    if !in_use.is_empty() {
+        checks.push(
+            Check::new(
+                "release",
+                Outcome::Skip,
+                format!(
+                    "the previous version still runs from {}",
+                    in_use.join(", ")
+                ),
+            )
+            .fix("devlanes daemon restart when convenient (it stops services); doctor deletes the old files afterwards"),
+        );
+    }
     let daemon = text(release, "daemon_version");
     if !daemon.is_empty() && daemon != version {
         checks.push(

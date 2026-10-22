@@ -37,6 +37,29 @@ compile_error!("devlanes supports 64-bit Windows (x64 and arm64) only");
 #[derive(Debug)]
 pub struct Job(OwnedHandle);
 
+/// Why [`Job::spawn_helper`] did not start a helper.
+#[derive(Debug, thiserror::Error)]
+pub enum HelperError {
+    /// The program did not start (missing, not executable, ...); it would fail
+    /// the same way outside a job.
+    #[error("{0}")]
+    Spawn(io::Error),
+    /// The program started but could not join the job or be resumed, and was
+    /// killed. Without the job it may start; a job this process runs in that
+    /// refuses nested jobs is one cause.
+    #[error("the job did not take the process: {0}")]
+    Job(io::Error),
+}
+
+impl From<HelperError> for io::Error {
+    /// The underlying error, for callers that handle both cases alike.
+    fn from(error: HelperError) -> Self {
+        match error {
+            HelperError::Spawn(error) | HelperError::Job(error) => error,
+        }
+    }
+}
+
 impl Job {
     /// Creates an unnamed job. With `breakaway`, processes inside may leave it by
     /// asking for `CREATE_BREAKAWAY_FROM_JOB`. Note that Git for Windows' MSYS2
@@ -162,13 +185,14 @@ impl Job {
     /// The child is created suspended, added to the job, then resumed. Creation
     /// flags set on `command` before are replaced; it gets `CREATE_NO_WINDOW`
     /// when this process has no console, as `no_window` sets. When the job
-    /// refuses the child, the child is killed, `command` is left with the flags
-    /// it would have without the job, and the error is returned, so the caller
-    /// can start it the usual way.
+    /// refuses the child ([`HelperError::Job`]), the child is killed and
+    /// `command` is left with the flags it would have without the job, so the
+    /// caller can start it the usual way. [`HelperError::Spawn`] would fail the
+    /// same way without the job.
     pub fn spawn_helper(
         &self,
         command: &mut tokio::process::Command,
-    ) -> io::Result<tokio::process::Child> {
+    ) -> Result<tokio::process::Child, HelperError> {
         use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
         let window = if super::process::has_console() {
             0
@@ -178,7 +202,7 @@ impl Job {
         command.creation_flags(CREATE_SUSPENDED | window);
         let spawned = command.spawn();
         command.creation_flags(window);
-        let mut child = spawned?;
+        let mut child = spawned.map_err(HelperError::Spawn)?;
         let adopted = match child.raw_handle() {
             // SAFETY: the job handle is open, and `handle` is the child's,
             // valid while `child` has not been waited for.
@@ -196,7 +220,7 @@ impl Job {
         if let Err(error) = adopted {
             // Still suspended (or never resumed): it has run no code yet.
             let _ = child.start_kill();
-            return Err(error);
+            return Err(HelperError::Job(error));
         }
         Ok(child)
     }
@@ -321,6 +345,25 @@ mod tests {
             .await
             .map_err(|_| io::Error::other("the helper outlived its job"))??;
         assert_eq!(status.code(), Some(7));
+        assert_eq!(job.0.active_count()?, 0);
+        Ok(())
+    }
+
+    /// A program that cannot start is a spawn failure, not a job failure, and
+    /// the job is left empty.
+    #[tokio::test]
+    async fn missing_helpers_are_spawn_failures() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let job = Ending(Job::create_kill_on_close()?);
+        let mut command = tokio::process::Command::new(dir.path().join("missing.exe"));
+        command.kill_on_drop(true);
+        match job.0.spawn_helper(&mut command) {
+            Err(HelperError::Spawn(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+            }
+            Err(other) => panic!("not a spawn failure: {other}"),
+            Ok(_) => panic!("a missing program started"),
+        }
         assert_eq!(job.0.active_count()?, 0);
         Ok(())
     }

@@ -16,6 +16,17 @@ bin-dir = "devlanes-{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 disabled-strategies = ["quick-install"]
 
+# Windows releases are zip archives. devlanes.exe also needs devlanesw.exe and
+# devlanes-hosts-service.exe beside it, which binstall installs from the same archive
+# through the devlanes-logon-launcher and devlanes-hosts-service crates.
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/devlanes-{ version }-{ target }.zip"
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/devlanes-{ version }-{ target }.zip"
+pkg-fmt = "zip"
+
 [lints]
 workspace = true
 

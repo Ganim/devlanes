@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, Write as _};
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::mode::{mode_of, persist_with_mode};
-use crate::names::{stored_elsewhere, unusable_name};
+use crate::names::{fold_case, stored_elsewhere, unusable_name};
 use crate::{RelPath, SyncError};
 
 /// Prefix of in-flight temp files; manifests skip them so a crash never syncs one.
@@ -311,16 +312,37 @@ impl PartialFile {
 /// since the write would replace that other file.
 fn refuse_other_entry(dest: &Path) -> io::Result<()> {
     match stored_elsewhere(dest)? {
-        Some(stored) => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "{} reaches the existing {} on this file system; not replaced",
-                dest.display(),
-                stored.to_string_lossy()
-            ),
-        )),
+        Some(stored) => Err(reaches_other(dest, &stored)),
         None => Ok(()),
     }
+}
+
+/// The error for a path that reaches the existing entry `stored` instead.
+fn reaches_other(path: &Path, stored: &OsStr) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "{} reaches the existing {} on this file system; not replaced",
+            path.display(),
+            stored.to_string_lossy()
+        ),
+    )
+}
+
+/// The stored name of `dir`, an existing entry on the way to a file, when
+/// going through it would act on another entry: an 8.3 short name
+/// (`LONGFO~1` reaching `longfolder-name`), or a file in another case that a
+/// folder would replace. A folder in another case passes, because box folders
+/// `Dist/` and `dist/` share one folder on purpose (see [`crate::CaseCollisions`]).
+fn parent_elsewhere(dir: &Path, is_dir: bool) -> io::Result<Option<OsString>> {
+    let Some(stored) = stored_elsewhere(dir)? else {
+        return Ok(None);
+    };
+    let same_folder = is_dir
+        && dir.file_name().is_some_and(|name| {
+            fold_case(&name.to_string_lossy()) == fold_case(&stored.to_string_lossy())
+        });
+    Ok((!same_folder).then_some(stored))
 }
 
 /// Makes `root` a devlanes-owned destination, or explains why it cannot be one.
@@ -493,17 +515,22 @@ fn local_manifest(root: &Path) -> io::Result<Manifest> {
 /// Makes every directory from `root` to `rel`'s parent a real directory.
 ///
 /// A file or symlink in the way is replaced: the source now has a directory there,
-/// and following a symlink could write outside the root.
+/// and following a symlink could write outside the root. An entry reached under
+/// another name ([`parent_elsewhere`]) is refused instead.
 fn prepare_parents(root: &Path, rel: &RelPath) -> io::Result<PathBuf> {
     fs::create_dir_all(root)?;
     let mut dir = root.to_path_buf();
     for name in rel.parent_names() {
         dir.push(name);
         match fs::symlink_metadata(&dir) {
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => {
-                fs::remove_file(&dir)?;
-                fs::create_dir(&dir)?;
+            Ok(meta) => {
+                if let Some(stored) = parent_elsewhere(&dir, meta.is_dir())? {
+                    return Err(reaches_other(&dir, &stored));
+                }
+                if !meta.is_dir() {
+                    fs::remove_file(&dir)?;
+                    fs::create_dir(&dir)?;
+                }
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&dir)?,
             Err(error) => return Err(error),
@@ -543,6 +570,10 @@ fn remove_local(root: &Path, rel: &RelPath) -> io::Result<()> {
         match fs::symlink_metadata(&dir) {
             Ok(meta) if meta.is_dir() => parents.push(dir.clone()),
             _ => return Ok(()),
+        }
+        // A short name reaches another folder; the file is not in this one.
+        if parent_elsewhere(&dir, true)?.is_some() {
+            return Ok(());
         }
     }
     let dest = rel.to_path(root);
@@ -731,6 +762,73 @@ mod tests {
         assert_eq!(
             target.files().await.expect("files"),
             vec![rel("readme-long.md")]
+        );
+    }
+
+    /// A box path whose folder is another entry's 8.3 short name never goes
+    /// through that entry: a file is not turned into a folder, a folder is not
+    /// written into, and nothing is removed from it. A folder reached in
+    /// another case is the same folder and is used. Skipped when the volume
+    /// makes no short names.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn short_name_folders_never_reach_other_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("out");
+        let target = LocalTarget::owned(&root).await.expect("claim");
+        for (path, contents) in [
+            ("readme-long.md", b"long".as_slice()),
+            ("longfolder-name/keep.js", b"keep".as_slice()),
+        ] {
+            target
+                .write_file(&rel(path), Bytes::copy_from_slice(contents), 0o644)
+                .await
+                .expect("write");
+        }
+        if !root.join("README~1.MD").exists() || !root.join("LONGFO~1").exists() {
+            eprintln!("8.3 names are off on this volume; nothing to check");
+            return;
+        }
+        let begun = target.begin_file(&rel("README~1.MD/x.js"), 0o644).await;
+        assert!(begun.is_err(), "the file became a folder");
+        let written = target
+            .write_file(&rel("README~1.MD/x.js"), Bytes::from_static(b"x"), 0o644)
+            .await;
+        assert!(written.is_err(), "{written:?}");
+        let written = target
+            .write_file(&rel("LONGFO~1/x.js"), Bytes::from_static(b"x"), 0o644)
+            .await;
+        assert!(written.is_err(), "{written:?}");
+        assert!(
+            target
+                .begin_file(&rel("LONGFO~1/y.js"), 0o644)
+                .await
+                .is_err(),
+            "a temp file went into the other folder"
+        );
+        target
+            .remove(&rel("LONGFO~1/keep.js"))
+            .await
+            .expect("removing is a no-op");
+        target
+            .write_file(
+                &rel("LongFolder-Name/case.js"),
+                Bytes::from_static(b"c"),
+                0o644,
+            )
+            .await
+            .expect("a folder in another case is the same folder");
+        assert_eq!(
+            fs::read(root.join("readme-long.md")).expect("read"),
+            b"long"
+        );
+        assert_eq!(
+            target.files().await.expect("files"),
+            vec![
+                rel("longfolder-name/case.js"),
+                rel("longfolder-name/keep.js"),
+                rel("readme-long.md")
+            ]
         );
     }
 

@@ -1,5 +1,6 @@
 #!/bin/sh
-# Writes SHA256SUMS and release-manifest.json for the archives in DIST_DIR.
+# Writes SHA256SUMS (every archive, .zip included) and release-manifest.json (the
+# .tar.gz archives) for the archives in DIST_DIR.
 # The manifest has the shape ReleaseManifest::from_json in crates/transport-ssh
 # accepts: HTTPS URLs, lowercase hex SHA-256, tar_gz members without `..`.
 set -eu
@@ -49,6 +50,17 @@ for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu
 		"$os" "$arch" "$base_url" "$name" "$sum" "$name")
 	entries=${entries:+$entries,
 }$entry
+done
+
+# The Windows archives are listed in SHA256SUMS only: SSH bootstrap installs onto
+# Linux and macOS boxes, so the manifest names the .tar.gz archives alone.
+for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+	name=devlanes-$version-$target.zip
+	if [ ! -f "$dist/$name" ]; then
+		echo "missing $dist/$name" >&2
+		exit 1
+	fi
+	printf '%s  %s\n' "$(sha256 "$dist/$name")" "$name" >>"$sums"
 done
 
 printf '{\n  "version": "%s",\n  "artifacts": [\n%s\n  ]\n}\n' "$version" "$entries" >"$manifest"

@@ -803,6 +803,11 @@ pub mod remote {
     /// `{host, code, ...}` for mirroring problems such as a skipped lane or a busy port.
     pub const WARNING_EVENT: &str = "remote.warning";
 
+    /// Variables devlanes' ssh sets for one askpass run. Neither an
+    /// auto-spawned daemon nor a unit takes them from a client's environment:
+    /// a `devlanes` started under them would act as that run's askpass.
+    pub const ASKPASS_ENV: &[&str] = &["DEVLANES_ASKPASS", "DEVLANES_ASKPASS_SOCKET"];
+
     /// Largest synced file. The box skips (and reports) bigger ones before reading
     /// them, and the client refuses bigger file headers.
     pub const MAX_SYNC_FILE: u64 = 256 * 1024 * 1024;

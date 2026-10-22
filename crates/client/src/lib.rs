@@ -609,8 +609,9 @@ const DAEMON_ENV_PREFIXES: &[&str] = &["LC_", "XDG_", "DOCKER_", "DEVLANES_"];
 
 /// devlanes variables that match a prefix above but never reach an auto-spawned
 /// daemon. The askpass pair belongs to one ssh run: a daemon spawned from a
-/// shell that has them would hand them to every unit.
-const DAEMON_ENV_DENIED: &[&str] = &["DEVLANES_ASKPASS", "DEVLANES_ASKPASS_SOCKET"];
+/// shell that has them would hand them to every unit. The daemon drops them
+/// from request environments too.
+const DAEMON_ENV_DENIED: &[&str] = devlanes_proto::remote::ASKPASS_ENV;
 
 /// Nothing extra on Unix.
 #[cfg(unix)]

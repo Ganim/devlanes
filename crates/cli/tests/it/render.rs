@@ -1376,6 +1376,25 @@ fn doctor_shows_release_facts_and_the_upgrade_command() {
         "{text}"
     );
 
+    let mut upgraded = release(false, "0.2.1");
+    upgraded["release"]["old_copies"] = json!({
+        "removed": [r"C:\Users\u\AppData\Local\Programs\devlanes\devlanesw.exe.old-20261022120000"],
+        "in_use": [r"C:\Users\u\AppData\Local\Programs\devlanes\devlanes.exe.old-20261022120000"],
+    });
+    let text = render_text(Method::Doctor, &upgraded);
+    assert!(
+        text.contains("deleted 1 old executable left by an upgrade"),
+        "{text}"
+    );
+    assert!(
+        text.contains(r"the previous version still runs from C:\Users\u\AppData\Local\Programs\devlanes\devlanes.exe.old-20261022120000"),
+        "{text}"
+    );
+    assert!(
+        text.contains("doctor deletes the old files afterwards"),
+        "{text}"
+    );
+
     let off = json!({"release": {"version": "0.2.1", "build": "local", "install_method": "install.sh",
         "check": "off", "check_off_reason": "config"}});
     let text = render_text(Method::Doctor, &off);

@@ -28,6 +28,13 @@ pub trait Transport: Send + Sync {
     /// Return [`TransportError::Permanent`] when retrying cannot help (missing
     /// binary, rejected credentials) so reconnect loops stop instead of spinning.
     async fn connect(&self) -> Result<BoxDuplex, TransportError>;
+
+    /// Problems that do not stop connecting but should be shown with the
+    /// connection, such as a pipe running without the usual cleanup. Empty by
+    /// default.
+    fn warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Failure to produce a pipe, classified for reconnect decisions.

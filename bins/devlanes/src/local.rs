@@ -209,9 +209,20 @@ pub(crate) fn mkcert_selected(paths: &Paths) -> bool {
 }
 
 /// Configured trust targets, defaulting to [`default_targets`]; mobile targets
-/// are refused.
-fn targets(paths: &Paths) -> Vec<TrustTarget> {
-    let config = devlanes_config::load_user(paths.home.join("config.yaml")).unwrap_or_default();
+/// are refused. Reads the config and detects WSL off the async threads; the
+/// detection is cached, so [`store`] reuses it without blocking.
+async fn targets(paths: &Paths) -> Vec<TrustTarget> {
+    let config = paths.home.join("config.yaml");
+    tokio::task::spawn_blocking(move || configured_targets(&config))
+        .await
+        .unwrap_or_else(|_| default_targets(false))
+}
+
+/// [`targets`], blocking.
+fn configured_targets(config: &Path) -> Vec<TrustTarget> {
+    // Detected first in every case, so the cache is warm for `store`.
+    let windows_reachable = windows_store_reachable();
+    let config = devlanes_config::load_user(config).unwrap_or_default();
     let configured: Vec<TrustTarget> = config
         .tls
         .trust
@@ -224,7 +235,7 @@ fn targets(paths: &Paths) -> Vec<TrustTarget> {
         })
         .collect();
     if configured.is_empty() {
-        default_targets(windows_store_reachable())
+        default_targets(windows_reachable)
     } else {
         configured
     }
@@ -355,7 +366,7 @@ pub(crate) async fn trust_report() -> Value {
     };
     let mut done = BTreeSet::new();
     let mut report = Vec::new();
-    for target in targets(&paths) {
+    for target in targets(&paths).await {
         let status = async {
             target.ensure_supported()?;
             let store: Arc<dyn TrustStore> = Arc::from(store(target, !mkcert, false)?);
@@ -493,6 +504,7 @@ async fn trust(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
         return Ok(0);
     };
     let stores = targets(&paths)
+        .await
         .into_iter()
         .map(|target| {
             let store = target

@@ -11,12 +11,17 @@ use serde::{Deserialize, Serialize};
 
 /// The repository that `cargo binstall --git` and `cargo install --git` build from.
 const REPOSITORY: &str = "https://github.com/devlanes-run/devlanes";
-/// `install.sh` of the latest stable release, served by the website.
-const INSTALL_SCRIPT: &str = "https://devlanes.run/install.sh";
 /// The notice log under `$DEVLANES_HOME`.
 const NOTICES_FILE: &str = "notices.json";
 /// A notice repeats at most once per day.
 const REPEAT_MS: u64 = 24 * 3600 * 1000;
+/// The Windows executables a release ships side by side. `install.ps1` renames
+/// one that is running to `<name>.old-<timestamp>`; see [`remove_old_copies`].
+const SHIPPED_EXECUTABLES: [&str; 3] = [
+    "devlanes.exe",
+    "devlanesw.exe",
+    "devlanes-hosts-service.exe",
+];
 
 /// How this devlanes binary was installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,11 +31,16 @@ pub enum InstallMethod {
     Pnpm,
     Bun,
     Yarn,
+    /// Scoop on Windows (`scoop\apps\devlanes`).
+    Scoop,
+    /// A winget portable package on Windows (`WinGet\Packages`).
+    Winget,
     CargoBinstall,
     CargoInstall,
     /// A `target/` directory of a checkout.
     Source,
-    /// `install.sh`, or a copy placed by hand, in this directory.
+    /// `install.sh` (`install.ps1` on Windows), or a copy placed by hand, in
+    /// this directory.
     Script(PathBuf),
 }
 
@@ -39,16 +49,27 @@ impl InstallMethod {
     /// `~/.cargo`; `binstall_lists_devlanes` says whether cargo binstall's
     /// `crates-v1.json` records devlanes.
     pub fn detect(exe: &Path, cargo_home: Option<&Path>, binstall_lists_devlanes: bool) -> Self {
-        let text = exe.to_string_lossy();
-        if text.contains("/Cellar/devlanes/") {
+        let text = os::normalise(&exe.to_string_lossy());
+        let has = |needle: &str| text.contains(&os::normalise(needle));
+        if has("/Cellar/devlanes/") {
             return Self::Homebrew;
         }
-        if text.contains("/node_modules/@devlanes/") || text.contains("/node_modules/devlanes/") {
-            return if text.contains("/.bun/install/global/") {
+        // Scoop's root moves with $SCOOP but keeps this layout; `current` is a
+        // junction that canonicalisation resolves to the version directory.
+        if has("/scoop/apps/devlanes/") {
+            return Self::Scoop;
+        }
+        // winget runs portables through a symlink in WinGet\Links, which
+        // canonicalisation resolves into WinGet\Packages\<id>_<source>.
+        if has("/WinGet/Packages/devlanes-run.devlanes_") || has("/WinGet/Links/") {
+            return Self::Winget;
+        }
+        if has("/node_modules/@devlanes/") || has("/node_modules/devlanes/") {
+            return if has("/.bun/install/global/") {
                 Self::Bun
-            } else if text.contains("/.pnpm/") || text.contains("/pnpm/global/") {
+            } else if has("/.pnpm/") || has("/pnpm/global/") {
                 Self::Pnpm
-            } else if text.contains("/yarn/global/") {
+            } else if has("/yarn/global/") || has("/Yarn/Data/global/") {
                 Self::Yarn
             } else {
                 Self::Npm
@@ -62,7 +83,7 @@ impl InstallMethod {
                 Self::CargoInstall
             };
         }
-        if text.contains("/target/debug/") || text.contains("/target/release/") {
+        if has("/target/debug/") || has("/target/release/") {
             return Self::Source;
         }
         Self::Script(dir)
@@ -94,25 +115,28 @@ impl InstallMethod {
             Self::Pnpm => "pnpm",
             Self::Bun => "Bun",
             Self::Yarn => "Yarn",
+            Self::Scoop => "Scoop",
+            Self::Winget => "winget",
             Self::CargoBinstall => "cargo binstall",
             Self::CargoInstall => "cargo install",
             Self::Source => "a source checkout",
-            Self::Script(_) => "install.sh",
+            Self::Script(_) => os::SCRIPT,
         }
     }
 
     /// How doctor names the install: [`Self::label`], except that a binary outside
-    /// install.sh's default directory (`~/.local/bin` under `home`) is named by its
-    /// directory, since nothing says install.sh put it there.
+    /// the install script's default directory (`~/.local/bin` under `home`, or
+    /// `AppData\Local\Programs\devlanes` on Windows) is named by its directory,
+    /// since nothing says the script put it there.
     pub fn describe(&self, home: Option<&Path>) -> String {
         match self {
             Self::Script(dir) => {
-                let default = home.map(|home| home.join(".local/bin"));
+                let default = home.map(os::default_script_dir);
                 let default = default
                     .as_deref()
                     .map(|path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_owned()));
                 if default.as_deref() == Some(dir.as_path()) {
-                    "install.sh".into()
+                    os::SCRIPT.into()
                 } else {
                     format!("a standalone binary in {}", dir.display())
                 }
@@ -129,15 +153,27 @@ impl InstallMethod {
             Self::Pnpm => "pnpm add -g devlanes@latest".into(),
             Self::Bun => "bun add -g devlanes@latest".into(),
             Self::Yarn => "yarn global add devlanes@latest".into(),
-            Self::CargoBinstall => format!("cargo binstall --git {REPOSITORY} devlanes"),
+            Self::Scoop => "scoop update devlanes".into(),
+            Self::Winget => "winget upgrade --id devlanes-run.devlanes --exact".into(),
+            Self::CargoBinstall => os::cargo_binstall(),
             Self::CargoInstall => format!(
-                "cargo install --locked --git {REPOSITORY} --tag v{version} devlanes devlanes-hosts-helper"
+                "cargo install --locked --git {REPOSITORY} --tag v{version} {}",
+                os::CARGO_PACKAGES
             ),
             Self::Source => format!("git pull, then cargo build --release (v{version})"),
-            Self::Script(dir) => format!(
-                "curl -fsSL {INSTALL_SCRIPT} | DEVLANES_INSTALL_DIR={} sh",
-                shell_quote(&dir.to_string_lossy())
-            ),
+            Self::Script(dir) => os::script_upgrade(dir),
+        }
+    }
+
+    /// What to run to upgrade to `version`: [`Self::upgrade_command`], after
+    /// `devlanes daemon stop` when that command cannot replace the executable
+    /// the daemon runs from (Windows locks a running executable).
+    pub fn upgrade_advice(&self, version: &str) -> String {
+        let command = self.upgrade_command(version);
+        if os::replaces_running_executable(self) {
+            command
+        } else {
+            format!("devlanes daemon stop (it stops services), then {command}")
         }
     }
 }
@@ -151,16 +187,157 @@ pub fn binstall_lists_devlanes(text: &str) -> bool {
         .any(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some("devlanes"))
 }
 
-/// Quotes `text` for a POSIX shell when it needs it.
-fn shell_quote(text: &str) -> String {
-    let plain = !text.is_empty()
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"/._-+~".contains(&b));
-    if plain {
-        text.into()
-    } else {
-        format!("'{}'", text.replace('\'', "'\\''"))
+/// Copies of the shipped executables an upgrade left in a directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OldCopies {
+    /// Deleted now.
+    pub removed: Vec<PathBuf>,
+    /// Still held by a running process (usually the daemon), so kept.
+    pub in_use: Vec<PathBuf>,
+}
+
+/// Deletes the `devlanes.exe.old-*` (and `devlanesw.exe`,
+/// `devlanes-hosts-service.exe`) files `install.ps1` leaves next to an
+/// executable that was running during an upgrade. Windows refuses to delete
+/// one that still runs; it is reported in `in_use` and tried again next time.
+/// Blocking filesystem work.
+pub fn remove_old_copies(dir: &Path) -> OldCopies {
+    let mut copies = OldCopies::default();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return copies;
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            SHIPPED_EXECUTABLES.iter().any(|exe| {
+                name.strip_prefix(exe)
+                    .and_then(|rest| rest.strip_prefix(".old-"))
+                    .is_some_and(|stamp| !stamp.is_empty())
+            })
+        })
+        .map(|entry| entry.path())
+        .collect();
+    paths.sort();
+    for path in paths {
+        match std::fs::remove_file(&path) {
+            Ok(()) => copies.removed.push(path),
+            Err(_) => copies.in_use.push(path),
+        }
+    }
+    copies
+}
+
+/// macOS and Linux: `install.sh`, POSIX shell quoting, and executables that can
+/// be replaced while they run.
+#[cfg(not(windows))]
+mod os {
+    use std::path::{Path, PathBuf};
+
+    use super::{InstallMethod, REPOSITORY};
+
+    /// `install.sh` of the latest stable release, served by the website.
+    const INSTALL_SCRIPT: &str = "https://devlanes.run/install.sh";
+    /// The install script's name in doctor.
+    pub(super) const SCRIPT: &str = "install.sh";
+    /// The packages `cargo install` builds.
+    pub(super) const CARGO_PACKAGES: &str = "devlanes devlanes-hosts-helper";
+
+    /// Paths are matched as they are.
+    pub(super) fn normalise(path: &str) -> String {
+        path.to_owned()
+    }
+
+    /// `install.sh`'s default directory.
+    pub(super) fn default_script_dir(home: &Path) -> PathBuf {
+        home.join(".local/bin")
+    }
+
+    /// `install.sh` into `dir`.
+    pub(super) fn script_upgrade(dir: &Path) -> String {
+        format!(
+            "curl -fsSL {INSTALL_SCRIPT} | DEVLANES_INSTALL_DIR={} sh",
+            shell_quote(&dir.to_string_lossy())
+        )
+    }
+
+    /// cargo binstall installs devlanes and nothing else is needed.
+    pub(super) fn cargo_binstall() -> String {
+        format!("cargo binstall --git {REPOSITORY} devlanes")
+    }
+
+    /// Every installer replaces a running binary by renaming over it.
+    pub(super) fn replaces_running_executable(_method: &InstallMethod) -> bool {
+        true
+    }
+
+    /// Quotes `text` for a POSIX shell when it needs it.
+    fn shell_quote(text: &str) -> String {
+        let plain = !text.is_empty()
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/._-+~".contains(&b));
+        if plain {
+            text.into()
+        } else {
+            format!("'{}'", text.replace('\'', "'\\''"))
+        }
+    }
+}
+
+/// Windows: `install.ps1`, PowerShell quoting, case-insensitive `\` paths, and
+/// three executables that must sit side by side.
+#[cfg(windows)]
+mod os {
+    use std::path::{Path, PathBuf};
+
+    use super::{InstallMethod, REPOSITORY};
+
+    /// `install.ps1` of the latest release; every release attaches it.
+    const INSTALL_SCRIPT: &str =
+        "https://github.com/devlanes-run/devlanes/releases/latest/download/install.ps1";
+    /// The install script's name in doctor.
+    pub(super) const SCRIPT: &str = "install.ps1";
+    /// The packages `cargo install` builds: `devlanes.exe` finds the logon
+    /// launcher and the hosts service next to itself.
+    pub(super) const CARGO_PACKAGES: &str =
+        "devlanes devlanes-logon-launcher devlanes-hosts-service";
+
+    /// `\` as `/` and lower case, since Windows paths ignore case and the
+    /// patterns use `/`.
+    pub(super) fn normalise(path: &str) -> String {
+        path.replace('\\', "/").to_lowercase()
+    }
+
+    /// `install.ps1`'s default directory, `%LOCALAPPDATA%\Programs\devlanes`
+    /// for the usual `%LOCALAPPDATA%`.
+    pub(super) fn default_script_dir(home: &Path) -> PathBuf {
+        home.join(r"AppData\Local\Programs\devlanes")
+    }
+
+    /// `install.ps1` into `dir`, as one PowerShell line.
+    pub(super) fn script_upgrade(dir: &Path) -> String {
+        format!(
+            "$env:DEVLANES_INSTALL_DIR='{}'; irm {INSTALL_SCRIPT} | iex",
+            dir.to_string_lossy().replace('\'', "''")
+        )
+    }
+
+    /// binstall takes one crate per `--git` run, and each executable is a
+    /// crate of its own.
+    pub(super) fn cargo_binstall() -> String {
+        format!(
+            "cargo binstall --git {REPOSITORY} devlanes, then the same for devlanes-logon-launcher and devlanes-hosts-service"
+        )
+    }
+
+    /// Windows refuses to overwrite or delete a running executable. Only
+    /// `install.ps1` renames it out of the way; Scoop, winget, npm, cargo and
+    /// a rebuild fail while the daemon runs from the installed file.
+    pub(super) fn replaces_running_executable(method: &InstallMethod) -> bool {
+        matches!(method, InstallMethod::Script(_))
     }
 }
 
@@ -332,13 +509,82 @@ mod tests {
         );
     }
 
-    /// Only install.sh's default directory is named install.sh.
+    /// Windows paths as `std::env::current_exe` and canonicalisation give them.
+    #[cfg(windows)]
+    #[test]
+    fn detects_windows_install_methods() {
+        let cargo = Path::new(r"C:\Users\a\.cargo");
+        let detect = |path: &str| InstallMethod::detect(Path::new(path), Some(cargo), false);
+        assert_eq!(
+            detect(r"C:\Users\a\scoop\apps\devlanes\0.3.0\devlanes.exe"),
+            InstallMethod::Scoop
+        );
+        assert_eq!(
+            detect(r"D:\Tools\Scoop\apps\devlanes\current\devlanes.exe"),
+            InstallMethod::Scoop
+        );
+        assert_eq!(
+            detect(
+                r"C:\Users\a\AppData\Local\Microsoft\WinGet\Packages\devlanes-run.devlanes_Microsoft.Winget.Source_8wekyb3d8bbwe\devlanes-0.3.0-x86_64-pc-windows-msvc\devlanes.exe"
+            ),
+            InstallMethod::Winget
+        );
+        assert_eq!(
+            detect(r"C:\Users\a\AppData\Local\Microsoft\WinGet\Links\devlanes.exe"),
+            InstallMethod::Winget
+        );
+        assert_eq!(
+            detect(
+                r"C:\Users\a\AppData\Roaming\npm\node_modules\devlanes\node_modules\@devlanes\win32-x64\bin\devlanes.exe"
+            ),
+            InstallMethod::Npm
+        );
+        assert_eq!(
+            detect(
+                r"C:\Users\a\AppData\Local\pnpm\global\5\.pnpm\@devlanes+win32-x64@0.3.0\node_modules\@devlanes\win32-x64\bin\devlanes.exe"
+            ),
+            InstallMethod::Pnpm
+        );
+        assert_eq!(
+            detect(
+                r"C:\Users\a\.bun\install\global\node_modules\@devlanes\win32-arm64\bin\devlanes.exe"
+            ),
+            InstallMethod::Bun
+        );
+        assert_eq!(
+            detect(
+                r"C:\Users\a\AppData\Local\Yarn\Data\global\node_modules\@devlanes\win32-x64\bin\devlanes.exe"
+            ),
+            InstallMethod::Yarn
+        );
+        assert_eq!(
+            detect(r"C:\Users\a\.cargo\bin\devlanes.exe"),
+            InstallMethod::CargoInstall
+        );
+        assert_eq!(
+            detect(r"D:\dev\devlanes\Target\Release\devlanes.exe"),
+            InstallMethod::Source
+        );
+        assert_eq!(
+            detect(r"C:\Users\a\AppData\Local\Programs\devlanes\devlanes.exe"),
+            InstallMethod::Script(PathBuf::from(r"C:\Users\a\AppData\Local\Programs\devlanes"))
+        );
+    }
+
+    /// Only the install script's default directory is named after the script.
     #[test]
     fn standalone_binaries_are_named_by_directory() {
         let home = Path::new("/nonexistent-home");
+        #[cfg(not(windows))]
         assert_eq!(
             InstallMethod::Script(home.join(".local/bin")).describe(Some(home)),
             "install.sh"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            InstallMethod::Script(home.join(r"AppData\Local\Programs\devlanes"))
+                .describe(Some(home)),
+            "install.ps1"
         );
         assert_eq!(
             InstallMethod::Script(PathBuf::from("/opt/tools")).describe(Some(home)),
@@ -358,6 +604,45 @@ mod tests {
             "pnpm add -g devlanes@latest"
         );
         assert_eq!(
+            InstallMethod::Scoop.upgrade_command("0.3.0"),
+            "scoop update devlanes"
+        );
+        assert_eq!(
+            InstallMethod::Winget.upgrade_command("0.3.0"),
+            "winget upgrade --id devlanes-run.devlanes --exact"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_upgrades_stop_the_daemon_unless_install_ps1_runs() {
+        assert_eq!(
+            InstallMethod::CargoInstall.upgrade_command("0.3.0"),
+            "cargo install --locked --git https://github.com/devlanes-run/devlanes --tag v0.3.0 devlanes devlanes-logon-launcher devlanes-hosts-service"
+        );
+        let script = InstallMethod::Script(PathBuf::from(r"C:\Users\o'neil\Tools"));
+        assert_eq!(
+            script.upgrade_advice("0.3.0"),
+            "$env:DEVLANES_INSTALL_DIR='C:\\Users\\o''neil\\Tools'; irm https://github.com/devlanes-run/devlanes/releases/latest/download/install.ps1 | iex"
+        );
+        assert_eq!(
+            InstallMethod::Scoop.upgrade_advice("0.3.0"),
+            "devlanes daemon stop (it stops services), then scoop update devlanes"
+        );
+        assert_eq!(
+            InstallMethod::Npm.upgrade_advice("0.3.0"),
+            "devlanes daemon stop (it stops services), then npm install -g devlanes@latest"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_upgrade_commands() {
+        assert_eq!(
+            InstallMethod::Npm.upgrade_advice("0.3.0"),
+            "npm install -g devlanes@latest"
+        );
+        assert_eq!(
             InstallMethod::CargoInstall.upgrade_command("0.3.0"),
             "cargo install --locked --git https://github.com/devlanes-run/devlanes --tag v0.3.0 devlanes devlanes-hosts-helper"
         );
@@ -369,6 +654,73 @@ mod tests {
             InstallMethod::Script(PathBuf::from("/Users/a/My Tools")).upgrade_command("0.3.0"),
             "curl -fsSL https://devlanes.run/install.sh | DEVLANES_INSTALL_DIR='/Users/a/My Tools' sh"
         );
+    }
+
+    #[test]
+    fn old_copies_are_removed_and_other_files_kept() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        for name in [
+            "devlanes.exe",
+            "devlanes.exe.old-20261022120000",
+            "devlanesw.exe.old-20261022120000-1",
+            "devlanes-hosts-service.exe.old-20261022120000",
+            "devlanes.exe.old-",
+            "other.exe.old-20261022120000",
+            "LICENSE",
+        ] {
+            std::fs::write(dir.path().join(name), "x")?;
+        }
+        let copies = remove_old_copies(dir.path());
+        assert_eq!(
+            copies.removed,
+            [
+                dir.path()
+                    .join("devlanes-hosts-service.exe.old-20261022120000"),
+                dir.path().join("devlanes.exe.old-20261022120000"),
+                dir.path().join("devlanesw.exe.old-20261022120000-1"),
+            ]
+        );
+        assert!(copies.in_use.is_empty());
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<_, _>>()?;
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "LICENSE",
+                "devlanes.exe",
+                "devlanes.exe.old-",
+                "other.exe.old-20261022120000"
+            ]
+        );
+        assert_eq!(
+            remove_old_copies(&dir.path().join("missing")),
+            OldCopies::default()
+        );
+        Ok(())
+    }
+
+    /// A copy held open without delete sharing, as a running image is, stays
+    /// and is reported.
+    #[cfg(windows)]
+    #[test]
+    fn old_copies_in_use_are_kept() -> std::io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir()?;
+        let old = dir.path().join("devlanes.exe.old-20261022120000");
+        std::fs::write(&old, "x")?;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1)
+            .open(&old)?;
+        let copies = remove_old_copies(dir.path());
+        assert_eq!(copies.in_use, std::slice::from_ref(&old));
+        assert!(old.exists());
+        drop(held);
+        assert_eq!(remove_old_copies(dir.path()).removed, [old]);
+        Ok(())
     }
 
     #[test]

@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use devlanes_sys::NoWindow as _;
-use devlanes_sys::windows::job::Job;
+use devlanes_sys::windows::job::{HelperError, Job};
 use devlanes_transport::{BoxDuplex, Transport, TransportError};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
@@ -63,6 +63,8 @@ pub struct SshTransport {
     /// Set after the first tunnel opened: from then on a failing DNS lookup is a
     /// network blip (sleep, Wi-Fi change), not a misspelt host.
     connected: AtomicBool,
+    /// Why the last ssh run started outside a job, if it did.
+    outside_job: Mutex<Option<String>>,
 }
 
 /// What one session run found.
@@ -82,6 +84,7 @@ impl SshTransport {
             probe: Mutex::new(None),
             sessions: Mutex::new(CancellationToken::new()),
             connected: AtomicBool::new(false),
+            outside_job: Mutex::new(None),
         }
     }
 
@@ -183,7 +186,7 @@ impl SshTransport {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let (mut child, job) = spawn_in_job(&mut command, &program)?;
+        let (mut child, job) = self.spawn_in_job(&mut command, &program)?;
         let missing = || SshError::Io(io::Error::other("ssh stdio was not piped"));
         let stdin = child.stdin.take().ok_or_else(missing)?;
         let stdout = child.stdout.take().ok_or_else(missing)?;
@@ -198,8 +201,10 @@ impl SshTransport {
         let lines = match header {
             Err(_) => return Err(SshError::AuthTimeout(self.destination.clone())),
             Ok(Err(error)) => return Err(SshError::Io(error)),
-            Ok(Ok(Some(lines))) => lines,
-            Ok(Ok(None)) => return Err(self.ended_early(child, stderr).await),
+            Ok(Ok(Header::Ready(lines))) => lines,
+            Ok(Ok(Header::Ended { printed })) => {
+                return Err(self.ended_early(child, stderr, printed).await);
+            }
         };
         let probe = bootstrap::parse_session_header(&lines, &start)
             .ok_or_else(|| SshError::Probe(lines.join("\n")))?;
@@ -241,12 +246,20 @@ impl SshTransport {
     }
 
     /// The error for a session whose output ended before the sentinel. Exit
-    /// status 255 is ssh's own failure, classified from its stderr. Any other
-    /// end came from the box: ssh's stderr also carries the box's, so a shell
-    /// startup file printing "Permission denied" or a missing `sh` (exit 127)
-    /// must not read as rejected credentials, which would stop reconnecting for
-    /// good; those are temporary errors carrying the stderr tail.
-    async fn ended_early(&self, mut child: Child, stderr: JoinHandle<Vec<u8>>) -> SshError {
+    /// status 255 is ssh's own failure, classified from its stderr, unless the
+    /// box `printed` something: ssh had authenticated then, and the 255 came
+    /// from the box (its command exiting 255 or dying by a signal). Any other
+    /// end came from the box too. ssh's stderr also carries the box's, so a
+    /// shell startup file printing "Permission denied" or a missing `sh` (exit
+    /// 127) must not read as rejected credentials, which would stop
+    /// reconnecting for good; those are temporary errors carrying the stderr
+    /// tail.
+    async fn ended_early(
+        &self,
+        mut child: Child,
+        stderr: JoinHandle<Vec<u8>>,
+        printed: bool,
+    ) -> SshError {
         let status = tokio::time::timeout(EXIT_GRACE, child.wait()).await;
         let log = match tokio::time::timeout(EXIT_GRACE, stderr).await {
             Ok(Ok(log)) => log,
@@ -260,7 +273,7 @@ impl SshTransport {
                     log.trim()
                 ));
             }
-            Ok(Ok(status)) if status.code() == Some(SSH_FAILED) => {
+            Ok(Ok(status)) if status.code() == Some(SSH_FAILED) && !printed => {
                 return master_error(&self.destination, status, &log, self.first());
             }
             Ok(Ok(status)) => status.to_string(),
@@ -284,7 +297,7 @@ impl SshTransport {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let (child, job) = spawn_in_job(&mut command, &program)?;
+        let (child, job) = self.spawn_in_job(&mut command, &program)?;
         let output = tokio::time::timeout(limit, child.wait_with_output()).await;
         drop(askpass);
         // Anything ssh left running (a ProxyCommand) ends here.
@@ -338,9 +351,11 @@ impl SshTransport {
         Ok((command, program, askpass))
     }
 
-    /// ssh's own failure in a finished run, classified from its stderr.
+    /// ssh's own failure in a finished run, classified from its stderr. A run
+    /// in which the box printed something had authenticated, so its 255 is the
+    /// script's.
     fn ssh_failed(&self, output: &Output) -> Option<SshError> {
-        (output.status.code() == Some(SSH_FAILED)).then(|| {
+        (output.status.code() == Some(SSH_FAILED) && output.stdout.is_empty()).then(|| {
             master_error(
                 &self.destination,
                 output.status,
@@ -348,6 +363,42 @@ impl SshTransport {
                 self.first(),
             )
         })
+    }
+
+    /// Starts `command` inside a new job that ends the whole tree when the job
+    /// is dropped or this process dies. When no job can be made or the job
+    /// refuses ssh, ssh starts the usual way without that cover, and
+    /// [`Transport::warnings`] says so until a later run gets a job. A program
+    /// that does not start fails here, as it would without the job.
+    fn spawn_in_job(
+        &self,
+        command: &mut Command,
+        program: &Path,
+    ) -> Result<(Child, Option<Job>), SshError> {
+        let refused = match Job::create_kill_on_close() {
+            Ok(job) => match job.spawn_helper(command) {
+                Ok(child) => {
+                    *self
+                        .outside_job
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner) = None;
+                    return Ok((child, Some(job)));
+                }
+                Err(HelperError::Spawn(error)) => return Err(spawn_error(program, error)),
+                Err(HelperError::Job(error)) => error,
+            },
+            Err(error) => error,
+        };
+        let warning = outside_job_warning(&refused);
+        tracing::warn!(destination = %self.destination, "{warning}");
+        let child = command
+            .spawn()
+            .map_err(|error| spawn_error(program, error))?;
+        *self
+            .outside_job
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(warning);
+        Ok((child, None))
     }
 
     /// Whether no tunnel has opened yet.
@@ -384,6 +435,16 @@ impl Transport for SshTransport {
     async fn connect(&self) -> Result<BoxDuplex, TransportError> {
         Ok(Box::new(self.open().await?))
     }
+
+    /// Whether the last ssh run started outside its job.
+    fn warnings(&self) -> Vec<String> {
+        self.outside_job
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
 }
 
 /// The remote command for `script`. ssh joins its arguments into one command
@@ -392,29 +453,11 @@ fn remote_shell(script: &str) -> String {
     format!("sh -c {}", sh_quote(script))
 }
 
-/// Starts `command` inside a new job that ends the whole tree when the job is
-/// dropped or this process dies. When no job can be made or joined, ssh starts
-/// the usual way and the tree is not covered; that is logged.
-fn spawn_in_job(command: &mut Command, program: &Path) -> Result<(Child, Option<Job>), SshError> {
-    match Job::create_kill_on_close() {
-        Ok(job) => match job.spawn_helper(command) {
-            Ok(child) => return Ok((child, Some(job))),
-            // The same failure would follow without the job.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(spawn_error(program, error));
-            }
-            Err(error) => {
-                tracing::warn!(%error, "ssh runs outside a job; a ProxyCommand may outlive it");
-            }
-        },
-        Err(error) => {
-            tracing::warn!(%error, "ssh runs outside a job; a ProxyCommand may outlive it");
-        }
-    }
-    let child = command
-        .spawn()
-        .map_err(|error| spawn_error(program, error))?;
-    Ok((child, None))
+/// The warning shown while ssh runs outside a job, after `error`.
+fn outside_job_warning(error: &dyn std::fmt::Display) -> String {
+    format!(
+        "ssh runs outside a job object ({error}), so a ProxyCommand it starts may outlive the connection"
+    )
 }
 
 /// Resolves a bare `ssh` to the system OpenSSH client (`System32\OpenSSH`,
@@ -458,12 +501,19 @@ fn spawn_error(program: &Path, error: io::Error) -> SshError {
     }
 }
 
-/// Reads lines until `sentinel`, returning the lines before it, or `None` at
-/// EOF. The reader keeps whatever follows the sentinel for the tunnel.
-async fn read_header(
-    reader: &mut BufReader<ChildStdout>,
-    sentinel: &str,
-) -> io::Result<Option<Vec<String>>> {
+/// How the output before the sentinel ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Header {
+    /// The sentinel came; the lines before it.
+    Ready(Vec<String>),
+    /// EOF first. `printed` says whether the box wrote anything, which means
+    /// ssh had authenticated and the box's side ended the session.
+    Ended { printed: bool },
+}
+
+/// Reads lines until `sentinel`. The reader keeps whatever follows the
+/// sentinel for the tunnel.
+async fn read_header(reader: &mut BufReader<ChildStdout>, sentinel: &str) -> io::Result<Header> {
     let mut lines = Vec::new();
     let mut total = 0;
     loop {
@@ -473,7 +523,7 @@ async fn read_header(
             .read_until(b'\n', &mut line)
             .await?;
         if read == 0 {
-            return Ok(None);
+            return Ok(Header::Ended { printed: total > 0 });
         }
         total += read as u64;
         if total > MAX_HEADER {
@@ -485,7 +535,7 @@ async fn read_header(
         let text = String::from_utf8_lossy(&line);
         let text = text.trim_end_matches(['\r', '\n']);
         if text == sentinel {
-            return Ok(Some(lines));
+            return Ok(Header::Ready(lines));
         }
         lines.push(text.to_owned());
     }
@@ -642,6 +692,48 @@ mod tests {
         .await?
     }
 
+    /// Exit 255 is ssh's own only while the box printed nothing, and even then
+    /// a bare "Permission denied" from the box's shell is not ssh rejecting
+    /// credentials: both keep the link retrying.
+    #[tokio::test]
+    async fn box_failures_with_status_255_are_transient() -> TestResult {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempfile::tempdir()?;
+            let quiet = dir.path().join("quiet");
+            std::fs::create_dir(&quiet)?;
+            let transport = fake(&quiet, "bash: /home/acme/.bashrc: Permission denied\n")?;
+            let Err(error) = transport.connect().await else {
+                panic!("fake ssh unexpectedly connected");
+            };
+            assert!(!error.is_permanent(), "{error}");
+
+            let printed = dir.path().join("printed");
+            std::fs::create_dir(&printed)?;
+            let ssh = install(
+                &printed,
+                "ssh",
+                &Behaviour::new()
+                    .stdout("devlanes-probe-x\n")
+                    .stderr("user@box: Permission denied (publickey).\n")
+                    .exit(255),
+            )?;
+            let mut options = SshOptions::new(&printed);
+            options.ssh_program = ssh;
+            let transport = SshTransport::new("box", options);
+            let Err(error) = transport.connect().await else {
+                panic!("fake ssh unexpectedly connected");
+            };
+            assert!(!error.is_permanent(), "{error}");
+            assert!(
+                transport.warnings().is_empty(),
+                "{:?}",
+                transport.warnings()
+            );
+            Ok(())
+        })
+        .await?
+    }
+
     /// A misspelt host stops the link only before the first connection.
     #[tokio::test]
     async fn dns_failures_are_permanent_only_before_the_first_connection() -> TestResult {
@@ -677,6 +769,11 @@ mod tests {
         };
         assert!(error.is_permanent());
         assert!(error.to_string().contains("OpenSSH Client"), "{error}");
+        assert!(
+            transport.warnings().is_empty(),
+            "a missing program is not a job failure: {:?}",
+            transport.warnings()
+        );
         Ok(())
     }
 
@@ -717,7 +814,7 @@ mod tests {
             let header = read_header(&mut stdout, "ready-7").await?;
             assert_eq!(
                 header,
-                Some(vec![
+                Header::Ready(vec![
                     "motd".to_owned(),
                     "Linux".to_owned(),
                     "x86_64".to_owned(),
@@ -734,7 +831,22 @@ mod tests {
                 .kill_on_drop(true)
                 .spawn()?;
             let mut stdout = BufReader::new(child.stdout.take().ok_or("no stdout")?);
-            assert_eq!(read_header(&mut stdout, "other").await?, None);
+            assert_eq!(
+                read_header(&mut stdout, "other").await?,
+                Header::Ended { printed: true }
+            );
+            child.wait().await?;
+
+            let silent = install(dir.path(), "silent", &Behaviour::new())?;
+            let mut child = Command::new(&silent)
+                .stdout(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()?;
+            let mut stdout = BufReader::new(child.stdout.take().ok_or("no stdout")?);
+            assert_eq!(
+                read_header(&mut stdout, "other").await?,
+                Header::Ended { printed: false }
+            );
             child.wait().await?;
             Ok(())
         })

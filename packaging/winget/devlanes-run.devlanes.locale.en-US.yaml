@@ -1,0 +1,24 @@
+# Template for manifests/d/devlanes-run/devlanes/VERSION/ in microsoft/winget-pkgs.
+# packaging/winget/render.sh replaces the @...@ placeholders.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+PackageIdentifier: devlanes-run.devlanes
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: devlanes
+PublisherUrl: https://devlanes.run
+PublisherSupportUrl: https://github.com/devlanes-run/devlanes/issues
+PackageName: devlanes
+PackageUrl: https://github.com/devlanes-run/devlanes
+License: Apache-2.0
+LicenseUrl: https://github.com/devlanes-run/devlanes/blob/v@VERSION@/LICENSE
+ShortDescription: Development environments in Git worktree lanes
+Description: devlanes gives each Git worktree a lane with its own ports, hostnames and data, and a per-user daemon runs the services.
+Moniker: devlanes
+Tags:
+  - cli
+  - development
+  - git
+  - worktree
+ReleaseNotesUrl: https://github.com/devlanes-run/devlanes/releases/tag/v@VERSION@
+ManifestType: defaultLocale
+ManifestVersion: 1.10.0

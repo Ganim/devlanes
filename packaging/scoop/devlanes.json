@@ -1,0 +1,38 @@
+{
+    "version": "@VERSION@",
+    "description": "Development environments in Git worktree lanes",
+    "homepage": "https://devlanes.run",
+    "license": "Apache-2.0",
+    "notes": "Windows cannot replace a running devlanes.exe: run `devlanes daemon stop` (it stops services) before `scoop update devlanes`.",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/devlanes-run/devlanes/releases/download/v@VERSION@/devlanes-@VERSION@-x86_64-pc-windows-msvc.zip",
+            "hash": "@SHA256_X86_64_PC_WINDOWS_MSVC@",
+            "extract_dir": "devlanes-@VERSION@-x86_64-pc-windows-msvc"
+        },
+        "arm64": {
+            "url": "https://github.com/devlanes-run/devlanes/releases/download/v@VERSION@/devlanes-@VERSION@-aarch64-pc-windows-msvc.zip",
+            "hash": "@SHA256_AARCH64_PC_WINDOWS_MSVC@",
+            "extract_dir": "devlanes-@VERSION@-aarch64-pc-windows-msvc"
+        }
+    },
+    "bin": "devlanes.exe",
+    "checkver": {
+        "github": "https://github.com/devlanes-run/devlanes"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/devlanes-run/devlanes/releases/download/v$version/devlanes-$version-x86_64-pc-windows-msvc.zip",
+                "extract_dir": "devlanes-$version-x86_64-pc-windows-msvc"
+            },
+            "arm64": {
+                "url": "https://github.com/devlanes-run/devlanes/releases/download/v$version/devlanes-$version-aarch64-pc-windows-msvc.zip",
+                "extract_dir": "devlanes-$version-aarch64-pc-windows-msvc"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/SHA256SUMS"
+        }
+    }
+}

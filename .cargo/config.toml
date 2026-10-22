@@ -3,3 +3,12 @@
 warnings = "deny"
 # Every compile goes through the kache build cache; see CONTRIBUTING.md.
 rustc-wrapper = "kache"
+
+# Windows binaries link the C runtime statically, so devlanes.exe, devlanesw.exe and
+# devlanes-hosts-service.exe run on machines without the Visual C++ Redistributable.
+# A RUSTFLAGS environment variable replaces these flags.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -131,13 +131,25 @@ const MAX_DEPTH: u8 = 6;
 /// PowerShell: a cmdlet name such as `Set-Location` or `Start-Process`
 /// (capitalised as PowerShell prints them, so `npm run start-server` does not
 /// count), `$env:`, a statement that assigns `$name =` (a syntax error in
-/// POSIX shells) or a here-string (`@'` ending a line).
+/// POSIX shells) or a here-string (`@'` ending a line). Assignments and cmdlet
+/// names count only outside quotes, so an awk or perl program
+/// (`'{ n++; $x = 1 }'`) or a commit message that names `Get-Started` keeps a
+/// POSIX call POSIX. `$env:` counts anywhere, as `"$env:PATH"` is PowerShell's
+/// way to expand it.
 fn looks_like_powershell(command: &str) -> bool {
     const VERBS: &[&str] = &[
         "Add", "Clear", "Copy", "Export", "ForEach", "Get", "Import", "Invoke", "Join", "Measure",
         "Move", "New", "Out", "Pop", "Push", "Receive", "Remove", "Rename", "Resolve", "Select",
         "Set", "Sort", "Split", "Start", "Stop", "Test", "Wait", "Where", "Write",
     ];
+    if command.contains("$env:")
+        || ["@'\n", "@\"\n", "@'\r\n", "@\"\r\n"]
+            .iter()
+            .any(|marker| command.contains(marker))
+    {
+        return true;
+    }
+    let command = unquoted(command);
     let assigns = |statement: &str| {
         statement
             .trim_start()
@@ -151,11 +163,7 @@ fn looks_like_powershell(command: &str) -> bool {
                         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
             })
     };
-    command.contains("$env:")
-        || command.split(['\n', ';']).any(assigns)
-        || ["@'\n", "@\"\n", "@'\r\n", "@\"\r\n"]
-            .iter()
-            .any(|marker| command.contains(marker))
+    command.split(['\n', ';']).any(assigns)
         || command
             .split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | '{' | '|' | '&'))
             .any(|word| {
@@ -221,7 +229,7 @@ impl Check<'_> {
     /// POSIX rules, where `"C:\acme\"` would escape its closing quote and
     /// swallow the rest of the line. So there, inside double quotes that start
     /// with a path (`C:`, `\\`, `.\`, `..\`), `\` is a plain character, as it is
-    /// in PowerShell and cmd.
+    /// in PowerShell and cmd. PowerShell's own `` ` `` escape stays on in paths.
     fn split(&self, command: &str) -> Vec<(bool, String)> {
         let powershell = self.dialect == Dialect::PowerShell;
         let escape = if powershell { '`' } else { '\\' };
@@ -245,7 +253,8 @@ impl Check<'_> {
                 continue;
             }
             let in_double = quote == Some('"');
-            if c == escape && !(in_double && self.windows && windows_path(&quoted)) {
+            let plain_backslash = !powershell && in_double && self.windows && windows_path(&quoted);
+            if c == escape && !plain_backslash {
                 segment.push(c);
                 if in_double {
                     quoted.push(c);
@@ -285,7 +294,15 @@ impl Check<'_> {
                     segment.push(' ');
                     continue;
                 }
-                if c == '#' && segment.chars().next_back().is_none_or(char::is_whitespace) {
+                // `#` starts a comment where a token may start: after blanks
+                // and after `{`, `(`, `|` and `;`, which stay in the segment
+                // inside script blocks.
+                if c == '#'
+                    && segment
+                        .chars()
+                        .next_back()
+                        .is_none_or(|c| c.is_whitespace() || matches!(c, '{' | '(' | '|' | ';'))
+                {
                     i = find(&chars, i, &['\n']).unwrap_or(chars.len());
                     continue;
                 }
@@ -391,6 +408,11 @@ impl Check<'_> {
                     .nested()
                     .is_some_and(|nested| nested.judge(&text, detached, &mut dir));
             }
+            Some(Launched::Inline { text, detached }) => {
+                return self
+                    .nested()
+                    .is_some_and(|nested| nested.judge(&text, detached, dir));
+            }
             None => return false,
         };
         let Some(program) = launch.words.first() else {
@@ -401,6 +423,7 @@ impl Check<'_> {
         launch.detached
             && program != "devlanes"
             && !EDITORS.contains(&program.as_str())
+            && !HOST_EDITORS.contains(&program.as_str())
             && self.long_running(&launch.words)
             && in_project(&launch.dir)
     }
@@ -552,10 +575,9 @@ impl Check<'_> {
                                 args = &args[1..];
                             }
                             let text = strip_one_pair(tail(segment, args.first()?));
-                            return Some(Launched::Script {
+                            return Some(Launched::Inline {
                                 text: text.to_owned(),
                                 detached: launch.detached,
-                                dir: launch.dir,
                             });
                         }
                         // `cmd /c start ...`: judge the inner command.
@@ -724,15 +746,21 @@ impl Check<'_> {
     }
 }
 
-/// What a launcher starts: a command to judge, or PowerShell text that runs
-/// in its own scope (`pwsh -c`, `iex`, a job's script block).
+/// What a launcher starts: a command to judge, or PowerShell text.
 enum Launched<'w> {
     Command(Launch<'w>),
+    /// Text that runs in another process (`pwsh -c`, a job's script block).
     Script {
         text: String,
         detached: bool,
         /// Where the text starts; its `Set-Location` stays inside it.
         dir: PathBuf,
+    },
+    /// Text that runs in the caller's runspace (`iex`), so its `Set-Location`
+    /// moves the commands after it too.
+    Inline {
+        text: String,
+        detached: bool,
     },
 }
 
@@ -837,17 +865,28 @@ const EDITORS: &[&str] = &[
     "windsurf",
     "zed",
     "subl",
-    "notepad",
-    "notepad++",
-    "explorer",
-    "devenv",
     "idea",
     "idea64",
     "webstorm",
     "webstorm64",
     "xdg-open",
-    "open",
 ];
+
+/// Editors and openers whose names mean something else on other systems, so
+/// they count only on the OS where they are editors. On Windows: Notepad,
+/// Explorer and Visual Studio's `devenv`, which elsewhere is Nix's `devenv`
+/// (`devenv up` starts services), also from PowerShell on Linux.
+#[cfg(windows)]
+const HOST_EDITORS: &[&str] = &["notepad", "notepad++", "explorer", "devenv"];
+
+/// macOS `open` hands a file or URL to the app registered for it.
+#[cfg(target_os = "macos")]
+const HOST_EDITORS: &[&str] = &["open"];
+
+/// On Linux `open` may be Debian's `openvt`, which runs the command it is
+/// given on a new virtual terminal, so it is no editor.
+#[cfg(not(any(windows, target_os = "macos")))]
+const HOST_EDITORS: &[&str] = &[];
 
 /// `Start-Process` parameters (with their aliases and the common parameters)
 /// whose value is not part of the started command.
@@ -932,6 +971,43 @@ fn windows_path(quoted: &str) -> bool {
         || matches!(quoted, "." | "..")
         || quoted.starts_with(r".\")
         || quoted.starts_with(r"..\")
+}
+
+/// `command` with every quoted string replaced by a space, for
+/// [`looks_like_powershell`], which does not know the dialect yet. Inside
+/// double quotes both PowerShell's `` ` `` and POSIX `\` escape the next
+/// character, except that `\` is plain in a Windows path ([`windows_path`]).
+fn unquoted(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            // PowerShell's `''` inside single quotes closes and reopens, which
+            // removes the same text.
+            '\'' => {
+                chars.by_ref().find(|&c| c == '\'');
+                out.push(' ');
+            }
+            '"' => {
+                let mut quoted = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '`' => {
+                            chars.next();
+                        }
+                        '\\' if !windows_path(&quoted) => {
+                            chars.next();
+                        }
+                        _ => quoted.push(c),
+                    }
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// The end (exclusive) of a PowerShell here-string whose `@` is just before

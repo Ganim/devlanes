@@ -3820,7 +3820,7 @@ impl App {
             if !devlanes_proto::release::is_newer(latest, own) {
                 return None;
             }
-            let command = self.release.0.as_ref()?.upgrade_command(latest);
+            let command = self.release.0.as_ref()?.upgrade_advice(latest);
             Some((
                 update::update_key(latest),
                 format!("{latest} available: {command}"),

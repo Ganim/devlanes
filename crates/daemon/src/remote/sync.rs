@@ -54,7 +54,13 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>, session: BoxSe
     loop {
         if relist {
             match list(&session).await {
-                Ok(listed) => entries = listed,
+                Ok(listed) => {
+                    entries = listed;
+                    // Only after a listing: a failed one would drop every entry's state.
+                    let keys: BTreeSet<String> = entries.iter().map(key).collect();
+                    lock(&conn.names).retain(|key, _| keys.contains(key));
+                    lock(&conn.hashes).retain(|key, _| keys.contains(key));
+                }
                 Err(error) => tracing::debug!(host = %conn.name, %error, "cannot list box syncs"),
             }
             relist = false;
@@ -292,6 +298,7 @@ async fn send_manifest(
     let cache = walk.finish().await;
     lock(&conn.hashes).insert(key.to_owned(), cache);
     sent?;
+    names.end_listing();
     subscription.finish_input().await.map_err(|e| e.to_string())
 }
 
@@ -374,7 +381,10 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
         match message {
             Ok(SyncMessage::Manifest(value)) => match serde_json::from_value(value) {
                 Ok(SyncManifest::File { path, mode, size }) => {
-                    incoming = None;
+                    // A file the box never finished.
+                    if let Some(unfinished) = incoming.take() {
+                        unfinished.abandon(&mut names.names);
+                    }
                     rejected = None;
                     if size > MAX_SYNC_FILE {
                         status.issue(format!("{path}: {size} bytes is over the sync limit"));
@@ -382,11 +392,11 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
                         continue;
                     }
                     let begun = match RelPath::new(path.clone()) {
-                        Ok(rel) => begin(&target, &mut names.names, &rel, mode).await,
+                        Ok(rel) => begin(&target, &mut names.names, rel, mode, size).await,
                         Err(error) => Err(error.to_string()),
                     };
                     match begun {
-                        Ok(file) => incoming = Some(Incoming { path, size, file }),
+                        Ok(file) => incoming = Some(file),
                         Err(error) => {
                             status.issue(error);
                             rejected = Some(path);
@@ -406,30 +416,35 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
                 if rejected.as_deref() == Some(path.as_str()) {
                     continue;
                 }
-                let Some(file) = incoming.as_mut().filter(|file| file.path == path) else {
+                let Some(file) = incoming.as_mut().filter(|file| file.rel.as_str() == path) else {
                     status.issue(format!("{path}: data without a file header"));
                     rejected = Some(path);
                     continue;
                 };
                 let written = file.file.written();
-                if offset != written || written + data.len() as u64 > file.size {
-                    status.issue(format!(
+                let failed = if offset != written || written + data.len() as u64 > file.size {
+                    Some(format!(
                         "{path}: data out of order or longer than announced"
-                    ));
-                    incoming = None;
-                    rejected = Some(path);
-                    continue;
-                }
-                if let Err(error) = file.file.append(data).await {
-                    status.issue(error.to_string());
-                    incoming = None;
+                    ))
+                } else {
+                    file.file
+                        .append(data)
+                        .await
+                        .err()
+                        .map(|error| error.to_string())
+                };
+                if let Some(error) = failed {
+                    status.issue(error);
+                    if let Some(file) = incoming.take() {
+                        file.abandon(&mut names.names);
+                    }
                     rejected = Some(path);
                     continue;
                 }
                 if last && let Some(done) = incoming.take() {
-                    match done.file.commit().await {
+                    match done.commit(&mut names.names).await {
                         Ok(()) => status.written += 1,
-                        Err(error) => status.issue(error.to_string()),
+                        Err(error) => status.issue(error),
                     }
                 }
             }
@@ -453,6 +468,9 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
         }
         status.publish(&conn, &key);
     }
+    if let Some(unfinished) = incoming.take() {
+        unfinished.abandon(&mut names.names);
+    }
     if !failed {
         status.state = "stopped";
     }
@@ -467,19 +485,30 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
 async fn begin(
     target: &LocalTarget,
     names: &mut CaseCollisions,
-    rel: &RelPath,
+    rel: RelPath,
     mode: u32,
-) -> Result<PartialFile, String> {
-    devlanes_sync::refuse_unusable(rel).map_err(|error| error.to_string())?;
-    names.admit(rel).map_err(|held| {
+    size: u64,
+) -> Result<Incoming, String> {
+    devlanes_sync::refuse_unusable(&rel).map_err(|error| error.to_string())?;
+    let new = names.admit(&rel).map_err(|held| {
         format!(
             "{rel}: not synced, it clashes with {held}, whose name differs only in letter case, which this file system does not tell apart"
         )
     })?;
-    target
-        .begin_file(rel, mode)
-        .await
-        .map_err(|error| error.to_string())
+    match target.begin_file(&rel, mode).await {
+        Ok(file) => Ok(Incoming {
+            rel,
+            size,
+            file,
+            new,
+        }),
+        Err(error) => {
+            if new {
+                names.release(&rel);
+            }
+            Err(error.to_string())
+        }
+    }
 }
 
 /// One entry's names, taken from the host for a subscription and put back when
@@ -535,9 +564,33 @@ impl Drop for Interrupted {
 
 /// A file being received into a temp file.
 struct Incoming {
-    path: String,
+    rel: RelPath,
     size: u64,
     file: PartialFile,
+    /// Whether `rel` was not held before this file, so it is released when the
+    /// file does not land: nothing of it is on disk then, and keeping it would
+    /// refuse the other spellings of the path for no file.
+    new: bool,
+}
+
+impl Incoming {
+    /// Drops the temp file and releases a new path.
+    fn abandon(self, names: &mut CaseCollisions) {
+        if self.new {
+            names.release(&self.rel);
+        }
+    }
+
+    /// Moves the file into place; a refused or failed commit releases a new path.
+    async fn commit(self, names: &mut CaseCollisions) -> Result<(), String> {
+        let Self { rel, file, new, .. } = self;
+        file.commit().await.map_err(|error| {
+            if new {
+                names.release(&rel);
+            }
+            error.to_string()
+        })
+    }
 }
 
 /// Per-entry status shown by `remote ls` and `remote sync`.
@@ -700,27 +753,82 @@ mod tests {
         let root = dir.path().join("out");
         let target = LocalTarget::owned(&root).await.expect("claim");
         let mut names = CaseCollisions::new();
-        let mut file = begin(&target, &mut names, &rel("Dist"), 0o644)
+        let mut file = begin(&target, &mut names, rel("Dist"), 0o644, 4)
             .await
             .expect("begin");
-        file.append(bytes::Bytes::from_static(b"file"))
+        file.file
+            .append(bytes::Bytes::from_static(b"file"))
             .await
             .expect("append");
-        file.commit().await.expect("commit");
-        let folder = begin(&target, &mut names, &rel("dist/x.js"), 0o644).await;
-        let unusable = begin(&target, &mut names, &rel("aux.js"), 0o644).await;
+        file.commit(&mut names).await.expect("commit");
+        let folder = begin(&target, &mut names, rel("dist/x.js"), 0o644, 0).await;
+        let unusable = begin(&target, &mut names, rel("aux.js"), 0o644, 0).await;
         #[cfg(windows)]
         {
             let error = folder.err().unwrap_or_default();
             assert!(error.contains("letter case"), "{error}");
             assert_eq!(std::fs::read(root.join("Dist")).expect("read"), b"file");
             assert!(unusable.is_err());
-            assert_eq!(names.admit(&rel("AUX.js")), Ok(()), "aux.js was recorded");
+            assert_eq!(names.admit(&rel("AUX.js")), Ok(true), "aux.js was recorded");
         }
         #[cfg(unix)]
         {
             assert!(folder.is_ok());
             assert!(unusable.is_ok());
         }
+    }
+
+    /// A new path whose write fails (it could not begin, was abandoned, or its
+    /// commit failed) is forgotten, so a later file in another case is not
+    /// refused for a file that never landed. A held file keeps its name.
+    #[tokio::test]
+    async fn failed_writes_release_their_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A file where the destination folder should be: nothing can begin.
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"").expect("file");
+        let mut names = CaseCollisions::new();
+        let begun = begin(
+            &LocalTarget::new(&blocked),
+            &mut names,
+            rel("a.js"),
+            0o644,
+            0,
+        )
+        .await;
+        assert!(begun.is_err());
+        assert_eq!(names.admit(&rel("A.js")), Ok(true), "a.js stayed held");
+
+        let root = dir.path().join("out");
+        let target = LocalTarget::new(&root);
+        let mut names = CaseCollisions::new();
+        let file = begin(&target, &mut names, rel("b.js"), 0o644, 1)
+            .await
+            .expect("begin");
+        file.abandon(&mut names);
+        assert_eq!(names.admit(&rel("B.js")), Ok(true), "b.js stayed held");
+
+        // A folder with a file in it where the file should go: an unowned
+        // destination refuses to remove it, so the commit fails.
+        std::fs::create_dir_all(root.join("c.js")).expect("dir");
+        std::fs::write(root.join("c.js/keep"), b"keep").expect("keep");
+        let file = begin(&target, &mut names, rel("c.js"), 0o644, 0)
+            .await
+            .expect("begin");
+        assert!(file.commit(&mut names).await.is_err());
+        assert_eq!(names.admit(&rel("C.js")), Ok(true), "c.js stayed held");
+
+        // A held file whose update fails is still on disk and stays held.
+        let mut names = CaseCollisions::new();
+        names.hold(&rel("d.js"));
+        let file = begin(&target, &mut names, rel("d.js"), 0o644, 1)
+            .await
+            .expect("begin");
+        file.abandon(&mut names);
+        let other = names.admit(&rel("D.js"));
+        #[cfg(windows)]
+        assert_eq!(other, Err(rel("d.js")));
+        #[cfg(unix)]
+        assert_eq!(other, Ok(true));
     }
 }

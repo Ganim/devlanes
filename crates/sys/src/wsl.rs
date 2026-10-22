@@ -132,7 +132,7 @@ mod linux {
             osrelease: std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default(),
             binfmt,
             distro: env("WSL_DISTRO_NAME"),
-            interop_socket: env("WSL_INTEROP").is_some(),
+            interop_socket: env("WSL_INTEROP").map(|socket| Path::new(&socket).exists()),
             // WSL init keeps the interop sockets here; containers on a WSL
             // kernel (Docker Desktop) share the kernel but not this directory.
             run_wsl: Path::new("/run/WSL").is_dir(),
@@ -160,18 +160,20 @@ struct Markers {
     binfmt: Option<bool>,
     /// `WSL_DISTRO_NAME`.
     distro: Option<String>,
-    /// `WSL_INTEROP` is set.
-    interop_socket: bool,
+    /// `WSL_INTEROP`: `Some(exists)` when set, saying whether the socket it
+    /// names exists.
+    interop_socket: Option<bool>,
     /// `/run/WSL` exists.
     run_wsl: bool,
 }
 
 /// WSL when a distro marker is present. The kernel release alone is not
 /// enough: Docker Desktop's containers run on a WSL kernel without being a
-/// distro (no interop, no drive mounts). `WSL_DISTRO_NAME` alone is not enough
-/// either, as copied environments carry it to other machines (`ssh` with
-/// `SendEnv`, `env` dumps), so it counts only on a kernel whose release names
-/// Microsoft.
+/// distro (no interop, no drive mounts). `WSL_DISTRO_NAME` and `WSL_INTEROP`
+/// alone are not enough either, as copied environments carry them to other
+/// machines (`ssh` with `SendEnv`, `env` dumps), so they count only on a
+/// kernel whose release names Microsoft, or for `WSL_INTEROP` when the socket
+/// it names exists.
 /// WSL 1 reports a fake kernel whose release ends in `-Microsoft`; anything
 /// else is WSL 2, custom kernels included.
 ///
@@ -183,7 +185,9 @@ fn classify(markers: Markers) -> Option<WslInfo> {
     let release = markers.osrelease.trim();
     let microsoft_kernel = release.to_ascii_lowercase().contains("microsoft");
     let present = markers.binfmt.is_some()
-        || markers.interop_socket
+        || markers
+            .interop_socket
+            .is_some_and(|exists| exists || microsoft_kernel)
         || markers.run_wsl
         || (markers.distro.is_some() && microsoft_kernel);
     if !present {
@@ -196,7 +200,7 @@ fn classify(markers: Markers) -> Option<WslInfo> {
         version,
         interop: markers
             .binfmt
-            .unwrap_or(markers.interop_socket || version == 1),
+            .unwrap_or(markers.interop_socket.is_some() || version == 1),
         system32: None,
     })
 }
@@ -321,7 +325,7 @@ mod tests {
         assert!(!info.interop);
         assert_eq!(info.distro, None);
         let socket_only = Markers {
-            interop_socket: true,
+            interop_socket: Some(true),
             ..Markers::default()
         };
         assert!(classify(socket_only).expect("wsl").interop);
@@ -329,7 +333,7 @@ mod tests {
         let disabled_with_socket = Markers {
             osrelease: "6.6.36.6-microsoft-standard-WSL2".into(),
             binfmt: Some(false),
-            interop_socket: true,
+            interop_socket: Some(true),
             ..Markers::default()
         };
         assert!(!classify(disabled_with_socket).expect("wsl").interop);
@@ -370,6 +374,30 @@ mod tests {
             ..Markers::default()
         };
         assert_eq!(classify(wsl2).expect("wsl").version, 2);
+    }
+
+    /// A copied `WSL_INTEROP` whose socket does not exist counts only on a
+    /// Microsoft kernel; one whose socket exists counts on any kernel.
+    #[test]
+    fn a_leaked_interop_variable_alone_is_not_wsl() {
+        let leaked = Markers {
+            osrelease: "6.8.0-45-generic".into(),
+            interop_socket: Some(false),
+            ..Markers::default()
+        };
+        assert_eq!(classify(leaked), None);
+        let microsoft = Markers {
+            osrelease: "6.6.36.6-microsoft-standard-WSL2".into(),
+            interop_socket: Some(false),
+            ..Markers::default()
+        };
+        assert!(classify(microsoft).expect("wsl").interop);
+        let custom_kernel = Markers {
+            osrelease: "6.9.0-custom".into(),
+            interop_socket: Some(true),
+            ..Markers::default()
+        };
+        assert_eq!(classify(custom_kernel).expect("wsl").version, 2);
     }
 
     /// Drive mounts come from `9p` with `aname=drvfs`; other 9p mounts and

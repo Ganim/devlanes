@@ -49,7 +49,7 @@ pub async fn after_command(client: &mut Client, runtime: &Runtime, paths: &Paths
             now_ms(),
             daemon.as_deref(),
             latest.as_deref(),
-            |v| InstallMethod::current().upgrade_command(v),
+            |v| InstallMethod::current().upgrade_advice(v),
         );
         if !lines.is_empty() {
             // A lost write only repeats the notice sooner.
@@ -115,6 +115,9 @@ pub async fn annotate_doctor(client: Option<&mut Client>, data: &mut Value) {
     let method = tokio::task::spawn_blocking(InstallMethod::current)
         .await
         .unwrap_or(InstallMethod::Script(Default::default()));
+    let old_copies = tokio::task::spawn_blocking(old_copies)
+        .await
+        .unwrap_or(Value::Null);
     let latest = check.latest.clone();
     let target = latest.as_deref().unwrap_or(OWN);
     if let Some(map) = data.as_object_mut() {
@@ -125,7 +128,8 @@ pub async fn annotate_doctor(client: Option<&mut Client>, data: &mut Value) {
                 "build": Hello::current(0).build_id,
                 "daemon_version": daemon_version,
                 "install_method": method.describe(devlanes_client::user_home().as_deref()),
-                "command": method.upgrade_command(target),
+                "command": method.upgrade_advice(target),
+                "old_copies": old_copies,
                 "check": check.state,
                 "check_off_reason": check.reason,
                 "latest": latest,
@@ -138,6 +142,32 @@ pub async fn annotate_doctor(client: Option<&mut Client>, data: &mut Value) {
             }),
         );
     }
+}
+
+/// Deletes the copies `install.ps1` left next to this executable while it ran
+/// (`{removed, in_use}`, paths as text). Blocking filesystem work.
+#[cfg(windows)]
+fn old_copies() -> Value {
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+    else {
+        return Value::Null;
+    };
+    let copies = devlanes_client::update::remove_old_copies(&dir);
+    let text = |paths: Vec<std::path::PathBuf>| {
+        paths
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+    };
+    json!({"removed": text(copies.removed), "in_use": text(copies.in_use)})
+}
+
+/// Upgrades replace a running binary in place on Unix, so none are left.
+#[cfg(not(windows))]
+fn old_copies() -> Value {
+    Value::Null
 }
 
 #[cfg(test)]

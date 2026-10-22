@@ -29,6 +29,8 @@
     "@devlanes/darwin-arm64": "0.0.0",
     "@devlanes/darwin-x64": "0.0.0",
     "@devlanes/linux-arm64": "0.0.0",
-    "@devlanes/linux-x64": "0.0.0"
+    "@devlanes/linux-x64": "0.0.0",
+    "@devlanes/win32-arm64": "0.0.0",
+    "@devlanes/win32-x64": "0.0.0"
   }
 }
