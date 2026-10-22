@@ -151,12 +151,15 @@ pub fn system_program_dirs() -> Vec<PathBuf> {
     SYSTEM_PROGRAM_DIRS.iter().map(PathBuf::from).collect()
 }
 
-/// Directories [`find_system_program`] searches: `%SystemRoot%\System32`, where
-/// Windows' own tools (`certutil.exe`, `netsh.exe`) live.
+/// Directories [`find_system_program`] searches: the System32 directory Windows
+/// reports (`GetSystemDirectoryW`, not `%SystemRoot%`, which the environment can
+/// change), where its own tools (`certutil.exe`, `netsh.exe`) live. Empty when
+/// Windows cannot say, so nothing is found.
 #[cfg(windows)]
 pub fn system_program_dirs() -> Vec<PathBuf> {
-    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-    vec![PathBuf::from(root).join("System32")]
+    devlanes_sys::windows::dirs::system_directory()
+        .into_iter()
+        .collect()
 }
 
 /// Absolute path of `name` in [`system_program_dirs`].
@@ -167,7 +170,7 @@ pub fn system_program_dirs() -> Vec<PathBuf> {
 pub fn find_system_program(executor: &dyn CommandExecutor, name: &str) -> Option<PathBuf> {
     system_program_dirs()
         .iter()
-        .flat_map(|dir| candidates(dir, name))
+        .flat_map(|dir| system_candidates(dir, name))
         .find(|candidate| executor.is_executable(candidate))
 }
 
@@ -177,20 +180,55 @@ fn candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
     vec![dir.join(name)]
 }
 
+/// The files a system program `name` may be in `dir`; the same as for `PATH`.
+#[cfg(unix)]
+fn system_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    candidates(dir, name)
+}
+
 /// The files `name` may mean in `dir`: `name` itself when it has an extension,
 /// then `name` plus each `PATHEXT` extension (`certutil` finds `certutil.exe`),
 /// as `cmd.exe` searches.
 #[cfg(windows)]
 fn candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let extensions: Vec<&str> = pathext
+        .split(';')
+        .filter(|ext| ext.starts_with('.') && ext.len() > 1)
+        .collect();
+    with_extensions(dir, name, &extensions)
+}
+
+/// Like [`candidates`] with only `.exe` and `.com`: Windows' own tools are
+/// programs, and `PATHEXT` comes from the environment, which must not widen what
+/// a system lookup accepts (to `.bat` files run through `cmd.exe`, for example).
+#[cfg(windows)]
+fn system_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    const EXTENSIONS: [&str; 2] = [".exe", ".com"];
+    let mut found = with_extensions(dir, name, &EXTENSIONS);
+    // `certutil.bat` named in full is no program either.
+    found.retain(|path| {
+        path.extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|ext| {
+                EXTENSIONS
+                    .iter()
+                    .any(|known| known.strip_prefix('.') == Some(&*ext.to_ascii_lowercase()))
+            })
+    });
+    found
+}
+
+/// `name` in `dir` when it has an extension, then `name` plus each of `extensions`.
+#[cfg(windows)]
+fn with_extensions(dir: &Path, name: &str, extensions: &[&str]) -> Vec<PathBuf> {
     let mut found = Vec::new();
     if Path::new(name).extension().is_some() {
         found.push(dir.join(name));
     }
-    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
     found.extend(
-        pathext
-            .split(';')
-            .filter(|ext| ext.starts_with('.') && ext.len() > 1)
+        extensions
+            .iter()
             .map(|ext| dir.join(format!("{name}{ext}"))),
     );
     found
@@ -383,12 +421,20 @@ mod tests {
         );
     }
 
-    /// Windows tools are found without their extension, through `PATHEXT`, both on
-    /// `PATH` and in System32.
+    /// Windows tools are found without their extension: in System32 as `.exe` or
+    /// `.com` only, on `PATH` through `PATHEXT`.
     #[cfg(windows)]
     #[test]
-    fn windows_programs_resolve_through_pathext() {
+    fn windows_programs_resolve_without_extension() {
         let system32 = system_program_dirs().remove(0);
+        assert!(
+            system32
+                .to_string_lossy()
+                .to_lowercase()
+                .ends_with(r"\system32"),
+            "{}",
+            system32.display()
+        );
         let expected = system32
             .join("certutil.exe")
             .to_string_lossy()
@@ -403,6 +449,30 @@ mod tests {
                 .is_some()
         );
         assert_eq!(find_system_program(&SystemExecutor, "no-such-tool"), None);
+    }
+
+    /// System lookups try `.exe` and `.com` whatever `PATHEXT` says, and refuse
+    /// other extensions named in full.
+    #[cfg(windows)]
+    #[test]
+    fn system_candidates_are_programs_only() {
+        let dir = Path::new(r"C:\Windows\System32");
+        assert_eq!(
+            system_candidates(dir, "certutil"),
+            [dir.join("certutil.exe"), dir.join("certutil.com")]
+        );
+        assert_eq!(
+            system_candidates(dir, "netsh.EXE"),
+            [
+                dir.join("netsh.EXE"),
+                dir.join("netsh.EXE.exe"),
+                dir.join("netsh.EXE.com")
+            ]
+        );
+        assert_eq!(
+            system_candidates(dir, "evil.bat"),
+            [dir.join("evil.bat.exe"), dir.join("evil.bat.com")]
+        );
     }
 
     /// Windows runs files by extension: listed extensions count in any case,

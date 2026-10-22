@@ -383,6 +383,13 @@ pub struct ProxyConfig {
     pub lan: bool,
 }
 
+impl ProxyConfig {
+    /// Port the HTTP listener falls back to when `http_port` is denied or taken.
+    pub const HTTP_FALLBACK_PORT: u16 = 8080;
+    /// Port the HTTPS listener falls back to when `https_port` is denied or taken.
+    pub const HTTPS_FALLBACK_PORT: u16 = 8443;
+}
+
 impl Default for ProxyConfig {
     /// Prefer standard ports; runtime binding handles permission-related fallbacks.
     fn default() -> Self {

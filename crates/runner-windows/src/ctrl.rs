@@ -20,7 +20,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The environment variable carrying the request, `<pid> <c|break|anchor>`. An
+/// The environment variable carrying the request,
+/// `<pid> <c|break|anchor> [<milliseconds>]`: the target, what to do, and how
+/// long the target may still be setting up its console (none: no wait). An
 /// environment variable rather than arguments, so any program can be the helper
 /// whatever its own argument parsing.
 pub const REQUEST_VAR: &str = "DEVLANES_CONSOLE_CTRL";
@@ -53,18 +55,31 @@ impl Request {
         }
     }
 
-    /// Parses `<pid> <word>`.
-    fn parse(text: &str) -> Option<(u32, Self)> {
-        let (pid, word) = text.trim().split_once(' ')?;
-        let request = match word {
+    /// Parses `<pid> <word> [<milliseconds>]`.
+    fn parse(text: &str) -> Option<(u32, Self, Duration)> {
+        let mut words = text.split_whitespace();
+        let pid = words.next()?.parse().ok()?;
+        let request = match words.next()? {
             "c" => Self::CtrlC,
             "break" => Self::CtrlBreak,
             "anchor" => Self::Anchor,
             _ => return None,
         };
-        Some((pid.parse().ok()?, request))
+        let wait = match words.next() {
+            Some(millis) => Duration::from_millis(millis.parse().ok()?),
+            None => Duration::ZERO,
+        };
+        if words.next().is_some() {
+            return None;
+        }
+        Some((pid, request, wait))
     }
 }
+
+/// How long a target may still be setting up its console. A process creates
+/// it during its own startup, so a unit's leader asked about right after it
+/// was started may not have one yet.
+pub(crate) const CONSOLE_SETUP: Duration = Duration::from_secs(2);
 
 /// What follows [`ANSWER_PREFIX`] on an answer line, trimmed.
 fn answer(line: &str) -> Option<&str> {
@@ -85,13 +100,13 @@ fn parse_pids(answer: &str) -> Option<Vec<u32>> {
 /// `devlanes_sys::windows::ctrl::CtrlError`, 2 for a malformed request).
 pub fn console_ctrl_main() -> u8 {
     use devlanes_sys::windows::ctrl::CtrlEvent;
-    let Some((pid, request)) = std::env::var(REQUEST_VAR)
+    let Some((pid, request, wait)) = std::env::var(REQUEST_VAR)
         .ok()
         .and_then(|text| Request::parse(&text))
     else {
         return 2;
     };
-    let result = attach_patiently(pid).and_then(|attached| match request {
+    let result = attach_patiently(pid, wait).and_then(|attached| match request {
         Request::CtrlC => attached.send(CtrlEvent::CtrlC),
         Request::CtrlBreak => attached.send(CtrlEvent::CtrlBreak),
         Request::Anchor => {
@@ -105,22 +120,24 @@ pub fn console_ctrl_main() -> u8 {
     }
 }
 
-/// How long a target may still be setting up its console. A process creates
-/// it during its own startup, so a unit's leader asked about right after it
-/// was started may not have one yet.
-const CONSOLE_SETUP: Duration = Duration::from_secs(2);
-
-/// Attaches to `pid`'s console, waiting up to [`CONSOLE_SETUP`] for a process
-/// that has none yet. A process that never gets one (a GUI program,
-/// `DETACHED_PROCESS`) costs that wait.
+/// Attaches to `pid`'s console, waiting up to `wait` for a process that has
+/// none yet and is still running. The runner gives a wait only for a target it
+/// started moments ago; a process that never gets a console (a GUI program,
+/// `DETACHED_PROCESS`) costs at most that.
 fn attach_patiently(
     pid: u32,
+    wait: Duration,
 ) -> Result<devlanes_sys::windows::ctrl::Attached, devlanes_sys::windows::ctrl::CtrlError> {
-    use devlanes_sys::windows::ctrl::{Attached, CtrlError};
-    let deadline = Instant::now() + CONSOLE_SETUP;
+    use devlanes_sys::windows::{
+        ctrl::{Attached, CtrlError},
+        process::wait_exit,
+    };
+    let deadline = Instant::now() + wait;
     loop {
         match Attached::to(pid) {
-            Err(CtrlError::NoConsole) if Instant::now() < deadline => {
+            Err(CtrlError::NoConsole)
+                if Instant::now() < deadline && !wait_exit(pid, Duration::ZERO).unwrap_or(true) =>
+            {
                 std::thread::sleep(Duration::from_millis(20));
             }
             result => return result,
@@ -175,7 +192,9 @@ pub struct ConsoleHelper {
 }
 
 /// How long a helper (or one anchor answer) may take before it is given up on.
-const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Generous because the first start of a new executable can take seconds while
+/// an antivirus scans it; a helper that works answers in milliseconds.
+pub(crate) const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl ConsoleHelper {
     /// The shipped binary as its own helper: `<exe> __console-ctrl`.
@@ -191,18 +210,22 @@ impl ConsoleHelper {
     /// no runner supervises any more (a previous daemon's orphans); hold the
     /// process open meanwhile so its PID cannot name a stranger. Blocking.
     pub fn ask_to_stop(&self, pid: u32) -> bool {
-        self.send(pid, Request::CtrlBreak).is_ok()
+        self.send(pid, Request::CtrlBreak, Duration::ZERO).is_ok()
     }
 
     /// A helper process for `request` on `pid`, without a console of its own so
-    /// it can attach to the unit's.
-    fn command(&self, pid: u32, request: Request) -> std::process::Command {
+    /// it can attach to the unit's. `wait` is how long `pid` may still be
+    /// setting up its console.
+    fn command(&self, pid: u32, request: Request, wait: Duration) -> std::process::Command {
         use devlanes_sys::windows::process::DETACHED_PROCESS;
         use std::os::windows::process::CommandExt;
         let mut command = std::process::Command::new(&self.program);
         command
             .args(&self.args)
-            .env(REQUEST_VAR, format!("{pid} {}", request.word()))
+            .env(
+                REQUEST_VAR,
+                format!("{pid} {} {}", request.word(), wait.as_millis()),
+            )
             .creation_flags(DETACHED_PROCESS)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -211,10 +234,15 @@ impl ConsoleHelper {
     }
 
     /// Sends Ctrl-C or Ctrl-Break to `pid`'s console through a short-lived
-    /// helper. Blocking.
-    pub(crate) fn send(&self, pid: u32, request: Request) -> Result<(), HelperError> {
+    /// helper, waiting up to `wait` for a console still being set up. Blocking.
+    pub(crate) fn send(
+        &self,
+        pid: u32,
+        request: Request,
+        wait: Duration,
+    ) -> Result<(), HelperError> {
         let mut child = self
-            .command(pid, request)
+            .command(pid, request, wait)
             .spawn()
             .map_err(HelperError::Spawn)?;
         let deadline = Instant::now() + HELPER_TIMEOUT;
@@ -243,12 +271,13 @@ impl ConsoleHelper {
         }
     }
 
-    /// Starts an anchor on `pid`'s console and waits until it is attached.
-    /// Blocking. The caller keeps `pid` from being reused meanwhile (it holds the
-    /// unit leader's handle).
-    pub(crate) fn anchor(&self, pid: u32) -> Result<Anchor, HelperError> {
+    /// Starts an anchor on `pid`'s console and waits until it is attached,
+    /// giving `pid` up to `wait` to set its console up. Blocking. The caller
+    /// keeps `pid` from being reused meanwhile (it holds the unit leader's
+    /// handle).
+    pub(crate) fn anchor(&self, pid: u32, wait: Duration) -> Result<Anchor, HelperError> {
         let mut child = self
-            .command(pid, Request::Anchor)
+            .command(pid, Request::Anchor, wait)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -395,12 +424,18 @@ mod tests {
         for request in [Request::CtrlC, Request::CtrlBreak, Request::Anchor] {
             assert_eq!(
                 Request::parse(&format!("42 {}", request.word())),
-                Some((42, request))
+                Some((42, request, Duration::ZERO))
+            );
+            assert_eq!(
+                Request::parse(&format!("42 {} 1500", request.word())),
+                Some((42, request, Duration::from_millis(1500)))
             );
         }
         assert_eq!(Request::parse("42"), None);
         assert_eq!(Request::parse("x break"), None);
         assert_eq!(Request::parse("42 kill"), None);
+        assert_eq!(Request::parse("42 break soon"), None);
+        assert_eq!(Request::parse("42 break 1 2"), None);
     }
 
     /// Not a test of its own: this binary as the helper when started with a
@@ -430,7 +465,8 @@ mod tests {
                 .into(),
         };
         let result = (|| -> Result<(), HelperError> {
-            let mut anchor = helper.anchor(ping.id())?;
+            // Started just now: its console may still be on its way.
+            let mut anchor = helper.anchor(ping.id(), CONSOLE_SETUP)?;
             let pids = anchor.list()?;
             assert!(pids.contains(&ping.id()), "{pids:?} lacks {}", ping.id());
             anchor.send(Request::CtrlC)?;

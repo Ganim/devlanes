@@ -544,34 +544,13 @@ pub fn unsafe_directory(path: &Path) -> RpcError {
     RpcError::new("unsafe_home", data, 4)
 }
 
-/// Two `icacls` commands that leave `path` and everything in it to this user,
-/// SYSTEM and Administrators. The first makes the directory private: stops
-/// inheritance, grants those three, and removes the explicit grants of `others`
-/// (SIDs), which `/grant:r` would keep. The second resets every entry inside to
-/// inherit from it; entries keep their old grants otherwise. (`/T` on the first
-/// would copy directory-only inheritance flags onto files and lock them.)
-///
-/// SIDs instead of names, which Windows translates per display language. The
-/// quotes work in cmd and PowerShell, but no separator works in both, so the
-/// commands are joined by ", then ".
+/// The `icacls` commands that make `path` and everything in it private to this
+/// user, SYSTEM and Administrators (see
+/// [`devlanes_sys::windows::security::private_dir_fix`]); `None` when this user's
+/// SID cannot be read.
 #[cfg(windows)]
 pub(crate) fn acl_fix(path: &Path, others: &[String]) -> Option<String> {
-    let user = devlanes_sys::windows::token::current_user()
-        .and_then(|sid| sid.to_sddl())
-        .ok()?;
-    let path = path.display();
-    let mut directory = format!(
-        r#"icacls "{path}" /inheritance:r /grant:r "*{user}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F""#
-    );
-    if !others.is_empty() {
-        directory.push_str(" /remove:g");
-        for sid in others {
-            directory.push_str(&format!(r#" "*{sid}""#));
-        }
-    }
-    Some(format!(
-        r#"{directory}, then icacls "{path}\*" /reset /T /C"#
-    ))
+    devlanes_sys::windows::security::private_dir_fix(path, others).ok()
 }
 
 #[async_trait]

@@ -473,6 +473,14 @@ impl RouteSink for NoRoutes {
 pub trait PortInspector: Send + Sync {
     /// PID listening on `port`, if any can be identified.
     async fn holder(&self, port: u16) -> Option<u32>;
+
+    /// PID of another process (not this daemon) listening on `port` at a wildcard
+    /// address (`0.0.0.0` or `::`). Windows lets a loopback bind succeed over such
+    /// a listener and take its loopback connections, so remote mirrors look first.
+    /// None known by default.
+    async fn wildcard_holder(&self, _port: u16) -> Option<u32> {
+        None
+    }
 }
 
 /// Inspector that never identifies a holder.

@@ -9,6 +9,7 @@ pub mod cert;
 pub mod conpty;
 pub mod console;
 pub mod ctrl;
+pub mod dirs;
 pub mod handles;
 pub mod job;
 pub mod net;

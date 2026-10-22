@@ -7,19 +7,25 @@
 //! user's registry store), `.LocalMachine` and `.SmartCard` ("System Store
 //! Locations" in the Win32 docs), so [`View::Logical`] also lists the roots an
 //! administrator trusted for every user. That is the right answer to "does this
-//! user trust the CA". Changes other than adding go through [`View::UserRegistry`]
-//! (`CERT_STORE_PROV_SYSTEM_REGISTRY_W`, one physical store, no collection):
-//! deleting a certificate found through the collection deletes it from whichever
-//! physical store holds it, which would be the machine's `Root` in an elevated
-//! process.
+//! user trust the CA", and the logical view is read-only here. Every change goes
+//! through [`View::UserRegistry`] (`CERT_STORE_PROV_SYSTEM_REGISTRY_W`, only the
+//! user's `HKEY_CURRENT_USER` store, no collection): a write through the
+//! collection lands in whichever physical store accepts it, which could be the
+//! machine's `Root` in an elevated process.
 //!
 //! Adding to or deleting from the user's `Root` makes crypt32 show a security
 //! warning that the user must confirm; no flag suppresses it. Other stores never
-//! prompt, which is why tests use a scratch store and [`unregister_test_store`].
+//! prompt. The tests therefore use [`TestStore`] scratch stores and run in the
+//! normal test suite: they create `devlanes-test-*` keys under
+//! `HKCU\Software\Microsoft\SystemCertificates`, need no elevation, show no dialog,
+//! and the guard deletes the store when the test ends or panics. Only the ignored
+//! test in `devlanes-trust-windows` touches the real `Root`.
 
 use std::ffi::OsStr;
 use std::io;
 use std::ptr;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{
     CRYPT_E_NOT_FOUND, ERROR_CANCELLED, ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION, GetLastError,
@@ -69,9 +75,9 @@ pub enum CertError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     /// The logical store: every physical store of the system store, including the
-    /// machine-wide ones. Adds land in the user's own `.Default` store.
+    /// machine-wide ones. Read-only.
     Logical,
-    /// Only the user's registry store (`.Default`).
+    /// Only the user's registry store (`.Default`), the one view that can be changed.
     UserRegistry,
 }
 
@@ -93,15 +99,23 @@ pub struct CertStore {
 
 impl CertStore {
     /// Opens the CurrentUser system store `name` (`Root`, or a scratch name in tests).
+    /// [`View::Logical`] with [`Access::Write`] is `ErrorKind::InvalidInput`, so no
+    /// write can reach a machine-wide physical store.
     pub fn open(name: &str, view: View, access: Access) -> io::Result<Self> {
-        let provider = match view {
-            View::Logical => CERT_STORE_PROV_SYSTEM_W,
-            View::UserRegistry => CERT_STORE_PROV_SYSTEM_REGISTRY_W,
+        let provider = match (view, access) {
+            (View::Logical, Access::Read) => CERT_STORE_PROV_SYSTEM_W,
+            (View::Logical, Access::Write) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the logical certificate store view is read-only",
+                ));
+            }
+            (View::UserRegistry, _) => CERT_STORE_PROV_SYSTEM_REGISTRY_W,
         };
         let access_flags: CERT_OPEN_STORE_FLAGS = match access {
             Access::Read => CERT_STORE_READONLY_FLAG | CERT_STORE_OPEN_EXISTING_FLAG,
-            // Siblings the user cannot write (the machine's `Root` in the logical
-            // view) open read-only instead of failing the whole open.
+            // A store the user may only read opens read-only instead of failing;
+            // the change then fails with access denied.
             Access::Write => CERT_STORE_MAXIMUM_ALLOWED_FLAG,
         };
         let name = wide(OsStr::new(name));
@@ -370,30 +384,54 @@ pub fn unregister_test_store(name: &str) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+/// A uniquely named scratch CurrentUser store for tests, created by the first
+/// write and deleted on drop, which also runs when the test panics. It never
+/// prompts: only `Root` does.
+#[derive(Debug)]
+pub struct TestStore {
+    name: String,
+}
 
-    use super::*;
-
-    /// A scratch CurrentUser store, deleted on drop. Never `Root`: it does not prompt.
-    struct Scratch(String);
-
-    impl Scratch {
-        fn new() -> Self {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |elapsed| elapsed.as_nanos());
-            Self(format!("{TEST_STORE_PREFIX}{}-{nanos}", std::process::id()))
+impl TestStore {
+    /// A fresh name under [`TEST_STORE_PREFIX`], unique per process and call.
+    pub fn unique() -> Self {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        Self {
+            name: format!(
+                "{TEST_STORE_PREFIX}{}-{}-{nanos}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
         }
     }
 
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            if let Err(error) = unregister_test_store(&self.0) {
-                eprintln!("leaked certificate store {}: {error}", self.0);
-            }
+    /// The store name to pass to [`CertStore::open`].
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Drop for TestStore {
+    /// Deletes the store; one that was never written does not exist.
+    fn drop(&mut self) {
+        match unregister_test_store(&self.name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => eprintln!("leaked certificate store {}: {error}", self.name),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether the scratch store's registry key exists.
+    fn exists(name: &str) -> bool {
+        CertStore::open(name, View::UserRegistry, Access::Read).is_ok()
     }
 
     /// A self-signed CA certificate with common name `name`, DER-encoded.
@@ -414,8 +452,9 @@ mod tests {
     /// Add, find by subject and thumbprint, delete, and delete again in a scratch store.
     #[test]
     fn scratch_store_round_trip() {
-        let scratch = Scratch::new();
-        let store = CertStore::open(&scratch.0, View::Logical, Access::Write).expect("open");
+        let scratch = TestStore::unique();
+        let store =
+            CertStore::open(scratch.name(), View::UserRegistry, Access::Write).expect("open");
         store
             .add_der(&certificate("devlanes local development CA"))
             .expect("add");
@@ -423,27 +462,38 @@ mod tests {
             .add_der(&certificate("someone else's CA"))
             .expect("add other");
 
-        let ours = store
+        let logical = CertStore::open(scratch.name(), View::Logical, Access::Read).expect("read");
+        let ours = logical
             .thumbprints_with_subject("DEVLANES local development")
             .expect("by subject");
         assert_eq!(ours.len(), 1, "case-insensitive substring of the subject");
-        assert_eq!(store.all_thumbprints().expect("all").len(), 2);
-        assert!(store.contains(&ours[0]).expect("contains"));
+        assert_eq!(logical.all_thumbprints().expect("all").len(), 2);
+        assert!(logical.contains(&ours[0]).expect("contains"));
 
-        let registry =
-            CertStore::open(&scratch.0, View::UserRegistry, Access::Write).expect("registry");
-        assert!(registry.delete(&ours[0]).expect("delete"));
-        assert!(!registry.delete(&ours[0]).expect("delete absent"));
-        let reopened = CertStore::open(&scratch.0, View::Logical, Access::Read).expect("reopen");
+        assert!(store.delete(&ours[0]).expect("delete"));
+        assert!(!store.delete(&ours[0]).expect("delete absent"));
+        let reopened =
+            CertStore::open(scratch.name(), View::Logical, Access::Read).expect("reopen");
         assert!(!reopened.contains(&ours[0]).expect("gone"));
         assert_eq!(reopened.all_thumbprints().expect("all").len(), 1);
+    }
+
+    /// The logical view never opens for writing, so nothing can reach a machine store.
+    #[test]
+    fn logical_view_is_read_only() {
+        let scratch = TestStore::unique();
+        let error =
+            CertStore::open(scratch.name(), View::Logical, Access::Write).expect_err("refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert!(!exists(scratch.name()), "a refused open creates nothing");
     }
 
     /// Garbage is an I/O error, not a cancelled dialog.
     #[test]
     fn invalid_der_is_an_io_error() {
-        let scratch = Scratch::new();
-        let store = CertStore::open(&scratch.0, View::Logical, Access::Write).expect("open");
+        let scratch = TestStore::unique();
+        let store =
+            CertStore::open(scratch.name(), View::UserRegistry, Access::Write).expect("open");
         assert!(matches!(
             store.add_der(b"not a certificate"),
             Err(CertError::Io(_))
@@ -453,12 +503,35 @@ mod tests {
     /// A read-only open never creates a store.
     #[test]
     fn read_only_open_of_a_missing_store_is_not_found() {
-        let scratch = Scratch::new();
-        let error = CertStore::open(&scratch.0, View::Logical, Access::Read)
-            .expect_err("store does not exist");
+        let scratch = TestStore::unique();
+        for view in [View::Logical, View::UserRegistry] {
+            let error = CertStore::open(scratch.name(), view, Access::Read)
+                .expect_err("store does not exist");
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "{view:?}: {error}");
+        }
+        assert!(!exists(scratch.name()));
+    }
+
+    /// The guard deletes the store when a test panics, and a never-written store
+    /// is no error.
+    #[test]
+    fn test_store_is_deleted_after_a_panic() {
+        let name = std::panic::catch_unwind(|| {
+            let scratch = TestStore::unique();
+            CertStore::open(scratch.name(), View::UserRegistry, Access::Write)
+                .expect("create")
+                .add_der(&certificate("devlanes panic test CA"))
+                .expect("add");
+            assert!(exists(scratch.name()));
+            std::panic::panic_any(scratch.name().to_owned());
+        })
+        .expect_err("panicked")
+        .downcast::<String>()
+        .expect("store name");
+        assert!(!exists(&name), "{name} left behind");
+        let never = TestStore::unique();
+        let error = unregister_test_store(never.name()).expect_err("never written");
         assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
-        // Create it so the guard's cleanup has something to delete.
-        drop(CertStore::open(&scratch.0, View::Logical, Access::Write).expect("create"));
     }
 
     /// The logical CurrentUser `Root` includes the machine's roots, the user's

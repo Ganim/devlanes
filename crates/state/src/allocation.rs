@@ -208,7 +208,8 @@ fn plan(
             request
                 .avoid
                 .iter()
-                .filter_map(|port| PortBlock::new(*port, 1).ok()),
+                .filter_map(|port| PortBlock::new(*port, 1).ok())
+                .chain(request.avoid_blocks.iter().copied()),
         );
     }
     let retained: BTreeSet<_> = existing.values().copied().collect();

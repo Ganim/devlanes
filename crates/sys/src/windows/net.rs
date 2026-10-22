@@ -9,11 +9,15 @@ use windows_sys::Win32::Networking::WinSock::{
 };
 
 /// Sets `SO_EXCLUSIVEADDRUSE` on a socket that is not bound yet, so no other
-/// socket can bind its address and port while it is open: without it, another
-/// program could bind a more specific address on the same port (or the same one
-/// with `SO_REUSEADDR`) and take connections meant for this listener. A port
-/// another socket holds then fails `bind` with `AddrInUse` or `PermissionDenied`.
-/// Never combine it with `SO_REUSEADDR`.
+/// socket can bind its address and port while it is open. Meant for wildcard
+/// binds: without it, another program could bind a more specific address on the
+/// same port and take connections meant for this listener. On a specific
+/// (loopback) bind it changes no later bind's outcome (Microsoft's
+/// `SO_EXCLUSIVEADDRUSE` tables), and Microsoft documents that the port may not
+/// be bound again until connections the listener accepted are gone (not seen on
+/// Windows 11 loopback, where it rebinds). A port another socket holds fails
+/// `bind` with `AddrInUse` or `PermissionDenied`. Never combine it with
+/// `SO_REUSEADDR`.
 pub fn exclusive_address_use(socket: &impl AsSocket) -> io::Result<()> {
     let enable: i32 = 1;
     let socket = socket.as_socket().as_raw_socket() as SOCKET;

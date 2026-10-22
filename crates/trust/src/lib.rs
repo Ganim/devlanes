@@ -114,6 +114,12 @@ pub enum TrustStatus {
     Installed,
     /// The CA is absent, untrusted, or a different certificate holds its name.
     Missing,
+    /// The CA is installed, but a deny list the store honours overrides it (the
+    /// Windows `Disallowed` store), so it is not trusted.
+    Distrusted {
+        /// Where the CA is denied and how to lift that.
+        reason: String,
+    },
     /// The store could not be inspected, for example because `certutil` is missing.
     Unknown {
         /// Why the status could not be determined.
@@ -136,6 +142,15 @@ pub trait TrustStore: Send + Sync {
     /// to install there once.
     fn id(&self) -> &'static str;
 
+    /// Identity of what `install` and `uninstall` change, [`TrustStore::id`] by
+    /// default. A store that reports on its own line but changes another store's
+    /// certificates (Firefox through the Windows user root store) returns that
+    /// store's id, so the CLI runs each change once and only reads the status for
+    /// the others.
+    fn changes(&self) -> &'static str {
+        self.id()
+    }
+
     /// Human description of what the store changes, for prompts and `doctor`.
     fn describe(&self) -> String;
 
@@ -147,10 +162,21 @@ pub trait TrustStore: Send + Sync {
     }
 
     /// The confirmation the OS asks for while `install` or `uninstall` changes
-    /// this store, printed before the change so the dialog is expected. `None`
-    /// when nothing beyond the platform's usual prompt appears.
+    /// this store, in a few words for `doctor`'s fix line (`choose Yes in the
+    /// Windows security warning`). `None` when nothing beyond the platform's usual
+    /// prompt appears.
     fn approval(&self) -> Option<String> {
         None
+    }
+
+    /// What to tell the user right before `install` (or `uninstall` when `install`
+    /// is false) runs: the dialog it is about to show. `None` when the call will
+    /// show none, for example because the CA is already trusted or there is
+    /// nothing to delete. Reads the store without prompting; defaults to
+    /// [`TrustStore::approval`].
+    async fn pending_approval(&self, ca: &CaCertificate, install: bool) -> Option<String> {
+        let _ = (ca, install);
+        self.approval()
     }
 
     /// A setting outside devlanes that keeps this store from being used (Firefox

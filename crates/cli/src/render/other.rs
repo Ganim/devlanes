@@ -851,16 +851,19 @@ fn port_ranges(ranges: &[Value]) -> String {
         .join(", ")
 }
 
-/// The TCP port ranges Windows reserves (`excluded_ports: {ranges, pool,
-/// pool_overlaps, mirrored}` or `{error}`, reported on Windows only): a lane
-/// port or a mirrored box port inside one cannot be bound.
+/// The TCP port ranges Windows reserves (`excluded_ports: {ranges, error?, pool,
+/// pool_overlaps, mirrored, proxy}` or `{error}` when nothing could be read,
+/// reported on Windows only): a lane, proxy or mirrored box port inside one cannot
+/// be bound. New lane port blocks skip them, but the ranges can change after a
+/// reboot.
 fn excluded_port_checks(excluded: &Value) -> Vec<Check> {
     const LIST: &str = "netsh int ipv4 show excludedportrange protocol=tcp";
     if !excluded.is_object() {
         return Vec::new();
     }
+    let mut checks = Vec::new();
     if let Some(error) = excluded.get("error").and_then(Value::as_str) {
-        return vec![
+        checks.push(
             Check::new(
                 "ports",
                 Outcome::Skip,
@@ -870,9 +873,12 @@ fn excluded_port_checks(excluded: &Value) -> Vec<Check> {
                 ),
             )
             .fix(format!("run {LIST} to see them")),
-        ];
+        );
     }
-    let mut checks = Vec::new();
+    // Only an error: no family could be read, so there is nothing to judge.
+    if excluded.get("ranges").is_none() {
+        return checks;
+    }
     let pool = &excluded["pool"];
     if pool.is_object() {
         let range = port_ranges(std::slice::from_ref(pool));
@@ -888,7 +894,7 @@ fn excluded_port_checks(excluded: &Value) -> Vec<Check> {
                 "ports",
                 Outcome::Skip,
                 format!(
-                    "ports.range {range} overlaps ports Windows reserves ({}); a service given one of them cannot bind it",
+                    "ports.range {range} overlaps ports Windows reserves ({}); new port blocks skip them, but the ranges can change after a reboot and a block given out earlier may now sit inside one",
                     port_ranges(overlaps)
                 ),
             )
@@ -896,6 +902,33 @@ fn excluded_port_checks(excluded: &Value) -> Vec<Check> {
                 "set ports.range in ~/.devlanes/config.yaml clear of them ({LIST} lists them; Hyper-V, WSL and Docker Desktop reserve them)"
             ))
         });
+    }
+    let proxy: Vec<String> = list(excluded, "proxy")
+        .iter()
+        .map(|entry| {
+            let listener = text(entry, "listener");
+            let role = if entry["fallback"].as_bool() == Some(true) {
+                format!("{} fallback", listener.to_uppercase())
+            } else {
+                format!("proxy.{listener}_port")
+            };
+            format!("{} ({role})", display_value(&entry["port"]))
+        })
+        .collect();
+    if !proxy.is_empty() {
+        checks.push(
+            Check::new(
+                "ports",
+                Outcome::Skip,
+                format!(
+                    "proxy ports inside port ranges Windows reserves: {}; the proxy cannot bind them",
+                    proxy.join(", ")
+                ),
+            )
+            .fix(format!(
+                "set proxy.http_port and proxy.https_port in ~/.devlanes/config.yaml to free ports outside them ({LIST} lists them)"
+            )),
+        );
     }
     let mirrored: Vec<String> = list(excluded, "mirrored")
         .iter()
@@ -1229,7 +1262,9 @@ fn tls_and_hosts_checks(data: &Value, running: bool, cx: &Ctx<'_>) -> Vec<Check>
         ));
         // `[{store, state, reason?, location?, approval?, hint?}]`, added by the CLI
         // from this user's stores. `location` names the store when the target does
-        // not (Windows), `approval` the dialog `certs trust` shows.
+        // not (Windows), `approval` the dialog `certs trust` shows, named once even
+        // when several targets share the store.
+        let mut approvals = Vec::new();
         for entry in list(ca, "trust") {
             let store = match entry.get("location").and_then(Value::as_str) {
                 Some(location) => format!("{} ({})", text(entry, "store"), clean(location)),
@@ -1239,13 +1274,25 @@ fn tls_and_hosts_checks(data: &Value, running: bool, cx: &Ctx<'_>) -> Vec<Check>
             checks.push(match text(entry, "state").as_str() {
                 "trusted" => Check::new("tls", Outcome::Ok, format!("CA trusted by {store}")),
                 "untrusted" => {
-                    Check::new("tls", Outcome::Fail, format!("CA not trusted by {store}")).fix(
-                        match note("approval") {
-                            Some(approval) => format!("devlanes certs trust ({approval})"),
-                            None => "devlanes certs trust".into(),
-                        },
-                    )
+                    let fix = match note("approval") {
+                        Some(approval) if !approvals.contains(&approval) => {
+                            let fix = format!("devlanes certs trust, then {approval}");
+                            approvals.push(approval);
+                            fix
+                        }
+                        _ => "devlanes certs trust".into(),
+                    };
+                    Check::new("tls", Outcome::Fail, format!("CA not trusted by {store}")).fix(fix)
                 }
+                // In the store but overridden by a deny list; `certs trust` cannot lift it.
+                "distrusted" => Check::new(
+                    "tls",
+                    Outcome::Fail,
+                    format!(
+                        "CA distrusted by {store}: {}",
+                        clean(&text(entry, "reason"))
+                    ),
+                ),
                 _ => Check::new(
                     "tls",
                     Outcome::Skip,

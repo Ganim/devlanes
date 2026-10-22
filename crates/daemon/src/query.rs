@@ -984,13 +984,16 @@ impl Inner {
     #[cfg(unix)]
     async fn excluded_ports_doctor(&self, _data: &mut Value) {}
 
-    /// `doctor`'s `excluded_ports`: the port ranges Windows reserves, judged
-    /// against the port pool in effect and the ports of connected boxes.
+    /// `doctor`'s `excluded_ports`: the port ranges Windows reserves (read at most
+    /// once a minute), judged against the port pool in effect, the proxy ports and
+    /// the ports of connected boxes.
     #[cfg(windows)]
     async fn excluded_ports_doctor(&self, data: &mut Value) {
         let pool = self.pool().ok().map(|pool| (pool.start, pool.end));
         let mirrored = self.remote.advertised_ports();
-        data["excluded_ports"] = crate::excluded_ports::doctor(pool, &mirrored).await;
+        let reading = crate::excluded_ports::RESERVED.get().await;
+        data["excluded_ports"] =
+            crate::excluded_ports::report(&reading, pool, &mirrored, &self.opts.user.proxy);
     }
 
     /// `doctor`'s `stop_timeouts`: the longest stop timeout of each service of

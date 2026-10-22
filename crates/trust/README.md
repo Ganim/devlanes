@@ -10,7 +10,7 @@ use devlanes_trust::{CaCertificate, TrustError, TrustStatus, TrustStore};
 async fn trust(store: &dyn TrustStore, ca_pem: &str) -> Result<TrustStatus, TrustError> {
     let ca = CaCertificate::from_pem(ca_pem, "devlanes development CA")?;
     println!("installing into {}", store.describe());
-    if let Some(approval) = store.approval() {
+    if let Some(approval) = store.pending_approval(&ca, true).await {
         println!("{approval}");
     }
     store.install(&ca).await?;
@@ -20,14 +20,14 @@ async fn trust(store: &dyn TrustStore, ca_pem: &str) -> Result<TrustStatus, Trus
 
 ## API
 
-- `TrustStore`: `install`, `uninstall` and `status` for one store. Repeating an install or removing an absent CA succeeds without changes. `location`, `approval` and `hint` add text for the CLI: where the CA goes, the dialog to expect, and a setting that keeps the store from working.
+- `TrustStore`: `install`, `uninstall` and `status` for one store. Repeating an install or removing an absent CA succeeds without changes. `location`, `approval`, `pending_approval` and `hint` add text for the CLI: where the CA goes, the dialog to expect (in general, and for the change about to run), and a setting that keeps the store from working. `id` names the store for report lines and `changes` what `install` and `uninstall` change, so the CLI runs a shared change once.
 - `TrustTarget`: the `tls.trust` names (`system`, `firefox`, `chrome`, `ios-simulator`, `android-emulator`).
-- `TrustStatus`: `Installed`, `Missing` or `Unknown { reason }`.
+- `TrustStatus`: `Installed`, `Missing`, `Distrusted { reason }` (installed but overridden by a deny list) or `Unknown { reason }`.
 - `CaCertificate`: the public CA plus the name stores file it under. It keeps only the first certificate of the PEM, so a key in the input never reaches a store. `is_name_constrained` tells an older, unconstrained devlanes CA apart.
-- `find_system_program`: absolute path of a root-run tool from the system directories (`system_program_dirs`), never `PATH`. On Windows that is `%SystemRoot%\System32`, and names may leave out the extension (`PATHEXT`).
+- `find_system_program`: absolute path of a root-run tool from the system directories (`system_program_dirs`), never `PATH`. On Windows that is the System32 directory from `GetSystemDirectoryW`, and names may leave out `.exe` or `.com`.
 - `CommandExecutor` and `SystemExecutor`: every external command goes through this trait. The `fake` feature adds `fake::FakeExecutor`, which records argv for tests.
 - `nss::NssStore` (Unix): Firefox profiles or a shared NSS database, changed through `certutil`.
-- `TrustError`: typed failures, including `Unsupported`, `ToolMissing { hint }`, `InteractionRequired` and `Cancelled`.
+- `TrustError`: typed failures, including `Unsupported`, `ToolMissing { hint }`, `InteractionRequired`, `Cancelled` and `StillTrusted`.
 
 ## Config example
 

@@ -1,5 +1,5 @@
-//! Security descriptors for objects only the current user may open, and checks that
-//! a directory is private to that user.
+//! Security descriptors for objects only the current user may open, checks that
+//! a directory or file is private to that user, and `icacls` commands that fix one.
 
 use std::ffi::{OsStr, c_void};
 use std::fs::File;
@@ -21,8 +21,9 @@ use windows_sys::Win32::Security::{
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_READ_ATTRIBUTES, READ_CONTROL, WRITE_DAC,
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, GetFileInformationByHandle, READ_CONTROL,
+    WRITE_DAC,
 };
 
 use super::token::{self, Sid};
@@ -152,6 +153,35 @@ pub enum DirProblem {
     Acl(Vec<String>),
 }
 
+/// Why a file is not private to the current user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileProblem {
+    /// A directory or device is in the way.
+    NotAFile,
+    /// A symlink or other reparse point, which could point anywhere.
+    ReparsePoint,
+    /// The file has this many names; another one may sit in a directory other
+    /// accounts can open, or be swapped for other contents there.
+    HardLinks(u32),
+    /// Owned by another account.
+    Owner,
+    /// Other accounts are granted access, such as an explicit `Everyone` grant.
+    /// Holds those accounts' SIDs; empty when access cannot be judged.
+    Acl(Vec<String>),
+}
+
+impl From<DirProblem> for FileProblem {
+    /// The same finding about a file.
+    fn from(problem: DirProblem) -> Self {
+        match problem {
+            DirProblem::NotADirectory => Self::NotAFile,
+            DirProblem::ReparsePoint => Self::ReparsePoint,
+            DirProblem::Owner => Self::Owner,
+            DirProblem::Acl(others) => Self::Acl(others),
+        }
+    }
+}
+
 /// What [`ensure_private_dir`] found or did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivateDir {
@@ -174,6 +204,97 @@ pub fn check_private_dir(path: &Path) -> io::Result<Result<(), DirProblem>> {
     };
     // SAFETY: the handle stays open for the call.
     unsafe { inspect(&directory, None) }
+}
+
+/// Checks that `path` is a regular file with a single name, owned by the current
+/// user (or Administrators), granting access only to that user, SYSTEM and
+/// Administrators: what a file created in a private directory inherits. The file
+/// itself is opened, never a link's target. A missing file is an error of kind
+/// `NotFound`.
+///
+/// Its directory needs [`check_private_dir`] as well: a private file in a
+/// directory others can write to can be replaced.
+pub fn check_private_file(path: &Path) -> io::Result<Result<(), FileProblem>> {
+    let file = File::options()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+        // Backup semantics lets a directory open too, so it is reported, not denied.
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.file_attributes() & REPARSE_POINT != 0 {
+        return Ok(Err(FileProblem::ReparsePoint));
+    }
+    if !metadata.is_file() {
+        return Ok(Err(FileProblem::NotAFile));
+    }
+    let links = link_count(&file)?;
+    if links > 1 {
+        return Ok(Err(FileProblem::HardLinks(links)));
+    }
+    // SAFETY: the handle stays open with READ_CONTROL for the call.
+    Ok(unsafe { inspect(&file, None) }?.map_err(FileProblem::from))
+}
+
+/// How many names (hard links) the open file has.
+fn link_count(file: &File) -> io::Result<u32> {
+    let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: the handle is owned by `file` and stays open for the call; `info`
+    // points to writable memory of the structure's size.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), info.as_mut_ptr()) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call succeeded, so it filled the whole structure.
+    Ok(unsafe { info.assume_init() }.nNumberOfLinks)
+}
+
+/// `Everyone (S-1-1-0)` for the well-known groups that end up on directories
+/// outside the user profile, the bare SID for any other account. The names are
+/// English; Windows shows them translated per display language.
+pub fn account_label(sid: &str) -> String {
+    let name = match sid {
+        "S-1-1-0" => "Everyone",
+        "S-1-5-11" => "Authenticated Users",
+        "S-1-5-32-545" => "Users",
+        "S-1-5-32-546" => "Guests",
+        "S-1-5-4" => "INTERACTIVE",
+        "S-1-5-7" => "ANONYMOUS LOGON",
+        _ => return sid.to_owned(),
+    };
+    format!("{name} ({sid})")
+}
+
+/// Two `icacls` commands that leave `path` and everything in it to this user,
+/// SYSTEM and Administrators. The first makes the directory private: stops
+/// inheritance, grants those three, and removes the explicit grants of `others`
+/// (SIDs), which `/grant:r` would keep. The second resets every entry inside to
+/// inherit from it; entries keep their old grants otherwise. (`/T` on the first
+/// would copy directory-only inheritance flags onto files and lock them.)
+///
+/// SIDs instead of names, which Windows translates per display language. The
+/// quotes work in cmd and PowerShell, but no separator works in both, so the
+/// commands are joined by ", then ".
+pub fn private_dir_fix(path: &Path, others: &[String]) -> io::Result<String> {
+    let user = token::current_user()?.to_sddl()?;
+    let path = path.display();
+    let mut directory = format!(
+        r#"icacls "{path}" /inheritance:r /grant:r "*{user}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F""#
+    );
+    if !others.is_empty() {
+        directory.push_str(" /remove:g");
+        for sid in others {
+            directory.push_str(&format!(r#" "*{sid}""#));
+        }
+    }
+    Ok(format!(
+        r#"{directory}, then icacls "{path}\*" /reset /T /C"#
+    ))
+}
+
+/// An `icacls` command that drops a file's own grants and lets it inherit its
+/// directory's access list again; enough once that directory is private.
+pub fn private_file_fix(path: &Path) -> String {
+    format!(r#"icacls "{}" /reset"#, path.display())
 }
 
 /// Creates `path` private when missing (its parent must exist) and checks it.
@@ -262,7 +383,7 @@ fn open_dir(path: &Path, write_dac: bool) -> io::Result<Result<File, DirProblem>
     Ok(Ok(file))
 }
 
-/// Judges the owner and access list of `directory`. With `replace`, an
+/// Judges the owner and access list of `directory` (or a file). With `replace`, an
 /// access-list problem on an acceptable owner is fixed by applying that
 /// descriptor's DACL as a protected one, and still reported so the caller can
 /// tell it happened.
@@ -457,6 +578,62 @@ mod tests {
         let everyone = DirProblem::Acl(vec!["S-1-1-0".to_owned()]);
         assert_eq!(ensure_private_dir(&open, true)?, Err(everyone.clone()));
         assert_eq!(check_private_dir(&open)?, Err(everyone), "left unchanged");
+        Ok(())
+    }
+
+    /// A file in a private directory is private; an explicit grant, a second
+    /// name (hard link) or a directory in its place is not.
+    #[test]
+    fn private_files() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("private");
+        ensure_private_dir(&directory, false)?.map_err(|p| io::Error::other(format!("{p:?}")))?;
+        let key = directory.join("key.pem");
+        std::fs::write(&key, "x")?;
+        assert_eq!(check_private_file(&key)?, Ok(()));
+        assert_eq!(check_private_file(&directory)?, Err(FileProblem::NotAFile));
+        assert_eq!(
+            check_private_file(&directory.join("missing"))
+                .err()
+                .map(|e| e.kind()),
+            Some(io::ErrorKind::NotFound)
+        );
+
+        let linked = directory.join("linked.pem");
+        std::fs::write(&linked, "x")?;
+        std::fs::hard_link(&linked, temp.path().join("elsewhere.pem"))?;
+        assert_eq!(check_private_file(&linked)?, Err(FileProblem::HardLinks(2)));
+
+        // Everyone (S-1-1-0), read access, on the file alone.
+        icacls(&key, &["/grant", "*S-1-1-0:R"])?;
+        assert_eq!(
+            check_private_file(&key)?,
+            Err(FileProblem::Acl(vec!["S-1-1-0".to_owned()]))
+        );
+        icacls(&key, &["/reset"])?;
+        assert_eq!(
+            check_private_file(&key)?,
+            Ok(()),
+            "{}",
+            private_file_fix(&key)
+        );
+        Ok(())
+    }
+
+    /// The fix names this user, SYSTEM and Administrators, removes the other
+    /// accounts' grants and resets what is inside; labels name well-known groups.
+    #[test]
+    fn fixes_and_labels() -> io::Result<()> {
+        let user = token::current_user()?.to_sddl()?;
+        let fix = private_dir_fix(Path::new(r"D:\ca"), &["S-1-5-11".to_owned()])?;
+        assert_eq!(
+            fix,
+            format!(
+                r#"icacls "D:\ca" /inheritance:r /grant:r "*{user}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /remove:g "*S-1-5-11", then icacls "D:\ca\*" /reset /T /C"#
+            )
+        );
+        assert_eq!(account_label("S-1-5-11"), "Authenticated Users (S-1-5-11)");
+        assert_eq!(account_label("S-1-5-21-1-2-3-1001"), "S-1-5-21-1-2-3-1001");
         Ok(())
     }
 

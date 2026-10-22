@@ -32,7 +32,7 @@ use tokio::{
     time::{self, Instant, MissedTickBehavior},
 };
 
-use crate::ctrl::{Anchor, ConsoleHelper, Request};
+use crate::ctrl::{Anchor, CONSOLE_SETUP, ConsoleHelper, HELPER_TIMEOUT, Request};
 use crate::{WindowsRunner, command};
 
 /// Read size per call; large enough for bursty build output.
@@ -107,12 +107,17 @@ struct Inner {
     /// When the readers last published output, for closing the console only once
     /// it went quiet.
     last_output: Arc<Mutex<Instant>>,
+    /// When the leader was started, for how long it may still be setting up its
+    /// console.
+    spawned_at: Instant,
     /// Sends console control events; `None` disables graceful stops of pipe
     /// units.
     helper: Option<ConsoleHelper>,
     /// The helper that stays on a pipe task's console, so what is still on it
     /// can be listed after the task exits (decision Q9).
     anchor: Arc<Mutex<ConsoleAnchor>>,
+    /// The background attach of [`Inner::anchor`], which the sweep waits for.
+    anchoring: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// `cmd.exe` processes seen alone at the last shim check, and since when.
     shims: Mutex<Option<SeenShims>>,
     leader_exited: AtomicBool,
@@ -192,6 +197,8 @@ pub(crate) async fn spawn_unit(
     spec: LaunchSpec,
 ) -> Result<Arc<WindowsUnit>, Error> {
     let stderr = runner.stderr;
+    // Taken before the launch, so the console wait errs long.
+    let spawned_at = Instant::now();
     let launched = blocking(move || launch(&spec, stderr)).await??;
     let child = launched.child;
     let identity = ProcessIdentity {
@@ -236,8 +243,10 @@ pub(crate) async fn spawn_unit(
         pty: launched.terminal.is_some(),
         terminal: Mutex::new(launched.terminal),
         last_output,
+        spawned_at,
         helper: runner.helper.clone(),
         anchor: Arc::new(Mutex::new(ConsoleAnchor::NotWanted)),
+        anchoring: Mutex::new(None),
         shims: Mutex::new(None),
         leader_exited: AtomicBool::new(false),
         crashed: AtomicBool::new(false),
@@ -473,7 +482,12 @@ async fn supervise(
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut stopping: Option<Stopping> = None;
     let mut waiter_alive = true;
-    inner.attach_anchor().await;
+    // In the background: a helper's first start can take seconds (an antivirus
+    // scanning a new executable), and stops and the exit must not wait for it.
+    let attaching = Arc::clone(&inner);
+    *lock(&inner.anchoring) = Some(tokio::spawn(async move {
+        attaching.attach_anchor().await;
+    }));
 
     let outcome = loop {
         let asking = stopping.filter(|s| !s.escalated);
@@ -625,7 +639,12 @@ enum KeepRule {
 /// Sends `event` to `target`'s console through a one-off helper while holding
 /// `target` open, so the helper's attach by bare PID cannot reach a stranger
 /// that got the PID meanwhile. Blocking.
-fn send_held(helper: &ConsoleHelper, target: &ProcessIdentity, event: Request) -> bool {
+fn send_held(
+    helper: &ConsoleHelper,
+    target: &ProcessIdentity,
+    event: Request,
+    wait: Duration,
+) -> bool {
     let held = match Held::open(target) {
         Ok(Some(held)) => held,
         Ok(None) => return false,
@@ -634,7 +653,7 @@ fn send_held(helper: &ConsoleHelper, target: &ProcessIdentity, event: Request) -
             return false;
         }
     };
-    let sent = helper.send(target.pid, event);
+    let sent = helper.send(target.pid, event, wait);
     drop(held);
     match sent {
         Ok(()) => true,
@@ -763,6 +782,12 @@ impl Inner {
             WindowsStop::CtrlBreak => Request::CtrlBreak,
         };
         let live = self.live_members().await;
+        // Windows first: a console event can wait on a helper, and the stop's
+        // grace period is already running.
+        let pids: Vec<u32> = live.iter().map(|p| p.pid).collect();
+        let closed = blocking(move || devlanes_sys::windows::window::close_windows(&pids))
+            .await
+            .unwrap_or(0);
         let mut asked = false;
         if event == Request::CtrlC && self.pty {
             let queue = lock(&self.terminal)
@@ -780,23 +805,27 @@ impl Inner {
         } else if let Some(helper) = self.helper.clone() {
             // The leader's console is the unit's; after it exited, any member
             // still running shares it unless it made its own.
+            // Only the leader can still be setting up its console; any other
+            // member was seen in a snapshot a tick ago.
             let leader_alive = matches!(self.child.exit_code(), Ok(None));
             let target = if leader_alive {
-                Some(self.identity)
+                Some((self.identity, self.console_wait()))
             } else {
-                live.first().map(ProcessInfo::identity)
+                live.first().map(|p| (p.identity(), Duration::ZERO))
             };
-            if let Some(target) = target {
-                asked = blocking(move || send_held(&helper, &target, event))
+            if let Some((target, wait)) = target {
+                asked = blocking(move || send_held(&helper, &target, event, wait))
                     .await
                     .unwrap_or(false);
             }
         }
-        let pids: Vec<u32> = live.iter().map(|p| p.pid).collect();
-        let closed = blocking(move || devlanes_sys::windows::window::close_windows(&pids))
-            .await
-            .unwrap_or(0);
         asked || closed > 0
+    }
+
+    /// How long the leader may still be setting up its console: what is left of
+    /// [`CONSOLE_SETUP`] since it was started.
+    fn console_wait(&self) -> Duration {
+        CONSOLE_SETUP.saturating_sub(self.spawned_at.elapsed())
     }
 
     /// Sends `event` through the task's anchor; `None` without one.
@@ -866,8 +895,9 @@ impl Inner {
             return;
         };
         let pid = self.identity.pid;
-        let attached = blocking(move || helper.anchor(pid)).await;
-        *lock(&self.anchor) = match attached {
+        let wait = self.console_wait();
+        let attached = blocking(move || helper.anchor(pid, wait)).await;
+        let state = match attached {
             Ok(Ok(anchor)) => ConsoleAnchor::Attached(anchor),
             Ok(Err(error)) => {
                 tracing::warn!(%error, pid, "cannot watch the task's console; everything it leaves running is kept");
@@ -878,11 +908,28 @@ impl Inner {
                 ConsoleAnchor::Failed
             }
         };
+        let mut current = lock(&self.anchor);
+        if matches!(*current, ConsoleAnchor::Closed) {
+            // The unit finished without waiting (a crash path): end the helper.
+            drop(current);
+            if let ConsoleAnchor::Attached(anchor) = state {
+                let _ = std::thread::Builder::new()
+                    .name("devlanes-anchor-close".into())
+                    .spawn(move || drop(anchor));
+            }
+        } else {
+            *current = state;
+        }
     }
 
     /// How the sweep decides what a task keeps, closing the anchor: from a final
     /// listing of the console through it, or without one.
     async fn keep_rule(self: &Arc<Self>) -> KeepRule {
+        // Bounded by the helper's own timeouts.
+        let attaching = lock(&self.anchoring).take();
+        if let Some(attaching) = attaching {
+            let _ = attaching.await;
+        }
         let anchor = std::mem::replace(&mut *lock(&self.anchor), ConsoleAnchor::Closed);
         let listed = blocking(move || match anchor {
             ConsoleAnchor::NotWanted => KeepRule::ByJob,
@@ -1103,9 +1150,11 @@ impl WindowsUnit {
         if self.inner.stops.send(policy).is_err() && self.inner.crashed.load(Ordering::SeqCst) {
             return self.stop_without_supervisor().await;
         }
-        // The grace period, then the supervisor's own worst case: the sweep, both
+        // The grace period, then the supervisor's own worst case: a console
+        // helper that hangs (asking, then the sweep's listing), the sweep, both
         // output drains, and slack for scans on a loaded machine.
         let bound = policy.timeout
+            + HELPER_TIMEOUT * 2
             + self.inner.timing.sweep_timeout
             + self.inner.timing.drain_timeout * 2
             + Duration::from_secs(5);

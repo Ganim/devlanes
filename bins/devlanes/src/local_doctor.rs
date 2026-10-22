@@ -11,12 +11,11 @@ use serde_json::{Value, json};
 /// the user config on disk, the CA and its trust, processes on the proxy ports,
 /// and the hosts helper's version when it is installed.
 pub async fn facts(paths: &Paths) -> Value {
-    let home = paths.home.clone();
-    let config_path = home.join("config.yaml");
-    let (user_config, proxy_ports) =
-        tokio::task::spawn_blocking(move || (user_config(&config_path), proxy_ports(&config_path)))
-            .await
-            .unwrap_or((Value::Null, Vec::new()));
+    let config_path = paths.home.join("config.yaml");
+    let (user, user_config) = tokio::task::spawn_blocking(move || user_config(&config_path))
+        .await
+        .unwrap_or_else(|_| (devlanes_config::UserConfig::default(), Value::Null));
+    let proxy_ports = proxy_ports(&user);
     let home_check = {
         let home = paths.home.clone();
         tokio::task::spawn_blocking(move || home_check(&home))
@@ -45,34 +44,29 @@ pub async fn facts(paths: &Paths) -> Value {
         "port_holders": port_holders,
         "hosts": hosts_helper().await,
     });
-    annotate_excluded_ports(&mut facts, &home.join("config.yaml")).await;
+    annotate_excluded_ports(&mut facts, &user).await;
     facts
 }
 
 /// Adds `excluded_ports` as the daemon's doctor reports it, judged against
-/// `ports.range` in the user config on disk (the default without a file). No box
-/// is mirrored without a daemon.
+/// `ports.range` and the proxy ports in the user config on disk (the defaults
+/// without a file). No box is mirrored without a daemon.
 #[cfg(windows)]
-async fn annotate_excluded_ports(facts: &mut Value, config: &Path) {
-    let config = config.to_owned();
-    let pool = tokio::task::spawn_blocking(move || {
-        let user = if config.exists() {
-            devlanes_config::load_user_lenient(&config).0
-        } else {
-            devlanes_config::UserConfig::default()
-        };
-        user.ports.bounds().ok()
-    })
-    .await
-    .ok()
-    .flatten();
-    facts["excluded_ports"] =
-        devlanes_daemon::excluded_ports::doctor(pool, &std::collections::BTreeSet::new()).await;
+async fn annotate_excluded_ports(facts: &mut Value, user: &devlanes_config::UserConfig) {
+    use devlanes_daemon::excluded_ports;
+    let pool = user.ports.bounds().ok();
+    let reading = excluded_ports::read().await;
+    facts["excluded_ports"] = excluded_ports::report(
+        &reading,
+        pool,
+        &std::collections::BTreeSet::new(),
+        &user.proxy,
+    );
 }
 
 /// Windows alone reserves port ranges this way.
 #[cfg(unix)]
-async fn annotate_excluded_ports(_facts: &mut Value, _config: &Path) {}
+async fn annotate_excluded_ports(_facts: &mut Value, _user: &devlanes_config::UserConfig) {}
 
 /// Adds `terminal: {elevated, elevation_allowed, job, conpty}` about the shell
 /// running this command: an elevated shell cannot start the daemon unless
@@ -172,11 +166,15 @@ fn home_check(home: &Path) -> Value {
     }
 }
 
-/// The user config as the daemon's doctor reports it: `{path, valid, error,
-/// errors, warnings}`; a missing file is valid. Blocking.
-fn user_config(path: &Path) -> Value {
+/// The user config, parsed once (leniently; the defaults without a file), and its
+/// report as the daemon's doctor gives it: `{path, valid, error, errors,
+/// warnings}`; a missing file is valid. Blocking.
+fn user_config(path: &Path) -> (devlanes_config::UserConfig, Value) {
     if !path.exists() {
-        return json!({"path": path, "valid": true, "error": null, "errors": [], "warnings": []});
+        return (
+            devlanes_config::UserConfig::default(),
+            json!({"path": path, "valid": true, "error": null, "errors": [], "warnings": []}),
+        );
     }
     let (config, errors) = devlanes_config::load_user_lenient(path);
     let errors: Vec<Value> = errors
@@ -190,22 +188,18 @@ fn user_config(path: &Path) -> Value {
             })
         })
         .collect();
-    json!({
+    let report = json!({
         "path": path,
         "valid": errors.is_empty(),
         "error": errors.first(),
         "errors": errors,
         "warnings": config.warnings(),
-    })
+    });
+    (config, report)
 }
 
-/// `[(listener, port)]` the proxy will bind, from the user config. Blocking.
-fn proxy_ports(path: &Path) -> Vec<(&'static str, u16)> {
-    let config = if path.exists() {
-        devlanes_config::load_user_lenient(path).0
-    } else {
-        devlanes_config::UserConfig::default()
-    };
+/// `[(listener, port)]` the proxy will bind, from the user config.
+fn proxy_ports(config: &devlanes_config::UserConfig) -> Vec<(&'static str, u16)> {
     vec![
         ("http", config.proxy.http_port),
         ("https", config.proxy.https_port),
@@ -317,15 +311,17 @@ mod tests {
     fn user_config_on_disk() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("config.yaml");
-        assert_eq!(user_config(&path)["valid"], true);
+        let (missing, checked) = user_config(&path);
+        assert_eq!(checked["valid"], true);
+        assert_eq!(proxy_ports(&missing), [("http", 80), ("https", 443)]);
         std::fs::write(&path, "proxy:\n  http_port: nope\n").expect("config");
-        let checked = user_config(&path);
+        let (_, checked) = user_config(&path);
         assert_eq!(checked["valid"], false, "{checked}");
         assert!(checked["error"]["line"].is_u64(), "{checked}");
-        assert_eq!(
-            proxy_ports(&temp.path().join("missing.yaml")),
-            [("http", 80), ("https", 443)]
-        );
+        std::fs::write(&path, "proxy:\n  https_port: 9443\n").expect("config");
+        let (config, checked) = user_config(&path);
+        assert_eq!(checked["valid"], true, "{checked}");
+        assert_eq!(proxy_ports(&config), [("http", 80), ("https", 9443)]);
     }
 
     /// Facts about a fresh home: not running, nothing created.

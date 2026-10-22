@@ -9,9 +9,11 @@
 //! the dialog is [`TrustError::Cancelled`].
 //!
 //! Lookups use the logical store, which also holds the machine's roots, so a CA an
-//! administrator trusted for every user counts as installed. Deletes only touch
-//! the user's own registry store. The Win32 calls live in `devlanes-sys`; this
-//! crate has no `unsafe`. Empty on other platforms.
+//! administrator trusted for every user counts as installed, unless the logical
+//! `Disallowed` store also holds it ([`TrustStatus::Distrusted`]). Adds and deletes
+//! only touch the user's own registry store, so an elevated run cannot change the
+//! machine's. The Win32 calls live in `devlanes-sys`; this crate has no `unsafe`.
+//! Empty on other platforms.
 #![cfg(windows)]
 
 mod firefox;
@@ -22,17 +24,22 @@ use async_trait::async_trait;
 use devlanes_sys::windows::cert::{Access, CertError, CertStore, Thumbprint, View};
 use devlanes_trust::{CaCertificate, TrustError, TrustStatus, TrustStore, TrustTarget};
 
-pub use firefox::{
-    ENTERPRISE_ROOTS_PREF, FirefoxStore, enterprise_roots_disabled, firefox_profile_roots,
-};
+pub use firefox::{ENTERPRISE_ROOTS_PREF, FirefoxDirs, FirefoxStore, enterprise_roots_disabled};
 
 /// The CurrentUser system store browsers trust as roots.
 pub const ROOT: &str = "Root";
 
-/// Store id shared by `system` and `chrome`, which both mean the user's root store.
+/// The CurrentUser system store of explicitly distrusted certificates ("Untrusted
+/// Certificates" in `certmgr.msc`); a certificate there is not trusted even when a
+/// root store holds it.
+pub const DISALLOWED: &str = "Disallowed";
+
+/// Store id shared by `system` and `chrome`, which both mean the user's root
+/// store; also what the `firefox` target changes.
 pub const STORE_ID: &str = "windows-current-user-root";
 
-/// Store id of the `firefox` target, which reports on the same store.
+/// Store id of the `firefox` target, which reports on the same store on a line of
+/// its own.
 pub const FIREFOX_ID: &str = "windows-firefox";
 
 /// Common name `devlanes-pki` gives its CA; older devlanes CAs are found by it.
@@ -41,50 +48,55 @@ pub const DEVLANES_CA_SUBJECT: &str = "devlanes local development CA";
 /// What [`UserRootStore::location`] calls the real `Root` store.
 pub const LOCATION: &str = "Windows user root store";
 
-/// The dialogs Windows shows for `Root` changes, from crypt32's own strings.
-const APPROVAL: &str = "Windows asks you to confirm each certificate devlanes adds to or \
-     deletes from your user root store (a \"Security Warning\" to install, a \"Root \
-     Certificate Store\" prompt to delete); choose Yes";
+/// The confirmation every `Root` change needs, short enough for `doctor`'s fix line.
+const APPROVAL: &str = "choose Yes in the Windows security warning";
 
 /// Builds the Windows store for each [`TrustTarget`].
 pub struct WindowsTrust {
     store: String,
+    disallowed: String,
     subject: Option<String>,
-    firefox_roots: Vec<std::path::PathBuf>,
+    firefox: FirefoxDirs,
 }
 
 impl WindowsTrust {
     /// Uses the CurrentUser store `store` (tests pass a scratch store) and looks
-    /// for Firefox profiles under `firefox_roots`.
-    pub fn new(store: impl Into<String>, firefox_roots: Vec<std::path::PathBuf>) -> Self {
+    /// for Firefox profiles in `firefox`.
+    pub fn new(store: impl Into<String>, firefox: FirefoxDirs) -> Self {
         Self {
             store: store.into(),
+            disallowed: DISALLOWED.to_owned(),
             subject: None,
-            firefox_roots,
+            firefox,
         }
     }
 
-    /// The real [`ROOT`] store and the Firefox profiles under `%APPDATA%`.
+    /// The real [`ROOT`] store and the Firefox profiles of this user.
     pub fn from_env() -> Self {
-        let roots = std::env::var_os("APPDATA")
-            .map(|appdata| firefox_profile_roots(std::path::Path::new(&appdata)))
-            .unwrap_or_default();
-        Self::new(ROOT, roots)
+        Self::new(ROOT, FirefoxDirs::from_env())
     }
 
-    /// Stores also remove certificates whose subject contains `subject`; see
-    /// [`UserRootStore::with_subject`]. Pass [`DEVLANES_CA_SUBJECT`] for devlanes'
-    /// own CA, never for mkcert's.
+    /// Stores also remove certificates whose subject contains `subject` on
+    /// uninstall; see [`UserRootStore::with_subject`]. Pass [`DEVLANES_CA_SUBJECT`]
+    /// for devlanes' own CA, never for mkcert's.
     #[must_use]
     pub fn with_ca_subject(mut self, subject: impl Into<String>) -> Self {
         self.subject = Some(subject.into());
         self
     }
 
+    /// Reads distrusted certificates from the CurrentUser store `name` instead of
+    /// [`DISALLOWED`]; tests pass a scratch store.
+    #[must_use]
+    pub fn with_disallowed(mut self, name: impl Into<String>) -> Self {
+        self.disallowed = name.into();
+        self
+    }
+
     /// The store for `target`; mobile targets are [`TrustError::Unsupported`].
     pub fn store(&self, target: TrustTarget) -> Result<Box<dyn TrustStore>, TrustError> {
         let system = |target| {
-            let store = UserRootStore::new(&self.store, target);
+            let store = UserRootStore::new(&self.store, target).with_disallowed(&self.disallowed);
             match &self.subject {
                 Some(subject) => store.with_subject(subject),
                 None => store,
@@ -94,7 +106,7 @@ impl WindowsTrust {
             TrustTarget::System | TrustTarget::Chrome => Ok(Box::new(system(target))),
             TrustTarget::Firefox => Ok(Box::new(FirefoxStore::new(
                 system(TrustTarget::Firefox),
-                self.firefox_roots.clone(),
+                self.firefox.clone(),
             ))),
             TrustTarget::IosSimulator | TrustTarget::AndroidEmulator => {
                 Err(TrustError::Unsupported { target })
@@ -123,30 +135,69 @@ enum Change {
     Delete,
 }
 
+impl Change {
+    /// The devlanes command that makes this change, for the user to rerun.
+    fn command(self) -> &'static str {
+        match self {
+            Self::Add => "devlanes certs trust",
+            Self::Delete => "devlanes certs untrust",
+        }
+    }
+
+    /// The title of the dialog crypt32 shows for it.
+    fn dialog(self) -> &'static str {
+        match self {
+            Self::Add => "\"Security Warning\"",
+            Self::Delete => "\"Root Certificate Store\"",
+        }
+    }
+}
+
+/// Where a CA stands in the logical stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lookup {
+    /// No root store this user trusts holds it.
+    Missing,
+    /// A root store holds it and the `Disallowed` store does not.
+    Trusted,
+    /// A root store holds it, but so does the `Disallowed` store.
+    Denied,
+}
+
 /// One CurrentUser certificate store, [`ROOT`] in production.
 pub struct UserRootStore {
     name: String,
+    disallowed: String,
     target: TrustTarget,
     subject: Option<String>,
 }
 
 impl UserRootStore {
-    /// Manages the CurrentUser store `name` for `target`.
+    /// Manages the CurrentUser store `name` for `target`, with [`DISALLOWED`] as
+    /// the deny list.
     pub fn new(name: impl Into<String>, target: TrustTarget) -> Self {
         Self {
             name: name.into(),
+            disallowed: DISALLOWED.to_owned(),
             target,
             subject: None,
         }
     }
 
-    /// Also removes certificates whose subject contains `subject` from the user's
-    /// own store: older ones on install (a regenerated `$DEVLANES_HOME/ca` leaves
-    /// them trusted otherwise), all of them on uninstall. Leave unset for CAs
+    /// On uninstall, also removes every certificate whose subject contains
+    /// `subject` from the user's own store (older CAs left by a regenerated
+    /// `$DEVLANES_HOME/ca`). Install never removes anything. Leave unset for CAs
     /// devlanes does not own, such as mkcert's.
     #[must_use]
     pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
         self.subject = Some(subject.into());
+        self
+    }
+
+    /// Reads the deny list from the CurrentUser store `name` instead of [`DISALLOWED`].
+    #[must_use]
+    pub fn with_disallowed(mut self, name: impl Into<String>) -> Self {
+        self.disallowed = name.into();
         self
     }
 
@@ -165,75 +216,93 @@ impl UserRootStore {
         format!(r"Cert:\CurrentUser\{}", self.name)
     }
 
+    /// Whether a change would fail for want of a desktop to show the dialog on.
+    /// An unreadable window station counts as a desktop: Windows then tries, and a
+    /// dialog it cannot show comes back as an error.
+    fn lacks_desktop(&self) -> bool {
+        self.prompts()
+            && matches!(
+                devlanes_sys::windows::cert::interactive_desktop(),
+                Ok(false)
+            )
+    }
+
     /// Fails before a change the dialog could not be shown for.
     fn ensure_desktop(&self, change: Change) -> Result<(), TrustError> {
-        if !self.prompts() {
-            return Ok(());
+        if self.lacks_desktop() {
+            return Err(self.no_desktop(change));
         }
-        match devlanes_sys::windows::cert::interactive_desktop() {
-            Ok(false) => Err(self.no_desktop(change)),
-            // Unknown: let Windows try; a dialog it cannot show comes back as an error.
-            Ok(true) | Err(_) => Ok(()),
+        Ok(())
+    }
+
+    /// What `change` does, for messages.
+    fn action(&self, change: Change) -> String {
+        match change {
+            Change::Add => format!("adding the CA to {}", self.path()),
+            Change::Delete => format!("removing a CA from {}", self.path()),
         }
     }
 
     /// [`TrustError::InteractionRequired`] for `change`.
     fn no_desktop(&self, change: Change) -> TrustError {
-        let verb = match change {
-            Change::Add => "add to",
-            Change::Delete => "delete from",
-        };
         TrustError::InteractionRequired {
-            command: format!("{verb} {}", self.path()),
-            detail: "Windows asks for confirmation in a security warning on the desktop; run \
-                     this from a logged-in desktop session, not over SSH or from a service"
-                .into(),
+            command: change.command().to_owned(),
+            detail: format!(
+                "{} shows a Windows {} dialog on the desktop; run it from a logged-in \
+                 desktop session, not over SSH or from a service",
+                self.action(change),
+                change.dialog()
+            ),
         }
     }
 
     /// Maps a failed change to the error the CLI shows.
     fn change_error(&self, change: Change, error: CertError) -> TrustError {
-        let what = match change {
-            Change::Add => format!("adding the CA to {}", self.path()),
-            Change::Delete => format!("removing a devlanes CA from {}", self.path()),
-        };
+        let action = self.action(change);
         match error {
             CertError::Cancelled => TrustError::Cancelled {
                 detail: format!(
-                    "{what} was declined in the Windows security warning; run the command \
-                     again and choose Yes"
+                    "{action} was declined in the Windows {} dialog; run `{}` again and \
+                     choose Yes",
+                    change.dialog(),
+                    change.command()
                 ),
             },
             CertError::NoDesktop => self.no_desktop(change),
-            CertError::Io(error) => TrustError::io(what, error),
+            CertError::Io(error) => TrustError::io(action, error),
         }
     }
 
-    /// Whether the logical store (machine roots included) holds `thumbprint`;
-    /// `Err` carries the reason it could not be read.
-    async fn trusted(&self, thumbprint: Thumbprint) -> Result<Result<bool, String>, TrustError> {
+    /// Where `thumbprint` stands in the logical stores, machine roots included;
+    /// `Err` carries the reason a store could not be read.
+    async fn lookup(&self, thumbprint: Thumbprint) -> Result<Result<Lookup, String>, TrustError> {
         let name = self.name.clone();
-        let path = self.path();
+        let disallowed = self.disallowed.clone();
         blocking("reading the certificate store", move || {
-            let store = match CertStore::open(&name, View::Logical, Access::Read) {
-                Ok(store) => store,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-                Err(error) => return Err(format!("{path}: {error}")),
+            let holds = |store: &str| -> Result<bool, String> {
+                let path = format!(r"Cert:\CurrentUser\{store}");
+                match CertStore::open(store, View::Logical, Access::Read) {
+                    Ok(opened) => opened
+                        .contains(&thumbprint)
+                        .map_err(|error| format!("{path}: {error}")),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                    Err(error) => Err(format!("{path}: {error}")),
+                }
             };
-            store
-                .contains(&thumbprint)
-                .map_err(|error| format!("{path}: {error}"))
+            Ok(if !holds(&name)? {
+                Lookup::Missing
+            } else if holds(&disallowed)? {
+                Lookup::Denied
+            } else {
+                Lookup::Trusted
+            })
         })
         .await
     }
 
     /// Certificates in the user's own store to delete: `ca` when present and, with
-    /// a subject, every match except `keep`.
-    async fn doomed(
-        &self,
-        ca: Option<Thumbprint>,
-        keep: Option<Thumbprint>,
-    ) -> Result<Vec<Thumbprint>, TrustError> {
+    /// a subject, every other match.
+    async fn doomed(&self, ca: Thumbprint) -> Result<Vec<Thumbprint>, TrustError> {
         let name = self.name.clone();
         let subject = self.subject.clone();
         let path = self.path();
@@ -244,14 +313,12 @@ impl UserRootStore {
                 Err(error) => return Err(error),
             };
             let mut doomed = Vec::new();
-            if let Some(ca) = ca
-                && store.contains(&ca)?
-            {
+            if store.contains(&ca)? {
                 doomed.push(ca);
             }
             if let Some(subject) = subject {
                 for found in store.thumbprints_with_subject(&subject)? {
-                    if Some(found) != keep && !doomed.contains(&found) {
+                    if !doomed.contains(&found) {
                         doomed.push(found);
                     }
                 }
@@ -318,59 +385,94 @@ impl TrustStore for UserRootStore {
         })
     }
 
-    /// The security warning and the delete prompt, for `Root` only.
+    /// Choosing Yes in the security warning, for `Root` only.
     fn approval(&self) -> Option<String> {
         self.prompts().then(|| APPROVAL.to_owned())
     }
 
-    /// Adds the CA unless the store already trusts it, then removes older CAs
-    /// with the same subject. The add comes first, so a declined dialog changes
-    /// nothing, and older CAs only go once the new one is trusted.
+    /// The dialog `install` or `uninstall` is about to show: none when the CA is
+    /// already in a root store, when there is nothing to delete, or without a
+    /// desktop (the change then fails with [`TrustError::InteractionRequired`]).
+    async fn pending_approval(&self, ca: &CaCertificate, install: bool) -> Option<String> {
+        if !self.prompts() || self.lacks_desktop() {
+            return None;
+        }
+        let thumbprint = thumbprint(ca).ok()?;
+        if install {
+            // An unreadable store gets the add, so it gets the notice too.
+            if let Ok(Ok(Lookup::Trusted | Lookup::Denied)) = self.lookup(thumbprint).await {
+                return None;
+            }
+            return Some(format!(
+                "Windows asks you to confirm adding the CA to your user root store in a \
+                 {} dialog; choose Yes",
+                Change::Add.dialog()
+            ));
+        }
+        let what = match self.doomed(thumbprint).await {
+            Ok(doomed) if doomed.is_empty() => return None,
+            Ok(doomed) if doomed.len() > 1 => {
+                format!("each of the {} CAs devlanes removes", doomed.len())
+            }
+            Ok(_) | Err(_) => "removing the CA".to_owned(),
+        };
+        Some(format!(
+            "Windows asks you to confirm {what} from your user root store in a {} dialog; \
+             choose Yes",
+            Change::Delete.dialog()
+        ))
+    }
+
+    /// Adds the CA to the user's own store unless a root store this user trusts
+    /// already holds it. Older devlanes CAs stay until `uninstall`, as on macOS:
+    /// replacing the CA runs `certs untrust` first.
     async fn install(&self, ca: &CaCertificate) -> Result<(), TrustError> {
         let thumbprint = thumbprint(ca)?;
-        if self.trusted(thumbprint).await? != Ok(true) {
-            self.ensure_desktop(Change::Add)?;
-            let name = self.name.clone();
-            let der = ca.der().to_vec();
-            blocking(
-                "changing the certificate store",
-                move || -> Result<(), CertError> {
-                    CertStore::open(&name, View::Logical, Access::Write)?.add_der(&der)
-                },
-            )
-            .await?
-            .map_err(|error| self.change_error(Change::Add, error))?;
+        if let Ok(Lookup::Trusted | Lookup::Denied) = self.lookup(thumbprint).await? {
+            return Ok(());
         }
-        if self.subject.is_some() {
-            let older = self.doomed(None, Some(thumbprint)).await?;
-            self.delete(older).await?;
-        }
-        Ok(())
+        self.ensure_desktop(Change::Add)?;
+        let name = self.name.clone();
+        let der = ca.der().to_vec();
+        blocking(
+            "changing the certificate store",
+            move || -> Result<(), CertError> {
+                // The registry view: when elevated, a write through the logical
+                // store could land in the machine's `Root`.
+                CertStore::open(&name, View::UserRegistry, Access::Write)?.add_der(&der)
+            },
+        )
+        .await?
+        .map_err(|error| self.change_error(Change::Add, error))
     }
 
     /// Deletes the CA and, with a subject, every devlanes CA from the user's own
-    /// store. A CA that stays trusted through the machine's `Root` is an error:
-    /// only an administrator can remove it there.
+    /// store. A CA still trusted through the logical store afterwards comes from a
+    /// store only an administrator can change: [`TrustError::StillTrusted`].
     async fn uninstall(&self, ca: &CaCertificate) -> Result<(), TrustError> {
         let thumbprint = thumbprint(ca)?;
-        let doomed = self.doomed(Some(thumbprint), None).await?;
+        let doomed = self.doomed(thumbprint).await?;
         self.delete(doomed).await?;
-        match self.trusted(thumbprint).await? {
-            Ok(true) => Err(TrustError::io(
-                format!("removing the CA from {}", self.path()),
-                io::Error::other(
-                    r"it is still trusted through the machine root store (Cert:\LocalMachine\Root), which only an administrator can change",
-                ),
-            )),
-            Ok(false) | Err(_) => Ok(()),
+        match self.lookup(thumbprint).await? {
+            Ok(Lookup::Trusted) => Err(TrustError::StillTrusted {
+                through: format!(r"Cert:\LocalMachine\{} or a group policy store", self.name),
+            }),
+            Ok(Lookup::Missing | Lookup::Denied) | Err(_) => Ok(()),
         }
     }
 
-    /// Installed when the logical store, machine roots included, holds the CA.
+    /// Installed when a logical root store, machine roots included, holds the CA
+    /// and the logical [`DISALLOWED`] store does not.
     async fn status(&self, ca: &CaCertificate) -> Result<TrustStatus, TrustError> {
-        Ok(match self.trusted(thumbprint(ca)?).await? {
-            Ok(true) => TrustStatus::Installed,
-            Ok(false) => TrustStatus::Missing,
+        Ok(match self.lookup(thumbprint(ca)?).await? {
+            Ok(Lookup::Trusted) => TrustStatus::Installed,
+            Ok(Lookup::Missing) => TrustStatus::Missing,
+            Ok(Lookup::Denied) => TrustStatus::Distrusted {
+                reason: format!(
+                    r"Cert:\CurrentUser\{0} (Untrusted Certificates in certmgr.msc) also holds it, which overrides the root store; remove it there, or have an administrator remove it from Cert:\LocalMachine\{0}",
+                    self.disallowed
+                ),
+            },
             Err(reason) => TrustStatus::Unknown { reason },
         })
     }
@@ -384,4 +486,51 @@ async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|error| TrustError::io(what, io::Error::other(error)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A No names the dialog of that change and the command to rerun.
+    #[test]
+    fn declined_dialogs_name_their_dialog_and_command() {
+        let root = UserRootStore::new(ROOT, TrustTarget::System);
+        let detail = |change| match root.change_error(change, CertError::Cancelled) {
+            TrustError::Cancelled { detail } => detail,
+            other => panic!("{other:?}"),
+        };
+        let add = detail(Change::Add);
+        assert!(add.contains("\"Security Warning\""), "{add}");
+        assert!(add.contains("`devlanes certs trust`"), "{add}");
+        let delete = detail(Change::Delete);
+        assert!(delete.contains("\"Root Certificate Store\""), "{delete}");
+        assert!(delete.contains("`devlanes certs untrust`"), "{delete}");
+    }
+
+    /// Without a desktop the error carries the devlanes command to rerun.
+    #[test]
+    fn no_desktop_names_the_devlanes_command() {
+        let root = UserRootStore::new(ROOT, TrustTarget::System);
+        for (change, command, dialog) in [
+            (Change::Add, "devlanes certs trust", "\"Security Warning\""),
+            (
+                Change::Delete,
+                "devlanes certs untrust",
+                "\"Root Certificate Store\"",
+            ),
+        ] {
+            let error = root.change_error(change, CertError::NoDesktop);
+            let TrustError::InteractionRequired {
+                command: got,
+                detail,
+            } = &error
+            else {
+                panic!("{error:?}");
+            };
+            assert_eq!(got, command);
+            assert!(detail.contains(dialog), "{detail}");
+            assert!(error.to_string().starts_with(&format!("`{command}`")));
+        }
+    }
 }

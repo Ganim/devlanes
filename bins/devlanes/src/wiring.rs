@@ -521,10 +521,7 @@ async fn certificate_authority_with(
             create_private_dir(&directory)?;
         }
         let system = system_roots(ca.certificate_der().as_ref());
-        let bundle = directory.join("bundle.pem");
-        let temp = directory.join(".bundle.pem.tmp");
-        std::fs::write(&temp, ca.combined_bundle(&system))?;
-        std::fs::rename(&temp, &bundle)?;
+        let bundle = write_bundle(&directory, &ca.combined_bundle(&system))?;
         Ok::<_, devlanes_pki::Error>((ca, cert, bundle))
     })
     .await;
@@ -556,6 +553,28 @@ async fn certificate_authority_with(
     }
 }
 
+/// Writes `contents` to `bundle.pem` in `directory` through a temporary file renamed
+/// into place, and returns the bundle's path. Blocking.
+///
+/// When the rename fails and an older bundle exists, that bundle is kept with a
+/// warning: units only read it at start, so a stale bundle beats turning HTTPS off.
+/// On Windows this happens while a program holds the old file open without delete
+/// sharing (most do); on Unix a rename over an open file succeeds.
+fn write_bundle(directory: &Path, contents: &str) -> std::io::Result<PathBuf> {
+    let bundle = directory.join("bundle.pem");
+    let temp = directory.join(".bundle.pem.tmp");
+    std::fs::write(&temp, contents)?;
+    if let Err(error) = std::fs::rename(&temp, &bundle) {
+        // The temporary file is rewritten next time, so a failed cleanup is harmless.
+        let _ = std::fs::remove_file(&temp);
+        if !bundle.is_file() {
+            return Err(error);
+        }
+        tracing::warn!(%error, path = %bundle.display(), "cannot replace bundle.pem; keeping the previous one");
+    }
+    Ok(bundle)
+}
+
 /// The system's PEM roots for `bundle.pem`, from the first bundle file the OS
 /// ships; empty when there is none. Blocking.
 #[cfg(unix)]
@@ -570,36 +589,97 @@ fn system_roots(_own: &[u8]) -> String {
     .unwrap_or_default()
 }
 
-/// The system's roots for `bundle.pem` as PEM, from the current user's `Root`
-/// store, which also lists the machine's roots. Filtered like rustls-native-certs
-/// 0.8 does: valid now and usable for server authentication. The devlanes root
-/// (`own`, listed there once `certs trust` added it) and duplicates are left out,
-/// since the bundle appends the root itself. A store that cannot be opened leaves
-/// only the devlanes root, like a Unix machine without a bundle file. Blocking.
+/// The system's roots for `bundle.pem` as PEM: Mozilla's public roots (built in)
+/// plus the current user's `Root` store, which also lists the machine's roots and
+/// so carries enterprise and custom roots. Blocking.
 ///
-/// Windows fetches some third-party roots on first use (automatic root update),
-/// so a root no Windows program has needed yet is missing here.
+/// Windows fetches most public roots on first use (automatic root update), so the
+/// store alone lacks many of the roots Python's certifi has, and units pointed at
+/// `bundle.pem` through `SSL_CERT_FILE` would lose them. Store roots are filtered
+/// like rustls-native-certs 0.8 does (valid now, usable for server
+/// authentication); a root the store lists but fails that filter (purposes
+/// disabled, expired) is left out even when Mozilla's set has it, and so is any
+/// certificate in the user's `Disallowed` store. A store that cannot be opened
+/// leaves the other source. Roots carrying a "disallowed after" date
+/// (`CERT_DISALLOWED_FILETIME_PROP_ID`) are not detected: schannel has no reader
+/// for that property.
 #[cfg(windows)]
 fn system_roots(own: &[u8]) -> String {
-    use schannel::cert_context::ValidUses;
+    use schannel::cert_context::{HashAlgorithm, ValidUses};
     /// The server authentication extended key usage.
     const SERVER_AUTH: &str = "1.3.6.1.5.5.7.3.1";
-    let store = match schannel::cert_store::CertStore::open_current_user("Root") {
-        Ok(store) => store,
+    let open = |name: &str| {
+        schannel::cert_store::CertStoreBuilder::new()
+            .read_only()
+            .open_current_user(name)
+    };
+    let store = match open("Root") {
+        Ok(store) => store
+            .certs()
+            .map(|cert| {
+                let server_auth = match cert.valid_uses() {
+                    Ok(ValidUses::All) => true,
+                    Ok(ValidUses::Oids(oids)) => oids.iter().any(|oid| oid == SERVER_AUTH),
+                    Err(_) => false,
+                };
+                let usable = server_auth && cert.is_time_valid().unwrap_or(false);
+                (cert.to_der().to_vec(), usable)
+            })
+            .collect(),
         Err(error) => {
-            tracing::warn!(%error, "cannot read the Windows root store; bundle.pem has only the devlanes root");
-            return String::new();
+            tracing::warn!(%error, "cannot read the Windows root store; bundle.pem has Mozilla's roots only");
+            Vec::new()
         }
     };
-    let usable = store.certs().filter_map(|cert| {
-        let server_auth = match cert.valid_uses() {
-            Ok(ValidUses::All) => true,
-            Ok(ValidUses::Oids(oids)) => oids.iter().any(|oid| oid == SERVER_AUTH),
-            Err(_) => false,
-        };
-        (server_auth && cert.is_time_valid().unwrap_or(false)).then(|| cert.to_der().to_vec())
-    });
-    roots_pem(usable, own)
+    let disallowed: std::collections::HashSet<Vec<u8>> = match open("Disallowed") {
+        Ok(store) => store
+            .certs()
+            .filter_map(|cert| cert.fingerprint(HashAlgorithm::sha1()).ok())
+            .collect(),
+        Err(error) => {
+            tracing::warn!(%error, "cannot read the Windows Disallowed store; distrusted roots are not filtered");
+            std::collections::HashSet::new()
+        }
+    };
+    // A certificate that cannot be hashed cannot be checked, so it is left out.
+    let distrusted = |der: &[u8]| {
+        schannel::cert_context::CertContext::new(der)
+            .and_then(|cert| cert.fingerprint(HashAlgorithm::sha1()))
+            .ok()
+            .is_none_or(|sha1| disallowed.contains(&sha1))
+    };
+    let builtin = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|cert| cert.to_vec());
+    union_roots(builtin, store, distrusted, own)
+}
+
+/// The bundle's roots as PEM: `builtin` and the usable `store` roots (DER, usable
+/// flag), each once, without `own`, store roots that are not usable and anything
+/// `distrusted` accepts.
+#[cfg(windows)]
+fn union_roots(
+    builtin: impl IntoIterator<Item = Vec<u8>>,
+    store: Vec<(Vec<u8>, bool)>,
+    distrusted: impl Fn(&[u8]) -> bool,
+    own: &[u8],
+) -> String {
+    let refused: std::collections::HashSet<&[u8]> = store
+        .iter()
+        .filter(|(_, usable)| !usable)
+        .map(|(der, _)| der.as_slice())
+        .collect();
+    let candidates: Vec<Vec<u8>> = builtin
+        .into_iter()
+        .chain(
+            store
+                .iter()
+                .filter(|(_, usable)| *usable)
+                .map(|(der, _)| der.clone()),
+        )
+        .filter(|der| !refused.contains(der.as_slice()) && !distrusted(der))
+        .collect();
+    roots_pem(candidates, own)
 }
 
 /// `roots` as PEM blocks, each certificate once and without `own`.
@@ -655,7 +735,11 @@ async fn proxy(
     let lan = user.proxy.lan;
     let mut status = serde_json::Map::new();
     let https = match &ca {
-        Some(_) => match devlanes_proxy::bind_listeners(user.proxy.https_port, 8443, lan) {
+        Some(_) => match devlanes_proxy::bind_listeners(
+            user.proxy.https_port,
+            devlanes_config::ProxyConfig::HTTPS_FALLBACK_PORT,
+            lan,
+        ) {
             Ok(listeners) => Some(listeners),
             Err(error) => {
                 status.insert(
@@ -700,7 +784,11 @@ async fn proxy(
             }
         }
     }
-    match devlanes_proxy::bind_listeners(user.proxy.http_port, 8080, lan) {
+    match devlanes_proxy::bind_listeners(
+        user.proxy.http_port,
+        devlanes_config::ProxyConfig::HTTP_FALLBACK_PORT,
+        lan,
+    ) {
         Ok(listeners) => {
             status.insert(
                 "http".into(),
@@ -1063,6 +1151,37 @@ impl PortInspector for SysPorts {
         .ok()
         .flatten()
     }
+
+    /// Scans listening sockets of all visible processes but this one.
+    async fn wildcard_holder(&self, port: u16) -> Option<u32> {
+        tokio::task::spawn_blocking(move || {
+            let pids: Vec<u32> = devlanes_sys::processes()
+                .ok()?
+                .iter()
+                .map(|p| p.pid)
+                .collect();
+            let sockets = devlanes_sys::listening_tcp(&pids).ok()?;
+            wildcard_listener(&sockets, port, std::process::id())
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+}
+
+/// The first of `sockets` on `port` at a wildcard address, owned by a process other
+/// than `own`. Either family counts: a dual-stack `::` listener also takes IPv4.
+fn wildcard_listener(
+    sockets: &[devlanes_sys::ListeningSocket],
+    port: u16,
+    own: u32,
+) -> Option<u32> {
+    sockets
+        .iter()
+        .find(|socket| {
+            socket.addr.port() == port && socket.addr.ip().is_unspecified() && socket.pid != own
+        })
+        .map(|socket| socket.pid)
 }
 
 /// Refuses two tauri instances (any lane or replica) sharing a bundle identifier.
@@ -2235,9 +2354,9 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    /// On Windows bundle.pem holds the root store's certificates, a well-known
-    /// public root among them, plus the devlanes root exactly once, and every
-    /// block parses as a PEM certificate.
+    /// On Windows bundle.pem holds Mozilla's roots and the root store's
+    /// certificates, a well-known public root among them, plus the devlanes root
+    /// exactly once, and every block parses as a PEM certificate.
     async fn windows_bundle_has_system_roots_and_the_devlanes_root() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().join("home");
@@ -2256,7 +2375,13 @@ mod tests {
             .split_inclusive("-----END CERTIFICATE-----\n")
             .filter(|block| !block.trim().is_empty())
             .collect();
-        assert!(blocks.len() > 1, "only {} certificates", blocks.len());
+        // Mozilla's set alone has well over a hundred roots; the Windows store
+        // often lists fewer than that until roots are fetched on use.
+        assert!(
+            blocks.len() > webpki_root_certs::TLS_SERVER_ROOT_CERTS.len() / 2,
+            "only {} certificates",
+            blocks.len()
+        );
         let ders: Vec<Vec<u8>> = blocks
             .iter()
             .map(|block| {
@@ -2307,6 +2432,116 @@ mod tests {
             devlanes_trust::CaCertificate::from_pem(&pem_certificate(&own), "root").expect("pem");
         assert_eq!(parsed.der(), own.as_slice());
         assert_eq!(parsed.pem(), pem_certificate(&own));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// The bundle is the union of Mozilla's roots and the usable store roots, minus
+    /// store roots Windows refuses (also when Mozilla has them) and distrusted ones.
+    fn windows_roots_union_mozilla_and_the_store() {
+        let cert = |n: u8| vec![0x30, 0x03, 0x02, 0x01, n];
+        let (mozilla, both, disabled, enterprise, expired, distrusted, own) = (
+            cert(1),
+            cert(2),
+            cert(3),
+            cert(4),
+            cert(5),
+            cert(6),
+            cert(7),
+        );
+        let pem = union_roots(
+            [
+                mozilla.clone(),
+                both.clone(),
+                disabled.clone(),
+                distrusted.clone(),
+            ],
+            vec![
+                (both.clone(), true),
+                (disabled.clone(), false),
+                (enterprise.clone(), true),
+                (expired.clone(), false),
+                (distrusted.clone(), true),
+                (own.clone(), true),
+            ],
+            |der| der == distrusted.as_slice(),
+            &own,
+        );
+        let expected: String = [mozilla, both, enterprise]
+            .iter()
+            .map(|der| pem_certificate(der))
+            .collect();
+        assert_eq!(pem, expected);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// Mozilla's set reaches the bundle through the real filter: the Disallowed
+    /// store does not hold ISRG Root X1, so it is never left out.
+    fn windows_system_roots_include_mozilla_roots() {
+        let pem = system_roots(&[]);
+        let isrg = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .find(|cert| {
+                let name = b"ISRG Root X1";
+                cert.windows(name.len()).any(|bytes| bytes == name)
+            })
+            .expect("ISRG Root X1 in Mozilla's set");
+        assert!(pem.contains(&pem_certificate(isrg)));
+    }
+
+    #[test]
+    /// A mirror is shadowed only by another process's wildcard listener on the
+    /// same port, in either family; loopback listeners and the daemon's own are not.
+    fn wildcard_listener_is_another_process_on_the_same_port() {
+        let socket = |pid: u32, addr: &str| devlanes_sys::ListeningSocket {
+            pid,
+            addr: addr.parse().expect("address"),
+        };
+        let own = 10;
+        let sockets = [
+            socket(own, "0.0.0.0:5432"),
+            socket(20, "127.0.0.1:5432"),
+            socket(30, "0.0.0.0:6379"),
+            socket(40, "[::]:5432"),
+        ];
+        assert_eq!(wildcard_listener(&sockets, 5432, own), Some(40));
+        assert_eq!(wildcard_listener(&sockets, 6379, own), Some(30));
+        assert_eq!(wildcard_listener(&sockets[..2], 5432, own), None);
+        assert_eq!(wildcard_listener(&sockets, 8080, own), None);
+    }
+
+    #[test]
+    /// A bundle is written through a rename; one that cannot be replaced with no
+    /// older bundle to keep is an error.
+    fn bundle_is_written_or_reported() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bundle = write_bundle(tmp.path(), "one").expect("write");
+        assert_eq!(std::fs::read_to_string(&bundle).expect("read"), "one");
+        let blocked = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(blocked.path().join("bundle.pem/inside")).expect("dir");
+        assert!(write_bundle(blocked.path(), "two").is_err());
+        assert!(!blocked.path().join(".bundle.pem.tmp").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// A bundle held open without delete sharing (what Python's `open` does) cannot
+    /// be replaced; the old one stays and the CA still loads.
+    fn windows_open_bundle_is_kept() {
+        use std::os::windows::fs::OpenOptionsExt;
+        /// `FILE_SHARE_READ`: readers may share, renames over the file may not.
+        const FILE_SHARE_READ: u32 = 1;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bundle = write_bundle(tmp.path(), "old").expect("write");
+        let _held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&bundle)
+            .expect("open");
+        assert_eq!(write_bundle(tmp.path(), "new").expect("kept"), bundle);
+        assert_eq!(std::fs::read_to_string(&bundle).expect("read"), "old");
+        assert!(!tmp.path().join(".bundle.pem.tmp").exists());
     }
 
     /// An empty one-page SQLite database whose header carries `user_version`.

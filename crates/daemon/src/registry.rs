@@ -15,7 +15,7 @@ use devlanes_config::{
 use devlanes_core::{
     WorktreeId,
     paths::{path_starts_with, same_path, strip_path_prefix},
-    ports::{PortName, PortPool},
+    ports::{PortBlock, PortName, PortPool},
 };
 use devlanes_proto::{RpcError, events};
 use devlanes_resolve::{LaneFacts, ResolveInput, lane_name};
@@ -306,6 +306,21 @@ fn literal<T: Clone + serde::de::DeserializeOwned>(value: &Option<Templated<T>>)
     value
         .as_ref()
         .and_then(|value| value.evaluate(&ExpressionContext::default()).ok())
+}
+
+/// Port ranges new pool blocks keep clear of because the OS will not let a
+/// service bind there. Unix reserves none this way.
+#[cfg(unix)]
+async fn reserved_blocks() -> Vec<PortBlock> {
+    Vec::new()
+}
+
+/// Windows' excluded port ranges (Hyper-V, WSL, Docker Desktop), read at most
+/// once a minute. Ranges that could not be read are simply not avoided; doctor
+/// reports the error.
+#[cfg(windows)]
+async fn reserved_blocks() -> Vec<PortBlock> {
+    crate::excluded_ports::RESERVED.get().await.blocks()
 }
 
 impl Inner {
@@ -1004,6 +1019,8 @@ impl Inner {
                     names,
                     reserved: needs.reserved.clone(),
                     avoid: self.remote.advertised_ports(),
+                    // A fixed start ignores them.
+                    avoid_blocks: Vec::new(),
                 })
                 .await;
             let mut st = lane.st();
@@ -1021,6 +1038,7 @@ impl Inner {
                 }
             });
         }
+        let reserved_ranges = reserved_blocks().await;
         let allocation = self
             .store
             .allocate(AllocationRequest {
@@ -1031,6 +1049,7 @@ impl Inner {
                 names,
                 reserved: needs.reserved.clone(),
                 avoid: self.remote.advertised_ports(),
+                avoid_blocks: reserved_ranges.clone(),
             })
             .await
             .map_err(store_error)?;
@@ -1056,6 +1075,7 @@ impl Inner {
                     names: shared,
                     reserved: BTreeSet::new(),
                     avoid: self.remote.advertised_ports(),
+                    avoid_blocks: reserved_ranges,
                 })
                 .await
                 .map_err(store_error)?;

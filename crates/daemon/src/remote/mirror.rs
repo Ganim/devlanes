@@ -33,7 +33,7 @@ use tokio::{
 use super::HostConn;
 use crate::{
     engine::Inner,
-    integrations::{RouteEntry, RouteStatus},
+    integrations::{PortInspector, RouteEntry, RouteStatus},
     model::lock,
 };
 
@@ -314,8 +314,17 @@ impl Mirror {
                 .copied()
                 .filter(|address| !mirror.bound.iter().any(|b| b.address == *address))
                 .collect();
+            let shadowed = if missing.is_empty() {
+                None
+            } else {
+                shadowed_holder(engine.integ.ports.as_ref(), *port).await
+            };
             for address in missing {
-                match bind(address, *port) {
+                let bound = match shadowed {
+                    Some(_) => Err(std::io::Error::from(std::io::ErrorKind::AddrInUse)),
+                    None => bind(address, *port),
+                };
+                match bound {
                     Ok(listener) => {
                         mirror.conflicts.remove(&address);
                         mirror.bound.push(Bound {
@@ -326,10 +335,10 @@ impl Mirror {
                     // No IPv6 loopback on this machine: nothing to mirror there.
                     Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {}
                     Err(error) => {
-                        let pid = if maybe_held(&error) {
-                            engine.integ.ports.holder(*port).await
-                        } else {
-                            None
+                        let pid = match shadowed {
+                            Some(pid) => Some(pid),
+                            None if maybe_held(&error) => engine.integ.ports.holder(*port).await,
+                            None => None,
                         };
                         let in_use = error.kind() == std::io::ErrorKind::AddrInUse || pid.is_some();
                         let message = if in_use {
@@ -606,11 +615,28 @@ fn claim(socket: &TcpSocket) -> std::io::Result<()> {
     socket.set_reuseaddr(cfg!(target_os = "linux"))
 }
 
-/// Windows lets another program bind a more specific address on the same port and
-/// take connections, unless the listener claims the port exclusively.
+/// Mirrors bind loopback only, where `SO_EXCLUSIVEADDRUSE` changes no later bind's
+/// outcome (Microsoft's tables) and, as documented, may keep the port from being
+/// bound again while accepted connections linger, so the defaults stay.
 #[cfg(windows)]
-fn claim(socket: &TcpSocket) -> std::io::Result<()> {
-    devlanes_sys::windows::net::exclusive_address_use(socket)
+fn claim(_socket: &TcpSocket) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Another process's wildcard listener on `port`. Unix refuses a loopback bind over
+/// it with `AddrInUse` (Linux because it is listening, macOS because the mirror
+/// sets no `SO_REUSEADDR`), so `bind` reports it and only Windows looks.
+#[cfg(unix)]
+async fn shadowed_holder(_ports: &dyn PortInspector, _port: u16) -> Option<u32> {
+    None
+}
+
+/// Another process's wildcard listener on `port`: Windows lets a loopback bind
+/// succeed over it and take its loopback connections, so the mirror reports the
+/// conflict instead of binding.
+#[cfg(windows)]
+async fn shadowed_holder(ports: &dyn PortInspector, port: u16) -> Option<u32> {
+    ports.wildcard_holder(port).await
 }
 
 /// Whether a failed bind may mean another socket holds the port, so its holder
@@ -620,9 +646,9 @@ fn maybe_held(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::AddrInUse
 }
 
-/// With `SO_EXCLUSIVEADDRUSE` a port another socket holds can also fail with
-/// access denied, which an excluded port range returns too; the holder lookup
-/// tells them apart.
+/// A port another program holds with `SO_EXCLUSIVEADDRUSE` fails with access
+/// denied, which an excluded port range returns too; the holder lookup tells them
+/// apart.
 #[cfg(windows)]
 fn maybe_held(error: &std::io::Error) -> bool {
     matches!(

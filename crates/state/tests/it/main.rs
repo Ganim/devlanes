@@ -13,7 +13,7 @@ use diesel_migrations::{MigrationHarness, embed_migrations};
 
 use devlanes_core::{
     Actor, ActorKind, ExitOutcome, ProcessIdentity, ProjectId,
-    ports::{PortName, PortPool},
+    ports::{PortBlock, PortName, PortPool},
 };
 use devlanes_state::{
     AllocationRequest, BlockOwner, DesiredState, Error, Lane, LaneInput, Project, ProjectInput,
@@ -72,6 +72,7 @@ fn request(owner: BlockOwner, count: usize) -> AllocationRequest {
             .collect(),
         reserved: BTreeSet::new(),
         avoid: BTreeSet::new(),
+        avoid_blocks: Vec::new(),
     }
 }
 
@@ -424,6 +425,28 @@ async fn avoided_ports_stay_outside_new_blocks() {
     fixed.avoid = BTreeSet::from([31_000]);
     let fixed = store.allocate(fixed).await.expect("fixed start wins");
     assert_eq!(fixed.block.start, 31_000);
+}
+
+#[tokio::test]
+/// Reserved port ranges (Windows' excluded ranges) keep new pool blocks clear of
+/// them like avoided ports; a fixed start ignores them.
+async fn reserved_ranges_stay_outside_new_blocks() {
+    let store = Store::open(":memory:").await.expect("store");
+    let project = project(&store, "demo").await;
+    let a = lane(&store, project.id, 0).await;
+    let b = lane(&store, project.id, 1).await;
+    let mut first = request(BlockOwner::Lane(a.id), 2);
+    first.avoid_blocks = vec![
+        PortBlock::new(20_000, 100).expect("block"),
+        PortBlock::new(20_105, 1).expect("block"),
+    ];
+    let placed = store.allocate(first).await.expect("placed");
+    assert_eq!(placed.block.start, 20_106);
+    let mut fixed = request(BlockOwner::Lane(b.id), 1);
+    fixed.fixed_start = Some(20_000);
+    fixed.avoid_blocks = vec![PortBlock::new(20_000, 100).expect("block")];
+    let fixed = store.allocate(fixed).await.expect("fixed start wins");
+    assert_eq!(fixed.block.start, 20_000);
 }
 
 #[tokio::test]

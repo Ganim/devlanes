@@ -224,9 +224,9 @@ fn targets(paths: &Paths) -> Vec<TrustTarget> {
 
 /// The OS decides the store implementation at compile time. `own_ca` lets the
 /// macOS keychain and the Windows root store also remove older devlanes CAs by
-/// name; mkcert's CA is not ours. On Linux, sudo may ask for a password only when
-/// this invocation may prompt; the macOS and Windows dialogs appear on the desktop
-/// either way.
+/// name on uninstall; mkcert's CA is not ours. On Linux, sudo may ask for a
+/// password only when this invocation may prompt; the macOS and Windows dialogs
+/// appear on the desktop either way.
 fn store(
     target: TrustTarget,
     own_ca: bool,
@@ -305,7 +305,7 @@ impl StoreNotes {
 }
 
 /// Whether each configured trust store trusts the CA, for `doctor`:
-/// `[{store, state: trusted|untrusted|unknown, reason?, location?, approval?, hint?}]`,
+/// `[{store, state: trusted|untrusted|distrusted|unknown, reason?, location?, approval?, hint?}]`,
 /// `null` without a CA. Read-only and never prompts: a store that would need a
 /// password is `unknown`.
 pub(crate) async fn trust_report() -> Value {
@@ -348,6 +348,9 @@ fn trust_entry(target: TrustTarget, status: &TrustStatus, notes: &StoreNotes) ->
     let mut entry = match status {
         TrustStatus::Installed => json!({"store": target.as_str(), "state": "trusted"}),
         TrustStatus::Missing => json!({"store": target.as_str(), "state": "untrusted"}),
+        TrustStatus::Distrusted { reason } => {
+            json!({"store": target.as_str(), "state": "distrusted", "reason": reason})
+        }
         TrustStatus::Unknown { reason } => {
             json!({"store": target.as_str(), "state": "unknown", "reason": reason})
         }
@@ -362,6 +365,65 @@ fn trust_entry(target: TrustTarget, status: &TrustStatus, notes: &StoreNotes) ->
         }
     }
     entry
+}
+
+/// A target's status after `certs trust` or `untrust`, or why it failed.
+type TrustResult = Result<(TrustStatus, StoreNotes), devlanes_trust::TrustError>;
+
+/// A configured target and its store, or why there is none.
+type TargetStore = (
+    TrustTarget,
+    Result<Box<dyn TrustStore>, devlanes_trust::TrustError>,
+);
+
+/// Installs or removes `ca` in `stores`, in order, and reads each one's status.
+///
+/// Stores sharing an id (System and Chrome in the macOS login keychain and the
+/// Windows user root store) get one result. Each change set
+/// ([`TrustStore::changes`]) is changed once, by its first store; a later store
+/// with the same change set, tried or failed, only reads its status. On Windows
+/// Firefox reports on its own line but changes the user root store, so a declined
+/// dialog is not shown a second time. `announce` gets the dialog a change is
+/// about to show.
+async fn apply_trust(
+    stores: Vec<TargetStore>,
+    ca: &CaCertificate,
+    install: bool,
+    mut announce: impl FnMut(String),
+) -> Vec<(TrustTarget, TrustResult)> {
+    let mut reported = BTreeSet::new();
+    let mut tried = BTreeSet::new();
+    let mut results = Vec::new();
+    for (target, store) in stores {
+        let result = async {
+            let store = store?;
+            if !reported.insert(store.id()) {
+                return Ok(None);
+            }
+            if tried.insert(store.changes()) {
+                if let Some(approval) = store.pending_approval(ca, install).await {
+                    announce(approval);
+                }
+                if install {
+                    store.install(ca).await?;
+                } else {
+                    store.uninstall(ca).await?;
+                }
+            }
+            let status = store.status(ca).await?;
+            Ok::<_, devlanes_trust::TrustError>(Some((
+                status,
+                StoreNotes::of(store.as_ref()).await,
+            )))
+        }
+        .await;
+        match result {
+            Ok(None) => {}
+            Ok(Some(done)) => results.push((target, Ok(done))),
+            Err(error) => results.push((target, Err(error))),
+        }
+    }
+    results
 }
 
 /// Installs or removes the CA in every configured store; one failure doesn't skip the rest.
@@ -393,49 +455,37 @@ async fn trust(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
         ));
         return Ok(0);
     };
-    let mut done = BTreeSet::new();
-    let mut announced = BTreeSet::new();
+    let stores = targets(&paths)
+        .into_iter()
+        .map(|target| {
+            let store = target
+                .ensure_supported()
+                .and_then(|()| store(target, !mkcert, runtime.can_prompt()));
+            (target, store)
+        })
+        .collect();
+    // Said before the change, which waits on the dialog.
+    let announce = |approval: String| {
+        if !runtime.quiet {
+            emit(&Rendered {
+                stderr: format!("{approval}\n"),
+                ..Rendered::default()
+            });
+        }
+    };
     let mut failed = false;
     let mut lines = String::new();
     let mut hints = String::new();
-    for target in targets(&paths) {
-        let result = async {
-            target.ensure_supported()?;
-            let store: Arc<dyn TrustStore> =
-                Arc::from(store(target, !mkcert, runtime.can_prompt())?);
-            // System and Chrome share the macOS login keychain and the Windows
-            // user root store; touch it once.
-            if !done.insert(store.id()) {
-                return Ok(None);
-            }
-            // Said before the change, which waits on the dialog; once per dialog text.
-            if let Some(approval) = store.approval()
-                && !runtime.quiet
-                && announced.insert(approval.clone())
-            {
-                emit(&Rendered {
-                    stderr: format!("{approval}\n"),
-                    ..Rendered::default()
-                });
-            }
-            if install {
-                store.install(&certificate).await?;
-            } else {
-                store.uninstall(&certificate).await?;
-            }
-            let status = store.status(&certificate).await?;
-            Ok::<_, devlanes_trust::TrustError>(Some((
-                status,
-                StoreNotes::of(store.as_ref()).await,
-            )))
-        }
-        .await;
+    for (target, result) in apply_trust(stores, &certificate, install, announce).await {
         match result {
-            Ok(None) => {}
-            Ok(Some((status, notes))) => {
-                let word = match status {
+            Ok((status, notes)) => {
+                let word = match &status {
                     TrustStatus::Installed => "trusted",
                     TrustStatus::Missing => "untrusted",
+                    TrustStatus::Distrusted { reason } => {
+                        hints.push_str(&format!("warning: {target} distrusts the CA: {reason}\n"));
+                        "distrusted"
+                    }
                     TrustStatus::Unknown { .. } => "unknown",
                 };
                 lines.push_str(&format!("{word} {}\n", notes.name(target)));
@@ -853,6 +903,16 @@ mod tests {
             ),
             json!({"store": "firefox", "state": "unknown", "reason": "certutil is missing"})
         );
+        assert_eq!(
+            trust_entry(
+                TrustTarget::System,
+                &TrustStatus::Distrusted {
+                    reason: "Disallowed holds it".into()
+                },
+                &StoreNotes::default()
+            ),
+            json!({"store": "system", "state": "distrusted", "reason": "Disallowed holds it"})
+        );
     }
 
     #[test]
@@ -879,6 +939,163 @@ mod tests {
             "system (Windows user root store)"
         );
         assert_eq!(StoreNotes::default().name(TrustTarget::System), "system");
+    }
+
+    /// A store that logs its calls, for [`apply_trust`].
+    struct Recorder {
+        target: TrustTarget,
+        id: &'static str,
+        changes: &'static str,
+        decline: bool,
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Recorder {
+        /// Logs `call` and fails like a declined Windows dialog when asked to.
+        fn record(&self, call: &str) -> Result<(), devlanes_trust::TrustError> {
+            self.log
+                .lock()
+                .expect("log")
+                .push(format!("{} {call}", self.target));
+            if self.decline && call != "status" {
+                return Err(devlanes_trust::TrustError::Cancelled {
+                    detail: "declined".into(),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TrustStore for Recorder {
+        fn target(&self) -> TrustTarget {
+            self.target
+        }
+
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn changes(&self) -> &'static str {
+            self.changes
+        }
+
+        fn describe(&self) -> String {
+            self.id.into()
+        }
+
+        async fn pending_approval(&self, _: &CaCertificate, install: bool) -> Option<String> {
+            Some(format!("approve {} install={install}", self.target))
+        }
+
+        async fn install(&self, _: &CaCertificate) -> Result<(), devlanes_trust::TrustError> {
+            self.record("install")
+        }
+
+        async fn uninstall(&self, _: &CaCertificate) -> Result<(), devlanes_trust::TrustError> {
+            self.record("uninstall")
+        }
+
+        async fn status(
+            &self,
+            _: &CaCertificate,
+        ) -> Result<TrustStatus, devlanes_trust::TrustError> {
+            self.record("status").map(|()| TrustStatus::Missing)
+        }
+    }
+
+    /// A fresh devlanes CA.
+    fn test_ca() -> CaCertificate {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ca =
+            devlanes_pki::CertificateAuthority::load_or_create(&dir.path().join("ca")).expect("ca");
+        CaCertificate::from_pem(ca.certificate_pem(), CA_NAME).expect("parse")
+    }
+
+    /// Runs [`apply_trust`] over `stores` (target, id, change set, declines) and
+    /// returns the calls, the announced dialogs and the per-target outcome.
+    async fn run_apply(
+        stores: &[(TrustTarget, &'static str, &'static str, bool)],
+        install: bool,
+    ) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut stores: Vec<TargetStore> = stores
+            .iter()
+            .map(|&(target, id, changes, decline)| {
+                let store: Box<dyn TrustStore> = Box::new(Recorder {
+                    target,
+                    id,
+                    changes,
+                    decline,
+                    log: Arc::clone(&log),
+                });
+                (target, Ok(store))
+            })
+            .collect();
+        stores.push((
+            TrustTarget::IosSimulator,
+            Err(devlanes_trust::TrustError::Unsupported {
+                target: TrustTarget::IosSimulator,
+            }),
+        ));
+        let mut announced = Vec::new();
+        let results = apply_trust(stores, &test_ca(), install, |text| announced.push(text)).await;
+        let outcomes = results
+            .into_iter()
+            .map(|(target, result)| match result {
+                Ok((status, _)) => format!("{target} {status:?}"),
+                Err(error) => format!("{target} failed: {error}"),
+            })
+            .collect();
+        let calls = log.lock().expect("log").clone();
+        (calls, announced, outcomes)
+    }
+
+    #[tokio::test]
+    /// Firefox on Windows reports on its own line but shares the user root store's
+    /// change set: after a declined dialog it only reads the status, so no second
+    /// dialog appears and the failure is reported once.
+    async fn shared_change_set_runs_once() {
+        let stores = [
+            (TrustTarget::System, "root", "root", true),
+            (TrustTarget::Chrome, "root", "root", true),
+            (TrustTarget::Firefox, "firefox", "root", true),
+        ];
+        for install in [true, false] {
+            let change = if install { "install" } else { "uninstall" };
+            let (calls, announced, outcomes) = run_apply(&stores, install).await;
+            assert_eq!(calls, [format!("system {change}"), "firefox status".into()]);
+            assert_eq!(announced, [format!("approve system install={install}")]);
+            assert_eq!(
+                outcomes,
+                [
+                    "system failed: declined",
+                    "firefox Missing",
+                    "ios-simulator failed: ios-simulator certificate trust is not supported yet",
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    /// Stores with their own change set (NSS profiles on Unix) are each changed.
+    async fn separate_change_sets_each_change() {
+        let stores = [
+            (TrustTarget::System, "keychain", "keychain", false),
+            (TrustTarget::Firefox, "nss", "nss", false),
+        ];
+        let (calls, announced, outcomes) = run_apply(&stores, true).await;
+        assert_eq!(
+            calls,
+            [
+                "system install",
+                "system status",
+                "firefox install",
+                "firefox status"
+            ]
+        );
+        assert_eq!(announced.len(), 2);
+        assert_eq!(outcomes[..2], ["system Missing", "firefox Missing"]);
     }
 
     #[test]

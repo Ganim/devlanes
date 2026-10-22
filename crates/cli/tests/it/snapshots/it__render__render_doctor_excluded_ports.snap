@@ -9,8 +9,10 @@ daemon
 sandbox
   ✓ not sandboxed
 ports
-  ! ports.range 20000-32767 overlaps ports Windows reserves (27339, 32700-32799); a service given one of them cannot bind it
+  ! ports.range 20000-32767 overlaps ports Windows reserves (27339, 32700-32799); new port blocks skip them, but the ranges can change after a reboot and a block given out earlier may now sit inside one
     fix: set ports.range in ~/.devlanes/config.yaml clear of them (netsh int ipv4 show excludedportrange protocol=tcp lists them; Hyper-V, WSL and Docker Desktop reserve them)
+  ! proxy ports inside port ranges Windows reserves: 80 (proxy.http_port), 8443 (HTTPS fallback); the proxy cannot bind them
+    fix: set proxy.http_port and proxy.https_port in ~/.devlanes/config.yaml to free ports outside them (netsh int ipv4 show excludedportrange protocol=tcp lists them)
   ! box ports 27339, 32701 are inside port ranges Windows reserves; they cannot be mirrored here
     fix: set ports.range on the box clear of the reserved ranges, then restart its lanes (netsh int ipv4 show excludedportrange protocol=tcp lists them)
 output
@@ -22,8 +24,10 @@ daemon
 sandbox
   ok not sandboxed
 ports
-  warn ports.range 20000-32767 overlaps ports Windows reserves (27339, 32700-32799); a service given one of them cannot bind it
+  warn ports.range 20000-32767 overlaps ports Windows reserves (27339, 32700-32799); new port blocks skip them, but the ranges can change after a reboot and a block given out earlier may now sit inside one
     fix: set ports.range in ~/.devlanes/config.yaml clear of them (netsh int ipv4 show excludedportrange protocol=tcp lists them; Hyper-V, WSL and Docker Desktop reserve them)
+  warn proxy ports inside port ranges Windows reserves: 80 (proxy.http_port), 8443 (HTTPS fallback); the proxy cannot bind them
+    fix: set proxy.http_port and proxy.https_port in ~/.devlanes/config.yaml to free ports outside them (netsh int ipv4 show excludedportrange protocol=tcp lists them)
   warn box ports 27339, 32701 are inside port ranges Windows reserves; they cannot be mirrored here
     fix: set ports.range on the box clear of the reserved ranges, then restart its lanes (netsh int ipv4 show excludedportrange protocol=tcp lists them)
 output
@@ -31,8 +35,10 @@ output
 --- agent (exit 0)
 warn daemon: not running (socket \\.\pipe\devlanes-0)
   fix: devlanes start, or devlanes daemon restart
-warn ports: ports.range 20000-32767 overlaps ports Windows reserves (27339, 32700-32799); a service given one of them cannot bind it
+warn ports: ports.range 20000-32767 overlaps ports Windows reserves (27339, 32700-32799); new port blocks skip them, but the ranges can change after a reboot and a block given out earlier may now sit inside one
   fix: set ports.range in ~/.devlanes/config.yaml clear of them (netsh int ipv4 show excludedportrange protocol=tcp lists them; Hyper-V, WSL and Docker Desktop reserve them)
+warn ports: proxy ports inside port ranges Windows reserves: 80 (proxy.http_port), 8443 (HTTPS fallback); the proxy cannot bind them
+  fix: set proxy.http_port and proxy.https_port in ~/.devlanes/config.yaml to free ports outside them (netsh int ipv4 show excludedportrange protocol=tcp lists them)
 warn ports: box ports 27339, 32701 are inside port ranges Windows reserves; they cannot be mirrored here
   fix: set ports.range on the box clear of the reserved ranges, then restart its lanes (netsh int ipv4 show excludedportrange protocol=tcp lists them)
 ok sandbox: not sandboxed

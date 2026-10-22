@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
@@ -33,12 +33,65 @@ pub enum Error {
     Tls(#[from] rustls::Error),
     #[error("CA directory contains an incomplete certificate/key pair")]
     IncompleteCa,
-    #[error("CA key or directory must be a regular non-symlink path with private permissions")]
-    InsecurePath,
+    /// A CA directory or key file that others could read or swap; `fix` is a
+    /// command that makes it private, when one is known.
+    #[error("CA path {} is not private: {problem}{}", .path.display(), fix_suffix(.fix))]
+    InsecurePath {
+        path: PathBuf,
+        problem: PathProblem,
+        fix: Option<String>,
+    },
     #[error("CA certificate is invalid, expired, or lacks signing authority")]
     InvalidCa,
     #[error("certificate SAN list must contain valid DNS names")]
     InvalidNames,
+}
+
+/// `; fix: <command>` for [`Error::InsecurePath`]'s message, or nothing.
+fn fix_suffix(fix: &Option<String>) -> String {
+    fix.as_ref()
+        .map(|fix| format!("; fix: {fix}"))
+        .unwrap_or_default()
+}
+
+/// Why a CA path is not private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathProblem {
+    /// A symlink, junction or other reparse point, which could point anywhere.
+    Link,
+    /// Something other than a directory where the CA directory should be.
+    NotADirectory,
+    /// Something other than a regular file where a key or lock file should be.
+    NotAFile,
+    /// The file has this many names, so it can be reached or swapped elsewhere.
+    HardLinks(u32),
+    /// Another account owns it.
+    Owner,
+    /// Group or others have access (Unix permission bits).
+    Mode(u32),
+    /// Other accounts can open it (Windows), as `Name (SID)` or a bare SID; empty
+    /// when its access list cannot be judged.
+    Accounts(Vec<String>),
+}
+
+impl std::fmt::Display for PathProblem {
+    /// A clause for [`Error::InsecurePath`]'s message.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Link => f.write_str("it is a symlink or junction"),
+            Self::NotADirectory => f.write_str("it is not a directory"),
+            Self::NotAFile => f.write_str("it is not a regular file"),
+            Self::HardLinks(links) => write!(f, "it has {links} hard links"),
+            Self::Owner => f.write_str("another account owns it"),
+            Self::Mode(mode) => write!(f, "group or others have access (mode {mode:o})"),
+            Self::Accounts(accounts) if accounts.is_empty() => {
+                f.write_str("its access list grants access that cannot be judged")
+            }
+            Self::Accounts(accounts) => {
+                write!(f, "other accounts can open it: {}", accounts.join(", "))
+            }
+        }
+    }
 }
 
 /// Owns an ECDSA signing key without exposing it through Debug or accessors.
@@ -391,7 +444,7 @@ fn create_private_directory(path: &Path) -> Result<(), Error> {
 fn create_private_directory(path: &Path) -> Result<(), Error> {
     match devlanes_sys::windows::security::ensure_private_dir(path, false)? {
         Ok(_) => Ok(()),
-        Err(_) => Err(Error::InsecurePath),
+        Err(problem) => Err(insecure_directory(path, problem)),
     }
 }
 
@@ -400,43 +453,94 @@ fn create_private_directory(path: &Path) -> Result<(), Error> {
 fn check_private(path: &Path, directory: bool) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt;
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink()
-        || (directory && !metadata.is_dir())
-        || (!directory && !metadata.is_file())
-        || metadata.permissions().mode() & 0o077 != 0
-    {
-        return Err(Error::InsecurePath);
-    }
-    Ok(())
+    let mode = metadata.permissions().mode() & 0o7777;
+    let problem = if metadata.file_type().is_symlink() {
+        PathProblem::Link
+    } else if directory && !metadata.is_dir() {
+        PathProblem::NotADirectory
+    } else if !directory && !metadata.is_file() {
+        PathProblem::NotAFile
+    } else if mode & 0o077 != 0 {
+        PathProblem::Mode(mode)
+    } else {
+        return Ok(());
+    };
+    let fix = matches!(problem, PathProblem::Mode(_)).then(|| {
+        let private = if directory { "700" } else { "600" };
+        format!("chmod {private} {}", path.display())
+    });
+    Err(Error::InsecurePath {
+        path: path.to_owned(),
+        problem,
+        fix,
+    })
 }
 
-/// Rejects any reparse point (symlinks and junctions, which could point anywhere)
-/// and a directory others can open. A file's access comes from the directory it
-/// sits in: files created there inherit its private access list, so a file is
-/// checked through its parent.
+/// Rejects a directory that is a reparse point (symlinks and junctions, which
+/// could point anywhere), is another account's or that others can open; for a
+/// file, its directory first (the directory's fix also resets the files inside),
+/// then the file itself the same way plus extra hard links, which an explicit
+/// grant or a second name in another directory would expose.
 #[cfg(windows)]
 fn check_private(path: &Path, directory: bool) -> Result<(), Error> {
-    use devlanes_sys::windows::security::check_private_dir;
-    use std::os::windows::fs::MetadataExt;
-    /// `FILE_ATTRIBUTE_REPARSE_POINT`.
-    const REPARSE_POINT: u32 = 0x400;
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_attributes() & REPARSE_POINT != 0
-        || (directory && !metadata.is_dir())
-        || (!directory && !metadata.is_file())
-    {
-        return Err(Error::InsecurePath);
-    }
-    let directory = if directory { Some(path) } else { path.parent() };
+    use devlanes_sys::windows::security::{FileProblem, check_private_dir, check_private_file};
+    let parent = if directory { Some(path) } else { path.parent() };
     // A bare file name sits in the working directory.
-    let directory = match directory {
+    let parent = match parent {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
-    match check_private_dir(directory)? {
-        Ok(()) => Ok(()),
-        Err(_) => Err(Error::InsecurePath),
+    if let Err(problem) = check_private_dir(parent)? {
+        return Err(insecure_directory(parent, problem));
     }
+    if directory {
+        return Ok(());
+    }
+    let (problem, fix) = match check_private_file(path)? {
+        Ok(()) => return Ok(()),
+        Err(FileProblem::NotAFile) => (PathProblem::NotAFile, None),
+        Err(FileProblem::ReparsePoint) => (PathProblem::Link, None),
+        Err(FileProblem::HardLinks(links)) => (PathProblem::HardLinks(links), None),
+        Err(FileProblem::Owner) => (PathProblem::Owner, None),
+        // The directory is private by now, so inheriting from it is enough.
+        Err(FileProblem::Acl(others)) => (
+            accounts(&others),
+            Some(devlanes_sys::windows::security::private_file_fix(path)),
+        ),
+    };
+    Err(Error::InsecurePath {
+        path: path.to_owned(),
+        problem,
+        fix,
+    })
+}
+
+/// [`Error::InsecurePath`] for a CA directory, with the `icacls` commands the
+/// daemon's home check also gives when other accounts can open it.
+#[cfg(windows)]
+fn insecure_directory(path: &Path, problem: devlanes_sys::windows::security::DirProblem) -> Error {
+    use devlanes_sys::windows::security::{DirProblem, private_dir_fix};
+    let (problem, fix) = match problem {
+        DirProblem::NotADirectory => (PathProblem::NotADirectory, None),
+        DirProblem::ReparsePoint => (PathProblem::Link, None),
+        DirProblem::Owner => (PathProblem::Owner, None),
+        DirProblem::Acl(others) => (accounts(&others), private_dir_fix(path, &others).ok()),
+    };
+    Error::InsecurePath {
+        path: path.to_owned(),
+        problem,
+        fix,
+    }
+}
+
+/// [`PathProblem::Accounts`] with readable names for well-known groups.
+#[cfg(windows)]
+fn accounts(sids: &[String]) -> PathProblem {
+    PathProblem::Accounts(
+        sids.iter()
+            .map(|sid| devlanes_sys::windows::security::account_label(sid))
+            .collect(),
+    )
 }
 
 /// Builds the permitted subtrees for a new CA, adding a normalized TLD when it is not covered.

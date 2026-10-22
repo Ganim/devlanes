@@ -662,9 +662,11 @@ fn doctor_without_a_daemon() {
 }
 
 /// Trust entries with a location (Windows) name the store, the dialog `certs
-/// trust` shows, and a hint the CLI cannot fix (Firefox ignoring the store).
+/// trust` shows (once for a shared store), and a hint the CLI cannot fix (Firefox
+/// ignoring the store). A CA in the deny list fails without a `certs trust` fix.
 #[test]
 fn doctor_names_the_store_its_dialog_and_hints() {
+    let approval = "choose Yes in the Windows security warning";
     let data = json!({
         "running": false, "version": "0.3.0", "home": r"C:\Users\u\.devlanes",
         "socket": r"\\.\pipe\devlanes-0", "db_path": r"C:\Users\u\.devlanes\state.db",
@@ -672,21 +674,42 @@ fn doctor_names_the_store_its_dialog_and_hints() {
                "name_constrained": true, "hint": null, "fix": null,
                "trust": [
                    {"store": "system", "state": "untrusted", "location": "Windows user root store",
-                    "approval": "Windows asks you to confirm; choose Yes"},
-                   {"store": "firefox", "state": "trusted",
+                    "approval": approval},
+                   {"store": "firefox", "state": "untrusted",
                     "location": "Windows user root store, read by Firefox at startup",
+                    "approval": approval,
                     "hint": "Firefox profile a.default sets security.enterprise_roots.enabled to false"},
                ]},
     });
     let text = render_text(Method::Doctor, &data);
     for expected in [
         "fail tls: CA not trusted by system (Windows user root store)",
-        "devlanes certs trust (Windows asks you to confirm; choose Yes)",
-        "ok tls: CA trusted by firefox (Windows user root store, read by Firefox at startup)",
+        "devlanes certs trust, then choose Yes in the Windows security warning",
+        "fail tls: CA not trusted by firefox (Windows user root store, read by Firefox at startup)",
         "tls: Firefox profile a.default sets security.enterprise_roots.enabled to false",
     ] {
         assert!(text.contains(expected), "{expected}:\n{text}");
     }
+    for mode in text.split("--- ").filter(|mode| !mode.is_empty()) {
+        assert!(
+            mode.matches(approval).count() <= 1,
+            "approval repeated:\n{mode}"
+        );
+    }
+
+    let mut distrusted = data.clone();
+    distrusted["ca"]["trust"] = json!([
+        {"store": "system", "state": "distrusted", "location": "Windows user root store",
+         "reason": r"Cert:\CurrentUser\Disallowed also holds it", "approval": approval},
+    ]);
+    let text = render_text(Method::Doctor, &distrusted);
+    assert!(
+        text.contains(
+            r"fail tls: CA distrusted by system (Windows user root store): Cert:\CurrentUser\Disallowed also holds it"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains(approval), "{text}");
 }
 
 /// Windows terminal facts. Without a daemon an elevated shell fails doctor and a
@@ -842,8 +865,9 @@ fn doctor_terminal_and_acl_checks() {
 }
 
 /// Port ranges Windows reserves (`excluded_ports`): a pool clear of them is a
-/// passing check, overlaps with the pool or with mirrored box ports are warnings
-/// with a fix, and an unreadable list is a warning too. None of them fails doctor.
+/// passing check, overlaps with the pool, the proxy ports or mirrored box ports
+/// are warnings with a fix, and an unreadable list (whole or one family) is a
+/// warning too. None of them fails doctor.
 #[test]
 fn doctor_excluded_port_checks() {
     let with = |excluded: Value| {
@@ -879,8 +903,22 @@ fn doctor_excluded_port_checks() {
         "pool": pool,
         "pool_overlaps": [{"start": 27339, "end": 27339}, {"start": 32700, "end": 32799}],
         "mirrored": [27339, 32701],
+        "proxy": [
+            {"listener": "http", "port": 80, "fallback": false},
+            {"listener": "https", "port": 8443, "fallback": true},
+        ],
     }));
     insta::assert_snapshot!("render_doctor_excluded_ports", overlapping);
+    assert!(
+        overlapping.contains(
+            "warn ports: proxy ports inside port ranges Windows reserves: 80 (proxy.http_port), 8443 (HTTPS fallback)"
+        ),
+        "{overlapping}"
+    );
+    assert!(
+        overlapping.contains("new port blocks skip them, but the ranges can change after a reboot"),
+        "{overlapping}"
+    );
     assert!(overlapping.contains("--- agent (exit 0)"), "{overlapping}");
     assert!(
         overlapping.contains(
@@ -914,6 +952,20 @@ fn doctor_excluded_port_checks() {
         "{failed}"
     );
     assert!(failed.contains("--- agent (exit 0)"), "{failed}");
+    assert!(!failed.contains("ports.range"), "{failed}");
+
+    // One family failed: its error shows next to the checks of what was read.
+    let partial = with(json!({
+        "ranges": [{"start": 27339, "end": 27339}], "pool": pool,
+        "pool_overlaps": [{"start": 27339, "end": 27339}], "mirrored": [], "proxy": [],
+        "error": "ipv6: netsh failed (exit code: 1)",
+    }));
+    for expected in [
+        "warn ports: cannot read the port ranges Windows reserves: ipv6: netsh failed (exit code: 1)",
+        "warn ports: ports.range 20000-32767 overlaps ports Windows reserves (27339)",
+    ] {
+        assert!(partial.contains(expected), "{expected}\n{partial}");
+    }
 
     // Unix reports nothing, so nothing is rendered.
     let unix = with(Value::Null);

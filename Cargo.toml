@@ -29,6 +29,9 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
 tracing = "0.1"
 tempfile = "3"
+# Mozilla's root certificates as DER. Windows only: bundle.pem adds them to the
+# Windows store, which downloads most public roots on first use.
+webpki-root-certs = "1"
 # Win32 bindings for the `sys` crate's Windows modules; crates enable only the API
 # features they call.
 windows-sys = "0.61"

@@ -51,6 +51,13 @@ pub enum TrustError {
         /// What was declined and how to retry.
         detail: String,
     },
+    /// The CA was removed from the user's store but another store this user trusts
+    /// still holds it (the Windows machine root store).
+    #[error("the CA is still trusted through {through}, which only an administrator can change")]
+    StillTrusted {
+        /// The store that still holds the CA.
+        through: String,
+    },
     /// A command exited unsuccessfully.
     #[error("`{command}` failed with {}: {}", exit_code(*.code), stderr.trim())]
     CommandFailed {

@@ -69,19 +69,6 @@ impl CtrlError {
     }
 }
 
-/// Sends `event` to every process attached to the console of process `pid`.
-/// Only call it from a process started without a console: it attaches to the
-/// target's, which a process can only do while it has none of its own.
-pub fn send(pid: u32, event: CtrlEvent) -> Result<(), CtrlError> {
-    Attached::to(pid)?.send(event)
-}
-
-/// PIDs of every process attached to the console of process `pid`, this helper
-/// excluded. Same precondition as [`send`].
-pub fn console_processes(pid: u32) -> Result<Vec<u32>, CtrlError> {
-    Attached::to(pid)?.processes()
-}
-
 /// This process attached to another's console, with control events ignored,
 /// until dropped. Staying attached keeps the console, and so its process list,
 /// alive after the process it was reached through exits.
@@ -90,17 +77,10 @@ pub struct Attached(());
 
 impl Attached {
     /// Attaches to `pid`'s console, ignoring the events sent to it from here on.
-    /// Same precondition as [`send`].
+    /// Only call it from a process started without a console: a process can
+    /// attach to another's only while it has none of its own.
     pub fn to(pid: u32) -> Result<Self, CtrlError> {
-        // Installed first: once attached, an event someone else sends to the
-        // console would otherwise end this process with the default handler. A
-        // real handler is needed, since `SetConsoleCtrlHandler(NULL, TRUE)` only
-        // ignores Ctrl-C.
-        // SAFETY: `ignore` is a valid handler for the life of the process; adding
-        // it again only adds another entry that does the same.
-        if unsafe { SetConsoleCtrlHandler(Some(ignore), 1) } == 0 {
-            return Err(io::Error::last_os_error().into());
-        }
+        ignore_events()?;
         // SAFETY: harmless without a console.
         unsafe { FreeConsole() };
         // SAFETY: plain call; failures are mapped below.
@@ -157,6 +137,23 @@ impl Drop for Attached {
         // SAFETY: detaches from the console attached in `to`.
         unsafe { FreeConsole() };
     }
+}
+
+/// Installs [`ignore`] once per process, before any attach: once attached, an
+/// event someone else sends to the console would otherwise end this process
+/// with the default handler. A real handler is needed, since
+/// `SetConsoleCtrlHandler(NULL, TRUE)` only ignores Ctrl-C. Retried attaches
+/// reuse it instead of adding an entry each time.
+fn ignore_events() -> Result<(), CtrlError> {
+    static INSTALLED: std::sync::OnceLock<Result<(), i32>> = std::sync::OnceLock::new();
+    let installed = INSTALLED.get_or_init(|| {
+        // SAFETY: `ignore` is a valid handler for the life of the process.
+        if unsafe { SetConsoleCtrlHandler(Some(ignore), 1) } == 0 {
+            return Err(io::Error::last_os_error().raw_os_error().unwrap_or(0));
+        }
+        Ok(())
+    });
+    installed.map_err(|code| io::Error::from_raw_os_error(code).into())
 }
 
 /// Handles every control event by ignoring it.

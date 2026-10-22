@@ -140,6 +140,9 @@ pub struct AllocationRequest {
     /// mirrored ports. A new pool block never covers them; a kept block or a fixed
     /// start ignores them, because local lanes win over mirrors.
     pub avoid: BTreeSet<u16>,
+    /// Port ranges the OS keeps out of reach (Windows' excluded port ranges),
+    /// treated like `avoid`. Empty on Unix.
+    pub avoid_blocks: Vec<PortBlock>,
 }
 
 /// Stable names include removed services until GC. `previous` signals a port change.
