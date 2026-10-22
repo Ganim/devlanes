@@ -47,6 +47,20 @@ impl Captured {
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default()
     }
+
+    /// Waits up to 4 s until `text` was written after byte `from`.
+    async fn wait_for(&self, from: usize, text: &str) {
+        for _ in 0..400 {
+            if self
+                .text()
+                .get(from..)
+                .is_some_and(|after| after.contains(text))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 /// `acme@1` starting with one of its two services ready.
@@ -110,8 +124,10 @@ async fn the_loop_writes_the_bar_and_clears_it_on_quit() -> TestResult {
     }));
     let mut terminal = Terminal::new(TestBackend::new(100, 24))?;
     let driver_api: Arc<dyn DaemonApi> = api.clone();
+    let out = Captured::default();
     let script = {
         let api = Arc::clone(&api);
+        let out = out.clone();
         async move {
             for _ in 0..100 {
                 if api
@@ -122,17 +138,17 @@ async fn the_loop_writes_the_bar_and_clears_it_on_quit() -> TestResult {
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Quit once the bar for the starting lane was written.
+            out.wait_for(0, "\x1b]9;4;1;50\x1b\\").await;
             let quit = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
             keys_tx.send(Ok(TermEvent::Key(quit))).await.ok();
         }
     };
-    let out = Captured::default();
     // q closes at once; the quit dialog has its own tests.
     let options = Options {
         progress: Some(Wrap::Bare),
         on_quit: Some("keep".into()),
-        ..Options::default()
+        ..crate::hermetic_options()
     };
     let run = drive(
         &mut terminal,
@@ -186,6 +202,8 @@ async fn the_bar_survives_switching_lanes_and_a_resync_during_a_start() -> TestR
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
+            // The plan is in: one of its two units is ready.
+            out.wait_for(0, "\x1b]9;4;1;50\x1b\\").await;
             let press = |c| {
                 Ok(TermEvent::Key(KeyEvent::new(
                     KeyCode::Char(c),
@@ -193,24 +211,30 @@ async fn the_bar_survives_switching_lanes_and_a_resync_during_a_start() -> TestR
                 )))
             };
             // Back and forth between the lanes while it starts, and a resync
-            // (the subscriber fell behind) in the middle.
+            // (the subscriber fell behind) in the middle; its status reply is
+            // waited for.
             for c in [']', '[', ']', '['] {
                 keys_tx.send(press(c)).await.ok();
-                tokio::time::sleep(Duration::from_millis(20)).await;
             }
+            let statuses = |n: usize| {
+                move |calls: &[String]| calls.iter().filter(|c| *c == "status").count() >= n
+            };
             api.emit(events::RESYNC, json!({})).await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            crate::wait_for_calls(&api, statuses(2)).await;
+            // The start's next event, then a second resync: events are handled
+            // in order, so its status call means the phase event was handled.
             api.emit(
                 events::PHASE,
                 json!({"lane": "acme@1", "phase": "services", "state": "progress", "start_id": 4}),
             )
             .await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            api.emit(events::RESYNC, json!({})).await;
+            crate::wait_for_calls(&api, statuses(3)).await;
             // A key after all that writes the bar again, with the start's
             // own share: one of its two units, not two of three.
             let before = out.text().len();
             keys_tx.send(press(']')).await.ok();
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            out.wait_for(before, "\x1b]9;4;1;").await;
             let after = out.text()[before..].to_owned();
             keys_tx.send(press('q')).await.ok();
             after
@@ -219,7 +243,7 @@ async fn the_bar_survives_switching_lanes_and_a_resync_during_a_start() -> TestR
     let options = Options {
         progress: Some(Wrap::Bare),
         on_quit: Some("keep".into()),
-        ..Options::default()
+        ..crate::hermetic_options()
     };
     let run = drive(
         &mut terminal,
@@ -255,7 +279,7 @@ async fn without_support_nothing_is_written() -> TestResult {
         keys_tx.send(Ok(TermEvent::Key(quit))).await.ok();
     };
     let out = Captured::default();
-    let options = Options::default();
+    let options = crate::hermetic_options();
     let run = drive(
         &mut terminal,
         driver_api,

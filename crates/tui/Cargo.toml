@@ -13,6 +13,8 @@ base64 = "0.22"
 bytes.workspace = true
 crossterm = { version = "0.29", features = ["event-stream"] }
 devlanes-client = { path = "../client" }
+# The daemon page words doctor checks exactly as `devlanes doctor` does.
+devlanes-cli = { path = "../cli" }
 # The options page reads the user config schema and edits config.yaml in place.
 devlanes-config = { path = "../config" }
 devlanes-proto = { path = "../proto" }

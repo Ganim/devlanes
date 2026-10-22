@@ -931,9 +931,11 @@ impl Layout {
     }
 
     /// Picks columns for `width`, in monitor.md's order; the sparkline
-    /// takes what is left. Bars shrink first, then the name down to 12,
-    /// then columns drop by priority: state, kind, peak, the sparkline,
-    /// uptime, lane, memory.
+    /// takes what is left. Bars shrink first (down to 4), then kind and
+    /// peak go, then the name shrinks to 12, then columns drop by priority:
+    /// the sparkline, uptime, lane, state, memory. State stays as long as
+    /// anything can give way: it is the one column that says a unit is not
+    /// running.
     fn fit(width: usize, flat: bool, longest: usize, lane: usize) -> Self {
         let mut columns = vec![
             Column::Name,
@@ -958,15 +960,15 @@ impl Layout {
             spark: 0,
         };
         let room = |l: &Layout| l.used() + 13 <= width;
-        for bar in [8, 6, 5] {
+        for bar in [8, 6, 5, 4] {
             layout.bar = bar;
             if room(&layout) {
                 break;
             }
         }
-        // State, kind and peak go before the name shrinks; the name shrinks
-        // to 12 before anything that matters more goes.
-        for column in [Column::State, Column::Kind, Column::Peak] {
+        // Kind and peak go before the name shrinks; the name shrinks to 12
+        // before anything that matters more goes.
+        for column in [Column::Kind, Column::Peak] {
             if room(&layout) {
                 break;
             }
@@ -975,7 +977,13 @@ impl Layout {
         while !room(&layout) && layout.name > 12 {
             layout.name -= 1;
         }
-        for column in [Column::Spark, Column::Uptime, Column::Lane, Column::Mem] {
+        for column in [
+            Column::Spark,
+            Column::Uptime,
+            Column::Lane,
+            Column::State,
+            Column::Mem,
+        ] {
             if room(&layout) {
                 break;
             }
@@ -1700,6 +1708,33 @@ mod tests {
         assert_eq!(bytes_fine(518_936_576), "494.9M");
         assert_eq!(bytes_fine(11 << 30), "11.0G");
         assert_eq!(format_bytes(518_412_288), "494M");
+    }
+
+    #[test]
+    fn the_state_column_stays_at_80_columns() {
+        // 80x24: the table's inside is 78 wide.
+        let layout = Layout::fit(78, false, 16, 6);
+        assert!(
+            layout.columns.contains(&Column::State),
+            "{:?}",
+            layout.columns
+        );
+        assert!(layout.columns.contains(&Column::Cpu));
+        assert!(layout.columns.contains(&Column::Mem));
+        // Kind gave way first.
+        assert!(!layout.columns.contains(&Column::Kind));
+        // Narrower still, the name shrinks and the sparkline goes before state.
+        let narrow = Layout::fit(60, false, 16, 6);
+        assert!(
+            narrow.columns.contains(&Column::State),
+            "{:?}",
+            narrow.columns
+        );
+        assert!(!narrow.columns.contains(&Column::Spark));
+        // Wide enough, everything shows with full bars.
+        let wide = Layout::fit(160, true, 16, 10);
+        assert_eq!(wide.columns.len(), 9);
+        assert_eq!(wide.bar, 8);
     }
 
     #[test]

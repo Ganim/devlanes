@@ -299,6 +299,76 @@ async fn zoom_from_watching_renders_output_at_the_zoomed_width() -> TestResult {
     Ok(())
 }
 
+/// The output stream's text as drawn.
+fn shown(app: &App) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(draw(app)?.backend().to_string())
+}
+
+#[tokio::test]
+async fn zoom_keeps_the_last_frame_until_the_reopened_stream_draws() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
+    feed(&mut app, generation, b"");
+    let generation = focus_terminal(&mut app, b"OLD FRAME\r\n$ ").ok_or("no interactive attach")?;
+    app.update(key(KeyCode::Esc));
+    let effects = app.update(key(KeyCode::Char('z')));
+    let token = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::SettleResize { token, .. } => Some(*token),
+            _ => None,
+        })
+        .ok_or(format!("no settle timer: {effects:?}"))?;
+    // The shell redraws into the locally resized grid meanwhile; the pane
+    // still shows the frame from before the zoom.
+    app.update(Msg::AttachOutput {
+        generation,
+        bytes: b"\x1b[H\x1b[2Jlocal redraw".to_vec(),
+    });
+    let text = shown(&app)?;
+    assert!(text.contains("OLD FRAME"), "{text}");
+    assert!(!text.contains("local redraw"), "{text}");
+    // Settled: the stream reopens, and the pane is not blank while it opens.
+    let effects = app.update(Msg::ResizeSettled { token });
+    let (reopened, interactive) = attach_in(&effects).ok_or(format!("no reopen: {effects:?}"))?;
+    assert!(interactive && reopened > generation, "{effects:?}");
+    app.update(opened(reopened));
+    let text = shown(&app)?;
+    assert!(text.contains("OLD FRAME"), "{text}");
+    // The daemon's redraw at the new size replaces it.
+    app.update(Msg::AttachOutput {
+        generation: reopened,
+        bytes: b"\x1b[H\x1b[2JNEW FRAME".to_vec(),
+    });
+    let text = shown(&app)?;
+    assert!(text.contains("NEW FRAME"), "{text}");
+    assert!(!text.contains("OLD FRAME"), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn zoom_from_watching_keeps_the_last_frame_until_the_stream_draws() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
+    feed(&mut app, generation, b"WATCHED FRAME");
+    // Watching: `z` reopens at once, without a settle timer.
+    let effects = app.update(key(KeyCode::Char('z')));
+    let (reopened, _) = attach_in(&effects).ok_or(format!("no reopen: {effects:?}"))?;
+    app.update(opened(reopened));
+    let text = shown(&app)?;
+    assert!(text.contains("WATCHED FRAME"), "{text}");
+    app.update(Msg::AttachOutput {
+        generation: reopened,
+        bytes: b"\x1b[H\x1b[2JZOOMED FRAME".to_vec(),
+    });
+    let text = shown(&app)?;
+    assert!(text.contains("ZOOMED FRAME"), "{text}");
+    assert!(!text.contains("WATCHED FRAME"), "{text}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn units_the_daemon_marks_without_a_pty_are_never_resized() -> TestResult {
     let mut lanes = mixed_lanes();

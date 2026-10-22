@@ -69,11 +69,6 @@ impl TerminalScreen {
         self.parser.screen_mut().set_scrollback(0);
     }
 
-    /// A borrowable view for rendering with tui-term.
-    pub fn view(&self) -> ScreenView<'_> {
-        ScreenView::new(self.parser.screen())
-    }
-
     /// Plain text of the visible grid between two cells, inclusive of the start.
     pub fn text_between(&self, start: (u16, u16), end: (u16, u16)) -> String {
         let (first, last) = if start <= end {
@@ -104,7 +99,7 @@ pub struct ScreenView<'a> {
 
 impl<'a> ScreenView<'a> {
     /// Collects references to the visible cells; no cell contents are copied.
-    fn new(screen: &'a vt100::Screen) -> Self {
+    pub fn new(screen: &'a vt100::Screen) -> Self {
         let (rows, columns) = screen.size();
         let (rows, columns) = (rows.get(), columns.get());
         let mut cells = Vec::with_capacity(usize::from(rows) * usize::from(columns));

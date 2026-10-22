@@ -1136,6 +1136,58 @@ fn doctor_helper_and_user_config_checks() {
     assert!(text.contains("fix: devlanes certs trust --hosts"), "{text}");
 }
 
+/// The resolver strategy's DNS server and the OS resolver file, from `dns`.
+#[test]
+fn doctor_checks_the_dns_server_and_the_resolver_file() {
+    let dns = |file: Value, running: bool| {
+        json!({"dns": {"tld": "test", "listen": "127.0.0.1:15353", "running": running,
+            "error": if running { Value::Null } else { json!("address in use") },
+            "resolver_file": file}})
+    };
+    let ok = dns(
+        json!({"path": "/etc/resolver/test", "installed": true, "matches": true}),
+        true,
+    );
+    let text = render_text(Method::Doctor, &ok);
+    assert!(
+        text.contains(
+            "ok dns: DNS server for .test on 127.0.0.1:15353, resolver file /etc/resolver/test"
+        ),
+        "{text}"
+    );
+    let missing = dns(
+        json!({"path": "/etc/resolver/test", "installed": false, "matches": false}),
+        true,
+    );
+    let text = render_text(Method::Doctor, &missing);
+    assert!(
+        text.contains(
+            "warn dns: .test lookups do not reach the devlanes DNS server: nothing at /etc/resolver/test"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("fix: devlanes certs trust --resolver"),
+        "{text}"
+    );
+    let down = dns(Value::Null, false);
+    let checks = doctor_checks_of(&down);
+    let check = checks.iter().find(|c| c.group == "dns").expect("dns check");
+    assert_eq!(check.state, DoctorState::Fail);
+    assert_eq!(
+        check.text,
+        "DNS server for .test is not running on 127.0.0.1:15353: address in use"
+    );
+    // Without the resolver strategy there is nothing to say.
+    assert!(
+        !doctor_checks_of(&json!({}))
+            .iter()
+            .any(|c| c.group == "dns")
+    );
+    // Other clients get the same lines, minus this command's output mode.
+    assert!(!checks.iter().any(|c| c.group == "output"));
+}
+
 /// `lane.warning` events are one line in every mode; outside a start they name the lane.
 #[test]
 fn lane_warning_events_are_one_line() {

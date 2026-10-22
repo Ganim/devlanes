@@ -4,7 +4,7 @@
 //! filter and the folding of repeats. Pure, so the page, copy mode and the
 //! tests agree on what is on screen.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 /// A log level, most severe first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -248,6 +248,43 @@ pub struct Filters {
     pub text: String,
     /// `d` turns folding off.
     pub unfolded: bool,
+    /// `T`: only these targets; empty shows every target.
+    pub targets: BTreeSet<String>,
+}
+
+/// The targets of `entries` with how many entries each has, by name, for
+/// the `T` picker.
+pub fn targets(entries: &[Entry]) -> Vec<(String, usize)> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for entry in entries {
+        *counts.entry(entry.target.clone()).or_default() += 1;
+    }
+    counts.into_iter().collect()
+}
+
+/// Where the words of `filter` occur in `text`, as byte ranges sorted and
+/// merged, ignoring ASCII case, for highlighting `/` matches.
+pub fn matches_in(text: &str, filter: &str) -> Vec<std::ops::Range<usize>> {
+    let haystack = text.to_ascii_lowercase();
+    let mut found: Vec<std::ops::Range<usize>> = Vec::new();
+    for word in filter.split_whitespace() {
+        let word = word.to_ascii_lowercase();
+        let mut from = 0;
+        while let Some(at) = haystack[from..].find(&word) {
+            let start = from + at;
+            found.push(start..start + word.len());
+            from = start + word.len().max(1);
+        }
+    }
+    found.sort_by_key(|range| range.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in found {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
 }
 
 /// One shown entry: its index in the parsed entries (the newest occurrence
@@ -266,7 +303,9 @@ pub fn shown(entries: &[Entry], filters: &Filters) -> Vec<Shown> {
     let kept: Vec<usize> = (0..entries.len())
         .filter(|&index| {
             let entry = &entries[index];
-            filters.floor.admits(entry.level) && (text.is_empty() || entry.matches(text))
+            filters.floor.admits(entry.level)
+                && (text.is_empty() || entry.matches(text))
+                && (filters.targets.is_empty() || filters.targets.contains(&entry.target))
         })
         .collect();
     if filters.unfolded {
@@ -449,6 +488,40 @@ mod tests {
             ..Filters::default()
         };
         assert_eq!(shown(&entries, &text).len(), 1);
+    }
+
+    #[test]
+    fn targets_are_counted_and_filter_the_log() {
+        let entries = parse(&lines(&[
+            "2026-10-21T09:12:00.000Z  WARN devlanes_daemon::gate: start window full",
+            "2026-10-21T09:13:00.000Z  INFO devlanes_daemon::lifecycle: unit ready unit=a",
+            "2026-10-21T09:14:00.000Z  INFO devlanes_daemon::lifecycle: unit ready unit=b",
+        ]));
+        assert_eq!(
+            targets(&entries),
+            [
+                ("daemon::gate".to_owned(), 1),
+                ("daemon::lifecycle".to_owned(), 2)
+            ]
+        );
+        let only_gate = Filters {
+            targets: ["daemon::gate".to_owned()].into(),
+            ..Filters::default()
+        };
+        assert_eq!(shown(&entries, &only_gate)[0].entry, 0);
+        assert_eq!(shown(&entries, &only_gate).len(), 1);
+    }
+
+    #[test]
+    fn matches_are_found_for_every_word_ignoring_case() {
+        assert_eq!(
+            matches_in("updating /etc/hosts failed", "HOSTS fail"),
+            [14..19, 20..24]
+        );
+        // Overlapping words merge into one range.
+        let merged = matches_in("helper_missing", "help helper");
+        assert_eq!((merged.len(), merged[0].clone()), (1, 0..6));
+        assert!(matches_in("unit ready", "").is_empty());
     }
 
     #[test]

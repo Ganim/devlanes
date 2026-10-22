@@ -234,7 +234,11 @@ pub fn open_file(fd: std::os::fd::BorrowedFd<'_>) -> Result<OpenFile, Error> {
 ///
 /// Finds processes that keep a unit's PTY or output pipe open after the unit ended,
 /// typically daemonized grandchildren that were never seen in a snapshot. Processes
-/// that exit or cannot be inspected during the scan are skipped. Blocking; the cost
+/// that exit or cannot be inspected during the scan are skipped.
+///
+/// The answer is a snapshot of the moment: on Linux a child that `spawn` has just
+/// returned can still hold the parent's close-on-exec descriptors until the kernel
+/// finishes its exec, and is then reported as a holder. Blocking; the cost
 /// grows with the descriptors of every candidate, so pass a filtered set.
 pub fn holders(target: OpenFile, pids: &[u32]) -> Result<Vec<u32>, Error> {
     let mut found = Vec::new();

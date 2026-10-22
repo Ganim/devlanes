@@ -907,6 +907,7 @@ fn hints(app: &App) -> Vec<Hint> {
                 follow,
                 ("w", "level", ch('w')),
                 ("/", "filter", ch('/')),
+                ("T", "targets", ch('T')),
                 ("c", "copy", ch('c')),
                 ("i", "checks", ch('i')),
                 fold,

@@ -123,6 +123,9 @@ async fn services_are_one_list_in_config_order_with_stopped_ones_inline() -> Tes
     assert!(!line("● api-a").contains("ready"), "{text}");
     assert!(line("✕ wrk-b").contains("failed"), "{text}");
     assert!(line("docs").contains("· docs"), "{text}");
+    // The list's title is the lane's name alone, as in the mockups; its
+    // state glyph is on the chip in the lane bar.
+    assert!(text.contains("┌ main @0 ─"), "{text}");
     Ok(())
 }
 

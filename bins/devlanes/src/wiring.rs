@@ -27,8 +27,10 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-/// The TUI's progress bar, colors, glyphs and quit choice from the user config.
-pub fn tui_options(paths: &Paths) -> devlanes_tui::Options {
+/// The TUI's progress bar, colors, glyphs and quit choice from the user config,
+/// and the service definition the daemon page's doctor checks compare stop
+/// timeouts with.
+pub async fn tui_options(paths: &Paths) -> devlanes_tui::Options {
     use std::io::IsTerminal;
     // A config that does not load leaves the TUI on its detected defaults.
     let tui = devlanes_config::load_user(paths.home.join("config.yaml"))
@@ -43,6 +45,11 @@ pub fn tui_options(paths: &Paths) -> devlanes_tui::Options {
         theme: Some(tui.theme.as_str().to_owned()),
         glyphs: Some(tui.glyphs.as_str().to_owned()),
         on_quit: Some(tui.on_quit.as_str().to_owned()),
+        service: Some(crate::daemon::service_report().await).filter(|report| !report.is_null()),
+        // The process's environment, zone and directory.
+        env: None,
+        time_zone: None,
+        cwd: None,
     }
 }
 
@@ -58,7 +65,7 @@ pub fn tui_error(error: devlanes_tui::Error) -> RpcError {
 
 /// Opens the TUI; closing it never stops anything.
 pub async fn ui(paths: &Paths) -> Result<u8, RpcError> {
-    devlanes_tui::run_with(paths.clone(), tui_options(paths))
+    devlanes_tui::run_with(paths.clone(), tui_options(paths).await)
         .await
         .map(|()| 0)
         .map_err(tui_error)

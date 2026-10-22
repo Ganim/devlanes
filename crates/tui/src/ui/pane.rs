@@ -18,6 +18,7 @@ use crate::app::{
     App, AttachState, Attached, CopyState, ErrorEntry, Focus, LogView, PaneMode, is_orphaned,
     lane_profiles, started_by_agent, unit_ref,
 };
+use crate::screen::ScreenView;
 use crate::text::{self, clean, clip};
 use crate::theme::{Glyph, Theme, Tone};
 use crate::tree::{self, Role, RowId};
@@ -1312,7 +1313,8 @@ fn lanes_table(app: &App, current: &LaneSummary, width: usize) -> Vec<Line<'stat
 /// Draws the unit's screen. With `tail`, only the last rows with text fit,
 /// so the end of a dead unit's output shows under its card.
 fn render_terminal(app: &App, attached: &Attached, frame: &mut Frame, area: Rect, tail: bool) {
-    let view = attached.screen.view();
+    let shown = attached.shown();
+    let view = ScreenView::new(shown);
     let mut cursor = Cursor::default();
     if app.focus != Focus::Terminal {
         cursor.hide();
@@ -1322,8 +1324,8 @@ fn render_terminal(app: &App, attached: &Attached, frame: &mut Frame, area: Rect
         frame.render_widget(PseudoTerminal::new(&view).cursor(cursor), inner);
         return;
     }
-    let (rows, _) = attached.screen.size();
-    let full = Rect::new(0, 0, inner.width, rows.max(1));
+    let rows = shown.size().0.get();
+    let full = Rect::new(0, 0, inner.width, rows);
     let mut scratch = Buffer::empty(full);
     PseudoTerminal::new(&view)
         .cursor(cursor)

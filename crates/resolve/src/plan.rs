@@ -138,7 +138,7 @@ async fn plan_lane<E: Extensions>(
     let mut errors = IndexMap::new();
     for unit in layout.services.values() {
         let key = format!("services.{}", unit.name);
-        if errors.contains_key(&key) {
+        if errors.contains_key(&key) || !input.plans(&key) {
             continue;
         }
         match planner.service(unit).await {
@@ -160,6 +160,9 @@ async fn plan_lane<E: Extensions>(
     };
     let mut tasks = IndexMap::new();
     for (name, task) in &config.tasks {
+        if !input.plans(&format!("tasks.{name}")) {
+            continue;
+        }
         match planner.task(name, task, task_profiles).await {
             Ok(task) => {
                 tasks.insert(name.clone(), task);
@@ -176,6 +179,9 @@ async fn plan_lane<E: Extensions>(
         ("teardown", &config.infra.teardown, &mut teardown),
     ] {
         for (name, entry) in entries {
+            if !input.plans(&format!("infra.{phase}.{name}")) {
+                continue;
+            }
             match planner.infra_command(phase, name, entry).await {
                 Ok(command) => {
                     target.insert(name.clone(), command);

@@ -290,6 +290,16 @@ pub enum Dialog {
     Settings(Box<crate::settings::Settings>),
     /// q while lanes of the project run: keep them, stop them or stay.
     Quit(QuitDialog),
+    /// `T` on the daemon page: the log's targets to show.
+    Targets(TargetPicker),
+}
+
+/// The `T` picker: every target of the kept log lines with its count and
+/// whether it is checked; none checked shows them all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetPicker {
+    pub items: Vec<(String, usize, bool)>,
+    pub index: usize,
 }
 
 /// What quitting does with running lanes: `tui.on_quit` from the user config.
@@ -401,6 +411,19 @@ pub struct Attached {
     /// Interactive streams own the unit's PTY size. Browsing attaches as an
     /// observer so moving through the list never resizes anyone's terminal.
     pub interactive: bool,
+    /// The frame drawn while a resize or zoom waits for the reopened stream:
+    /// the last one before it, so the pane goes from that frame straight to
+    /// the daemon's redraw at the new size, never through a locally cut grid
+    /// or a blank one.
+    pub held: Option<vt100::Screen>,
+}
+
+impl Attached {
+    /// The screen the pane shows and keys are encoded for: the held frame
+    /// while there is one, else the live grid.
+    pub fn shown(&self) -> &vt100::Screen {
+        self.held.as_ref().unwrap_or_else(|| self.screen.screen())
+    }
 }
 
 /// The PTY is never made smaller than this, whatever the pane size.
@@ -742,6 +765,8 @@ pub struct App {
     want_terminal: bool,
     /// The latest resize; older settle timers are ignored.
     resize_token: u64,
+    /// A resize waits for its settle timer; output meanwhile keeps the held frame.
+    resize_settling: bool,
     /// Metrics fail every tick when unsupported; only a change is reported.
     last_metrics_error: Option<String>,
     notice_ticks: u8,
@@ -758,6 +783,11 @@ pub struct App {
     /// Where daemon.log times are shown: UTC until the runtime sets the
     /// system's zone, so tests draw the same everywhere.
     pub time_zone: jiff::tz::TimeZone,
+    /// The per-user service definition (`Options::service`), merged into
+    /// doctor facts for the stop-window check.
+    pub service_report: Option<serde_json::Value>,
+    /// The user's home, so paths under it show as `~/…`; `None` shows them whole.
+    pub user_home: Option<PathBuf>,
     /// [`Effect::QuitWith`] runs; q again quits at once.
     quitting: bool,
 }
@@ -809,6 +839,7 @@ impl App {
             pending: HashMap::new(),
             want_terminal: false,
             resize_token: 0,
+            resize_settling: false,
             last_metrics_error: None,
             notice_ticks: 0,
             generation: 0,
@@ -818,6 +849,8 @@ impl App {
             start_run: None,
             on_quit: OnQuit::Ask,
             time_zone: jiff::tz::TimeZone::UTC,
+            service_report: None,
+            user_home: None,
             quitting: false,
         }
     }
@@ -1055,6 +1088,7 @@ impl App {
                             "open terminal of {}",
                             unit_ref(&attached.lane, &attached.unit)
                         );
+                        attached.held = None;
                         attached.state = AttachState::Failed(worded.clone());
                         if self.focus == Focus::Terminal || std::mem::take(&mut self.want_terminal)
                         {
@@ -1079,6 +1113,7 @@ impl App {
                 let worded = words::api(&error);
                 // Failed, not Closed: the close that follows must not reopen at once,
                 // or a stream that keeps failing would reopen in a loop.
+                attached.held = None;
                 attached.state = AttachState::Failed(worded.clone());
                 if !expected {
                     let what = format!("terminal of {}", unit_ref(&attached.lane, &attached.unit));
@@ -1100,14 +1135,21 @@ impl App {
                 );
             }
             Msg::AttachOutput { generation, bytes } => {
+                let settling = self.resize_settling;
                 if let Some(attached) = self.attached_mut(generation) {
                     attached.screen.process(&bytes);
+                    // The reopened stream's first output is the daemon's full
+                    // redraw; before the reopen, output only reaches the live grid.
+                    if !settling {
+                        attached.held = None;
+                    }
                 }
             }
             Msg::AttachClosed { generation } => {
                 let Some(attached) = self.attached_mut(generation) else {
                     return effects;
                 };
+                attached.held = None;
                 let clean = !matches!(attached.state, AttachState::Failed(_));
                 if clean {
                     attached.state = AttachState::Closed;
@@ -1132,6 +1174,7 @@ impl App {
             }
             Msg::ResizeSettled { token } => {
                 if token == self.resize_token {
+                    self.resize_settling = false;
                     self.reopen_attach(&mut effects);
                 }
             }
@@ -1231,7 +1274,17 @@ impl App {
                     Err(error) => failure = Some(("daemon status", error)),
                 }
                 match doctor {
-                    Ok(doctor) => self.daemon.doctor = Some(doctor),
+                    Ok(mut doctor) => {
+                        // The service manager's stop window is this machine's
+                        // to read, not the daemon's; `devlanes doctor` adds it
+                        // the same way.
+                        if let (Some(service), Some(facts)) =
+                            (&self.service_report, doctor.as_object_mut())
+                        {
+                            facts.insert("service".into(), service.clone());
+                        }
+                        self.daemon.doctor = Some(doctor);
+                    }
                     Err(error) => failure = failure.or(Some(("doctor checks", error))),
                 }
                 match failure {
@@ -2392,6 +2445,7 @@ impl App {
             screen: TerminalScreen::new(rows, columns),
             mode: PaneMode::Live,
             interactive,
+            held: None,
         });
         effects.push(Effect::Attach {
             generation: self.generation,
@@ -2406,15 +2460,26 @@ impl App {
     /// Reopens the current stream for a fresh snapshot, keeping its role and
     /// the focus; keys typed meanwhile are dropped until it is live.
     fn reopen_attach(&mut self, effects: &mut Vec<Effect>) {
-        let Some(attached) = self.attached.as_ref() else {
+        if let Some(interactive) = self.attached.as_ref().map(|a| a.interactive) {
+            self.reopen_as(interactive, effects);
+        }
+    }
+
+    /// Reopens the current stream as `interactive`, at the pane's size. The
+    /// frame on screen stays until the new stream draws; a copy selection
+    /// does not survive the reopen, so its frame is not kept.
+    fn reopen_as(&mut self, interactive: bool, effects: &mut Vec<Effect>) {
+        let Some(attached) = self.attached.as_mut() else {
             return;
         };
-        let (lane, unit, interactive) = (
-            attached.lane.clone(),
-            attached.unit.clone(),
-            attached.interactive,
-        );
+        let (lane, unit) = (attached.lane.clone(), attached.unit.clone());
+        let held = attached.held.take().or_else(|| {
+            matches!(attached.mode, PaneMode::Live).then(|| attached.screen.screen().clone())
+        });
         self.open_attach(lane, unit, interactive, effects);
+        if let Some(attached) = self.attached.as_mut() {
+            attached.held = held;
+        }
     }
 
     /// The pane's inner `(columns, rows)`, using the lanes layout on every tab so
@@ -2433,7 +2498,8 @@ impl App {
 
     /// Resizes the local grid and, for an interactive stream, the PTY; once
     /// resizing pauses the stream is reopened, because a grid that shrank
-    /// cannot redraw what it cut off.
+    /// cannot redraw what it cut off. Until the reopened stream draws, the
+    /// pane keeps the frame from before the resize.
     fn resize_pane(&mut self, effects: &mut Vec<Effect>) {
         let (columns, rows) = self.attach_size();
         self.ensure_visible();
@@ -2441,6 +2507,10 @@ impl App {
         if let Some(attached) = self.attached.as_mut()
             && attached.screen.size() != (rows, columns)
         {
+            if matches!(attached.mode, PaneMode::Live) && attached.held.is_none() {
+                attached.held = Some(attached.screen.screen().clone());
+            }
+            self.resize_settling = true;
             attached.screen.resize(rows, columns);
             if let PaneMode::Copy(state) = &mut attached.mode {
                 state.cursor.0 = state.cursor.0.min(rows - 1);
@@ -2474,7 +2544,7 @@ impl App {
     fn modes(&self) -> InputModes {
         self.attached
             .as_ref()
-            .map(|a| InputModes::from_screen(a.screen.screen()))
+            .map(|a| InputModes::from_screen(a.shown()))
             .unwrap_or_default()
     }
 
@@ -2708,6 +2778,21 @@ impl App {
             }
             KeyCode::Char('/') => self.daemon.filter_editing = true,
             KeyCode::Char('i') => self.daemon.all_checks = !self.daemon.all_checks,
+            KeyCode::Char('T') => {
+                let (entries, _) = self.daemon_shown();
+                let items: Vec<(String, usize, bool)> = crate::daemonlog::targets(&entries)
+                    .into_iter()
+                    .map(|(target, count)| {
+                        let checked = self.daemon.filters.targets.contains(&target);
+                        (target, count, checked)
+                    })
+                    .collect();
+                if items.is_empty() {
+                    self.set_notice("no log lines yet".into());
+                } else {
+                    self.dialog = Some(Dialog::Targets(TargetPicker { items, index: 0 }));
+                }
+            }
             KeyCode::Char('R') => self.daemon_prompt(
                 "restart the daemon",
                 "Restart the daemon?",
@@ -2908,6 +2993,39 @@ impl App {
         self.daemon.copy = None;
     }
 
+    /// Keys of the `T` picker: move, space checks a target, `a` checks none
+    /// (every target), Enter applies, Esc leaves the filter as it was.
+    fn targets_key(&mut self, key: KeyEvent, mut picker: TargetPicker) {
+        let last = picker.items.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => picker.index = (picker.index + 1).min(last),
+            KeyCode::Char('k') | KeyCode::Up => picker.index = picker.index.saturating_sub(1),
+            KeyCode::Char(' ') => {
+                if let Some(item) = picker.items.get_mut(picker.index) {
+                    item.2 = !item.2;
+                }
+            }
+            KeyCode::Char('a') => {
+                for item in &mut picker.items {
+                    item.2 = false;
+                }
+            }
+            KeyCode::Enter => {
+                self.daemon.filters.targets = picker
+                    .items
+                    .into_iter()
+                    .filter(|(_, _, checked)| *checked)
+                    .map(|(target, _, _)| target)
+                    .collect();
+                self.daemon_filters_changed();
+                return;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => return,
+            _ => {}
+        }
+        self.dialog = Some(Dialog::Targets(picker));
+    }
+
     /// Keys while the log's text filter takes typing: Enter keeps it, Esc
     /// clears it.
     fn daemon_filter_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
@@ -3039,17 +3157,12 @@ impl App {
             KeyCode::Char('z') => {
                 self.zoom = !self.zoom;
                 // Zooming means looking at this terminal: take its size.
-                let watching = self
-                    .attached
-                    .as_ref()
-                    .filter(|a| !a.interactive)
-                    .map(|a| (a.lane.clone(), a.unit.clone()));
-                match watching {
-                    Some((lane, unit)) => {
-                        self.ensure_visible();
-                        self.open_attach(lane, unit, true, effects);
-                    }
-                    None => self.resize_pane(effects),
+                let watching = self.attached.as_ref().is_some_and(|a| !a.interactive);
+                if watching {
+                    self.ensure_visible();
+                    self.reopen_as(true, effects);
+                } else {
+                    self.resize_pane(effects);
                 }
             }
             KeyCode::Char('o') => self.open_url(effects),
@@ -3110,7 +3223,7 @@ impl App {
     pub fn full_screen(&self) -> bool {
         self.attached
             .as_ref()
-            .is_some_and(|a| a.screen.screen().alternate_screen())
+            .is_some_and(|a| a.shown().alternate_screen())
     }
 
     /// Keys while typing go to the unit, except the ways back. With no live
@@ -3183,6 +3296,7 @@ impl App {
                 self.dialog = Some(dialog);
                 self.quit_dialog_key(key, effects);
             }
+            Dialog::Targets(picker) => self.targets_key(key, picker),
         }
     }
 

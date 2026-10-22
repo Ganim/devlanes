@@ -791,7 +791,9 @@ impl Inner {
             project.st().last_env = Some(env);
         }
         // `--env` applies to this run only; the lane keeps its own overrides.
-        let resolved = self.resolve_overridden(&project, &lane, &run.env).await?;
+        let resolved = self
+            .resolve_task(&project, &lane, &run.task, &run.env)
+            .await?;
         if let Some(error) = resolved.errors.get(&format!("tasks.{}", run.task)) {
             return Err(crate::resolve::resolve_error(error));
         }

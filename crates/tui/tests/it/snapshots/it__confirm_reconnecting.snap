@@ -4,7 +4,7 @@ expression: draw(&app)?.backend()
 ---
 " devlanes  1 acme ●   2 shop ●   daemon not responding, …  M monitor   D daemon "
 " lanes    1 main @0 ●     2 feat/login @1 ·    +1 more  1-9 or [ ] switch lanes "
-"┌ · feat/login┌ clean acme@1 ────────────────────────────────────┐─────────────┐"
+"┌ feat/login @┌ clean acme@1 ────────────────────────────────────┐─────────────┐"
 "│ ▾ services  │ Clean feat/login (acme@1)?                       │ith its      │"
 "│   · api     │                                                  │s.           │"
 "│             │ It stops every unit in the lane, then:           │             │"

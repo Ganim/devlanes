@@ -97,12 +97,16 @@ fn inside(area: Rect) -> Rect {
     )
 }
 
-/// `/Users/acme/.devlanes` as `~/.devlanes`.
-fn home_short(path: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
-            format!("~{}", &path[home.len()..])
-        }
+/// `/Users/acme/.devlanes` as `~/.devlanes` when `/Users/acme` is the
+/// user's home (`App::user_home`).
+fn home_short(app: &App, path: &str) -> String {
+    let home = app
+        .user_home
+        .as_deref()
+        .and_then(std::path::Path::to_str)
+        .filter(|home| !home.is_empty());
+    match home {
+        Some(home) if path.starts_with(home) => format!("~{}", &path[home.len()..]),
         _ => path.to_owned(),
     }
 }
@@ -154,7 +158,7 @@ fn fact_lines(app: &App, wide: bool) -> Vec<Line<'static>> {
         .and_then(|s| s.get("uptime_ms"))
         .and_then(serde_json::Value::as_u64)
         .map(doctor::uptime);
-    let socket = home_short(&doctor::fact(&source, "socket"));
+    let socket = home_short(app, &doctor::fact(&source, "socket"));
     let mut managed = Vec::new();
     if let Some(processes) = view.managed_processes() {
         managed.push(format!("{processes} processes"));
@@ -199,7 +203,7 @@ fn fact_lines(app: &App, wide: bool) -> Vec<Line<'static>> {
         let state = format!(
             "schema {} · {}",
             doctor::fact(doctor, "schema_version"),
-            home_short(&doctor::fact(doctor, "db_path"))
+            home_short(app, &doctor::fact(doctor, "db_path"))
         );
         lines.push(line("state", state, plain));
     }
@@ -361,6 +365,38 @@ fn unit_style(app: &App, reference: &str) -> Style {
         .map_or_else(Style::new, |color| Style::new().fg(color))
 }
 
+/// `spans` with the `/` filter's words marked wherever they occur, like a
+/// search hit.
+fn mark(spans: Vec<Span<'static>>, filter: &str, hit: Style) -> Vec<Span<'static>> {
+    if filter.trim().is_empty() {
+        return spans;
+    }
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        let ranges = daemonlog::matches_in(&span.content, filter);
+        if ranges.is_empty() {
+            out.push(span);
+            continue;
+        }
+        let text = span.content.to_string();
+        let mut at = 0;
+        for range in ranges {
+            if range.start > at {
+                out.push(Span::styled(text[at..range.start].to_owned(), span.style));
+            }
+            out.push(Span::styled(
+                text[range.clone()].to_owned(),
+                span.style.patch(hit),
+            ));
+            at = range.end;
+        }
+        if at < text.len() {
+            out.push(Span::styled(text[at..].to_owned(), span.style));
+        }
+    }
+    out
+}
+
 /// One shown entry as rows of `width`: time, level and target, then the
 /// message and fields wrapped under the message column, the repeat count
 /// right-aligned on the first row, continuation lines below.
@@ -390,10 +426,19 @@ fn entry_rows(app: &App, entry: &Entry, shown: &Shown, width: usize) -> Vec<Line
         Span::styled(entry.level.tag().to_owned(), level_style),
         Span::raw(" "),
     ];
+    // `/` matches show like search hits in the target, message and fields.
+    let filter = app.daemon.filters.text.as_str();
+    let hit = theme
+        .tone(Tone::Attention)
+        .add_modifier(Modifier::REVERSED | Modifier::BOLD);
     if !narrow {
-        head.push(Span::styled(
-            format!("{:<20} ", daemonlog::clip_left(&entry.target, 20)),
-            base,
+        head.extend(mark(
+            vec![Span::styled(
+                format!("{:<20} ", daemonlog::clip_left(&entry.target, 20)),
+                base,
+            )],
+            filter,
+            hit,
         ));
     }
     // Words joined by spaces, each a group of styled spans: a field's key
@@ -424,6 +469,10 @@ fn entry_rows(app: &App, entry: &Entry, shown: &Shown, width: usize) -> Vec<Line
         ]);
         tokens.extend(words.map(|word| vec![Span::styled(word.to_owned(), value_style)]));
     }
+    let tokens: Vec<Vec<Span<'static>>> = tokens
+        .into_iter()
+        .map(|token| mark(token, filter, hit))
+        .collect();
     let tail = (shown.count > 1).then(|| {
         let since = shown
             .since
@@ -487,10 +536,9 @@ fn entry_rows(app: &App, entry: &Entry, shown: &Shown, width: usize) -> Vec<Line
     }
     for more in &entry.more {
         for part in text::wrap(&clean(more), message_width) {
-            lines.push(fit(
-                vec![Span::raw(" ".repeat(prefix)), Span::styled(part, base)],
-                width,
-            ));
+            let mut spans = vec![Span::raw(" ".repeat(prefix))];
+            spans.extend(mark(vec![Span::styled(part, base)], filter, hit));
+            lines.push(fit(spans, width));
         }
     }
     lines
@@ -572,6 +620,11 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
                 entries.len()
             ),
         ));
+    }
+    match view.filters.targets.len() {
+        0 => {}
+        1 => state.push((1, "1 target".into())),
+        n => state.push((1, format!("{n} targets"))),
     }
     state.push((4, format!("{} lines", view.log.len())));
     let joined = |state: &[(u8, String)]| {

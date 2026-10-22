@@ -77,7 +77,7 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
                 "j k  g G",
                 "scroll the log (pauses), oldest, newest and follow",
             ),
-            ("w  /", "level floor, text filter"),
+            ("w  /  T", "level floor, text filter, targets"),
             ("F  d", "pause or follow, fold or unfold repeats"),
             (
                 "c",
@@ -237,6 +237,59 @@ pub fn render(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
                 keys(theme, &[("enter", action), ("esc", "cancel")])
             };
             (title.clone(), body, vec![tail])
+        }
+        Dialog::Targets(picker) => {
+            let width = max.min(56);
+            let tail = vec![
+                Line::styled("With none checked, every target shows.", theme.quiet()),
+                Line::from(""),
+                keys(
+                    theme,
+                    &[
+                        ("space", "check"),
+                        ("a", "none"),
+                        ("enter", "apply"),
+                        ("esc", "cancel"),
+                    ],
+                ),
+            ];
+            let room = rows.saturating_sub(tail.len() + 1).max(1);
+            let start = window(picker.items.len(), picker.index, room);
+            let body = picker
+                .items
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(room)
+                .map(|(index, (target, count, checked))| {
+                    let selected = index == picker.index;
+                    let marker = if selected {
+                        theme.glyph(Glyph::Marker)
+                    } else {
+                        " "
+                    };
+                    let check = if *checked { "[x]" } else { "[ ]" };
+                    let name_width = width.saturating_sub(12);
+                    let line = fit(
+                        vec![
+                            Span::styled(marker, theme.focus()),
+                            Span::raw(format!("{check} ")),
+                            Span::raw(format!(
+                                "{:<name_width$} ",
+                                clip(&clean(target), name_width)
+                            )),
+                            Span::styled(format!("{count:>5}"), theme.quiet()),
+                        ],
+                        width,
+                    );
+                    if selected {
+                        line.patch_style(theme.selection())
+                    } else {
+                        line
+                    }
+                })
+                .collect();
+            ("daemon.log targets".to_owned(), body, tail)
         }
         Dialog::Quit(quit) => {
             let lanes = quit.lanes.join(", ");

@@ -30,11 +30,12 @@ async fn sample_postgres() -> Result<(), Box<dyn std::error::Error>> {
 
 - `DockerSource`: one `one-shot` stats request per container per tick, run concurrently with a 5 second timeout.
 - `cpu_percent_unix`, `memory_usage_no_cache`, `reading`: the docker CLI math on bollard's stats types, usable without an engine.
+- `CpuWindow`: a container's recent CPU counters, so CPU is measured over at least `CPU_WINDOW` (2 s).
 - `DockerVmInfo`: name, OS, server version, CPUs, total memory and running containers from `docker info`.
 
 ## Behaviour
 
-CPU and memory match `docker stats`: they port `calculateCPUPercentUnix` and `calculateMemUsageUnixNoCache` from the docker CLI's [`stats_helpers.go`](https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go). CPU is `(container usage delta / system usage delta) * online CPUs * 100`. Memory is usage minus `inactive_file` (`total_inactive_file` on cgroup v1).
+CPU and memory use the math of `docker stats`: they port `calculateCPUPercentUnix` and `calculateMemUsageUnixNoCache` from the docker CLI's [`stats_helpers.go`](https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go). CPU is `(container usage delta / system usage delta) * online CPUs * 100`. The deltas span at least 2 s of engine time rather than one tick: a container that works in short bursts about once a second (postgres, RabbitMQ) would otherwise read 0% for every second without a burst. Memory is usage minus `inactive_file` (`total_inactive_file` on cgroup v1).
 
 On macOS containers run inside one VM, so each sample also includes a `Subject::DockerVm` row with the sum of the sampled containers. Missing or stopped containers are skipped. The call fails only when every request fails.
 

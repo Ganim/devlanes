@@ -197,6 +197,64 @@ async fn the_log_filters_by_level_and_text_and_folds_repeats() -> TestResult {
 }
 
 #[tokio::test]
+async fn targets_pick_what_the_log_shows_and_matches_are_marked() -> TestResult {
+    let mut app = daemon_app(120, 40).await?;
+    // T lists the targets of the kept lines with their counts.
+    app.update(shifted('T'));
+    let Some(Dialog::Targets(picker)) = &app.dialog else {
+        return Err(format!("no picker: {:?}", app.dialog).into());
+    };
+    let names: Vec<&str> = picker.items.iter().map(|i| i.0.as_str()).collect();
+    assert_eq!(names, ["daemon", "daemon::lifecycle", "proxy"]);
+    assert_eq!(picker.items[1].1, 2, "two lifecycle lines");
+    let text = screen(&render(&app)?);
+    assert!(text.contains("daemon.log targets"), "{text}");
+    // Check proxy and apply: only its lines show; the title says so.
+    for code in [
+        KeyCode::Char('j'),
+        KeyCode::Char('j'),
+        KeyCode::Char(' '),
+        KeyCode::Enter,
+    ] {
+        app.update(key(code));
+    }
+    assert!(app.dialog.is_none());
+    assert_eq!(app.daemon_shown().1.len(), 2);
+    let text = screen(&render(&app)?);
+    assert!(text.contains("1 target"), "{text}");
+    assert!(!text.contains("compose failed"), "{text}");
+    // Esc in the picker keeps the filter; `a` then Enter shows every target.
+    app.update(shifted('T'));
+    app.update(key(KeyCode::Esc));
+    assert_eq!(app.daemon.filters.targets.len(), 1);
+    app.update(shifted('T'));
+    app.update(key(KeyCode::Char('a')));
+    app.update(key(KeyCode::Enter));
+    assert!(app.daemon.filters.targets.is_empty());
+    // `/compose`: the matching word is marked like a search hit.
+    app.update(key(KeyCode::Char('/')));
+    for c in "compose".chars() {
+        app.update(key(KeyCode::Char(c)));
+    }
+    app.update(key(KeyCode::Enter));
+    let buffer = render(&app)?;
+    let (y, line) = (0..buffer.area.height)
+        .map(|y| (y, row(&buffer, y)))
+        .find(|(_, line)| line.contains("compose failed"))
+        .ok_or("no compose line")?;
+    let x = u16::try_from(line[..line.find("compose").unwrap_or(0)].chars().count())?;
+    let cell = &buffer[(x, y)];
+    assert!(
+        cell.modifier.contains(ratatui::style::Modifier::REVERSED),
+        "{cell:?}"
+    );
+    // The word after it is not marked.
+    let after = &buffer[(x + 8, y)];
+    assert!(!after.modifier.contains(ratatui::style::Modifier::REVERSED));
+    Ok(())
+}
+
+#[tokio::test]
 async fn restart_and_stop_ask_first_and_enter_does_not_confirm() -> TestResult {
     let mut app = daemon_app(80, 24).await?;
     assert!(app.update(shifted('R')).is_empty());
@@ -471,33 +529,55 @@ async fn help_lists_clean_and_the_daemon_page() -> TestResult {
 
 // ---- full loop -------------------------------------------------------------------
 
-/// Runs `drive` against `api` while `keys` are pressed with a pause between them.
+/// One step of a [`run_keys`] script.
+pub enum Step {
+    Key(Msg),
+    /// Wait until the drawn screen contains this text, as after a key whose
+    /// effect needs a daemon answer (the profile picker's list).
+    Screen(&'static str),
+}
+
+/// Plain key presses as steps.
+pub fn presses(keys: Vec<Msg>) -> Vec<Step> {
+    keys.into_iter().map(Step::Key).collect()
+}
+
+/// Runs `drive` against `api` through `steps`, then quits once every text of
+/// `until` is on screen and `calls_done` holds for the calls the fake saw:
+/// what a test asserts arrives on its own (answers, refreshes, log reads), so
+/// it is waited for, never guessed with a sleep. Returns the last drawn screen.
 pub async fn run_keys(
     api: Arc<FakeApi>,
-    keys: Vec<Msg>,
-) -> Result<Terminal<TestBackend>, Box<dyn std::error::Error>> {
+    steps: Vec<Step>,
+    until: &[&str],
+    calls_done: impl Fn(&[String]) -> bool,
+) -> Result<TestBackend, Box<dyn std::error::Error>> {
     let (keys_tx, keys_rx) = mpsc::channel::<std::io::Result<TermEvent>>(64);
     let input = Box::pin(stream::unfold(keys_rx, |mut rx| async move {
         rx.recv().await.map(|event| (event, rx))
     }));
-    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+    let backend = crate::SharedBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend.clone())?;
     let driver_api: Arc<dyn DaemonApi> = api.clone();
     let script = {
         let api = Arc::clone(&api);
+        let backend = backend.clone();
         async move {
-            for _ in 0..100 {
-                if api.calls().iter().any(|c| c == "status") {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            for msg in keys {
-                if let Msg::Key(event) = msg {
-                    keys_tx.send(Ok(TermEvent::Key(event))).await.ok();
+            crate::wait_for_calls(&api, |calls| calls.iter().any(|c| c == "status")).await;
+            for step in steps {
+                match step {
+                    Step::Key(Msg::Key(event)) => {
+                        keys_tx.send(Ok(TermEvent::Key(event))).await.ok();
+                    }
+                    Step::Key(_) => {}
+                    Step::Screen(text) => backend.wait_for(text).await,
                 }
                 tokio::time::sleep(Duration::from_millis(15)).await;
             }
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            for text in until {
+                backend.wait_for(text).await;
+            }
+            crate::wait_for_calls(&api, calls_done).await;
             keys_tx
                 .send(Ok(TermEvent::Key(KeyEvent::new(
                     KeyCode::Char('q'),
@@ -510,7 +590,7 @@ pub async fn run_keys(
     // The closing q quits at once; the quit dialog has its own tests.
     let options = Options {
         on_quit: Some("keep".into()),
-        ..Options::default()
+        ..crate::hermetic_options()
     };
     let run = drive(
         &mut terminal,
@@ -522,7 +602,7 @@ pub async fn run_keys(
     let (result, ()) =
         tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(run, script) }).await?;
     result?;
-    Ok(terminal)
+    Ok(backend.lock().clone())
 }
 
 #[tokio::test]
@@ -531,7 +611,20 @@ async fn drive_cleans_only_after_the_name_is_typed() -> TestResult {
     let mut keys = vec![shifted('C'), key(KeyCode::Esc), shifted('C')];
     keys.extend("acme@0".chars().map(|c| key(KeyCode::Char(c))));
     keys.push(key(KeyCode::Enter));
-    let terminal = run_keys(Arc::clone(&api), keys).await?;
+    // The clean's notice, and the status refresh after it.
+    let refreshed = |calls: &[String]| {
+        calls
+            .iter()
+            .skip_while(|c| !c.starts_with("lane.clean"))
+            .any(|c| c == "status")
+    };
+    let terminal = run_keys(
+        Arc::clone(&api),
+        presses(keys),
+        &["cleaned acme@0"],
+        refreshed,
+    )
+    .await?;
     let calls = api.calls();
     assert_eq!(
         calls.iter().filter(|c| c.starts_with("lane.clean")).count(),
@@ -544,7 +637,7 @@ async fn drive_cleans_only_after_the_name_is_typed() -> TestResult {
         after_clean.filter(|c| *c == "status").count() >= 1,
         "refresh after clean: {calls:?}"
     );
-    let header = row(terminal.backend().buffer(), 0);
+    let header = row(terminal.buffer(), 0);
     assert!(header.contains("cleaned acme@0"), "{header}");
     Ok(())
 }
@@ -560,15 +653,19 @@ async fn drive_tails_the_daemon_log_file() -> TestResult {
     let mut fake = FakeApi::with_lanes(mixed_lanes());
     fake.log_path = Some(path);
     let api = Arc::new(fake);
-    let terminal = run_keys(Arc::clone(&api), vec![shifted('D')]).await?;
-    let text = screen(terminal.backend().buffer());
+    // The log read and the doctor answer arrive separately; both are waited for.
+    let terminal = run_keys(
+        Arc::clone(&api),
+        presses(vec![shifted('D')]),
+        &["compose failed", "1 fail · 1 warn"],
+        |_| true,
+    )
+    .await?;
+    let text = screen(terminal.buffer());
     assert!(text.contains("ERROR daemon::lifecycle"), "{text}");
     assert!(text.contains("compose failed"), "{text}");
-    assert!(
-        text.contains("2 fail · 1 warn") || text.contains("fail"),
-        "{text}"
-    );
-    assert_clean(terminal.backend().buffer(), "drive daemon tab");
+    assert!(text.contains("fix: devlanes certs trust"), "{text}");
+    assert_clean(terminal.buffer(), "drive daemon tab");
     assert!(!api.calls().iter().any(|c| c.starts_with("daemon.shutdown")));
     Ok(())
 }

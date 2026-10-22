@@ -1,6 +1,6 @@
-//! Doctor checks and daemon facts for the daemon tab. The daemon sends raw
-//! facts; the checks and fixes follow the CLI's `doctor` renderer
-//! (`devlanes-cli` `render/other.rs`) so both clients agree.
+//! Doctor checks and daemon facts for the daemon page. The daemon sends raw
+//! facts; the checks, their words and fixes come from `devlanes doctor`'s
+//! renderer (`devlanes_cli::doctor_checks_of`), so both clients say the same.
 
 use serde_json::Value;
 
@@ -34,24 +34,6 @@ pub struct Check {
     pub fix: Option<String>,
 }
 
-impl Check {
-    /// A check without a fix.
-    fn new(group: &'static str, state: CheckState, text: impl Into<String>) -> Self {
-        Self {
-            group,
-            state,
-            text: text.into(),
-            fix: None,
-        }
-    }
-
-    /// Adds the fix.
-    fn fix(mut self, fix: impl Into<String>) -> Self {
-        self.fix = Some(fix.into());
-        self
-    }
-}
-
 /// A fact as cleaned text: strings bare, everything else as JSON, `unknown` when absent.
 pub fn fact(data: &Value, key: &str) -> String {
     match data.get(key) {
@@ -59,11 +41,6 @@ pub fn fact(data: &Value, key: &str) -> String {
         Some(Value::Null) | None => "unknown".into(),
         Some(other) => clean(&other.to_string()),
     }
-}
-
-/// An integer fact.
-fn int(data: &Value, key: &str) -> Option<i64> {
-    data.get(key).and_then(Value::as_i64)
 }
 
 /// `2h 5m`, `3m 12s` or `40s`.
@@ -78,224 +55,34 @@ pub fn uptime(ms: u64) -> String {
     }
 }
 
-/// The `http` or `https` listener check.
-fn listener(proxy: &Value, name: &'static str) -> Option<Check> {
-    let entry = proxy.get(name)?;
-    if entry.get("bound").and_then(Value::as_bool) == Some(true) {
-        let port = fact(entry, "port");
-        return Some(match entry.get("fallback_reason").and_then(Value::as_str) {
-            Some(reason) => Check::new(
-                "proxy",
-                CheckState::Warn,
-                format!("{name} on fallback port {port}: {}", clean(reason)),
-            )
-            .fix(format!(
-                "free port {}, or set proxy ports in ~/.devlanes/config.yaml",
-                if name == "https" { 443 } else { 80 }
-            )),
-            None => Check::new("proxy", CheckState::Ok, format!("{name} on port {port}")),
-        });
-    }
-    if entry.get("reason").and_then(Value::as_str) == Some("no_ca") {
-        return Some(
-            Check::new(
-                "proxy",
-                CheckState::Warn,
-                format!("{name} off: no local CA yet"),
-            )
-            .fix("devlanes certs trust"),
-        );
-    }
-    Some(
-        Check::new(
-            "proxy",
-            CheckState::Fail,
-            format!(
-                "{name} can't bind port {}: {}",
-                fact(entry, "port"),
-                fact(entry, "error")
-            ),
-        )
-        .fix("stop whatever holds the port, then run devlanes daemon restart"),
-    )
-}
-
-/// Every check from the doctor facts.
+/// Every check from the doctor facts, as `devlanes doctor` words them:
+/// state database, sandbox, Docker, proxy listeners (serving or not), CA
+/// and its route warnings, /etc/hosts and its helper, DNS, the user config,
+/// the service manager's stop window against the services' stop timeouts.
 pub fn checks(data: &Value) -> Vec<Check> {
-    let mut checks = Vec::new();
-    match (
-        int(data, "schema_version"),
-        int(data, "supported_schema_version"),
-    ) {
-        (Some(found), Some(supported)) if found > supported => checks.push(
-            Check::new(
-                "state",
-                CheckState::Fail,
-                format!("state database is schema {found}; this devlanes reads up to {supported}"),
-            )
-            .fix("upgrade devlanes"),
-        ),
-        (Some(found), _) => checks.push(Check::new(
-            "state",
-            CheckState::Ok,
-            format!("schema {found}, {}", fact(data, "db_path")),
-        )),
-        (None, _) => checks.push(
-            Check::new(
-                "state",
-                CheckState::Fail,
-                "can't read the state database schema",
-            )
-            .fix("devlanes daemon reset-state --yes"),
-        ),
-    }
-    let sandbox = &data["sandbox"];
-    let sandboxed: Vec<&str> = ["codex_sandbox", "app_sandbox"]
+    devlanes_cli::doctor_checks_of(data)
         .into_iter()
-        .filter(|key| sandbox.get(*key).and_then(Value::as_bool) == Some(true))
-        .collect();
-    if !sandboxed.is_empty() {
-        checks.push(
-            Check::new(
-                "sandbox",
-                CheckState::Warn,
-                format!("daemon runs inside a sandbox ({})", sandboxed.join(", ")),
-            )
-            .fix("run devlanes daemon install so the daemon starts outside the sandbox"),
-        );
-    }
-    let docker = &data["infra"]["docker"];
-    let reachable = docker.get("reachable").and_then(Value::as_bool) == Some(true);
-    checks.push(if reachable {
-        Check::new(
-            "docker",
-            CheckState::Ok,
-            format!("Docker {}", fact(docker, "version")),
-        )
-    } else {
-        Check::new("docker", CheckState::Warn, "Docker not reachable")
-            .fix("start Docker (only projects with infra need it)")
-    });
-    let compose = &data["infra"]["compose"];
-    if compose.get("version").is_some() {
-        let unsupported = compose
-            .get("supports_lane_overrides")
-            .and_then(Value::as_bool)
-            == Some(false);
-        checks.push(if unsupported {
-            Check::new(
-                "docker",
-                CheckState::Warn,
-                format!(
-                    "Compose {} can't apply per-lane overrides",
-                    fact(compose, "version")
-                ),
-            )
-            .fix("upgrade Docker Compose")
-        } else {
-            Check::new(
-                "docker",
-                CheckState::Ok,
-                format!("Compose {}", fact(compose, "version")),
-            )
-        });
-    } else if compose.get("error").is_some() && reachable {
-        // Without Docker, Compose fails for the same reason; one check says it.
-        checks.push(
-            Check::new(
-                "docker",
-                CheckState::Warn,
-                format!("Compose unavailable ({})", fact(compose, "error")),
-            )
-            .fix("install the Docker Compose plugin"),
-        );
-    }
-    let proxy = &data["proxy"];
-    checks.extend(
-        ["http", "https"]
-            .into_iter()
-            .filter_map(|name| listener(proxy, name)),
-    );
-    let ca = &data["ca"];
-    if ca.get("present").and_then(Value::as_bool) == Some(true) {
-        checks.push(Check::new(
-            "tls",
-            CheckState::Ok,
-            format!("CA at {}", fact(ca, "path")),
-        ));
-        // A CA that exists but is not trusted, or about to expire.
-        if let Some(hint) = ca.get("hint").and_then(Value::as_str) {
-            let mut check = Check::new("tls", CheckState::Warn, clean(hint));
-            if let Some(fix) = ca.get("fix").and_then(Value::as_str) {
-                check = check.fix(clean(fix));
-            }
-            checks.push(check);
-        }
-    } else if ca.is_object() {
-        let error = fact(ca, "error");
-        let text = if error.contains("no CA") || error.contains("not created") {
-            "no local CA yet".to_owned()
-        } else {
-            format!("CA error: {error}")
-        };
-        checks.push(Check::new("tls", CheckState::Fail, text).fix("devlanes certs trust"));
-    }
-    let hosts = &data["hosts"];
-    if hosts.is_object() {
-        let mode = fact(hosts, "mode");
-        let probe = hosts.get("probe").and_then(Value::as_str).map_or_else(
-            || "resolver not checked".to_owned(),
-            |probe| match probe {
-                "localhost_resolves" => ".localhost resolves".to_owned(),
-                other => format!("resolver {}", clean(other).replace('_', " ")),
+        .map(|check| Check {
+            group: check.group,
+            state: match check.state {
+                devlanes_cli::DoctorState::Ok => CheckState::Ok,
+                devlanes_cli::DoctorState::Warn => CheckState::Warn,
+                devlanes_cli::DoctorState::Fail => CheckState::Fail,
             },
-        );
-        if let Some(error) = hosts.get("last_error").filter(|e| e.is_object()) {
-            let check = Check::new(
-                "hosts",
-                CheckState::Fail,
-                format!("/etc/hosts fallback {mode}: {}", fact(error, "message")),
-            );
-            checks.push(match error.get("code").and_then(Value::as_str) {
-                Some("hosts_file_refused") => {
-                    check.fix("fix the devlanes markers in /etc/hosts by hand")
-                }
-                _ => check.fix("devlanes certs trust --hosts"),
-            });
-        } else {
-            let state = match (
-                hosts.get("state").and_then(Value::as_str),
-                int(hosts, "names"),
-            ) {
-                (Some("applied"), Some(names)) => format!("{names} names"),
-                (Some("idle"), _) => "no names written".into(),
-                (Some(other), _) => clean(other),
-                (None, _) => "unknown".into(),
-            };
-            checks.push(Check::new(
-                "hosts",
-                CheckState::Ok,
-                format!("{probe}; /etc/hosts fallback {mode}, {state}"),
-            ));
-        }
-        if let Some(error) = hosts.get("tld_error").filter(|e| e.is_object()) {
-            checks.push(Check::new(
-                "hosts",
-                CheckState::Warn,
-                format!(
-                    "{}; only .localhost names are written",
-                    fact(error, "message")
-                ),
-            ));
-        }
-    }
-    checks
+            text: clean(&check.text),
+            fix: check.fix.map(|fix| clean(&fix)),
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn find<'a>(checks: &'a [Check], needle: &str) -> Option<&'a Check> {
+        checks.iter().find(|c| c.text.contains(needle))
+    }
 
     #[test]
     fn checks_word_proxy_fallback_and_missing_ca() {
@@ -309,10 +96,7 @@ mod tests {
             "ca": {"present": false, "error": "not created"},
         });
         let checks = checks(&data);
-        let https = checks
-            .iter()
-            .find(|c| c.text.starts_with("https"))
-            .map(|c| (c.state, c.text.as_str()));
+        let https = find(&checks, "https on").map(|c| (c.state, c.text.as_str()));
         assert_eq!(
             https,
             Some((
@@ -326,6 +110,68 @@ mod tests {
             Some("devlanes certs trust")
         );
         assert!(checks.iter().any(|c| c.text == "Compose 2.29.1"));
+    }
+
+    /// The checks the CLI has and the TUI used to miss, in the CLI's words.
+    #[test]
+    fn the_page_has_every_check_the_cli_has() {
+        let data = json!({
+            "proxy": {
+                "http": {"bound": true, "port": 80, "serving": false,
+                    "listeners": [{"address": "127.0.0.1:80", "running": false}]},
+            },
+            "ca": {"present": true, "path": "/h/ca.pem"},
+            "ca_warnings": [{"code": "host_outside_ca",
+                "data": {"lane": "acme@0", "unit": "api", "host": "api.example.com"}}],
+            "route_warnings": [{"code": "host_conflict",
+                "data": {"host": "api.acme.localhost", "lane": "acme@0", "other": "acme@1"}}],
+            "warnings": [{"code": "ports_pending", "data": {"lane": "acme@2"}}],
+            "hosts": {"mode": "auto", "state": "applied", "names": 3, "last_error": null,
+                "helper": {"state": "mismatch", "level": "warning", "installed": "0.1.0", "expected": "0.2.0"}},
+            "dns": {"tld": "test", "listen": "127.0.0.1:15353", "running": true,
+                "resolver_file": {"path": "/etc/resolver/test", "installed": false, "matches": false}},
+            "user_config": {"path": "/h/config.yaml", "valid": false,
+                "error": {"message": "unknown key `prxy`", "line": 3, "column": 1}, "warnings": []},
+            "service": {"manager": "launchd agent", "path": "/h/agent.plist", "installed": true,
+                "stop_window_s": 20, "window_source": "installed", "recommended_window_s": 45},
+            "stop_timeouts": [{"project": "acme", "unit": "worker", "timeout_ms": 60000}],
+        });
+        let checks = checks(&data);
+        let state = |needle: &str| find(&checks, needle).map(|c| c.state);
+        assert_eq!(
+            state("http on port 80 is not serving"),
+            Some(CheckState::Fail)
+        );
+        assert_eq!(
+            state("api.example.com is outside the CA's names"),
+            Some(CheckState::Warn)
+        );
+        assert_eq!(
+            state("api.acme.localhost is routed by acme@0 and acme@1"),
+            Some(CheckState::Warn)
+        );
+        assert_eq!(state("config changed ports"), Some(CheckState::Warn));
+        assert_eq!(
+            state("the installed /etc/hosts helper is version 0.1.0, devlanes is 0.2.0"),
+            Some(CheckState::Warn)
+        );
+        assert_eq!(
+            state(".test lookups do not reach the devlanes DNS server"),
+            Some(CheckState::Warn)
+        );
+        assert_eq!(
+            state("user config /h/config.yaml:3:1: unknown key `prxy`"),
+            Some(CheckState::Fail)
+        );
+        assert_eq!(
+            state("gives the daemon 20s to stop"),
+            Some(CheckState::Warn)
+        );
+        assert_eq!(
+            state("1 unit with a stop timeout longer than"),
+            Some(CheckState::Warn)
+        );
+        assert!(!checks.iter().any(|c| c.group == "output"));
     }
 
     #[test]

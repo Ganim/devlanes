@@ -1741,6 +1741,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "crossterm",
+ "devlanes-cli",
  "devlanes-client",
  "devlanes-config",
  "devlanes-core",

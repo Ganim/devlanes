@@ -213,8 +213,13 @@ where
     let mut app = App::new(size.width, size.height);
     app.theme = options.theme();
     app.on_quit = crate::app::OnQuit::parse(options.on_quit.as_deref());
-    app.time_zone = jiff::tz::TimeZone::system();
-    if let Ok(cwd) = std::env::current_dir() {
+    app.time_zone = options
+        .time_zone
+        .clone()
+        .unwrap_or_else(jiff::tz::TimeZone::system);
+    app.service_report = options.service.clone();
+    app.user_home = options.var("HOME").map(std::path::PathBuf::from);
+    if let Some(cwd) = options.cwd.clone().or_else(|| std::env::current_dir().ok()) {
         app.prefer_path(cwd);
     }
     let (sender, mut receiver) = mpsc::channel(MESSAGE_QUEUE);
@@ -357,7 +362,7 @@ impl Executor {
             api,
             sender,
             out: ProgressBar::new(clipboard, options.progress),
-            in_tmux: std::env::var_os("TMUX").is_some(),
+            in_tmux: options.var("TMUX").is_some(),
             subscription: None,
             attach: None,
             metrics: None,
@@ -642,12 +647,8 @@ impl Executor {
                 }));
             }
             Effect::LoadNotices => {
-                let home = api.home();
                 tokio::task::spawn_blocking(move || {
-                    let method = devlanes_client::update::InstallMethod::current();
-                    let dismissed = home
-                        .map(|home| devlanes_client::update::NoticeLog::load(&home).dismissed)
-                        .unwrap_or_default();
+                    let (method, dismissed) = api.notices();
                     deliver_blocking(&sender, Msg::Notices { method, dismissed });
                 });
             }

@@ -564,10 +564,19 @@ async fn remote_box_end_to_end() {
         })
         .await;
         assert!(down.is_some(), "link reports reconnecting");
-        assert_eq!(
-            client.route_state("web.boxapp.localhost").await.as_deref(),
-            Some("reconnecting")
+        // The mirror republishes routes after it sees the link go down, a moment
+        // after `host.list` does; the link stays down until `accept` below.
+        let route = eventually(SOON, || async {
+            let state = client.route_state("web.boxapp.localhost").await;
+            (state.as_deref() == Some("reconnecting")).then_some(())
+        })
+        .await;
+        assert!(
+            route.is_some(),
+            "route reads reconnecting while the link is down: {:?}",
+            client.route_state("web.boxapp.localhost").await
         );
+        assert_eq!(client.host().await["state"], "reconnecting");
         assert!(
             TcpStream::connect((Ipv6Addr::LOCALHOST, echo_port))
                 .await

@@ -733,6 +733,59 @@ fn listener(proxy: &Value, name: &'static str) -> Option<Check> {
 
 /// Every doctor check from the daemon facts and this invocation's output policy.
 fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
+    let mut checks = fact_checks(data);
+    checks.push(Check::new(
+        "output",
+        Outcome::Ok,
+        format!(
+            "mode {} ({})",
+            cx.runtime.output_description(),
+            cx.runtime.reason
+        ),
+    ));
+    checks
+}
+
+/// How a doctor check came out, for clients that word checks as the CLI does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorState {
+    Ok,
+    Warn,
+    Fail,
+}
+
+/// One doctor check as `devlanes doctor` words it: the group (`tls`, `hosts`),
+/// the outcome, the line and the command that fixes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorCheck {
+    pub group: &'static str,
+    pub state: DoctorState,
+    pub text: String,
+    pub fix: Option<String>,
+}
+
+/// The checks `devlanes doctor` shows for `data` (the daemon's `doctor` facts,
+/// with `service` and other client facts when the caller has them), in the
+/// CLI's order and words, without the line about this command's output mode.
+/// The TUI's daemon page shows these, so both say the same thing.
+pub fn doctor_checks_of(data: &Value) -> Vec<DoctorCheck> {
+    fact_checks(data)
+        .into_iter()
+        .map(|check| DoctorCheck {
+            group: check.group,
+            state: match check.outcome {
+                Outcome::Ok => DoctorState::Ok,
+                Outcome::Skip => DoctorState::Warn,
+                Outcome::Fail => DoctorState::Fail,
+            },
+            text: check.text,
+            fix: check.fix,
+        })
+        .collect()
+}
+
+/// The checks of the facts themselves: everything but the output mode.
+fn fact_checks(data: &Value) -> Vec<Check> {
     // `running: false` comes from the CLI's own checks when no daemon answered.
     let running = data.get("running").and_then(Value::as_bool) != Some(false);
     let mut checks = vec![if running {
@@ -840,8 +893,68 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
         );
     }
     checks.extend(service_checks(data));
-    checks.extend(tls_and_hosts_checks(data, running, cx));
+    checks.extend(tls_and_hosts_checks(data, running));
     checks
+}
+
+/// The embedded DNS server of the `resolver` hostname strategy (`dns`:
+/// `{tld, listen, running, error, resolver_file}`), and whether the OS sends
+/// the TLD's lookups to it. Nothing without that strategy.
+fn dns_checks(dns: &Value) -> Vec<Check> {
+    if !dns.is_object() {
+        return Vec::new();
+    }
+    let tld = text(dns, "tld");
+    let listen = display_value(&dns["listen"]);
+    if dns.get("running").and_then(Value::as_bool) != Some(true) {
+        return vec![
+            Check::new(
+                "dns",
+                Outcome::Fail,
+                format!(
+                    "DNS server for .{tld} is not running on {listen}: {}",
+                    text(dns, "error")
+                ),
+            )
+            .fix("free that address, then devlanes daemon restart"),
+        ];
+    }
+    let file = &dns["resolver_file"];
+    let path = text(file, "path");
+    let check = if let Some(error) = file.get("error").and_then(Value::as_str) {
+        Check::new(
+            "dns",
+            Outcome::Skip,
+            format!("this OS has no resolver file for .{tld}: {}", clean(error)),
+        )
+    } else if !file.is_object() {
+        Check::new(
+            "dns",
+            Outcome::Ok,
+            format!("DNS server for .{tld} on {listen}"),
+        )
+    } else if file.get("installed").and_then(Value::as_bool) != Some(true) {
+        Check::new(
+            "dns",
+            Outcome::Skip,
+            format!(".{tld} lookups do not reach the devlanes DNS server: nothing at {path}"),
+        )
+        .fix("devlanes certs trust --resolver")
+    } else if file.get("matches").and_then(Value::as_bool) != Some(true) {
+        Check::new(
+            "dns",
+            Outcome::Skip,
+            format!("{path} sends .{tld} lookups elsewhere, not to {listen}"),
+        )
+        .fix("devlanes certs trust --resolver")
+    } else {
+        Check::new(
+            "dns",
+            Outcome::Ok,
+            format!("DNS server for .{tld} on {listen}, resolver file {path}"),
+        )
+    };
+    vec![check]
 }
 
 /// Seconds a shutdown needs past a unit's stop timeout, to record exits and
@@ -1053,9 +1166,9 @@ fn docker_checks(data: &Value) -> Vec<Check> {
     checks
 }
 
-/// CA, trust, route warnings, hosts file, user config, daemon counts, release and
-/// output mode.
-fn tls_and_hosts_checks(data: &Value, running: bool, cx: &Ctx<'_>) -> Vec<Check> {
+/// CA, trust, route warnings, hosts file, DNS, user config, daemon counts and
+/// release.
+fn tls_and_hosts_checks(data: &Value, running: bool) -> Vec<Check> {
     let mut checks = Vec::new();
     let ca = &data["ca"];
     if ca.get("pending").and_then(Value::as_bool) == Some(true) {
@@ -1180,6 +1293,7 @@ fn tls_and_hosts_checks(data: &Value, running: bool, cx: &Ctx<'_>) -> Vec<Check>
             checks.push(check);
         }
     }
+    checks.extend(dns_checks(&data["dns"]));
     checks.extend(user_config_checks(&data["user_config"]));
     if running {
         checks.push(Check::new(
@@ -1195,15 +1309,6 @@ fn tls_and_hosts_checks(data: &Value, running: bool, cx: &Ctx<'_>) -> Vec<Check>
     if let Some(release) = data.get("release").filter(|r| r.is_object()) {
         checks.extend(release_checks(release));
     }
-    checks.push(Check::new(
-        "output",
-        Outcome::Ok,
-        format!(
-            "mode {} ({})",
-            cx.runtime.output_description(),
-            cx.runtime.reason
-        ),
-    ));
     checks
 }
 

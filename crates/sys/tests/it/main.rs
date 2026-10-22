@@ -139,15 +139,23 @@ fn listening_ports_of_pid_set() -> Result<(), Box<dyn std::error::Error>> {
 fn holders_of_pipes_and_terminals() -> Result<(), Box<dyn std::error::Error>> {
     use std::os::fd::AsFd;
 
+    // Started before the pipe and terminal exist. A child spawned while they are
+    // open can still hold them for a moment after `spawn` returns: on Linux the
+    // vfork-style spawn resumes the parent before the kernel closes close-on-exec
+    // descriptors, and `holders` then rightly reports that child too.
+    let bystander = sleeper();
+
     let (reader, writer) = std::io::pipe()?;
     let master =
         rustix::pty::openpt(rustix::pty::OpenptFlags::RDWR | rustix::pty::OpenptFlags::NOCTTY)?;
+    // So the holder does not keep the master after exec.
+    rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC)?;
     rustix::pty::grantpt(&master)?;
     rustix::pty::unlockpt(&master)?;
     let name = rustix::pty::ptsname(&master, Vec::new())?;
     let slave = rustix::fs::open(
         name.as_c_str(),
-        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY,
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )?;
     let pipe = devlanes_sys::open_file(reader.as_fd())?;
@@ -162,7 +170,6 @@ fn holders_of_pipes_and_terminals() -> Result<(), Box<dyn std::error::Error>> {
             .stdout(writer)
             .spawn()?,
     );
-    let bystander = sleeper();
     let pids = [holder.0.id(), bystander.0.id()];
     assert_eq!(devlanes_sys::holders(pipe, &pids)?, [holder.0.id()]);
     assert_eq!(devlanes_sys::holders(tty, &pids)?, [holder.0.id()]);

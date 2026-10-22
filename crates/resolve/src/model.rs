@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use devlanes_config::{Extensions, OpaqueExtensions, ProjectConfig, Scalar, TaskWhen};
 use devlanes_core::{
@@ -56,9 +62,18 @@ pub struct ResolveInput<'a, E: Extensions = OpaqueExtensions> {
     /// Port the proxy's HTTPS listener is bound to. Public URLs and origins add
     /// `:<port>` unless it is 443; `None` renders them without a port.
     pub public_https_port: Option<u16>,
+    /// Plans only these units, by config path (`services.api`, `tasks.migrate`,
+    /// `infra.setup.db`); `None` plans all of them. Layout and namespaces still
+    /// cover every service, so what is planned comes out as in a full resolve.
+    pub only: Option<&'a BTreeSet<String>>,
 }
 
 impl<'a, E: Extensions> ResolveInput<'a, E> {
+    /// Whether the unit at `path` is planned (see [`ResolveInput::only`]).
+    pub fn plans(&self, path: &str) -> bool {
+        self.only.is_none_or(|only| only.contains(path))
+    }
+
     /// Input with empty environments, namespaces and integrations.
     pub fn new(
         config: &'a ProjectConfig<E>,
@@ -84,6 +99,7 @@ impl<'a, E: Extensions> ResolveInput<'a, E> {
             script_runners: &[],
             ca_env: &EMPTY_ENV,
             public_https_port: None,
+            only: None,
         }
     }
 }

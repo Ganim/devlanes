@@ -533,6 +533,35 @@ fn scenes() -> Vec<Scene> {
             setup: |f| f.shifted('D'),
         },
         Scene {
+            name: "daemon-targets",
+            what: "the target picker on the daemon page (T): gate checked",
+            setup: |f| {
+                f.shifted('D');
+                f.shifted('T');
+                f.key(KeyCode::Char(' '));
+            },
+        },
+        Scene {
+            name: "daemon-targets-applied",
+            what: "the daemon log narrowed to the gate target (T, space, enter)",
+            setup: |f| {
+                f.shifted('D');
+                f.shifted('T');
+                f.key(KeyCode::Char(' '));
+                f.key(KeyCode::Enter);
+            },
+        },
+        Scene {
+            name: "daemon-search",
+            what: "a search on the daemon log (/ wrk-export, enter): matches marked",
+            setup: |f| {
+                f.shifted('D');
+                f.key(KeyCode::Char('/'));
+                f.type_text("wrk-export");
+                f.key(KeyCode::Enter);
+            },
+        },
+        Scene {
             name: "daemon-copy",
             what: "copy mode on the daemon log (c, v, k): two lines selected",
             setup: |f| {

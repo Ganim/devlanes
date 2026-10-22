@@ -37,19 +37,18 @@ pub fn render(app: &App, frame: &mut Frame, boxed: Rect, area: Rect) {
         );
         return;
     };
-    // Title: the lane's glyph and `main @0`, and the filter while one is
-    // set. The lane has no row: selecting it (k from the top, a click on
-    // the title) highlights the title and shows its status in the pane.
-    let (glyph, tone) = super::lane_glyph(theme, lane, app.spin);
+    // Title: `main @0` as the mockups draw it (the lane's state glyph is on
+    // its chip), and the filter while one is set. The lane has no row:
+    // selecting it (k from the top, a click on the title) highlights the
+    // title and shows its status in the pane.
     let mut name = vec![
         Span::raw(" "),
-        Span::styled(format!("{glyph} "), theme.tone(tone)),
         Span::styled(lane_name(lane), Style::new().add_modifier(Modifier::BOLD)),
     ];
     if let Some(index) = lane.index {
         name.push(Span::raw(format!(" @{index}")));
     }
-    // Normal states are the glyph alone; a lane on its way somewhere says so.
+    // A lane on its way somewhere says so; settled states need no word.
     let word = if app.is_cleaning(&lane.reference) {
         Some("cleaning…")
     } else {

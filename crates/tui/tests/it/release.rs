@@ -46,14 +46,16 @@ async fn newer_release_shows_until_dismissed() -> TestResult {
     // The top bar marks the daemon button; the daemon page says what to run.
     let screen = draw(&app)?.backend().to_string();
     let top = screen.lines().next().unwrap_or_default();
-    assert!(top.contains("D daemon · 2 issues, update"), "{top}");
+    // The empty doctor reply has one problem by `devlanes doctor`'s rules:
+    // the state schema is unknown.
+    assert!(top.contains("D daemon · 1 issue, update"), "{top}");
     app.update(Msg::Key(crossterm::event::KeyEvent::new(
         KeyCode::Char('D'),
         crossterm::event::KeyModifiers::SHIFT,
     )));
     let page = draw(&app)?.backend().to_string();
     assert!(
-        page.contains("warn update 99.0.0 available · u hides it"),
+        page.contains("warn update  99.0.0 available · u hides it"),
         "{page}"
     );
     assert!(

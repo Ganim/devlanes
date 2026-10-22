@@ -59,6 +59,18 @@ pub struct Options {
     pub glyphs: Option<String>,
     /// `tui.on_quit` from the user config: `ask` (or unset), `keep` or `stop`.
     pub on_quit: Option<String>,
+    /// The per-user service definition as `devlanes doctor` reads it
+    /// (`{manager, path, installed, stop_window_s, ...}`), for the daemon
+    /// page's stop-window check; `None` leaves that check out.
+    pub service: Option<serde_json::Value>,
+    /// The environment the TUI reads (`NO_COLOR`, `COLORTERM`, the locale,
+    /// `TMUX`, `HOME`); `None` reads the process's. Tests pass their own so
+    /// the machine they run on does not show in what they draw.
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    /// Where daemon.log times are shown; `None` is the system's zone.
+    pub time_zone: Option<jiff::tz::TimeZone>,
+    /// The directory whose lane opens first; `None` is the process's.
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 impl Options {
@@ -66,8 +78,16 @@ impl Options {
     /// the user config.
     pub fn theme(&self) -> theme::Theme {
         theme::Theme::detect(self.theme.as_deref(), self.glyphs.as_deref(), |key| {
-            std::env::var(key).ok()
+            self.var(key)
         })
+    }
+
+    /// An environment variable from [`Options::env`], else the process's.
+    pub fn var(&self, key: &str) -> Option<String> {
+        match &self.env {
+            Some(env) => env.get(key).cloned(),
+            None => std::env::var(key).ok(),
+        }
     }
 }
 

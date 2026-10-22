@@ -29,6 +29,19 @@ use tokio::sync::mpsc;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+/// Options for driving the loop in tests: an empty environment (no
+/// `NO_COLOR`, locale or `TMUX` from the machine, no `HOME`), UTC and a
+/// directory no lane uses, so what a test draws is the same everywhere.
+/// The fake daemon answers everything else, the install method included.
+fn hermetic_options() -> Options {
+    Options {
+        env: Some(std::collections::BTreeMap::new()),
+        time_zone: Some(jiff::tz::TimeZone::UTC),
+        cwd: Some("/nonexistent/devlanes-tests".into()),
+        ..Options::default()
+    }
+}
+
 /// Draws the app into a fresh test terminal.
 fn draw(app: &App) -> Result<Terminal<TestBackend>, Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(TestBackend::new(app.size.0, app.size.1))?;
@@ -994,7 +1007,7 @@ async fn drive_stops_the_lanes_and_remembers_before_closing() -> TestResult {
             keys_tx
         }
     };
-    let options = Options::default();
+    let options = hermetic_options();
     let run = drive(
         &mut terminal,
         driver_api,
@@ -1301,7 +1314,9 @@ impl SharedBackend {
         self.lock().to_string()
     }
 
-    /// Waits up to 4 s until the drawn screen contains `text`.
+    /// Waits up to 4 s until the drawn screen contains `text`; panics with the
+    /// last screen otherwise, so a test never goes on with a frame it did
+    /// not wait for.
     async fn wait_for(&self, text: &str) {
         for _ in 0..400 {
             if self.screen().contains(text) {
@@ -1309,6 +1324,7 @@ impl SharedBackend {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        panic!("never drawn: {text:?}\n{}", self.screen());
     }
 }
 
@@ -1400,9 +1416,12 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
             // The lane opens on its failed worker; api is two rows up.
             keys_tx.send(press('k')).await.ok();
             keys_tx.send(press('k')).await.ok();
-            // Quit only once the attached pane is on screen: `q` ends the loop
-            // without another frame.
+            // Quit only once the attached pane and the doctor's badge (the
+            // fake's checks, fetched on the first tick) are on screen: `q`
+            // ends the loop without another frame, so a slower machine would
+            // otherwise snapshot an earlier one.
             backend.wait_for("┌ api  ready").await;
+            backend.wait_for("D daemon · 2 issues").await;
             keys_tx.send(press('q')).await.ok();
             // Returned, so the input stays open: the loop must end on q, not
             // because the stream ended.
@@ -1412,7 +1431,7 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
     // `tui.on_quit: keep`: q closes without asking; the dialog has its own tests.
     let options = Options {
         on_quit: Some("keep".into()),
-        ..Options::default()
+        ..hermetic_options()
     };
     let run = drive(
         &mut terminal,

@@ -396,10 +396,21 @@ pub trait DaemonApi: Send + Sync {
     fn daemon_log(&self) -> Option<PathBuf> {
         None
     }
-    /// `DEVLANES_HOME` of the daemon this TUI talks to, passed to commands it
-    /// opens in other terminals so they reach the same daemon.
+    /// `DEVLANES_HOME` of the daemon this TUI talks to, where config.yaml and
+    /// the dismissed notices live.
     fn home(&self) -> Option<PathBuf> {
         None
+    }
+    /// How this devlanes was installed and the release notices dismissed so
+    /// far, for the update notice. Reads the binary's path and the home's
+    /// notice log; called on a blocking thread.
+    fn notices(&self) -> (devlanes_client::update::InstallMethod, Vec<String>) {
+        let method = devlanes_client::update::InstallMethod::current();
+        let dismissed = self
+            .home()
+            .map(|home| devlanes_client::update::NoticeLog::load(&home).dismissed)
+            .unwrap_or_default();
+        (method, dismissed)
     }
 }
 

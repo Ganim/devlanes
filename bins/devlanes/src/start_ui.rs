@@ -73,7 +73,7 @@ pub async fn run(
             return Ok(rendered.exit_code);
         }
     };
-    let options = crate::wiring::tui_options(paths);
+    let options = crate::wiring::tui_options(paths).await;
     let exit = devlanes_tui::run_start(paths.clone(), options, handoff)
         .await
         .map_err(crate::wiring::tui_error)?;

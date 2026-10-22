@@ -15,7 +15,7 @@ use ratatui::{
 };
 use serde_json::json;
 
-use crate::daemon::run_keys;
+use crate::daemon::{Step, run_keys};
 use crate::errors::{assert_clean, key, render, row, screen};
 use crate::fake::{FakeApi, lane, mixed_lanes, unit};
 
@@ -509,14 +509,17 @@ async fn other_profile_list_failures_use_the_error_path() -> TestResult {
 async fn drive_starts_with_the_profiles_checked_in_the_picker() -> TestResult {
     // Lanes are set directly: the helper waits for the loop's own first status call.
     let api = Arc::new(FakeApi::with_lanes(profile_lanes()));
-    let keys = vec![
-        key(KeyCode::Char('p')),
-        key(KeyCode::Char('j')),
-        key(KeyCode::Char('j')),
-        key(KeyCode::Char(' ')),
-        key(KeyCode::Enter),
+    // The picker's keys wait for its list; the start's notice is waited for
+    // before quitting.
+    let steps = vec![
+        Step::Key(key(KeyCode::Char('p'))),
+        Step::Screen("frontend"),
+        Step::Key(key(KeyCode::Char('j'))),
+        Step::Key(key(KeyCode::Char('j'))),
+        Step::Key(key(KeyCode::Char(' '))),
+        Step::Key(key(KeyCode::Enter)),
     ];
-    let terminal = run_keys(Arc::clone(&api), keys).await?;
+    let terminal = run_keys(Arc::clone(&api), steps, &["started acme@0 with"], |_| true).await?;
     let calls = api.calls();
     assert!(
         calls.contains(&"profile.list acme@0".to_owned()),
@@ -526,7 +529,7 @@ async fn drive_starts_with_the_profiles_checked_in_the_picker() -> TestResult {
         calls.contains(&"Start acme@0 [] profiles=[\"web\", \"frontend\"]".to_owned()),
         "{calls:?}"
     );
-    let header = row(terminal.backend().buffer(), 0);
+    let header = row(terminal.buffer(), 0);
     assert!(header.contains("started acme@0 with"), "{header}");
     Ok(())
 }

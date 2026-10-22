@@ -600,7 +600,10 @@ impl Inner {
         let started = self.identity.start_time;
         let found = blocking(move || -> Result<Vec<ProcessInfo>, devlanes_sys::Error> {
             let uid = devlanes_sys::current_uid();
-            // The daemon holds the master and the pipe read ends itself.
+            // The daemon holds the master and the pipe read ends itself. Its direct
+            // children are helpers or other units' leaders, never this unit's
+            // descendants, and one spawned just now may still carry the daemon's
+            // close-on-exec descriptors for a moment.
             let me = std::process::id();
             let candidates: Vec<ProcessInfo> = snapshot::processes(Duration::ZERO)?
                 .iter()
@@ -608,6 +611,7 @@ impl Inner {
                     p.uid == uid
                         && !p.zombie
                         && p.pid != me
+                        && p.ppid != me
                         && p.start_time >= started
                         && !known.contains(&p.pid)
                 })

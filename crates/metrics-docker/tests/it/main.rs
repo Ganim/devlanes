@@ -4,11 +4,12 @@
 //! names replaced. `stats_v1.json` is hand-built in the cgroup v1 shape (no
 //! `online_cpus`, `total_inactive_file`) because no v1 host was available.
 
+use bollard::models::ContainerCpuUsage;
 use devlanes_core::{LaneId, ProjectId};
 use devlanes_metrics::{ContainerTarget, MetricsSource, SampleRequest, Subject};
 use devlanes_metrics_docker::{
-    ContainerStatsResponse, DockerSource, DockerVmInfo, SystemInfo, cpu_percent_unix,
-    memory_usage_no_cache, reading,
+    ContainerCpuStats, ContainerStatsResponse, CpuWindow, DockerSource, DockerVmInfo, SystemInfo,
+    cpu_percent_unix, memory_usage_no_cache, reading,
 };
 
 /// Parses a captured stats response.
@@ -91,6 +92,70 @@ fn edge_cases_follow_docker_cli() {
         reading(&stopped, None).is_none(),
         "stopped containers have no usage"
     );
+}
+
+/// Engine CPU counters of a container on 12 CPUs that works 20 ms in a burst
+/// every 1.3 s, sampled every second: `(total_usage, system_cpu_usage)` in ns.
+fn bursty(samples: u64) -> Vec<ContainerCpuStats> {
+    (0..samples)
+        .map(|second| ContainerCpuStats {
+            cpu_usage: Some(ContainerCpuUsage {
+                total_usage: Some(1_000_000_000 + 20_000_000 * (second * 10 / 13)),
+                ..ContainerCpuUsage::default()
+            }),
+            system_cpu_usage: Some(5_000_000_000_000 + second * 12_000_000_000),
+            online_cpus: Some(12),
+            ..ContainerCpuStats::default()
+        })
+        .collect()
+}
+
+#[test]
+/// A steady bursty load reads steady over the 2 s window, where sample to
+/// sample deltas drop to 0% whenever a second passes without a burst.
+fn cpu_window_reads_bursty_load_steady() {
+    let samples = bursty(30);
+    let deltas: Vec<f64> = samples
+        .windows(2)
+        .map(|pair| cpu_percent_unix(&pair[0], &pair[1]))
+        .collect();
+    assert!(deltas.contains(&0.0), "the old math drops to 0: {deltas:?}");
+
+    let mut window = CpuWindow::default();
+    let percents: Vec<f64> = samples
+        .iter()
+        .map(|stats| window.percent(stats, None))
+        .collect();
+    // 20 ms per 1.3 s is about 1.54% of one CPU; one or two bursts per 2 s
+    // give 1% or 2%. The first sample has no earlier reading.
+    for percent in &percents[2..] {
+        assert!((0.99..=2.01).contains(percent), "{percents:?}");
+    }
+    let average = percents[2..].iter().sum::<f64>() / (percents.len() - 2) as f64;
+    assert!((average - 20.0 / 1300.0 * 100.0).abs() < 0.2, "{average}");
+}
+
+#[test]
+/// The window starts over when a restart resets the counter, and an idle
+/// container still reads 0%.
+fn cpu_window_restarts_and_idles() {
+    let mut window = CpuWindow::default();
+    let samples = bursty(5);
+    for stats in &samples {
+        window.percent(stats, None);
+    }
+    let mut restarted = samples[4].clone();
+    restarted.cpu_usage = Some(ContainerCpuUsage {
+        total_usage: Some(10_000_000),
+        ..ContainerCpuUsage::default()
+    });
+    restarted.system_cpu_usage = Some(5_000_000_000_000 + 5 * 12_000_000_000);
+    // Without an earlier reading the counter counts from zero, as on first sight.
+    let first = window.percent(&restarted, None);
+    assert!((0.0..0.01).contains(&first), "{first}");
+    let mut later = restarted.clone();
+    later.system_cpu_usage = Some(5_000_000_000_000 + 8 * 12_000_000_000);
+    assert_eq!(window.percent(&later, None), 0.0, "idle since the restart");
 }
 
 #[test]

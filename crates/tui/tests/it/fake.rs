@@ -224,6 +224,12 @@ impl DaemonApi for FakeApi {
     fn home(&self) -> Option<PathBuf> {
         self.home.clone()
     }
+
+    /// Fixed: a source build with nothing dismissed, whatever binary runs
+    /// the tests and whatever its home holds.
+    fn notices(&self) -> (devlanes_client::update::InstallMethod, Vec<String>) {
+        (devlanes_client::update::InstallMethod::Source, Vec::new())
+    }
 }
 
 /// Profiles as `profile.list` describes them: a default, an extra and one without infra.
