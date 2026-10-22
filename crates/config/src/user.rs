@@ -392,8 +392,8 @@ impl PortsConfig {
 pub struct TlsConfig {
     /// Use devlanes' own CA by default, or reuse mkcert's CA.
     pub ca: CaKind,
-    /// Trust stores that should accept the local CA; mobile targets are ignored with a warning for now.
-    #[schemars(extend("examples" = [["system","firefox"],["chrome"]]))]
+    /// Trust stores that should accept the local CA; unset means system, plus windows inside WSL. Mobile targets are ignored with a warning for now.
+    #[schemars(extend("examples" = [["system","firefox"],["chrome"],["system","windows"]]))]
     pub trust: Vec<TrustTarget>,
 }
 
@@ -414,7 +414,7 @@ pub enum CaKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 /// Store in which the local CA should be trusted; mobile stores are not supported yet.
-#[schemars(extend("examples" = ["system","firefox","chrome","ios-simulator","android-emulator"]))]
+#[schemars(extend("examples" = ["system","firefox","chrome","windows","ios-simulator","android-emulator"]))]
 pub enum TrustTarget {
     /// Trust the local CA in the operating system's certificate store.
     #[schemars(extend("examples" = ["system"]))]
@@ -425,6 +425,9 @@ pub enum TrustTarget {
     /// Trust the local CA in Chrome's certificate database where required.
     #[schemars(extend("examples" = ["chrome"]))]
     Chrome,
+    /// Trust the local CA in the Windows user certificate store, for Windows browsers; from inside WSL, or on Windows, where it is the system store.
+    #[schemars(extend("examples" = ["windows"]))]
+    Windows,
     /// Reserved iOS simulator trust target; not supported yet, so it is ignored with a warning.
     #[schemars(extend("examples" = ["ios-simulator"]))]
     IosSimulator,
@@ -537,7 +540,7 @@ pub enum Terminal {
     /// Open a session in macOS Terminal.app.
     #[schemars(extend("examples" = ["terminal"]))]
     Terminal,
-    /// Open a tab in the most recent Windows Terminal window on Windows.
+    /// Open a tab in the most recent Windows Terminal window, on Windows or from inside WSL.
     #[serde(rename = "windows-terminal")]
     #[schemars(extend("examples" = ["windows-terminal"]))]
     WindowsTerminal,
@@ -581,7 +584,7 @@ pub enum TerminalConfig {
 #[serde(default, deny_unknown_fields)]
 #[schemars(extend("examples" = [{"app":"ghostty","progress":"auto"},{"progress":"never"}]))]
 pub struct TerminalSettings {
-    /// Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, Windows Terminal on Windows when installed, else the first one installed.
+    /// Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, Windows Terminal on Windows and inside WSL when installed, else the first one installed.
     #[schemars(extend("examples" = ["ghostty","iterm2"]))]
     pub app: Option<Terminal>,
     /// Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto.

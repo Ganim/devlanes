@@ -13,10 +13,8 @@ use devlanes_core::{
     ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopPolicy, TerminalSize, Unit,
     contrib::{CA_BUNDLE_ENV, CA_CERT_ENV, Contributor, ScriptRunner},
 };
-use devlanes_daemon::integrations::ExitDetails;
-#[cfg(unix)]
 use devlanes_daemon::integrations::{
-    ConnectOptions, RemoteConnector, RemotePrompt, RemotePrompter,
+    ConnectOptions, ExitDetails, RemoteConnector, RemotePrompt, RemotePrompter,
 };
 use devlanes_daemon::{
     Engine, EngineOptions, Handler,
@@ -32,10 +30,13 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-/// Terminal launchers for "open in terminal"; the TUI picks one by the user config name.
+/// Terminal launchers for "open in terminal"; the TUI picks one by the user
+/// config name, else the first installed. Windows Terminal is only available
+/// inside WSL, where it comes first, as on Windows.
 #[cfg(unix)]
 fn launchers() -> Vec<Arc<dyn devlanes_term::TerminalLauncher>> {
     vec![
+        Arc::new(devlanes_term_windows_terminal::WindowsTerminal),
         Arc::new(devlanes_term_iterm2::Iterm2),
         Arc::new(devlanes_term_ghostty::Ghostty),
         Arc::new(devlanes_term_wezterm::Wezterm),
@@ -143,15 +144,11 @@ pub async fn engine(
     integ.ca_permitted = ca_permitted;
     integ.presets = presets();
     integ.launch_checks = vec![Arc::new(DistinctTauriIdentifiers)];
-    // Windows keeps the default connector, which refuses with `not_supported_yet`
-    // until the SSH transport has a Windows mode.
-    #[cfg(unix)]
-    {
-        integ.remote = Arc::new(SshConnector {
-            home: paths.home.clone(),
-            exe: std::env::current_exe().ok(),
-        });
-    }
+    integ.remote = Arc::new(SshConnector {
+        home: paths.home.clone(),
+        exe: std::env::current_exe().ok(),
+        ssh_options: ssh_options_from_env(),
+    });
     integ.hosts = hosts_file(hosts_policy, hosts_tld, hosts_probe)
         .await
         .map(Arc::new);
@@ -484,9 +481,10 @@ impl devlanes_daemon::integrations::ResolverFiles for OsResolverFiles {
 
 #[cfg(windows)]
 impl devlanes_daemon::integrations::ResolverFiles for OsResolverFiles {
-    /// `{namespace, server, installed, matches, foreign, group_policy}` for the
-    /// NRPT rule; `foreign` when another program's rule routes the namespace,
-    /// `group_policy` when Group Policy rules make Windows ignore local ones.
+    /// The NRPT rule's facts from `resolver_nrpt::status`: `foreign` when
+    /// another program's rule routes the namespace, `group_policy` when Group
+    /// Policy rules make Windows ignore local ones, `more_specific` and
+    /// `effective_servers` for rules (a VPN's included) that win over it.
     fn status(&self, tld: &str, server: std::net::SocketAddr) -> Value {
         crate::resolver_nrpt::status(tld, server)
     }
@@ -996,17 +994,37 @@ fn listener_status(bound: &Value, health: &[devlanes_proxy::ListenerHealth]) -> 
 }
 
 /// `connect` over system OpenSSH, with ssh's prompts relayed to the attached CLI.
-#[cfg(unix)]
 struct SshConnector {
-    /// `$DEVLANES_HOME`; control sockets live in its `run/ssh`.
+    /// `$DEVLANES_HOME`; Unix control sockets live in its `run/ssh`.
     home: PathBuf,
     /// This binary, which ssh runs as `askpass`; without it ssh runs in batch mode.
     exe: Option<PathBuf>,
+    /// Extra `-o` options for every ssh run, from [`SSH_OPTIONS_ENV`].
+    ssh_options: Vec<String>,
 }
 
-#[cfg(unix)]
+/// Extra ssh options for every box, one `-o` option per line (`Port=2222`,
+/// `IdentityFile=...`). For setups that cannot use `~/.ssh/config`, such as
+/// tests against a throwaway box; read once when the daemon starts.
+const SSH_OPTIONS_ENV: &str = "DEVLANES_SSH_OPTIONS";
+
+/// The options in [`SSH_OPTIONS_ENV`], blank lines skipped.
+fn ssh_options_from_env() -> Vec<String> {
+    std::env::var(SSH_OPTIONS_ENV)
+        .map(|value| {
+            value
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl RemoteConnector for SshConnector {
-    /// One SSH transport (and ControlMaster) per box.
+    /// One SSH transport per box: a ControlMaster on Unix, one ssh process per
+    /// session on Windows.
     fn transport(
         &self,
         host: &str,
@@ -1014,6 +1032,7 @@ impl RemoteConnector for SshConnector {
         connect: ConnectOptions,
     ) -> Result<Arc<dyn devlanes_transport::Transport>, RpcError> {
         let mut options = devlanes_transport_ssh::SshOptions::new(&self.home);
+        options.ssh_options = self.ssh_options.clone();
         // A box without devlanes gets this client's own release, and only with
         // `remote connect --install`; otherwise the plan is reported.
         options.manifest_url = Some(format!(
@@ -1040,10 +1059,8 @@ impl RemoteConnector for SshConnector {
 }
 
 /// Adapts the daemon's prompt relay to the SSH transport's.
-#[cfg(unix)]
 struct PromptBridge(Arc<dyn RemotePrompter>);
 
-#[cfg(unix)]
 #[async_trait]
 impl devlanes_transport_ssh::PromptRelay for PromptBridge {
     /// Forwards with the CLI's prompt kind words.

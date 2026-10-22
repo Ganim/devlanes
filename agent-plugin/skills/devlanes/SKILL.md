@@ -16,7 +16,7 @@ This page covers daily use. Read a reference first when the task is about the co
 
 ## Rules
 
-- Never start a long-running process with `&`, `nohup`, `setsid` or a background shell. Use `devlanes start` for the services in `devlanes.yaml` and `devlanes exec --name NAME -- COMMAND` for anything else.
+- Never start a long-running process with `&`, `nohup`, `setsid`, a background shell, or in PowerShell `Start-Process`, `Start-Job` or a trailing `&`. Use `devlanes start` for the services in `devlanes.yaml` and `devlanes exec --name NAME -- COMMAND` for anything else.
 - `start`, `restart` and `wait` return once units are ready or have failed. Do not poll with `sleep` or `curl` loops.
 - Read logs with `--tail`, `--grep` or `--since`. Output is capped at 16 KiB per command, and truncated output ends with the command that fetches the rest. Follow logs (`-f`) only together with `--timeout`.
 - A command that needs confirmation exits 2 and names the flag. Rerun it with `--yes` only when the user asked for that action.
@@ -114,6 +114,14 @@ devlanes with -- pnpm test
 devlanes stop --mine
 ```
 
+## Windows
+
+- `run:` strings and `ready.cmd` use POSIX `sh` syntax on every OS. On Windows devlanes runs them with Git for Windows' `sh.exe`, and with `cmd.exe /d /s /c` when the daemon found no Git for Windows at startup. `devlanes config check` then warns (`shell_fallback`) and POSIX-only syntax fails; the fix is for the user to install Git for Windows and run `devlanes daemon restart`, which stops every running service. Write `run:` strings for `sh`, not PowerShell.
+- Services run in a pseudo console by default (`pty: true`), which can rewrap long lines and add escape sequences to the log. Set `pty: false` on a unit when its logs must hold exactly the bytes it wrote.
+- Hints and `more:` lines are quoted for PowerShell. Words without quotes paste into any shell; in Git Bash, requote words that PowerShell wrapped in single quotes.
+- Environment of a unit in PowerShell: `devlanes env export api --shell pwsh | Out-String | Invoke-Expression`. In Git Bash, use `eval "$(devlanes env export api)"` as on Unix.
+- Git Bash rewrites arguments that look like POSIX paths before devlanes sees them, so in `devlanes exec --name x -- cmd /c dir` the `/c` arrives as `C:/`. Prefix such commands with `MSYS_NO_PATHCONV=1`, or run them from PowerShell.
+
 ## Daemon and sandboxes
 
-The CLI starts the daemon on first use. Inside a sandbox (for example Codex, which sets `CODEX_SANDBOX`) it refuses to and fails with `auto-spawn refused in sandbox`. Ask the user to run `devlanes daemon install` outside the sandbox. It registers a per-user service that starts the daemon now and at login. Then retry. `devlanes doctor` reports the socket and sandbox state, and never starts the daemon: without one it says `daemon: not running` and checks what it can locally.
+The CLI starts the daemon on first use. Inside a sandbox, such as Codex's, it refuses to and fails with `auto-spawn refused in sandbox`. Ask the user to run `devlanes daemon install` outside the sandbox. It registers a per-user service that starts the daemon now and at login. Then retry. `devlanes doctor` reports the socket and sandbox state, and never starts the daemon: without one it says `daemon: not running` and checks what it can locally.

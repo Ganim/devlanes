@@ -799,6 +799,7 @@ fn doctor_checks(data: &Value, cx: &Ctx<'_>) -> Vec<Check> {
         .fix("devlanes daemon install, so the daemon starts outside the sandbox")
     });
     checks.extend(terminal_checks(&data["terminal"], running));
+    checks.extend(wsl_checks(data, running));
     // Docker is the daemon's to ask; without one there is nothing to say.
     if data.get("infra").is_some() {
         checks.extend(docker_checks(data));
@@ -1184,6 +1185,130 @@ fn terminal_checks(terminal: &Value, running: bool) -> Vec<Check> {
                 "this terminal stops every process it started when it closes, including a daemon started from it",
             )
             .fix("start the daemon from a terminal outside this one (for example Windows Terminal), then devlanes daemon restart"),
+        );
+    }
+    checks
+}
+
+/// What `wsl.exe --shutdown` from Windows applies, for fixes that edit WSL's files.
+const WSL_RESTART: &str = "then run wsl.exe --shutdown from Windows and reopen the distro";
+
+/// The WSL distro this CLI runs in (`wsl`, added by the CLI inside WSL only:
+/// `{distro, version, interop, systemd, networking_mode, generate_hosts,
+/// unprivileged_port_start, privileged_proxy_ports}`) and what it changes: interop
+/// off, no systemd for `daemon install`, proxy ports that need root, WSL
+/// rewriting `/etc/hosts`, a CA Windows browsers do not trust, and worktrees on
+/// Windows drives (`windows_drive_worktrees`, from the daemon).
+fn wsl_checks(data: &Value, running: bool) -> Vec<Check> {
+    let wsl = &data["wsl"];
+    if !wsl.is_object() {
+        return Vec::new();
+    }
+    let flag = |key: &str| wsl.get(key).and_then(Value::as_bool);
+    let interop = flag("interop") == Some(true);
+    let name = match wsl.get("distro").and_then(Value::as_str) {
+        Some(distro) => format!("WSL {} ({})", display_value(&wsl["version"]), clean(distro)),
+        None => format!("WSL {}", display_value(&wsl["version"])),
+    };
+    let mut checks = vec![if interop {
+        Check::new("wsl", Outcome::Ok, format!("{name}, Windows interop on"))
+    } else {
+        Check::new(
+            "wsl",
+            Outcome::Skip,
+            format!("{name}, Windows interop off: devlanes cannot open URLs in Windows, trust the CA there or open Windows Terminal tabs"),
+        )
+        .fix(format!("set enabled=true under [interop] in /etc/wsl.conf, {WSL_RESTART}"))
+    }];
+    if flag("systemd") == Some(false) {
+        checks.push(
+            Check::new(
+                "wsl",
+                Outcome::Skip,
+                "systemd is not running in this distro, so devlanes daemon install cannot start the daemon with it",
+            )
+            .fix(format!("set systemd=true under [boot] in /etc/wsl.conf, {WSL_RESTART}")),
+        );
+    }
+    if let Some(mode) = wsl.get("networking_mode").and_then(Value::as_str) {
+        let how = match mode {
+            "mirrored" => "Windows and the distro share localhost",
+            "nat" => "Windows reaches the proxy through WSL's localhost forwarding",
+            _ => "Windows may not reach the proxy on localhost",
+        };
+        let label = if mode == "nat" {
+            "NAT".to_owned()
+        } else {
+            clean(mode)
+        };
+        checks.push(Check::new(
+            "wsl",
+            Outcome::Ok,
+            format!("{label} networking: {how}"),
+        ));
+    }
+    let ports: Vec<u64> = list(wsl, "privileged_proxy_ports")
+        .iter()
+        .filter_map(Value::as_u64)
+        .collect();
+    // A running proxy that got its ports anyway (a capability, an older sysctl
+    // value) needs no fix.
+    let fell_back = ["http", "https"].iter().any(|name| {
+        data["proxy"][name]
+            .get("fallback_reason")
+            .is_some_and(|reason| !reason.is_null())
+    });
+    if let Some(lowest) = ports.iter().min().filter(|_| !running || fell_back) {
+        let listed: Vec<String> = ports.iter().map(u64::to_string).collect();
+        checks.push(
+            Check::new(
+                "wsl",
+                Outcome::Skip,
+                format!(
+                    "ports below {} need root in this distro, so the proxy cannot bind {} and uses its fallback ports (8080 for HTTP, 8443 for HTTPS)",
+                    display_value(&wsl["unprivileged_port_start"]),
+                    listed.join(" and ")
+                ),
+            )
+            .fix(format!(
+                "sudo sysctl -w net.ipv4.ip_unprivileged_port_start={lowest}, and keep it with echo net.ipv4.ip_unprivileged_port_start={lowest} | sudo tee /etc/sysctl.d/50-devlanes.conf; then devlanes daemon restart"
+            )),
+        );
+    }
+    if flag("generate_hosts") == Some(true) && text(&data["hosts"], "state") == "applied" {
+        checks.push(Check::new(
+            "wsl",
+            Outcome::Ok,
+            "WSL rewrites /etc/hosts when the distro starts (generateHosts); the daemon writes its names again when it starts, and Windows programs never read this file",
+        ));
+    }
+    let ca = &data["ca"];
+    let windows_listed = list(ca, "trust")
+        .iter()
+        .any(|entry| text(entry, "store") == "windows");
+    if interop && ca.get("present").and_then(Value::as_bool) == Some(true) && !windows_listed {
+        checks.push(
+            Check::new(
+                "wsl",
+                Outcome::Skip,
+                "browsers on Windows do not trust the CA: tls.trust leaves out windows",
+            )
+            .fix("add windows to tls.trust in ~/.devlanes/config.yaml, then devlanes certs trust"),
+        );
+    }
+    for worktree in list(data, "windows_drive_worktrees") {
+        checks.push(
+            Check::new(
+                "wsl",
+                Outcome::Skip,
+                format!(
+                    "{} is on the Windows drive {} ({}): file access is slow and file watching misses edits made from Windows",
+                    text(worktree, "lane"),
+                    text(worktree, "drive"),
+                    text(worktree, "path")
+                ),
+            )
+            .fix("move the repository to the Linux filesystem, for example ~/src"),
         );
     }
     checks

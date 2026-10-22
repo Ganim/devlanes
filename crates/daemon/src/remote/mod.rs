@@ -432,8 +432,8 @@ fn valid_host(host: &str) -> bool {
 /// `$DEVLANES_HOME/sync/<host>/<project>/<lane>/<leaf>` for a box sync entry.
 ///
 /// Every component is a single validated path name, so nothing the box sends can
-/// point the destination elsewhere; the box's own `to` is never used. The project
-/// is checked as sent, then stored under its disk name, as everywhere else.
+/// point the destination elsewhere; the box's own `to` is never used. Each name
+/// is checked as sent, then stored as [`folder_name`] says.
 fn sync_destination(home: &Path, host: &str, entry: &SyncEntry) -> Result<PathBuf, String> {
     let host = host.replace('/', "_");
     let mut path = home.join("sync");
@@ -447,13 +447,28 @@ fn sync_destination(home: &Path, host: &str, entry: &SyncEntry) -> Result<PathBu
         if !valid {
             return Err(format!("the box sent an unusable {what} name {part:?}"));
         }
-        if what == "project" {
-            path.push(devlanes_core::paths::disk_name(part));
-        } else {
-            path.push(part);
-        }
+        path.push(folder_name(what, part));
     }
     Ok(path)
+}
+
+/// The folder a destination name is stored under: the project under its disk
+/// name, as everywhere else, the other names as they are.
+#[cfg(unix)]
+fn folder_name(what: &str, part: &str) -> String {
+    if what == "project" {
+        devlanes_core::paths::disk_name(part)
+    } else {
+        part.to_owned()
+    }
+}
+
+/// The folder a destination name is stored under: every name under its disk
+/// name, because Windows refuses some names Unix allows. `ssh://box:2222` and
+/// `[::1]` are valid hosts, and the box chose its own folder names.
+#[cfg(windows)]
+fn folder_name(_what: &str, part: &str) -> String {
+    devlanes_core::paths::disk_name(part)
 }
 
 impl Inner {
@@ -904,6 +919,26 @@ mod tests {
                 "/home/u/.devlanes/sync/user@box_x/app/app@1/ext"
             ))
         );
+    }
+
+    /// Windows stores every name under its disk name: a port in an `ssh://`
+    /// host, a device name or a trailing dot from the box cannot reach the
+    /// file system as such.
+    #[cfg(windows)]
+    #[test]
+    fn windows_sync_destinations_use_disk_names() {
+        let home = Path::new(r"C:\u\.devlanes");
+        assert_eq!(
+            sync_destination(home, "ssh://box:2222", &entry("app", "app@1", "aux")),
+            Ok(PathBuf::from(
+                r"C:\u\.devlanes\sync\ssh___box_2222\app\app@1\aux+"
+            ))
+        );
+        assert_eq!(
+            sync_destination(home, "box", &entry("app", "app@1", "dist.")),
+            Ok(PathBuf::from(r"C:\u\.devlanes\sync\box\app\app@1\dist+"))
+        );
+        assert!(sync_destination(home, "..", &entry("app", "app@1", "ext")).is_err());
     }
 
     #[test]

@@ -169,6 +169,21 @@ pub fn disk_name(name: &str) -> String {
     out
 }
 
+/// Whether `name` can be a file or directory name on every OS devlanes runs on:
+/// not empty and left unchanged by [`disk_name`], so no device name, no
+/// trailing `.` or space, and none of `< > : " | ? * \ /` or control characters.
+///
+/// ```
+/// use devlanes_core::paths::is_portable_name;
+/// assert!(is_portable_name("index.html"));
+/// assert!(!is_portable_name("aux.js"));
+/// assert!(!is_portable_name("notes."));
+/// assert!(!is_portable_name("a:b"));
+/// ```
+pub fn is_portable_name(name: &str) -> bool {
+    !name.is_empty() && disk_name(name) == name
+}
+
 /// Whether `stem` is a DOS device name, ignoring ASCII case: `CON`, `PRN`,
 /// `AUX`, `NUL`, or `COM`/`LPT` followed by one digit or a superscript `¹²³`.
 fn is_device_name(stem: &str) -> bool {

@@ -1,8 +1,6 @@
 # devlanes-transport-ssh
 
-The SSH `Transport` for `devlanes remote connect`. It runs the system `ssh` with a ControlMaster per box and starts `devlanes tunnel --stdio` there, so `~/.ssh/config`, agents, ProxyJump and certificates apply as usual. The binary's composition root registers it; `devlanes-transport` runs the protocol on top.
-
-Unix only for now. On Windows the crate compiles to an empty library.
+The SSH `Transport` for `devlanes remote connect`. It runs the system `ssh` and starts `devlanes tunnel --stdio` on the box, so `~/.ssh/config`, agents, ProxyJump and certificates apply as usual. On Unix one ControlMaster per box carries every session; on Windows each session is its own `ssh.exe` process. The binary's composition root registers it; `devlanes-transport` runs the protocol on top.
 
 ## Usage
 
@@ -28,7 +26,7 @@ async fn connect(home: &std::path::Path, relay: Arc<dyn PromptRelay>) -> Result<
 }
 ```
 
-`devlanes askpass <prompt>` calls `run_askpass(&prompt)`, prints the answer and exits 0, or exits 1 to cancel.
+`devlanes askpass <prompt>` calls `run_askpass(&prompt)`, prints the answer and exits 0, or exits 1 to cancel. On Windows ssh runs `devlanes.exe <prompt>` directly with `DEVLANES_ASKPASS=1` set, and the binary dispatches on that marker before parsing arguments.
 
 ## API
 
@@ -47,6 +45,10 @@ Only a session channel is used, so boxes with `AllowTcpForwarding no` work.
 Bootstrap installs to `$HOME/.devlanes/bin` only when no binary exists, verifying the manifest's SHA-256 on the box. It never replaces an installed binary, so a running box daemon is never upgraded; a protocol mismatch is reported with instructions.
 
 The control socket path must stay under 100 bytes for macOS, so pass a short `control_dir` if `DEVLANES_HOME` is deep.
+
+## Windows
+
+Win32-OpenSSH has no ControlMaster, so a session runs `sh -c '<probe>; <sentinel>; exec devlanes tunnel --stdio'` on the box in one `ssh.exe` process: the probe lines come before a random sentinel line and mux frames after it, so a connect authenticates once. Installing and `probe` are separate ssh runs. The bare program name `ssh` resolves to `%SystemRoot%\System32\OpenSSH\ssh.exe`, then `PATH`; a missing client is `SshError::ProgramMissing`. Prompts travel over a named pipe that only the current user can open, and ssh runs without a console window when the daemon has none.
 
 ## License
 

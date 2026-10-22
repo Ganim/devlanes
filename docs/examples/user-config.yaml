@@ -16,7 +16,9 @@ ports:
 tls:
   # Certificate authority: devlanes keeps its own under ~/.devlanes/ca; mkcert reuses mkcert's.
   ca: devlanes
-  # Stores that devlanes certs trust installs the CA into.
+  # Stores that devlanes certs trust installs the CA into: system, firefox, chrome, or
+  # windows (the Windows user store, for Windows browsers when devlanes runs inside WSL).
+  # Unset means system, plus windows inside WSL.
   trust: [system, firefox]
 # Ports the HTTPS proxy listens on; lan: true also accepts other machines.
 proxy:
@@ -54,7 +56,8 @@ history:
 state:
   max_size: 512MiB
 # Terminal app the TUI's O key opens a unit in: ghostty, iterm2, kitty, wezterm, terminal
-# or windows-terminal. On Windows only windows-terminal and wezterm work.
+# or windows-terminal. On Windows only windows-terminal and wezterm work; inside WSL,
+# windows-terminal opens a Windows Terminal tab in the same distro.
 # `terminal: ghostty` alone works too. progress shows start progress in the tab's
 # progress bar: auto (terminals known to draw it), always or never.
 # DEVLANES_TERM_PROGRESS=0 or 1 overrides it.

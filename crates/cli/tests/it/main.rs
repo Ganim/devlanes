@@ -1402,6 +1402,7 @@ fn completion_is_lazy_and_filters_existing_candidates() {
     );
 }
 mod agent_guide;
+mod agent_hook;
 mod choose;
 mod ci;
 mod codes;

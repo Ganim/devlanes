@@ -13,12 +13,15 @@
 mod held;
 mod ignore;
 mod mode;
+mod names;
 mod path;
 mod syncer;
 mod target;
 
 pub use held::{HeldFile, HeldWalk};
 pub use ignore::IgnoreRules;
+pub use mode::READ_ONLY_MODES;
+pub use names::CaseCollisions;
 pub use path::RelPath;
 pub use syncer::{SyncHandle, SyncIssue, SyncOptions, SyncState, SyncStatus, Syncer};
 pub use target::{

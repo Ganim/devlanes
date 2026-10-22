@@ -31,6 +31,9 @@ const CACHE_FOR: Duration = Duration::from_secs(60);
 /// The address families `netsh` lists separately.
 const FAMILIES: [&str; 2] = ["ipv4", "ipv6"];
 
+/// The command that lists the ranges, for messages.
+pub const LIST_COMMAND: &str = "netsh int ipv4 show excludedportrange protocol=tcp";
+
 /// Why one family's ranges could not be read.
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
@@ -72,6 +75,13 @@ impl Reading {
                 .collect::<Vec<_>>()
                 .join("; ")
         })
+    }
+
+    /// Whether `port` lies in one of the ranges.
+    pub fn reserves(&self, port: u16) -> bool {
+        self.ranges
+            .iter()
+            .any(|(start, end)| (*start..=*end).contains(&port))
     }
 
     /// The ranges as port blocks, for the allocator to keep new blocks clear of.
@@ -205,11 +215,7 @@ pub fn report(
         return json!({"error": reading.error()});
     }
     let ranges = &reading.ranges;
-    let reserved = |port: u16| {
-        ranges
-            .iter()
-            .any(|(start, end)| (*start..=*end).contains(&port))
-    };
+    let reserved = |port: u16| reading.reserves(port);
     let range = |&(start, end): &(u16, u16)| json!({"start": start, "end": end});
     let pool_overlaps: Vec<Value> = pool
         .map(|(first, last)| {

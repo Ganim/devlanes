@@ -23,6 +23,10 @@ tokio-util.workspace = true
 tracing.workspace = true
 walkdir = "2"
 
+# Windows file-name rules for names a box sends.
+[target.'cfg(windows)'.dependencies]
+devlanes-core = { path = "../core" }
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true

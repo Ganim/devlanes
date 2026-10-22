@@ -27,7 +27,7 @@ What it does per OS, by the stores in `tls.trust` (default `[system]`):
 | macOS | login keychain, trusted as root for your user (GUI password dialog, no sudo); Safari, Chrome, Edge and `/usr/bin/curl` read it; Firefox 120+ too | same store as `system` | `certutil` into every Firefox profile; needs `brew install nss` |
 | Linux | anchor directory of your distro (`/usr/local/share/ca-certificates`, `/etc/pki/ca-trust/source/anchors`, …) then `update-ca-certificates` or `update-ca-trust`, through sudo | `~/.pki/nssdb` with `certutil`; Chrome, Chromium and Playwright's browsers read it | every profile under `~/.mozilla/firefox` (snap and flatpak paths too); needs `libnss3-tools` or `nss-tools` |
 
-On Linux the system store does not reach browsers, so set `tls.trust: [system, chrome, firefox]` in `~/.devlanes/config.yaml` there. `devlanes certs untrust` removes the CA from the same stores; `--keep-ca` with `--hosts` or `--resolver` removes only those extras.
+On Linux the system store does not reach browsers, so set `tls.trust: [system, chrome, firefox]` in `~/.devlanes/config.yaml` there. Inside WSL the default adds `windows`, the Windows user root store that browsers on Windows read; see [Windows (WSL2)](wsl.md). `devlanes certs untrust` removes the CA from the same stores; `--keep-ca` with `--hosts` or `--resolver` removes only those extras.
 
 `devlanes doctor` reports the CA path and, per store, whether it is trusted. The CA is constrained to `localhost`, `test`, `internal`, `home.arpa` and the TLD configured when it was created; a hostname outside those is reported by `doctor` as `outside the CA's names`.
 
@@ -89,7 +89,11 @@ hostnames: { resolver: resolver, tld: test }
 devlanes certs trust --resolver
 ```
 
-switches lane domains to `acme.test` and `acme-2.test`, answered by a DNS server the daemon runs on `127.0.0.1:15353`. `--resolver` writes `/etc/resolver/test` on macOS, or a systemd-resolved delegate (systemd 258 or newer) on Linux, so the OS sends only that TLD there. The TLD must be `test`, `internal`, `home.arpa` or a name under one of them. The CA is constrained to the TLD it was created with; switching later needs the recreate command `doctor` prints. `.dev` is a real TLD with HSTS preloaded and `.local` is mDNS; neither is accepted.
+switches lane domains to `acme.test` and `acme-2.test`, answered by a DNS server the daemon runs on `127.0.0.1:15353`. `--resolver` writes `/etc/resolver/test` on macOS, or a systemd-resolved delegate (systemd 258 or newer) on Linux, so the OS sends only that TLD there.
+
+On Windows the server listens on `127.53.0.1:53`, because a Name Resolution Policy Table (NRPT) rule names a server by address only, and `--resolver` adds an NRPT rule for `.test` after the administrator prompt. In their default automatic secure DNS mode, Chrome and Edge do not upgrade lookups to DNS over HTTPS while any NRPT rule exists, so `*.test` reaches the rule; with a secure DNS provider chosen explicitly those names fail, so pick the OS default provider or turn secure DNS off. Group Policy NRPT rules make Windows ignore local ones; `doctor --output json` reports that and VPN rules for names under the TLD. `crates/resolver-dns/README.md` has the details.
+
+The TLD must be `test`, `internal`, `home.arpa` or a name under one of them. The CA is constrained to the TLD it was created with; switching later needs the recreate command `doctor` prints. `.dev` is a real TLD with HSTS preloaded and `.local` is mDNS; neither is accepted.
 
 ## Ports 443 and 80
 

@@ -25,6 +25,7 @@ mod resolver_nrpt;
 mod start_ui;
 mod verbose;
 mod wiring;
+mod wsl_doctor;
 
 use std::process::ExitCode;
 
@@ -51,6 +52,20 @@ fn main() -> ExitCode {
         }) {
             return hosts_service::elevated_main(subcommand, &args[1..]);
         }
+    }
+    // ssh runs this binary as SSH_ASKPASS with the prompt as its only argument,
+    // which clap would read as an unknown subcommand.
+    #[cfg(windows)]
+    if let Some(code) = remote::askpass_from_env() {
+        return ExitCode::from(code);
+    }
+    // The agent plugin's PreToolUse hook: needs no daemon, runtime or output
+    // policy, and is not a listed command.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == devlanes_cli::agent_hook::ARG)
+    {
+        return ExitCode::from(devlanes_cli::agent_hook::run());
     }
     // CompleteEnv must run before any thread exists; it exits when completing.
     completion::install();

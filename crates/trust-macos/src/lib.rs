@@ -79,7 +79,8 @@ impl MacosTrust {
         Ok(Self::new(Arc::new(SystemExecutor), PathBuf::from(home)))
     }
 
-    /// The store for `target`; mobile targets are [`TrustError::Unsupported`].
+    /// The store for `target`; mobile targets are [`TrustError::Unsupported`],
+    /// and `windows` is [`TrustError::Unavailable`] on a Mac.
     pub fn store(&self, target: TrustTarget) -> Result<Box<dyn TrustStore>, TrustError> {
         match target {
             TrustTarget::System | TrustTarget::Chrome => {
@@ -99,6 +100,10 @@ impl MacosTrust {
                 },
                 certutil_lookup(),
             ))),
+            TrustTarget::Windows => Err(TrustError::Unavailable {
+                target,
+                reason: "it is the Windows certificate store, used from WSL or Windows".into(),
+            }),
             TrustTarget::IosSimulator | TrustTarget::AndroidEmulator => {
                 Err(TrustError::Unsupported { target })
             }

@@ -487,6 +487,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                 let mut data = crate::local_doctor::facts(&paths).await;
                 crate::notices::annotate_doctor(None, &mut data).await;
                 crate::local_doctor::annotate_terminal(&mut data);
+                crate::wsl_doctor::annotate(&paths, &mut data).await;
                 if let Some(autostart) = crate::daemon::autostart(&paths).await {
                     data["autostart"] = autostart;
                 }
@@ -555,6 +556,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                             if method == Method::Doctor {
                                 crate::notices::annotate_doctor(Some(&mut client), &mut data).await;
                                 crate::local_doctor::annotate_terminal(&mut data);
+                                crate::wsl_doctor::annotate(&paths, &mut data).await;
                                 if let Some(autostart) = crate::daemon::autostart(&paths).await {
                                     data["autostart"] = autostart;
                                 }
@@ -1104,33 +1106,15 @@ fn confirm(runtime: &Runtime, question: &str) -> Result<bool, RpcError> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
-/// The browser is launched by the client, never the daemon (it may be remote or headless).
-#[cfg(unix)]
-async fn open_url(url: &str) -> Result<(), RpcError> {
-    if url.is_empty() {
-        return Err(RpcError::new("no_url", Value::Null, 3));
-    }
-    #[cfg(target_os = "macos")]
-    let opener = "open";
-    #[cfg(not(target_os = "macos"))]
-    let opener = "xdg-open";
-    tokio::process::Command::new(opener)
-        .arg(url)
-        .status()
-        .await
-        .map_err(|error| RpcError::new("open_failed", json!({"message": error.to_string()}), 1))?;
-    Ok(())
-}
-
-/// The browser is launched by the client, never the daemon. `ShellExecuteW` takes
-/// the URL as one string, so `&` and quotes in it are never parsed as a command.
-#[cfg(windows)]
+/// The browser is launched by the client, never the daemon (it may be remote or
+/// headless); [`devlanes_term::open_url`] picks the opener, the Windows browser
+/// under WSL included.
 async fn open_url(url: &str) -> Result<(), RpcError> {
     if url.is_empty() {
         return Err(RpcError::new("no_url", Value::Null, 3));
     }
     let owned = url.to_owned();
-    tokio::task::spawn_blocking(move || devlanes_sys::windows::shell::open_url(&owned))
+    tokio::task::spawn_blocking(move || devlanes_term::open_url(&owned))
         .await
         .map_err(|error| RpcError::new("open_failed", json!({"message": error.to_string()}), 1))?
         .map_err(|error| {

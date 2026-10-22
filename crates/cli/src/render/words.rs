@@ -467,6 +467,13 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             // Installed as a service, the daemon runs outside the sandbox.
             Some(Hint::command(["daemon", "install"])),
         ),
+        // `daemon install` inside a WSL distro that does not run systemd.
+        "wsl_systemd_off" => (
+            "systemd is not running in this WSL distro, and daemon install needs it".into(),
+            Some(Hint(
+                "set systemd=true under [boot] in /etc/wsl.conf, run wsl.exe --shutdown from Windows, reopen the distro, then devlanes daemon install".into(),
+            )),
+        ),
         "daemon_still_running" => (
             format!(
                 "the old daemon (pid {}) was still running after {}s",
@@ -938,6 +945,10 @@ pub(crate) fn remote_warning(code: &str, data: &Value) -> String {
             "{host}: port {} is busy here, so it is not mirrored",
             field(data, "port")
         ),
+        "port_reserved" => format!(
+            "{host}: port {} is inside a port range Windows reserves, so it is not mirrored; set ports.range on the box clear of the ranges `netsh int ipv4 show excludedportrange protocol=tcp` lists",
+            field(data, "port")
+        ),
         other => match data.get("message").and_then(Value::as_str) {
             Some(message) => format!("{host}: {}", super::clean(message)),
             None => format!("{host}: {}", super::clean(other).replace('_', " ")),
@@ -1084,6 +1095,12 @@ pub(crate) fn lane_warning(code: &str, data: &Value) -> String {
             "this lane's units peak at {} together, more than the {} available; starts may wait for memory",
             memory(data, "peak_memory_bytes"),
             memory(data, "available_memory_bytes")
+        ),
+        // Inside WSL, `/mnt/<letter>` is the Windows drive `drive`.
+        "windows_drive" => format!(
+            "{} is on the Windows drive {}: file access is slow and file watching misses edits made from Windows; move the repository to the Linux filesystem (for example ~/src)",
+            field(data, "path"),
+            field(data, "drive")
         ),
         other => match data.get("message").and_then(Value::as_str) {
             Some(message) => super::clean(message),

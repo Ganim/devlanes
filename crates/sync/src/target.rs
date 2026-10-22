@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::mode::{mode_of, persist_with_mode};
+use crate::names::unusable_name;
 use crate::{RelPath, SyncError};
 
 /// Prefix of in-flight temp files; manifests skip them so a crash never syncs one.
@@ -184,7 +185,9 @@ impl LocalTarget {
     }
 
     /// Starts writing `path` in pieces; nothing is visible until [`PartialFile::commit`].
+    /// A name this OS cannot hold is refused with [`SyncError::InvalidPath`].
     pub async fn begin_file(&self, path: &RelPath, mode: u32) -> Result<PartialFile, SyncError> {
+        refuse_unusable(path)?;
         let root = self.root.clone();
         let rel = path.clone();
         let dest = path.to_path(&self.root);
@@ -372,6 +375,18 @@ fn clear_directory(dest: &Path, owned: bool) -> io::Result<()> {
     }
 }
 
+/// Refuses a path with a name this OS cannot hold, such as `aux.js` or `a:b`
+/// on Windows, before it reaches the file system.
+fn refuse_unusable(path: &RelPath) -> Result<(), SyncError> {
+    if unusable_name(path) {
+        return Err(SyncError::InvalidPath {
+            path: path.to_string(),
+            reason: "it is not a valid file name on this system",
+        });
+    }
+    Ok(())
+}
+
 /// Runs blocking filesystem work off the async executor.
 async fn blocking<T: Send + 'static>(
     context: String,
@@ -398,12 +413,14 @@ impl SyncTarget for LocalTarget {
     }
 
     /// Writes a sibling temp file, sets its mode, then renames it over the target.
+    /// A name this OS cannot hold is refused with [`SyncError::InvalidPath`].
     async fn write_file(
         &self,
         path: &RelPath,
         contents: Bytes,
         mode: u32,
     ) -> Result<(), SyncError> {
+        refuse_unusable(path)?;
         let root = self.root.clone();
         let rel = path.clone();
         let owned = self.owned;
@@ -416,6 +433,11 @@ impl SyncTarget for LocalTarget {
 
     /// Deletes the file and prunes empty parents up to the root.
     async fn remove(&self, path: &RelPath) -> Result<(), SyncError> {
+        // Such a file cannot exist here, and on Windows the name could reach a
+        // device (`aux`) or another file (`a.` is `a`) instead.
+        if unusable_name(path) {
+            return Ok(());
+        }
         let root = self.root.clone();
         let rel = path.clone();
         blocking(
@@ -608,6 +630,42 @@ mod tests {
             .expect("write read-only again");
         target.remove(&rel("locked.txt")).await.expect("remove");
         assert!(!path.exists());
+    }
+
+    /// Names Windows cannot hold are refused before anything is written, and
+    /// removing one touches nothing: `aux` would reach a device and `keep.`
+    /// the file `keep`.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_refuses_names_it_cannot_hold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = LocalTarget::new(dir.path().join("out"));
+        target
+            .write_file(&rel("keep"), Bytes::from_static(b"kept"), 0o644)
+            .await
+            .expect("write");
+        for bad in ["aux.js", "dist/con", "keep.", "a:b", r"a\b"] {
+            let written = target
+                .write_file(&rel(bad), Bytes::from_static(b"x"), 0o644)
+                .await;
+            assert!(
+                matches!(written, Err(SyncError::InvalidPath { .. })),
+                "{bad}: {written:?}"
+            );
+            assert!(
+                matches!(
+                    target.begin_file(&rel(bad), 0o644).await,
+                    Err(SyncError::InvalidPath { .. })
+                ),
+                "{bad}"
+            );
+            target.remove(&rel(bad)).await.expect("removing is a no-op");
+        }
+        assert_eq!(
+            fs::read(dir.path().join("out/keep")).expect("read"),
+            b"kept"
+        );
+        assert_eq!(target.files().await.expect("files"), vec![rel("keep")]);
     }
 
     #[cfg(unix)]

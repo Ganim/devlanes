@@ -13,6 +13,14 @@ use crate::{
     model::{ConfigState, lock},
 };
 
+/// `doctor`'s key for what routes the TLD to the server: the OS resolver file.
+#[cfg(unix)]
+const ROUTE_FACTS: &str = "resolver_file";
+
+/// `doctor`'s key for what routes the TLD to the server: the NRPT rule.
+#[cfg(windows)]
+const ROUTE_FACTS: &str = "nrpt_rule";
+
 impl Inner {
     /// The TLD when the user config selects the `resolver` strategy.
     pub(crate) fn resolver_tld(&self) -> Option<String> {
@@ -79,8 +87,9 @@ impl Inner {
         *lock(&self.dns) = status;
     }
 
-    /// `doctor` facts: the server plus whether the OS resolver file routes the TLD
-    /// to it. `null` without the resolver strategy.
+    /// `doctor` facts: the server plus whether the OS resolver file (the NRPT
+    /// rule on Windows) routes the TLD to it, under [`ROUTE_FACTS`]. `null`
+    /// without the resolver strategy.
     pub(crate) async fn dns_doctor(&self) -> Value {
         let mut status = lock(&self.dns).clone();
         let Some(tld) = self.resolver_tld() else {
@@ -97,7 +106,7 @@ impl Inner {
             None => Value::Null,
         };
         if let Some(map) = status.as_object_mut() {
-            map.insert("resolver_file".into(), file);
+            map.insert(ROUTE_FACTS.into(), file);
         }
         status
     }

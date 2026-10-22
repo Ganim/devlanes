@@ -28,6 +28,7 @@ mod file;
 mod rlimit;
 mod snapshot;
 mod tree;
+mod wsl;
 
 #[cfg(any(target_os = "linux", test))]
 mod procfs;
@@ -66,6 +67,19 @@ pub use file::{
 pub use rlimit::{NofileLimit, child_nofile_limit, raise_nofile_limit};
 pub use snapshot::{scans_started, shared_processes};
 pub use tree::{DescendantTracker, session_members, session_members_known};
+pub use wsl::{DriveMount, WindowsDrives, WslInfo};
+
+/// The WSL distro this process runs in, detected on the first call and cached;
+/// `None` outside WSL and on macOS and Windows. The first call blocks briefly.
+pub fn wsl() -> Option<&'static WslInfo> {
+    wsl::wsl()
+}
+
+/// The Windows drives mounted into this WSL distro, read from the mount table
+/// now; empty outside WSL. Blocking.
+pub fn windows_drives() -> WindowsDrives {
+    wsl::windows_drives()
+}
 
 /// Failures reading process tables or invoking diagnostic tools.
 #[derive(Debug, thiserror::Error)]

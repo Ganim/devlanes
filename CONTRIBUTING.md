@@ -40,11 +40,12 @@ While working on one crate, test just that crate: `cargo nextest run -p devlanes
 Changes to shell scripts or workflows also have a check, which CI runs in its `packaging` job:
 
 ```sh
-shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh agent-plugin/scripts/*.sh e2e/ssh/run.sh
+shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh e2e/ssh/run.sh
 actionlint
-sh packaging/scripts/check.sh                       # release scripts and install.sh against fake binaries
-sh agent-plugin/scripts/test-block-background.sh    # the Claude Code hook
+sh packaging/scripts/check.sh    # release scripts and install.sh against fake binaries
 ```
+
+The agent plugin's hook is `devlanes __agent-hook`; its tests are in `crates/cli/tests/it/agent_hook.rs`.
 
 ## Running the CLI from a checkout
 

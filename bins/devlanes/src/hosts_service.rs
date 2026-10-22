@@ -243,7 +243,7 @@ async fn elevate(subcommand: &str, mut arguments: Vec<OsString>) -> Result<Value
         }
         Err(error) => {
             reader.abort();
-            return Err(failed(format!("starting the elevated installer: {error}")));
+            return Err(failed(format!("running the elevated installer: {error}")));
         }
     };
     // The child wrote its report before exiting; a child that never connected

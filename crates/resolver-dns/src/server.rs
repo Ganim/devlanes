@@ -80,12 +80,38 @@ fn retry_ephemeral(kind: io::ErrorKind) -> bool {
     )
 }
 
+/// Nothing to add to a bind error outside Windows.
+#[cfg(not(windows))]
+pub(crate) fn bind_hint(_addr: &SocketAddr, _source: &io::Error) -> &'static str {
+    ""
+}
+
+/// Where to look when port 53 cannot be bound: a socket on `0.0.0.0:53` with
+/// `SO_EXCLUSIVEADDRUSE` makes Windows refuse every other address on the port
+/// with `WSAEACCES`, and one on this exact address reports it in use.
+#[cfg(windows)]
+pub(crate) fn bind_hint(addr: &SocketAddr, source: &io::Error) -> &'static str {
+    let held = matches!(
+        source.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse
+    );
+    if addr.port() == 53 && held {
+        "; another program holds port 53 on this address or on all addresses (see Get-NetUDPEndpoint -LocalPort 53 and Get-NetTCPConnection -LocalPort 53)"
+    } else {
+        ""
+    }
+}
+
 impl DnsServer {
     /// Binds UDP and TCP on `listen`.
     ///
     /// Port 0 picks one ephemeral port free for both protocols, which tests use.
     pub async fn bind(listen: SocketAddr, zone: Zone) -> Result<Self, DnsError> {
         let bind_error = |addr, source| DnsError::Bind { addr, source };
+        // No SO_EXCLUSIVEADDRUSE on Windows: on our address it would make a
+        // later wildcard bind of the port fail (Internet Connection Sharing
+        // binding 0.0.0.0:53 after the daemon started), and Windows already
+        // refuses other accounts a bind of this exact address and port.
         if listen.port() != 0 {
             let udp = UdpSocket::bind(listen)
                 .await
@@ -228,6 +254,29 @@ mod tests {
         assert!(retry_ephemeral(io::ErrorKind::PermissionDenied));
         #[cfg(not(windows))]
         assert!(!retry_ephemeral(io::ErrorKind::PermissionDenied));
+    }
+
+    /// A held port 53 on Windows says where to look; other failures, ports and
+    /// OSes keep the plain message.
+    #[test]
+    fn bind_errors_name_the_port_53_holder_on_windows() {
+        let message = |port: u16, kind: io::ErrorKind| {
+            DnsError::Bind {
+                addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 53, 0, 1)), port),
+                source: io::Error::from(kind),
+            }
+            .to_string()
+        };
+        let hint = "Get-NetUDPEndpoint -LocalPort 53";
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::AddrInUse] {
+            assert_eq!(message(53, kind).contains(hint), cfg!(windows), "{kind:?}");
+            assert!(!message(5353, kind).contains(hint));
+        }
+        assert!(!message(53, io::ErrorKind::AddrNotAvailable).contains(hint));
+        assert!(
+            message(53, io::ErrorKind::AddrInUse)
+                .starts_with("cannot bind the DNS server on 127.53.0.1:53: ")
+        );
     }
 
     /// Unix resolver files name a port; NRPT rules cannot, so Windows uses 53 on

@@ -120,6 +120,15 @@ pub fn powershell_literal(text: &str) -> String {
     literal
 }
 
+/// The first statements of the elevated scripts: Windows PowerShell 5.1 lists
+/// the user's own `Documents\WindowsPowerShell\Modules` first in
+/// `PSModulePath`, so autoloading the DnsClient cmdlets could import a module
+/// the user (or anything running as the user) planted there, and run it as
+/// administrator. Only modules under `$PSHOME` are searched afterwards, and
+/// DnsClient is imported from there by path. Both statements work in
+/// Constrained Language mode.
+pub const MODULE_PIN: &str = r"$env:PSModulePath = $PSHOME + '\Modules'; Import-Module -Name ($PSHOME + '\Modules\DnsClient\DnsClient.psd1')";
+
 /// PowerShell condition on `$_`: the rule's comment starts with the marker,
 /// matching [`is_managed`] (a missing comment is an empty string).
 fn managed_condition() -> String {
@@ -132,15 +141,16 @@ fn managed_condition() -> String {
 /// Reads the rules into `$rules`, or exits with [`ScriptFailure::Read`].
 fn read_rules() -> String {
     format!(
-        "try {{ $rules = @(Get-DnsClientNrptRule) }} catch {{ exit {} }}",
+        "try {{ $rules = @(DnsClient\\Get-DnsClientNrptRule) }} catch {{ exit {} }}",
         ScriptFailure::Read.exit_code()
     )
 }
 
-/// Removes every devlanes rule in `$rules`, or exits with [`ScriptFailure::Remove`].
-fn remove_managed() -> String {
+/// Removes the devlanes rules in `$rules` for which `keep` (a condition on `$_`)
+/// is false, or exits with [`ScriptFailure::Remove`].
+fn remove_managed(keep: &str) -> String {
     format!(
-        "try {{ $rules | Where-Object {{ {} }} | ForEach-Object {{ Remove-DnsClientNrptRule -Name $_.Name -Force }} }} catch {{ exit {} }}",
+        "try {{ $rules | Where-Object {{ ({}) -and -not ({keep}) }} | ForEach-Object {{ DnsClient\\Remove-DnsClientNrptRule -Name $_.Name -Force }} }} catch {{ exit {} }}",
         managed_condition(),
         ScriptFailure::Remove.exit_code()
     )
@@ -150,35 +160,38 @@ fn remove_managed() -> String {
 /// exits with [`ScriptFailure::Flush`].
 fn flush() -> String {
     format!(
-        "try {{ Clear-DnsClientCache }} catch {{ exit {} }}",
+        "try {{ DnsClient\\Clear-DnsClientCache }} catch {{ exit {} }}",
         ScriptFailure::Flush.exit_code()
     )
 }
 
 /// The elevated script for `certs trust --resolver`: refuses when another
-/// program's rule routes the namespace, replaces every devlanes rule (an older
-/// TLD's included) with one sending the namespace to `server`, and clears the
-/// DNS Client cache. Exits 0 or with a [`ScriptFailure`] code.
+/// program's rule routes the namespace, adds one rule sending the namespace to
+/// `server`, then removes every other devlanes rule (an older TLD's included)
+/// and clears the DNS Client cache. Exits 0 or with a [`ScriptFailure`] code.
 ///
-/// The CLI checks for a foreign rule before asking for elevation too; checking
-/// again here covers a rule added while the prompt was open.
+/// Adding first keeps the old rule when the add fails. The CLI checks for a
+/// foreign rule before asking for elevation too; checking again here covers a
+/// rule added while the prompt was open. Namespaces compare without a trailing
+/// dot and without case, as the DNS Client matches them.
 pub fn install_script(zone: &Zone, server: IpAddr) -> String {
     [
+        MODULE_PIN.to_owned(),
         "$ErrorActionPreference = 'Stop'".to_owned(),
         format!("$namespace = {}", powershell_literal(&namespace(zone))),
         read_rules(),
         format!(
-            "if (@($rules | Where-Object {{ ($_.Namespace -contains $namespace) -and -not ({}) }}).Count -gt 0) {{ exit {} }}",
+            "if (@($rules | Where-Object {{ ((@($_.Namespace) -replace '\\.$', '') -contains $namespace) -and -not ({}) }}).Count -gt 0) {{ exit {} }}",
             managed_condition(),
             ScriptFailure::Foreign.exit_code()
         ),
-        remove_managed(),
         format!(
-            "try {{ Add-DnsClientNrptRule -Namespace $namespace -NameServers {} -Comment {} }} catch {{ exit {} }}",
+            "try {{ $added = DnsClient\\Add-DnsClientNrptRule -Namespace $namespace -NameServers {} -Comment {} -PassThru }} catch {{ exit {} }}",
             powershell_literal(&server.to_string()),
             powershell_literal(&rule_comment(zone)),
             ScriptFailure::Add.exit_code()
         ),
+        remove_managed("$_.Name -eq $added.Name"),
         flush(),
         "exit 0".to_owned(),
     ]
@@ -190,26 +203,35 @@ pub fn install_script(zone: &Zone, server: IpAddr) -> String {
 /// stay. Exits 0 or with a [`ScriptFailure`] code.
 pub fn remove_script() -> String {
     [
+        MODULE_PIN.to_owned(),
         "$ErrorActionPreference = 'Stop'".to_owned(),
         read_rules(),
-        remove_managed(),
+        remove_managed("$false"),
         flush(),
         "exit 0".to_owned(),
     ]
     .join("; ")
 }
 
-/// The unelevated script that prints the local rules and whether Group Policy
-/// rules override them as one JSON object for [`NrptRules::parse`]:
-/// `{"rules": [...], "group_policy": false}`. Reading needs no admin. Output is
-/// UTF-8, since redirected output otherwise uses the OEM code page.
+/// The unelevated script that prints the local rules, whether Group Policy
+/// rules override them, and the effective policy as one JSON object for
+/// [`NrptRules::parse`]: `{"rules": [...], "group_policy": false, "effective":
+/// [...]}`. Reading needs no admin.
+///
+/// Output is UTF-8, since redirected output otherwise uses the OEM code page;
+/// Constrained Language mode refuses that .NET call, and the script then goes
+/// on with the code page. Group Policy counts only with rules under its key, as
+/// Chromium decides (`net/dns/public/win_dns_system_settings.cc`): an empty key
+/// left after a policy was removed does not override local rules. The effective
+/// policy also holds rules from VPN profiles and is `null` when unreadable.
 pub fn status_script() -> String {
     format!(
         "$ErrorActionPreference = 'Stop'; \
-         [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
+         try {{ [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) }} catch {{ }}; \
          $rules = @(Get-DnsClientNrptRule | Select-Object Name, Namespace, NameServers, Comment); \
-         $policy = Test-Path -LiteralPath {}; \
-         ConvertTo-Json -Compress -Depth 4 -InputObject @{{ rules = $rules; group_policy = $policy }}",
+         $policy = @(Get-ChildItem -LiteralPath {} -ErrorAction SilentlyContinue).Count -gt 0; \
+         try {{ $effective = @(Get-DnsClientNrptPolicy -Effective | Select-Object Namespace, NameServers) }} catch {{ $effective = $null }}; \
+         ConvertTo-Json -Compress -Depth 4 -InputObject @{{ rules = $rules; group_policy = $policy; effective = $effective }}",
         powershell_literal(GROUP_POLICY_KEY)
     )
 }
@@ -223,12 +245,33 @@ pub fn powershell_command_line(script: &str) -> Option<String> {
         .then(|| format!("{} \"{script}\"", POWERSHELL_ARGS.join(" ")))
 }
 
-/// One NRPT rule as `Get-DnsClientNrptRule` reports it.
+/// `namespace` without one trailing dot: the DNS Client treats `.test.` and
+/// `.test` alike.
+fn normalized(namespace: &str) -> &str {
+    namespace
+        .strip_suffix('.')
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(namespace)
+}
+
+/// Whether `routed` names something strictly under `namespace` (`.a.test` or
+/// `host.test` under `.test`), without case.
+fn is_under(routed: &str, namespace: &str) -> bool {
+    let routed = normalized(routed);
+    routed.len() > namespace.len()
+        && routed
+            .get(routed.len() - namespace.len()..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(namespace))
+}
+
+/// One NRPT rule as `Get-DnsClientNrptRule` reports it, or one entry of the
+/// effective policy (`Get-DnsClientNrptPolicy -Effective`), which has no name
+/// or comment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NrptRule {
     /// Identifier (a GUID in braces), which removal takes.
     pub name: String,
-    /// Namespaces it routes, such as `.test`.
+    /// Namespaces it routes, such as `.test`, without a trailing dot.
     pub namespaces: Vec<String>,
     /// DNS servers it sends them to.
     pub name_servers: Vec<String>,
@@ -242,11 +285,12 @@ impl NrptRule {
         is_managed(&self.comment)
     }
 
-    /// Whether the rule routes `namespace` (NRPT compares names without case).
+    /// Whether the rule routes `namespace` (NRPT compares names without case
+    /// and without a trailing dot).
     pub fn routes(&self, namespace: &str) -> bool {
         self.namespaces
             .iter()
-            .any(|routed| routed.eq_ignore_ascii_case(namespace))
+            .any(|routed| normalized(routed).eq_ignore_ascii_case(normalized(namespace)))
     }
 
     /// Builds a rule from one object of `ConvertTo-Json` output.
@@ -263,11 +307,23 @@ impl NrptRule {
         };
         Ok(Self {
             name: text("Name"),
-            namespaces: strings(object.get("Namespace")),
+            namespaces: strings(object.get("Namespace"))
+                .into_iter()
+                .map(|namespace| normalized(&namespace).to_owned())
+                .collect(),
             name_servers: strings(object.get("NameServers")),
             comment: text("Comment"),
         })
     }
+}
+
+/// A namespace some other NRPT rule routes, and the servers it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    /// The namespace, such as `.api.test` or `host.test`.
+    pub namespace: String,
+    /// Its DNS servers; empty for rules that set other options only.
+    pub name_servers: Vec<String>,
 }
 
 /// How the local rules route one namespace.
@@ -286,9 +342,12 @@ pub struct RuleStatus {
 pub struct NrptRules {
     /// Every local rule, devlanes' or not.
     pub rules: Vec<NrptRule>,
-    /// Group Policy NRPT rules exist ([`GROUP_POLICY_KEY`]), so Windows ignores
-    /// the local rules.
+    /// Group Policy NRPT rules exist (subkeys of [`GROUP_POLICY_KEY`]), so
+    /// Windows ignores the local rules.
     pub group_policy: bool,
+    /// The policy the DNS Client applies (local, Group Policy and VPN rules),
+    /// without names or comments; `None` when it could not be read.
+    pub effective: Option<Vec<NrptRule>>,
 }
 
 impl NrptRules {
@@ -312,12 +371,54 @@ impl NrptRules {
                     .get("group_policy")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                effective: match object.get("effective") {
+                    None | Some(Value::Null) => None,
+                    effective => Some(rules(effective)?),
+                },
             }),
             _ => Ok(Self {
                 rules: rules(Some(&value))?,
-                group_policy: false,
+                ..Self::default()
             }),
         }
+    }
+
+    /// Namespaces strictly under `zone`'s that another rule routes, local or
+    /// effective (a VPN's included), once each. The DNS Client follows the most
+    /// specific rule, so names under them never reach devlanes. devlanes rules
+    /// route the zone's namespace only, so none of these is one.
+    pub fn more_specific(&self, zone: &Zone) -> Vec<Route> {
+        let namespace = namespace(zone);
+        let local = self.rules.iter().filter(|rule| !rule.is_managed());
+        let effective = self.effective.iter().flatten();
+        let mut routes: Vec<Route> = Vec::new();
+        for rule in local.chain(effective) {
+            for routed in &rule.namespaces {
+                let seen = routes
+                    .iter()
+                    .any(|route| route.namespace.eq_ignore_ascii_case(routed));
+                if is_under(routed, &namespace) && !seen {
+                    routes.push(Route {
+                        namespace: routed.clone(),
+                        name_servers: rule.name_servers.clone(),
+                    });
+                }
+            }
+        }
+        routes
+    }
+
+    /// The servers the effective policy sends `zone`'s namespace to: empty when
+    /// no applied rule routes it, `None` when the policy could not be read.
+    pub fn effective_servers(&self, zone: &Zone) -> Option<Vec<String>> {
+        let namespace = namespace(zone);
+        self.effective.as_ref().map(|effective| {
+            effective
+                .iter()
+                .filter(|rule| rule.routes(&namespace))
+                .flat_map(|rule| rule.name_servers.iter().cloned())
+                .collect()
+        })
     }
 
     /// How the rules route `zone`'s namespace, `server` being the address
@@ -431,18 +532,22 @@ mod tests {
         for part in [
             "$ErrorActionPreference = 'Stop'",
             "$namespace = '.dev.internal'",
-            "Get-DnsClientNrptRule",
-            "-not (([string]$_.Comment).StartsWith('# Managed by devlanes', [StringComparison]::Ordinal))",
+            "DnsClient\\Get-DnsClientNrptRule",
+            "((@($_.Namespace) -replace '\\.$', '') -contains $namespace) -and -not (([string]$_.Comment).StartsWith('# Managed by devlanes', [StringComparison]::Ordinal))",
             "{ exit 11 }",
-            "Remove-DnsClientNrptRule -Name $_.Name -Force",
-            "Add-DnsClientNrptRule -Namespace $namespace -NameServers '127.53.0.1' -Comment '# Managed by devlanes: sends *.dev.internal lookups to the devlanes DNS server'",
-            "Clear-DnsClientCache",
+            "$added = DnsClient\\Add-DnsClientNrptRule -Namespace $namespace -NameServers '127.53.0.1' -Comment '# Managed by devlanes: sends *.dev.internal lookups to the devlanes DNS server' -PassThru",
+            "-not ($_.Name -eq $added.Name)",
+            "DnsClient\\Remove-DnsClientNrptRule -Name $_.Name -Force",
+            "DnsClient\\Clear-DnsClientCache",
         ] {
             assert!(script.contains(part), "missing {part:?} in {script}");
         }
-        // Foreign rules are checked before anything is removed or added.
+        // Foreign rules are checked before anything changes, and the new rule
+        // is in place before the old ones go.
         let foreign = script.find("exit 11").expect("foreign check");
-        assert!(foreign < script.find("Remove-DnsClientNrptRule").expect("remove"));
+        let add = script.find("Add-DnsClientNrptRule").expect("add");
+        assert!(foreign < add);
+        assert!(add < script.find("Remove-DnsClientNrptRule").expect("remove"));
         assert!(script.ends_with("exit 0"));
     }
 
@@ -450,10 +555,34 @@ mod tests {
     fn remove_script_only_touches_marked_rules() {
         let script = remove_script();
         assert!(script.contains(
-            "$rules | Where-Object { ([string]$_.Comment).StartsWith('# Managed by devlanes', [StringComparison]::Ordinal) } | ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Force }"
+            "$rules | Where-Object { (([string]$_.Comment).StartsWith('# Managed by devlanes', [StringComparison]::Ordinal)) -and -not ($false) } | ForEach-Object { DnsClient\\Remove-DnsClientNrptRule -Name $_.Name -Force }"
         ));
-        assert!(script.contains("Clear-DnsClientCache"));
+        assert!(script.contains("DnsClient\\Clear-DnsClientCache"));
         assert!(!script.contains("Add-DnsClientNrptRule"));
+    }
+
+    /// The elevated scripts pin the module path and import DnsClient from
+    /// `$PSHOME` before anything else runs, and call its cmdlets by module.
+    #[test]
+    fn elevated_scripts_start_with_the_module_pin() {
+        assert_eq!(
+            MODULE_PIN,
+            r"$env:PSModulePath = $PSHOME + '\Modules'; Import-Module -Name ($PSHOME + '\Modules\DnsClient\DnsClient.psd1')"
+        );
+        assert!(!MODULE_PIN.contains('"'));
+        for script in [install_script(&zone("test"), server()), remove_script()] {
+            assert!(script.starts_with(&format!("{MODULE_PIN}; ")), "{script}");
+            for cmdlet in [
+                "Get-DnsClientNrptRule",
+                "Add-DnsClientNrptRule",
+                "Remove-DnsClientNrptRule",
+                "Clear-DnsClientCache",
+            ] {
+                let calls = script.matches(cmdlet).count();
+                let qualified = script.matches(&format!("DnsClient\\{cmdlet}")).count();
+                assert_eq!(calls, qualified, "{cmdlet} unqualified in {script}");
+            }
+        }
     }
 
     #[test]
@@ -480,8 +609,17 @@ mod tests {
         assert!(script.contains(
             "Get-DnsClientNrptRule | Select-Object Name, Namespace, NameServers, Comment"
         ));
+        // Rules under the key count, not the key itself.
         assert!(script.contains(
-            r"Test-Path -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig'"
+            r"$policy = @(Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig' -ErrorAction SilentlyContinue).Count -gt 0"
+        ));
+        assert!(!script.contains("Test-Path"));
+        // Constrained Language mode refuses the encoding call; the read goes on.
+        assert!(script.contains(
+            "try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }"
+        ));
+        assert!(script.contains(
+            "try { $effective = @(Get-DnsClientNrptPolicy -Effective | Select-Object Namespace, NameServers) } catch { $effective = $null }"
         ));
         assert!(script.contains("ConvertTo-Json -Compress"));
     }
@@ -566,7 +704,7 @@ mod tests {
         let status = |rules: Vec<NrptRule>| {
             NrptRules {
                 rules,
-                group_policy: false,
+                ..NrptRules::default()
             }
             .status(&test, server())
         };
@@ -603,5 +741,73 @@ mod tests {
         );
         // The marker must come first, as in resolver files.
         assert!(!rule(".test", &[], "copied from # Managed by devlanes").is_managed());
+        // The DNS Client reads `.test.` as `.test`.
+        assert!(status(vec![rule(".test.", &["127.0.0.1"], "Acme dev DNS")]).foreign);
+        assert!(status(vec![rule(".test.", &["127.53.0.1"], ours)]).matches);
+    }
+
+    #[test]
+    fn status_output_carries_group_policy_and_the_effective_policy() {
+        // Captured on Windows 11 (26300) without rules or policy.
+        let none =
+            NrptRules::parse(r#"{"effective":[],"group_policy":false,"rules":[]}"#).expect("none");
+        assert!(!none.group_policy);
+        assert_eq!(none.effective, Some(Vec::new()));
+        assert_eq!(none.effective_servers(&zone("test")), Some(Vec::new()));
+        // Shaped like the capture, with the policy and VPN entries a managed
+        // machine has; effective entries carry a string namespace and no name.
+        let managed = NrptRules::parse(
+            r##"{"effective":[{"Namespace":".test.","NameServers":["10.0.0.53"]},{"Namespace":".api.test","NameServers":"10.8.0.1"},{"Namespace":".corp","NameServers":null}],"group_policy":true,"rules":[{"Name":"{A}","Namespace":[".test"],"NameServers":["127.53.0.1"],"Comment":"# Managed by devlanes: x"},{"Name":"{B}","Namespace":["HOST.test."],"NameServers":["10.0.0.1"],"Comment":"Acme"}]}"##,
+        )
+        .expect("managed");
+        assert!(managed.group_policy);
+        assert_eq!(managed.rules[1].namespaces, ["HOST.test"]);
+        let test = zone("test");
+        assert_eq!(
+            managed.effective_servers(&test),
+            Some(vec!["10.0.0.53".to_owned()])
+        );
+        assert_eq!(
+            managed.more_specific(&test),
+            [
+                Route {
+                    namespace: "HOST.test".into(),
+                    name_servers: vec!["10.0.0.1".into()],
+                },
+                Route {
+                    namespace: ".api.test".into(),
+                    name_servers: vec!["10.8.0.1".into()],
+                },
+            ]
+        );
+        // Older output without the field, and a failed effective read.
+        for output in [
+            r#"{"group_policy":false,"rules":[]}"#,
+            r#"{"effective":null,"group_policy":false,"rules":[]}"#,
+        ] {
+            let parsed = NrptRules::parse(output).expect(output);
+            assert_eq!(parsed.effective, None);
+            assert_eq!(parsed.effective_servers(&test), None);
+        }
+    }
+
+    #[test]
+    fn more_specific_rules_are_strictly_under_the_zone() {
+        assert!(is_under(".api.test", ".test"));
+        assert!(is_under("host.TEST.", ".test"));
+        assert!(!is_under(".test", ".test"));
+        assert!(!is_under(".test.", ".test"));
+        assert!(!is_under("contest", ".test"));
+        assert!(!is_under(".internal", ".test"));
+        // devlanes rules never count, wherever they point.
+        let rules = NrptRules {
+            rules: vec![NrptRule {
+                namespaces: vec![".api.test".into()],
+                comment: "# Managed by devlanes: x".into(),
+                ..NrptRule::default()
+            }],
+            ..NrptRules::default()
+        };
+        assert!(rules.more_specific(&zone("test")).is_empty());
     }
 }

@@ -55,12 +55,14 @@ impl DaemonSync {
             .map_err(|error| SyncError::new(format!("sync.status: {error}")))
     }
 
-    /// Streams one entry until the client drops the feed.
+    /// Streams one entry until the client drops the feed; `read_only_modes` as
+    /// the client's request says (see [`SyncOptions::read_only_modes`]).
     async fn follow(
         &self,
         lane: String,
         unit: String,
         index: usize,
+        read_only_modes: bool,
         input: SyncInput,
     ) -> Result<SyncFeed, SyncError> {
         let permit = self.slots.clone().try_acquire_owned().map_err(|_| {
@@ -78,7 +80,7 @@ impl DaemonSync {
                     "{lane}:{unit} has no sync entry {index} running on this box"
                 ))
             })?;
-        follow_entry(&entry, input, permit)
+        follow_entry(&entry, read_only_modes, input, permit)
     }
 }
 
@@ -88,6 +90,7 @@ impl DaemonSync {
 /// subscription starts over with a fresh manifest.
 pub(crate) fn follow_entry(
     entry: &SyncEntry,
+    read_only_modes: bool,
     mut input: SyncInput,
     permit: OwnedSemaphorePermit,
 ) -> Result<SyncFeed, SyncError> {
@@ -98,6 +101,7 @@ pub(crate) fn follow_entry(
     let options = SyncOptions {
         ignore: entry.ignore.clone(),
         max_file: Some(MAX_SYNC_FILE),
+        read_only_modes,
         ..SyncOptions::default()
     };
     let mut syncer = Syncer::new(&entry.from, target, options)
@@ -190,9 +194,12 @@ impl SyncSource for DaemonSync {
                         .boxed(),
                 )
             }
-            SyncRequest::Follow { lane, unit, index } => {
-                self.follow(lane, unit, index, input).await
-            }
+            SyncRequest::Follow {
+                lane,
+                unit,
+                index,
+                read_only_modes,
+            } => self.follow(lane, unit, index, read_only_modes, input).await,
         }
     }
 }
@@ -287,17 +294,14 @@ mod tests {
 
     #[async_trait]
     impl SyncSource for TestSource {
-        async fn subscribe(
-            &self,
-            _request: Value,
-            input: SyncInput,
-        ) -> Result<SyncFeed, SyncError> {
+        async fn subscribe(&self, request: Value, input: SyncInput) -> Result<SyncFeed, SyncError> {
             let permit = self
                 .slots
                 .clone()
                 .try_acquire_owned()
                 .map_err(|_| SyncError::new("busy"))?;
-            follow_entry(&self.entry, input, permit)
+            let read_only_modes = request["read_only_modes"].as_bool().unwrap_or(false);
+            follow_entry(&self.entry, read_only_modes, input, permit)
         }
     }
 
@@ -408,6 +412,42 @@ mod tests {
             let (written, deleted) = until_ready(&mut sync).await;
             assert_eq!(written, ["d3/f3.txt"]);
             assert_eq!(deleted, ["stale.txt"]);
+        })
+        .await
+        .expect("timeout");
+    }
+
+    /// A client that keeps only a read-only attribute (Windows) reports `0o644`
+    /// for an executable it holds; with `read_only_modes` the box does not resend
+    /// it, without it the box sends it to restore the mode.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_only_clients_compare_modes_by_write_access() {
+        use std::os::unix::fs::PermissionsExt as _;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (source, destination) = (dir.path().join("src"), dir.path().join("dst"));
+            tree(&source, 3);
+            tree(&destination, 3);
+            let script = source.join("d1/f1.txt");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            let session = connect(&source).await;
+            for (read_only, expected) in [
+                (true, Vec::<String>::new()),
+                (false, vec!["d1/f1.txt".to_owned()]),
+            ] {
+                let request = json!({
+                    "op": "follow", "lane": "app@0", "unit": "web", "index": 0,
+                    "read_only_modes": read_only,
+                });
+                let mut sync = session.subscribe_sync(request).await.expect("subscribe");
+                send_manifest(&mut sync, &destination, 10).await;
+                sync.finish_input().await.expect("end");
+                let (written, deleted) = until_ready(&mut sync).await;
+                assert_eq!(written, expected, "read_only_modes: {read_only}");
+                assert!(deleted.is_empty(), "{deleted:?}");
+            }
         })
         .await
         .expect("timeout");

@@ -549,7 +549,7 @@ impl Executor {
             }
             Effect::OpenUrl(url) => {
                 tokio::task::spawn_blocking(move || {
-                    if let Err(error) = open_url(&url) {
+                    if let Err(error) = devlanes_term::open_url(&url) {
                         let msg = Msg::Failed {
                             what: format!("open {url}"),
                             message: error.to_string(),
@@ -866,31 +866,4 @@ async fn pump_attach(
         }
     }
     deliver(&sender, Msg::AttachClosed { generation }).await;
-}
-
-/// Hands a URL to the desktop's opener.
-#[cfg(unix)]
-fn open_url(url: &str) -> io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let program = "open";
-    #[cfg(not(target_os = "macos"))]
-    let program = "xdg-open";
-    let status = std::process::Command::new(program)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("{program} exited with {status}")))
-    }
-}
-
-/// Hands a URL to the default browser through the shell, never `cmd /c start`,
-/// which would parse `&` in the URL as a command separator.
-#[cfg(windows)]
-fn open_url(url: &str) -> io::Result<()> {
-    devlanes_sys::windows::shell::open_url(url)
 }

@@ -41,8 +41,9 @@ pub enum DnsError {
         /// Why it was rejected.
         reason: &'static str,
     },
-    /// UDP or TCP could not bind.
-    #[error("cannot bind the DNS server on {addr}: {source}")]
+    /// UDP or TCP could not bind. On Windows the message adds where to look
+    /// when another program holds port 53.
+    #[error("cannot bind the DNS server on {addr}: {source}{}", server::bind_hint(.addr, .source))]
     Bind {
         /// Requested address.
         addr: SocketAddr,

@@ -63,6 +63,14 @@ Hidden units stay on the box: their ports are not mirrored and the box refuses s
 - `devlanes certs trust`, once. The box's hostnames are served by your local proxy with your local CA.
 - Optionally a different `ports.range` than the box in `~/.devlanes/config.yaml`, so lanes created on both machines before they first connected do not overlap. Overlapping ports are reported, not mirrored, and the local allocator avoids the box's ports from then on.
 
+### Windows clients
+
+- The OpenSSH Client (Settings, System, Optional features, or `Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0` in an administrator PowerShell). devlanes runs `%SystemRoot%\System32\OpenSSH\ssh.exe`, else the first `ssh.exe` on `PATH`. It reads `%USERPROFILE%\.ssh\config` and uses the Windows `ssh-agent` service (`Get-Service ssh-agent`, then `ssh-add`).
+- There is no ControlMaster: each connection and each reconnect is a new ssh login. With a key in the agent that costs nothing; with a passphrase typed at the prompt, every reconnect while `remote connect` is not attached fails as `Permission denied`.
+- Prompts work as on macOS and Linux: ssh runs `devlanes.exe` as its askpass program, and the question appears in the terminal running `remote connect`.
+- Synced folders keep only the read-only attribute. Box files Windows cannot name, and files that differ from another only in letter case, are skipped and listed by `devlanes remote sync`.
+- Box ports inside the ranges Windows reserves (`netsh int ipv4 show excludedportrange protocol=tcp`) are not mirrored; set the box's `ports.range` clear of them.
+
 ```sh
 devlanes remote connect hetzner             # stays attached: shows state, relays ssh prompts
 devlanes remote connect hetzner --background
@@ -95,4 +103,4 @@ curl -sS https://api.acme.localhost/healthz          # from the client, once the
 
 ## Limits
 
-TCP only: UDP ports are not mirrored. The connection is client to box only; the box never dials you. Commands are not forwarded (`devlanes --host`), so manage lanes in an ssh shell or an editor's remote terminal on the box. A relay transport that needs no inbound SSH is planned.
+TCP only: UDP ports are not mirrored. The connection is client to box only; the box never dials you. A box runs macOS or Linux; Windows machines connect as clients only. Commands are not forwarded (`devlanes --host`), so manage lanes in an ssh shell or an editor's remote terminal on the box. A relay transport that needs no inbound SSH is planned.

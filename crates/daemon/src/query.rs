@@ -984,6 +984,11 @@ impl Inner {
             // The CLI compares them with the service manager's stop window.
             "stop_timeouts": self.stop_timeouts(),
         });
+        // Inside WSL only: worktrees on Windows drives, where file watching misses edits.
+        let drives = self.windows_drive_doctor().await;
+        if !drives.is_null() {
+            data["windows_drive_worktrees"] = drives;
+        }
         self.excluded_ports_doctor(&mut data).await;
         Ok(data)
     }

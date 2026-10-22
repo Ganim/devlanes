@@ -151,11 +151,14 @@ async fn system_and_chrome_share_one_store_firefox_reports_it() {
     let system = trust.store(TrustTarget::System).expect("system");
     let chrome = trust.store(TrustTarget::Chrome).expect("chrome");
     let firefox = trust.store(TrustTarget::Firefox).expect("firefox");
+    // The target WSL uses for this store; a shared config reports it once.
+    let windows = trust.store(TrustTarget::Windows).expect("windows");
     assert_eq!(system.id(), STORE_ID);
     assert_eq!(chrome.id(), STORE_ID);
+    assert_eq!(windows.id(), STORE_ID);
     assert_eq!(chrome.target(), TrustTarget::Chrome);
     assert_eq!(firefox.id(), FIREFOX_ID);
-    for store in [&system, &chrome, &firefox] {
+    for store in [&system, &chrome, &windows, &firefox] {
         assert_eq!(store.changes(), STORE_ID, "one change set");
     }
     for target in [TrustTarget::IosSimulator, TrustTarget::AndroidEmulator] {

@@ -37,6 +37,7 @@ fn draw(tty: bool, tracker: &StartTracker) -> std::io::Result<()> {
 - `Invocation::run` starts the helper with null stdio and reaps long-lived terminal processes on a background thread.
 - `LaunchRequest::env` reaches the command only through terminals that pass their caller's environment on (Windows Terminal, WezTerm outside macOS). The TUI uses it for `DEVLANES_HOME` on Windows, which has no `env` program; on macOS and Linux it prefixes the command with `env DEVLANES_HOME=...` instead.
 - `shell_quote`, `shell_join` and `applescript_string` quote commands for terminals that take shell text.
+- `open_url` opens a URL in the default browser for `devlanes url open` and the TUI: `open` on macOS, the shell on Windows, `xdg-open` on Linux, and inside WSL the Windows browser through `wslview`, then Windows' `rundll32.exe url.dll,FileProtocolHandler`. No opener goes through a shell, so `&` in a URL is safe. Blocking.
 - `Progress::sequence` encodes `OSC 9;4` (`ESC ] 9 ; 4 ; state ; percent ESC \`).
 - `progress_support` decides whether to draw the bar from the setting, the TTY and the environment.
 - `ProgressBar` writes it and clears it on drop, including while a panic unwinds.
@@ -59,7 +60,7 @@ terminal:
   progress: auto
 ```
 
-`terminal: wezterm` alone works too and keeps progress on auto. The app is one of `ghostty`, `iterm2`, `kitty`, `wezterm`, `terminal` or `windows-terminal`, and picks the launcher whose `name` matches. Without it the TUI uses Terminal.app on macOS, else the first launcher that is installed. Windows builds register only Windows Terminal and WezTerm.
+`terminal: wezterm` alone works too and keeps progress on auto. The app is one of `ghostty`, `iterm2`, `kitty`, `wezterm`, `terminal` or `windows-terminal`, and picks the launcher whose `name` matches. Without it the TUI uses Terminal.app on macOS, else the first launcher that is installed. Windows builds register only Windows Terminal and WezTerm; inside WSL, Windows Terminal is available too.
 
 ## License
 

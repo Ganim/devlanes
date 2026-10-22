@@ -9,6 +9,33 @@ pub(crate) use unix::{mode_of, persist_with_mode};
 #[cfg(windows)]
 pub(crate) use windows::{mode_of, persist_with_mode};
 
+/// Whether a [`LocalTarget`](crate::LocalTarget) on this OS keeps only the
+/// read-only attribute instead of permission bits. A remote source then compares
+/// modes as [`SyncOptions::read_only_modes`](crate::SyncOptions) describes, so a
+/// `0o755` file is not resent to a target that reports `0o644`.
+#[cfg(unix)]
+pub const READ_ONLY_MODES: bool = false;
+/// Whether a [`LocalTarget`](crate::LocalTarget) on this OS keeps only the
+/// read-only attribute instead of permission bits. A remote source then compares
+/// modes as [`SyncOptions::read_only_modes`](crate::SyncOptions) describes, so a
+/// `0o755` file is not resent to a target that reports `0o644`.
+#[cfg(windows)]
+pub const READ_ONLY_MODES: bool = true;
+
+/// Any write bit in a mode.
+const WRITE_BITS: u32 = 0o222;
+
+/// Whether a source file's `mode` matches the `held` mode a target reported.
+/// Exact, unless the target keeps only a read-only attribute (`read_only`):
+/// then only "has some write bit" has to agree.
+pub(crate) fn modes_match(mode: u32, held: u32, read_only: bool) -> bool {
+    if read_only {
+        (mode & WRITE_BITS == 0) == (held & WRITE_BITS == 0)
+    } else {
+        mode == held
+    }
+}
+
 #[cfg(unix)]
 mod unix {
     use std::fs::{Metadata, Permissions};
@@ -42,8 +69,7 @@ mod windows {
 
     use tempfile::NamedTempFile;
 
-    /// Any write bit in a mode.
-    const WRITE_BITS: u32 = 0o222;
+    use super::WRITE_BITS;
 
     /// `0o444` for read-only files, `0o644` for the rest.
     pub(crate) fn mode_of(meta: &Metadata) -> u32 {
@@ -77,5 +103,22 @@ mod windows {
         let mut permissions = meta.permissions();
         permissions.set_readonly(readonly);
         fs::set_permissions(path, permissions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::modes_match;
+
+    /// Exact by default; a read-only-attribute target only compares write access.
+    #[test]
+    fn modes_match_exactly_or_by_write_access() {
+        assert!(modes_match(0o755, 0o755, false));
+        assert!(!modes_match(0o755, 0o644, false));
+        assert!(modes_match(0o755, 0o644, true));
+        assert!(modes_match(0o600, 0o644, true));
+        assert!(modes_match(0o555, 0o444, true));
+        assert!(!modes_match(0o444, 0o644, true));
+        assert!(!modes_match(0o644, 0o444, true));
     }
 }

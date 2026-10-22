@@ -34,8 +34,8 @@ pub const ROOT: &str = "Root";
 /// root store holds it.
 pub const DISALLOWED: &str = "Disallowed";
 
-/// Store id shared by `system` and `chrome`, which both mean the user's root
-/// store; also what the `firefox` target changes.
+/// Store id shared by `system`, `chrome` and `windows`, which all mean the
+/// user's root store; also what the `firefox` target changes.
 pub const STORE_ID: &str = "windows-current-user-root";
 
 /// Store id of the `firefox` target, which reports on the same store on a line of
@@ -94,6 +94,8 @@ impl WindowsTrust {
     }
 
     /// The store for `target`; mobile targets are [`TrustError::Unsupported`].
+    /// `windows`, which names this store from WSL, is the user root store here
+    /// too, so a config shared with a WSL distro works on Windows unchanged.
     pub fn store(&self, target: TrustTarget) -> Result<Box<dyn TrustStore>, TrustError> {
         let system = |target| {
             let store = UserRootStore::new(&self.store, target).with_disallowed(&self.disallowed);
@@ -103,7 +105,9 @@ impl WindowsTrust {
             }
         };
         match target {
-            TrustTarget::System | TrustTarget::Chrome => Ok(Box::new(system(target))),
+            TrustTarget::System | TrustTarget::Chrome | TrustTarget::Windows => {
+                Ok(Box::new(system(target)))
+            }
             TrustTarget::Firefox => Ok(Box::new(FirefoxStore::new(
                 system(TrustTarget::Firefox),
                 self.firefox.clone(),
@@ -354,7 +358,7 @@ impl UserRootStore {
 
 #[async_trait]
 impl TrustStore for UserRootStore {
-    /// `system` or `chrome`, as requested.
+    /// `system`, `chrome` or `windows`, as requested.
     fn target(&self) -> TrustTarget {
         self.target
     }

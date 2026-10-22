@@ -12,6 +12,15 @@ pub enum TrustError {
         /// The rejected target.
         target: TrustTarget,
     },
+    /// The target exists, but not on this machine: `windows` outside WSL and
+    /// Windows, or under WSL with interop off.
+    #[error("{target} certificate trust is unavailable: {reason}")]
+    Unavailable {
+        /// The rejected target.
+        target: TrustTarget,
+        /// Why, with what would make it available.
+        reason: String,
+    },
     /// A `tls.trust` entry that names no known target.
     #[error("unknown trust target `{0}`")]
     UnknownTarget(String),

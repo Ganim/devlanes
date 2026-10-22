@@ -1,10 +1,14 @@
 //! Terminal integrations: opening a unit in the user's terminal application,
-//! and the terminal's own progress bar ([`progress`]).
+//! the terminal's own progress bar ([`progress`]), and opening URLs in the
+//! browser ([`open_url`]).
 //!
 //! Each terminal integration lives in its own `term-*` crate and implements
 //! [`TerminalLauncher`]; only the composition root decides which ones exist.
 
+mod open;
 pub mod progress;
+
+pub use open::open_url;
 
 pub use progress::{
     PROGRESS_ENV, Progress, ProgressBar, ProgressMode, StartTracker, Wrap, phase_detail,

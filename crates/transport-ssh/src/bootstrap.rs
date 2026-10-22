@@ -238,6 +238,33 @@ pub(crate) fn parse_probe(output: &str) -> Option<RemoteProbe> {
     })
 }
 
+/// Builds the script a Windows session runs: the probe of [`probe_script`], a
+/// `sentinel` line, then `exec <program> tunnel --stdio` when devlanes was found.
+/// Everything after the sentinel belongs to the tunnel, so probe and tunnel share
+/// one ssh connection and one authentication.
+#[cfg(windows)]
+pub(crate) fn session_script(program: &str, sentinel: &str) -> String {
+    let program = sh_quote(program);
+    let sentinel = sh_quote(sentinel);
+    format!(
+        "uname -s; uname -m; \
+         if command -v {program} >/dev/null 2>&1; then p=$(command -v {program}); \
+         elif [ -x \"$HOME/{INSTALL_DIR}/devlanes\" ]; then p=\"$HOME/{INSTALL_DIR}/devlanes\"; \
+         else p=; fi; \
+         printf '%s\\n' \"$p\" {sentinel}; \
+         if [ -n \"$p\" ]; then exec \"$p\" tunnel --stdio; fi"
+    )
+}
+
+/// Parses the lines a [`session_script`] printed before its sentinel. Only the
+/// last three count, so lines a login shell's startup files print first are
+/// ignored.
+#[cfg(windows)]
+pub(crate) fn parse_session_header(lines: &[String]) -> Option<RemoteProbe> {
+    let start = lines.len().checked_sub(3)?;
+    parse_probe(&lines[start..].join("\n"))
+}
+
 /// Builds the install script run on the box with `sh -c`.
 ///
 /// Downloads over HTTPS only (redirects included) with curl or wget, verifies
@@ -325,7 +352,9 @@ pub async fn fetch_manifest(url: &str, version: &str) -> Result<ReleaseManifest,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use sha2::{Digest, Sha256};
+    #[cfg(unix)]
     use std::time::Duration;
 
     fn artifact(url: String, sha256: String) -> Artifact {
@@ -385,7 +414,45 @@ mod tests {
         assert!(traversal.validate().is_err());
     }
 
-    /// Runs the install script locally against a `file://` URL; needs `sh` and `curl`.
+    /// Windows sessions read the probe from the three lines before the sentinel,
+    /// whatever a login shell printed first.
+    #[cfg(windows)]
+    #[test]
+    fn session_headers_use_the_lines_before_the_sentinel() {
+        let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let present = parse_session_header(&lines(
+            "welcome from .bashrc\nLinux\nx86_64\n/home/acme/.devlanes/bin/devlanes",
+        ));
+        assert_eq!(
+            present.and_then(|probe| probe.program).as_deref(),
+            Some("/home/acme/.devlanes/bin/devlanes")
+        );
+        let missing = parse_session_header(&["Linux".into(), "aarch64".into(), String::new()]);
+        assert_eq!(
+            missing,
+            Some(RemoteProbe {
+                platform: RemotePlatform {
+                    os: "linux".into(),
+                    arch: "aarch64".into()
+                },
+                program: None,
+            })
+        );
+        assert_eq!(parse_session_header(&lines("Linux\nx86_64")), None);
+        let script = session_script("devlanes", "ready-1");
+        assert!(
+            script.contains("printf '%s\\n' \"$p\" 'ready-1'"),
+            "{script}"
+        );
+        assert!(
+            script.ends_with("exec \"$p\" tunnel --stdio; fi"),
+            "{script}"
+        );
+    }
+
+    /// Runs the install script locally against a `file://` URL; needs `sh` and
+    /// `curl`. The script runs on a box, so the test is Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn install_script_verifies_checksum_and_never_replaces()
     -> Result<(), Box<dyn std::error::Error>> {

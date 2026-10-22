@@ -61,6 +61,11 @@ pub fn open_url(url: &str) -> io::Result<()> {
 /// `ERROR_CANCELLED`: the user answered No at the UAC prompt.
 pub const ERROR_CANCELLED: i32 = 1223;
 
+/// How long [`run_elevated`] waits for the elevated program once it started.
+/// Every caller runs a short, non-interactive step; a hang there (a stuck
+/// cmdlet or service call) must not block the CLI forever.
+pub const ELEVATED_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// Runs `program` with the command line `parameters` as administrator, the way
 /// "Run as administrator" does: Windows shows the UAC prompt (on the secure
 /// desktop), then starts the program elevated and hidden. Waits for it to exit
@@ -69,7 +74,10 @@ pub const ERROR_CANCELLED: i32 = 1223;
 ///
 /// A No at the prompt fails with raw OS error [`ERROR_CANCELLED`]. The prompt
 /// needs a visible desktop; check `cert::interactive_desktop` first. `parameters`
-/// is passed as is, so quote arguments the way the program parses them.
+/// is passed as is, so quote arguments the way the program parses them. A
+/// program still running after [`ELEVATED_WAIT`] fails with
+/// [`io::ErrorKind::TimedOut`] and is left running: it is elevated, so this
+/// process may not end it.
 pub fn run_elevated(program: &std::path::Path, parameters: &str) -> io::Result<u32> {
     run_elevated_child(program, parameters).map(|exit| exit.code)
 }
@@ -88,9 +96,9 @@ pub struct ElevatedExit {
 /// [`run_elevated`], also returning the elevated process's ID.
 pub fn run_elevated_child(program: &std::path::Path, parameters: &str) -> io::Result<ElevatedExit> {
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
-    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, GetProcessId, INFINITE, WaitForSingleObject,
+        GetExitCodeProcess, GetProcessId, WaitForSingleObject,
     };
     use windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -128,9 +136,24 @@ pub fn run_elevated_child(program: &std::path::Path, parameters: &str) -> io::Re
     if pid == 0 {
         return Err(io::Error::last_os_error());
     }
+    let wait_ms = u32::try_from(ELEVATED_WAIT.as_millis()).unwrap_or(u32::MAX - 1);
     // SAFETY: `process` is a valid process handle with SYNCHRONIZE access.
-    if unsafe { WaitForSingleObject(info.hProcess, INFINITE) } != WAIT_OBJECT_0 {
-        return Err(io::Error::last_os_error());
+    match unsafe { WaitForSingleObject(info.hProcess, wait_ms) } {
+        WAIT_OBJECT_0 => {}
+        WAIT_TIMEOUT => {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "the elevated {} did not exit within {} minutes; devlanes stopped waiting, and it may still be running (check Task Manager)",
+                    program.file_name().map_or_else(
+                        || program.display().to_string(),
+                        |name| name.to_string_lossy().into_owned()
+                    ),
+                    ELEVATED_WAIT.as_secs() / 60
+                ),
+            ));
+        }
+        _ => return Err(io::Error::last_os_error()),
     }
     let mut code = 0u32;
     // SAFETY: `process` has PROCESS_QUERY_LIMITED_INFORMATION; `code` is writable.

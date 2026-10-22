@@ -1,30 +1,40 @@
 //! Relays ssh passphrase, password and host-key prompts to an attached client.
 //!
 //! ssh runs `SSH_ASKPASS` as a bare program with the prompt as its only
-//! argument, so `SSH_ASKPASS` points at a generated wrapper script that execs
-//! `<devlanes exe> askpass <prompt>`. That subcommand calls [`run_askpass`],
-//! which asks the daemon over a private Unix socket; the daemon hands the
-//! prompt to a [`PromptRelay`].
+//! argument. On Unix, `SSH_ASKPASS` points at a generated wrapper script that
+//! execs `<devlanes exe> askpass <prompt>`; on Windows it is the devlanes
+//! executable itself, and the [`MARKER_ENV`] variable tells it to act as askpass.
+//! Either way [`run_askpass`] asks the daemon over a private endpoint (a Unix
+//! socket, or a named pipe on Windows) named by [`SOCKET_ENV`], and the daemon
+//! hands the prompt to a [`PromptRelay`].
 
-use std::ffi::OsString;
 use std::io;
-use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::sh_quote;
+#[cfg(unix)]
+mod unix;
+#[cfg(windows)]
+mod windows;
 
-/// Environment variable carrying the relay socket to the askpass process.
+#[cfg(unix)]
+pub(crate) use unix::AskpassServer;
+#[cfg(windows)]
+pub(crate) use windows::AskpassServer;
+
+/// Environment variable carrying the relay endpoint to the askpass process: a
+/// socket path on Unix, a pipe name on Windows.
 pub const SOCKET_ENV: &str = "DEVLANES_ASKPASS_SOCKET";
 
-/// Longest Unix socket path (`sun_path` is 104 bytes on macOS, with the NUL).
-const MAX_SOCKET_PATH: usize = 103;
+/// Set to `1` in the environment of ssh, whose `SSH_ASKPASS` is the devlanes
+/// executable on Windows: the binary then answers the prompt in its single
+/// argument instead of parsing a command line.
+#[cfg(windows)]
+pub const MARKER_ENV: &str = "DEVLANES_ASKPASS";
 
 /// Upper bound for one request or reply line.
 const MAX_LINE: u64 = 64 * 1024;
@@ -72,7 +82,7 @@ pub trait PromptRelay: Send + Sync {
     async fn prompt(&self, prompt: AskpassPrompt) -> Option<String>;
 }
 
-/// Askpass settings for master launches.
+/// Askpass settings for ssh launches.
 #[derive(Clone)]
 pub struct AskpassConfig {
     /// The devlanes binary that implements the `askpass` subcommand.
@@ -131,14 +141,18 @@ pub async fn run_askpass(prompt: &str) -> Result<String, AskpassError> {
     request(Path::new(&socket), prompt, kind).await
 }
 
-/// Sends one prompt to the relay socket and waits for the answer.
+/// Sends one prompt to the relay endpoint (a socket path, or a pipe name on
+/// Windows) and waits for the answer.
 pub async fn request(
     socket: &Path,
     prompt: &str,
     kind: PromptKind,
 ) -> Result<String, AskpassError> {
-    let stream = UnixStream::connect(socket).await?;
-    let (read, mut write) = stream.into_split();
+    #[cfg(unix)]
+    let stream = unix::connect(socket).await?;
+    #[cfg(windows)]
+    let stream = windows::connect(socket).await?;
+    let (read, mut write) = tokio::io::split(stream);
     let mut line = serde_json::to_vec(&Request {
         prompt: prompt.to_owned(),
         kind,
@@ -155,119 +169,22 @@ pub async fn request(
     }
 }
 
-/// A relay socket and wrapper script that live for one master launch.
-pub(crate) struct AskpassServer {
-    socket: PathBuf,
-    script: PathBuf,
-    task: JoinHandle<()>,
-}
-
-impl AskpassServer {
-    /// Binds the socket and writes the wrapper next to it in `dir` (mode 0700).
-    pub(crate) async fn start(
-        dir: &Path,
-        name: &str,
-        config: &AskpassConfig,
-        destination: &str,
-    ) -> io::Result<Self> {
-        let socket = dir.join(format!("{name}.sock"));
-        if socket.as_os_str().len() > MAX_SOCKET_PATH {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "askpass socket path {} is too long; use a shorter devlanes home",
-                    socket.display()
-                ),
-            ));
-        }
-        let script = dir.join(format!("{name}.askpass"));
-        let exe = config.exe.to_str().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "devlanes path is not UTF-8")
-        })?;
-        let content = format!("#!/bin/sh\nexec {} askpass \"$@\"\n", sh_quote(exe));
-        let script_path = script.clone();
-        let socket_path = socket.clone();
-        tokio::task::spawn_blocking(move || write_script(&script_path, &content, &socket_path))
-            .await
-            .map_err(io::Error::other)??;
-        let listener = UnixListener::bind(&socket)?;
-        // The directory is private to this user; answering only peers of the same
-        // uid also covers a directory whose mode was loosened later.
-        let owner = std::fs::metadata(dir)?.uid();
-        let relay = config.relay.clone();
-        let destination = destination.to_owned();
-        let task = tokio::spawn(async move {
-            // Held here so aborting this task also cancels prompts in flight.
-            let mut answering = JoinSet::new();
-            loop {
-                tokio::select! {
-                    accepted = listener.accept() => {
-                        let Ok((stream, _)) = accepted else { break };
-                        if !stream.peer_cred().is_ok_and(|cred| cred.uid() == owner) {
-                            tracing::warn!("askpass request from another user refused");
-                            continue;
-                        }
-                        let relay = relay.clone();
-                        let destination = destination.clone();
-                        answering.spawn(async move {
-                            if let Err(error) = answer(stream, relay, destination).await {
-                                tracing::debug!("askpass request failed: {error}");
-                            }
-                        });
-                    }
-                    Some(_) = answering.join_next(), if !answering.is_empty() => {}
-                }
-            }
-        });
-        Ok(Self {
-            socket,
-            script,
-            task,
-        })
-    }
-
-    /// Environment that routes ssh's prompts through this server.
-    pub(crate) fn env(&self) -> Vec<(&'static str, OsString)> {
-        vec![
-            ("SSH_ASKPASS", self.script.clone().into_os_string()),
-            ("SSH_ASKPASS_REQUIRE", OsString::from("force")),
-            (SOCKET_ENV, self.socket.clone().into_os_string()),
-        ]
-    }
-}
-
-impl Drop for AskpassServer {
-    fn drop(&mut self) {
-        self.task.abort();
-        // Unlinking two small files does not block meaningfully.
-        let _ = std::fs::remove_file(&self.socket);
-        let _ = std::fs::remove_file(&self.script);
-    }
-}
-
-/// Writes the wrapper as 0700 and clears a stale socket left by a crash.
-fn write_script(path: &Path, content: &str, socket: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    match std::fs::remove_file(socket) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
-    }
-    std::fs::write(path, content)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-}
-
-/// Answers one askpass connection through the relay.
-async fn answer(
-    stream: UnixStream,
-    relay: Arc<dyn PromptRelay>,
-    destination: String,
-) -> Result<(), AskpassError> {
-    let (read, mut write) = stream.into_split();
+/// Reads the one request line an askpass process sends.
+async fn read_request(reader: impl AsyncRead + Unpin) -> Result<Request, AskpassError> {
     let mut line = String::new();
-    BufReader::new(read.take(MAX_LINE))
+    BufReader::new(reader.take(MAX_LINE))
         .read_line(&mut line)
         .await?;
-    let request: Request = serde_json::from_str(&line)?;
+    Ok(serde_json::from_str(&line)?)
+}
+
+/// Asks the relay and writes its answer as the reply line.
+async fn relay_reply(
+    request: Request,
+    relay: &dyn PromptRelay,
+    destination: String,
+    mut writer: impl AsyncWrite + Unpin,
+) -> Result<(), AskpassError> {
     let prompt = AskpassPrompt {
         destination,
         prompt: request.prompt,
@@ -279,54 +196,6 @@ async fn answer(
     };
     let mut bytes = serde_json::to_vec(&reply)?;
     bytes.push(b'\n');
-    write.write_all(&bytes).await?;
+    writer.write_all(&bytes).await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    struct Fixed;
-
-    #[async_trait]
-    impl PromptRelay for Fixed {
-        async fn prompt(&self, prompt: AskpassPrompt) -> Option<String> {
-            (prompt.destination == "box" && prompt.prompt.contains("passphrase"))
-                .then(|| "hunter2".to_owned())
-        }
-    }
-
-    #[tokio::test]
-    async fn prompts_round_trip_through_the_relay() -> Result<(), Box<dyn std::error::Error>> {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let dir = tempfile::tempdir()?;
-            let config = AskpassConfig {
-                exe: PathBuf::from("/opt/dev lanes/devlanes"),
-                relay: Arc::new(Fixed),
-            };
-            let server = AskpassServer::start(dir.path(), "a-test", &config, "box").await?;
-            let script = std::fs::read_to_string(dir.path().join("a-test.askpass"))?;
-            assert_eq!(
-                script,
-                "#!/bin/sh\nexec '/opt/dev lanes/devlanes' askpass \"$@\"\n"
-            );
-            let env = server.env();
-            assert!(
-                env.iter()
-                    .any(|(k, v)| *k == "SSH_ASKPASS_REQUIRE" && v == "force")
-            );
-
-            let socket = dir.path().join("a-test.sock");
-            let answer = request(&socket, "Enter passphrase for key:", PromptKind::Secret).await?;
-            assert_eq!(answer, "hunter2");
-            let refused = request(&socket, "Password:", PromptKind::Secret).await;
-            assert!(matches!(refused, Err(AskpassError::Cancelled)));
-            drop(server);
-            assert!(!socket.exists());
-            Ok(())
-        })
-        .await?
-    }
 }

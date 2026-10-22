@@ -46,6 +46,10 @@ pub enum TrustTarget {
     /// Chrome and Chromium: the keychain on macOS, `~/.pki/nssdb` on Linux, the
     /// system store on Windows (Edge too).
     Chrome,
+    /// The Windows user root store, for the Windows browsers: from WSL through
+    /// interop, on Windows the same store as `System`. Elsewhere
+    /// [`TrustError::Unavailable`].
+    Windows,
     /// Excluded from v1; always [`TrustError::Unsupported`].
     IosSimulator,
     /// Excluded from v1; always [`TrustError::Unsupported`].
@@ -54,10 +58,11 @@ pub enum TrustTarget {
 
 impl TrustTarget {
     /// Every target, in config order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::System,
         Self::Firefox,
         Self::Chrome,
+        Self::Windows,
         Self::IosSimulator,
         Self::AndroidEmulator,
     ];
@@ -68,6 +73,7 @@ impl TrustTarget {
             Self::System => "system",
             Self::Firefox => "firefox",
             Self::Chrome => "chrome",
+            Self::Windows => "windows",
             Self::IosSimulator => "ios-simulator",
             Self::AndroidEmulator => "android-emulator",
         }

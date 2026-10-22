@@ -536,7 +536,39 @@ fn spawn_daemon(command: &mut Command) -> std::io::Result<tokio::process::Child>
 pub fn sandbox_reason() -> Option<&'static str> {
     ["CODEX_SANDBOX", "APP_SANDBOX_CONTAINER_ID"]
         .into_iter()
+        .chain(PLATFORM_SANDBOX_MARKERS.iter().copied())
         .find(|name| std::env::var_os(name).is_some())
+        .or_else(sandboxed_token)
+}
+
+/// No markers beyond the shared ones on Unix.
+#[cfg(unix)]
+const PLATFORM_SANDBOX_MARKERS: &[&str] = &[];
+
+/// Codex sets `CODEX_SANDBOX` only for macOS Seatbelt. On Windows its sandboxed
+/// commands carry `CODEX_SANDBOX_NETWORK_DISABLED=1` (codex-rs/core/src/spawn.rs
+/// and sandboxing/mod.rs) and, from its unelevated Windows sandbox,
+/// `SBX_NONET_ACTIVE=1` (codex-rs/windows-sandbox-rs/src/env.rs and
+/// spawn_prep.rs), both only when network access is off.
+#[cfg(windows)]
+const PLATFORM_SANDBOX_MARKERS: &[&str] = &["CODEX_SANDBOX_NETWORK_DISABLED", "SBX_NONET_ACTIVE"];
+
+/// Unix relies on the markers and the bind probe.
+#[cfg(unix)]
+fn sandboxed_token() -> Option<&'static str> {
+    None
+}
+
+/// A restricted, AppContainer or low-integrity token, as Codex's unelevated
+/// Windows sandbox runs commands with. A daemon started from it would inherit
+/// the token, and clients refuse such a daemon anyway. A token that cannot be
+/// read is left to the checks that follow.
+#[cfg(windows)]
+fn sandboxed_token() -> Option<&'static str> {
+    use devlanes_sys::windows::token::{MEDIUM_INTEGRITY, current_facts};
+    let facts = current_facts().ok()?;
+    (facts.restricted || facts.app_container || facts.integrity < MEDIUM_INTEGRITY)
+        .then_some("restricted process token")
 }
 
 /// Variables an auto-spawned daemon inherits from the spawning shell, by exact name.

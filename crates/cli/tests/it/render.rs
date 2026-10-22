@@ -864,6 +864,97 @@ fn doctor_terminal_and_acl_checks() {
     }
 }
 
+/// WSL facts (`wsl`, from the CLI inside a distro, and the daemon's
+/// `windows_drive_worktrees`): interop and the networking mode are passing
+/// checks; interop off, no systemd, proxy ports below the unprivileged start,
+/// a CA Windows browsers do not trust and worktrees on Windows drives are
+/// warnings with fixes; none fails doctor. Outside WSL nothing is added.
+#[test]
+fn doctor_wsl_checks() {
+    let base = json!({
+        "running": true, "version": "0.3.0", "pid": 42, "home": "/home/acme/.devlanes",
+        "socket": "/home/acme/.devlanes/run/daemon.sock",
+        "db_path": "/home/acme/.devlanes/state.db",
+        "schema_version": 1, "supported_schema_version": 1,
+        "sandbox": {"codex_sandbox": false, "app_sandbox": false},
+        "proxy": {"http": {"bound": true, "port": 8080, "fallback_reason": "port 80 needs root"},
+                  "https": {"bound": true, "port": 8443, "fallback_reason": "port 443 needs root"}},
+        "ca": {"present": true, "path": "/home/acme/.devlanes/ca/ca.pem",
+               "trust": [{"store": "system", "state": "trusted"}]},
+        "hosts": {"mode": "auto", "state": "applied", "names": 2},
+        "windows_drive_worktrees": [
+            {"lane": "acme@2", "path": "/mnt/c/src/acme-2", "drive": r"C:\"},
+        ],
+    });
+    let wsl = json!({
+        "distro": "Ubuntu", "version": 2, "interop": true, "systemd": false,
+        "networking_mode": "nat", "networking_source": "wslinfo", "generate_hosts": true,
+        "unprivileged_port_start": 1024, "privileged_proxy_ports": [80, 443],
+    });
+    let mut data = base.clone();
+    data["wsl"] = wsl.clone();
+    let text = render_text(Method::Doctor, &data);
+    insta::assert_snapshot!("render_doctor_wsl", text);
+    assert!(text.contains("--- agent (exit 0)"), "{text}");
+
+    // Outside WSL the same daemon facts add no wsl group.
+    let outside = render_text(Method::Doctor, &base);
+    assert!(!outside.contains("wsl:"), "{outside}");
+    assert!(!outside.contains("Windows drive"), "{outside}");
+
+    // Interop off and mirrored; the windows store is configured and the proxy
+    // got its ports, so neither the CA nor the sysctl hint appears.
+    let mut quiet = data.clone();
+    quiet["wsl"]["interop"] = json!(false);
+    quiet["wsl"]["distro"] = Value::Null;
+    quiet["wsl"]["systemd"] = json!(true);
+    quiet["wsl"]["networking_mode"] = json!("mirrored");
+    quiet["proxy"] = json!({"http": {"bound": true, "port": 80, "fallback_reason": null},
+                            "https": {"bound": true, "port": 443, "fallback_reason": null}});
+    quiet["ca"]["trust"] =
+        json!([{"store": "system", "state": "trusted"}, {"store": "windows", "state": "trusted"}]);
+    quiet["windows_drive_worktrees"] = json!([]);
+    let quiet = render_text(Method::Doctor, &quiet);
+    assert!(
+        quiet
+            .contains("warn wsl: WSL 2, Windows interop off: devlanes cannot open URLs in Windows"),
+        "{quiet}"
+    );
+    assert!(
+        quiet.contains("ok wsl: mirrored networking: Windows and the distro share localhost"),
+        "{quiet}"
+    );
+    for absent in [
+        "systemd",
+        "sysctl",
+        "tls.trust leaves out windows",
+        "Windows drive",
+    ] {
+        assert!(!quiet.contains(absent), "{absent}\n{quiet}");
+    }
+
+    // Without a daemon the configured ports alone call for the sysctl hint.
+    let mut stopped = json!({
+        "running": false, "version": "0.3.0", "home": "/home/acme/.devlanes",
+        "socket": "/home/acme/.devlanes/run/daemon.sock",
+        "db_path": "/home/acme/.devlanes/state.db",
+        "sandbox": {"codex_sandbox": false, "app_sandbox": false},
+    });
+    stopped["wsl"] = wsl;
+    stopped["wsl"]["privileged_proxy_ports"] = json!([443]);
+    let stopped = render_text(Method::Doctor, &stopped);
+    assert!(
+        stopped.contains(
+            "warn wsl: ports below 1024 need root in this distro, so the proxy cannot bind 443 and uses its fallback ports"
+        ),
+        "{stopped}"
+    );
+    assert!(
+        stopped.contains("fix: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=443"),
+        "{stopped}"
+    );
+}
+
 /// Port ranges Windows reserves (`excluded_ports`): a pool clear of them is a
 /// passing check, overlaps with the pool, the proxy ports or mirrored box ports
 /// are warnings with a fix, and an unreadable list (whole or one family) is a
@@ -1564,6 +1655,50 @@ fn lane_warning_events_are_one_line() {
     warn acme@2: api.example.com is outside the CA's names; HTTPS will fail; try api.acme.test
     ");
     // Agents see a start's warnings once, in its result.
+}
+
+/// A worktree on a Windows drive inside WSL warns at start with the path, the
+/// drive and where to move it.
+#[test]
+fn windows_drive_warning_names_the_drive() {
+    let event = Event {
+        seq: 1,
+        event: "lane.warning".into(),
+        data: json!({"lane": "acme@2", "code": "windows_drive", "data": {
+            "lane": "acme@2", "path": "/mnt/c/src/acme-2", "drive": r"C:\",
+        }}),
+    };
+    let line = runtime(OutputMode::Plain)
+        .reporter()
+        .event(Method::Subscribe, &event)
+        .expect("event")
+        .stdout;
+    assert_eq!(
+        line.trim_end(),
+        r"warn acme@2: /mnt/c/src/acme-2 is on the Windows drive C:\: file access is slow and file watching misses edits made from Windows; move the repository to the Linux filesystem (for example ~/src)"
+    );
+}
+
+/// `daemon install` inside a WSL distro without systemd says how to turn it on.
+#[test]
+fn wsl_systemd_off_says_how_to_enable_it() {
+    let rendered = runtime(OutputMode::Plain)
+        .reporter()
+        .error(&RpcError::new("wsl_systemd_off", json!({}), 1), None);
+    assert!(
+        rendered
+            .stderr
+            .contains("systemd is not running in this WSL distro, and daemon install needs it"),
+        "{}",
+        rendered.stderr
+    );
+    assert!(
+        rendered
+            .stderr
+            .contains("set systemd=true under [boot] in /etc/wsl.conf"),
+        "{}",
+        rendered.stderr
+    );
 }
 
 #[test]

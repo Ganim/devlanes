@@ -867,6 +867,11 @@ pub mod remote {
             lane: String,
             unit: String,
             index: usize,
+            /// The client keeps only a read-only attribute (Windows): the box
+            /// compares modes by write access alone. Left out when false, so
+            /// older boxes read the request unchanged.
+            #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+            read_only_modes: bool,
         },
     }
 

@@ -12,6 +12,7 @@ publish.workspace = true
 # there); only the composition root picks it on Linux. Empty on Windows.
 [target.'cfg(unix)'.dependencies]
 async-trait.workspace = true
+devlanes-sys = { path = "../sys" }
 devlanes-trust = { path = "../trust" }
 rustix = { version = "1", features = ["process"] }
 tokio.workspace = true

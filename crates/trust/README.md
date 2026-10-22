@@ -21,13 +21,13 @@ async fn trust(store: &dyn TrustStore, ca_pem: &str) -> Result<TrustStatus, Trus
 ## API
 
 - `TrustStore`: `install`, `uninstall` and `status` for one store. Repeating an install or removing an absent CA succeeds without changes. `location`, `approval`, `pending_approval` and `hint` add text for the CLI: where the CA goes, the dialog to expect (in general, and for the change about to run), and a setting that keeps the store from working. `id` names the store for report lines and `changes` what `install` and `uninstall` change, so the CLI runs a shared change once.
-- `TrustTarget`: the `tls.trust` names (`system`, `firefox`, `chrome`, `ios-simulator`, `android-emulator`).
+- `TrustTarget`: the `tls.trust` names (`system`, `firefox`, `chrome`, `windows`, `ios-simulator`, `android-emulator`). `windows` is the Windows user root store: reached through interop from WSL, the same store as `system` on Windows, `Unavailable` elsewhere.
 - `TrustStatus`: `Installed`, `Missing`, `Distrusted { reason }` (installed but overridden by a deny list) or `Unknown { reason }`.
 - `CaCertificate`: the public CA plus the name stores file it under. It keeps only the first certificate of the PEM, so a key in the input never reaches a store. `is_name_constrained` tells an older, unconstrained devlanes CA apart.
 - `find_system_program`: absolute path of a root-run tool from the system directories (`system_program_dirs`), never `PATH`. On Windows that is the System32 directory from `GetSystemDirectoryW`, and names may leave out `.exe` or `.com`.
 - `CommandExecutor` and `SystemExecutor`: every external command goes through this trait. The `fake` feature adds `fake::FakeExecutor`, which records argv for tests.
 - `nss::NssStore` (Unix): Firefox profiles or a shared NSS database, changed through `certutil`.
-- `TrustError`: typed failures, including `Unsupported`, `ToolMissing { hint }`, `InteractionRequired`, `Cancelled` and `StillTrusted`.
+- `TrustError`: typed failures, including `Unsupported`, `Unavailable { reason }` (a target this machine cannot reach), `ToolMissing { hint }`, `InteractionRequired`, `Cancelled` and `StillTrusted`.
 
 ## Config example
 
@@ -38,7 +38,7 @@ tls:
   trust: [system, firefox, chrome]
 ```
 
-Without `tls.trust`, `devlanes certs trust` uses only the `system` store.
+Without `tls.trust`, `devlanes certs trust` uses only the `system` store, and inside WSL with interop `system` and `windows`.
 
 ## Behaviour
 

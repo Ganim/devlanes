@@ -332,7 +332,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | Path | Type | Description | Example |
 | --- | --- | --- | --- |
 | `terminal` | `iterm2` or `ghostty` or `wezterm` or `kitty` or `terminal` or `windows-terminal` or object | Terminal app for open-in-terminal actions, alone or with the progress-bar setting. | `ghostty` |
-| `terminal.app` | `iterm2` or `ghostty` or `wezterm` or `kitty` or `terminal` or `windows-terminal` | Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, Windows Terminal on Windows when installed, else the first one installed. | `ghostty` |
+| `terminal.app` | `iterm2` or `ghostty` or `wezterm` or `kitty` or `terminal` or `windows-terminal` | Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, Windows Terminal on Windows and inside WSL when installed, else the first one installed. | `ghostty` |
 | `terminal.progress` | `auto` or `always` or `never` | Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto. | `auto` |
 
 ### tls
@@ -341,7 +341,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | --- | --- | --- | --- |
 | `tls` | object | Certificate authority and explicitly requested trust targets. | `{"ca":"devlanes","trust":["system","firefox"]}` |
 | `tls.ca` | `devlanes` or `mkcert` | Use devlanes' own CA by default, or reuse mkcert's CA. | `devlanes` |
-| `tls.trust` | list of `system` or `firefox` or `chrome` or `ios-simulator` or `android-emulator` | Trust stores that should accept the local CA; mobile targets are ignored with a warning for now. | `["system","firefox"]` |
+| `tls.trust` | list of `system` or `firefox` or `chrome` or `windows` or `ios-simulator` or `android-emulator` | Trust stores that should accept the local CA; unset means system, plus windows inside WSL. Mobile targets are ignored with a warning for now. | `["system","firefox"]` |
 
 ### tui
 

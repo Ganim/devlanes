@@ -1,5 +1,5 @@
-//! Linux trust stores: the distribution CA bundle, Chromium's NSS database, and
-//! Firefox profiles.
+//! Linux trust stores: the distribution CA bundle, Chromium's NSS database,
+//! Firefox profiles, and under WSL the Windows user root store ([`wsl`]).
 //!
 //! The system store needs root. Commands go through `sudo`, with `-n` when stdin is
 //! not a terminal so CI with passwordless sudo works and a missing password fails
@@ -8,6 +8,10 @@
 //!
 //! Empty on Windows. It builds on macOS so the argv tests run there too.
 #![cfg(unix)]
+
+pub mod wsl;
+
+pub use wsl::{WINDOWS_ID, WINDOWS_ROOT, WindowsInterop, WindowsInteropStore};
 
 use std::io::{self, IsTerminal as _};
 use std::path::{Path, PathBuf};
@@ -130,10 +134,13 @@ pub struct LinuxTrust {
     home: PathBuf,
     sysroot: PathBuf,
     privilege: Privilege,
+    /// `certutil.exe` for the `windows` target, or why there is none.
+    windows: Result<WindowsInterop, String>,
 }
 
 impl LinuxTrust {
-    /// Uses `executor` for commands, `home` for NSS databases and `/` as system root.
+    /// Uses `executor` for commands, `home` for NSS databases and `/` as system
+    /// root. The `windows` target stays unavailable until [`Self::with_windows`].
     pub fn new(
         executor: Arc<dyn CommandExecutor>,
         home: impl Into<PathBuf>,
@@ -144,6 +151,7 @@ impl LinuxTrust {
             home: home.into(),
             sysroot: PathBuf::from("/"),
             privilege,
+            windows: Err(wsl::NOT_WSL.into()),
         }
     }
 
@@ -154,7 +162,15 @@ impl LinuxTrust {
         self
     }
 
-    /// Real commands, `$HOME` and [`Privilege::detect`].
+    /// Serves the `windows` target with `interop`, normally
+    /// [`WindowsInterop::detect`]; an `Err` is the reason it is unavailable.
+    #[must_use]
+    pub fn with_windows(mut self, interop: Result<WindowsInterop, String>) -> Self {
+        self.windows = interop;
+        self
+    }
+
+    /// Real commands, `$HOME`, [`Privilege::detect`] and [`WindowsInterop::detect`].
     pub fn from_env() -> Result<Self, TrustError> {
         let home = std::env::var_os("HOME").ok_or_else(|| {
             TrustError::io(
@@ -166,10 +182,12 @@ impl LinuxTrust {
             Arc::new(SystemExecutor),
             PathBuf::from(home),
             Privilege::detect(),
-        ))
+        )
+        .with_windows(WindowsInterop::detect()))
     }
 
-    /// The store for `target`; mobile targets are [`TrustError::Unsupported`].
+    /// The store for `target`; mobile targets are [`TrustError::Unsupported`],
+    /// and `windows` without WSL interop is [`TrustError::Unavailable`].
     pub fn store(&self, target: TrustTarget) -> Result<Box<dyn TrustStore>, TrustError> {
         match target {
             TrustTarget::System => Ok(Box::new(SystemStore::new(
@@ -195,6 +213,16 @@ impl LinuxTrust {
                 },
                 certutil_lookup(),
             ))),
+            TrustTarget::Windows => match &self.windows {
+                Ok(interop) => Ok(Box::new(WindowsInteropStore::new(
+                    self.executor.clone(),
+                    interop.clone(),
+                ))),
+                Err(reason) => Err(TrustError::Unavailable {
+                    target,
+                    reason: reason.clone(),
+                }),
+            },
             TrustTarget::IosSimulator | TrustTarget::AndroidEmulator => {
                 Err(TrustError::Unsupported { target })
             }

@@ -10,6 +10,10 @@ publish.workspace = true
 [dependencies]
 devlanes-term = { path = "../term" }
 
+# WSL detection, for the tab that runs `wsl.exe` from inside a distro.
+[target.'cfg(target_os = "linux")'.dependencies]
+devlanes-sys = { path = "../sys" }
+
 [target.'cfg(windows)'.dev-dependencies]
 tempfile.workspace = true
 

@@ -14,7 +14,7 @@ use std::{
 use devlanes_proto::remote::{
     MANIFEST_BATCH, MAX_SYNC_FILE, ManifestBatch, SyncEntry, SyncFile, SyncManifest, SyncRequest,
 };
-use devlanes_sync::{HeldFile, LocalTarget, PartialFile, RelPath, SyncTarget};
+use devlanes_sync::{CaseCollisions, HeldFile, LocalTarget, PartialFile, RelPath, SyncTarget};
 use devlanes_transport::{Session as BoxSession, SyncMessage, SyncSubscription};
 use serde_json::json;
 use tokio::{task::JoinHandle, time::Instant};
@@ -181,18 +181,19 @@ fn key(entry: &SyncEntry) -> String {
 /// service syncs only when one replica has the entry or each names its folder
 /// differently.
 fn duplicate_leaves(entries: &[SyncEntry]) -> BTreeMap<String, String> {
-    let mut groups: BTreeMap<(&str, &str, &str), Vec<&SyncEntry>> = BTreeMap::new();
+    let mut groups: BTreeMap<(&str, &str, String), Vec<&SyncEntry>> = BTreeMap::new();
     for entry in entries {
         groups
-            .entry((&entry.project, &entry.lane, &entry.leaf))
+            .entry((&entry.project, &entry.lane, leaf_key(&entry.leaf)))
             .or_default()
             .push(entry);
     }
     let mut refused = BTreeMap::new();
-    for ((_, _, leaf), group) in groups {
+    for (_, group) in groups {
         if group.len() < 2 {
             continue;
         }
+        let leaf = &group[0].leaf;
         let sources: Vec<String> = group
             .iter()
             .map(|entry| format!("{}:{} ({})", entry.lane, entry.unit, entry.from.display()))
@@ -206,6 +207,19 @@ fn duplicate_leaves(entries: &[SyncEntry]) -> BTreeMap<String, String> {
         }
     }
     refused
+}
+
+/// The destination folder a leaf names, as this file system compares names.
+#[cfg(unix)]
+fn leaf_key(leaf: &str) -> String {
+    leaf.to_owned()
+}
+
+/// The destination folder a leaf names, as this file system compares names:
+/// under its disk name and without letter case, so `dist` and `Dist` share one.
+#[cfg(windows)]
+fn leaf_key(leaf: &str) -> String {
+    devlanes_core::paths::disk_name(leaf).to_uppercase()
 }
 
 /// Lists the box's entries over a `list` sync subscription.
@@ -248,12 +262,16 @@ async fn send_manifest(
     target: &LocalTarget,
     subscription: &mut SyncSubscription,
     status: &mut Status,
+    names: &mut CaseCollisions,
 ) -> Result<(), String> {
     let cached = lock(&conn.hashes).remove(key).unwrap_or_default();
     let mut walk = target.held(cached, MANIFEST_BATCH);
     let mut sent: Result<(), String> = Ok(());
     while let Some(batch) = walk.next().await {
         let count = batch.len() as u64;
+        for file in &batch {
+            names.hold(&file.path);
+        }
         let batch = ManifestBatch {
             files: batch.into_iter().map(sync_file).collect(),
         };
@@ -305,6 +323,7 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
         lane: entry.lane.clone(),
         unit: entry.unit.clone(),
         index: entry.index,
+        read_only_modes: devlanes_sync::READ_ONLY_MODES,
     };
     let subscription = match serde_json::to_value(&request) {
         Ok(request) => session.subscribe_sync(request).await,
@@ -326,7 +345,19 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
     // send that fails mid-manifest is retried as a whole on a new subscription.
     status.state = "comparing";
     status.publish(&conn, &key);
-    if let Err(error) = send_manifest(&conn, &key, &target, &mut subscription, &mut status).await {
+    // Box paths that this file system would merge into one file (Windows
+    // ignores letter case): the first one written wins, the others are skipped.
+    let mut names = CaseCollisions::new();
+    if let Err(error) = send_manifest(
+        &conn,
+        &key,
+        &target,
+        &mut subscription,
+        &mut status,
+        &mut names,
+    )
+    .await
+    {
         status.fail(format!("sending the manifest: {error}"));
         status.publish(&conn, &key);
         return true;
@@ -347,11 +378,18 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
                         rejected = Some(path);
                         continue;
                     }
+                    // Names this OS cannot hold fail in `begin_file`; only then
+                    // is the path recorded as held.
                     let begun = match RelPath::new(path.clone()) {
-                        Ok(rel) => target
-                            .begin_file(&rel, mode)
-                            .await
-                            .map_err(|error| error.to_string()),
+                        Ok(rel) => match target.begin_file(&rel, mode).await {
+                            Ok(file) => match names.admit(&rel) {
+                                Ok(()) => Ok(file),
+                                Err(held) => Err(format!(
+                                    "{path}: not synced, it differs from {held} only in letter case, which this file system does not tell apart"
+                                )),
+                            },
+                            Err(error) => Err(error.to_string()),
+                        },
                         Err(error) => Err(error.to_string()),
                     };
                     match begun {
@@ -403,6 +441,9 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
                 }
             }
             Ok(SyncMessage::Delete { path }) => match RelPath::new(path) {
+                // A path skipped for its letter case: the file on disk is the
+                // other spelling's, so it stays.
+                Ok(rel) if !names.release(&rel) => {}
                 // Deletions of the initial pass remove what the source lacks.
                 Ok(rel) => match target.remove(&rel).await {
                     Ok(()) if status.state == "watching" => status.removed += 1,
@@ -576,6 +617,15 @@ mod tests {
                 "app@2:web-2#0"
             ]
         );
+        // Windows does not tell `dist` from `Dist`; Unix keeps both folders.
+        let cased = duplicate_leaves(&[
+            entry("app@4", "web", "/box/web/dist"),
+            entry("app@4", "admin", "/box/admin/Dist"),
+        ]);
+        #[cfg(windows)]
+        assert_eq!(cased.len(), 2, "{cased:?}");
+        #[cfg(unix)]
+        assert!(cased.is_empty(), "{cased:?}");
         let message = &refused["app@0:web#0"];
         assert!(
             message.contains("app@0:web (/box/web/dist)")

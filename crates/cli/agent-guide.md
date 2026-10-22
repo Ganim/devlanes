@@ -3,7 +3,7 @@
 This repository runs its dev services with devlanes. A per-user daemon owns the processes; the `devlanes` CLI talks to it.
 
 - Start this worktree's lane with `devlanes start`. It waits for ready or failure.
-- Never background a process with `&` or `nohup`. Use `devlanes exec --name NAME -- COMMAND` instead.
+- Never background a process with `&`, `nohup`, `Start-Process` or `Start-Job`. Use `devlanes exec --name NAME -- COMMAND` instead.
 - Lanes are `project@N` or `project@branch`; units are `LANE:UNIT`. Globs and `+tags` select several units.
 - Inspect with `devlanes status`, `devlanes wait UNIT --timeout 180s`, `devlanes debug errors` and `devlanes debug why UNIT`.
 - Read logs with `devlanes logs UNIT --tail 100` or `--grep RE`, and continue with `--cursor`. Follow logs only with `--timeout`.
@@ -17,4 +17,5 @@ This repository runs its dev services with devlanes. A per-user daemon owns the 
 - An error ends with a `hint:` line naming the command that fixes it. Ask the user before running a hint that stops services this session did not start, such as `devlanes stop --lane LANE` when `lane clean` refuses a running lane, or `devlanes daemon restart`, which stops every service the daemon runs.
 - Add `--json` for complete structured output.
 - When a failure is unclear, rerun the command with `-v` (or `-vv`): the client's and the daemon's diagnostics go to stderr, so stdout keeps its format.
-- Inside a sandbox (Codex sets `CODEX_SANDBOX`) the CLI does not start the daemon. If a command fails with `auto-spawn refused in sandbox`, ask the user to run `devlanes daemon install` outside the sandbox, then retry.
+- Inside a sandbox, such as Codex's, the CLI does not start the daemon. If a command fails with `auto-spawn refused in sandbox`, ask the user to run `devlanes daemon install` outside the sandbox, then retry.
+- On Windows, `run:` strings in devlanes.yaml still use POSIX `sh` syntax (Git for Windows' `sh.exe`), and hints are quoted for PowerShell. Load a unit's environment into PowerShell by piping `devlanes env export UNIT --shell pwsh` to `Out-String | Invoke-Expression`.

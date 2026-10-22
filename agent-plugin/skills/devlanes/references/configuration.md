@@ -37,10 +37,11 @@ services:
 
 - `run_script: <file>#<name>` works with `package.json` (npm, pnpm, yarn or bun, from `packageManager` or the lockfile), `Makefile`, `justfile`, `deno.json`, `pyproject.toml` (uv or poetry) and `Cargo.toml` (a bin), and runs in that file's directory. Prefer it to `run: pnpm -F pkg dev`: presets place their flags correctly and profiles can remap the script name.
 - A multi-line `run` string is a shell script. Without `cwd`, `run` starts at the lane's worktree root.
+- `run` strings and `ready.cmd` are POSIX `sh` on every OS: on Windows devlanes runs them with Git for Windows' `sh.exe` (`cmd.exe` when it is missing, with a `shell_fallback` warning from `devlanes config check`). Don't write PowerShell or cmd syntax in them. A list `run` is an argv and needs no shell.
 - `autostart: false` keeps a service out of a plain `devlanes start` when no `default` profile exists; naming the service or its tag still starts it.
 - `replicas: N` runs N instances (`replica.index` counts from 1), each with its own port.
 - `stop: { signal: SIGINT, timeout: 15s }` replaces the default SIGTERM and 10 s grace period before the process tree is killed.
-- `pty: false` uses pipes instead of a terminal. `hidden: true` keeps the port off machines connected with `devlanes remote connect`.
+- `pty: false` uses pipes instead of a terminal. On Windows the terminal is a ConPTY pseudo console, which rewrites the output stream (line endings, cursor and colour sequences), so set `pty: false` when the logs must hold exactly what the process wrote. `hidden: true` keeps the port off machines connected with `devlanes remote connect`.
 - `name: API Admin` sets the label shown in the TUI and status, where the installed devlanes supports it (`devlanes config check` reports an unknown key otherwise). Keep the key short and dash-separated; the key is what commands and expressions use.
 
 devlanes has no dependencies between services and never restarts a process that exits. Order comes from `tasks` with `when` and from infra; a crash shows as `failed` with its log tail.

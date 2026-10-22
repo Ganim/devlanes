@@ -7,20 +7,30 @@
 //! - `DEVLANES_TEST_SSH_ALLOW_MISSING=1`: the box has no devlanes; the tunnel test skips.
 //! - `DEVLANES_TEST_SSH_LANE=1`: `run.sh` started a lane with an echo service and a
 //!   synced folder on the box; the mirroring test needs it.
+//! - `DEVLANES_TEST_SSH_PASSPHRASE` and `DEVLANES_TEST_SSH_ASKPASS_EXE`: the key's
+//!   passphrase and a built `devlanes` binary. With both, every test answers the
+//!   passphrase through the askpass relay, and the askpass test runs.
 
-// The transport is Unix only; the crate is empty elsewhere.
-#![cfg(unix)]
-
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use devlanes_transport::{
     DialTarget, RpcCallError, Session, SessionOptions, SyncMessage, Transport,
 };
-use devlanes_transport_ssh::{SshOptions, SshTransport};
+use devlanes_transport_ssh::{
+    AskpassConfig, AskpassPrompt, PromptKind, PromptRelay, SshOptions, SshTransport,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+/// A known_hosts file that is always empty.
+#[cfg(unix)]
+const NO_KNOWN_HOSTS: &str = "/dev/null";
+#[cfg(windows)]
+const NO_KNOWN_HOSTS: &str = "NUL";
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -30,8 +40,18 @@ fn allow_missing() -> bool {
     env("DEVLANES_TEST_SSH_ALLOW_MISSING").as_deref() == Some("1")
 }
 
-/// Builds a transport from the test environment; paths are quoted for ssh's option parser.
+/// Builds a transport from the test environment.
 fn transport(home: &Path) -> SshTransport {
+    SshTransport::new(destination(), options(home))
+}
+
+/// The ssh destination from the test environment.
+fn destination() -> String {
+    env("DEVLANES_TEST_SSH_DEST").unwrap_or_else(|| "localhost".to_owned())
+}
+
+/// Options from the test environment; paths are quoted for ssh's option parser.
+fn options(home: &Path) -> SshOptions {
     let mut options = SshOptions::new(home);
     if let Some(port) = env("DEVLANES_TEST_SSH_PORT") {
         options.ssh_options.push(format!("Port={port}"));
@@ -47,17 +67,94 @@ fn transport(home: &Path) -> SshTransport {
     if let Some(known_hosts) = env("DEVLANES_TEST_SSH_KNOWN_HOSTS") {
         options.ssh_options.extend([
             format!("UserKnownHostsFile=\"{known_hosts}\""),
-            "GlobalKnownHostsFile=/dev/null".to_owned(),
+            format!("GlobalKnownHostsFile={NO_KNOWN_HOSTS}"),
             "StrictHostKeyChecking=yes".to_owned(),
         ]);
     }
-    let destination = env("DEVLANES_TEST_SSH_DEST").unwrap_or_else(|| "localhost".to_owned());
-    SshTransport::new(destination, options)
+    // A passphrase-protected key needs the relay in every test.
+    options.askpass = passphrase_relay().map(|(relay, exe)| AskpassConfig { exe, relay });
+    options
+}
+
+/// A relay answering the test key's passphrase, and the binary ssh runs as askpass.
+fn passphrase_relay() -> Option<(Arc<Passphrase>, PathBuf)> {
+    let answer = env("DEVLANES_TEST_SSH_PASSPHRASE")?;
+    let exe = env("DEVLANES_TEST_SSH_ASKPASS_EXE")?;
+    let relay = Arc::new(Passphrase {
+        answer,
+        seen: Mutex::new(Vec::new()),
+    });
+    Some((relay, PathBuf::from(exe)))
 }
 
 /// Short home so the control socket fits in `sun_path`.
+#[cfg(unix)]
 fn short_home() -> std::io::Result<tempfile::TempDir> {
     tempfile::Builder::new().prefix("dl").tempdir_in("/tmp")
+}
+
+/// A home for the transport; Windows keeps no control files in it.
+#[cfg(windows)]
+fn short_home() -> std::io::Result<tempfile::TempDir> {
+    tempfile::tempdir()
+}
+
+/// Answers the passphrase prompt and records every prompt it saw.
+struct Passphrase {
+    answer: String,
+    seen: Mutex<Vec<AskpassPrompt>>,
+}
+
+#[async_trait]
+impl PromptRelay for Passphrase {
+    async fn prompt(&self, prompt: AskpassPrompt) -> Option<String> {
+        let answer = prompt
+            .prompt
+            .contains("passphrase")
+            .then(|| self.answer.clone());
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(prompt);
+        answer
+    }
+}
+
+/// A passphrase-protected key is unlocked through the askpass relay: ssh runs the
+/// devlanes binary as askpass, which reaches the relay over the private socket
+/// or pipe, and the session opens.
+#[tokio::test]
+#[ignore = "needs ssh"]
+async fn ssh_prompts_reach_the_relay() -> TestResult {
+    let Some((relay, exe)) = passphrase_relay() else {
+        eprintln!("skipping ssh_prompts_reach_the_relay: no passphrase key or askpass binary");
+        return Ok(());
+    };
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let home = short_home()?;
+        let mut options = options(home.path());
+        options.askpass = Some(AskpassConfig {
+            exe,
+            relay: relay.clone(),
+        });
+        let transport = SshTransport::new(destination(), options);
+        let probe = transport.probe().await?;
+        assert!(!probe.platform.os.is_empty(), "{probe:?}");
+        let seen = relay
+            .seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            seen.iter()
+                .any(|prompt| prompt.prompt.contains("passphrase")
+                    && prompt.kind == PromptKind::Secret),
+            "{seen:?}"
+        );
+        transport.close().await;
+        Ok(())
+    })
+    .await?
 }
 
 #[tokio::test]
@@ -77,11 +174,14 @@ async fn ssh_master_and_probe() -> TestResult {
         }
         // The cached probe and the live master are reused rather than relaunched.
         assert_eq!(transport.probe().await?, probe);
-        let masters = std::fs::read_dir(home.path().join("run/ssh"))?
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".log"))
-            .count();
-        assert_eq!(masters, 1);
+        #[cfg(unix)]
+        {
+            let masters = std::fs::read_dir(home.path().join("run/ssh"))?
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".log"))
+                .count();
+            assert_eq!(masters, 1);
+        }
         transport.close().await;
         Ok(())
     })

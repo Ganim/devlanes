@@ -1,5 +1,7 @@
 //! Windows Terminal launcher: a new tab in the most recent window,
-//! `wt.exe -w 0 new-tab --inheritEnvironment --startingDirectory <dir> -- <command>`.
+//! `wt.exe -w 0 new-tab --inheritEnvironment --startingDirectory <dir> -- <command>`
+//! on Windows, and from inside WSL a tab that runs the command in the same
+//! distro through `wsl.exe`.
 
 use devlanes_term::{Invocation, LaunchError, LaunchRequest, TerminalLauncher};
 
@@ -13,35 +15,30 @@ impl TerminalLauncher for WindowsTerminal {
         "windows-terminal"
     }
 
-    /// Plans a tab in the most recently used window (`-w 0`), or a new window
-    /// when none is open. `wt.exe` hands its environment to the tab's command,
-    /// so the request's `env` is set on it. `--inheritEnvironment` is the
-    /// default for a tab with a command line since Windows Terminal 1.18, but
-    /// a profile's `compatibility.reloadEnvironmentVariables` can change the
-    /// default; the flag wins over the profile.
+    /// Plans [`native_invocation`].
+    #[cfg(windows)]
     fn invocation(&self, request: &LaunchRequest) -> Result<Invocation, LaunchError> {
-        let command = request.require_command()?;
-        let mut args: Vec<String> = [
-            "-w",
-            "0",
-            "new-tab",
-            "--inheritEnvironment",
-            "--startingDirectory",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-        args.push(escape(&request.cwd_arg()));
-        if let Some(title) = &request.title {
-            args.extend(["--title".into(), escape(title)]);
+        native_invocation(request)
+    }
+
+    /// Inside WSL with interop, plans [`wsl_invocation`] for this distro;
+    /// elsewhere on Linux there is no Windows Terminal.
+    #[cfg(target_os = "linux")]
+    fn invocation(&self, request: &LaunchRequest) -> Result<Invocation, LaunchError> {
+        match devlanes_sys::wsl() {
+            Some(wsl) if wsl.interop => wsl_invocation(request, wsl.distro.as_deref()),
+            _ => Err(LaunchError::Unsupported {
+                terminal: "Windows Terminal",
+            }),
         }
-        // Everything after `--` is the tab's command line, even words that
-        // look like wt options.
-        args.push("--".into());
-        args.extend(command.iter().map(|word| escape(word)));
-        // wt.exe hands the request to the running Terminal and exits, so its
-        // status is worth waiting for.
-        Ok(Invocation::new("wt.exe", args, true).with_env(&request.env))
+    }
+
+    /// Windows Terminal runs only on Windows, and from WSL.
+    #[cfg(not(any(windows, target_os = "linux")))]
+    fn invocation(&self, _request: &LaunchRequest) -> Result<Invocation, LaunchError> {
+        Err(LaunchError::Unsupported {
+            terminal: "Windows Terminal",
+        })
     }
 
     /// The `wt.exe` App Execution Alias on `PATH`, which Windows Terminal
@@ -51,15 +48,94 @@ impl TerminalLauncher for WindowsTerminal {
         devlanes_term::on_path("wt")
     }
 
-    /// Windows Terminal exists only on Windows.
-    #[cfg(not(windows))]
+    /// Inside WSL with interop, `wt.exe` on `PATH`: WSL appends the Windows
+    /// `PATH`, alias directory included, unless `appendWindowsPath` is off in
+    /// `/etc/wsl.conf`.
+    #[cfg(target_os = "linux")]
+    fn available(&self) -> bool {
+        devlanes_sys::wsl().is_some_and(|wsl| wsl.interop) && devlanes_term::on_path("wt.exe")
+    }
+
+    /// Windows Terminal runs only on Windows, and from WSL.
+    #[cfg(not(any(windows, target_os = "linux")))]
     fn available(&self) -> bool {
         false
     }
 }
 
+/// A tab in the most recently used window (`-w 0`), or a new window when none
+/// is open. `wt.exe` hands its environment to the tab's command, so the
+/// request's `env` is set on it. `--inheritEnvironment` is the default for a
+/// tab with a command line since Windows Terminal 1.18, but a profile's
+/// `compatibility.reloadEnvironmentVariables` can change the default; the flag
+/// wins over the profile.
+#[cfg(any(windows, test))]
+fn native_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> {
+    let command = request.require_command()?;
+    let mut args: Vec<String> = [
+        "-w",
+        "0",
+        "new-tab",
+        "--inheritEnvironment",
+        "--startingDirectory",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    args.push(escape(&request.cwd_arg()));
+    if let Some(title) = &request.title {
+        args.extend(["--title".into(), escape(title)]);
+    }
+    // Everything after `--` is the tab's command line, even words that look
+    // like wt options.
+    args.push("--".into());
+    args.extend(command.iter().map(|word| escape(word)));
+    // wt.exe hands the request to the running Terminal and exits, so its
+    // status is worth waiting for.
+    Ok(Invocation::new("wt.exe", args, true).with_env(&request.env))
+}
+
+/// The tab for a request made inside WSL: `wt.exe -w 0 new-tab [--title <title>]
+/// -- wsl.exe [-d <distro>] --cd <cwd> --exec [env K=V...] <command>`.
+///
+/// `--exec` runs the command without the distro's shell, which would split
+/// and expand the words again (`wsl.exe -- <command>` joins them for
+/// `$SHELL -c`). The working directory is the Linux path, which `--cd` takes as
+/// is. Without a distro name (`WSL_DISTRO_NAME` unset) the tab opens the
+/// default distro. The request's `env` reaches the command through `env`,
+/// because Windows does not pass its environment into WSL.
+#[cfg(any(target_os = "linux", test))]
+fn wsl_invocation(
+    request: &LaunchRequest,
+    distro: Option<&str>,
+) -> Result<Invocation, LaunchError> {
+    let command = request.require_command()?;
+    let mut args: Vec<String> = ["-w", "0", "new-tab"].map(str::to_owned).to_vec();
+    if let Some(title) = &request.title {
+        args.extend(["--title".into(), escape(title)]);
+    }
+    // wt would read `-d` and `--cd` as its own options without `--`.
+    args.extend(["--".into(), "wsl.exe".into()]);
+    if let Some(distro) = distro {
+        args.extend(["-d".into(), escape(distro)]);
+    }
+    args.extend(["--cd".into(), escape(&request.cwd_arg()), "--exec".into()]);
+    if !request.env.is_empty() {
+        args.push("env".into());
+        args.extend(
+            request
+                .env
+                .iter()
+                .map(|(key, value)| escape(&format!("{key}={value}"))),
+        );
+    }
+    args.extend(command.iter().map(|word| escape(word)));
+    Ok(Invocation::new("wt.exe", args, true))
+}
+
 /// Escapes `;` as `\;`. wt.exe splits its arguments into subcommands at every
 /// `;`, also inside `--` and quoted words, and turns `\;` back into `;`.
+#[cfg(any(windows, target_os = "linux", test))]
 fn escape(word: &str) -> String {
     word.replace(';', r"\;")
 }
@@ -84,9 +160,103 @@ mod tests {
         }
     }
 
+    /// What the TUI asks for inside WSL: `env DEVLANES_HOME=...` already leads
+    /// the command, and `env` stays empty.
+    fn wsl_request() -> LaunchRequest {
+        LaunchRequest {
+            cwd: "/home/acme/src/acme lanes".into(),
+            command: vec![
+                "env".into(),
+                "DEVLANES_HOME=/home/acme/.devlanes".into(),
+                "/home/acme/.local/bin/devlanes".into(),
+                "attach".into(),
+                "acme@2:api".into(),
+            ],
+            title: Some("acme@2:api".into()),
+            env: Vec::new(),
+        }
+    }
+
+    /// The tab runs `wsl.exe` in this distro at the Linux directory, without a
+    /// shell, after `--` so wt does not take `-d` and `--cd` as its own.
+    #[test]
+    fn wsl_plans_a_tab_in_the_same_distro() -> Result<(), LaunchError> {
+        let invocation = wsl_invocation(&wsl_request(), Some("Ubuntu"))?;
+        assert_eq!(invocation.program, "wt.exe");
+        assert!(invocation.wait);
+        assert!(invocation.env.is_empty());
+        assert_eq!(
+            invocation.args,
+            [
+                "-w",
+                "0",
+                "new-tab",
+                "--title",
+                "acme@2:api",
+                "--",
+                "wsl.exe",
+                "-d",
+                "Ubuntu",
+                "--cd",
+                "/home/acme/src/acme lanes",
+                "--exec",
+                "env",
+                "DEVLANES_HOME=/home/acme/.devlanes",
+                "/home/acme/.local/bin/devlanes",
+                "attach",
+                "acme@2:api",
+            ]
+        );
+        Ok(())
+    }
+
+    /// Without a distro name the default distro opens; variables in `env` go
+    /// through `env`, and `;` is escaped everywhere.
+    #[test]
+    fn wsl_without_distro_with_env_and_semicolons() -> Result<(), LaunchError> {
+        let invocation = wsl_invocation(
+            &LaunchRequest {
+                cwd: "/src/a;b".into(),
+                command: vec!["sh".into(), "-c".into(), "echo one;two".into()],
+                title: None,
+                env: vec![("DEVLANES_HOME".into(), "/x;y".into())],
+            },
+            None,
+        )?;
+        assert_eq!(
+            invocation.args,
+            [
+                "-w",
+                "0",
+                "new-tab",
+                "--",
+                "wsl.exe",
+                "--cd",
+                r"/src/a\;b",
+                "--exec",
+                "env",
+                r"DEVLANES_HOME=/x\;y",
+                "sh",
+                "-c",
+                r"echo one\;two",
+            ]
+        );
+        assert!(matches!(
+            wsl_invocation(
+                &LaunchRequest {
+                    command: Vec::new(),
+                    ..wsl_request()
+                },
+                None
+            ),
+            Err(LaunchError::EmptyCommand)
+        ));
+        Ok(())
+    }
+
     #[test]
     fn plans_a_new_tab_in_the_recent_window() -> Result<(), LaunchError> {
-        let invocation = WindowsTerminal.invocation(&request())?;
+        let invocation = native_invocation(&request())?;
         assert_eq!(invocation.program, "wt.exe");
         assert!(invocation.wait);
         assert_eq!(
@@ -113,7 +283,7 @@ mod tests {
     /// A `;` anywhere would start a second wt subcommand.
     #[test]
     fn escapes_semicolons_in_every_word() -> Result<(), LaunchError> {
-        let invocation = WindowsTerminal.invocation(&LaunchRequest {
+        let invocation = native_invocation(&LaunchRequest {
             cwd: r"C:\src\a;b".into(),
             command: vec!["cmd.exe".into(), "/c".into(), "echo one;two".into()],
             title: Some("x;y".into()),
@@ -138,7 +308,7 @@ mod tests {
 
     #[test]
     fn untitled_requests_omit_the_title_flag() -> Result<(), LaunchError> {
-        let invocation = WindowsTerminal.invocation(&LaunchRequest {
+        let invocation = native_invocation(&LaunchRequest {
             title: None,
             ..request()
         })?;
@@ -148,11 +318,22 @@ mod tests {
 
     #[test]
     fn empty_command_is_rejected() {
-        let result = WindowsTerminal.invocation(&LaunchRequest {
+        let result = native_invocation(&LaunchRequest {
             command: Vec::new(),
             ..request()
         });
         assert!(matches!(result, Err(LaunchError::EmptyCommand)));
+    }
+
+    /// Outside Windows and WSL there is nothing to launch.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unsupported_on_macos() {
+        assert!(!WindowsTerminal.available());
+        assert!(matches!(
+            WindowsTerminal.invocation(&wsl_request()),
+            Err(LaunchError::Unsupported { .. })
+        ));
     }
 
     /// Opens a real tab whose command writes the variable and a `;` to a file:

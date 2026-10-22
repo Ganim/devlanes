@@ -2048,7 +2048,9 @@ impl Inner {
                 .retain(|failure| !withdrawn.contains_key(&failure.unit));
         }
         let branch = cx.lane.st().branch.clone();
-        let warnings = self.ca_warnings(&cx.reference, &cx.lane.st());
+        let mut warnings = self.ca_warnings(&cx.reference, &cx.lane.st());
+        let path = cx.lane.st().path.clone();
+        warnings.extend(self.windows_drive_warning(&cx.reference, &path).await);
         for warning in &warnings {
             self.bus.emit(
                 events::LANE_WARNING,

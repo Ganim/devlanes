@@ -23,6 +23,9 @@ use devlanes_sys::NoWindow;
 use devlanes_trust::{CaCertificate, TrustStatus, TrustStore, TrustTarget};
 use serde_json::{Value, json};
 
+// Windows routes the TLD with an NRPT rule instead of a resolver file.
+#[cfg(windows)]
+use crate::resolver_nrpt::apply as resolver_install;
 use crate::{driver::rpc_error, output::emit};
 
 /// Name shown in keychains and NSS databases.
@@ -205,7 +208,8 @@ pub(crate) fn mkcert_selected(paths: &Paths) -> bool {
     matches!(config.tls.ca, devlanes_config::CaKind::Mkcert)
 }
 
-/// Configured trust targets, defaulting to the system store; mobile targets are refused.
+/// Configured trust targets, defaulting to [`default_targets`]; mobile targets
+/// are refused.
 fn targets(paths: &Paths) -> Vec<TrustTarget> {
     let config = devlanes_config::load_user(paths.home.join("config.yaml")).unwrap_or_default();
     let configured: Vec<TrustTarget> = config
@@ -220,9 +224,21 @@ fn targets(paths: &Paths) -> Vec<TrustTarget> {
         })
         .collect();
     if configured.is_empty() {
-        vec![TrustTarget::System]
+        default_targets(devlanes_sys::wsl())
     } else {
         configured
+    }
+}
+
+/// The targets of an unset `tls.trust`: the system store, plus the Windows user
+/// store inside WSL with interop, because a browser on Windows is the usual
+/// client of a daemon in the distro. Without interop that store is out of
+/// reach, and `doctor` says why.
+fn default_targets(wsl: Option<&devlanes_sys::WslInfo>) -> Vec<TrustTarget> {
+    if wsl.is_some_and(|wsl| wsl.interop) {
+        vec![TrustTarget::System, TrustTarget::Windows]
+    } else {
+        vec![TrustTarget::System]
     }
 }
 
@@ -264,7 +280,9 @@ fn store(
                 std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"),
             )
         })?;
-        LinuxTrust::new(Arc::new(devlanes_trust::SystemExecutor), home, privilege).store(target)
+        LinuxTrust::new(Arc::new(devlanes_trust::SystemExecutor), home, privilege)
+            .with_windows(devlanes_trust_linux::WindowsInterop::detect())
+            .store(target)
     }
     #[cfg(windows)]
     {
@@ -691,10 +709,6 @@ pub(crate) fn resolver_tld(paths: &Paths) -> Option<String> {
         .filter(|tld| !tld.is_empty())
 }
 
-// Windows routes the TLD with an NRPT rule instead of a resolver file.
-#[cfg(windows)]
-use crate::resolver_nrpt::apply as resolver_install;
-
 /// `certs trust --resolver` writes the OS resolver file for `hostnames.tld` with
 /// sudo; `certs untrust --resolver` removes the file the last install recorded.
 /// Either way the OS is told to reload. Files without the devlanes marker are
@@ -894,6 +908,23 @@ async fn unlock(runtime: &Runtime, context: Context) -> Result<u8, RpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    /// An unset `tls.trust` adds the Windows store only inside WSL with interop.
+    fn default_targets_add_windows_inside_wsl() {
+        let wsl = |interop| devlanes_sys::WslInfo {
+            distro: Some("Ubuntu".into()),
+            version: 2,
+            interop,
+            system32: None,
+        };
+        assert_eq!(default_targets(None), [TrustTarget::System]);
+        assert_eq!(
+            default_targets(Some(&wsl(true))),
+            [TrustTarget::System, TrustTarget::Windows]
+        );
+        assert_eq!(default_targets(Some(&wsl(false))), [TrustTarget::System]);
+    }
 
     #[test]
     /// Doctor's trust entries name the store and its state.

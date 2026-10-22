@@ -38,6 +38,7 @@ mod spawn_error;
 mod stream;
 pub mod units;
 pub mod update;
+mod wsl;
 
 pub use engine::{Engine, EngineOptions};
 

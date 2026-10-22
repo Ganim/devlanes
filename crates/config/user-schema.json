@@ -654,7 +654,7 @@
         },
         {
           "const": "windows-terminal",
-          "description": "Open a tab in the most recent Windows Terminal window on Windows.",
+          "description": "Open a tab in the most recent Windows Terminal window, on Windows or from inside WSL.",
           "examples": [
             "windows-terminal"
           ],
@@ -748,7 +748,7 @@
             }
           ],
           "default": null,
-          "description": "Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, Windows Terminal on Windows when installed, else the first one installed.",
+          "description": "Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, Windows Terminal on Windows and inside WSL when installed, else the first one installed.",
           "examples": [
             "ghostty",
             "iterm2"
@@ -790,7 +790,7 @@
         },
         "trust": {
           "default": [],
-          "description": "Trust stores that should accept the local CA; mobile targets are ignored with a warning for now.",
+          "description": "Trust stores that should accept the local CA; unset means system, plus windows inside WSL. Mobile targets are ignored with a warning for now.",
           "examples": [
             [
               "system",
@@ -798,6 +798,10 @@
             ],
             [
               "chrome"
+            ],
+            [
+              "system",
+              "windows"
             ]
           ],
           "items": {
@@ -807,6 +811,7 @@
               "system",
               "firefox",
               "chrome",
+              "windows",
               "ios-simulator",
               "android-emulator"
             ]
@@ -822,6 +827,7 @@
         "system",
         "firefox",
         "chrome",
+        "windows",
         "ios-simulator",
         "android-emulator"
       ],
@@ -847,6 +853,14 @@
           "description": "Trust the local CA in Chrome's certificate database where required.",
           "examples": [
             "chrome"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "windows",
+          "description": "Trust the local CA in the Windows user certificate store, for Windows browsers; from inside WSL, or on Windows, where it is the system store.",
+          "examples": [
+            "windows"
           ],
           "type": "string"
         },

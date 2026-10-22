@@ -579,6 +579,14 @@ pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
     let paths = Paths::discover()
         .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
     let manager = Manager::current();
+    // WSL distros run without systemd unless wsl.conf turns it on; systemctl would
+    // fail later with a message about the bus, after the unit file was written.
+    if manager == Manager::Systemd
+        && devlanes_sys::wsl().is_some()
+        && !Path::new("/run/systemd/system").is_dir()
+    {
+        return Err(RpcError::new("wsl_systemd_off", json!({}), 1));
+    }
     let path = manager.path(&user_home()?);
     let contents = manager.definition(&exe, &paths.home);
     let previous = tokio::fs::read_to_string(&path).await.ok();

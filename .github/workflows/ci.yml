@@ -79,9 +79,8 @@ jobs:
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12 "$RUNNER_TEMP"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - run: actionlint
-      - run: shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh agent-plugin/scripts/*.sh e2e/ssh/run.sh
+      - run: shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh e2e/ssh/run.sh
       - run: sh packaging/scripts/check.sh
-      - run: sh agent-plugin/scripts/test-block-background.sh
   # On Windows, tests that need a later porting step are ignored.
   e2e:
     strategy:
