@@ -56,8 +56,13 @@ impl LogReader {
         if query.around.is_some() && query.cursor.is_some() {
             return Err(Error::Query("around and cursor cannot be combined".into()));
         }
-        if query.tail == Some(0) || query.max_bytes == Some(0) {
-            return Err(Error::Query("tail and byte budget must be positive".into()));
+        if query.tail == Some(0) || query.head == Some(0) || query.max_bytes == Some(0) {
+            return Err(Error::Query(
+                "tail, head and byte budget must be positive".into(),
+            ));
+        }
+        if query.tail.is_some() && query.head.is_some() {
+            return Err(Error::Query("head and tail cannot be combined".into()));
         }
         let since = query
             .since
@@ -96,7 +101,11 @@ impl LogReader {
         }
         let page = PageBuilder::new(
             query.max_bytes.unwrap_or(1024 * 1024).min(MAX_QUERY_BYTES),
-            query.tail.unwrap_or(1000).min(MAX_QUERY_LINES),
+            query
+                .tail
+                .or(query.head)
+                .unwrap_or(1000)
+                .min(MAX_QUERY_LINES),
             backwards,
         );
         let empty = LogLine {
@@ -105,6 +114,7 @@ impl LogReader {
             timestamp_ms: u64::MAX,
             text: String::new(),
             level: Some("error".into()),
+            styled: None,
         };
         if encoded_size(&empty)? > page.max_bytes {
             return Err(Error::Query(
@@ -129,6 +139,7 @@ impl LogReader {
             },
             pending: VecDeque::new(),
             trailing: 0,
+            styled: query.styled,
         };
         let candidates = self.segments.iter().filter(|segment| {
             segment.records > 0
@@ -187,12 +198,17 @@ struct Scan {
     /// Non-matching neighbours seen just before the next match, in scan order.
     pending: VecDeque<LogLine>,
     trailing: usize,
+    /// Keep [`LogLine::styled`]; without it the page budget counts plain text.
+    styled: bool,
 }
 
 impl Scan {
     /// Feeds one record in scan order. Context is symmetric, so a backward scan
     /// selects the same lines as a forward one. False means the page is full.
-    fn visit(&mut self, line: LogLine) -> Result<bool> {
+    fn visit(&mut self, mut line: LogLine) -> Result<bool> {
+        if !self.styled {
+            line.styled = None;
+        }
         if line.seq < self.lower
             || line.seq > self.upper
             || self.since.is_some_and(|s| line.timestamp_ms < s)

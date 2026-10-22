@@ -12,7 +12,7 @@ use devlanes_tui::{
     start::{StartExit, StartFrame, StartHandoff},
 };
 use futures_util::stream;
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::Terminal;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -162,9 +162,13 @@ async fn a_successful_start_ends_ready() -> TestResult {
     Ok(())
 }
 
-/// Runs the loop on a start whose remaining frames are `frames`, then presses `quit`.
+/// Runs the loop on a start whose remaining frames are `frames`, waits until
+/// `shown` (what the last frame puts in the header) is drawn, then presses
+/// `quit`. The key and start streams stay open until the loop ended, so it
+/// ends on the key alone.
 async fn run(
     frames: Vec<StartFrame>,
+    shown: &str,
     quit: KeyEvent,
 ) -> Result<(StartExit, Arc<FakeApi>), Box<dyn std::error::Error>> {
     let api = Arc::new(FakeApi::with_lanes(mixed_lanes()));
@@ -178,19 +182,25 @@ async fn run(
         frames: vec![phase("infra", "started")],
         stream: start_rx,
     };
-    let script = async move {
-        for frame in frames {
-            start_tx.send(frame).await.ok();
+    let backend = crate::SharedBackend::new(100, 24);
+    let script = {
+        let backend = backend.clone();
+        async move {
+            for frame in frames {
+                start_tx.send(frame).await.ok();
+            }
+            backend.wait_for(shown).await;
+            keys_tx.send(Ok(TermEvent::Key(quit))).await.ok();
+            (keys_tx, start_tx)
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        keys_tx.send(Ok(TermEvent::Key(quit))).await.ok();
-        // Keeps the start stream open until the loop quit.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        drop(start_tx);
     };
-    let mut terminal = Terminal::new(TestBackend::new(100, 24))?;
+    let mut terminal = Terminal::new(backend)?;
     let driver_api: Arc<dyn DaemonApi> = api.clone();
-    let options = Options::default();
+    // q closes at once; the quit dialog has its own tests.
+    let options = Options {
+        on_quit: Some("keep".into()),
+        ..crate::hermetic_options()
+    };
     let run = drive_start(
         &mut terminal,
         driver_api,
@@ -199,7 +209,7 @@ async fn run(
         Box::new(std::io::sink()),
         handoff,
     );
-    let (exit, ()) =
+    let (exit, _streams) =
         tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(run, script) }).await?;
     Ok((exit?, api))
 }
@@ -207,7 +217,12 @@ async fn run(
 #[tokio::test]
 async fn quitting_after_a_failure_reports_it_and_stops_nothing() -> TestResult {
     let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-    let (exit, api) = run(vec![StartFrame::Done(Ok(failed_result()))], q).await?;
+    let (exit, api) = run(
+        vec![StartFrame::Done(Ok(failed_result()))],
+        "✕ start acme@1:api failed",
+        q,
+    )
+    .await?;
     assert_eq!(exit, StartExit::Failed);
     let calls = api.calls();
     assert!(
@@ -222,7 +237,12 @@ async fn quitting_after_a_failure_reports_it_and_stops_nothing() -> TestResult {
 #[tokio::test]
 async fn ctrl_c_before_the_result_leaves_the_start_pending() -> TestResult {
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    let (exit, api) = run(vec![phase("services", "started")], ctrl_c).await?;
+    let (exit, api) = run(
+        vec![phase("services", "started")],
+        "starting acme@1: 0 of 1 services",
+        ctrl_c,
+    )
+    .await?;
     assert_eq!(exit, StartExit::Pending);
     assert!(!api.calls().iter().any(|c| c.starts_with("Stop")));
     Ok(())

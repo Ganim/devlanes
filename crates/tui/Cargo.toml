@@ -13,11 +13,18 @@ base64 = "0.22"
 bytes.workspace = true
 crossterm = { version = "0.29", features = ["event-stream"] }
 devlanes-client = { path = "../client" }
+# The daemon page words doctor checks exactly as `devlanes doctor` does.
+devlanes-cli = { path = "../cli" }
+# The options page reads the user config schema and edits config.yaml in place.
+devlanes-config = { path = "../config" }
+# `path_starts_with`, which compares Windows paths without case.
 devlanes-core = { path = "../core" }
 devlanes-proto = { path = "../proto" }
 devlanes-sys = { path = "../sys" }
 devlanes-term = { path = "../term" }
 futures-util.workspace = true
+# daemon.log timestamps shown in local time.
+jiff = "0.2"
 ratatui = "0.30"
 serde.workspace = true
 serde_json.workspace = true
@@ -31,7 +38,7 @@ vt100 = "0.18"
 [dev-dependencies]
 # The `screens` example draws every TUI page to PNG for design review.
 ab_glyph = "0.2"
-insta = "1"
+insta = { version = "1", features = ["filters"] }
 png = "0.17"
 tempfile.workspace = true
 

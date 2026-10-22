@@ -446,6 +446,23 @@ fn block(
             canvas.rect(left, top, w / 2, h, color);
             return true;
         }
+        // The halves and quadrants of the menu banner.
+        '▐' => {
+            canvas.rect(left + w / 2, top, w - w / 2, h, color);
+            return true;
+        }
+        '▀' => {
+            canvas.rect(left, top, w, h / 2, color);
+            return true;
+        }
+        '▖' => {
+            canvas.rect(left, top + h / 2, w / 2, h - h / 2, color);
+            return true;
+        }
+        '▗' => {
+            canvas.rect(left + w / 2, top + h / 2, w - w / 2, h - h / 2, color);
+            return true;
+        }
         _ => return false,
     };
     let filled = h * eighths / 8;

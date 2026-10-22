@@ -1,17 +1,22 @@
 //! The devlanes terminal UI: a daemon client like the CLI, with a lane tree,
 //! a live terminal pane for one unit, a resource monitor and a daemon tab.
 //!
-//! Quitting only closes connections. Units keep running in the daemon.
+//! Quitting closes connections and units keep running in the daemon, unless
+//! the user chooses to stop the project's lanes on the way out.
 
 pub mod api;
 pub mod app;
+pub mod banner;
+pub mod daemonlog;
 pub mod doctor;
 pub mod graph;
 pub mod input;
 pub mod logfile;
+pub mod menu;
 pub mod monitor;
 mod runtime;
 pub mod screen;
+pub mod settings;
 pub mod start;
 pub mod text;
 pub mod theme;
@@ -26,8 +31,7 @@ pub use api::{
     LaneMetrics, Metrics, MetricsQuery, SystemMetrics, UnitMetrics, Window,
 };
 pub use devlanes_client::Paths;
-pub use devlanes_term::TerminalLauncher;
-pub use runtime::{TerminalGuard, drive, drive_start, terminal_command, terminal_env};
+pub use runtime::{TerminalGuard, drive, drive_start};
 
 /// Failures that end the TUI before or while it runs.
 #[derive(Debug, thiserror::Error)]
@@ -43,13 +47,9 @@ pub enum Error {
     Panicked,
 }
 
-/// Integrations supplied by the composition root.
+/// What the composition root reads from the user config.
 #[derive(Default, Clone)]
 pub struct Options {
-    /// Every available launcher; the binary registers them.
-    pub launchers: Vec<Arc<dyn TerminalLauncher>>,
-    /// The user config's terminal app, matched against [`TerminalLauncher::name`].
-    pub terminal: Option<String>,
     /// How to draw start progress in the tab's progress bar, from
     /// [`devlanes_term::progress_support`]; `None` draws nothing.
     pub progress: Option<devlanes_term::Wrap>,
@@ -57,6 +57,20 @@ pub struct Options {
     pub theme: Option<String>,
     /// `tui.glyphs` from the user config: `auto` (or unset), `unicode` or `ascii`.
     pub glyphs: Option<String>,
+    /// `tui.on_quit` from the user config: `ask` (or unset), `keep` or `stop`.
+    pub on_quit: Option<String>,
+    /// The per-user service definition as `devlanes doctor` reads it
+    /// (`{manager, path, installed, stop_window_s, ...}`), for the daemon
+    /// page's stop-window check; `None` leaves that check out.
+    pub service: Option<serde_json::Value>,
+    /// The environment the TUI reads (`NO_COLOR`, `COLORTERM`, the locale,
+    /// `TMUX`, `HOME`); `None` reads the process's. Tests pass their own so
+    /// the machine they run on does not show in what they draw.
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    /// Where daemon.log times are shown; `None` is the system's zone.
+    pub time_zone: Option<jiff::tz::TimeZone>,
+    /// The directory whose lane opens first; `None` is the process's.
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 impl Options {
@@ -64,84 +78,25 @@ impl Options {
     /// the user config.
     pub fn theme(&self) -> theme::Theme {
         theme::Theme::detect(self.theme.as_deref(), self.glyphs.as_deref(), |key| {
-            std::env::var(key).ok()
+            self.var(key)
         })
     }
 
-    /// [`Options::pick_launcher_with`] with the process environment.
-    fn pick_launcher(&self) -> Result<Arc<dyn TerminalLauncher>, String> {
-        self.pick_launcher_with(|key| std::env::var(key).ok())
-    }
-
-    /// The configured launcher; without one, the terminal this TUI runs in when
-    /// a launcher for it is registered, else Terminal.app where it exists, else
-    /// the first registered launcher that is installed. Checks the filesystem,
-    /// so the runtime calls it from a blocking task.
-    fn pick_launcher_with(
-        &self,
-        env: impl Fn(&str) -> Option<String>,
-    ) -> Result<Arc<dyn TerminalLauncher>, String> {
-        if self.launchers.is_empty() {
-            return Err("this build can't open terminal windows".into());
+    /// An environment variable from [`Options::env`], else the process's.
+    pub fn var(&self, key: &str) -> Option<String> {
+        match &self.env {
+            Some(env) => env.get(key).cloned(),
+            None => std::env::var(key).ok(),
         }
-        let names: Vec<&str> = self.launchers.iter().map(|l| l.name()).collect();
-        if let Some(wanted) = &self.terminal {
-            return self
-                .launchers
-                .iter()
-                .find(|launcher| launcher.name().eq_ignore_ascii_case(wanted))
-                .cloned()
-                .ok_or_else(|| {
-                    format!(
-                        "unknown terminal {wanted}; pick one of {}",
-                        names.join(", ")
-                    )
-                });
-        }
-        let named = |name: &str| self.launchers.iter().find(|l| l.name() == name);
-        // The terminal the user is in now is the one they expect a new window in.
-        let current = current_terminal(&env).and_then(named);
-        let preferred = named("terminal").filter(|launcher| launcher.available());
-        current
-            .or(preferred)
-            .or_else(|| self.launchers.iter().find(|launcher| launcher.available()))
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "no supported terminal app found; set terminal in ~/.devlanes/config.yaml to one of {}",
-                    names.join(", ")
-                )
-            })
     }
 }
 
-/// The launcher name of the terminal this process runs in, from the variables
-/// each terminal sets. `LC_TERMINAL` and the terminals' own variables survive
-/// tmux and ssh, where `TERM_PROGRAM` names tmux or nothing.
-fn current_terminal(env: &impl Fn(&str) -> Option<String>) -> Option<&'static str> {
-    let set = |key: &str| env(key).is_some_and(|value| !value.is_empty());
-    let program = env("TERM_PROGRAM").unwrap_or_default();
-    Some(match program.as_str() {
-        "iTerm.app" => "iterm2",
-        "ghostty" => "ghostty",
-        "WezTerm" => "wezterm",
-        "Apple_Terminal" => "terminal",
-        _ if env("LC_TERMINAL").as_deref() == Some("iTerm2") => "iterm2",
-        _ if set("KITTY_WINDOW_ID") || env("TERM").as_deref() == Some("xterm-kitty") => "kitty",
-        _ if set("GHOSTTY_RESOURCES_DIR") => "ghostty",
-        _ if set("WEZTERM_EXECUTABLE") || set("WEZTERM_PANE") => "wezterm",
-        // Windows Terminal sets no TERM_PROGRAM.
-        _ if set("WT_SESSION") => "windows-terminal",
-        _ => return None,
-    })
-}
-
-/// Opens the TUI for bare `devlanes` and `devlanes ui`, without terminal launchers.
+/// Opens the TUI for bare `devlanes` and `devlanes ui` with default options.
 pub async fn run(paths: Paths) -> Result<(), Error> {
     run_with(paths, Options::default()).await
 }
 
-/// Opens the TUI with launchers and the configured terminal.
+/// Opens the TUI with the user config's options.
 ///
 /// Connects (spawning the daemon when needed) before touching the terminal,
 /// so connection errors print normally.
@@ -194,114 +149,4 @@ pub async fn run_start(
     .await;
     drop(guard);
     result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use devlanes_term::{Invocation, LaunchError, LaunchRequest};
-
-    /// A launcher that is installed or not, by construction.
-    struct Fake(&'static str, bool);
-
-    impl TerminalLauncher for Fake {
-        fn name(&self) -> &'static str {
-            self.0
-        }
-        fn invocation(&self, _: &LaunchRequest) -> Result<Invocation, LaunchError> {
-            Err(LaunchError::EmptyCommand)
-        }
-        fn available(&self) -> bool {
-            self.1
-        }
-    }
-
-    fn options(terminal: Option<&str>, launchers: &[(&'static str, bool)]) -> Options {
-        Options {
-            launchers: launchers
-                .iter()
-                .map(|(name, there)| Arc::new(Fake(name, *there)) as Arc<dyn TerminalLauncher>)
-                .collect(),
-            terminal: terminal.map(str::to_owned),
-            ..Options::default()
-        }
-    }
-
-    #[test]
-    fn default_launcher_is_terminal_app_else_the_first_installed() {
-        // Outside any known terminal, whatever runs the tests.
-        let picked = |o: Options| o.pick_launcher_with(|_| None).map(|l| l.name());
-        // macOS: Terminal.app is always there and wins over other installed apps.
-        let mac = [("iterm2", true), ("kitty", true), ("terminal", true)];
-        assert_eq!(picked(options(None, &mac)), Ok("terminal"));
-        // Linux: Terminal.app and iTerm2 are absent; the first installed one wins.
-        let linux = [
-            ("iterm2", false),
-            ("ghostty", false),
-            ("kitty", true),
-            ("terminal", false),
-        ];
-        assert_eq!(picked(options(None, &linux)), Ok("kitty"));
-        // A configured terminal is used as named, installed or not.
-        assert_eq!(picked(options(Some("Ghostty"), &linux)), Ok("ghostty"));
-        assert!(picked(options(Some("xterm"), &linux)).is_err());
-        assert!(picked(options(None, &[("terminal", false)])).is_err());
-    }
-
-    #[test]
-    fn the_terminal_the_tui_runs_in_is_preferred() {
-        let mac = [
-            ("iterm2", true),
-            ("ghostty", true),
-            ("wezterm", true),
-            ("kitty", true),
-            ("terminal", true),
-        ];
-        let picked = |terminal: Option<&str>, pairs: &[(&str, &str)]| {
-            let env: Vec<(String, String)> = pairs
-                .iter()
-                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                .collect();
-            options(terminal, &mac)
-                .pick_launcher_with(|key| {
-                    env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
-                })
-                .map(|l| l.name())
-        };
-        for (pairs, expected) in [
-            (&[("TERM_PROGRAM", "iTerm.app")][..], "iterm2"),
-            (&[("TERM_PROGRAM", "ghostty")][..], "ghostty"),
-            (&[("TERM_PROGRAM", "WezTerm")][..], "wezterm"),
-            (&[("TERM_PROGRAM", "Apple_Terminal")][..], "terminal"),
-            (
-                &[("KITTY_WINDOW_ID", "3"), ("TERM", "xterm-kitty")][..],
-                "kitty",
-            ),
-            // Inside tmux TERM_PROGRAM says tmux; iTerm2 still sets LC_TERMINAL.
-            (
-                &[("TERM_PROGRAM", "tmux"), ("LC_TERMINAL", "iTerm2")][..],
-                "iterm2",
-            ),
-            (
-                &[("TERM_PROGRAM", "tmux"), ("GHOSTTY_RESOURCES_DIR", "/x")][..],
-                "ghostty",
-            ),
-            // Unknown terminals fall back to the default.
-            (&[("TERM_PROGRAM", "vscode")][..], "terminal"),
-            (&[("WT_SESSION", "abc")][..], "terminal"),
-        ] {
-            assert_eq!(picked(None, pairs), Ok(expected), "{pairs:?}");
-        }
-        // An explicit choice in the user config still wins.
-        assert_eq!(
-            picked(Some("kitty"), &[("TERM_PROGRAM", "iTerm.app")]),
-            Ok("kitty")
-        );
-        // Windows Terminal is found by WT_SESSION where its launcher exists.
-        let windows = [("windows-terminal", true), ("wezterm", true)];
-        let picked = options(None, &windows)
-            .pick_launcher_with(|key| (key == "WT_SESSION").then(|| "abc".to_owned()))
-            .map(|l| l.name());
-        assert_eq!(picked, Ok("windows-terminal"));
-    }
 }

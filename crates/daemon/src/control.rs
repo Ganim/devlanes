@@ -792,7 +792,9 @@ impl Inner {
             project.st().last_env = Some(env);
         }
         // `--env` applies to this run only; the lane keeps its own overrides.
-        let resolved = self.resolve_overridden(&project, &lane, &run.env).await?;
+        let resolved = self
+            .resolve_task(&project, &lane, &run.task, &run.env)
+            .await?;
         if let Some(error) = resolved.errors.get(&format!("tasks.{}", run.task)) {
             return Err(crate::resolve::resolve_error(error));
         }
@@ -820,6 +822,10 @@ impl Inner {
         }
         let background = task.interactive || run.detach;
         if background {
+            // A previous run of the task stays listed until the new one replaces it.
+            let previous = unit
+                .as_ref()
+                .and_then(|unit| lane.st().units.get(unit).map(|rec| rec.host.clone()));
             let engine = self.clone();
             let actor = context.actor.clone();
             let name = run.task.clone();
@@ -828,9 +834,11 @@ impl Inner {
             // Ends with the daemon or a clean or reset of the lane; `stop` of the
             // task's unit ends it otherwise.
             let (adhoc, cancel) = lane.enter_adhoc(&self.shutdown).await;
+            // The run's error, or `None` once it ended without one.
+            let (ended, mut outcome) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
                 let _adhoc = adhoc;
-                let _ = engine
+                let result = engine
                     .run_task(
                         &task_project,
                         &task_lane,
@@ -843,17 +851,28 @@ impl Inner {
                         0,
                     )
                     .await;
+                let _ = ended.send(result.err());
             });
-            // The client attaches to this unit, so it must exist before we answer.
+            // The client attaches to this unit, so this run of it must exist before
+            // we answer; an earlier run that ended does not count, or the client
+            // would attach to its finished screen. A run that could not start (its
+            // previous run still going) answers with its error.
             if let Some(unit) = &unit {
                 for _ in 0..100 {
-                    if lane
-                        .st()
-                        .units
-                        .get(unit)
-                        .is_some_and(|rec| rec.host.is_alive() || rec.host.exit_outcome().is_some())
-                    {
+                    let spawned = lane.st().units.get(unit).is_some_and(|rec| {
+                        previous
+                            .as_ref()
+                            .is_none_or(|previous| !rec.host.same_run(previous))
+                    });
+                    if spawned {
                         break;
+                    }
+                    match outcome.try_recv() {
+                        Ok(Some(error)) => return Err(error),
+                        Ok(None) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                            break;
+                        }
+                        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
@@ -1188,25 +1207,10 @@ impl Inner {
         let known = crate::platforms::known(&self.integ.contributors);
         let path = file.clone();
         let shell = self.integ.shell.clone();
-        let user_file = self.opts.home.join("config.yaml");
         let (report, unknown) = tokio::task::spawn_blocking(move || {
             let config = devlanes_config::load_project_with::<OpaqueExtensions>(&path)?;
             let report = crate::registry::check_config(&config, &checks)?;
             let mut extra = crate::platforms::unknown(&config, &known);
-            // Read now, like doctor: the file may have changed since startup.
-            // Only settings this OS cannot honour (a macOS-only terminal on
-            // Windows); the user config's other warnings stay in doctor.
-            if user_file.exists() {
-                let (user, _) = devlanes_config::load_user_lenient(&user_file);
-                extra.extend(user.platform_warnings().into_iter().map(|w| {
-                    json!({
-                        "path": w.path,
-                        "message": w.message,
-                        "file": user_file,
-                        "code": "user_config",
-                    })
-                }));
-            }
             // Windows without Git for Windows: run strings go to cmd.exe.
             extra.extend(
                 devlanes_resolve::shell_warnings(&config, &shell)

@@ -27,7 +27,6 @@ const INTERNAL: &[&str] = &[
     // daemon's `message`).
     "unknown_platform",
     "shell_fallback",
-    "user_config",
 ];
 
 /// `.rs` files under `dir`, recursively.

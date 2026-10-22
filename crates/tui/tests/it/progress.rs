@@ -47,6 +47,20 @@ impl Captured {
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default()
     }
+
+    /// Waits up to 4 s until `text` was written after byte `from`.
+    async fn wait_for(&self, from: usize, text: &str) {
+        for _ in 0..400 {
+            if self
+                .text()
+                .get(from..)
+                .is_some_and(|after| after.contains(text))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 /// `acme@1` starting with one of its two services ready.
@@ -110,8 +124,10 @@ async fn the_loop_writes_the_bar_and_clears_it_on_quit() -> TestResult {
     }));
     let mut terminal = Terminal::new(TestBackend::new(100, 24))?;
     let driver_api: Arc<dyn DaemonApi> = api.clone();
+    let out = Captured::default();
     let script = {
         let api = Arc::clone(&api);
+        let out = out.clone();
         async move {
             for _ in 0..100 {
                 if api
@@ -122,15 +138,17 @@ async fn the_loop_writes_the_bar_and_clears_it_on_quit() -> TestResult {
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Quit once the bar for the starting lane was written.
+            out.wait_for(0, "\x1b]9;4;1;50\x1b\\").await;
             let quit = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
             keys_tx.send(Ok(TermEvent::Key(quit))).await.ok();
         }
     };
-    let out = Captured::default();
+    // q closes at once; the quit dialog has its own tests.
     let options = Options {
         progress: Some(Wrap::Bare),
-        ..Options::default()
+        on_quit: Some("keep".into()),
+        ..crate::hermetic_options()
     };
     let run = drive(
         &mut terminal,
@@ -150,6 +168,103 @@ async fn the_loop_writes_the_bar_and_clears_it_on_quit() -> TestResult {
 }
 
 #[tokio::test]
+async fn the_bar_survives_switching_lanes_and_a_resync_during_a_start() -> TestResult {
+    // acme@1 starts api and web; docs ran already and is not the start's.
+    let mut starting = half_started();
+    starting.units.push(unit("acme@1", "docs", "ready"));
+    let lanes: Vec<_> = mixed_lanes()
+        .into_iter()
+        .map(|l| {
+            if l.reference == "acme@1" {
+                starting.clone()
+            } else {
+                l
+            }
+        })
+        .collect();
+    let api = Arc::new(FakeApi::with_lanes(lanes));
+    let (keys_tx, keys_rx) = mpsc::channel::<std::io::Result<TermEvent>>(16);
+    let events = Box::pin(stream::unfold(keys_rx, |mut rx| async move {
+        rx.recv().await.map(|event| (event, rx))
+    }));
+    let mut terminal = Terminal::new(TestBackend::new(100, 24))?;
+    let driver_api: Arc<dyn DaemonApi> = api.clone();
+    let out = Captured::default();
+    let script = {
+        let api = Arc::clone(&api);
+        let out = out.clone();
+        async move {
+            let plan = json!({"lane": "acme@1", "phase": "services", "state": "started",
+                "start_id": 4, "units": ["api", "web"]});
+            for _ in 0..100 {
+                if api.emit(events::PHASE, plan.clone()).await {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // The plan is in: one of its two units is ready.
+            out.wait_for(0, "\x1b]9;4;1;50\x1b\\").await;
+            let press = |c| {
+                Ok(TermEvent::Key(KeyEvent::new(
+                    KeyCode::Char(c),
+                    KeyModifiers::NONE,
+                )))
+            };
+            // Back and forth between the lanes while it starts, and a resync
+            // (the subscriber fell behind) in the middle; its status reply is
+            // waited for.
+            for c in [']', '[', ']', '['] {
+                keys_tx.send(press(c)).await.ok();
+            }
+            let statuses = |n: usize| {
+                move |calls: &[String]| calls.iter().filter(|c| *c == "status").count() >= n
+            };
+            api.emit(events::RESYNC, json!({})).await;
+            crate::wait_for_calls(&api, statuses(2)).await;
+            // The start's next event, then a second resync: events are handled
+            // in order, so its status call means the phase event was handled.
+            api.emit(
+                events::PHASE,
+                json!({"lane": "acme@1", "phase": "services", "state": "progress", "start_id": 4}),
+            )
+            .await;
+            api.emit(events::RESYNC, json!({})).await;
+            crate::wait_for_calls(&api, statuses(3)).await;
+            // A key after all that writes the bar again, with the start's
+            // own share: one of its two units, not two of three.
+            let before = out.text().len();
+            keys_tx.send(press(']')).await.ok();
+            out.wait_for(before, "\x1b]9;4;1;").await;
+            let after = out.text()[before..].to_owned();
+            keys_tx.send(press('q')).await.ok();
+            after
+        }
+    };
+    let options = Options {
+        progress: Some(Wrap::Bare),
+        on_quit: Some("keep".into()),
+        ..crate::hermetic_options()
+    };
+    let run = drive(
+        &mut terminal,
+        driver_api,
+        &options,
+        events,
+        Box::new(out.clone()),
+    );
+    let (result, after) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(run, script) }).await?;
+    result?;
+    assert!(after.contains("\x1b]9;4;1;50\x1b\\"), "{after:?}");
+    // Before the plan arrives the lane's three units count (66%); once it
+    // has, nothing (lane switches, the resync) brings that back.
+    let text = out.text();
+    let planned = text.find("\x1b]9;4;1;50").ok_or("no 50%")?;
+    assert!(!text[planned..].contains("\x1b]9;4;1;66"), "{text:?}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn without_support_nothing_is_written() -> TestResult {
     let api = Arc::new(FakeApi::with_lanes(vec![half_started()]));
     let (keys_tx, keys_rx) = mpsc::channel::<std::io::Result<TermEvent>>(8);
@@ -164,7 +279,7 @@ async fn without_support_nothing_is_written() -> TestResult {
         keys_tx.send(Ok(TermEvent::Key(quit))).await.ok();
     };
     let out = Captured::default();
-    let options = Options::default();
+    let options = crate::hermetic_options();
     let run = drive(
         &mut terminal,
         driver_api,

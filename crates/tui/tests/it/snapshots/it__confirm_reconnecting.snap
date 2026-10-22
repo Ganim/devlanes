@@ -2,13 +2,13 @@
 source: crates/tui/tests/it/main.rs
 expression: draw(&app)?.backend()
 ---
-" devlanes   1 acme ●   2 shop ●  daemon not responding, …  M monitor   D daemon "
-" lanes    main @0 ●     feat/login @1 ·    +1 more         [ and ] switch lanes "
+" devlanes  1 acme ●   2 shop ●   daemon not responding, …  M monitor   D daemon "
+" lanes    1 main @0 ●     2 feat/login @1 ·    +1 more  1-9 or [ ] switch lanes "
 "┌ feat/login @┌ clean acme@1 ────────────────────────────────────┐─────────────┐"
-"│ · whole lane│ Clean feat/login (acme@1)?                       │ith its      │"
-"│             │                                                  │s.           │"
-"│ ▾ services  │ It stops every unit in the lane, then:           │             │"
-"│   · api     │   runs its lane.clean tasks and infra teardown   │             │"
+"│ ▾ services  │ Clean feat/login (acme@1)?                       │ith its      │"
+"│   · api     │                                                  │s.           │"
+"│             │ It stops every unit in the lane, then:           │             │"
+"│             │   runs its lane.clean tasks and infra teardown   │             │"
 "│             │   removes the lane's own containers and volumes  │             │"
 "│             │   frees its ports and setup records              │             │"
 "│             │ Files in /work/acme/feat/login stay as they are. │pped         │"
@@ -17,4 +17,4 @@ expression: draw(&app)?.backend()
 "│             └──────────────────────────────────────────────────┘led · 1 star…│"
 "│                              ││ … z shows the rest                           │"
 "└──────────────────────────────┘└──────────────────────────────────────────────┘"
-" s start lane   p start with profiles                     ? all keys   q quit   "
+" s start lane   S start all   p start with profiles       ? all keys   q quit   "

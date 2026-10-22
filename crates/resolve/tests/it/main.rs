@@ -1448,6 +1448,81 @@ async fn snapshot_minimal() {
 }
 
 #[tokio::test]
+/// `only` plans just the named units, each exactly as a full resolve does, and
+/// leaves the namespaces whole; no other unit reaches a script runner.
+async fn only_plans_the_named_units() {
+    let config = parse(FULL);
+    let facts = facts("acme", 1, Some("main"));
+    let mise: Arc<dyn Contributor> = Arc::new(FakeContributor::env(
+        "fake-mise",
+        10,
+        vec![("PATH", "/mise/bin:/usr/bin:/bin")],
+    ));
+    let contributors = [mise];
+    let (block, offsets) = allocation(&config, 21_000, &contributors);
+    let infra = infra();
+    let client = client_env();
+    let resolve = |only: Option<BTreeSet<String>>| {
+        let (config, facts, offsets, infra, client, contributors) =
+            (&config, &facts, &offsets, &infra, &client, &contributors);
+        async move {
+            let runner = Arc::new(FakeRunner::new());
+            let runners: [Arc<dyn ScriptRunner>; 1] = [runner.clone()];
+            let mut input = ResolveInput::new(config, facts, block, offsets);
+            input.contributors = contributors;
+            input.script_runners = &runners;
+            input.infra = infra;
+            input.client_env = client;
+            input.only = only.as_ref();
+            let lane = resolve_lane(input).await.expect("resolves");
+            let scripts: Vec<String> = runner
+                .calls
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|call| call.1.clone())
+                .collect();
+            (lane, scripts)
+        }
+    };
+    let (full, _) = resolve(None).await;
+    let only: BTreeSet<String> = [
+        "tasks.reset-db",
+        "tasks.migrate",
+        "tasks.seed",
+        "infra.setup.database",
+        "infra.teardown.database",
+    ]
+    .map(str::to_owned)
+    .into();
+    let (part, scripts) = resolve(Some(only)).await;
+    assert!(part.services.is_empty());
+    assert_eq!(
+        part.tasks.keys().collect::<Vec<_>>(),
+        ["migrate", "seed", "reset-db"]
+    );
+    for (name, task) in &part.tasks {
+        assert_eq!(
+            format!("{task:?}"),
+            format!("{:?}", full.tasks[name]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        format!("{:?}", part.setup.get("database")),
+        format!("{:?}", full.setup.get("database"))
+    );
+    assert_eq!(part.setup.len() + part.teardown.len(), 2);
+    assert_eq!(
+        format!("{:?}", part.teardown.get("database")),
+        format!("{:?}", full.teardown.get("database"))
+    );
+    assert_eq!(part.svc_namespace(), full.svc_namespace());
+    assert_eq!(part.lane_env(), full.lane_env());
+    assert_eq!(scripts, ["db-deploy", "start"], "only migrate and seed");
+}
+
+#[tokio::test]
 /// Snapshot of examples/devlanes.yaml in lane 2 with fake integrations and secrets.
 async fn snapshot_reference() {
     let config = parse(FULL);

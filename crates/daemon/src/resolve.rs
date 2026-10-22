@@ -1,6 +1,10 @@
 //! Full lane resolution (launch plans with env) and the evaluated infra spec.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use devlanes_config::{ComposeFiles, Run};
 use devlanes_core::ports::{PortBlock, PortName};
@@ -72,6 +76,33 @@ pub(crate) fn resolve_error(error: &ResolveError) -> RpcError {
     RpcError::new(code, data, exit)
 }
 
+/// Config paths of `task` and everything its `steps` run, recursively (see
+/// [`devlanes_resolve::ResolveInput::only`]); `None` when one of them is not
+/// defined.
+pub(crate) fn task_units(
+    config: &devlanes_config::ProjectConfig,
+    task: &str,
+) -> Option<BTreeSet<String>> {
+    let mut units = BTreeSet::new();
+    let mut pending = vec![task.to_owned()];
+    while let Some(step) = pending.pop() {
+        if let Some(entry) = step.strip_prefix("infra.setup.") {
+            config.infra.setup.contains_key(entry).then_some(())?;
+            units.insert(step);
+        } else if let Some(entry) = step.strip_prefix("infra.teardown.") {
+            config.infra.teardown.contains_key(entry).then_some(())?;
+            units.insert(step);
+        } else {
+            let found = config.tasks.get(&step)?;
+            // Two steps can share a task; walk it once.
+            if units.insert(format!("tasks.{step}")) {
+                pending.extend(found.steps.iter().flatten().cloned());
+            }
+        }
+    }
+    Some(units)
+}
+
 impl Inner {
     /// Plans every unit of a lane with its stored client env. Fails with
     /// `needs_env` when the lane has none (decision 7).
@@ -91,19 +122,29 @@ impl Inner {
         lane: &Arc<LaneRt>,
         fallback: Option<Arc<EnvMap>>,
     ) -> Result<Arc<ResolvedLane>, RpcError> {
-        self.resolve_planned(project, lane, fallback, None, None)
+        self.resolve_planned(project, lane, fallback, None, None, None)
             .await
     }
 
-    /// Like [`Self::resolve_full`] with `extra` layered over the lane's overrides,
-    /// for one `run --env` that must not change the lane's later plans.
-    pub(crate) async fn resolve_overridden(
+    /// Plans what `run <task>` needs: the task and, through its `steps`, the
+    /// tasks and infra commands it runs, with `extra` layered over the lane's
+    /// overrides for one `run --env` that must not change the lane's later plans.
+    /// Services are not planned (each can cost a contributor call); expressions
+    /// still see all of them. A task or step the config does not define plans
+    /// everything, so the error lists the same candidates.
+    pub(crate) async fn resolve_task(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
         lane: &Arc<LaneRt>,
+        task: &str,
         extra: &EnvMap,
     ) -> Result<Arc<ResolvedLane>, RpcError> {
-        self.resolve_planned(project, lane, None, None, Some(extra))
+        let only = lane
+            .st()
+            .config
+            .loaded()
+            .and_then(|config| task_units(config, task));
+        self.resolve_planned(project, lane, None, None, Some(extra), only.as_ref())
             .await
     }
 
@@ -115,12 +156,12 @@ impl Inner {
         lane: &Arc<LaneRt>,
         config: Arc<devlanes_config::ProjectConfig>,
     ) -> Result<Arc<ResolvedLane>, RpcError> {
-        self.resolve_planned(project, lane, None, Some(config), None)
+        self.resolve_planned(project, lane, None, Some(config), None, None)
             .await
     }
 
     /// Shared body of the resolve methods; `config` overrides the lane's, `extra`
-    /// is layered over the lane's overrides.
+    /// is layered over the lane's overrides, `only` limits the planned units.
     async fn resolve_planned(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
@@ -128,6 +169,7 @@ impl Inner {
         fallback: Option<Arc<EnvMap>>,
         config: Option<Arc<devlanes_config::ProjectConfig>>,
         extra: Option<&EnvMap>,
+        only: Option<&BTreeSet<String>>,
     ) -> Result<Arc<ResolvedLane>, RpcError> {
         let reference = lane.st().reference(&project.name());
         let (config, allocation, env, mut overrides, profiles, infra_ns, index) = {
@@ -192,6 +234,7 @@ impl Inner {
         input.ca_env = &self.integ.ca_env;
         input.public_https_port = self.integ.routes.https_port();
         input.shell = &self.integ.shell;
+        input.only = only;
         devlanes_resolve::resolve_lane(input)
             .await
             .map(Arc::new)
@@ -430,5 +473,51 @@ impl Inner {
                 .join(devlanes_core::paths::disk_name(&project.name()))
                 .join(format!("lane{index}")),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_units;
+
+    const CONFIG: &str = "project: demo
+infra:
+  setup:
+    db: echo up
+  teardown:
+    db: echo down
+tasks:
+  migrate: { run: echo migrate }
+  seed: { run: echo seed }
+  reset: { steps: [infra.teardown.db, infra.setup.db, migrate, seed] }
+  again: { steps: [reset, seed] }
+";
+
+    /// A task brings its steps along, recursively, each once; an undefined task
+    /// means everything gets planned (validation rejects undefined steps and
+    /// step cycles).
+    #[test]
+    fn task_units_follow_steps() {
+        let config = devlanes_config::parse_project(CONFIG, None).expect("config");
+        let units = |task| task_units(&config, task).map(|units| units.into_iter().collect());
+        assert_eq!(units("migrate"), Some(vec!["tasks.migrate".to_owned()]));
+        assert_eq!(
+            units("reset"),
+            Some(
+                [
+                    "infra.setup.db",
+                    "infra.teardown.db",
+                    "tasks.migrate",
+                    "tasks.reset",
+                    "tasks.seed"
+                ]
+                .map(str::to_owned)
+                .to_vec()
+            )
+        );
+        let again = units("again").expect("defined");
+        assert_eq!(again.len(), 6, "{again:?}");
+        assert!(again.contains(&"tasks.again".to_owned()));
+        assert_eq!(units("missing"), None);
     }
 }

@@ -1,18 +1,16 @@
 //! Errors stay inside their widgets, attach to what failed and stay readable.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use devlanes_proto::{AttachResult, RpcError, UnitSummary, events};
 use devlanes_tui::{
-    ApiError, DaemonApi, Options,
+    ApiError, DaemonApi,
     app::{App, Msg, Target, View, areas},
-    drive, ui,
+    ui,
 };
-use futures_util::stream;
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use serde_json::json;
-use tokio::sync::mpsc;
 
 use crate::fake::{FakeApi, lane, unit};
 
@@ -198,7 +196,7 @@ async fn compose_failure_at_80x24() -> TestResult {
     let mut app = portal_app(80, 24).await?;
     fail_start(&mut app);
     let buffer = check_layout(&mut app)?;
-    insta::assert_snapshot!("compose_failure_80x24", screen(&buffer));
+    assert_screen!("compose_failure_80x24", screen(&buffer));
     Ok(())
 }
 
@@ -207,7 +205,7 @@ async fn compose_failure_at_160x45() -> TestResult {
     let mut app = portal_app(160, 45).await?;
     fail_start(&mut app);
     let buffer = check_layout(&mut app)?;
-    insta::assert_snapshot!("compose_failure_160x45", screen(&buffer));
+    assert_screen!("compose_failure_160x45", screen(&buffer));
     Ok(())
 }
 
@@ -402,7 +400,9 @@ pub fn assert_clean(buffer: &Buffer, context: &str) {
 pub fn assert_boxes(buffer: &Buffer, width: u16, height: u16, context: &str) {
     // The first-run strip, when it shows, moves the boxes up one row.
     let strip = (0..height).any(|y| row(buffer, y).contains("enter types into a service"));
-    let Some(layout) = devlanes_tui::app::areas_with(width, height, false, strip) else {
+    // The lane bar shows only for projects with several lanes.
+    let lane_bar = row(buffer, 1).starts_with(" lanes");
+    let Some(layout) = devlanes_tui::app::areas_with(width, height, false, strip, lane_bar) else {
         return;
     };
     for rect in layout.list_box.into_iter().chain([layout.pane_box]) {
@@ -533,48 +533,21 @@ async fn drive_shows_a_failed_start_in_the_header_and_on_the_row() -> TestResult
     let mut fake = FakeApi::with_lanes(lanes());
     fake.control_error = Some(compose_error());
     let api = Arc::new(fake);
-    let (keys_tx, keys_rx) = mpsc::channel::<std::io::Result<TermEvent>>(8);
-    let input = Box::pin(stream::unfold(keys_rx, |mut rx| async move {
-        rx.recv().await.map(|event| (event, rx))
-    }));
-    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
-    let driver_api: Arc<dyn DaemonApi> = api.clone();
-    let script = {
-        let api = Arc::clone(&api);
-        async move {
-            for _ in 0..100 {
-                if api.calls().iter().any(|c| c == "status") {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            let press = |c| {
-                Ok(TermEvent::Key(KeyEvent::new(
-                    KeyCode::Char(c),
-                    KeyModifiers::NONE,
-                )))
-            };
-            // The next lane, down to portal, start it.
-            for c in [']', 'j', 'j', 's'] {
-                keys_tx.send(press(c)).await.ok();
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            tokio::time::sleep(Duration::from_millis(80)).await;
-            keys_tx.send(press('q')).await.ok();
-        }
-    };
-    let options = Options::default();
-    let run = drive(
-        &mut terminal,
-        driver_api,
-        &options,
-        input,
-        Box::new(std::io::sink()),
+    // The next lane, down to portal, start it; quit once the failure the
+    // fake answers with is drawn.
+    let steps = crate::daemon::presses(
+        [']', 'j', 'j', 's']
+            .into_iter()
+            .map(|c| key(KeyCode::Char(c)))
+            .collect(),
     );
-    let (result, ()) =
-        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(run, script) }).await?;
-    result?;
+    let backend = crate::daemon::run_keys(
+        Arc::clone(&api),
+        steps,
+        &["✕ start acme@1:portal failed"],
+        |_| true,
+    )
+    .await?;
     assert!(
         api.calls()
             .iter()
@@ -582,7 +555,7 @@ async fn drive_shows_a_failed_start_in_the_header_and_on_the_row() -> TestResult
         "{:?}",
         api.calls()
     );
-    let buffer = terminal.backend().buffer().clone();
+    let buffer = backend.buffer().clone();
     assert!(
         row(&buffer, 0).contains("✕ start acme@1:portal failed"),
         "{}",

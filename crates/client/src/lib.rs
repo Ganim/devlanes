@@ -2,6 +2,7 @@
 //! local endpoint from [`devlanes_ipc::local`].
 
 mod paths;
+pub mod restart;
 pub mod update;
 
 use std::{collections::VecDeque, path::PathBuf, process::Stdio, time::Duration};

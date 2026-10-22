@@ -8,16 +8,8 @@ use devlanes_proto::{ContainerSummary, LaneSummary, UnitSummary};
 
 use crate::api::{LaneMetrics, Metrics, UnitMetrics};
 
-/// Graph ranges `+` and `-` step through, with their labels.
-pub const RANGES: [(u64, &str); 4] = [
-    (120_000, "2m"),
-    (900_000, "15m"),
-    (3_600_000, "1h"),
-    (21_600_000, "6h"),
-];
-/// 15 minutes, the default range.
-pub const DEFAULT_RANGE: usize = 1;
-/// Up to this range the daemon sends raw samples; beyond it, 10 s windows.
+/// The daemon's raw ring: one sample a second for this long. Graphs show at
+/// most this much history; past it the daemon sends 10 s windows instead.
 pub const RAW_RANGE_MS: u64 = 900_000;
 
 /// Columns the table sorts by, in the order `<` and `>` walk them.
@@ -84,8 +76,8 @@ pub enum MonitorId {
     },
 }
 
-/// The monitor's sort, filter, grouping, range and selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The monitor's sort, filter, grouping and selection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MonitorView {
     pub filter: String,
     /// Keys go to the filter until Enter or Esc.
@@ -97,8 +89,6 @@ pub struct MonitorView {
     pub flat: bool,
     /// Folded group keys; they last for the session.
     pub folded: BTreeSet<String>,
-    /// Index into [`RANGES`].
-    pub range: usize,
     /// The detail graphs fill the body.
     pub zoom: bool,
     pub selected: Option<MonitorId>,
@@ -108,30 +98,7 @@ pub struct MonitorView {
     pub offset: usize,
 }
 
-impl Default for MonitorView {
-    fn default() -> Self {
-        Self {
-            filter: String::new(),
-            editing: false,
-            sort: SortKey::default(),
-            reverse: false,
-            flat: false,
-            folded: BTreeSet::new(),
-            range: DEFAULT_RANGE,
-            zoom: false,
-            selected: None,
-            index: 0,
-            offset: 0,
-        }
-    }
-}
-
 impl MonitorView {
-    /// The range in milliseconds and its label.
-    pub fn range(&self) -> (u64, &'static str) {
-        RANGES[self.range.min(RANGES.len() - 1)]
-    }
-
     /// Whether the column is sorted highest first now.
     pub fn descending(&self) -> bool {
         self.sort.descending() != self.reverse

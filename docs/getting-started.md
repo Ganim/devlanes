@@ -48,7 +48,7 @@ devlanes stop            # stop the lane
 
 The daemon starts on first use. `start` is safe to repeat: running services are left alone.
 
-On a terminal, `start` opens the TUI on the lane and runs the start inside it: the header shows the phase (infra, setup, tasks, services), the tree shows each service coming up, and a service that fails shows its reason and the end of its log in the details pane. When the start ends, the header keeps the result and the TUI stays open. Quitting never stops services; the exit status is 0 when the start was ready, 1 when it failed, and 130 when you quit before it ended (the start keeps going in the daemon). A start the daemon refuses outright, such as a worktree without `devlanes.yaml` or an unknown unit, prints its error before any TUI opens. `restart`, `lane resume` and `lane new --start` work the same way.
+On a terminal, `start` opens the TUI on the lane and runs the start inside it: the header shows the phase (infra, setup, tasks, services), the tree shows each service coming up, and a service that fails shows its reason and the end of its log in the details pane. When the start ends, the header keeps the result and the TUI stays open. Quitting keeps services running unless you choose otherwise: while lanes run, `q` asks whether to keep or stop them (`tui.on_quit` in `~/.devlanes/config.yaml` answers for you). The exit status is 0 when the start was ready, 1 when it failed, and 130 when you quit before it ended (the start keeps going in the daemon). A start the daemon refuses outright, such as a worktree without `devlanes.yaml` or an unknown unit, prints its error before any TUI opens. `restart`, `lane resume` and `lane new --start` work the same way.
 
 `--no-ui`, `DEVLANES_NO_UI=1` or `tui.open_on_start: false` in `~/.devlanes/config.yaml` print the start as text instead: it returns once every service is ready, and a failure exits 1 with the end of the service's log. Agents, scripts, CI and piped output always get the text. `devlanes debug why api` explains why a unit is not up.
 
@@ -86,7 +86,7 @@ Run `devlanes` with no command (or `devlanes ui`) on a terminal. It lists every 
 
 ## Coding agents
 
-Agents should start services through devlanes instead of backgrounding `pnpm dev &` in their shell. `devlanes agent-guide` prints a short guide to paste into an `AGENTS.md`. The [agent plugin](../agent-plugin/README.md) packages the same guide as a Claude Code plugin, a skill for the skills CLI and a Codex `AGENTS.md`, plus an optional hook that rejects backgrounded dev servers. When devlanes detects an agent it switches to terse output with failures first; `devlanes exec --name NAME -- COMMAND` runs a one-off process as a unit, and `devlanes wait` and budgeted `devlanes logs` let the agent check on it.
+Agents should start services through devlanes instead of backgrounding `pnpm dev &` in their shell. The [agent plugin](../agent-plugin/README.md) packages a guide for them as a Claude Code plugin, a skill for the skills CLI and a Codex `AGENTS.md` to paste into a repository, plus an optional hook that rejects backgrounded dev servers. When devlanes detects an agent it switches to terse output with failures first; `devlanes exec --name NAME -- COMMAND` runs a one-off process as a unit, and `devlanes wait` and budgeted `devlanes logs` let the agent check on it.
 
 In CI, `devlanes with -- pnpm test:e2e` starts the lane, runs the command with the lane's URLs in its environment, stops what it started and exits with the command's code.
 

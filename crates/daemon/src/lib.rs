@@ -33,6 +33,7 @@ mod remote;
 mod resolve;
 mod routes;
 mod sampler;
+mod screen;
 pub mod secrets;
 mod spawn_error;
 mod stream;

@@ -361,15 +361,19 @@ impl UnitLog {
             timestamp_ms: frame.timestamp_ms,
             level: extract_level(&frame.text),
             text: frame.text,
+            styled: None,
         };
-        let flags = u8::from(frame.partial) | (u8::from(frame.continued) << 1);
+        // A colored line stores its styled form; readers strip it for `text`.
+        let flags = u8::from(frame.partial)
+            | (u8::from(frame.continued) << 1)
+            | (u8::from(frame.styled.is_some()) << 2);
         let encoded = format!(
             "{}\t{}\t{}\t{}\t{}\n",
             line.seq,
             line.timestamp_ms,
             flags,
             line.level.as_deref().unwrap_or("-"),
-            line.text
+            frame.styled.as_deref().unwrap_or(&line.text)
         );
         if self.segments.last().is_some_and(|m| {
             m.records > 0
@@ -769,15 +773,17 @@ pub(crate) fn read_record(
         .next()
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| Error::Corrupt("timestamp".into()))?;
-    let _flags = parts
+    let flags = parts
         .next()
         .and_then(|s| s.parse::<u8>().ok())
         .ok_or_else(|| Error::Corrupt("flags".into()))?;
     let level = parts.next().ok_or_else(|| Error::Corrupt("level".into()))?;
-    let text = parts
-        .next()
-        .ok_or_else(|| Error::Corrupt("text".into()))?
-        .to_owned();
+    let stored = parts.next().ok_or_else(|| Error::Corrupt("text".into()))?;
+    let (text, styled) = if flags & 4 != 0 {
+        (strip_sgr(stored), Some(stored.to_owned()))
+    } else {
+        (stored.to_owned(), None)
+    };
     Ok(Some((
         LogLine {
             unit: unit.to_owned(),
@@ -785,7 +791,26 @@ pub(crate) fn read_record(
             timestamp_ms,
             text,
             level: (level != "-").then(|| level.to_owned()),
+            styled,
         },
         size as u64,
     )))
+}
+
+/// `text` without its `ESC [ … m` sequences: the only escapes stored lines keep.
+pub fn strip_sgr(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\x1b[") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find('m') {
+            Some(end) => rest = &after[end + 1..],
+            None => {
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }

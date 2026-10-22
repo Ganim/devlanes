@@ -5,7 +5,9 @@ use std::{num::NonZeroU32, path::Path, time::Duration};
 
 /// Finished unit/task history lifetime, duplicated from the state crate to avoid a dependency.
 /// The binary's retention-default test keeps these independent definitions aligned.
-pub const DEFAULT_RUN_HISTORY_RETENTION: Duration = Duration::from_secs(30 * 86_400);
+pub const DEFAULT_RUN_HISTORY_RETENTION: Duration = Duration::from_secs(7 * 86_400);
+/// Monitor history lifetime, duplicated from the state crate and checked by the binary test.
+pub const DEFAULT_METRICS_RETENTION: Duration = Duration::from_secs(7 * 86_400);
 /// Disconnected remote-host lifetime, duplicated from the state crate and checked by the binary test.
 pub const DEFAULT_REMOTE_HOST_RETENTION: Duration = Duration::from_secs(90 * 86_400);
 /// Database and SQLite sidecar budget, duplicated from the state crate and checked by the binary test.
@@ -14,7 +16,7 @@ pub const DEFAULT_MAX_SIZE_BYTES: u64 = 512 * 1024 * 1024;
 /// Per-user machine settings, separate from project configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-#[schemars(extend("examples" = [{"hostnames":{"resolver":"localhost"},"ports":{"range":"20000-32767"},"terminal":"ghostty"}]))]
+#[schemars(extend("examples" = [{"hostnames":{"resolver":"localhost"},"ports":{"range":"20000-32767"},"terminal":{"progress":"auto"}}]))]
 pub struct UserConfig {
     /// Settings that loading ignored, reported by [`UserConfig::warnings`].
     #[serde(skip)]
@@ -38,7 +40,7 @@ pub struct UserConfig {
     pub state: StateConfig,
     /// How many services start at once, across all lanes and projects.
     pub startup: StartupConfig,
-    /// Terminal app for open-in-terminal actions, alone or with the progress-bar setting.
+    /// How devlanes uses the terminal tab's progress bar during starts.
     pub terminal: Option<TerminalConfig>,
     /// Whether the daemon looks for new devlanes releases.
     pub updates: UpdatesConfig,
@@ -49,7 +51,7 @@ pub struct UserConfig {
 /// Terminal UI behaviour of the CLI.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-#[schemars(extend("examples" = [{"open_on_start":false},{"theme":"light","glyphs":"ascii"}]))]
+#[schemars(extend("examples" = [{"open_on_start":false},{"theme":"light","glyphs":"ascii"},{"on_quit":"keep"}]))]
 pub struct TuiConfig {
     /// Run `start`, `restart`, `lane resume` and `lane new --start` inside the TUI when typed at a terminal; defaults to true. false prints them as text, like `--no-ui` or DEVLANES_NO_UI=1.
     #[schemars(extend("examples" = [true,false]))]
@@ -58,6 +60,8 @@ pub struct TuiConfig {
     pub theme: TuiTheme,
     /// Symbols the TUI draws states and markers with; defaults to auto.
     pub glyphs: TuiGlyphs,
+    /// What quitting the TUI does while lanes of the project on screen run; defaults to ask. The quit dialog's "remember" box writes it.
+    pub on_quit: TuiOnQuit,
 }
 
 impl Default for TuiConfig {
@@ -67,6 +71,35 @@ impl Default for TuiConfig {
             open_on_start: true,
             theme: TuiTheme::Auto,
             glyphs: TuiGlyphs::Auto,
+            on_quit: TuiOnQuit::Ask,
+        }
+    }
+}
+
+/// What quitting the TUI does with running lanes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(extend("examples" = ["ask","keep","stop"]))]
+pub enum TuiOnQuit {
+    /// Ask each time whether to keep the lanes running or stop them.
+    #[default]
+    #[schemars(extend("examples" = ["ask"]))]
+    Ask,
+    /// Close the TUI and leave every lane running in the daemon.
+    #[schemars(extend("examples" = ["keep"]))]
+    Keep,
+    /// Stop the running lanes of the project on screen, then close the TUI.
+    #[schemars(extend("examples" = ["stop"]))]
+    Stop,
+}
+
+impl TuiOnQuit {
+    /// The word the TUI reads and writes: `ask`, `keep` or `stop`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Keep => "keep",
+            Self::Stop => "stop",
         }
     }
 }
@@ -152,10 +185,10 @@ impl Default for UpdatesConfig {
 /// Age limits for finished unit/task history and disconnected remote-host records.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-#[schemars(extend("examples" = [{"retention":"30d","remote_hosts_retention":"90d"}]))]
+#[schemars(extend("examples" = [{"retention":"7d","remote_hosts_retention":"90d"}]))]
 pub struct HistoryConfig {
-    /// Maximum age since a unit or task finished; defaults to 30d. Disk pressure may prune it sooner.
-    #[schemars(extend("examples" = ["30d","14d"]))]
+    /// Maximum age since a unit or task finished; defaults to 7d. Disk pressure may prune it sooner.
+    #[schemars(extend("examples" = ["7d","30d"]))]
     pub retention: ConfigDuration,
     /// Maximum age since a remote host last connected successfully; defaults to 90d. Records without a timestamp are retained.
     #[schemars(extend("examples" = ["90d","180d"]))]
@@ -504,89 +537,46 @@ impl Default for LogRetention {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 /// Retention for monitor history used by graphs and service baselines, including database aggregates.
-#[schemars(extend("examples" = [{"retention":"30d"}]))]
+#[schemars(extend("examples" = [{"retention":"7d"}]))]
 pub struct MetricsConfig {
-    /// Maximum age of persisted monitor samples and database run summaries; defaults to 30d.
-    #[schemars(extend("examples" = ["30d"]))]
+    /// Maximum age of persisted monitor samples and database run summaries; defaults to 7d.
+    #[schemars(extend("examples" = ["7d","30d"]))]
     pub retention: ConfigDuration,
 }
 
 impl Default for MetricsConfig {
-    /// Keep thirty days of persisted monitor aggregates.
+    /// Keep a week of persisted monitor aggregates.
     fn default() -> Self {
         Self {
-            retention: ConfigDuration(std::time::Duration::from_secs(30 * 86_400)),
+            retention: ConfigDuration(DEFAULT_METRICS_RETENTION),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-/// Terminal application used by open-in-terminal actions.
-#[schemars(extend("examples" = ["iterm2","ghostty","wezterm","kitty","terminal","windows-terminal"]))]
-pub enum Terminal {
-    /// Open a session in iTerm2 on macOS.
-    #[schemars(extend("examples" = ["iterm2"]))]
-    Iterm2,
-    /// Open a session in Ghostty.
-    #[schemars(extend("examples" = ["ghostty"]))]
-    Ghostty,
-    /// Open a session in WezTerm.
-    #[schemars(extend("examples" = ["wezterm"]))]
-    Wezterm,
-    /// Open a session in kitty.
-    #[schemars(extend("examples" = ["kitty"]))]
-    Kitty,
-    /// Open a session in macOS Terminal.app.
-    #[schemars(extend("examples" = ["terminal"]))]
-    Terminal,
-    /// Open a tab in the most recent Windows Terminal window, on Windows or from inside WSL.
-    #[serde(rename = "windows-terminal")]
-    #[schemars(extend("examples" = ["windows-terminal"]))]
-    WindowsTerminal,
-}
-
-impl Terminal {
-    /// The config value, such as `windows-terminal`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Iterm2 => "iterm2",
-            Self::Ghostty => "ghostty",
-            Self::Wezterm => "wezterm",
-            Self::Kitty => "kitty",
-            Self::Terminal => "terminal",
-            Self::WindowsTerminal => "windows-terminal",
-        }
-    }
-
-    /// Whether the app has a Windows version: iTerm2 and Terminal.app are
-    /// macOS apps, and kitty and Ghostty ship for macOS and Linux only.
-    pub fn runs_on_windows(self) -> bool {
-        matches!(self, Self::Wezterm | Self::WindowsTerminal)
-    }
-}
-
-/// The terminal app name alone, or a mapping with the app and the progress-bar setting.
-#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+/// How devlanes uses the terminal, or (from older configs) a terminal app
+/// name, which is ignored.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
-#[schemars(extend("examples" = ["ghostty",{"app":"ghostty","progress":"auto"}]))]
+#[schemars(extend("examples" = [{"progress":"auto"}]))]
 pub enum TerminalConfig {
-    /// Terminal app used by open-in-terminal actions; progress stays on auto.
+    /// A terminal app name from when devlanes opened units in a new terminal
+    /// window; that feature is gone, so the name is ignored with a warning.
     #[schemars(extend("examples" = ["ghostty"]))]
-    App(Terminal),
-    /// Terminal app and progress-bar setting written as separate fields.
-    #[schemars(extend("examples" = [{"app":"wezterm","progress":"never"}]))]
+    Legacy(String),
+    /// How devlanes uses the terminal's own progress bar.
+    #[schemars(extend("examples" = [{"progress":"never"}]))]
     Settings(TerminalSettings),
 }
 
-/// Terminal app and how devlanes uses the terminal's own progress bar.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
+/// How devlanes uses the terminal's own progress bar.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-#[schemars(extend("examples" = [{"app":"ghostty","progress":"auto"},{"progress":"never"}]))]
+#[schemars(extend("examples" = [{"progress":"auto"},{"progress":"never"}]))]
 pub struct TerminalSettings {
-    /// Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, Windows Terminal on Windows and inside WSL when installed, else the first one installed.
-    #[schemars(extend("examples" = ["ghostty","iterm2"]))]
-    pub app: Option<Terminal>,
+    /// A terminal app from older configs; ignored with a warning.
+    #[serde(skip_serializing)]
+    #[schemars(skip)]
+    pub app: Option<String>,
     /// Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto.
     #[schemars(extend("examples" = ["auto","never"]))]
     pub progress: TerminalProgress,
@@ -611,19 +601,19 @@ pub enum TerminalProgress {
 }
 
 impl TerminalConfig {
-    /// The app for open-in-terminal actions, if one is set.
-    pub fn app(&self) -> Option<Terminal> {
+    /// The progress-bar setting; the legacy app name keeps it on auto.
+    pub fn progress(&self) -> TerminalProgress {
         match self {
-            Self::App(app) => Some(*app),
-            Self::Settings(settings) => settings.app,
+            Self::Legacy(_) => TerminalProgress::Auto,
+            Self::Settings(settings) => settings.progress,
         }
     }
 
-    /// The progress-bar setting; the bare app form keeps it on auto.
-    pub fn progress(&self) -> TerminalProgress {
+    /// A terminal app name an older config set, now ignored.
+    fn legacy_app(&self) -> Option<&str> {
         match self {
-            Self::App(_) => TerminalProgress::Auto,
-            Self::Settings(settings) => settings.progress,
+            Self::Legacy(app) => Some(app),
+            Self::Settings(settings) => settings.app.as_deref(),
         }
     }
 }
@@ -688,17 +678,22 @@ impl UserConfig {
         &self.warnings
     }
 
-    /// Settings this OS cannot honour, such as a macOS-only terminal app on
-    /// Windows. Configs move between machines, so these warn instead of failing.
-    /// [`UserConfig::warnings`] includes them; `config check` shows them too.
-    pub fn platform_warnings(&self) -> Vec<crate::ConfigWarning> {
-        platform::warnings(self)
-    }
-
-    /// Adds [`UserConfig::platform_warnings`] to the load warnings.
-    fn warn_platform(&mut self) {
-        let warnings = self.platform_warnings();
-        self.warnings.extend(warnings);
+    /// Warns about a terminal app name from older configs: devlanes no longer
+    /// opens units in a new terminal window.
+    fn ignore_legacy_terminal(&mut self) {
+        let Some(app) = self.terminal.as_ref().and_then(TerminalConfig::legacy_app) else {
+            return;
+        };
+        let path = match self.terminal {
+            Some(TerminalConfig::Legacy(_)) => "terminal",
+            _ => "terminal.app",
+        };
+        self.warnings.push(crate::ConfigWarning {
+            path: path.into(),
+            message: format!(
+                "devlanes no longer opens units in a terminal app; {app} is ignored and can be removed"
+            ),
+        });
     }
 
     /// Drop deferred trust targets with a warning instead of passing them to trust adapters.
@@ -766,7 +761,7 @@ pub fn parse_user_lenient(file: &str, source: &str) -> (UserConfig, Vec<ConfigEr
             Ok(mut config) => match config.validate() {
                 Ok(()) => {
                     config.ignore_deferred_trust();
-                    config.warn_platform();
+                    config.ignore_legacy_terminal();
                     return (config, issues);
                 }
                 Err(error) => match error.message.split_once(": ") {
@@ -847,47 +842,6 @@ fn parse_user_named(file: &str, source: &str) -> Result<UserConfig, ConfigError>
         .validate()
         .map_err(|e| crate::loader::locate(e, file, source, None))?;
     config.ignore_deferred_trust();
-    config.warn_platform();
+    config.ignore_legacy_terminal();
     Ok(config)
-}
-
-/// User settings every OS honours; nothing to warn about.
-#[cfg(not(windows))]
-mod platform {
-    use super::UserConfig;
-    use crate::ConfigWarning;
-
-    /// No warnings outside Windows.
-    pub(super) fn warnings(_config: &UserConfig) -> Vec<ConfigWarning> {
-        Vec::new()
-    }
-}
-
-/// User settings Windows cannot honour.
-#[cfg(windows)]
-mod platform {
-    use super::{TerminalConfig, UserConfig};
-    use crate::ConfigWarning;
-
-    /// A terminal app without a Windows version. The TUI only registers
-    /// Windows Terminal and WezTerm there, so `O` would fail later.
-    pub(super) fn warnings(config: &UserConfig) -> Vec<ConfigWarning> {
-        let Some(terminal) = config.terminal else {
-            return Vec::new();
-        };
-        let path = match terminal {
-            TerminalConfig::App(_) => "terminal",
-            TerminalConfig::Settings(_) => "terminal.app",
-        };
-        match terminal.app() {
-            Some(app) if !app.runs_on_windows() => vec![ConfigWarning {
-                path: path.into(),
-                message: format!(
-                    "{} has no Windows version; use windows-terminal or wezterm, or leave it unset",
-                    app.as_str()
-                ),
-            }],
-            _ => Vec::new(),
-        }
-    }
 }

@@ -1,15 +1,16 @@
 //! Docker container collector for `devlanes-metrics`, using the Engine stats API.
 //!
-//! CPU and memory follow the docker CLI so numbers match `docker stats`:
-//! `calculateCPUPercentUnix` and `calculateMemUsageUnixNoCache` in
-//! <https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go>.
+//! CPU and memory follow the docker CLI's math, `calculateCPUPercentUnix` and
+//! `calculateMemUsageUnixNoCache` in
+//! <https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go>,
+//! with CPU taken over a [`CPU_WINDOW`] instead of one tick.
 //!
 //! On macOS containers run inside one Linux VM, so the source also emits a
 //! [`Subject::DockerVm`] row summing the sampled containers; [`DockerSource::vm_info`]
 //! gives the VM's CPU and memory capacity from `docker info`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Mutex, PoisonError},
     time::{Duration, SystemTime},
 };
@@ -58,6 +59,74 @@ pub fn cpu_percent_unix(previous: &ContainerCpuStats, current: &ContainerCpuStat
         cpu_delta / system_delta * online * 100.0
     } else {
         0.0
+    }
+}
+
+/// CPU is measured over at least this much engine time. Workloads that work in
+/// short bursts about once a second (postgres, Erlang schedulers) leave whole
+/// 1 s intervals without a counter change, which a sample-to-sample delta
+/// reports as 0%; over 2 s each interval sees at least one burst.
+pub const CPU_WINDOW: Duration = Duration::from_secs(2);
+
+/// A container's recent CPU counters, to measure over [`CPU_WINDOW`].
+#[derive(Debug, Clone, Default)]
+pub struct CpuWindow {
+    readings: VecDeque<ContainerCpuStats>,
+}
+
+/// More readings than this means samples far faster than one a second; the
+/// oldest go even inside the window.
+const MAX_READINGS: usize = 64;
+
+impl CpuWindow {
+    /// CPU percent of `current` against the newest kept reading at least
+    /// [`CPU_WINDOW`] older, else the oldest one, else `precpu` (first sight),
+    /// with [`cpu_percent_unix`]. Then keeps `current`.
+    pub fn percent(
+        &mut self,
+        current: &ContainerCpuStats,
+        precpu: Option<&ContainerCpuStats>,
+    ) -> f64 {
+        let usage = |stats: &ContainerCpuStats| {
+            stats
+                .cpu_usage
+                .as_ref()
+                .and_then(|usage| usage.total_usage)
+                .unwrap_or(0)
+        };
+        let system = |stats: &ContainerCpuStats| stats.system_cpu_usage.unwrap_or(0);
+        // A counter that went back means the container restarted: start over.
+        if self
+            .readings
+            .back()
+            .is_some_and(|last| usage(current) < usage(last))
+        {
+            self.readings.clear();
+        }
+        // `system_cpu_usage` counts nanoseconds on every online CPU.
+        let cpus = u64::from(current.online_cpus.unwrap_or(1).max(1));
+        let span = u64::try_from(CPU_WINDOW.as_nanos())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(cpus);
+        let elapsed = |old: &ContainerCpuStats| system(current).saturating_sub(system(old));
+        let fallback = ContainerCpuStats::default();
+        let base = self
+            .readings
+            .iter()
+            .rev()
+            .find(|old| elapsed(old) >= span)
+            .or(self.readings.front())
+            .or(precpu)
+            .unwrap_or(&fallback);
+        let percent = cpu_percent_unix(base, current);
+        // Only the newest reading a full window back is needed later.
+        while self.readings.len() >= 2 && elapsed(&self.readings[1]) >= span
+            || self.readings.len() >= MAX_READINGS
+        {
+            self.readings.pop_front();
+        }
+        self.readings.push_back(current.clone());
+        percent
     }
 }
 
@@ -172,10 +241,10 @@ fn unavailable(error: impl std::fmt::Display) -> Error {
 /// Samples managed containers through the Docker Engine API.
 ///
 /// Each tick issues one non-streaming `one-shot` stats request per container,
-/// concurrently, and computes CPU against the previous tick's reading kept here.
+/// concurrently, and computes CPU over each container's [`CpuWindow`] kept here.
 pub struct DockerSource {
     docker: Docker,
-    previous: Mutex<HashMap<String, ContainerCpuStats>>,
+    previous: Mutex<HashMap<String, CpuWindow>>,
 }
 
 impl DockerSource {
@@ -262,14 +331,20 @@ impl MetricsSource for DockerSource {
                 Err(error) => {
                     tracing::debug!(container = %target.id, %error, "container stats failed");
                     failures.push(error);
+                    // One failed request keeps the container's window.
+                    if let Some(window) = previous.remove(&target.id) {
+                        next.insert(target.id.clone(), window);
+                    }
                     continue;
                 }
             };
-            let Some(reading) = reading(&stats, previous.get(&target.id)) else {
+            let Some(mut reading) = reading(&stats, None) else {
                 continue;
             };
-            if let Some(cpu) = stats.cpu_stats {
-                next.insert(target.id.clone(), cpu);
+            if let Some(cpu) = &stats.cpu_stats {
+                let mut window = previous.remove(&target.id).unwrap_or_default();
+                reading.cpu_percent = window.percent(cpu, stats.precpu_stats.as_ref());
+                next.insert(target.id.clone(), window);
             }
             samples.push(container_sample(target, &reading, ts_ms));
         }

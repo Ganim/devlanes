@@ -221,8 +221,6 @@ The daemon owns the process: logs, stop, attach and status work on it by its\n\
     },
     /// Check the daemon, Docker, proxy, CA, hosts file and output mode, each with a fix; never starts the daemon
     Doctor,
-    /// Print the short guide for AI agents that use devlanes
-    AgentGuide,
     /// Print shell completions; lane and unit names come from the running daemon
     Completions {
         /// Shell to generate completions for
@@ -337,6 +335,9 @@ pub struct LogArgs {
     /// Show the last N lines [default: 100 in agent mode or without a terminal]
     #[arg(long, value_name = "N")]
     pub tail: Option<usize>,
+    /// Show the first N lines of the selected range
+    #[arg(long, value_name = "N", conflicts_with_all = ["tail", "follow"])]
+    pub head: Option<usize>,
     /// Keep streaming new lines; agent mode requires --timeout
     #[arg(short, long)]
     pub follow: bool,
@@ -628,7 +629,7 @@ pub enum DaemonCommand {
     Status,
     /// Stop the daemon and every process it manages
     Stop,
-    /// Restart the daemon; asks first when processes are running
+    /// Restart the daemon and start again, with this shell's environment, the services that ran; asks first when processes are running
     Restart,
     /// Print the daemon's own log file
     Logs {
@@ -692,7 +693,6 @@ pub enum Action {
     DaemonInstall,
     DaemonUninstall,
     DaemonRun,
-    AgentGuide,
     Completions(clap_complete::Shell),
     Tunnel,
     Askpass(Option<String>),
@@ -865,7 +865,10 @@ impl Cli {
                         all: args.all,
                         query: LogQuery {
                             units: args.units.clone(),
-                            tail: args.tail.or(bounded.then_some(100)),
+                            tail: args
+                                .tail
+                                .or((bounded && args.head.is_none()).then_some(100)),
+                            head: args.head,
                             max_bytes: self.budget.or(bounded.then_some(crate::DEFAULT_BUDGET)),
                             cursor: args.cursor.clone(),
                             since: args.since.clone(),
@@ -875,6 +878,8 @@ impl Cli {
                             context_lines: args.context_lines,
                             follow: args.follow,
                             mine: args.mine,
+                            // Colors come along only where they are shown.
+                            styled: runtime.color,
                         },
                     })?,
                 )
@@ -997,7 +1002,11 @@ impl Cli {
                 DaemonCommand::Status => (Method::DaemonStatus, json!({})),
                 DaemonCommand::Stop => (Method::DaemonShutdown, json!({})),
                 DaemonCommand::ResetState => (Method::DaemonResetState, json!({})),
-                DaemonCommand::Restart => return Ok(Action::DaemonRestart(context)),
+                DaemonCommand::Restart => {
+                    // The lanes that ran come back with this shell's env, as `lane resume`.
+                    context.env = Some(environment());
+                    return Ok(Action::DaemonRestart(context));
+                }
                 DaemonCommand::Logs { follow, tail } => {
                     return Ok(Action::DaemonLogs {
                         follow: *follow,
@@ -1021,7 +1030,6 @@ impl Cli {
                 RemoteCommand::Ls => (Method::HostList, json!({})),
                 RemoteCommand::Sync => (Method::SyncStatus, json!({})),
             },
-            Some(Command::AgentGuide) => return Ok(Action::AgentGuide),
             Some(Command::Completions { shell }) => return Ok(Action::Completions(*shell)),
             Some(Command::Tunnel { .. }) => return Ok(Action::Tunnel),
             Some(Command::Askpass { prompt }) => return Ok(Action::Askpass(prompt.clone())),

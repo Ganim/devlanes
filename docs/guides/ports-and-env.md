@@ -78,7 +78,7 @@ Two services may read each other's `url` and `public_url`. Only `env.PORT` and `
 
 Layers, lowest first. A later layer wins on the same key.
 
-1. The environment of the shell that ran `devlanes start` (or `restart`, `run`, `exec`, `lane resume`). The daemon keeps it in memory for the lane and reuses it for restarts from the TUI; it is never written to disk. After a daemon restart, `devlanes lane resume` from a shell supplies it again.
+1. The environment of the shell that ran `devlanes start` (or `restart`, `run`, `exec`, `lane resume`). The daemon keeps it in memory for the lane and reuses it for restarts from the TUI; it is never written to disk. `devlanes daemon restart` starts what ran again with the environment of the shell that ran it; after a reboot or `daemon stop`, `devlanes lane resume` from a shell supplies it again.
 2. Contributors: mise, direnv, then the platform (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, …) and preset (`WRANGLER_REGISTRY_PATH`).
 3. Secrets from fnox.
 4. devlanes' own variables: `DEVLANES=1`, `DEVLANES_PROJECT`, `DEVLANES_LANE` (the index), `DEVLANES_LANE_NAME` (`main` or `lane<N>`), `DEVLANES_CA_CERT`, `DEVLANES_CA_BUNDLE`; for services also `PORT`, `HOST=127.0.0.1`, `DEVLANES_SERVICE`, `DEVLANES_PUBLIC_URL` (when the service has hosts) and `DEVLANES_ORIGINS`.

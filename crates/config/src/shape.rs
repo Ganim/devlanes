@@ -8,12 +8,12 @@
 use crate::{
     ComposeFiles, HostConfig, HostRoute, InfraCommand, InfraCommandOptions, ProfileConfig,
     ProfileOptions, ReadyCheck, ReadyConfig, Run, RunScript, Scalar, ScriptSource, Started,
-    TcpReady, Templated, Terminal, TerminalConfig, TerminalSettings,
+    TcpReady, Templated, TerminalConfig, TerminalSettings,
 };
 use serde::{
     Deserialize, Deserializer,
     de::{
-        self, IntoDeserializer, MapAccess, SeqAccess, Visitor,
+        self, MapAccess, SeqAccess, Visitor,
         value::{MapAccessDeserializer, SeqAccessDeserializer},
     },
 };
@@ -125,10 +125,10 @@ shape!(TcpReady, "true or a named port",
     }
 );
 
-shape!(TerminalConfig, "a terminal app name or a mapping with app and progress",
-    /// Parse the app name; an unknown one lists the known apps.
+shape!(TerminalConfig, "a mapping with progress",
+    /// Keep an older config's terminal app name, ignored with a warning.
     fn visit_str<E: de::Error>(self, value: &str) -> Result<TerminalConfig, E> {
-        Terminal::deserialize(value.into_deserializer()).map(TerminalConfig::App)
+        Ok(TerminalConfig::Legacy(value.to_owned()))
     }
     mapping!(TerminalConfig::Settings, TerminalSettings);
 );

@@ -10,12 +10,22 @@ use std::{
 };
 
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose, NameConstraints,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
+    GeneralSubtree, IsCa, Issuer, KeyPair, KeyUsagePurpose, NameConstraints, SanType,
 };
 
 /// DNS subtrees every newly created devlanes CA may sign for. A configured TLD is added at creation.
 pub const PERMITTED_DOMAINS: &[&str] = &["localhost", "test", "internal", "home.arpa"];
+/// Common name of new CAs. macOS uses it as the keychain label that `certs untrust` searches.
+const CA_COMMON_NAME: &str = "devlanes local development CA";
+/// Organization in the subject of every certificate devlanes creates.
+const ORGANIZATION: &str = "devlanes";
+/// Leaf organizational unit when the routing owner names no project and lane.
+const DEFAULT_UNIT: &str = "local development";
+/// Shown as a URI subject alternative name on new CAs, which certificate viewers list.
+const PROJECT_URL: &str = "https://devlanes.run";
+/// RFC 5280 upper bound, in characters, for common name and organizational unit values.
+const NAME_BOUND: usize = 64;
 use rustls::{
     ServerConfig,
     pki_types::{CertificateDer, PrivatePkcs8KeyDer},
@@ -160,9 +170,9 @@ impl CertificateAuthority {
                     KeyUsagePurpose::CrlSign,
                     KeyUsagePurpose::DigitalSignature,
                 ];
-                params
-                    .distinguished_name
-                    .push(DnType::CommonName, "devlanes local development CA");
+                params.distinguished_name = subject(Some(CA_COMMON_NAME), &machine_label());
+                // A CA is not checked against its own name constraints, so the URI stays valid.
+                params.subject_alt_names = vec![SanType::URI(PROJECT_URL.try_into()?)];
                 // A leaked key can then only impersonate development names, never public sites.
                 params.name_constraints = Some(NameConstraints {
                     permitted_subtrees: permitted
@@ -262,7 +272,10 @@ impl CertificateAuthority {
     }
 
     /// Mints a short-lived leaf. Route authorization belongs to `CertificatePolicy`.
-    pub fn issue(&self, names: &[String]) -> Result<Arc<CertifiedKey>, Error> {
+    ///
+    /// The subject names the first SAN and `owner` (a `project@lane` reference), so a
+    /// browser's certificate viewer shows what the leaf is for.
+    pub fn issue(&self, names: &[String], owner: Option<&str>) -> Result<Arc<CertifiedKey>, Error> {
         if names.is_empty() || names.iter().any(|name| !valid_dns_name(name)) {
             return Err(Error::InvalidNames);
         }
@@ -274,6 +287,12 @@ impl CertificateAuthority {
         let mut params = CertificateParams::new(names.to_vec())?;
         params.not_before = now - time::Duration::minutes(5);
         params.not_after = (now + time::Duration::days(30)).min(self.not_after);
+        params.distinguished_name = subject(
+            names.first().map(String::as_str),
+            owner
+                .filter(|owner| !owner.is_empty())
+                .unwrap_or(DEFAULT_UNIT),
+        );
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         let certificate = params.signed_by(&key, &self.issuer)?;
@@ -290,7 +309,10 @@ impl CertificateAuthority {
 #[derive(Clone, Debug)]
 pub struct CertificateIdentity {
     pub generation: u64,
+    /// SANs; the first becomes the leaf's common name.
     pub names: Vec<String>,
+    /// Project and lane that own the name, such as `acme@0`, shown in the leaf's subject.
+    pub owner: Option<String>,
 }
 
 /// Implemented by the routing owner; unknown names must return `None`.
@@ -303,6 +325,7 @@ pub trait CertificatePolicy: Send + Sync + std::fmt::Debug {
 struct CachedKey {
     issued: Instant,
     names: Vec<String>,
+    owner: Option<String>,
     key: Arc<CertifiedKey>,
 }
 
@@ -313,12 +336,15 @@ struct Cache {
 }
 
 impl Cache {
-    /// Returns a cached key only while it is young and still carries the authorized SANs.
-    fn fresh(&self, name: &str, names: &[String]) -> Option<Arc<CertifiedKey>> {
+    /// Returns a cached key only while it is young and still carries the authorized SANs
+    /// and owner; an owner change alone does not bump the route generation.
+    fn fresh(&self, name: &str, identity: &CertificateIdentity) -> Option<Arc<CertifiedKey>> {
         self.keys
             .get(name)
             .filter(|entry| {
-                entry.issued.elapsed() < Duration::from_secs(24 * 3600) && entry.names == names
+                entry.issued.elapsed() < Duration::from_secs(24 * 3600)
+                    && entry.names == identity.names
+                    && entry.owner == identity.owner
             })
             .map(|entry| entry.key.clone())
     }
@@ -355,18 +381,21 @@ impl DynamicCertResolver {
                 cache.keys.clear();
                 cache.generation = Some(identity.generation);
             }
-            if let Some(key) = cache.fresh(&name, &identity.names) {
+            if let Some(key) = cache.fresh(&name, &identity) {
                 return Some(key);
             }
         }
         // Key generation and signing run unlocked so one miss does not stall every handshake.
-        let key = self.ca.issue(&identity.names).ok()?;
+        let key = self
+            .ca
+            .issue(&identity.names, identity.owner.as_deref())
+            .ok()?;
         let mut cache = self.cache();
         // Routes changed while minting: serve this handshake but leave the new generation's cache alone.
         if cache.generation != Some(identity.generation) {
             return Some(key);
         }
-        if let Some(winner) = cache.fresh(&name, &identity.names) {
+        if let Some(winner) = cache.fresh(&name, &identity) {
             return Some(winner);
         }
         if cache.keys.len() >= 256 {
@@ -377,6 +406,7 @@ impl DynamicCertResolver {
             CachedKey {
                 issued: Instant::now(),
                 names: identity.names,
+                owner: identity.owner,
                 key: key.clone(),
             },
         );
@@ -422,6 +452,47 @@ fn valid_dns_name(name: &str) -> bool {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         })
+}
+
+/// Builds an O, OU, CN subject. A common name over the X.509 bound is left out
+/// (the SAN still carries it); a long unit is cut, since it is only informative.
+fn subject(common_name: Option<&str>, unit: &str) -> DistinguishedName {
+    let mut name = DistinguishedName::new();
+    name.push(DnType::OrganizationName, ORGANIZATION);
+    name.push(
+        DnType::OrganizationalUnitName,
+        unit.chars().take(NAME_BOUND).collect::<String>(),
+    );
+    if let Some(common_name) = common_name.filter(|cn| cn.chars().count() <= NAME_BOUND) {
+        name.push(DnType::CommonName, common_name);
+    }
+    name
+}
+
+/// `user@host` of the creating account, so CAs from several machines can be told apart.
+#[cfg(unix)]
+fn machine_label() -> String {
+    let user = ["USER", "LOGNAME"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find(|user| !user.is_empty())
+        .unwrap_or_else(|| rustix::process::getuid().as_raw().to_string());
+    let uname = rustix::system::uname();
+    format!("{user}@{}", uname.nodename().to_string_lossy())
+}
+
+/// `user@host` of the creating account, so CAs from several machines can be
+/// told apart. Windows sets `USERNAME` and `COMPUTERNAME` for every logon;
+/// `USER` is what Git Bash and other Unix-like shells may set instead.
+#[cfg(windows)]
+fn machine_label() -> String {
+    let var = |keys: &[&str]| {
+        keys.iter()
+            .filter_map(|key| std::env::var(key).ok())
+            .find(|value| !value.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned())
+    };
+    format!("{}@{}", var(&["USERNAME", "USER"]), var(&["COMPUTERNAME"]))
 }
 
 /// Creates the directory only the owner can enter. Existing directories are
@@ -611,6 +682,7 @@ mod tests {
             (name == "app.lane.localhost").then(|| CertificateIdentity {
                 generation: 1,
                 names: vec![name.into()],
+                owner: None,
             })
         }
     }

@@ -13,6 +13,7 @@ mod lifecycle;
 mod proxy;
 mod shutdown;
 mod tasks;
+mod tui_zoom;
 #[cfg(windows)]
 mod windows;
 mod with;

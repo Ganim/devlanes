@@ -1,5 +1,5 @@
 //! The monitor page: sorting, the selection across re-sorts, the filter,
-//! the range, actions on units and lanes, and the graphs on screen.
+//! the history asked for, actions on units and lanes, and the graphs on screen.
 
 use crossterm::event::KeyCode;
 use devlanes_tui::{
@@ -11,12 +11,13 @@ use ratatui::style::Color;
 use super::{TestResult, draw, key, loaded, shifted};
 use crate::fake::{FakeApi, mixed_lanes};
 
-/// 15 minutes of samples every 5 s ending at `now`, around `cpu`.
+/// 15 minutes of samples, one a second as the daemon sends them, ending at
+/// `now`, around `cpu`.
 fn history(now: u64, cpu: f64, memory: u64) -> Vec<(u64, f64, u64)> {
-    (0..180)
+    (0..900)
         .map(|i| {
             (
-                now - (179 - i) * 5_000,
+                now - (899 - i) * 1_000,
                 cpu * (0.5 + (i % 10) as f64 / 10.0),
                 memory,
             )
@@ -131,22 +132,19 @@ async fn the_filter_takes_the_keys_and_esc_steps_back() -> TestResult {
 }
 
 #[tokio::test]
-async fn the_range_steps_and_refetches() -> TestResult {
-    let mut app = monitor(120, 40, metrics(80.0, 5.0)).await;
-    let effects = app.update(key(KeyCode::Char('+')));
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::FetchMetrics(q) if q.range_ms == 3_600_000)),
-        "{effects:?}"
-    );
-    app.update(key(KeyCode::Char('-')));
-    let effects = app.update(key(KeyCode::Char('-')));
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::FetchMetrics(q) if q.range_ms == 120_000))
-    );
+async fn the_history_asked_for_is_as_many_seconds_as_the_widest_graph() -> TestResult {
+    let app = monitor(120, 40, metrics(80.0, 5.0)).await;
+    // Before a frame: two seconds per terminal column, raw samples.
+    let query = app.metrics_query();
+    assert_eq!((query.range_ms, query.points), (240_000, 0));
+    // After one: the widest graph's dot columns, one second each.
+    draw(&app)?;
+    let seconds = app.monitor_seconds.get();
+    assert!(seconds > 60, "{seconds}");
+    assert_eq!(app.metrics_query().range_ms, seconds as u64 * 1000);
+    // The range keys are gone: + and - do nothing.
+    let mut app = app;
+    assert!(app.update(key(KeyCode::Char('+'))).is_empty());
     Ok(())
 }
 
@@ -202,15 +200,18 @@ async fn graphs_are_braille_in_gradient_colors_with_the_system_line() -> TestRes
     // 16 colors: green for low load, red where one core is exceeded.
     assert!(braille.contains(&Color::Green));
     let text = terminal.backend().to_string();
-    // The detail's stats come from the history; its last sample is 112%.
+    // The detail's `now` is the current reading (80%); avg, min and max
+    // come from the history.
     for expected in [
         "┌ cpu ",
-        "of 4 cores · 15m",
+        "of 4 cores ",
         "┌ mem ",
         "of 16.0G",
         "system",
-        "-15m",
-        "now 112%",
+        // The axis says how far back the graph's columns reach.
+        "└-1m",
+        "now 80%",
+        "max 112%",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }

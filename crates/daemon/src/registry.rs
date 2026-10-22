@@ -1525,6 +1525,9 @@ impl Inner {
             return;
         }
         let mut summary = lane_summary(&name, &lane.st());
+        if lane.st().record.is_some() {
+            crate::model::add_shared(&mut summary, &crate::model::shared_containers(project));
+        }
         self.fill_queued(&mut summary);
         self.bus
             .emit(events::LANE_CHANGED, json!({"lane": summary}));

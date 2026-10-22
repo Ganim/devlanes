@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use devlanes_cli::{
-    AGENT_GUIDE, Action, Cli, Hint, InterruptPolicy, Rendered, Report, ReporterStream, Runtime,
+    Action, Cli, Hint, InterruptPolicy, Rendered, Report, ReporterStream, Runtime,
     export_environment, run_with, stop_with_logs, write_completions,
 };
 use devlanes_client::{Client, Paths};
@@ -223,13 +223,6 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
                 .and_then(|code| u8::try_from(code).ok())
                 .unwrap_or(1))
         }
-        Action::AgentGuide => {
-            emit(&Rendered {
-                stdout: AGENT_GUIDE.into(),
-                ..Rendered::default()
-            });
-            Ok(0)
-        }
         Action::Completions(shell) => {
             let mut buffer = Vec::new();
             write_completions(shell, &mut buffer)
@@ -242,9 +235,21 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
         }
         Action::DaemonRestart(context) => {
             let paths = paths()?;
+            // What runs now comes back after the restart; `daemon stop` keeps it stopped.
+            let mut running = Vec::new();
+            let (env, actor) = (
+                context.env.clone().unwrap_or_default(),
+                context.actor.clone(),
+            );
             // Any protocol: restarting is how an incompatible daemon gets replaced.
             match Client::connect_any(&paths).await {
                 Ok(mut client) => {
+                    if client.compatible() {
+                        running = client.running_lanes().await.unwrap_or_else(|error| {
+                            tracing::warn!(%error, "could not read what runs; nothing is resumed");
+                            Vec::new()
+                        });
+                    }
                     let processes = client.peer.managed_processes;
                     if processes > 0
                         && !context.yes
@@ -296,7 +301,25 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
                     data["autostart"] = autostart;
                 }
             }
-            render_result(runtime, Method::DaemonStatus, &data, None)
+            let items = if running.is_empty() {
+                Vec::new()
+            } else {
+                client.resume_running(&running, &env, &actor).await
+            };
+            // JSON output stays one document; text prints the starts after the status.
+            if runtime.mode == devlanes_cli::OutputMode::Json {
+                if data.is_object() {
+                    data["resumed"] = json!(items);
+                }
+                return render_result(runtime, Method::DaemonStatus, &data, None);
+            }
+            let status = render_result(runtime, Method::DaemonStatus, &data, None)?;
+            if items.is_empty() {
+                return Ok(status);
+            }
+            let page = json!({"items": items, "truncated": false, "next_cursor": null});
+            let resumed = render_result(runtime, Method::Resume, &page, None)?;
+            Ok(status.max(resumed))
         }
         Action::DaemonLogs { follow, tail } => daemon_logs(follow, tail.unwrap_or(100)).await,
         Action::DebugBundle {

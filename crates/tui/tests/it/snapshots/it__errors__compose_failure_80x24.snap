@@ -2,13 +2,13 @@
 source: crates/tui/tests/it/errors.rs
 expression: screen(&buffer)
 ---
-" devlanes   1 acme ●  ✕ start acme@1:portal failed: dock…  M monitor   D daemon "
-" lanes    main @0 ●     feat/portal @1 ·                   [ and ] switch lanes "
+" devlanes  1 acme ●   ✕ start acme@1:portal failed: dock…  M monitor   D daemon "
+" lanes    1 main @0 ●     2 feat/portal @1 ·            1-9 or [ ] switch lanes "
 "┌ feat/portal @1 ──────────────┐┌ portal  stopped ─────────────────────────────┐"
-"│ · whole lane     not running ││ ✕ Start acme@1:portal failed: docker compose │"
-"│                              ││   failed (exit status 1)                     │"
-"│ ▾ services                 1 ││   error: open                                │"
-"│   · portal      start failed ││   /work/acme/worktrees/portal-checkout-with-a│"
+"│ ▾ services                 1 ││ ✕ Start acme@1:portal failed: docker compose │"
+"│   · portal      start failed ││   failed (exit status 1)                     │"
+"│                              ││   error: open                                │"
+"│                              ││   /work/acme/worktrees/portal-checkout-with-a│"
 "│                              ││   -long-directory-name/compose.yaml: no such │"
 "│                              ││   file or directory                          │"
 "│                              ││       compose could not load the project     │"

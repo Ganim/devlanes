@@ -474,6 +474,7 @@ impl WithDriver for FakeDriver {
                 timestamp_ms: 1,
                 text: text.into(),
                 level: None,
+                styled: None,
             }],
         };
         Ok(vec![

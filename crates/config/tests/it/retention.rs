@@ -7,6 +7,11 @@ use std::time::Duration;
 fn retention_defaults_and_overrides() {
     let defaults = parse_user("{}").expect("user defaults");
     assert_eq!(defaults.history.retention.0, DEFAULT_RUN_HISTORY_RETENTION);
+    // A week of finished runs and monitor history unless configured.
+    let week = Duration::from_secs(7 * 86_400);
+    assert_eq!(defaults.history.retention.0, week);
+    assert_eq!(defaults.metrics.retention.0, week);
+    assert_eq!(DEFAULT_METRICS_RETENTION, week);
     assert_eq!(
         defaults.history.remote_hosts_retention.0,
         DEFAULT_REMOTE_HOST_RETENTION

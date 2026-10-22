@@ -17,8 +17,8 @@ use devlanes_proto::{Actor, LogLine, LogQuery, Page, RpcError};
 use serde_json::json;
 use tokio::sync::{broadcast, watch};
 
-/// Daemon-side scrollback stays small; deep history comes from log segments.
-const SCROLLBACK: usize = 200;
+use crate::screen::Screen;
+
 /// Most output chunks fed to the screen model per blocking-pool trip.
 const PUMP_BATCH: usize = 64;
 /// Output chunks queued for the log thread; beyond this, chunks are dropped from
@@ -144,7 +144,7 @@ struct Inner {
     exit: watch::Sender<Option<ExitOutcome>>,
     /// The screen lock also orders re-broadcast, so an attacher's snapshot and its
     /// subscription never leave a gap or a duplicate.
-    screen: StdMutex<vt100::Parser>,
+    screen: StdMutex<Screen>,
     live: broadcast::Sender<Bytes>,
     log: Arc<StdMutex<UnitLog>>,
     log_tx: std::sync::mpsc::SyncSender<LogCommand>,
@@ -198,7 +198,6 @@ impl UnitHost {
             info.name.clone(),
             log_done.clone(),
         );
-        let size = TerminalSize::default();
         let host = Self {
             inner: Arc::new(Inner {
                 info,
@@ -206,11 +205,7 @@ impl UnitHost {
                 identity,
                 state: watch::channel(UnitState::Starting).0,
                 exit: watch::channel(None).0,
-                screen: StdMutex::new(vt100::Parser::new(
-                    cells(size.rows),
-                    cells(size.columns),
-                    SCROLLBACK,
-                )),
+                screen: StdMutex::new(Screen::new(TerminalSize::default())),
                 live: broadcast::channel(1024).0,
                 log,
                 log_tx,
@@ -406,10 +401,15 @@ impl UnitHost {
     /// A pipe unit has no PTY: only its screen model changes, which is never an error.
     pub async fn resize(&self, size: TerminalSize) -> Result<(), RpcError> {
         if let Ok(mut screen) = self.inner.screen.lock() {
-            screen
-                .screen_mut()
-                .set_size(cells(size.rows), cells(size.columns));
+            screen.resize(size);
         }
+        tracing::debug!(
+            unit = %self.inner.info.name,
+            columns = size.columns,
+            rows = size.rows,
+            pty = self.inner.info.pty,
+            "terminal resized"
+        );
         if !self.inner.info.pty {
             return Ok(());
         }
@@ -420,25 +420,43 @@ impl UnitHost {
             .map_err(|error| internal("resize_failed", error))
     }
 
-    /// Returns a full-screen redraw plus a receiver for everything after it.
-    pub fn attach(&self) -> (Bytes, broadcast::Receiver<Bytes>) {
-        match self.inner.screen.lock() {
+    /// Returns a full-screen redraw for a viewer of `size` (the unit's own
+    /// size when `None`) plus a receiver for everything after it.
+    pub async fn attach(&self, size: Option<TerminalSize>) -> (Bytes, broadcast::Receiver<Bytes>) {
+        let inner = self.inner.clone();
+        // Replaying recent output is CPU work proportional to it; keep it off the executor.
+        let snapshot = tokio::task::spawn_blocking(move || match inner.screen.lock() {
             Ok(screen) => {
-                let snapshot = snapshot_bytes(&screen);
-                (snapshot, self.inner.live.subscribe())
+                let snapshot = screen.snapshot(size);
+                tracing::debug!(
+                    unit = %inner.info.name,
+                    columns = size.map(|s| s.columns),
+                    rows = size.map(|s| s.rows),
+                    alternate = screen.screen().alternate_screen(),
+                    bytes = snapshot.len(),
+                    "attach snapshot"
+                );
+                (snapshot, inner.live.subscribe())
             }
             // A poisoned lock only loses the snapshot; live output still flows.
-            Err(_) => (Bytes::new(), self.inner.live.subscribe()),
-        }
+            Err(_) => (Bytes::new(), inner.live.subscribe()),
+        })
+        .await;
+        snapshot.unwrap_or_else(|_| (Bytes::new(), self.inner.live.subscribe()))
     }
 
-    /// Fresh redraw for a viewer that lagged behind the live channel.
-    pub fn redraw(&self) -> Bytes {
-        self.inner
-            .screen
-            .lock()
-            .map(|screen| snapshot_bytes(&screen))
-            .unwrap_or_default()
+    /// Fresh redraw at `size` for a viewer that lagged behind the live channel.
+    pub async fn redraw(&self, size: Option<TerminalSize>) -> Bytes {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            inner
+                .screen
+                .lock()
+                .map(|screen| screen.snapshot(size))
+                .unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// Process tree members for metrics and diagnostics (and v2 window matching).
@@ -504,9 +522,20 @@ impl UnitHost {
     /// The last lines of this run, ANSI stripped, for failure reports and `log`
     /// ready checks. Earlier runs share the log directory and are left out.
     pub async fn tail(&self, lines: usize) -> Vec<String> {
+        self.tail_lines(lines, false)
+            .await
+            .into_iter()
+            .map(|line| line.text)
+            .collect()
+    }
+
+    /// [`UnitHost::tail`] as log lines, with their colors when `styled`.
+    pub async fn tail_lines(&self, lines: usize, styled: bool) -> Vec<LogLine> {
         let query = LogQuery {
             tail: Some(lines),
-            max_bytes: Some(32 * 1024),
+            // Colors make lines longer; the budget grows with them.
+            max_bytes: Some(if styled { 64 * 1024 } else { 32 * 1024 }),
+            styled,
             ..LogQuery::default()
         };
         self.logs(query)
@@ -515,7 +544,6 @@ impl UnitHost {
                 page.items
                     .into_iter()
                     .filter(|line| self.of_this_run(line))
-                    .map(|line| line.text)
                     .collect()
             })
             .unwrap_or_default()
@@ -641,7 +669,7 @@ impl Inner {
             }
         }
         if redraw {
-            let _ = self.live.send(snapshot_bytes(&screen));
+            let _ = self.live.send(screen.snapshot(None));
         }
     }
 
@@ -881,15 +909,6 @@ impl Drop for DoneGuard {
     }
 }
 
-/// Clear + home + current contents, so the viewer's terminal matches the model exactly.
-fn snapshot_bytes(parser: &vt100::Parser) -> Bytes {
-    let screen = parser.screen();
-    let mut bytes = b"\x1b[H\x1b[2J".to_vec();
-    bytes.extend_from_slice(screen.contents_formatted().as_bytes());
-    bytes.extend_from_slice(screen.input_mode_formatted().as_bytes());
-    Bytes::from(bytes)
-}
-
 /// `bytes` with a `\r` before every `\n` that lacks one; `after_cr` carries the
 /// last byte's state to the next chunk.
 fn crlf(bytes: &Bytes, after_cr: &mut bool) -> Bytes {
@@ -917,11 +936,6 @@ fn crlf(bytes: &Bytes, after_cr: &mut bool) -> Bytes {
         previous_cr = byte == b'\r';
     }
     Bytes::from(out)
-}
-
-/// vt100 rejects zero-sized screens; a client reporting 0 rows still gets one.
-fn cells(value: u16) -> std::num::NonZeroU16 {
-    std::num::NonZeroU16::new(value).unwrap_or(std::num::NonZeroU16::MIN)
 }
 
 /// Milliseconds since the epoch for log and summary timestamps.
@@ -1250,7 +1264,7 @@ mod tests {
             .clone()
             .expect("output open");
         let host = host(unit, &dir).await;
-        let (_, mut live) = host.attach();
+        let (_, mut live) = host.attach(None).await;
         // The scripted unit buffers 4 chunks; the pump has not run yet, so it lags.
         for line in 0..20 {
             let _ = output.send(OutputChunk {
@@ -1304,7 +1318,8 @@ mod tests {
             assert!(Instant::now() < deadline, "output never logged");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let (snapshot, _) = host.attach();
+        let (snapshot, _) = host.attach(None).await;
+        let cells = |n| std::num::NonZeroU16::new(n).expect("nonzero");
         let mut parser = vt100::Parser::new(cells(5), cells(20), 0);
         parser.process(&snapshot);
         assert_eq!(parser.screen().contents(), "line 1\nline 2");

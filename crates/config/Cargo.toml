@@ -20,6 +20,8 @@ miette = { version = "7", features = ["fancy"] }
 strsim = "0.11"
 globset = "0.4"
 serde_path_to_error = "0.1"
+# Lossless YAML tree: user config edits keep comments, order and formatting.
+yaml-edit = { version = "0.3.5", default-features = false }
 
 [dev-dependencies]
 devlanes-preset-vite = { path = "../preset-vite" }

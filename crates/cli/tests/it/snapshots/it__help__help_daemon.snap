@@ -9,7 +9,7 @@ Usage: devlanes daemon [OPTIONS] <COMMAND>
 Commands:
   status       Show the daemon's version, pid, uptime and managed process count; never starts it
   stop         Stop the daemon and every process it manages
-  restart      Restart the daemon; asks first when processes are running
+  restart      Restart the daemon and start again, with this shell's environment, the services that ran; asks first when processes are running
   logs         Print the daemon's own log file
   install      Start the daemon at login (launchd agent, systemd user unit, or a Windows logon entry)
   uninstall    Stop starting the daemon at login; a running daemon keeps running

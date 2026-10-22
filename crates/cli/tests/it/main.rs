@@ -161,7 +161,6 @@ fn entire_command_inventory_builds_actions() {
         (&["daemon", "uninstall"], None),
         (&["daemon", "run"], None),
         (&["ui"], None),
-        (&["agent-guide"], None),
         (&["completions", "zsh"], None),
         (&["tunnel", "--stdio"], None),
         (&["askpass", "Password:"], None),
@@ -498,6 +497,18 @@ fn typed_params_preserve_opaque_refs_argv_and_context() {
     assert_eq!(params.tail, Some(100));
     assert_eq!(params.max_bytes, Some(16 * 1024));
     assert_eq!(params.units, ["acme@feat/checkout:+api"]);
+    assert!(!params.styled, "agents get no colors");
+    let cli = Cli::parse_from(["devlanes", "logs", "api", "--head", "5"]);
+    let params: LogQuery =
+        serde_json::from_value(request(action(&cli, &runtime(&cli, OutputMode::Agent))).params)
+            .expect("log query");
+    assert_eq!((params.head, params.tail), (Some(5), None));
+    for conflicting in [["--tail", "5"], ["-f", "--timeout=1s"]] {
+        let args = ["devlanes", "logs", "api", "--head", "5"]
+            .into_iter()
+            .chain(conflicting);
+        assert!(Cli::try_parse_from(args).is_err(), "{conflicting:?}");
+    }
 }
 
 #[test]
@@ -677,6 +688,7 @@ fn log_shaping_snapshot_and_utf8_budget() {
             timestamp_ms: 1,
             text,
             level: None,
+            styled: None,
         })
         .collect();
     let data = serde_json::to_value(Page::complete(lines)).expect("serialize");
@@ -968,6 +980,7 @@ fn log_event(seq: u64, text: &str) -> Event {
         timestamp_ms: 1,
         text: text.into(),
         level: None,
+        styled: None,
     };
     Event {
         seq,
@@ -1079,6 +1092,7 @@ fn failure_tail_and_long_lines_have_explicit_limits() {
         timestamp_ms: 1,
         text: "界".repeat(500),
         level: None,
+        styled: None,
     };
     let text = line.text(true, false);
     assert_eq!(

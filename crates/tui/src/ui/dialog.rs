@@ -19,20 +19,23 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
     (
         "list",
         &[
-            ("j k  up down", "move"),
-            ("g G", "first, last"),
-            ("h l", "fold, unfold; h moves to the group"),
-            ("enter  space", "fold a group, or type into a running unit"),
-            ("[ ]", "previous, next lane"),
+            ("j k  up down", "move; k from the top selects the lane"),
+            ("g G", "the lane, the last row"),
+            ("h l", "fold, unfold; h moves to the section"),
+            (
+                "enter  space",
+                "fold a section, or type into a running unit",
+            ),
+            ("[ ]  1-9", "previous, next lane; lane by number"),
             ("n N", "next, previous problem"),
             (
                 "s  x  r",
                 "start, stop, restart the selection; s runs a task",
             ),
+            ("s  S", "on the lane: its default services; every service"),
             ("p", "start the lane with chosen profiles"),
             ("C", "clean the lane (asks first)"),
-            ("o", "open the unit's url in a browser"),
-            ("O", "new terminal on the unit, or a shell in the worktree"),
+            ("o", "open the unit's address in a browser"),
             ("/", "filter by name or +tag; enter keeps, esc clears"),
         ],
     ),
@@ -60,7 +63,6 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
             ("i", "reverse the sort"),
             ("/  e", "filter, grouped or flat"),
             ("h l", "fold, unfold a lane"),
-            ("+ -", "range of the graphs: 2m, 15m, 1h, 6h"),
             ("z", "detail graphs fill the page"),
             ("s  x  r", "start, stop, restart the unit or lane"),
             ("enter", "open the unit in its project"),
@@ -71,9 +73,16 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("R  S", "restart, stop or start the daemon"),
             ("X", "clean every lane whose worktree is gone"),
+            (
+                "j k  g G",
+                "scroll the log (pauses), oldest, newest and follow",
+            ),
             ("w  /  T", "level floor, text filter, targets"),
-            ("F  d", "pause or follow, fold repeats"),
-            ("c  O", "select log lines, open the log in less"),
+            ("F  d", "pause or follow, fold or unfold repeats"),
+            (
+                "c",
+                "copy mode: v select, y copy as in the file, Y as shown",
+            ),
             ("i", "every check, or problems only"),
         ],
     ),
@@ -81,11 +90,11 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
         "everywhere",
         &[
             ("tab  shift+tab", "next, previous project"),
-            ("1-9", "project by number"),
+            ("shift+1-9", "project by number"),
             ("M  D", "monitor, daemon; again or esc returns"),
-            ("esc", "one step back"),
+            ("esc", "one step back, then the menu: options, help, quit"),
             ("u", "hide the hint strip or version notice"),
-            ("q", "quit; units keep running"),
+            ("q", "quit; asks first while lanes run (tui.on_quit)"),
         ],
     ),
 ];
@@ -202,6 +211,11 @@ pub fn render(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
     let rows = usize::from(area.height.saturating_sub(2)).max(1);
     // `body` may be cut to fit; `tail` (the keys) always stays.
     let (title, body, tail): (String, Vec<Line>, Vec<Line>) = match dialog {
+        // The Esc menu and its options page draw themselves.
+        Dialog::Menu(menu) => return crate::menu::render(theme, menu, frame, area),
+        Dialog::Settings(settings) => {
+            return crate::settings::render(theme, settings, frame, area);
+        }
         Dialog::Confirm {
             title,
             prompt,
@@ -223,6 +237,104 @@ pub fn render(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
                 keys(theme, &[("enter", action), ("esc", "cancel")])
             };
             (title.clone(), body, vec![tail])
+        }
+        Dialog::Targets(picker) => {
+            let width = max.min(56);
+            let tail = vec![
+                Line::styled("With none checked, every target shows.", theme.quiet()),
+                Line::from(""),
+                keys(
+                    theme,
+                    &[
+                        ("space", "check"),
+                        ("a", "none"),
+                        ("enter", "apply"),
+                        ("esc", "cancel"),
+                    ],
+                ),
+            ];
+            let room = rows.saturating_sub(tail.len() + 1).max(1);
+            let start = window(picker.items.len(), picker.index, room);
+            let body = picker
+                .items
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(room)
+                .map(|(index, (target, count, checked))| {
+                    let selected = index == picker.index;
+                    let marker = if selected {
+                        theme.glyph(Glyph::Marker)
+                    } else {
+                        " "
+                    };
+                    let check = if *checked { "[x]" } else { "[ ]" };
+                    let name_width = width.saturating_sub(12);
+                    let line = fit(
+                        vec![
+                            Span::styled(marker, theme.focus()),
+                            Span::raw(format!("{check} ")),
+                            Span::raw(format!(
+                                "{:<name_width$} ",
+                                clip(&clean(target), name_width)
+                            )),
+                            Span::styled(format!("{count:>5}"), theme.quiet()),
+                        ],
+                        width,
+                    );
+                    if selected {
+                        line.patch_style(theme.selection())
+                    } else {
+                        line
+                    }
+                })
+                .collect();
+            ("daemon.log targets".to_owned(), body, tail)
+        }
+        Dialog::Quit(quit) => {
+            let lanes = quit.lanes.join(", ");
+            let prompt = if quit.lanes.len() == 1 {
+                format!("{lanes} is running.")
+            } else {
+                format!("{lanes} are running.")
+            };
+            let mut body = wrapped(&prompt, narrow, Style::new().add_modifier(Modifier::BOLD));
+            body.push(Line::from(""));
+            for (index, choice) in crate::app::QUIT_CHOICES.iter().enumerate() {
+                let selected = index == quit.index;
+                let marker = if selected {
+                    theme.glyph(Glyph::Marker)
+                } else {
+                    " "
+                };
+                let line = fit(
+                    vec![
+                        Span::styled(marker, theme.focus()),
+                        Span::raw(format!("{choice} ")),
+                    ],
+                    narrow,
+                );
+                body.push(if selected {
+                    line.patch_style(theme.selection())
+                } else {
+                    line
+                });
+            }
+            body.push(Line::from(""));
+            let check = if quit.remember { "[x]" } else { "[ ]" };
+            body.push(Line::from(vec![
+                Span::raw(format!(" {check} remember this choice ")),
+                Span::styled("(tui.on_quit)", theme.quiet()),
+            ]));
+            let tail = keys(
+                theme,
+                &[
+                    ("enter", "choose"),
+                    ("space", "remember"),
+                    ("esc", "cancel"),
+                ],
+            );
+            ("quit".to_owned(), body, vec![tail])
         }
         Dialog::Profiles { lane, state } => {
             let mut body = Vec::new();
@@ -345,7 +457,13 @@ pub fn render(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
         }
     };
     let lines = compact(body, tail, rows, theme);
-    let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
+    // Wide enough for the title too, which is cut only on a narrow screen.
+    let content_width = lines
+        .iter()
+        .map(Line::width)
+        .max()
+        .unwrap_or(0)
+        .max(text::width(&clean(&title)) + 2);
     let width = u16::try_from(content_width + 4)
         .unwrap_or(area.width)
         .clamp(20.min(area.width), area.width);

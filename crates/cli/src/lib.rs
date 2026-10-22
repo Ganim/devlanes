@@ -19,6 +19,7 @@ pub use clap_complete::Shell;
 pub use completion::*;
 pub use output::*;
 pub use progress::*;
+pub use render::{DoctorCheck, DoctorState, doctor_checks_of};
 pub use runtime::*;
 pub use with::*;
 
@@ -28,11 +29,6 @@ pub use with::*;
 pub fn has_wording(code: &str) -> bool {
     render::has_wording(code)
 }
-
-/// Local help for agents; process ownership always remains with the daemon.
-/// The same text is `agent-plugin/codex/AGENTS.md` (a test keeps them identical) and the
-/// short form of `agent-plugin/skills/devlanes/SKILL.md`.
-pub const AGENT_GUIDE: &str = include_str!("../agent-guide.md");
 
 /// Process exit statuses shared by all command handlers.
 pub mod exit {

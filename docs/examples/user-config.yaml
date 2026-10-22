@@ -45,24 +45,20 @@ logs:
   retention: { days: 7, max_size: 5GiB }
 # How long CPU and memory history is kept, including database aggregates and run summaries.
 metrics:
-  retention: 30d
+  retention: 7d
 # Finished unit/task history and disconnected remote-host records in the database.
 history:
-  retention: 30d
+  retention: 7d
   # Age since the host's last successful connection.
   remote_hosts_retention: 90d
 # Soft database budget, including SQLite WAL and shared-memory files.
 # Old metrics and history are pruned first; live registry and completion records are preserved.
 state:
   max_size: 512MiB
-# Terminal app the TUI's O key opens a unit in: ghostty, iterm2, kitty, wezterm, terminal
-# or windows-terminal. On Windows only windows-terminal and wezterm work; inside WSL,
-# windows-terminal opens a Windows Terminal tab in the same distro.
-# `terminal: ghostty` alone works too. progress shows start progress in the tab's
-# progress bar: auto (terminals known to draw it), always or never.
-# DEVLANES_TERM_PROGRESS=0 or 1 overrides it.
+# progress shows start progress in the terminal tab's progress bar: auto
+# (terminals known to draw it), always or never. DEVLANES_TERM_PROGRESS=0 or 1
+# overrides it.
 terminal:
-  app: ghostty
   progress: auto
 # Once a day the daemon reads the version of the latest devlanes release, and commands
 # print the upgrade command when it is newer. false (or DEVLANES_NO_UPDATE_CHECK=1) turns it off.
@@ -73,7 +69,10 @@ updates:
 # theme: auto uses the terminal's 16 colors, or a true-color palette when the
 # terminal says it supports one and reports its background; dark, light or ansi pick one.
 # glyphs: auto draws Unicode on a UTF-8 locale and ASCII otherwise.
+# on_quit: what q does while lanes of the project on screen run: ask, keep
+# (they keep running) or stop (they stop, then the TUI closes).
 tui:
   open_on_start: true
   theme: auto
   glyphs: auto
+  on_quit: ask

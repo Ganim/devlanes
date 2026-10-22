@@ -16,6 +16,11 @@ serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+# The TUI tests run `devlanes ui` in a pseudo-terminal and read its screen.
+portable-pty = "0.9"
+vt100 = "0.18"
+
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
 

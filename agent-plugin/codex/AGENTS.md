@@ -6,7 +6,7 @@ This repository runs its dev services with devlanes. A per-user daemon owns the 
 - Never background a process with `&`, `nohup`, `Start-Process` or `Start-Job`. Use `devlanes exec --name NAME -- COMMAND` instead.
 - Lanes are `project@N` or `project@branch`; units are `LANE:UNIT`. Globs and `+tags` select several units.
 - Inspect with `devlanes status`, `devlanes wait UNIT --timeout 180s`, `devlanes debug errors` and `devlanes debug why UNIT`.
-- Read logs with `devlanes logs UNIT --tail 100` or `--grep RE`, and continue with `--cursor`. Follow logs only with `--timeout`.
+- Read logs with `devlanes logs UNIT --tail 100`, `--head 50` or `--grep RE`, and continue with `--cursor`. Follow logs only with `--timeout`.
 - Run tests with `devlanes with -- COMMAND`. It starts the lane, waits, runs COMMAND, stops what it started and exits with COMMAND's code.
 - Clean up with `devlanes stop --mine`, which stops only what this session started; `devlanes status --mine` lists it.
 - A command that needs confirmation exits 2. Rerun it with `--yes` only when the user asked for that action.

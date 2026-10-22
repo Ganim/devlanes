@@ -17,8 +17,9 @@ use devlanes_client::update::InstallMethod;
 use devlanes_proto::{AttachResult, Event, Page, RpcError, events};
 use devlanes_tui::{
     ApiError,
-    app::{App, Effect, Msg, RowId, Section, Selected, Target},
+    app::{App, Dialog, Effect, Msg, RowId, Section, Selected, Target},
     logfile::{LogChunk, LogPosition},
+    settings,
     start::StartFrame,
     theme::{Glyphs, Theme, Tier},
     ui,
@@ -186,6 +187,24 @@ impl Fake {
                 result: Ok(data::tasks(&lane)),
                 lane,
             }],
+            // The file starts as USER_CONFIG; a save writes its changes over it.
+            Effect::Settings(request) => {
+                let mut source = USER_CONFIG.to_owned();
+                if let settings::Request::Save { changes } = request {
+                    for (key, value) in changes {
+                        if let Ok(text) =
+                            devlanes_config::edit_user_source(&source, &key, value.as_ref())
+                        {
+                            source = text;
+                        }
+                    }
+                }
+                vec![Msg::Settings(settings::Reply::Loaded {
+                    path: "~/.devlanes/config.yaml".into(),
+                    source: Ok(source),
+                    error: None,
+                })]
+            }
             _ => Vec::new(),
         };
         self.queue.extend(reply);
@@ -206,6 +225,58 @@ fn start_event(name: &str, data: serde_json::Value) -> Msg {
         event: name.into(),
         data,
     }))
+}
+
+/// The user config the options page reads.
+const USER_CONFIG: &str = "\
+# machine settings for devlanes
+tui:
+  theme: dark
+proxy:
+  https_port: 8443 # 443 needs the helper
+  http_port: 8080
+history:
+  retention: 14d
+";
+
+/// Opens the Esc menu's options page.
+fn options(f: &mut Fake) {
+    f.key(KeyCode::Esc);
+    f.key(KeyCode::Char('o'));
+}
+
+/// Moves the options page's selection to `key` on its tab.
+fn option(f: &mut Fake, key: &str) {
+    for _ in 0..40 {
+        let at = match &f.app.dialog {
+            Some(Dialog::Settings(settings)) => settings.selected().map(|item| item.key.clone()),
+            _ => None,
+        };
+        if at.as_deref() == Some(key) {
+            return;
+        }
+        f.key(KeyCode::Down);
+    }
+}
+
+/// Options with two changes kept and not saved: proxy.lan on the network tab,
+/// then history.retention typed on the storage tab, which stays selected.
+fn unsaved(f: &mut Fake) {
+    options(f);
+    f.key(KeyCode::Tab);
+    option(f, "proxy.lan");
+    f.key(KeyCode::Enter);
+    f.key(KeyCode::Right);
+    f.key(KeyCode::Enter);
+    f.key(KeyCode::Char('4'));
+    option(f, "history.retention");
+    f.key(KeyCode::Enter);
+    f.send(Msg::Key(KeyEvent::new(
+        KeyCode::Char('u'),
+        KeyModifiers::CONTROL,
+    )));
+    f.type_text("21d");
+    f.key(KeyCode::Enter);
 }
 
 /// The scene `lanes-unit` in another color tier and glyph set.
@@ -240,7 +311,7 @@ fn scenes() -> Vec<Scene> {
         },
         Scene {
             name: "sections-folded",
-            what: "tasks and infra folded by the user (h), the whole-lane row selected",
+            what: "tasks and infra folded by the user (h), the lane selected through its title (g)",
             setup: |f| {
                 f.select("acme@0", RowId::Section(Section::Tasks));
                 f.key(KeyCode::Char('h'));
@@ -255,14 +326,12 @@ fn scenes() -> Vec<Scene> {
             setup: |f| f.select("acme@0", RowId::Section(Section::Services)),
         },
         Scene {
-            name: "not-started-open",
-            what: "the not started fold opened (l): services that are not running while the lane runs",
+            name: "infra-shared",
+            what: "infra: the lane's containers, the project's shared ones (hidden pgbouncer dimmed)",
             setup: |f| {
-                f.select(
-                    "acme@0",
-                    RowId::Group(Section::Services, "not started".into()),
-                );
+                f.select("acme@0", RowId::Group(Section::Infra, "shared".into()));
                 f.key(KeyCode::Char('l'));
+                f.key(KeyCode::Char('j'));
             },
         },
         Scene {
@@ -275,12 +344,12 @@ fn scenes() -> Vec<Scene> {
         },
         Scene {
             name: "lane-overview",
-            what: "the whole-lane row: facts, services not up, and every lane of the project",
+            what: "the lane selected (its title): facts, services not up, and every lane of the project",
             setup: |f| f.lane("acme@0"),
         },
         Scene {
             name: "lane-starting",
-            what: "a lane in the middle of its start: phases on the whole-lane row, ] to reach it",
+            what: "a lane in the middle of its start: phases in the pane, ] to reach it",
             setup: |f| {
                 for data in data::start_phases() {
                     f.send(Msg::Event(Event {
@@ -304,13 +373,13 @@ fn scenes() -> Vec<Scene> {
         },
         Scene {
             name: "project-shop",
-            what: "another project tab (3)",
-            setup: |f| f.key(KeyCode::Char('3')),
+            what: "another project tab (Shift+3)",
+            setup: |f| f.key(KeyCode::Char('#')),
         },
         Scene {
             name: "project-config-error",
-            what: "a project whose devlanes.yaml does not load (2)",
-            setup: |f| f.key(KeyCode::Char('2')),
+            what: "a project whose devlanes.yaml does not load (Shift+2)",
+            setup: |f| f.key(KeyCode::Char('@')),
         },
         Scene {
             name: "unit-failed",
@@ -464,6 +533,35 @@ fn scenes() -> Vec<Scene> {
             setup: |f| f.shifted('D'),
         },
         Scene {
+            name: "daemon-targets",
+            what: "the target picker on the daemon page (T): gate checked",
+            setup: |f| {
+                f.shifted('D');
+                f.shifted('T');
+                f.key(KeyCode::Char(' '));
+            },
+        },
+        Scene {
+            name: "daemon-targets-applied",
+            what: "the daemon log narrowed to the gate target (T, space, enter)",
+            setup: |f| {
+                f.shifted('D');
+                f.shifted('T');
+                f.key(KeyCode::Char(' '));
+                f.key(KeyCode::Enter);
+            },
+        },
+        Scene {
+            name: "daemon-search",
+            what: "a search on the daemon log (/ wrk-export, enter): matches marked",
+            setup: |f| {
+                f.shifted('D');
+                f.key(KeyCode::Char('/'));
+                f.type_text("wrk-export");
+                f.key(KeyCode::Enter);
+            },
+        },
+        Scene {
             name: "daemon-copy",
             what: "copy mode on the daemon log (c, v, k): two lines selected",
             setup: |f| {
@@ -508,6 +606,103 @@ fn scenes() -> Vec<Scene> {
                     dismissed: Vec::new(),
                 });
                 f.unit("acme@0", "web-app");
+            },
+        },
+        Scene {
+            name: "menu",
+            what: "the Esc menu: banner over lane lines, version, options, help, quit",
+            setup: |f| f.key(KeyCode::Esc),
+        },
+        Scene {
+            name: "menu-light",
+            what: "the Esc menu in true color on a light background, quit selected",
+            setup: |f| {
+                f.app.theme = Theme {
+                    tier: Tier::Light,
+                    glyphs: Glyphs::Unicode,
+                };
+                f.key(KeyCode::Esc);
+                f.key(KeyCode::Up);
+            },
+        },
+        Scene {
+            name: "menu-ascii",
+            what: "the Esc menu with ASCII glyphs",
+            setup: |f| {
+                f.app.theme = Theme {
+                    tier: Tier::Ansi,
+                    glyphs: Glyphs::Ascii,
+                };
+                f.key(KeyCode::Esc);
+            },
+        },
+        Scene {
+            name: "options",
+            what: "options (Esc, o): the general tab, tui.theme with its values",
+            setup: |f| {
+                options(f);
+                option(f, "tui.theme");
+            },
+        },
+        Scene {
+            name: "options-error",
+            what: "a typed value the config refuses: proxy.https_port equal to http_port",
+            setup: |f| {
+                options(f);
+                f.key(KeyCode::Tab);
+                option(f, "proxy.https_port");
+                f.key(KeyCode::Enter);
+                f.send(Msg::Key(KeyEvent::new(
+                    KeyCode::Char('u'),
+                    KeyModifiers::CONTROL,
+                )));
+                f.type_text("8080");
+                f.key(KeyCode::Enter);
+            },
+        },
+        Scene {
+            name: "options-preview",
+            what: "tui.theme in edit mode (Enter, →): light previews before saving",
+            setup: |f| {
+                options(f);
+                option(f, "tui.theme");
+                f.key(KeyCode::Enter);
+                f.key(KeyCode::Right);
+            },
+        },
+        Scene {
+            name: "options-unsaved",
+            what: "two changes kept with Enter and not saved yet: the count in the title, s or [save] writes them",
+            setup: unsaved,
+        },
+        Scene {
+            name: "options-discard",
+            what: "Esc with unsaved changes: save changes, discard or keep editing",
+            setup: |f| {
+                unsaved(f);
+                f.key(KeyCode::Esc);
+            },
+        },
+        Scene {
+            name: "options-restart",
+            what: "after s: what was saved and the daemon restart it needs, R to restart",
+            setup: |f| {
+                unsaved(f);
+                f.key(KeyCode::Char('s'));
+            },
+        },
+        Scene {
+            name: "options-editing",
+            what: "typing a duration on the storage tab (4, Enter)",
+            setup: |f| {
+                options(f);
+                f.key(KeyCode::Char('4'));
+                option(f, "history.retention");
+                f.key(KeyCode::Enter);
+                f.key(KeyCode::Backspace);
+                f.key(KeyCode::Backspace);
+                f.key(KeyCode::Backspace);
+                f.type_text("21d");
             },
         },
     ]
@@ -566,6 +761,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         index.push('\n');
     }
+    // The Esc menu falls back to the plain word when the banner does not fit.
+    let mut narrow = Fake::new(56, 16);
+    narrow.key(KeyCode::Esc);
+    let base = write(&out, fonts.as_ref(), "menu-narrow", &narrow.app)?;
+    let _ = writeln!(
+        index,
+        "## menu-narrow\n\nthe Esc menu without room for the banner\n\n- 56x16: [png]({base}.png) · [txt]({base}.txt) · [ansi]({base}.ansi)\n"
+    );
     // Below the minimum size the TUI only says so.
     let small = Fake::new(36, 7);
     let base = write(&out, fonts.as_ref(), "small-terminal", &small.app)?;

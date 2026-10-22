@@ -34,6 +34,60 @@ fn persists_ca_and_protects_key() -> Result {
     Ok(())
 }
 
+/// The first string value of one subject attribute type.
+fn first<'a>(
+    mut values: impl Iterator<Item = &'a x509_parser::x509::AttributeTypeAndValue<'a>>,
+) -> Option<String> {
+    values
+        .next()
+        .and_then(|value| value.as_str().ok())
+        .map(str::to_owned)
+}
+
+/// The subject's (CN, O, OU) values, `None` where absent.
+fn subject(der: &[u8]) -> Result<[Option<String>; 3]> {
+    let (_, certificate) = x509_parser::parse_x509_certificate(der)?;
+    let subject = certificate.subject();
+    Ok([
+        first(subject.iter_common_name()),
+        first(subject.iter_organization()),
+        first(subject.iter_organizational_unit()),
+    ])
+}
+
+/// New roots name devlanes, the creating account and machine, and link the project site.
+#[test]
+fn ca_subject_and_url() -> Result {
+    let directory = tempfile::tempdir()?;
+    let ca = CertificateAuthority::load_or_create(&directory.path().join("ca"))?;
+    let der = ca.certificate_der();
+    let [cn, o, ou] = subject(&der)?;
+    // trust-macos untrusts by this label, so the common name must not change.
+    assert_eq!(cn.as_deref(), Some("devlanes local development CA"));
+    assert_eq!(o.as_deref(), Some("devlanes"));
+    let ou = ou.ok_or("missing OU")?;
+    let (user, host) = ou.split_once('@').ok_or("OU is not user@host")?;
+    assert!(!user.is_empty() && !host.is_empty(), "{ou}");
+    // Windows always sets USERNAME; USER there may come from Git Bash.
+    let user_var = if cfg!(windows) { "USERNAME" } else { "USER" };
+    if let Ok(expected) = std::env::var(user_var)
+        && !expected.is_empty()
+    {
+        assert_eq!(user, expected);
+    }
+    let (_, root) = x509_parser::parse_x509_certificate(&der)?;
+    let san = root.subject_alternative_name()?.ok_or("missing SAN")?;
+    assert!(!san.critical);
+    assert_eq!(
+        san.value.general_names,
+        [x509_parser::extensions::GeneralName::URI(
+            "https://devlanes.run"
+        )]
+    );
+    assert!(ca.permitted_dns_names().is_some());
+    Ok(())
+}
+
 /// Leaves carry exact, wildcard and apex SANs with a bounded validity interval.
 #[test]
 fn leaf_sans_and_validity() -> Result {
@@ -44,7 +98,7 @@ fn leaf_sans_and_validity() -> Result {
         "lane.localhost".into(),
         "deep.app.lane.localhost".into(),
     ];
-    let key = ca.issue(&names)?;
+    let key = ca.issue(&names, None)?;
     let (_, leaf) = x509_parser::parse_x509_certificate(&key.cert[0])?;
     let san = leaf.subject_alternative_name()?.ok_or("missing SAN")?;
     let actual: Vec<_> = san
@@ -61,8 +115,38 @@ fn leaf_sans_and_validity() -> Result {
         leaf.validity().not_after.timestamp() - leaf.validity().not_before.timestamp()
             <= 30 * 86400 + 300
     );
-    assert!(ca.issue(&["*.localhost".into()]).is_err());
-    assert!(ca.issue(&["bad/name".into()]).is_err());
+    assert!(ca.issue(&["*.localhost".into()], None).is_err());
+    assert!(ca.issue(&["bad/name".into()], None).is_err());
+    Ok(())
+}
+
+/// Leaves name their first SAN and owning lane instead of rcgen's placeholder subject.
+#[test]
+fn leaf_subject_names_host_and_lane() -> Result {
+    let directory = tempfile::tempdir()?;
+    let ca = CertificateAuthority::load_or_create(&directory.path().join("ca"))?;
+    let names = vec!["app.lane.localhost".to_owned(), "lane.localhost".into()];
+    let owned = ca.issue(&names, Some("acme@0"))?;
+    assert_eq!(
+        subject(&owned.cert[0])?,
+        [
+            Some("app.lane.localhost".to_owned()),
+            Some("devlanes".into()),
+            Some("acme@0".into())
+        ]
+    );
+    for owner in [None, Some("")] {
+        let unowned = ca.issue(&names, owner)?;
+        assert_eq!(
+            subject(&unowned.cert[0])?[2].as_deref(),
+            Some("local development")
+        );
+    }
+    // A common name over 64 characters is invalid X.509, so only the SAN carries it.
+    let long = format!("{}.lane.localhost", "a".repeat(60));
+    let leaf = ca.issue(std::slice::from_ref(&long), Some("acme@0"))?;
+    assert_eq!(subject(&leaf.cert[0])?[0], None);
+    verify_issued(&ca, &[&long], &long, Some("acme@0"))?;
     Ok(())
 }
 
@@ -95,12 +179,22 @@ fn recovers_from_interrupted_creation() -> Result {
     assert_ne!(first.certificate_der(), recovered.certificate_der());
     let again = CertificateAuthority::load_or_create(&path)?;
     assert_eq!(recovered.certificate_der(), again.certificate_der());
-    recovered.issue(&["app.lane.localhost".into()])?;
+    recovered.issue(&["app.lane.localhost".into()], None)?;
     Ok(())
 }
 
 /// Verifies a leaf chain with rustls' WebPKI verifier, which enforces CA name constraints.
 fn verify(ca: &CertificateAuthority, sans: &[&str], server_name: &str) -> Result {
+    verify_issued(ca, sans, server_name, Some("acme@0"))
+}
+
+/// [`verify`] with an explicit leaf owner.
+fn verify_issued(
+    ca: &CertificateAuthority,
+    sans: &[&str],
+    server_name: &str,
+    owner: Option<&str>,
+) -> Result {
     use rustls::{
         client::{WebPkiServerVerifier, danger::ServerCertVerifier},
         pki_types::{ServerName, UnixTime},
@@ -113,7 +207,7 @@ fn verify(ca: &CertificateAuthority, sans: &[&str], server_name: &str) -> Result
     )
     .build()?;
     let names: Vec<String> = sans.iter().map(|&name| name.to_owned()).collect();
-    let leaf = ca.issue(&names)?;
+    let leaf = ca.issue(&names, owner)?;
     verifier.verify_server_cert(
         &leaf.cert[0],
         &[],
@@ -225,7 +319,8 @@ fn unconstrained_roots_report_no_permitted_names() -> Result {
 }
 
 #[derive(Debug)]
-struct Policy(RwLock<Option<u64>>);
+/// Route generation (`None` removes the route) and owning lane.
+struct Policy(RwLock<Option<u64>>, RwLock<Option<String>>);
 
 impl CertificatePolicy for Policy {
     /// Tests mutate authorization independently of the resolver cache.
@@ -236,6 +331,7 @@ impl CertificatePolicy for Policy {
         Some(CertificateIdentity {
             generation: (*self.0.read().ok()?)?,
             names: vec![name.into()],
+            owner: self.1.read().ok()?.clone(),
         })
     }
 }
@@ -247,21 +343,31 @@ fn resolver_cache_invalidation_and_unknown_host() -> Result {
     let ca = Arc::new(CertificateAuthority::load_or_create(
         &directory.path().join("ca"),
     )?);
-    let policy = Arc::new(Policy(RwLock::new(Some(1))));
+    let policy = Arc::new(Policy(
+        RwLock::new(Some(1)),
+        RwLock::new(Some("acme@0".into())),
+    ));
     let resolver = Arc::new(DynamicCertResolver::new(ca, policy.clone()));
     assert!(resolver.resolve_name("unknown.localhost").is_none());
     let first = resolver
         .resolve_name("app.lane.localhost")
         .ok_or("no certificate")?;
+    assert_eq!(subject(&first.cert[0])?[2].as_deref(), Some("acme@0"));
     let repeated = resolver
         .resolve_name("app.lane.localhost")
         .ok_or("no cached certificate")?;
     assert!(Arc::ptr_eq(&first, &repeated));
+    // The name moved to another lane without changing SANs or the generation.
+    *policy.1.write().map_err(|_| "poisoned policy")? = Some("acme@1".into());
+    let moved = resolver
+        .resolve_name("app.lane.localhost")
+        .ok_or("no reissued certificate")?;
+    assert_eq!(subject(&moved.cert[0])?[2].as_deref(), Some("acme@1"));
     *policy.0.write().map_err(|_| "poisoned policy")? = Some(2);
     let rotated = resolver
         .resolve_name("app.lane.localhost")
         .ok_or("no rotated certificate")?;
-    assert!(!Arc::ptr_eq(&first, &rotated));
+    assert!(!Arc::ptr_eq(&moved, &rotated));
     *policy.0.write().map_err(|_| "poisoned policy")? = None;
     assert!(resolver.resolve_name("app.lane.localhost").is_none());
     let config = resolver.server_config()?;

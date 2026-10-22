@@ -132,6 +132,8 @@ pub(crate) struct UnitRec {
     pub env: Arc<Environment>,
     /// Last log lines captured when the unit failed, for proxy pages and errors.
     pub failure_tail: Vec<String>,
+    /// `failure_tail` with colors; empty when it had none.
+    pub failure_tail_styled: Vec<String>,
     pub preset: Option<String>,
     /// Contributor-prepared files, kept for cross-lane launch checks.
     pub files: Vec<devlanes_core::contrib::PreparedFile>,
@@ -794,6 +796,33 @@ pub(crate) fn apply_phase_reason(lane: &LaneSt, summary: &mut UnitSummary) {
     }
 }
 
+/// Sets `UnitSummary.order`: where the unit is declared in its list of the
+/// lane's config (`services`, `tasks`, `infra.setup` or `infra.teardown`). A
+/// replica `name.N` takes its service's place.
+pub(crate) fn apply_order(lane: &LaneSt, summary: &mut UnitSummary) {
+    let Some(config) = lane.config.loaded() else {
+        return;
+    };
+    let name = summary.name.as_str();
+    let service = config.services.get_index_of(name).or_else(|| {
+        let (base, replica) = name.rsplit_once('.')?;
+        replica.parse::<u16>().ok()?;
+        config.services.get_index_of(base)
+    });
+    let index = match summary.role.as_deref() {
+        Some("setup") => name
+            .strip_prefix("setup.")
+            .and_then(|entry| config.infra.setup.get_index_of(entry)),
+        Some("teardown") => name
+            .strip_prefix("teardown.")
+            .and_then(|entry| config.infra.teardown.get_index_of(entry)),
+        _ if summary.kind == "task" => config.tasks.get_index_of(name),
+        _ if summary.kind == "service" => service,
+        _ => None,
+    };
+    summary.order = index.and_then(|index| u32::try_from(index).ok());
+}
+
 /// Builds the summary of one live or finished unit.
 pub(crate) fn unit_summary(lane: &str, name: &str, unit: &UnitRec) -> UnitSummary {
     let state = unit.host.state();
@@ -839,6 +868,12 @@ pub(crate) fn unit_summary(lane: &str, name: &str, unit: &UnitRec) -> UnitSummar
         ready_check: unit.ready_check.map(str::to_owned),
         pty: info.pty,
         role: Some(unit.role.to_owned()),
+        order: None,
+        public_url: unit
+            .urls
+            .iter()
+            .find(|url| url.starts_with("https://"))
+            .cloned(),
     }
 }
 
@@ -905,6 +940,7 @@ pub(crate) fn idle_summary(lane: &str, service: &ServiceInfo) -> UnitSummary {
         color: Some(service.color.clone()),
         display_name: service.display_name.clone(),
         role: Some("service".into()),
+        public_url: service.public_url.clone(),
         ..UnitSummary::default()
     }
 }
@@ -940,6 +976,7 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
     }
     for summary in &mut units {
         apply_phase_reason(lane, summary);
+        apply_order(lane, summary);
     }
     let missing =
         (!lane.present).then(|| RpcError::new("worktree_missing", json!({"path": lane.path}), 3));
@@ -1039,6 +1076,33 @@ fn container_summaries(lane: &LaneSt) -> Vec<devlanes_proto::ContainerSummary> {
             }
         })
         .collect()
+}
+
+/// The project's shared containers as some lane whose infra is up sees them.
+/// Shared infra serves every lane, so lanes that are idle list them too.
+pub(crate) fn shared_containers(project: &ProjectRt) -> Vec<devlanes_proto::ContainerSummary> {
+    let mut shared: Vec<devlanes_proto::ContainerSummary> = Vec::new();
+    for lane in project.lanes() {
+        for container in container_summaries(&lane.st()) {
+            if container.shared && !shared.iter().any(|known| known.name == container.name) {
+                shared.push(container);
+            }
+        }
+    }
+    shared
+}
+
+/// Adds the shared containers a lane summary does not list yet.
+pub(crate) fn add_shared(summary: &mut LaneSummary, shared: &[devlanes_proto::ContainerSummary]) {
+    for container in shared {
+        if !summary
+            .containers
+            .iter()
+            .any(|known| known.name == container.name)
+        {
+            summary.containers.push(container.clone());
+        }
+    }
 }
 
 /// How bad a container state is, so a service's replicas report the worst.

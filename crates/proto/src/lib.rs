@@ -365,6 +365,9 @@ pub struct LogQuery {
     #[serde(default)]
     pub units: Vec<String>,
     pub tail: Option<usize>,
+    /// The first N lines of the selected range, oldest first; not with `tail`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<usize>,
     pub max_bytes: Option<usize>,
     pub cursor: Option<String>,
     pub since: Option<String>,
@@ -377,6 +380,9 @@ pub struct LogQuery {
     pub follow: bool,
     #[serde(default)]
     pub mine: bool,
+    /// Also send [`LogLine::styled`]: for a client that shows colors.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub styled: bool,
 }
 
 /// Persistent log sequence numbers remain useful after reconnect and rotation.
@@ -385,8 +391,14 @@ pub struct LogLine {
     pub unit: String,
     pub seq: u64,
     pub timestamp_ms: u64,
+    /// The line without terminal escapes; what `grep` and `level` look at.
     pub text: String,
     pub level: Option<String>,
+    /// `text` with the unit's SGR color sequences, ending in a reset so nothing
+    /// carries into the next line. Sent only when the query asked for it and the
+    /// line had colors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub styled: Option<String>,
 }
 
 /// Public service state is separate from an OS-specific process handle.
@@ -467,6 +479,16 @@ pub struct UnitSummary {
     /// Absent from older daemons; clients then fall back to `kind`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Where the unit is declared in `devlanes.yaml`, counted from 0 within its
+    /// list (`services`, `tasks`, `infra.setup`, `infra.teardown`); replicas share
+    /// their service's place. Absent for exec units and undeclared names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
+    /// `https://<first non-wildcard host>`, with the proxy's HTTPS port unless it
+    /// is 443: the URL a browser opens. Also the second entry of `urls`, after the
+    /// loopback `http://127.0.0.1:<port>`. Absent without hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
 }
 
 /// Older daemons sized every attached unit, so a missing `pty` keeps doing that.
@@ -508,6 +530,8 @@ impl Default for UnitSummary {
             ready_check: None,
             pty: true,
             role: None,
+            order: None,
+            public_url: None,
         }
     }
 }
@@ -776,6 +800,26 @@ pub struct UnitFailureData {
     pub log_tail: Vec<String>,
     #[serde(default)]
     pub reason: Option<RpcError>,
+    /// `log_tail` with the unit's colors (see [`LogLine::styled`]), line for
+    /// line; empty when no line had any. For clients that show colors.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub log_tail_styled: Vec<String>,
+}
+
+/// Plain and colored forms of log lines, as [`UnitFailureData::log_tail`] and
+/// [`UnitFailureData::log_tail_styled`] carry them: the colored list is empty
+/// when no line had colors.
+pub fn split_styled(lines: Vec<LogLine>) -> (Vec<String>, Vec<String>) {
+    let colored = lines.iter().any(|line| line.styled.is_some());
+    let styled = if colored {
+        lines
+            .iter()
+            .map(|line| line.styled.clone().unwrap_or_else(|| line.text.clone()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    (lines.into_iter().map(|line| line.text).collect(), styled)
 }
 
 /// Per-unit peaks for the current lane start, for CI summaries.

@@ -28,6 +28,8 @@ pub struct FakeApi {
     pub clean_error: Option<RpcError>,
     /// The daemon log the TUI tails.
     pub log_path: Option<PathBuf>,
+    /// `DEVLANES_HOME`, where config.yaml is written.
+    pub home: Option<PathBuf>,
     /// When set, `profile.list` fails with this daemon error.
     pub profiles_error: Option<RpcError>,
     pub calls: Mutex<Vec<String>>,
@@ -218,6 +220,16 @@ impl DaemonApi for FakeApi {
     fn daemon_log(&self) -> Option<PathBuf> {
         self.log_path.clone()
     }
+
+    fn home(&self) -> Option<PathBuf> {
+        self.home.clone()
+    }
+
+    /// Fixed: a source build with nothing dismissed, whatever binary runs
+    /// the tests and whatever its home holds.
+    fn notices(&self) -> (devlanes_client::update::InstallMethod, Vec<String>) {
+        (devlanes_client::update::InstallMethod::Source, Vec::new())
+    }
 }
 
 /// Profiles as `profile.list` describes them: a default, an extra and one without infra.
@@ -236,10 +248,14 @@ pub fn profiles() -> Vec<ProfileInfo> {
     ]
 }
 
+/// The fake daemon's version: this build's, so no version-skew notice shows
+/// unless a test sets another version on purpose.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// `daemon.status` as the daemon sends it.
 pub fn daemon_status() -> Value {
     json!({
-        "version": "0.1.0",
+        "version": VERSION,
         "pid": 4242,
         "uptime_ms": 7_500_000,
         "managed_processes": 3,
@@ -250,7 +266,7 @@ pub fn daemon_status() -> Value {
 /// `doctor` facts with a fallback port, a missing CA and an applied hosts file.
 pub fn doctor_facts() -> Value {
     json!({
-        "version": "0.1.0",
+        "version": VERSION,
         "pid": 4242,
         "home": "/home/acme/.devlanes",
         "db_path": "/home/acme/.devlanes/state.db",

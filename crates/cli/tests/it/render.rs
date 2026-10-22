@@ -586,21 +586,6 @@ fn config_check_shell_fallback_is_not_prefixed() {
     assert!(!text.contains("services.web.run: "), "{text}");
 }
 
-/// User config warnings carry the key path; the label names the file they are in.
-#[test]
-fn config_check_labels_user_config_warnings() {
-    let text = render_text(
-        Method::ConfigCheck,
-        &json!({"project": "acme", "path": "/work/acme/devlanes.yaml", "warnings": [
-            {"code": "user_config", "path": "terminal", "file": "/home/u/.devlanes/config.yaml", "message": "iterm2 is not available on Windows"},
-        ]}),
-    );
-    assert!(
-        text.contains("warn user config terminal: iterm2 is not available on Windows"),
-        "{text}"
-    );
-}
-
 #[test]
 fn every_result_shape_in_every_text_mode() {
     for (name, method, data) in fixtures() {
@@ -1274,6 +1259,81 @@ fn doctor_warns_about_stop_timeouts_past_the_service_window() {
     );
 }
 
+#[test]
+/// A human terminal with colors gets a unit's colors back, each line ending in a
+/// reset and nothing but SGR kept; every other output gets plain text.
+fn logs_keep_colors_only_where_they_show() {
+    let line = json!({"unit": "api", "seq": 7, "timestamp_ms": 1, "level": "info",
+        "text": "INFO ready", "styled": "\u{1b}[32mINFO\u{1b}[0m \u{1b}[2Kready\u{1b}[0m"});
+    let page = json!({"items": [line], "truncated": false, "next_cursor": null});
+    let text = colored_runtime()
+        .reporter()
+        .result(&Report::new(Method::Logs, &page))
+        .expect("render")
+        .stdout;
+    assert_eq!(text, "api#7 \u{1b}[32mINFO\u{1b}[0m ready\u{1b}[0m\n");
+    for mode in [OutputMode::Human, OutputMode::Plain, OutputMode::Agent] {
+        let text = runtime(mode)
+            .reporter()
+            .result(&Report::new(Method::Logs, &page))
+            .expect("render")
+            .stdout;
+        assert!(!text.contains('\u{1b}'), "{mode:?}: {text:?}");
+        assert!(text.contains("api#7 INFO ready"), "{mode:?}: {text:?}");
+    }
+}
+
+/// A human runtime on a terminal, with colors.
+fn colored_runtime() -> Runtime {
+    let cli = Cli::parse_from(["devlanes"]);
+    Runtime::resolve(
+        &cli,
+        Signals {
+            env_output: Some("human".into()),
+            stdout_tty: true,
+            stdin_tty: true,
+            ..Signals::default()
+        },
+    )
+    .expect("runtime")
+}
+
+#[test]
+/// Failure tails of `start` and `wait` show the unit's colors on a colored
+/// terminal, and plain text everywhere else.
+fn failure_tails_keep_colors_only_where_they_show() {
+    let styled = "\u{1b}[31mError\u{1b}[0m: boom\u{1b}[0m";
+    let start = json!({
+        "lane": "acme@0", "ready": false, "started": ["api"],
+        "failures": [{"lane": "acme@0", "unit": "api", "exit_code": 1,
+            "log_tail": ["Error: boom"], "log_tail_styled": [styled]}],
+    });
+    let wait = json!({
+        "lane": "acme@0", "unit": "api", "state": "failed", "ready": false, "failed": ["api"],
+        "exit_code": 1, "log_tail": ["Error: boom"], "log_tail_styled": [styled],
+    });
+    for (method, data) in [(Method::Start, &start), (Method::Wait, &wait)] {
+        let text = colored_runtime()
+            .reporter()
+            .result(&Report::new(method, data))
+            .expect("render")
+            .stdout;
+        assert!(text.contains(styled), "{method:?}: {text:?}");
+        for mode in [OutputMode::Human, OutputMode::Plain, OutputMode::Agent] {
+            let text = runtime(mode)
+                .reporter()
+                .result(&Report::new(method, data))
+                .expect("render")
+                .stdout;
+            assert!(!text.contains('\u{1b}'), "{method:?} {mode:?}: {text:?}");
+            assert!(
+                text.contains("Error: boom"),
+                "{method:?} {mode:?}: {text:?}"
+            );
+        }
+    }
+}
+
 /// Splits [`render_text`] output into its human, plain and agent parts.
 fn modes(text: &str) -> Vec<&str> {
     text.split("--- ").filter(|part| !part.is_empty()).collect()
@@ -1641,6 +1701,58 @@ fn doctor_helper_and_user_config_checks() {
         "{text}"
     );
     assert!(text.contains("fix: devlanes certs trust --hosts"), "{text}");
+}
+
+/// The resolver strategy's DNS server and the OS resolver file, from `dns`.
+#[test]
+fn doctor_checks_the_dns_server_and_the_resolver_file() {
+    let dns = |file: Value, running: bool| {
+        json!({"dns": {"tld": "test", "listen": "127.0.0.1:15353", "running": running,
+            "error": if running { Value::Null } else { json!("address in use") },
+            "resolver_file": file}})
+    };
+    let ok = dns(
+        json!({"path": "/etc/resolver/test", "installed": true, "matches": true}),
+        true,
+    );
+    let text = render_text(Method::Doctor, &ok);
+    assert!(
+        text.contains(
+            "ok dns: DNS server for .test on 127.0.0.1:15353, resolver file /etc/resolver/test"
+        ),
+        "{text}"
+    );
+    let missing = dns(
+        json!({"path": "/etc/resolver/test", "installed": false, "matches": false}),
+        true,
+    );
+    let text = render_text(Method::Doctor, &missing);
+    assert!(
+        text.contains(
+            "warn dns: .test lookups do not reach the devlanes DNS server: nothing at /etc/resolver/test"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("fix: devlanes certs trust --resolver"),
+        "{text}"
+    );
+    let down = dns(Value::Null, false);
+    let checks = doctor_checks_of(&down);
+    let check = checks.iter().find(|c| c.group == "dns").expect("dns check");
+    assert_eq!(check.state, DoctorState::Fail);
+    assert_eq!(
+        check.text,
+        "DNS server for .test is not running on 127.0.0.1:15353: address in use"
+    );
+    // Without the resolver strategy there is nothing to say.
+    assert!(
+        !doctor_checks_of(&json!({}))
+            .iter()
+            .any(|c| c.group == "dns")
+    );
+    // Other clients get the same lines, minus this command's output mode.
+    assert!(!checks.iter().any(|c| c.group == "output"));
 }
 
 /// `lane.warning` events are one line in every mode; outside a start they name the lane.

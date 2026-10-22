@@ -11,7 +11,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use super::{draw_box, fit, lane_glyph, spans_width, spread, target_error, task_look, unit_look};
+use super::{draw_box, fit, spans_width, spread, target_error, task_look, unit_look};
 use crate::app::{App, Focus, View};
 use crate::text::{self, clean};
 use crate::theme::{Glyph, Tone};
@@ -37,23 +37,60 @@ pub fn render(app: &App, frame: &mut Frame, boxed: Rect, area: Rect) {
         );
         return;
     };
-    // Title: `main @0`, and the filter while one is set.
-    let mut title = vec![
+    // Title: `main @0` as the mockups draw it (the lane's state glyph is on
+    // its chip), and the filter while one is set. The lane has no row:
+    // selecting it (k from the top, a click on the title) highlights the
+    // title and shows its status in the pane.
+    let mut name = vec![
         Span::raw(" "),
         Span::styled(lane_name(lane), Style::new().add_modifier(Modifier::BOLD)),
     ];
     if let Some(index) = lane.index {
-        title.push(Span::raw(format!(" @{index}")));
+        name.push(Span::raw(format!(" @{index}")));
     }
+    // A lane on its way somewhere says so; settled states need no word.
+    let word = if app.is_cleaning(&lane.reference) {
+        Some("cleaning…")
+    } else {
+        match lane.state.as_str() {
+            "starting" => Some("starting"),
+            "stopping" => Some("stopping"),
+            _ => None,
+        }
+    };
+    if let Some(word) = word {
+        name.push(Span::styled(format!(" · {word}"), theme.tone(Tone::Busy)));
+    }
+    name.push(Span::raw(" "));
+    if app.selected_id() == Some(&RowId::WholeLane) {
+        name = name
+            .into_iter()
+            .map(|s| {
+                let style = if focused {
+                    theme.selected(s.style)
+                } else {
+                    s.style
+                };
+                Span::styled(s.content, style.add_modifier(Modifier::BOLD))
+            })
+            .collect();
+    }
+    let title_width = super::spans_width(&name);
+    let mut title = name;
     if let Some(filter) = &app.filter {
-        title.push(Span::styled(" · filter: ", theme.quiet()));
+        title.push(Span::styled("· filter: ", theme.quiet()));
         title.push(Span::raw(clean(&filter.text)));
         if filter.editing {
             title.push(Span::styled("▏", theme.focus()));
         }
+        title.push(Span::raw(" "));
     }
-    title.push(Span::raw(" "));
     draw_box(app, frame, boxed, title, Vec::new(), false);
+    super::hit(
+        app,
+        Rect::new(boxed.x + 1, boxed.y, title_width as u16, 1),
+        crate::app::Click::StartLane(lane.reference.clone()),
+    );
 
     let height = usize::from(area.height);
     let selected = app.selected_row();
@@ -159,21 +196,7 @@ fn row_line(app: &App, lane: &LaneSummary, item: &Row, width: usize) -> Line<'st
         row(left, right, width)
     };
     match &item.id {
-        RowId::Gap(_) => Line::from(""),
-        RowId::WholeLane => {
-            let (glyph, tone) = lane_glyph(theme, lane, app.spin);
-            let left = vec![
-                Span::raw(" "),
-                Span::styled(format!("{glyph} "), theme.tone(tone)),
-                Span::raw("whole lane"),
-            ];
-            let mut summary = lane_summary(app, lane);
-            // The name stays whole; summary parts drop from the end.
-            while spans_width(&summary) + 16 > width && summary.len() > 1 {
-                summary.truncate(summary.len().saturating_sub(2));
-            }
-            row(left, summary, width)
-        }
+        RowId::Gap(_) | RowId::WholeLane => Line::from(""),
         RowId::Section(section) => {
             let summary = match section {
                 Section::Infra if item.folded != Some(true) => Vec::new(),
@@ -182,10 +205,6 @@ fn row_line(app: &App, lane: &LaneSummary, item: &Row, width: usize) -> Line<'st
             };
             header(section.name().into(), summary)
         }
-        RowId::Group(_, name) if name == tree::STOPPED => header(
-            clean(name),
-            vec![Span::styled(item.members.len().to_string(), theme.quiet())],
-        ),
         RowId::Group(_, name) => header(clean(name), members_summary(app, lane, &item.members)),
         RowId::Unit(name) => match lane.units.iter().find(|u| u.name == *name) {
             Some(unit) => unit_line(app, lane, unit, item, width),
@@ -206,32 +225,30 @@ fn row_line(app: &App, lane: &LaneSummary, item: &Row, width: usize) -> Line<'st
             row(left, joined(right, theme.quiet()), width)
         }
         RowId::Container(name) => {
-            let Some(container) = lane.containers.iter().find(|c| c.name == *name) else {
+            let Some(container) = app.find_container(lane, name) else {
                 return Line::from(format!("{indent}{}", clean(name)));
             };
-            let (glyph, tone, word) = container_look(app, container);
+            let (glyph, tone, word) = container_look(app, &container);
             let mut right = Vec::new();
             if tone != Tone::Ok {
                 right.push(Span::styled(word, theme.tone(tone)));
             }
-            if container.shared {
-                right.push(Span::styled("shared", theme.quiet()));
-            }
+            // Hidden in `infra.hidden`: listed, dimmed, as hidden services.
             let left = leaf(
                 app,
                 item,
                 container.color.as_deref(),
                 (glyph, tone),
                 clean(name),
-                false,
+                container.hidden,
             );
             row(left, joined(right, theme.quiet()), width)
         }
     }
 }
 
-/// A unit, task or container: its color bar in column 1, then the glyph and
-/// the name at its depth.
+/// A unit, task or container: the glyph, then the name at its depth in the
+/// family's color (dimmed when it does not run or is hidden).
 fn leaf(
     app: &App,
     item: &Row,
@@ -241,17 +258,16 @@ fn leaf(
     quiet: bool,
 ) -> Vec<Span<'static>> {
     let theme = &app.theme;
-    let bar = color.and_then(|c| theme.identity(c)).map_or_else(
-        || Span::raw(" "),
-        |color| Span::styled(theme.glyph(Glyph::Bar), Style::new().fg(color)),
-    );
-    let indent = " ".repeat((2 * usize::from(item.depth)).saturating_sub(1));
+    let mut style = color
+        .and_then(|c| theme.identity(c))
+        .map_or_else(Style::new, |color| Style::new().fg(color));
+    if quiet {
+        style = style.patch(theme.quiet());
+    }
     vec![
-        Span::raw(" "),
-        bar,
-        Span::raw(indent),
+        Span::raw(" ".repeat(1 + 2 * usize::from(item.depth))),
         Span::styled(format!("{glyph} "), theme.tone(tone)),
-        Span::styled(name, if quiet { theme.quiet() } else { Style::new() }),
+        Span::styled(name, style),
     ]
 }
 
@@ -292,7 +308,7 @@ fn unit_line(
     let theme = &app.theme;
     let look = unit_look(theme, unit, app.spin);
     let role = tree::role(unit);
-    // Tasks and setup steps have no bar: they don't run long.
+    // Tasks and setup steps keep the default color: they don't run long.
     let color = match role {
         tree::Role::Service | tree::Role::Exec => unit.color.as_deref(),
         _ => None,
@@ -331,8 +347,8 @@ fn unit_line(
             }
         }
     }
-    // Names stay in the default color; a unit that does not run, or a hidden
-    // one, is dimmed.
+    // The name takes the family color; a unit that does not run, or a
+    // hidden one, is dimmed.
     let quiet = look.tone == Tone::Quiet || unit.hidden;
     let left = leaf(
         app,
@@ -367,8 +383,8 @@ fn members_summary(app: &App, lane: &LaneSummary, members: &[RowId]) -> Vec<Span
                 add(look.word, look.tone);
             }
             RowId::Container(name) => {
-                if let Some(container) = lane.containers.iter().find(|c| c.name == *name) {
-                    let (_, tone, word) = container_look(app, container);
+                if let Some(container) = app.find_container(lane, name) {
+                    let (_, tone, word) = container_look(app, &container);
                     add(word, tone);
                 }
             }

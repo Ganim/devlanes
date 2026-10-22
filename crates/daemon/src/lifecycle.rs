@@ -273,12 +273,15 @@ pub(crate) async fn failure_of(lane: &str, name: &str, host: &UnitHost) -> UnitF
         UnitState::Failed(reason) => reason,
         _ => None,
     };
+    let (log_tail, log_tail_styled) =
+        devlanes_proto::split_styled(host.tail_lines(TAIL, true).await);
     UnitFailureData {
         lane: lane.to_owned(),
         unit: name.to_owned(),
         exit_code: host.exit_outcome().and_then(|o| o.code),
-        log_tail: host.tail(TAIL).await,
+        log_tail,
         reason,
+        log_tail_styled,
     }
 }
 
@@ -1209,6 +1212,7 @@ impl Inner {
                 literal_port: request.literal_port,
                 env: request.env,
                 failure_tail: Vec::new(),
+                failure_tail_styled: Vec::new(),
                 preset: request.preset,
                 files: request.files,
                 color: Some(color),
@@ -1255,7 +1259,8 @@ impl Inner {
             loop {
                 let state = watch.borrow_and_update().clone();
                 if let UnitState::Failed(_) = state {
-                    let tail = host.tail(TAIL).await;
+                    let (tail, styled) =
+                        devlanes_proto::split_styled(host.tail_lines(TAIL, true).await);
                     if let Some(rec) = lane
                         .st()
                         .units
@@ -1263,6 +1268,7 @@ impl Inner {
                         .filter(|r| r.host.same_run(&host))
                     {
                         rec.failure_tail = tail;
+                        rec.failure_tail_styled = styled;
                     }
                 }
                 engine.emit_unit(&project, &lane, &name, &host);
@@ -1372,6 +1378,7 @@ impl Inner {
                 .map(|rec| {
                     let mut summary = unit_summary(&st.reference(&project.name()), name, rec);
                     crate::model::apply_phase_reason(&st, &mut summary);
+                    crate::model::apply_order(&st, &mut summary);
                     summary
                 })
         };
@@ -2779,6 +2786,7 @@ impl Inner {
             project.st().lanes.remove(&lane.worktree);
             lane.watch.cancel();
         }
+        self.forget_if_empty(project).await;
         self.publish_routes();
         Ok(json!({
             "lane": reference,
@@ -2787,6 +2795,30 @@ impl Inner {
             "teardown": teardown,
             "infra": infra,
         }))
+    }
+
+    /// Forgets a project whose every lane was cleaned: its rows go (the store
+    /// refuses while a run is unfinished) and so does it in memory, so neither a
+    /// daemon restart nor its watchers bring it back; the next command run in its
+    /// folder registers it again.
+    pub(crate) async fn forget_if_empty(&self, project: &Arc<ProjectRt>) {
+        let empty = project.lanes().iter().all(|lane| {
+            let st = lane.st();
+            st.record.is_none() && !st.any_running() && st.busy.is_none()
+        });
+        if !empty {
+            return;
+        }
+        if let Err(error) = self.store.delete_project(project.id).await {
+            tracing::warn!(project = %project.name(), %error, "keeping a project whose lanes were all cleaned");
+            return;
+        }
+        crate::model::lock(&self.projects).remove(&project.id);
+        project.watch.cancel();
+        for lane in project.lanes() {
+            lane.watch.cancel();
+        }
+        tracing::info!(project = %project.name(), "forgot a project whose lanes were all cleaned");
     }
 
     /// Worktree auto-start or setup with the project's last request env.
@@ -3188,6 +3220,8 @@ pub(crate) async fn stream_logs(host: UnitHost, session: Session) {
         let query = LogQuery {
             cursor: cursor.clone(),
             max_bytes: Some(256 * 1024),
+            // The client words them; colors stay for one that shows them.
+            styled: true,
             ..LogQuery::default()
         };
         if let Ok(page) = host.logs(query).await {

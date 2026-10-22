@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     path::PathBuf,
     sync::{Arc, LazyLock},
@@ -68,9 +68,18 @@ pub struct ResolveInput<'a, E: Extensions = OpaqueExtensions> {
     /// Runs `run:` strings. Defaults to [`Shell::default`]; the daemon passes the
     /// shell it found at startup (Git for Windows' `sh.exe` on Windows).
     pub shell: &'a Shell,
+    /// Plans only these units, by config path (`services.api`, `tasks.migrate`,
+    /// `infra.setup.db`); `None` plans all of them. Layout and namespaces still
+    /// cover every service, so what is planned comes out as in a full resolve.
+    pub only: Option<&'a BTreeSet<String>>,
 }
 
 impl<'a, E: Extensions> ResolveInput<'a, E> {
+    /// Whether the unit at `path` is planned (see [`ResolveInput::only`]).
+    pub fn plans(&self, path: &str) -> bool {
+        self.only.is_none_or(|only| only.contains(path))
+    }
+
     /// Input with empty environments, namespaces and integrations.
     pub fn new(
         config: &'a ProjectConfig<E>,
@@ -97,6 +106,7 @@ impl<'a, E: Extensions> ResolveInput<'a, E> {
             ca_env: &EMPTY_ENV,
             public_https_port: None,
             shell: &DEFAULT_SHELL,
+            only: None,
         }
     }
 }

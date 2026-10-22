@@ -66,13 +66,13 @@ fn did_you_mean_outside_services() {
 /// error, and every other key keeps its value.
 #[test]
 fn lenient_user_config_keeps_valid_keys() {
-    let source = "proxy:\n  htps_port: 8443\n  http_port: 8081\nstate:\n  max_size: 0B\nterminal: kitty\nports:\n  range: [not, a, range]\n";
+    let source = "proxy:\n  htps_port: 8443\n  http_port: 8081\nstate:\n  max_size: 0B\nterminal: { progress: never }\nports:\n  range: [not, a, range]\n";
     let (config, issues) = parse_user_lenient("config.yaml", source);
     assert_eq!(config.proxy.http_port, 8081);
-    assert!(matches!(
-        config.terminal.as_ref().and_then(TerminalConfig::app),
-        Some(Terminal::Kitty)
-    ));
+    assert_eq!(
+        config.terminal.as_ref().map(TerminalConfig::progress),
+        Some(TerminalProgress::Never)
+    );
     assert_eq!(
         config.state.max_size.0,
         UserConfig::default().state.max_size.0
@@ -105,22 +105,24 @@ fn lenient_user_config_keeps_valid_keys() {
     assert_eq!(issues.len(), 1);
 }
 
-/// `terminal` is the app name alone or a mapping with the progress setting.
+/// `terminal` is a mapping with the progress setting; an older config's
+/// terminal app (alone or as `app:`) still loads, ignored with a warning.
 #[test]
-fn terminal_takes_a_name_or_a_mapping() {
-    let bare = parse_user("terminal: kitty\n").expect("name");
-    let terminal = bare.terminal.expect("terminal");
-    assert!(matches!(terminal.app(), Some(Terminal::Kitty)));
-    assert_eq!(terminal.progress(), TerminalProgress::Auto);
-    let mapped = parse_user("terminal:\n  app: ghostty\n  progress: never\n").expect("mapping");
-    let terminal = mapped.terminal.expect("terminal");
-    assert!(matches!(terminal.app(), Some(Terminal::Ghostty)));
-    assert_eq!(terminal.progress(), TerminalProgress::Never);
+fn terminal_takes_progress_and_ignores_an_old_app() {
     let progress_only = parse_user("terminal: { progress: always }\n").expect("progress only");
+    assert!(progress_only.warnings().is_empty());
     let terminal = progress_only.terminal.expect("terminal");
-    assert!(terminal.app().is_none());
     assert_eq!(terminal.progress(), TerminalProgress::Always);
-    let source = "terminal:\n  app: ghostty\n  progres: never\n";
+    let bare = parse_user("terminal: kitty\n").expect("old app name");
+    assert_eq!(bare.warnings()[0].path, "terminal");
+    assert!(bare.warnings()[0].message.contains("kitty is ignored"));
+    let terminal = bare.terminal.expect("terminal");
+    assert_eq!(terminal.progress(), TerminalProgress::Auto);
+    let mapped = parse_user("terminal:\n  app: ghostty\n  progress: never\n").expect("old mapping");
+    assert_eq!(mapped.warnings()[0].path, "terminal.app");
+    let terminal = mapped.terminal.expect("terminal");
+    assert_eq!(terminal.progress(), TerminalProgress::Never);
+    let source = "terminal:\n  progress: never\n  progres: never\n";
     let error = parse_user(source).expect_err("typo");
     assert!(
         error
@@ -130,128 +132,6 @@ fn terminal_takes_a_name_or_a_mapping() {
         error.message
     );
     assert_eq!(error.location.line, 3);
-    assert!(parse_user("terminal: xterm\n").is_err());
-}
-
-/// `windows-terminal` is spelled with a dash like the launcher's name, and
-/// only it and WezTerm have Windows versions.
-#[test]
-fn windows_terminal_parses_with_its_launcher_name() {
-    let config = parse_user("terminal: windows-terminal\n").expect("windows-terminal");
-    let app = config.terminal.and_then(|t| t.app()).expect("app");
-    assert!(matches!(app, Terminal::WindowsTerminal));
-    assert_eq!(app.as_str(), "windows-terminal");
-    assert_eq!(
-        serde_json::to_value(app).expect("serialize"),
-        "windows-terminal"
-    );
-    assert!(parse_user("terminal: windowsterminal\n").is_err());
-    let on_windows: Vec<&str> = [
-        Terminal::Iterm2,
-        Terminal::Ghostty,
-        Terminal::Wezterm,
-        Terminal::Kitty,
-        Terminal::Terminal,
-        Terminal::WindowsTerminal,
-    ]
-    .into_iter()
-    .filter(|app| app.runs_on_windows())
-    .map(Terminal::as_str)
-    .collect();
-    assert_eq!(on_windows, ["wezterm", "windows-terminal"]);
-}
-
-/// `as_str` is the serde name of every variant. The names come from the schema,
-/// so a new variant is covered without editing this test.
-#[test]
-fn terminal_names_match_serde_for_every_variant() {
-    /// Every `const` and `enum` string in a schema.
-    fn names(schema: &serde_json::Value, found: &mut Vec<String>) {
-        match schema {
-            serde_json::Value::Object(map) => {
-                for (key, value) in map {
-                    match (key.as_str(), value) {
-                        ("const", serde_json::Value::String(name)) => found.push(name.clone()),
-                        ("enum", serde_json::Value::Array(items)) => found.extend(
-                            items
-                                .iter()
-                                .filter_map(|item| item.as_str().map(str::to_owned)),
-                        ),
-                        _ => names(value, found),
-                    }
-                }
-            }
-            serde_json::Value::Array(items) => items.iter().for_each(|item| names(item, found)),
-            _ => {}
-        }
-    }
-    let schema = serde_json::to_value(schemars::schema_for!(Terminal)).expect("schema");
-    let mut found = Vec::new();
-    // Examples repeat the names; only the variant definitions count.
-    let mut variants = schema.clone();
-    strip_examples(&mut variants);
-    names(&variants, &mut found);
-    found.sort();
-    found.dedup();
-    assert!(
-        found.len() >= 6,
-        "the walk missed variants: {found:?}\n{schema}"
-    );
-    for name in found {
-        let app: Terminal = serde_json::from_value(serde_json::Value::String(name.clone()))
-            .unwrap_or_else(|error| panic!("{name}: {error}"));
-        assert_eq!(app.as_str(), name);
-        assert_eq!(serde_json::to_value(app).expect("serialize"), name.as_str());
-    }
-}
-
-/// Removes `examples` everywhere in a schema.
-fn strip_examples(schema: &mut serde_json::Value) {
-    match schema {
-        serde_json::Value::Object(map) => {
-            map.remove("examples");
-            map.values_mut().for_each(strip_examples);
-        }
-        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_examples),
-        _ => {}
-    }
-}
-
-/// A terminal app without a Windows version warns on Windows (config check and
-/// doctor show it) but never fails, since configs move between machines.
-#[cfg(windows)]
-#[test]
-fn unix_only_terminals_warn_on_windows() {
-    for (source, path) in [
-        ("terminal: iterm2\n", "terminal"),
-        ("terminal:\n  app: kitty\n", "terminal.app"),
-    ] {
-        let config = parse_user(source).expect(source);
-        let paths: Vec<_> = config.warnings().iter().map(|w| w.path.as_str()).collect();
-        assert_eq!(paths, [path], "{source}");
-        assert!(
-            config.warnings()[0].message.contains("no Windows version"),
-            "{}",
-            config.warnings()[0].message
-        );
-        assert_eq!(config.platform_warnings().len(), 1);
-    }
-    for source in ["terminal: wezterm\n", "terminal: windows-terminal\n", "{}"] {
-        assert!(parse_user(source).expect(source).warnings().is_empty());
-    }
-    let (lenient, _) = parse_user_lenient("config.yaml", "terminal: ghostty\n");
-    assert_eq!(lenient.warnings().len(), 1);
-}
-
-/// Outside Windows every terminal app is accepted silently.
-#[cfg(not(windows))]
-#[test]
-fn terminals_never_warn_outside_windows() {
-    for source in ["terminal: iterm2\n", "terminal:\n  app: kitty\n"] {
-        let config = parse_user(source).expect(source);
-        assert!(config.warnings().is_empty(), "{source}");
-        assert!(config.platform_warnings().is_empty(), "{source}");
-    }
 }
 
 /// Values with several YAML forms report the chosen form's own unknown keys.

@@ -18,6 +18,7 @@ use crate::app::{
     App, AttachState, Attached, CopyState, ErrorEntry, Focus, LogView, PaneMode, is_orphaned,
     lane_profiles, started_by_agent, unit_ref,
 };
+use crate::screen::ScreenView;
 use crate::text::{self, clean, clip};
 use crate::theme::{Glyph, Theme, Tone};
 use crate::tree::{self, Role, RowId};
@@ -55,19 +56,24 @@ pub fn render(app: &App, frame: &mut Frame, boxed: Rect, area: Rect) {
             details(frame, task_lines(app, lane, &name, width), area, app);
         }
         Some(RowId::Container(name)) => {
-            let container = lane.containers.iter().find(|c| c.name == name);
+            // Shared containers may come from another lane of the project.
+            let container = app.find_container(lane, &name);
             let facts = container
+                .as_ref()
                 .map(|c| {
                     let (_, tone, word) = container_look(app, c);
                     let mut facts = vec![Span::styled(word, theme.tone(tone))];
                     if c.shared {
                         facts.push(Span::styled("shared", theme.quiet()));
                     }
+                    if c.hidden {
+                        facts.push(Span::styled("hidden", theme.quiet()));
+                    }
                     dotted(app, facts)
                 })
                 .unwrap_or_default();
             render_header(app, frame, boxed, title(&name, "", app), facts);
-            if let Some(container) = container {
+            if let Some(container) = &container {
                 details(frame, container_lines(app, container, width), area, app);
             }
         }
@@ -801,7 +807,7 @@ fn members_table(
         width,
     )];
     for member in members {
-        let (glyph, tone, name, word, cpu, memory, url) = match member {
+        let (glyph, tone, name, word, cpu, memory, url, hidden) = match member {
             RowId::Unit(name) => {
                 let Some(unit) = lane.units.iter().find(|u| u.name == *name) else {
                     continue;
@@ -815,6 +821,7 @@ fn members_table(
                     unit.cpu_percent,
                     unit.memory_bytes,
                     unit.urls.first().cloned().unwrap_or_default(),
+                    unit.hidden,
                 )
             }
             RowId::Task(name) => (
@@ -825,12 +832,13 @@ fn members_table(
                 None,
                 None,
                 String::new(),
+                false,
             ),
             RowId::Container(name) => {
-                let Some(container) = lane.containers.iter().find(|c| c.name == *name) else {
+                let Some(container) = app.find_container(lane, name) else {
                     continue;
                 };
-                let (glyph, tone, word) = container_look(app, container);
+                let (glyph, tone, word) = container_look(app, &container);
                 (
                     glyph,
                     tone,
@@ -839,16 +847,22 @@ fn members_table(
                     container.cpu_percent,
                     container.memory_bytes,
                     String::new(),
+                    container.hidden,
                 )
             }
             _ => continue,
         };
         let cpu = cpu.map_or_else(|| "-".into(), |cpu| format!("{cpu:.0}%"));
         let memory = memory.map_or_else(|| "-".into(), super::format_bytes);
+        // Hidden units and containers are dimmed here as in the list.
+        let name_style = if hidden { theme.quiet() } else { Style::new() };
         lines.push(fit(
             vec![
                 Span::styled(format!("{glyph} "), theme.tone(tone)),
-                Span::raw(format!("{:<name_width$}  ", clip(&name, name_width))),
+                Span::styled(
+                    format!("{:<name_width$}  ", clip(&name, name_width)),
+                    name_style,
+                ),
                 Span::styled(
                     format!("{word:<9}"),
                     theme.tone(if tone == Tone::Ok { Tone::Quiet } else { tone }),
@@ -1288,7 +1302,7 @@ fn lanes_table(app: &App, current: &LaneSummary, width: usize) -> Vec<Line<'stat
     }
     lines.push(Line::from(""));
     lines.extend(sentence(
-        "[ and ] or a click on a chip switch lanes. devlanes lane new <branch> adds one.",
+        "1-9, [ and ] or a click on a chip switch lanes. devlanes lane new <branch> adds one.",
         width,
         Vec::new(),
         theme.quiet(),
@@ -1299,7 +1313,8 @@ fn lanes_table(app: &App, current: &LaneSummary, width: usize) -> Vec<Line<'stat
 /// Draws the unit's screen. With `tail`, only the last rows with text fit,
 /// so the end of a dead unit's output shows under its card.
 fn render_terminal(app: &App, attached: &Attached, frame: &mut Frame, area: Rect, tail: bool) {
-    let view = attached.screen.view();
+    let shown = attached.shown();
+    let view = ScreenView::new(shown);
     let mut cursor = Cursor::default();
     if app.focus != Focus::Terminal {
         cursor.hide();
@@ -1309,8 +1324,8 @@ fn render_terminal(app: &App, attached: &Attached, frame: &mut Frame, area: Rect
         frame.render_widget(PseudoTerminal::new(&view).cursor(cursor), inner);
         return;
     }
-    let (rows, _) = attached.screen.size();
-    let full = Rect::new(0, 0, inner.width, rows.max(1));
+    let rows = shown.size().0.get();
+    let full = Rect::new(0, 0, inner.width, rows);
     let mut scratch = Buffer::empty(full);
     PseudoTerminal::new(&view)
         .cursor(cursor)

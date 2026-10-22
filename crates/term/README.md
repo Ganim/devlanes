@@ -1,23 +1,8 @@
 # devlanes-term
 
-Terminal integrations for devlanes clients: the `TerminalLauncher` trait behind "open in terminal" in the TUI, and the terminal tab's progress bar during starts. Each terminal application has its own `devlanes-term-*` launcher crate, and `bins/devlanes` registers them. `devlanes-cli` and `devlanes-tui` use the progress bar.
+Terminal integrations for devlanes clients: the terminal tab's progress bar during starts, the detection of terminals that draw it, and opening URLs in the browser. `devlanes-cli` and `devlanes-tui` use it.
 
 ## Usage
-
-```rust
-use devlanes_term::{LaunchRequest, TerminalLauncher};
-
-fn open(launcher: &dyn TerminalLauncher) -> Result<(), devlanes_term::LaunchError> {
-    launcher.launch(&LaunchRequest {
-        cwd: "/work/acme".into(),
-        command: vec!["devlanes".into(), "attach".into(), "acme@2:api".into()],
-        title: Some("acme@2:api".into()),
-        env: Vec::new(),
-    })
-}
-```
-
-`launch` blocks while a short helper such as `osascript` or `open` runs, so call it from `spawn_blocking` in async code.
 
 ```rust
 use devlanes_term::{ProgressBar, ProgressMode, StartTracker, progress_support_from_env};
@@ -32,17 +17,12 @@ fn draw(tty: bool, tracker: &StartTracker) -> std::io::Result<()> {
 
 ## API
 
-- `TerminalLauncher::name` is the user config value that selects the launcher (`terminal: kitty`).
-- `TerminalLauncher::invocation` plans the helper process as data; `launch` runs it.
-- `Invocation::run` starts the helper with null stdio and reaps long-lived terminal processes on a background thread.
-- `LaunchRequest::env` reaches the command only through terminals that pass their caller's environment on (Windows Terminal, WezTerm outside macOS). The TUI uses it for `DEVLANES_HOME` on Windows, which has no `env` program; on macOS and Linux it prefixes the command with `env DEVLANES_HOME=...` instead.
-- `shell_quote`, `shell_join` and `applescript_string` quote commands for terminals that take shell text.
-- `open_url` opens a URL in the default browser for `devlanes url open` and the TUI: `open` on macOS, the shell on Windows, `xdg-open` on Linux, and inside WSL the Windows browser through `wslview`, then Windows' `rundll32.exe url.dll,FileProtocolHandler`. No opener goes through a shell, so `&` in a URL is safe. `Output::Terminal` lets the opener use the terminal (the CLI), `Output::Hidden` keeps it off the screen and puts its last stderr line into the error (the TUI). Blocking.
 - `Progress::sequence` encodes `OSC 9;4` (`ESC ] 9 ; 4 ; state ; percent ESC \`).
 - `progress_support` decides whether to draw the bar from the setting, the TTY and the environment.
 - `ProgressBar` writes it and clears it on drop, including while a panic unwinds.
 - `StartTracker` turns lane events into progress: ready services over the units the start's `services:started` event plans, newest `start_id` per lane. `command()` reads the events a start request streams; `viewer()` reads `subscribe` and `status` for the TUI.
 - `phase_detail` words a phase's `progress` event (`waiting for postgres (1 of 2 healthy)`, `migrate (2 of 3)`); the CLI's phase lines and the TUI header both use it.
+- `open_url` opens a URL in the default browser for `devlanes url open` and the TUI: `open` on macOS, the shell on Windows, `xdg-open` on Linux, and inside WSL the Windows browser through `wslview`, then Windows' `rundll32.exe url.dll,FileProtocolHandler`. No opener goes through a shell, so `&` in a URL is safe. `Output::Terminal` lets the opener use the terminal (the CLI), `Output::Hidden` keeps it off the screen and puts its last stderr line into the error (the TUI). Blocking.
 
 ## Progress bar
 
@@ -53,14 +33,10 @@ Auto mode follows cargo's `term.progress` detection: Windows Terminal, ConEmu, W
 ## Config example
 
 ```yaml
-# ~/.devlanes/config.yaml: terminal app the TUI's O key opens a unit in,
-# and the tab progress bar during starts (auto, always or never).
+# ~/.devlanes/config.yaml: the tab progress bar during starts (auto, always or never).
 terminal:
-  app: wezterm
   progress: auto
 ```
-
-`terminal: wezterm` alone works too and keeps progress on auto. The app is one of `ghostty`, `iterm2`, `kitty`, `wezterm`, `terminal` or `windows-terminal`, and picks the launcher whose `name` matches. Without it the TUI uses Terminal.app on macOS, else the first launcher that is installed. Windows builds register only Windows Terminal and WezTerm; inside WSL, Windows Terminal is available too.
 
 ## License
 

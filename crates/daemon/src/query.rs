@@ -177,6 +177,9 @@ impl Inner {
                 continue;
             }
             let mut summary = lane_summary(&project.name(), &lane.st());
+            if lane.st().record.is_some() {
+                crate::model::add_shared(&mut summary, &crate::model::shared_containers(project));
+            }
             self.fill_queued_with(gate.as_ref(), &mut summary);
             if let Some(caller) = mine {
                 summary
@@ -357,6 +360,13 @@ impl Inner {
                 items.extend(page.items);
             }
             items.sort_by_key(|line| (line.timestamp_ms, line.seq));
+            // `head` is the first N of the merged range, not N per unit.
+            if let Some(head) = query.head
+                && items.len() > head
+            {
+                items.truncate(head);
+                truncated = true;
+            }
             Page {
                 items,
                 truncated,
@@ -501,11 +511,15 @@ impl Inner {
                 if let Some(&first) = failed.first() {
                     let (name, host) = &hosts[first];
                     let failure = crate::lifecycle::failure_of(&reference, name, host).await;
-                    return Ok(json!({
+                    let mut answer = json!({
                         "lane": reference, "unit": unit, "state": "failed", "ready": false,
                         "failed": failed.iter().map(|i| hosts[*i].0.clone()).collect::<Vec<_>>(),
                         "reason": failure.reason, "exit_code": failure.exit_code, "log_tail": failure.log_tail,
-                    }));
+                    });
+                    if !failure.log_tail_styled.is_empty() {
+                        answer["log_tail_styled"] = json!(failure.log_tail_styled);
+                    }
+                    return Ok(answer);
                 }
                 let all_ready =
                     !states.is_empty() && states.iter().all(|s| matches!(s, UnitState::Ready));
@@ -572,7 +586,7 @@ impl Inner {
                         (
                             name.clone(),
                             rec.host.clone(),
-                            rec.failure_tail.clone(),
+                            (rec.failure_tail.clone(), rec.failure_tail_styled.clone()),
                             rec.ports.clone(),
                         )
                     })
@@ -598,25 +612,27 @@ impl Inner {
                     .count();
                 let state = host.state();
                 let failed = matches!(state, UnitState::Failed(_));
-                let error_lines = if failed {
+                let (error_lines, error_lines_styled) = if failed {
                     tail
                 } else {
                     let query = LogQuery {
                         tail: Some(10),
                         level: Some("error".into()),
                         since: (since_ms > 0).then(|| since_ms.to_string()),
+                        styled: true,
                         ..LogQuery::default()
                     };
-                    host.logs(query)
-                        .await
-                        .map(|page| {
-                            page.items
-                                .into_iter()
-                                .filter(|line| host.of_this_run(line))
-                                .map(|l| l.text)
-                                .collect()
-                        })
-                        .unwrap_or_default()
+                    devlanes_proto::split_styled(
+                        host.logs(query)
+                            .await
+                            .map(|page| {
+                                page.items
+                                    .into_iter()
+                                    .filter(|line| host.of_this_run(line))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    )
                 };
                 let mut conflicts = Vec::new();
                 if failed {
@@ -648,6 +664,12 @@ impl Inner {
                     "error_lines": error_lines,
                     "port_conflicts": conflicts,
                 }));
+                // Colors only when some line had them, as `log_tail_styled`.
+                if !error_lines_styled.is_empty()
+                    && let Some(item) = items.last_mut()
+                {
+                    item["error_lines_styled"] = json!(error_lines_styled);
+                }
             }
         }
         Ok(json!({"items": items, "truncated": false, "next_cursor": null}))

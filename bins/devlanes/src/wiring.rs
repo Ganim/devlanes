@@ -30,50 +30,16 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-/// Terminal launchers for "open in terminal"; the TUI picks one by the user
-/// config name, else the first installed. Windows Terminal is only available
-/// inside WSL, where it comes first, as on Windows.
-#[cfg(unix)]
-fn launchers() -> Vec<Arc<dyn devlanes_term::TerminalLauncher>> {
-    vec![
-        Arc::new(devlanes_term_windows_terminal::WindowsTerminal),
-        Arc::new(devlanes_term_iterm2::Iterm2),
-        Arc::new(devlanes_term_ghostty::Ghostty),
-        Arc::new(devlanes_term_wezterm::Wezterm),
-        Arc::new(devlanes_term_kitty::Kitty),
-        Arc::new(devlanes_term_terminal_app::TerminalApp),
-    ]
-}
-
-/// Terminal launchers for "open in terminal"; the TUI picks one by the user
-/// config name, else the first installed, so Windows Terminal comes first.
-/// iTerm2, Terminal.app, kitty and Ghostty have no Windows version.
-#[cfg(windows)]
-fn launchers() -> Vec<Arc<dyn devlanes_term::TerminalLauncher>> {
-    vec![
-        Arc::new(devlanes_term_windows_terminal::WindowsTerminal),
-        Arc::new(devlanes_term_wezterm::Wezterm),
-    ]
-}
-
-/// The user's preferred terminal from `~/.devlanes/config.yaml`, if it parses.
-fn preferred_terminal(paths: &Paths) -> Option<String> {
-    let config = devlanes_config::load_user(paths.home.join("config.yaml")).ok()?;
-    let value = serde_json::to_value(config.terminal?.app()?).ok()?;
-    value.as_str().map(str::to_owned)
-}
-
-/// The TUI's launchers, terminal app, progress bar, colors and glyphs from the
-/// user config.
-pub fn tui_options(paths: &Paths) -> devlanes_tui::Options {
+/// The TUI's progress bar, colors, glyphs and quit choice from the user config,
+/// and the service definition the daemon page's doctor checks compare stop
+/// timeouts with.
+pub async fn tui_options(paths: &Paths) -> devlanes_tui::Options {
     use std::io::IsTerminal;
     // A config that does not load leaves the TUI on its detected defaults.
     let tui = devlanes_config::load_user(paths.home.join("config.yaml"))
         .map(|config| config.tui)
         .unwrap_or_default();
     devlanes_tui::Options {
-        launchers: launchers(),
-        terminal: preferred_terminal(paths),
         // The TUI is always human output; it still needs a terminal that draws the bar.
         progress: devlanes_term::progress_support_from_env(
             crate::progress::configured_mode(paths),
@@ -81,6 +47,12 @@ pub fn tui_options(paths: &Paths) -> devlanes_tui::Options {
         ),
         theme: Some(tui.theme.as_str().to_owned()),
         glyphs: Some(tui.glyphs.as_str().to_owned()),
+        on_quit: Some(tui.on_quit.as_str().to_owned()),
+        service: Some(crate::daemon::service_report().await).filter(|report| !report.is_null()),
+        // The process's environment, zone and directory.
+        env: None,
+        time_zone: None,
+        cwd: None,
     }
 }
 
@@ -96,7 +68,7 @@ pub fn tui_error(error: devlanes_tui::Error) -> RpcError {
 
 /// Opens the TUI; closing it never stops anything.
 pub async fn ui(paths: &Paths) -> Result<u8, RpcError> {
-    devlanes_tui::run_with(paths.clone(), tui_options(paths))
+    devlanes_tui::run_with(paths.clone(), tui_options(paths).await)
         .await
         .map(|()| 0)
         .map_err(tui_error)
@@ -913,6 +885,7 @@ impl RouteSink for ProxyRoutes {
                 };
                 route.start_hint = entry.start_hint;
                 route.certificate_names = entry.certificate_names;
+                route.owner = Some(entry.lane).filter(|lane| !lane.is_empty());
                 route
             })
             .collect();

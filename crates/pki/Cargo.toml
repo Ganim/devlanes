@@ -17,6 +17,10 @@ x509-parser = "0.18"
 tempfile.workspace = true
 fs2 = "0.4"
 
+# The CA's `user@host` label: uid and node name.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process", "system"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 

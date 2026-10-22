@@ -8,15 +8,34 @@ pub const PARTIAL_FLUSH_MS: u64 = 200;
 pub struct Frame {
     pub raw: Vec<u8>,
     pub text: String,
+    /// `text` with its SGR color sequences and a closing reset, when it had any.
+    pub styled: Option<String>,
     pub timestamp_ms: u64,
     pub partial: bool,
     pub continued: bool,
 }
 
+/// Resets every SGR attribute; ends each styled line.
+pub const SGR_RESET: &str = "\x1b[0m";
+
 #[derive(Default)]
 struct Text {
     value: String,
+    /// `value` with SGR sequences kept.
+    styled: String,
+    /// Some SGR sequence is in `styled`.
+    has_style: bool,
+    /// SGR sequences since the last reset: they still apply on the next line.
+    active: String,
     carriage_return: bool,
+}
+
+impl Text {
+    /// Starts the next line with the colors still in effect.
+    fn next_line(&mut self) {
+        self.styled.clone_from(&self.active);
+        self.has_style = !self.active.is_empty();
+    }
 }
 
 impl vte::Perform for Text {
@@ -24,9 +43,11 @@ impl vte::Perform for Text {
     fn print(&mut self, c: char) {
         if self.carriage_return {
             self.value.clear();
+            self.next_line();
             self.carriage_return = false;
         }
         self.value.push(c);
+        self.styled.push(c);
     }
 
     /// CRLF keeps the preceding text; other terminal controls stay out of disk logs.
@@ -36,6 +57,42 @@ impl vte::Perform for Text {
             b'\t' => self.print('\t'),
             _ => {}
         }
+    }
+
+    /// Keeps SGR (`ESC [ … m`), the only sequence that colors text; cursor moves
+    /// and the rest stay out of disk logs.
+    fn csi_dispatch(
+        &mut self,
+        params: &vte::Params,
+        intermediates: &[u8],
+        ignore: bool,
+        action: char,
+    ) {
+        if action != 'm' || ignore || !intermediates.is_empty() {
+            return;
+        }
+        let mut sequence = String::from("\x1b[");
+        let mut reset = true;
+        for (index, param) in params.iter().enumerate() {
+            if index > 0 {
+                sequence.push(';');
+            }
+            for (sub, value) in param.iter().enumerate() {
+                if sub > 0 {
+                    sequence.push(':');
+                }
+                sequence.push_str(&value.to_string());
+                reset &= *value == 0;
+            }
+        }
+        sequence.push('m');
+        if reset {
+            self.active.clear();
+        } else {
+            self.active.push_str(&sequence);
+        }
+        self.styled.push_str(&sequence);
+        self.has_style = true;
     }
 }
 
@@ -123,9 +180,16 @@ impl Framer {
     fn take(&mut self, partial: bool, continued: bool) -> Frame {
         self.text.carriage_return = false;
         self.emitted_boundary = partial || continued;
+        let styled = std::mem::take(&mut self.text.styled);
+        // Only a line with visible text needs its colors; the reset keeps them
+        // from reaching whatever a client prints next.
+        let styled =
+            (self.text.has_style && !self.text.value.is_empty()).then(|| styled + SGR_RESET);
+        self.text.next_line();
         Frame {
             raw: std::mem::take(&mut self.raw),
             text: std::mem::take(&mut self.text.value),
+            styled,
             timestamp_ms: self.last_byte_ms,
             partial,
             continued,

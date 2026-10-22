@@ -99,7 +99,7 @@ async fn an_orphan_shows_its_pid_and_has_no_terminal() -> TestResult {
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    insta::assert_snapshot!("orphan_80x24", text);
+    assert_screen!("orphan_80x24", text);
     // Amber, not red and not the unit's own color: red stays for failures.
     // Off the selected row, which is plain reverse video in 16 colors.
     app.update(key(KeyCode::Char('g')));

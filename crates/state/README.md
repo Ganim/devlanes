@@ -38,7 +38,7 @@ state:
   max_size: 512MiB
 history:
   # Finished unit and task runs older than this are pruned.
-  retention: 30d
+  retention: 7d
   # Remote hosts that have not connected for this long are forgotten.
   remote_hosts_retention: 90d
 ```
@@ -53,7 +53,7 @@ Paths are stored in their native form: raw bytes on Unix, UTF-16LE code units on
 
 Opening runs pending embedded Diesel migrations and configures WAL, foreign keys, and a five-second busy timeout. Old rusqlite development databases using `user_version` are refused with `STATE_LEGACY_SCHEMA`: run `devlanes daemon reset-state`. Newer Diesel schemas require an upgrade.
 
-Call retention periodically from the daemon with configuration-derived limits. Defaults are 30 days for finished runs and metrics, 7 days for log segment rows, 90 days since a remote host's last connection, and a 512 MiB database budget. These defaults are exported as `DEFAULT_*` constants. Log files have separate retention; this store removes their metadata only.
+Call retention periodically from the daemon with configuration-derived limits. Defaults are 7 days for finished runs, metrics and log segment rows, 90 days since a remote host's last connection, and a 512 MiB database budget. These defaults are exported as `DEFAULT_*` constants. Log files have separate retention; this store removes their metadata only.
 
 Startup peaks (`record_startup_peak`, `startup_peaks`) keep the newest ten per metrics series and expire with metrics retention; the daemon's start gate uses them as each unit's memory need.
 

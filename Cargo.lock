@@ -457,7 +457,7 @@ checksum = "553c5d846a6ba5150c65e3b1b8ec073bcf1abc20f9b7220de384a4443ea4e20a"
 dependencies = [
  "borsh-derive",
  "bytes",
- "cfg_aliases",
+ "cfg_aliases 0.2.2",
 ]
 
 [[package]]
@@ -540,6 +540,12 @@ name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+
+[[package]]
+name = "cfg_aliases"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
 
 [[package]]
 name = "cfg_aliases"
@@ -655,6 +661,12 @@ name = "core_detect"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
+name = "countme"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7704b5fdd17b18ae31c4c1da5a2e0305a2bf17b5249300a9ee9ed7b72114c636"
 
 [[package]]
 name = "cpufeatures"
@@ -908,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -959,12 +971,6 @@ dependencies = [
  "devlanes-state",
  "devlanes-sys",
  "devlanes-term",
- "devlanes-term-ghostty",
- "devlanes-term-iterm2",
- "devlanes-term-kitty",
- "devlanes-term-terminal-app",
- "devlanes-term-wezterm",
- "devlanes-term-windows-terminal",
  "devlanes-transport",
  "devlanes-transport-ssh",
  "devlanes-trust",
@@ -988,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1009,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "devlanes-ipc",
@@ -1027,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devlanes-core",
  "devlanes-preset-next",
@@ -1048,11 +1054,12 @@ dependencies = [
  "strsim",
  "tempfile",
  "thiserror 2.0.21",
+ "yaml-edit",
 ]
 
 [[package]]
 name = "devlanes-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1066,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1110,20 +1117,22 @@ dependencies = [
 
 [[package]]
 name = "devlanes-e2e"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devlanes-sys",
  "devlanes-testing",
+ "portable-pty",
  "rustix",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "vt100",
 ]
 
 [[package]]
 name = "devlanes-env-direnv"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1137,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-env-mise"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1151,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-git"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devlanes-core",
  "devlanes-sys",
@@ -1165,14 +1174,14 @@ dependencies = [
 
 [[package]]
 name = "devlanes-hosts-helper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "devlanes-hosts-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devlanes-hosts-helper",
  "devlanes-sys",
@@ -1184,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-infra-compose"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devlanes-sys",
  "serde",
@@ -1197,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-infra-docker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bollard",
  "futures-util",
@@ -1211,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "devlanes-proto",
@@ -1227,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-logon-launcher"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devlanes-client",
  "devlanes-sys",
@@ -1239,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-logs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devlanes-proto",
  "devlanes-sys",
@@ -1258,7 +1267,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-metrics"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1269,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-metrics-docker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bollard",
@@ -1284,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-metrics-linux"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1296,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-metrics-macos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1309,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-metrics-windows"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1321,11 +1330,12 @@ dependencies = [
 
 [[package]]
 name = "devlanes-pki"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devlanes-sys",
  "fs2",
  "rcgen",
+ "rustix",
  "rustls",
  "rustls-pemfile",
  "tempfile",
@@ -1336,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-platform-bun"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1347,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-platform-deno"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1357,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-platform-node"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1367,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-platform-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1377,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-platform-rust"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1387,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-preset-next"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1401,7 +1411,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-preset-tauri"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1417,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-preset-vite"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1431,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-preset-wrangler"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1450,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1458,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-proxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1478,11 +1488,12 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tokio-util",
  "tracing",
+ "x509-parser",
 ]
 
 [[package]]
 name = "devlanes-resolve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-config",
@@ -1504,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-resolver-dns"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "thiserror 2.0.21",
@@ -1515,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-resolver-hosts"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-hosts-helper",
@@ -1529,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-run-script-cargo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1543,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-run-script-deno"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1557,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-run-script-just"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1571,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-run-script-make"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1583,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-run-script-npm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1597,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-run-script-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1611,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-runner-pty"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1624,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-runner-windows"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1638,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-secrets-fnox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1652,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-start-gate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1662,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-state"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devlanes-core",
  "diesel",
@@ -1679,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-sync"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1700,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-sys"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devlanes-core",
  "libc",
@@ -1714,63 +1725,18 @@ dependencies = [
 
 [[package]]
 name = "devlanes-term"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "devlanes-proto",
  "devlanes-sys",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.21",
 ]
 
 [[package]]
-name = "devlanes-term-ghostty"
-version = "0.1.0"
-dependencies = [
- "devlanes-term",
-]
-
-[[package]]
-name = "devlanes-term-iterm2"
-version = "0.1.0"
-dependencies = [
- "devlanes-term",
-]
-
-[[package]]
-name = "devlanes-term-kitty"
-version = "0.1.0"
-dependencies = [
- "devlanes-term",
-]
-
-[[package]]
-name = "devlanes-term-terminal-app"
-version = "0.1.0"
-dependencies = [
- "devlanes-term",
-]
-
-[[package]]
-name = "devlanes-term-wezterm"
-version = "0.1.0"
-dependencies = [
- "devlanes-term",
-]
-
-[[package]]
-name = "devlanes-term-windows-terminal"
-version = "0.1.0"
-dependencies = [
- "devlanes-sys",
- "devlanes-term",
- "tempfile",
-]
-
-[[package]]
 name = "devlanes-testing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -1789,7 +1755,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1805,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-transport-ssh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-ipc",
@@ -1826,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-trust"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1844,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-trust-linux"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-pki",
@@ -1857,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-trust-macos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-pki",
@@ -1868,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-trust-windows"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-pki",
@@ -1881,20 +1847,23 @@ dependencies = [
 
 [[package]]
 name = "devlanes-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ab_glyph",
  "async-trait",
  "base64 0.22.1",
  "bytes",
  "crossterm",
+ "devlanes-cli",
  "devlanes-client",
+ "devlanes-config",
  "devlanes-core",
  "devlanes-proto",
  "devlanes-sys",
  "devlanes-term",
  "futures-util",
  "insta",
+ "jiff",
  "png",
  "ratatui",
  "serde",
@@ -1910,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-tunnel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1936,7 +1905,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebe9f7eaef33febd60290c5a9f3b0571d03c4c04a24739cd64808ce30e65a5d3"
 dependencies = [
  "diesel_derives",
- "downcast-rs",
+ "downcast-rs 2.0.2",
  "libsqlite3-sys",
  "sqlite-wasm-rs",
  "time",
@@ -2004,6 +1973,12 @@ checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
 ]
+
+[[package]]
+name = "downcast-rs"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "downcast-rs"
@@ -2465,6 +2440,12 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+
+[[package]]
+name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
@@ -2822,8 +2803,10 @@ checksum = "b67d3d2e287e4b86c10b3f3b641033d1f89b74bdb39d05f34952e2b9a6fe21cd"
 dependencies = [
  "console",
  "once_cell",
+ "regex",
  "serde",
  "similar",
+ "strip-ansi-escapes",
  "tempfile",
 ]
 
@@ -3301,13 +3284,25 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "nix"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases 0.1.1",
+ "libc",
+]
+
+[[package]]
+name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
 dependencies = [
  "bitflags 2.13.2",
  "cfg-if",
- "cfg_aliases",
+ "cfg_aliases 0.2.2",
  "libc",
 ]
 
@@ -3319,7 +3314,7 @@ checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
  "bitflags 2.13.2",
  "cfg-if",
- "cfg_aliases",
+ "cfg_aliases 0.2.2",
  "libc",
  "memoffset",
 ]
@@ -3783,6 +3778,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "portable-pty"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4a596a2b3d2752d94f51fac2d4a96737b8705dddd311a32b9af47211f08671e"
+dependencies = [
+ "anyhow",
+ "bitflags 1.3.2",
+ "downcast-rs 1.2.1",
+ "filedescriptor",
+ "lazy_static",
+ "libc",
+ "log",
+ "nix 0.28.0",
+ "serial2",
+ "shared_library",
+ "shell-words",
+ "winapi",
+ "winreg",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4157,6 +4173,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rowan"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "417a3a9f582e349834051b8a10c8d71ca88da4211e4093528e36b9845f6b5f21"
+dependencies = [
+ "countme",
+ "hashbrown 0.14.5",
+ "rustc-hash",
+ "text-size",
+]
+
+[[package]]
 name = "rsqlite-vfs"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4171,6 +4199,12 @@ name = "rustc-demangle"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
+
+[[package]]
+name = "rustc-hash"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc_version"
@@ -4444,6 +4478,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serial2"
+version = "0.2.38"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b16809bc35793b19ce4e0c53924bc0dce3937f15487997cfdaed936004180730"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4475,10 +4520,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "shared_library"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a9e7e0f2bfae24d8a5b5a66c5b257a83c7412304311512a0c054cd5e619da11"
+dependencies = [
+ "lazy_static",
+ "libc",
+]
+
+[[package]]
 name = "shell-escape"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "45bb67a18fa91266cc7807181f62f9178a6873bfad7dc788c42e6430db40184f"
+
+[[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"
@@ -4828,6 +4889,12 @@ dependencies = [
  "wezterm-input-types",
  "winapi",
 ]
+
+[[package]]
+name = "text-size"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f18aa187839b2bdb1ad2fa35ead8c4c2976b64e4363c386d45ac0f7ee85c9233"
 
 [[package]]
 name = "textwrap"
@@ -5825,6 +5892,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "winreg"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80d0f4e272c85def139476380b12f9ac60926689dd2e01d4923222f40580869d"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5852,6 +5928,15 @@ dependencies = [
  "rusticata-macros",
  "thiserror 2.0.21",
  "time",
+]
+
+[[package]]
+name = "yaml-edit"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c51b74331bfa10feffb8945c197439b4f937b68b9853cd48224d3226be247b8"
+dependencies = [
+ "rowan",
 ]
 
 [[package]]

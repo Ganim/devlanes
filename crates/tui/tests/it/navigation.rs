@@ -89,16 +89,18 @@ async fn lanes_switch_with_brackets_and_keep_their_selection() -> TestResult {
 }
 
 #[tokio::test]
-async fn services_are_one_list_and_stopped_ones_fold_away() -> TestResult {
+async fn services_are_one_list_in_config_order_with_stopped_ones_inline() -> TestResult {
     let api = FakeApi::with_lanes(lanes());
     let (app, _) = loaded(&api, 100, 30).await;
     let rows = ids(&app);
+    // The daemon's order (devlanes.yaml), and docs stays in it although it
+    // is idle while the lane runs.
     let units: Vec<&RowId> = rows
         .iter()
         .filter(|r| matches!(r, RowId::Unit(_)))
         .collect();
     let names = [
-        "api-a", "api-b", "api-c", "web-a", "web-b", "wrk-a", "wrk-b",
+        "api-a", "api-b", "api-c", "web-a", "web-b", "wrk-a", "wrk-b", "docs",
     ];
     assert_eq!(
         units,
@@ -107,15 +109,10 @@ async fn services_are_one_list_and_stopped_ones_fold_away() -> TestResult {
             .iter()
             .collect::<Vec<_>>()
     );
-    assert!(
-        !rows
-            .iter()
-            .any(|r| matches!(r, RowId::Group(_, name) if name != "not started"))
-    );
-    // docs is idle while the lane runs: folded under `not started`.
-    assert!(rows.contains(&RowId::Group(Section::Services, "not started".into())));
-    assert!(!rows.contains(&RowId::Unit("docs".into())));
-    // Normal states are a glyph alone; a failure says so.
+    assert!(!rows.iter().any(|r| matches!(r, RowId::Group(..))));
+    assert!(!rows.contains(&RowId::WholeLane));
+    // Normal states are a glyph alone; a failure says so; a stopped service
+    // is dimmed with its stopped glyph.
     let text = draw(&app)?.backend().to_string();
     let line = |name: &str| {
         text.lines()
@@ -125,6 +122,10 @@ async fn services_are_one_list_and_stopped_ones_fold_away() -> TestResult {
     };
     assert!(!line("● api-a").contains("ready"), "{text}");
     assert!(line("✕ wrk-b").contains("failed"), "{text}");
+    assert!(line("docs").contains("· docs"), "{text}");
+    // The list's title is the lane's name alone, as in the mockups; its
+    // state glyph is on the chip in the lane bar.
+    assert!(text.contains("┌ main @0 ─"), "{text}");
     Ok(())
 }
 
