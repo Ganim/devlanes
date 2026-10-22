@@ -5,9 +5,11 @@ pub mod color;
 pub mod contrib;
 pub mod env;
 pub mod gate;
+pub mod paths;
 pub mod ports;
 pub mod refs;
 pub mod runtime;
+pub mod shell;
 
 pub use runtime::*;
 use serde::{Deserialize, Serialize};

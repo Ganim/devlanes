@@ -14,6 +14,7 @@ use devlanes_config::{
 };
 use devlanes_core::{
     WorktreeId,
+    paths::{path_starts_with, same_path, strip_path_prefix},
     ports::{PortName, PortPool},
 };
 use devlanes_proto::{RpcError, events};
@@ -319,7 +320,7 @@ impl Inner {
         }
         for (project, lane) in self.all_lanes() {
             let st = lane.st();
-            if st.present && cwd.starts_with(&st.path) {
+            if st.present && path_starts_with(cwd, &st.path) {
                 return Ok(Some(project));
             }
         }
@@ -358,10 +359,7 @@ impl Inner {
             .map_err(|error| internal("git_failed", error))?;
         let (root, common_dir, primary_branch, relative, trees) = match &repository {
             Some(repo) => {
-                let relative = config_dir
-                    .strip_prefix(&repo.root)
-                    .map(Path::to_path_buf)
-                    .unwrap_or_default();
+                let relative = strip_path_prefix(&config_dir, &repo.root).unwrap_or_default();
                 let trees = repo.worktrees.iter().map(tree).collect();
                 (
                     repo.root.clone(),
@@ -391,7 +389,7 @@ impl Inner {
         let identity = common_dir.clone().unwrap_or_else(|| root.clone());
         let existing = self.all_projects().into_iter().find(|project| {
             let st = project.st();
-            st.common_dir.as_ref().unwrap_or(&st.root) == &identity
+            same_path(st.common_dir.as_ref().unwrap_or(&st.root), &identity)
         });
         if let Some(project) = existing {
             self.sync_worktrees(&project, trees).await?;
@@ -531,7 +529,7 @@ impl Inner {
                     .lanes()
                     .into_iter()
                     .map(|lane| lane.st().path.clone())
-                    .find(|path| path.exists() && *path != root);
+                    .find(|path| path.exists() && !same_path(path, &root));
                 match alternative {
                     Some(path) => devlanes_git::list(&path, &common_dir)
                         .await
@@ -590,7 +588,7 @@ impl Inner {
             let (was_present, moved, rebranched) = {
                 let mut st = lane.st();
                 let was_present = st.present;
-                let moved = st.path != tree.path;
+                let moved = !same_path(&st.path, &tree.path);
                 let rebranched = st.branch != tree.branch;
                 st.path = tree.path.clone();
                 st.branch = tree.branch.clone();

@@ -39,10 +39,6 @@ fn request<'a>(
 
 /// `deno task <name> <args>` in the config's directory, with the task body.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
-)]
 fn renders_deno_task() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_files(
@@ -68,7 +64,8 @@ fn renders_deno_task() {
             .strip_prefix(temp.path())
             .expect("inside worktree")
             .display()
-            .to_string();
+            .to_string()
+            .replace('\\', "/");
         rendered.push_str(&format!(
             "{source}#{name}: cwd={cwd} argv={} body={:?}\n",
             plan.argv.join(" "),
@@ -86,10 +83,6 @@ fn renders_deno_task() {
 
 /// Missing tasks list the defined ones; bad sources and names are rejected.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
-)]
 fn errors() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_files(
@@ -97,9 +90,11 @@ fn errors() {
         &[("deno.json", CONFIG), ("bad/deno.json", "{ tasks: }")],
     );
     let error = plan(&request(temp.path(), "deno.json", "start", &[])).expect_err("missing task");
+    // The message shows the host's absolute path; only the shape is checked.
     let message = error
         .to_string()
-        .replace(&temp.path().display().to_string(), "<lane>");
+        .replace(&temp.path().display().to_string(), "<lane>")
+        .replace('\\', "/");
     insta::assert_snapshot!(message, @"`<lane>/deno.json` has no task `start` (tasks: build, ci, dev)");
     assert!(matches!(
         plan(&request(temp.path(), "bad/deno.json", "dev", &[])),

@@ -23,8 +23,10 @@ const INTERNAL: &[&str] = &[
     "stop_failed",
     // Hosts sync states in `doctor`, matched by the tuple pattern.
     "applied",
-    // Config check warning with its own renderer (`config_check`).
+    // Config check warnings rendered by `config_check` (its own wording, or the
+    // daemon's `message`).
     "unknown_platform",
+    "shell_fallback",
 ];
 
 /// `.rs` files under `dir`, recursively.

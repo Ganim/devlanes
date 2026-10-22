@@ -14,6 +14,7 @@ use devlanes_core::{
         CA_CERT_ENV, ContribCx, Contributor, DETECT_MANIFEST, DETECT_REFINE, DETECT_SCRIPT_SOURCE,
         DetectCx, LaunchDraft,
     },
+    env,
 };
 
 /// Platform name matched against `platform:` (explicit or inferred).
@@ -80,7 +81,7 @@ impl Contributor for BunContributor {
         }
         if let Some(cert) = cx.ca_env.get(CA_CERT_ENV) {
             // One extra file only, as in node: a shell value is replaced and reported.
-            if let Some(previous) = cx.client_env.get("NODE_EXTRA_CA_CERTS")
+            if let Some(previous) = env::get(cx.client_env, "NODE_EXTRA_CA_CERTS")
                 && previous != cert
             {
                 draft.notes.push(format!(
@@ -91,7 +92,9 @@ impl Contributor for BunContributor {
                 .env
                 .insert("NODE_EXTRA_CA_CERTS".to_owned(), cert.clone());
         }
-        if !cx.client_env.contains_key("FORCE_COLOR") && !cx.client_env.contains_key("NO_COLOR") {
+        if !env::contains_key(cx.client_env, "FORCE_COLOR")
+            && !env::contains_key(cx.client_env, "NO_COLOR")
+        {
             draft.env.insert("FORCE_COLOR".to_owned(), "1".to_owned());
         }
         Ok(())

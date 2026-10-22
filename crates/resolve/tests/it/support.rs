@@ -62,6 +62,11 @@ pub fn allocation(
 pub fn client_env() -> BTreeMap<String, String> {
     BTreeMap::from([
         ("HOME".to_owned(), "/home/dev".to_owned()),
+        // `USERPROFILE` on Windows, where `~` in sync paths reads it; `HOME` again on Unix.
+        (
+            devlanes_core::paths::HOME_VAR.to_owned(),
+            "/home/dev".to_owned(),
+        ),
         ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
     ])
 }
@@ -86,6 +91,8 @@ pub struct FakeContributor {
     pub preset_ports: Option<(&'static str, &'static str)>,
     /// Append `--port <self.port>` for services with this preset.
     pub port_flag_for: Option<&'static str>,
+    /// Arguments appended to every unit's command.
+    pub args: Vec<&'static str>,
     /// Platform claimed through detection.
     pub platform: Option<&'static str>,
     /// Detection rules, checked in order; the first match gives the confidence.
@@ -110,6 +117,7 @@ impl FakeContributor {
             env,
             preset_ports: None,
             port_flag_for: None,
+            args: Vec::new(),
             platform: None,
             probes: Vec::new(),
         }
@@ -187,6 +195,9 @@ impl Contributor for FakeContributor {
         {
             draft.args.extend(["--port".to_owned(), port.to_string()]);
         }
+        draft
+            .args
+            .extend(self.args.iter().map(|arg| (*arg).to_owned()));
         Ok(())
     }
 }
@@ -277,12 +288,22 @@ impl SecretsProvider for FakeSecrets {
     }
 }
 
+/// A path for snapshots with `/` separators. The fixtures use Unix-style lane
+/// paths, and Windows joins config-relative parts onto them with `\`; the
+/// snapshots check which path is chosen, not the host's separator.
+pub fn shown(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 /// Snapshot view of a launch: values are fake test data, so they are printed.
 pub fn launch_view(launch: &Launch) -> Value {
     let env: serde_json::Map<String, Value> = launch
         .env
         .values
         .iter()
+        // On Windows the client env also carries the home as `USERPROFILE`
+        // (see `client_env`); leaving it out keeps one snapshot for every OS.
+        .filter(|(key, _)| key.as_str() == "HOME" || key.as_str() != devlanes_core::paths::HOME_VAR)
         .map(|(key, value)| {
             let value = if key == "DEVLANES_ORIGINS" {
                 "<lane origins>".to_owned()
@@ -298,14 +319,14 @@ pub fn launch_view(launch: &Launch) -> Value {
     json!({
         "program": launch.program,
         "args": launch.args,
-        "cwd": launch.cwd,
+        "cwd": shown(&launch.cwd),
         "platform": launch.platform,
         "script": launch.script.as_ref().map(|s| json!({
-            "source": s.source, "name": s.name, "runner": s.runner, "cwd": s.cwd,
+            "source": shown(&s.source), "name": s.name, "runner": s.runner, "cwd": shown(&s.cwd),
         })),
         "contributors": launch.contributors,
         "notes": launch.notes,
-        "files": launch.files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>(),
+        "files": launch.files.iter().map(|f| shown(&f.path)).collect::<Vec<_>>(),
         "env": env,
     })
 }
@@ -332,7 +353,10 @@ pub fn lane_view(lane: &ResolvedLane) -> Value {
                     "hidden": s.hidden,
                     "tags": s.tags,
                     "literal_port": s.literal_port,
-                    "sync": s.sync.iter().map(|s| format!("{:?}", s)).collect::<Vec<_>>(),
+                    "sync": s.sync.iter().map(|s| format!(
+                        "SyncSpec {{ from: {:?}, to: {:?}, ignore: {:?} }}",
+                        shown(&s.from), shown(&s.to), s.ignore,
+                    )).collect::<Vec<_>>(),
                     "launch": launch_view(&s.launch),
                 }),
             )

@@ -77,6 +77,101 @@ pub fn current_user() -> io::Result<Sid> {
 
 /// The user process `pid` runs as.
 pub fn process_user(pid: u32) -> io::Result<Sid> {
+    token_user(&process_token(pid)?)
+}
+
+/// Who a token speaks for, and how far it is trusted. Windows can run code of
+/// the same user at a lower trust (low integrity, AppContainer, restricted
+/// tokens), so the user alone does not say a peer is as trusted as this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenFacts {
+    pub user: Sid,
+    /// The mandatory integrity level RID: 0x2000 medium, 0x3000 high, 0x1000 low.
+    pub integrity: u32,
+    pub app_container: bool,
+    pub restricted: bool,
+}
+
+impl TokenFacts {
+    /// Whether a peer with these facts is trusted as much as `own`: the same user,
+    /// not sandboxed, and at least the same integrity level.
+    pub fn as_trusted_as(&self, own: &Self) -> bool {
+        self.user == own.user
+            && !self.app_container
+            && !self.restricted
+            && self.integrity >= own.integrity
+    }
+}
+
+/// This process's token facts.
+pub fn current_facts() -> io::Result<TokenFacts> {
+    token_facts(&current_process_token()?)
+}
+
+/// The token facts of process `pid`.
+pub fn process_facts(pid: u32) -> io::Result<TokenFacts> {
+    token_facts(&process_token(pid)?)
+}
+
+/// Reads user, integrity level, AppContainer and restriction from `token`.
+pub(crate) fn token_facts(token: &OwnedHandle) -> io::Result<TokenFacts> {
+    use windows_sys::Win32::Security::{
+        IsTokenRestricted, TOKEN_MANDATORY_LABEL, TokenIntegrityLevel, TokenIsAppContainer,
+    };
+    let label = token_information(token, TokenIntegrityLevel)?;
+    // SAFETY: the buffer holds a TOKEN_MANDATORY_LABEL whose SID points into it.
+    let label = unsafe {
+        let label = &*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>();
+        Sid::copy_from(label.Label.Sid)
+    }?;
+    // The level is the label SID's last sub-authority, as in `S-1-16-8192`.
+    let integrity = label
+        .to_sddl()?
+        .rsplit('-')
+        .next()
+        .and_then(|rid| rid.parse().ok())
+        .unwrap_or(0);
+    let container = token_information(token, TokenIsAppContainer)?;
+    // SAFETY: the token is open with query rights.
+    let restricted = unsafe { IsTokenRestricted(raw(token)) } != 0;
+    Ok(TokenFacts {
+        user: token_user(token)?,
+        integrity,
+        app_container: container.first().is_some_and(|&value| value != 0),
+        restricted,
+    })
+}
+
+/// A token information class read into an aligned buffer.
+fn token_information(
+    token: &OwnedHandle,
+    class: windows_sys::Win32::Security::TOKEN_INFORMATION_CLASS,
+) -> io::Result<Vec<u64>> {
+    let mut needed = 0;
+    // SAFETY: a size query with no buffer; it fails with the needed size.
+    unsafe { GetTokenInformation(raw(token), class, ptr::null_mut(), 0, &raw mut needed) };
+    if needed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buffer = vec![0_u64; (needed as usize).div_ceil(8)];
+    // SAFETY: `buffer` holds `needed` writable, aligned bytes.
+    let ok = unsafe {
+        GetTokenInformation(
+            raw(token),
+            class,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &raw mut needed,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(buffer)
+}
+
+/// The access token of process `pid`, for queries.
+fn process_token(pid: u32) -> io::Result<OwnedHandle> {
     // SAFETY: plain call; a null result is checked.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     let process = owned(process)?;
@@ -85,7 +180,7 @@ pub fn process_user(pid: u32) -> io::Result<Sid> {
     if unsafe { OpenProcessToken(raw(&process), TOKEN_QUERY, &raw mut token) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    token_user(&owned(token)?)
+    owned(token)
 }
 
 /// Whether this process runs elevated (as administrator under UAC).
@@ -107,6 +202,20 @@ pub fn elevated() -> io::Result<bool> {
         return Err(io::Error::last_os_error());
     }
     Ok(elevation.TokenIsElevated != 0)
+}
+
+/// Why the daemon does not start from an elevated process, as a startup reason
+/// (`CODE: message`) that clients turn into the `daemon_elevated` reason.
+pub const ELEVATED_REASON: &str = "DAEMON_ELEVATED: the daemon refuses to run elevated; run devlanes from a terminal that is not running as administrator";
+
+/// Whether the daemon must not start from this process: it is elevated, so every
+/// unit would inherit administrator rights, and `DEVLANES_ALLOW_ELEVATED=1` (for
+/// CI runners that only run elevated) is not set.
+pub fn elevation_refused() -> io::Result<bool> {
+    if std::env::var_os("DEVLANES_ALLOW_ELEVATED").is_some_and(|value| value == "1") {
+        return Ok(false);
+    }
+    elevated()
 }
 
 /// The user of an access token.
@@ -140,6 +249,7 @@ pub(crate) fn token_user(token: &OwnedHandle) -> io::Result<Sid> {
     }
 }
 
+/// This process's access token, for queries.
 fn current_process_token() -> io::Result<OwnedHandle> {
     let mut token: HANDLE = ptr::null_mut();
     // SAFETY: the pseudo handle needs no closing; `token` receives a new handle.
@@ -175,6 +285,15 @@ mod tests {
         assert_eq!(process_user(std::process::id())?, me);
         assert!(me.to_sddl()?.starts_with("S-1-"));
         elevated()?;
+        let facts = current_facts()?;
+        assert_eq!(facts, process_facts(std::process::id())?);
+        assert!(facts.integrity >= 0x2000, "{facts:?}");
+        assert!(facts.as_trusted_as(&facts));
+        let lower = TokenFacts {
+            integrity: 0x1000,
+            ..facts.clone()
+        };
+        assert!(!lower.as_trusted_as(&facts));
         Ok(())
     }
 }

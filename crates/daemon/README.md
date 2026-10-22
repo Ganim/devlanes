@@ -59,6 +59,12 @@ ports:
 - Each start and restart gets a `start_id`, on its `lane.phase` events and its `StartResult`; `services:started` lists in `units` the units it spawns. `start`, `restart`, `resume`, `lane.new` and `wait` given `"events": true` stream their lanes' `lane.phase` (own starts only), `task`, `unit.changed` and `lane.changed` events on the request (`stream.rs`), so a client needs no `subscribe` connection.
 - While a phase runs, `lane.phase` events with `state: progress` say what it waits on (`phase_progress.rs`): during infra, each container's state from `InfraProvider::progress`, polled once a second and sent only when it changes; during setup and tasks, the entry or task running with its index and count.
 
+## Windows
+
+- The endpoint is a named pipe, `\\.\pipe\devlanes-<hash of the home>`, so each home gets its own daemon; the lock and peer check work as with the Unix socket.
+- The daemon refuses to run elevated (as administrator): every unit would inherit administrator rights, and an unelevated CLI could not inspect the daemon's process. `DEVLANES_ALLOW_ELEVATED=1` lifts this for CI runners that only run elevated.
+- State directories are created with an access list for the user, SYSTEM and Administrators only, the Windows counterpart of mode 0700. A directory the user owns whose access list lets other accounts in is tightened to that list at startup.
+
 Lane discovery and port blocks are in `registry.rs`, the start pipeline and stop/restart/clean in `lifecycle.rs`, method handlers in `control.rs` and `query.rs`, startup reconciliation in `reconcile.rs`. Integration tests with fake runner, infra and process table are in `tests/it/`.
 
 ## License

@@ -55,12 +55,21 @@ pub fn resolve_host(
         .ok_or(Error::UnknownContext(context))
 }
 
-/// The CLI config directory: `DOCKER_CONFIG`, else `$HOME/.docker`.
+/// The variable holding the user's home, where the Docker CLI keeps `.docker`.
+#[cfg(unix)]
+const HOME_VAR: &str = "HOME";
+/// The variable holding the user's home, where the Docker CLI keeps `.docker`;
+/// Windows shells may not set `HOME`, and Docker Desktop ignores it.
+#[cfg(windows)]
+const HOME_VAR: &str = "USERPROFILE";
+
+/// The CLI config directory: `DOCKER_CONFIG`, else `.docker` in the user's home
+/// (`$HOME` on Unix, `%USERPROFILE%` on Windows).
 pub fn config_dir(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     env("DOCKER_CONFIG")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|home| PathBuf::from(home).join(".docker")))
+        .or_else(|| env(HOME_VAR).map(|home| PathBuf::from(home).join(".docker")))
 }
 
 fn read_current_context(path: &Path) -> Result<Option<String>, Error> {
@@ -191,12 +200,12 @@ mod tests {
     #[test]
     fn config_dir_precedence() {
         assert_eq!(
-            config_dir(env(&[("DOCKER_CONFIG", "/c"), ("HOME", "/h")])),
+            config_dir(env(&[("DOCKER_CONFIG", "/c"), (HOME_VAR, "/h")])),
             Some(PathBuf::from("/c"))
         );
         assert_eq!(
-            config_dir(env(&[("HOME", "/h")])),
-            Some(PathBuf::from("/h/.docker"))
+            config_dir(env(&[(HOME_VAR, "/h")])),
+            Some(Path::new("/h").join(".docker"))
         );
         assert_eq!(config_dir(env(&[])), None);
     }

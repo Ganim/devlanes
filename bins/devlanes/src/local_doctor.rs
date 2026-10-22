@@ -79,14 +79,18 @@ fn home_check(home: &Path) -> Value {
             json!({"path": home, "exists": true, "problem": "unreadable", "message": error.to_string()})
         }
         Ok(verdict) => {
-            let problem = match verdict {
+            let problem = match &verdict {
                 Ok(()) => None,
                 Err(DirProblem::ReparsePoint) => Some("symlink"),
                 Err(DirProblem::NotADirectory) => Some("not_a_directory"),
                 Err(DirProblem::Owner) => Some("owner"),
-                Err(DirProblem::Acl) => Some("acl"),
+                Err(DirProblem::Acl(_)) => Some("acl"),
             };
-            json!({"path": home, "exists": true, "problem": problem})
+            let fix = match &verdict {
+                Err(DirProblem::Acl(others)) => crate::driver::acl_fix(home, others),
+                _ => None,
+            };
+            json!({"path": home, "exists": true, "problem": problem, "fix": fix})
         }
     }
 }

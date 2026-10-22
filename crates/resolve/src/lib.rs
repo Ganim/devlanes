@@ -20,6 +20,7 @@ mod model;
 mod plan;
 mod ports;
 mod select;
+mod shell;
 mod util;
 
 pub use error::ResolveError;
@@ -29,4 +30,5 @@ pub use model::*;
 pub use plan::{container_ready, detect_platform, resolve_lane};
 pub use ports::{PortNeeds, port_needs, port_unit, reserved_offsets};
 pub use select::{ProfileSummary, Selection, profile_summaries, select, select_profiles};
-pub use util::{public_url_env_key, shell_quote};
+pub use shell::shell_warnings;
+pub use util::{cmd_quote, public_url_env_key, shell_quote};

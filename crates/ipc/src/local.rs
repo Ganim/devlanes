@@ -167,46 +167,52 @@ mod tests {
     /// and a second listener on the same endpoint is refused while one runs.
     #[tokio::test]
     async fn many_clients_connect_and_the_endpoint_is_exclusive() -> io::Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = endpoint(dir.path());
-        let mut listener = LocalListener::bind(&path).await.map_err(io::Error::other)?;
-        assert!(matches!(
-            LocalListener::bind(&path).await,
-            Err(BindError::AlreadyListening(_))
-        ));
-        let server = tokio::spawn(async move {
-            for _ in 0..50 {
-                let mut stream = listener.accept().await?;
-                assert!(stream.peer_is_current_user()?);
-                tokio::spawn(async move {
-                    let mut byte = [0];
-                    stream.read_exact(&mut byte).await?;
-                    stream.confirm_peer_after_read()?;
-                    stream.write_all(&byte).await
-                });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempfile::tempdir()?;
+            let path = endpoint(dir.path());
+            let mut listener = LocalListener::bind(&path).await.map_err(io::Error::other)?;
+            let server = tokio::spawn(async move {
+                for _ in 0..50 {
+                    let mut stream = listener.accept().await?;
+                    assert!(stream.peer_is_current_user()?);
+                    tokio::spawn(async move {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).await?;
+                        assert!(stream.confirm_peer_after_read()?);
+                        stream.write_all(&byte).await
+                    });
+                }
+                Ok::<_, io::Error>(listener)
+            });
+            let clients: Vec<_> = (0..50u8)
+                .map(|n| {
+                    let path = path.clone();
+                    tokio::spawn(async move {
+                        let mut stream = connect(&path).await?;
+                        assert!(stream.peer_is_current_user()?);
+                        stream.write_all(&[n]).await?;
+                        let mut echo = [0];
+                        stream.read_exact(&mut echo).await?;
+                        assert_eq!(echo, [n]);
+                        Ok::<_, io::Error>(())
+                    })
+                })
+                .collect();
+            for client in clients {
+                client.await.map_err(io::Error::other)??;
             }
-            Ok::<_, io::Error>(listener)
-        });
-        let clients = (0..50u8).map(|n| {
-            let path = path.clone();
-            tokio::spawn(async move {
-                let mut stream = tokio::time::timeout(Duration::from_secs(10), connect(&path))
-                    .await
-                    .map_err(io::Error::other)??;
-                assert!(stream.peer_is_current_user()?);
-                stream.write_all(&[n]).await?;
-                let mut echo = [0];
-                stream.read_exact(&mut echo).await?;
-                assert_eq!(echo, [n]);
-                Ok::<_, io::Error>(())
-            })
-        });
-        for client in clients.collect::<Vec<_>>() {
-            client.await.map_err(io::Error::other)??;
-        }
-        let listener = server.await.map_err(io::Error::other)??;
-        listener.close();
-        remove(&path).await
+            let listener = server.await.map_err(io::Error::other)??;
+            // Only once no accept is pending: on Unix the check's own connection
+            // would otherwise be accepted as one of the fifty.
+            assert!(matches!(
+                LocalListener::bind(&path).await,
+                Err(BindError::AlreadyListening(_))
+            ));
+            listener.close();
+            remove(&path).await
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 }
 

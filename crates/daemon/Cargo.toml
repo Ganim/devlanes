@@ -27,6 +27,7 @@ devlanes-sync = { path = "../sync" }
 devlanes-transport = { path = "../transport" }
 async-trait.workspace = true
 base64.workspace = true
+dunce.workspace = true
 futures-util.workspace = true
 globset = "0.4"
 indexmap = "2"

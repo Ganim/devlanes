@@ -137,10 +137,6 @@ fn no_source_exits_3_naming_the_files() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "POSIX absolute paths in fixtures are relative on Windows, ported in the Windows path step"
-)]
 fn json_output_has_path_sources_yaml_and_notes() {
     let (home, dir) = project(&[(
         "mprocs.yaml",
@@ -151,10 +147,8 @@ fn json_output_has_path_sources_yaml_and_notes() {
     let data: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     assert_eq!(data["written"], true);
     assert!(
-        data["path"]
-            .as_str()
-            .expect("path")
-            .ends_with("acme/devlanes.yaml")
+        std::path::Path::new(data["path"].as_str().expect("path"))
+            .ends_with(std::path::Path::new("acme").join("devlanes.yaml"))
     );
     assert_eq!(data["sources"][0]["source"], "mprocs");
     assert_eq!(data["sources"][0]["files"][0], "mprocs.yaml");

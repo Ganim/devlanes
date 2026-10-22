@@ -24,13 +24,15 @@ fn write_files(root: &Path, files: &[(&str, &str)]) {
     }
 }
 
-/// Renders a detection with paths relative to `root` for stable snapshots.
+/// Renders a detection with paths relative to `root` for stable snapshots,
+/// with `/` separators on every OS.
 fn describe(root: &Path, result: Result<Detection, NpmError>) -> String {
     let relative = |path: &Path| match path
         .strip_prefix(root)
         .unwrap_or(path)
         .display()
         .to_string()
+        .replace('\\', "/")
     {
         empty if empty.is_empty() => ".".to_owned(),
         other => other,
@@ -88,10 +90,6 @@ fn table(cases: &[(&str, &[(&str, &str)])]) -> String {
 /// Declared fields: `packageManager` beats `devEngines`, nearest manifest
 /// wins up to the workspace root, and the field beats any lockfile.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
-)]
 fn declared_field_precedence() {
     let cases: &[(&str, &[(&str, &str)])] = &[
         (
@@ -214,10 +212,6 @@ fn declared_field_precedence() {
 
 /// Without a declared field, the nearest lockfile decides and a note asks for the field.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
-)]
 fn lockfile_fallback_table() {
     let cases: &[(&str, &[(&str, &str)])] = &[
         ("pnpm", &[("pnpm-lock.yaml", "")]),
@@ -345,10 +339,6 @@ fn plan_uses_manifest_dir_and_exposes_body() {
 
 /// A missing script names the file and lists the scripts that exist.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
-)]
 fn missing_script_lists_available() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_files(
@@ -365,9 +355,11 @@ fn missing_script_lists_available() {
         extra_args: &[],
     })
     .expect_err("missing script");
+    // The message shows the host's absolute path; only the shape is checked.
     let message = error
         .to_string()
-        .replace(&temp.path().display().to_string(), "<lane>");
+        .replace(&temp.path().display().to_string(), "<lane>")
+        .replace('\\', "/");
     insta::assert_snapshot!(message, @"`<lane>/package.json` has no script `dev` (available: build, start)");
 }
 

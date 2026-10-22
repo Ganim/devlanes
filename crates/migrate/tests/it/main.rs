@@ -148,10 +148,6 @@ fn pm2_computed_js_asks_for_json() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "POSIX absolute paths in fixtures are relative on Windows, ported in the Windows path step"
-)]
 fn tmuxinator() {
     snapshot("tmuxinator", &[SourceKind::Tmuxinator]);
 }

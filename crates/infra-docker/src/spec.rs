@@ -204,8 +204,72 @@ pub fn container_labels(spec: &ContainerSpec, hash: &str) -> BTreeMap<String, St
     labels
 }
 
-/// Resolves one volume entry. Sources starting with `/` are absolute, sources starting with
-/// `.` or containing `/` are relative to `base_dir`, other sources are named volumes.
+/// Host path forms in volume sources. Unix knows `/`; Windows adds drive letters
+/// (`C:\data:/data`, whose first colon is not a separator), UNC paths and `\`.
+#[cfg(unix)]
+mod os {
+    use std::path::{Path, PathBuf};
+
+    /// Bytes at the start of a volume spec that belong to a drive prefix.
+    pub(super) fn drive_prefix_len(_spec: &str) -> usize {
+        0
+    }
+
+    /// Whether `source` is a host path rather than a named volume.
+    pub(super) fn is_absolute(source: &str) -> bool {
+        source.starts_with('/')
+    }
+
+    /// Whether `source` is a path relative to the base directory.
+    pub(super) fn is_relative(source: &str) -> bool {
+        source.starts_with('.') || source.contains('/')
+    }
+
+    /// An absolute source, lexically normalized.
+    pub(super) fn absolute(source: &str) -> PathBuf {
+        super::normalize(Path::new(source))
+    }
+}
+
+/// Host path forms in volume sources. Unix knows `/`; Windows adds drive letters
+/// (`C:\data:/data`, whose first colon is not a separator), UNC paths and `\`.
+#[cfg(windows)]
+mod os {
+    use std::path::{Path, PathBuf};
+
+    /// Length of a leading `C:\` or `C:/` drive letter and colon, else 0.
+    pub(super) fn drive_prefix_len(spec: &str) -> usize {
+        match spec.as_bytes() {
+            [letter, b':', b'\\' | b'/', ..] if letter.is_ascii_alphabetic() => 2,
+            _ => 0,
+        }
+    }
+
+    /// Whether `source` is a host path rather than a named volume.
+    pub(super) fn is_absolute(source: &str) -> bool {
+        source.starts_with('/') || Path::new(source).is_absolute()
+    }
+
+    /// Whether `source` is a path relative to the base directory.
+    pub(super) fn is_relative(source: &str) -> bool {
+        source.starts_with('.') || source.contains(['/', '\\'])
+    }
+
+    /// An absolute source, lexically normalized. A POSIX `/x` source names a
+    /// path inside Docker Desktop's Linux VM, so it keeps its `/` separators.
+    pub(super) fn absolute(source: &str) -> PathBuf {
+        let normalized = super::normalize(Path::new(source));
+        if source.starts_with('/') {
+            PathBuf::from(normalized.to_string_lossy().replace('\\', "/"))
+        } else {
+            normalized
+        }
+    }
+}
+
+/// Resolves one volume entry. Absolute sources (`/x`, and on Windows `C:\x` or a
+/// UNC path) are binds, sources starting with `.` or containing a separator are
+/// relative to `base_dir`, other sources are named volumes.
 /// `~` is rejected because the daemon's home is not necessarily the user's.
 pub fn resolve_volume(
     spec: &str,
@@ -219,7 +283,13 @@ pub fn resolve_volume(
         spec: spec.to_owned(),
         reason,
     };
-    let parts: Vec<&str> = spec.split(':').collect();
+    let drive = os::drive_prefix_len(spec);
+    let mut parts: Vec<&str> = spec[drive..].split(':').collect();
+    if drive > 0
+        && let Some(first) = parts.first_mut()
+    {
+        *first = &spec[..drive + first.len()];
+    }
     let (source, target, mode) = match parts.as_slice() {
         [target] => (None, *target, None),
         [source, target] => (Some(*source), *target, None),
@@ -245,14 +315,14 @@ pub fn resolve_volume(
             "`~` is not expanded; use an absolute or relative path",
         ));
     }
-    if source.starts_with('/') {
+    if os::is_absolute(source) {
         return Ok(Mount::Bind {
-            source: normalize(Path::new(source)),
+            source: os::absolute(source),
             target,
             mode,
         });
     }
-    if source.starts_with('.') || source.contains('/') {
+    if os::is_relative(source) {
         return Ok(Mount::Bind {
             source: normalize(&base_dir.join(source)),
             target,
@@ -446,16 +516,18 @@ mod tests {
         assert_eq!(Scope::from_labels(&BTreeMap::new()), None);
     }
 
+    /// A `/`-separated fixture path in the host's spelling, as resolved
+    /// relative sources come out.
+    fn host(path: &str) -> PathBuf {
+        PathBuf::from(path.replace('/', std::path::MAIN_SEPARATOR_STR))
+    }
+
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
-    )]
     fn relative_paths_resolve_against_base_dir() {
         assert_eq!(
             resolve("./infra/cerbos:/policies:ro", Scope::Shared).ok(),
             Some(Mount::Bind {
-                source: "/work/acme/infra/cerbos".into(),
+                source: host("/work/acme/infra/cerbos"),
                 target: "/policies".into(),
                 mode: Some("ro".into()),
             })
@@ -463,7 +535,7 @@ mod tests {
         assert_eq!(
             resolve("../shared/./data:/data", Scope::Shared).ok(),
             Some(Mount::Bind {
-                source: "/work/shared/data".into(),
+                source: host("/work/shared/data"),
                 target: "/data".into(),
                 mode: None,
             })
@@ -471,7 +543,7 @@ mod tests {
         assert_eq!(
             resolve("infra/x:/x", Scope::Shared).ok(),
             Some(Mount::Bind {
-                source: "/work/acme/infra/x".into(),
+                source: host("/work/acme/infra/x"),
                 target: "/x".into(),
                 mode: None,
             })
@@ -513,6 +585,39 @@ mod tests {
             "./x:/x:",
             "bad name:/x",
         ] {
+            assert!(resolve(volume, Scope::Shared).is_err(), "{volume}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    /// A drive letter means nothing on Unix: `C` is a named volume and the
+    /// remaining parts do not fit `source:target[:mode]`.
+    fn unix_drive_letters_are_not_paths() {
+        assert!(resolve(r"C:\data:/data", Scope::Shared).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// The drive colon belongs to the source; drive, UNC and `\` paths are binds.
+    fn windows_drive_letter_sources() {
+        for (volume, expected) in [
+            (r"C:\data:/data", r"C:\data:/data"),
+            (r"d:/data/../db:/db:ro", r"d:\db:/db:ro"),
+            (r"\\server\share\x:/x", r"\\server\share\x:/x"),
+            (r".\infra\x:/x", r"\work\acme\infra\x:/x"),
+            ("/etc/hosts:/etc/hosts:ro", "/etc/hosts:/etc/hosts:ro"),
+        ] {
+            assert_eq!(
+                resolve(volume, Scope::Shared)
+                    .ok()
+                    .and_then(|mount| mount.bind())
+                    .as_deref(),
+                Some(expected),
+                "{volume}"
+            );
+        }
+        for volume in [r"C:\data", r"C:\data:relative", r"C:\a:/a:ro:x"] {
             assert!(resolve(volume, Scope::Shared).is_err(), "{volume}");
         }
     }

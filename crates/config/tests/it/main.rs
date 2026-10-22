@@ -149,6 +149,10 @@ fn broken_diagnostics() {
             "wrong_type",
             "project: demo\nlanes:\n  block_size: banana\n",
         ),
+        (
+            "windows_name",
+            "project: demo\nservices:\n  api:\n    run: server\n  aux:\n    run: worker\n",
+        ),
     ];
     for (name, yaml) in cases {
         let error = parse_project(yaml, None).expect_err(name);
@@ -330,6 +334,47 @@ fn structural_validation() {
         (
             "project: demo\nservices: { api: { tags: [x] } }",
             "services.api: service requires run or run_script",
+        ),
+        // Names that cannot be Windows file names fail on every OS.
+        (
+            "project: nul.d",
+            "project: `nul.d` is a reserved device name on Windows",
+        ),
+        (
+            "project: demo.",
+            "project: `demo.` ends with `.`, which Windows drops from file names, and configs are shared across operating systems; did you mean `demo`?",
+        ),
+        (
+            "project: demo\nservices: { CON: { run: a } }",
+            "services.CON: `CON` is a reserved device name on Windows",
+        ),
+        (
+            "project: demo\nservices: { com7.log: { run: a } }",
+            "services.com7.log: `com7.log` is a reserved device name",
+        ),
+        (
+            "project: demo\nservices: { 'api ': { run: a } }",
+            "`api ` ends with a space, which Windows drops from file names, and configs are shared across operating systems; did you mean `api`?",
+        ),
+        (
+            "project: demo\nservices: { 'a|b': { run: a } }",
+            "services.a|b: `a|b` contains `|`, which Windows does not allow in file names",
+        ),
+        (
+            "project: demo\ntasks: { 'seed?': { run: a } }",
+            "tasks.seed?: `seed?` contains `?`",
+        ),
+        (
+            "project: demo\ntasks: { 'db\\seed': { run: a } }",
+            r"tasks.db\seed: `db\seed` contains `\`",
+        ),
+        (
+            "project: demo\ntasks: { \"a\\tb\": { run: a } }",
+            "contains a control character",
+        ),
+        (
+            "project: demo\ntasks: { lpt1: { run: a } }",
+            "tasks.lpt1: `lpt1` is a reserved device name on Windows and cannot name a file, and configs are shared across operating systems; pick another name",
         ),
     ] {
         let error = parse_project(yaml, None).expect_err(yaml);

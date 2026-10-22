@@ -2,33 +2,40 @@
 //! a directory is private to that user.
 
 use std::ffi::{OsStr, c_void};
+use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SDDL_REVISION_1,
-    SE_FILE_OBJECT,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+    SE_FILE_OBJECT, SetSecurityInfo,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
-    DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, OWNER_SECURITY_INFORMATION, PSID,
-    SECURITY_ATTRIBUTES,
+    DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetSecurityDescriptorDacl,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
 };
-use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateDirectoryW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_READ_ATTRIBUTES, READ_CONTROL, WRITE_DAC,
+};
 
 use super::token::{self, Sid};
 
-/// `ACCESS_ALLOWED_ACE_TYPE`.
-const ACCESS_ALLOWED: u8 = 0;
 /// `FILE_ATTRIBUTE_REPARSE_POINT`, set on symlinks and junctions.
 const REPARSE_POINT: u32 = 0x400;
 /// Accounts that may appear on a private directory besides its user: SYSTEM,
-/// Administrators, and CREATOR OWNER (inherited entries that apply to the creator).
+/// Administrators, and CREATOR OWNER (an inherited entry that only applies to
+/// whoever creates a file inside).
 const TRUSTED: [&str; 3] = ["S-1-5-18", "S-1-5-32-544", "S-1-3-0"];
+/// Administrators, accepted as owner too: an elevated process owns what it
+/// creates through this group, and an administrator can reach everything anyway.
+const ADMINISTRATORS: &str = "S-1-5-32-544";
 
 /// A self-relative security descriptor allocated by the system, freed on drop.
 pub struct SecurityDescriptor(*mut c_void);
@@ -57,6 +64,21 @@ impl SecurityDescriptor {
             return Err(io::Error::last_os_error());
         }
         Ok(Self(descriptor))
+    }
+
+    /// The descriptor's DACL; valid while `self` lives.
+    fn dacl(&self) -> io::Result<*mut ACL> {
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl: *mut ACL = ptr::null_mut();
+        // SAFETY: `self.0` is a valid descriptor; `dacl` points into it.
+        let ok = unsafe {
+            GetSecurityDescriptorDacl(self.0, &raw mut present, &raw mut dacl, &raw mut defaulted)
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(dacl)
     }
 }
 
@@ -92,12 +114,13 @@ impl SecurityAttributes {
     }
 
     /// Full access for the current user and nobody else, for kernel objects such
-    /// as pipes and job objects. Lower-integrity processes of the same user are
-    /// kept out by the default mandatory label.
+    /// as pipes and job objects. The medium mandatory label with no-read-up and
+    /// no-write-up keeps lower-integrity processes of the same user (sandboxes,
+    /// low-integrity browsers) out entirely.
     pub fn current_user_only() -> io::Result<Self> {
         let user = token::current_user()?.to_sddl()?;
         Ok(Self::new(SecurityDescriptor::from_sddl(&format!(
-            "D:P(A;;GA;;;{user})"
+            "D:P(A;;GA;;;{user})S:(ML;;NWNR;;;ME)"
         ))?))
     }
 
@@ -114,33 +137,124 @@ pub enum DirProblem {
     NotADirectory,
     /// A symlink or junction, which could point anywhere.
     ReparsePoint,
-    /// Owned by another account (for example Administrators after an elevated run).
+    /// Owned by another account.
     Owner,
     /// Other accounts are granted access, such as `Authenticated Users` on
-    /// directories created under a drive root.
-    Acl,
+    /// directories created under a drive root. Holds those accounts' SIDs; empty
+    /// when access cannot be judged (a missing access list, an unknown entry type).
+    Acl(Vec<String>),
 }
 
-/// Checks that `path` is a real directory owned by the current user, granting
-/// access only to that user, SYSTEM and Administrators.
+/// What [`ensure_private_dir`] found or did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateDir {
+    /// It was missing and was created private.
+    Created,
+    /// It existed and was private already.
+    Present,
+    /// It existed, was this user's, and others had access; it now has the
+    /// private access list.
+    Tightened,
+}
+
+/// Checks that `path` is a real directory owned by the current user (or
+/// Administrators), granting access only to that user, SYSTEM and Administrators.
+/// A missing directory is an error of kind `NotFound`.
 pub fn check_private_dir(path: &Path) -> io::Result<Result<(), DirProblem>> {
-    let metadata = std::fs::symlink_metadata(path)?;
+    let directory = match open_dir(path, false)? {
+        Ok(directory) => directory,
+        Err(problem) => return Ok(Err(problem)),
+    };
+    // SAFETY: the handle stays open for the call.
+    unsafe { inspect(&directory, None) }
+}
+
+/// Creates `path` private when missing (its parent must exist) and checks it.
+/// With `tighten`, an own directory that others can open gets the private access
+/// list instead of being refused, the Windows counterpart of `chmod 700`.
+///
+/// The check and the change go through one handle opened without following links,
+/// so the path cannot be swapped for a junction in between.
+pub fn ensure_private_dir(
+    path: &Path,
+    tighten: bool,
+) -> io::Result<Result<PrivateDir, DirProblem>> {
+    let descriptor = private_descriptor()?;
+    let mut attributes = SecurityAttributes::new(descriptor);
+    let wide_path = wide(path.as_os_str());
+    // SAFETY: `wide_path` is NUL-terminated and `attributes` outlives the call.
+    let created = unsafe { CreateDirectoryW(wide_path.as_ptr(), attributes.as_mut_ptr()) } != 0;
+    if !created {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_ALREADY_EXISTS as i32) {
+            return Err(error);
+        }
+    }
+    let directory = match open_dir(path, tighten)? {
+        Ok(directory) => directory,
+        Err(problem) => return Ok(Err(problem)),
+    };
+    let private = private_descriptor()?;
+    // SAFETY: the handle stays open for the call; `private` lives across it.
+    let verdict = unsafe { inspect(&directory, tighten.then_some(&private)) }?;
+    Ok(match verdict {
+        Ok(()) if created => Ok(PrivateDir::Created),
+        Ok(()) => Ok(PrivateDir::Present),
+        Err(DirProblem::Acl(_)) if tighten => Ok(PrivateDir::Tightened),
+        Err(problem) => Err(problem),
+    })
+}
+
+/// The protected access list of a private directory, inherited by everything
+/// created inside, owned by the current user even when this process is elevated
+/// (whose default owner would be Administrators).
+fn private_descriptor() -> io::Result<SecurityDescriptor> {
+    let user = token::current_user()?.to_sddl()?;
+    SecurityDescriptor::from_sddl(&format!(
+        "O:{user}D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    ))
+}
+
+/// Opens `path` itself (never a link's target) for reading its security, and for
+/// changing its access list with `write_dac`. A link or a non-directory is a
+/// problem, not an error.
+fn open_dir(path: &Path, write_dac: bool) -> io::Result<Result<File, DirProblem>> {
+    let access = READ_CONTROL | FILE_READ_ATTRIBUTES | if write_dac { WRITE_DAC } else { 0 };
+    let file = File::options()
+        .access_mode(access)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
     if metadata.file_attributes() & REPARSE_POINT != 0 {
         return Ok(Err(DirProblem::ReparsePoint));
     }
     if !metadata.is_dir() {
         return Ok(Err(DirProblem::NotADirectory));
     }
-    let user = token::current_user()?;
-    let wide = wide(path.as_os_str());
+    Ok(Ok(file))
+}
+
+/// Judges the owner and access list of `directory`. With `replace`, an
+/// access-list problem on an acceptable owner is fixed by applying that
+/// descriptor's DACL as a protected one, and still reported so the caller can
+/// tell it happened.
+///
+/// # Safety
+///
+/// `directory` must be open with `READ_CONTROL`, plus `WRITE_DAC` with `replace`.
+unsafe fn inspect(
+    directory: &File,
+    replace: Option<&SecurityDescriptor>,
+) -> io::Result<Result<(), DirProblem>> {
+    let handle = directory.as_raw_handle();
     let mut owner: PSID = ptr::null_mut();
     let mut dacl: *mut ACL = ptr::null_mut();
     let mut descriptor = ptr::null_mut();
-    // SAFETY: `wide` is NUL-terminated; on success `owner` and `dacl` point into
-    // `descriptor`, which is freed below after their last use.
+    // SAFETY: the handle is open with READ_CONTROL; on success `owner` and `dacl`
+    // point into `descriptor`, which is freed below after their last use.
     let status = unsafe {
-        GetNamedSecurityInfoW(
-            wide.as_ptr(),
+        GetSecurityInfo(
+            handle,
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             &raw mut owner,
@@ -154,25 +268,50 @@ pub fn check_private_dir(path: &Path) -> io::Result<Result<(), DirProblem>> {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
     // SAFETY: `owner` and `dacl` point into `descriptor`, alive until freed below.
-    let verdict = unsafe { judge(&user, owner, dacl) };
-    // SAFETY: allocated by GetNamedSecurityInfoW.
+    let verdict = unsafe { judge(owner, dacl) };
+    // SAFETY: allocated by GetSecurityInfo.
     unsafe { LocalFree(descriptor) };
-    verdict
+    let verdict = verdict?;
+    if let (Err(DirProblem::Acl(_)), Some(replace)) = (&verdict, replace) {
+        let dacl = replace.dacl()?;
+        // SAFETY: the handle is open with WRITE_DAC; `dacl` lives in `replace`.
+        let status = unsafe {
+            SetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                dacl,
+                ptr::null(),
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+    }
+    Ok(verdict)
 }
 
-/// Compares the owner and walks the DACL.
+/// Compares the owner and walks the access list.
 ///
 /// # Safety
 ///
-/// `owner` and `dacl` must be valid for the call (`dacl` may be null).
-unsafe fn judge(user: &Sid, owner: PSID, dacl: *const ACL) -> io::Result<Result<(), DirProblem>> {
-    // SAFETY: the caller guarantees `owner` is valid.
-    if unsafe { Sid::copy_from(owner) }? != *user {
+/// `owner` and `dacl` must be null or valid for the call.
+unsafe fn judge(owner: PSID, dacl: *const ACL) -> io::Result<Result<(), DirProblem>> {
+    let user = token::current_user()?.to_sddl()?;
+    // Volumes without security (FAT) report no owner.
+    if owner.is_null() {
         return Ok(Err(DirProblem::Owner));
     }
-    // A null DACL grants everyone full access.
+    // SAFETY: the caller guarantees a non-null `owner` is valid.
+    let owner = unsafe { Sid::copy_from(owner) }?.to_sddl()?;
+    if owner != user && owner != ADMINISTRATORS {
+        return Ok(Err(DirProblem::Owner));
+    }
+    // A null access list grants everyone full access.
     if dacl.is_null() {
-        return Ok(Err(DirProblem::Acl));
+        return Ok(Err(DirProblem::Acl(Vec::new())));
     }
     let mut size = ACL_SIZE_INFORMATION {
         AceCount: 0,
@@ -191,7 +330,8 @@ unsafe fn judge(user: &Sid, owner: PSID, dacl: *const ACL) -> io::Result<Result<
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    let user = user.to_sddl()?;
+    let mut others = Vec::new();
+    let mut unjudged = false;
     for index in 0..size.AceCount {
         let mut ace: *mut c_void = ptr::null_mut();
         // SAFETY: `index` is below the ACE count; `ace` points into `dacl`.
@@ -199,95 +339,33 @@ unsafe fn judge(user: &Sid, owner: PSID, dacl: *const ACL) -> io::Result<Result<
             return Err(io::Error::last_os_error());
         }
         // SAFETY: every ACE starts with an ACE_HEADER.
-        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
-        // Deny entries only take access away, so only grants can make it too open.
-        if header.AceType != ACCESS_ALLOWED {
-            continue;
-        }
-        // SAFETY: an access-allowed ACE has the SID starting at `SidStart`.
-        let sid = unsafe {
-            let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
-            Sid::copy_from((&raw mut (*allowed).SidStart).cast())
-        }?;
-        let sid = sid.to_sddl()?;
-        if sid != user && !TRUSTED.contains(&sid.as_str()) {
-            return Ok(Err(DirProblem::Acl));
-        }
-    }
-    Ok(Ok(()))
-}
-
-/// The protected DACL of a private directory: full access for the current user,
-/// SYSTEM and Administrators, inherited by everything created inside.
-fn private_descriptor() -> io::Result<SecurityDescriptor> {
-    let user = token::current_user()?.to_sddl()?;
-    SecurityDescriptor::from_sddl(&format!(
-        "D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
-    ))
-}
-
-/// Creates `path` with the private DACL when missing (its parent must exist), then
-/// checks it. An existing directory is only checked here; [`tighten_private_dir`]
-/// repairs an own directory that is too open.
-pub fn ensure_private_dir(path: &Path) -> io::Result<Result<(), DirProblem>> {
-    let mut attributes = SecurityAttributes::new(private_descriptor()?);
-    let wide = wide(path.as_os_str());
-    // SAFETY: `wide` is NUL-terminated and `attributes` outlives the call.
-    if unsafe { CreateDirectoryW(wide.as_ptr(), attributes.as_mut_ptr()) } == 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(ERROR_ALREADY_EXISTS as i32) {
-            return Err(error);
+        let kind = unsafe { (*ace.cast::<ACE_HEADER>()).AceType };
+        match kind {
+            // Allowed and allowed-callback entries share the layout with the SID
+            // at `SidStart`.
+            0 | 9 => {
+                // SAFETY: as stated for these two types.
+                let sid = unsafe {
+                    let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
+                    Sid::copy_from((&raw mut (*allowed).SidStart).cast())
+                }?
+                .to_sddl()?;
+                if sid != user && !TRUSTED.contains(&sid.as_str()) && !others.contains(&sid) {
+                    others.push(sid);
+                }
+            }
+            // Deny entries only take access away.
+            1 | 6 | 10 | 12 => {}
+            // Object and compound grants have other layouts; a private directory
+            // never needs them, so their presence alone fails the check.
+            _ => unjudged = true,
         }
     }
-    check_private_dir(path)
-}
-
-/// Replaces the DACL of `path` with the private one and stops inheritance from its
-/// parent, the Windows counterpart of `chmod 700`. Only call it for a directory
-/// this user owns: the check comes first, so another account's directory is never
-/// changed.
-pub fn tighten_private_dir(path: &Path) -> io::Result<()> {
-    set_dacl(path, &private_descriptor()?)
-}
-
-/// Applies the DACL of `descriptor` to `path` as a protected DACL.
-fn set_dacl(path: &Path, descriptor: &SecurityDescriptor) -> io::Result<()> {
-    use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
-    use windows_sys::Win32::Security::{
-        GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
-    };
-    let mut present = 0;
-    let mut defaulted = 0;
-    let mut dacl: *mut ACL = ptr::null_mut();
-    // SAFETY: `descriptor` is valid; `dacl` points into it while it lives.
-    let ok = unsafe {
-        GetSecurityDescriptorDacl(
-            descriptor.0,
-            &raw mut present,
-            &raw mut dacl,
-            &raw mut defaulted,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
+    if others.is_empty() && !unjudged {
+        Ok(Ok(()))
+    } else {
+        Ok(Err(DirProblem::Acl(others)))
     }
-    let wide = wide(path.as_os_str());
-    // SAFETY: `wide` is NUL-terminated and `dacl` is valid for the call.
-    let status = unsafe {
-        SetNamedSecurityInfoW(
-            wide.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            dacl,
-            ptr::null(),
-        )
-    };
-    if status != 0 {
-        return Err(io::Error::from_raw_os_error(status as i32));
-    }
-    Ok(())
 }
 
 /// A NUL-terminated UTF-16 copy for Win32 string parameters.
@@ -299,29 +377,42 @@ pub(crate) fn wide(text: &OsStr) -> Vec<u16> {
 mod tests {
     use super::*;
 
-    /// A directory devlanes creates is private; one with an extra grant is not.
+    /// Runs `icacls` on `path` to set up access lists.
+    fn icacls(path: &Path, args: &[&str]) -> io::Result<()> {
+        let status = std::process::Command::new("icacls")
+            .arg(path)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        assert!(status.success(), "icacls {args:?}");
+        Ok(())
+    }
+
+    /// A directory devlanes creates is private; one with an extra grant is not,
+    /// names that grant, and is fixed only when tightening is asked for.
     #[test]
     fn created_directories_are_private() -> io::Result<()> {
         let temp = tempfile::tempdir()?;
         let private = temp.path().join("private");
-        assert_eq!(ensure_private_dir(&private)?, Ok(()));
         assert_eq!(
-            ensure_private_dir(&private)?,
-            Ok(()),
-            "existing is checked again"
+            ensure_private_dir(&private, false)?,
+            Ok(PrivateDir::Created)
+        );
+        assert_eq!(
+            ensure_private_dir(&private, false)?,
+            Ok(PrivateDir::Present)
         );
         let file = temp.path().join("file");
         std::fs::write(&file, "x")?;
         assert_eq!(check_private_dir(&file)?, Err(DirProblem::NotADirectory));
         let open = temp.path().join("open");
         std::fs::create_dir(&open)?;
-        // Everyone (WD) read access, the classic "too open" grant.
-        let user = token::current_user()?.to_sddl()?;
-        let descriptor =
-            SecurityDescriptor::from_sddl(&format!("D:P(A;OICI;FA;;;{user})(A;OICI;FR;;;WD)"))?;
-        set_dacl(&open, &descriptor)?;
-        assert_eq!(check_private_dir(&open)?, Err(DirProblem::Acl));
-        tighten_private_dir(&open)?;
+        // Everyone (S-1-1-0), read access.
+        icacls(&open, &["/grant", "*S-1-1-0:(OI)(CI)R"])?;
+        let everyone = DirProblem::Acl(vec!["S-1-1-0".to_owned()]);
+        assert_eq!(check_private_dir(&open)?, Err(everyone.clone()));
+        assert_eq!(ensure_private_dir(&open, false)?, Err(everyone));
+        assert_eq!(ensure_private_dir(&open, true)?, Ok(PrivateDir::Tightened));
         assert_eq!(check_private_dir(&open)?, Ok(()), "tightened");
         Ok(())
     }
@@ -341,7 +432,10 @@ mod tests {
             .status()?;
         assert!(status.success(), "mklink /J failed");
         assert_eq!(check_private_dir(&link)?, Err(DirProblem::ReparsePoint));
-        assert_eq!(ensure_private_dir(&link)?, Err(DirProblem::ReparsePoint));
+        assert_eq!(
+            ensure_private_dir(&link, true)?,
+            Err(DirProblem::ReparsePoint)
+        );
         Ok(())
     }
 }

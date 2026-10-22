@@ -1,12 +1,18 @@
-//! Win32 backend. The process-table queries are not implemented yet and report
-//! [`Error::Unsupported`]. Callers differ in what they make of that (the daemon's
-//! orphan check reads it as "not alive"), so no Windows runner may depend on them
-//! before they exist.
+//! Win32 backend: the process table (`proc`) plus safe wrappers for the endpoint,
+//! daemon and runner crates.
+//!
+//! Processes have no session or process group here, so [`crate::ProcessInfo`]
+//! reports `sid: None` and `pgid: 0`; units are grouped by Job Objects instead.
 
+pub mod job;
 pub mod pipe;
+pub mod proc;
 pub mod process;
 pub mod security;
+pub mod spawn;
 pub mod token;
+
+pub(crate) use proc::{boot_id, listening_tcp, process, processes};
 
 use std::fs::File;
 use std::io;
@@ -18,27 +24,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetFileInformationByHandleEx,
 };
 
-use crate::{Error, FileIdentity, ListeningSocket, ProcessInfo};
-
-/// Not implemented yet.
-pub(crate) fn processes() -> Result<Vec<ProcessInfo>, Error> {
-    Err(Error::Unsupported("process enumeration"))
-}
-
-/// Not implemented yet.
-pub(crate) fn process(_pid: u32) -> Result<Option<ProcessInfo>, Error> {
-    Err(Error::Unsupported("process lookup"))
-}
-
-/// Not implemented yet.
-pub(crate) fn boot_id() -> Result<String, Error> {
-    Err(Error::Unsupported("boot id"))
-}
-
-/// Not implemented yet.
-pub(crate) fn listening_tcp(_pids: &[u32]) -> Result<Vec<ListeningSocket>, Error> {
-    Err(Error::Unsupported("listening sockets"))
-}
+use crate::FileIdentity;
 
 /// Volume serial number and 128-bit file id of an open handle. File systems
 /// without `FILE_ID_INFO` (FAT) fall back to the 64-bit file index.

@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use devlanes_core::shell::Shell;
 use devlanes_proto::RpcError;
 use serde_json::json;
 use tokio::{
@@ -42,6 +43,8 @@ pub enum Readiness {
         cwd: std::path::PathBuf,
         /// The unit's assembled environment; the daemon's own is never inherited.
         env: BTreeMap<String, String>,
+        /// The shell `run:` strings use, so the probe sees the same syntax.
+        shell: Shell,
     },
 }
 
@@ -152,9 +155,14 @@ async fn probe_until_ready(
             )
             .await
         }
-        Readiness::Cmd { command, cwd, env } => {
+        Readiness::Cmd {
+            command,
+            cwd,
+            env,
+            shell,
+        } => {
             poll(deadline, || async move {
-                cmd_succeeds(command, cwd, env, deadline).await
+                cmd_succeeds(shell, command, cwd, env, deadline).await
             })
             .await
         }
@@ -201,6 +209,7 @@ async fn probe_until_ready(
 /// [`CMD_ATTEMPT`] and the overall deadline; a timed-out probe is killed, not left
 /// running alongside the next attempt.
 async fn cmd_succeeds(
+    shell: &Shell,
     command: &str,
     cwd: &std::path::Path,
     env: &BTreeMap<String, String>,
@@ -209,11 +218,12 @@ async fn cmd_succeeds(
     let limit = deadline
         .saturating_duration_since(Instant::now())
         .min(CMD_ATTEMPT);
-    let status = tokio::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
+    // The shell's own variables go first so a value in the unit's env wins,
+    // as it does for the unit itself.
+    let status = os::shell_command(shell, command)
         .current_dir(cwd)
         .env_clear()
+        .envs(&shell.env)
         .envs(env)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -221,6 +231,40 @@ async fn cmd_succeeds(
         .kill_on_drop(true)
         .status();
     matches!(timeout(limit, status).await, Ok(Ok(status)) if status.success())
+}
+
+#[cfg(unix)]
+mod os {
+    use devlanes_core::shell::Shell;
+
+    /// `<shell> <args> <command>`.
+    pub(super) fn shell_command(shell: &Shell, command: &str) -> tokio::process::Command {
+        let mut process = tokio::process::Command::new(&shell.program);
+        process.args(&shell.args).arg(command);
+        process
+    }
+}
+
+#[cfg(windows)]
+mod os {
+    use devlanes_core::shell::{Shell, ShellKind};
+
+    /// `CREATE_NO_WINDOW`: the daemon has no console, so a console program
+    /// would otherwise open a window for every probe attempt.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    /// `<shell> <args> <command>`. `cmd.exe` does not undo the `\"` escaping
+    /// std applies, so its text goes verbatim inside the quotes `/s` strips.
+    pub(super) fn shell_command(shell: &Shell, command: &str) -> tokio::process::Command {
+        let mut process = tokio::process::Command::new(&shell.program);
+        process.args(&shell.args);
+        match shell.kind {
+            ShellKind::Posix => process.arg(command),
+            ShellKind::Cmd => process.raw_arg(format!("\"{command}\"")),
+        };
+        process.creation_flags(CREATE_NO_WINDOW);
+        process
+    }
 }
 
 /// ANSI stripping that keeps parser state across chunks, so an escape sequence or a
@@ -301,15 +345,17 @@ fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
 }
 
 /// Waits for `infra.containers.<name>.ready` once the container is up. `ports`
-/// maps its port names to published host ports in declaration order; `env` runs
-/// a `cmd` probe; `logs` reads the container's last lines for a `log` probe.
-/// Fails with `config_error` for an unknown port name or pattern, and with
-/// `container_not_ready` when the check does not pass within its timeout.
+/// maps its port names to published host ports in declaration order; `env` and
+/// `shell` run a `cmd` probe on the host; `logs` reads the container's last
+/// lines for a `log` probe. Fails with `config_error` for an unknown port name
+/// or pattern, and with `container_not_ready` when the check does not pass
+/// within its timeout.
 pub(crate) async fn container_ready<F, Fut>(
     name: &str,
     ready: &devlanes_resolve::ContainerReady,
     ports: &[(String, u16)],
     env: &BTreeMap<String, String>,
+    shell: &Shell,
     logs: F,
 ) -> Result<(), RpcError>
 where
@@ -366,8 +412,8 @@ where
             let probe = || async move { logs().await.iter().any(|line| regex.is_match(line)) };
             ("log", poll(deadline, probe).await)
         }
-        ContainerCheck::Cmd { shell, cwd } => {
-            let probe = || cmd_succeeds(shell, cwd, env, deadline);
+        ContainerCheck::Cmd { shell: text, cwd } => {
+            let probe = || cmd_succeeds(shell, text, cwd, env, deadline);
             ("cmd", poll(deadline, probe).await)
         }
     };
@@ -503,24 +549,90 @@ mod tests {
     }
 
     /// `cmd` probes see the unit's environment only, and a hanging attempt is cut
-    /// at the deadline instead of blocking the check. Unix only until probes pick
-    /// a Windows shell.
+    /// at the deadline instead of blocking the check.
     #[cfg(unix)]
     #[tokio::test]
     async fn cmd_probe_uses_unit_env_and_is_bounded() {
+        let sh = Shell::posix();
         let cwd = std::env::temp_dir();
         let env = BTreeMap::from([
             ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
             ("DL_READY".to_owned(), "yes".to_owned()),
         ]);
         let soon = Instant::now() + Duration::from_secs(5);
-        assert!(cmd_succeeds("test \"$DL_READY\" = yes", &cwd, &env, soon).await);
+        assert!(cmd_succeeds(&sh, "test \"$DL_READY\" = yes", &cwd, &env, soon).await);
         // The daemon's own HOME is not inherited.
-        assert!(!cmd_succeeds("test -n \"$HOME\"", &cwd, &env, soon).await);
+        assert!(!cmd_succeeds(&sh, "test -n \"$HOME\"", &cwd, &env, soon).await);
         let started = Instant::now();
         let deadline = started + Duration::from_millis(300);
-        assert!(!cmd_succeeds("sleep 30", &cwd, &env, deadline).await);
+        assert!(!cmd_succeeds(&sh, "sleep 30", &cwd, &env, deadline).await);
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// The unit's env on Windows: what Windows processes need, without the
+    /// daemon's own variables.
+    #[cfg(windows)]
+    fn windows_env(extra: &[(&str, &str)]) -> BTreeMap<String, String> {
+        let mut env: BTreeMap<String, String> = ["SystemRoot", "Path", "PATHEXT", "TEMP"]
+            .into_iter()
+            .filter_map(|name| Some((name.to_owned(), std::env::var(name).ok()?)))
+            .collect();
+        env.extend(
+            extra
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+        );
+        env
+    }
+
+    /// Git for Windows' sh runs probes with POSIX syntax and quoting and sees the
+    /// unit's env with MSYS path conversion off. Needs Git for Windows, which
+    /// building devlanes on Windows already does. The deadline is not exercised
+    /// here: killing `sh.exe` leaves its children running on Windows, so a
+    /// `sleep` would outlive the test.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn git_sh_probe_uses_posix_syntax_and_unit_env() {
+        let sh = crate::integrations::detect_shell().await;
+        assert_eq!(sh.kind, devlanes_core::shell::ShellKind::Posix, "{sh:?}");
+        let cwd = std::env::temp_dir();
+        let env = windows_env(&[("DL_READY", "a \"b\" c")]);
+        let soon = Instant::now() + Duration::from_secs(20);
+        assert!(cmd_succeeds(&sh, r#"test "$DL_READY" = 'a "b" c'"#, &cwd, &env, soon).await);
+        assert!(cmd_succeeds(&sh, r#"test "$MSYS_NO_PATHCONV" = 1"#, &cwd, &env, soon).await);
+        assert!(!cmd_succeeds(&sh, "test -n \"$DL_NOT_SET\"", &cwd, &env, soon).await);
+    }
+
+    /// The cmd.exe fallback receives the text verbatim, quotes included.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cmd_fallback_probe_gets_the_text_verbatim() {
+        let cmd = Shell::default();
+        assert!(cmd.is_fallback());
+        let cwd = std::env::temp_dir();
+        let env = windows_env(&[("DL_READY", "yes")]);
+        let soon = Instant::now() + Duration::from_secs(20);
+        assert!(
+            cmd_succeeds(
+                &cmd,
+                r#"if "%DL_READY%"=="yes" (exit 0) else (exit 1)"#,
+                &cwd,
+                &env,
+                soon
+            )
+            .await
+        );
+        assert!(
+            !cmd_succeeds(
+                &cmd,
+                r#"if "%DL_READY%"=="no" (exit 0) else (exit 1)"#,
+                &cwd,
+                &env,
+                soon
+            )
+            .await
+        );
+        assert!(cmd_succeeds(&cmd, "echo a & exit 0", &cwd, &env, soon).await);
     }
 
     #[tokio::test]

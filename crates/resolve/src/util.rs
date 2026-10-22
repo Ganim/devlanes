@@ -1,6 +1,7 @@
 use serde_json::Value;
 
-/// Quotes `value` for `/bin/sh` when it contains anything but safe characters.
+/// Quotes `value` for a POSIX `sh` (`/bin/sh`, Git for Windows' `sh.exe`) when
+/// it contains anything but safe characters.
 ///
 /// ```
 /// assert_eq!(devlanes_resolve::shell_quote("--port"), "--port");
@@ -16,6 +17,36 @@ pub fn shell_quote(value: &str) -> String {
     } else {
         format!("'{}'", value.replace('\'', r"'\''"))
     }
+}
+
+/// Quotes `value` as one argument on a `cmd.exe /d /s /c` line, or `None` when
+/// it cannot be passed safely: `"` cannot be escaped inside quotes, `%` expands
+/// variables even inside quotes, `!` does when delayed expansion is on, and a
+/// line break ends the command.
+///
+/// ```
+/// assert_eq!(devlanes_resolve::cmd_quote("--port").as_deref(), Some("--port"));
+/// assert_eq!(devlanes_resolve::cmd_quote(r"a b\").as_deref(), Some(r#""a b\\""#));
+/// assert_eq!(devlanes_resolve::cmd_quote("100%"), None);
+/// ```
+pub fn cmd_quote(value: &str) -> Option<String> {
+    if value.contains(['"', '%', '!', '\r', '\n', '\0']) {
+        return None;
+    }
+    // `=` and `,` split batch-file parameters (npm.cmd and friends), so they
+    // get quotes too.
+    let safe = !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_@+:./-".contains(&b));
+    if safe {
+        return Some(value.to_owned());
+    }
+    // Inside quotes cmd.exe leaves `&|<>^()` alone; the program then splits its
+    // command line with the MSVC rules, where backslashes before the closing
+    // quote must be doubled or they escape it.
+    let trailing = value.len() - value.trim_end_matches('\\').len();
+    Some(format!("\"{value}{}\"", "\\".repeat(trailing)))
 }
 
 /// Returns `DEVLANES_PUBLIC_URL_<SERVICE>`: uppercase, every character other than
@@ -78,6 +109,20 @@ mod tests {
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("$HOME"), "'$HOME'");
+    }
+
+    #[test]
+    /// cmd.exe quoting protects spaces and operators, doubles trailing
+    /// backslashes and refuses what quotes cannot protect.
+    fn cmd_quoting() {
+        assert_eq!(cmd_quote("127.0.0.1").as_deref(), Some("127.0.0.1"));
+        assert_eq!(cmd_quote("").as_deref(), Some(r#""""#));
+        assert_eq!(cmd_quote("a & b").as_deref(), Some(r#""a & b""#));
+        assert_eq!(cmd_quote("--host=::1").as_deref(), Some(r#""--host=::1""#));
+        assert_eq!(cmd_quote(r"C:\dir\\").as_deref(), Some(r#""C:\dir\\\\""#));
+        for unsafe_value in ["say \"hi\"", "%PATH%", "wow!", "a\nb"] {
+            assert_eq!(cmd_quote(unsafe_value), None, "{unsafe_value:?}");
+        }
     }
 
     #[test]

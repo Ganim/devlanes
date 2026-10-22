@@ -361,7 +361,22 @@ fn major(version: Option<&str>) -> Option<u64> {
 fn relative(path: &Path, boundary: &Path) -> String {
     match path.strip_prefix(boundary) {
         Ok(rest) if rest.as_os_str().is_empty() => ".".to_owned(),
-        Ok(rest) => rest.display().to_string(),
+        Ok(rest) => worktree_relative(rest),
         Err(_) => path.display().to_string(),
     }
+}
+
+/// Shows a worktree-relative path the way configs write `run_script` sources.
+/// Unix displays it as is.
+#[cfg(unix)]
+pub(crate) fn worktree_relative(path: &Path) -> String {
+    path.display().to_string()
+}
+
+/// Shows a worktree-relative path the way configs write `run_script` sources:
+/// with `/`. Windows joins detected files with `\` onto a source written with
+/// `/`, which would otherwise show both (`apps/web\package.json`).
+#[cfg(windows)]
+pub(crate) fn worktree_relative(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
 }

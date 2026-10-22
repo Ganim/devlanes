@@ -997,9 +997,15 @@ mod tests {
 
     /// An identity whose process is gone: a child that was spawned and reaped.
     fn gone_identity() -> ProcessIdentity {
-        let mut child = std::process::Command::new("true")
-            .spawn()
-            .expect("spawn true");
+        #[cfg(unix)]
+        let mut command = std::process::Command::new("true");
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/d", "/c", "exit"]);
+            command
+        };
+        let mut child = command.spawn().expect("spawn a short-lived child");
         let pid = child.id();
         let identity = devlanes_sys::identity(pid)
             .ok()
@@ -1013,7 +1019,6 @@ mod tests {
     /// value when nobody is subscribed. A unit that ended before any `wait_exit` call
     /// then looked alive forever and `stop` never returned.
     #[tokio::test]
-    #[cfg_attr(windows, ignore = "needs the Windows process backend in devlanes-sys")]
     async fn exit_published_without_subscribers_is_kept() {
         let dir = tempfile::tempdir().expect("tempdir");
         let unit = ScriptedUnit::start(Some(Duration::ZERO), gone_identity());
@@ -1039,7 +1044,6 @@ mod tests {
     /// a live unit's directory sees its output without taking the writer's lock, and a
     /// query of a missing directory creates nothing.
     #[tokio::test]
-    #[cfg_attr(windows, ignore = "needs the Windows process backend in devlanes-sys")]
     async fn live_output_reaches_read_only_directory_queries() {
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("missing");
@@ -1083,7 +1087,6 @@ mod tests {
 
     /// Stops sent right as units exit on their own always finish with a known outcome.
     #[tokio::test]
-    #[cfg_attr(windows, ignore = "needs the Windows process backend in devlanes-sys")]
     async fn stop_racing_natural_exit_always_finishes() {
         let dir = tempfile::tempdir().expect("tempdir");
         for round in 0..200_u64 {
@@ -1113,7 +1116,6 @@ mod tests {
     /// When the runner never reports an exit, stop still ends after its bound: a dead
     /// leader gets an unknown outcome, a live one is reported as `stop_timeout`.
     #[tokio::test]
-    #[cfg_attr(windows, ignore = "needs the Windows process backend in devlanes-sys")]
     async fn overdue_stop_is_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
         let policy = StopPolicy {
@@ -1159,7 +1161,6 @@ mod tests {
     /// After the pump loses chunks, attached viewers get a full redraw of the screen
     /// model rather than raw bytes that assume output they never saw.
     #[tokio::test]
-    #[cfg_attr(windows, ignore = "needs the Windows process backend in devlanes-sys")]
     async fn lagged_pump_sends_a_full_redraw() {
         let dir = tempfile::tempdir().expect("tempdir");
         let unit = ScriptedUnit::start(None, gone_identity_cached());

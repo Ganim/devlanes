@@ -474,7 +474,11 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
                 Some(message) => format!("daemon is unreachable: {}", super::clean(message)),
                 None => "daemon is unreachable".into(),
             },
-            Some(Hint::command(["daemon", "install"])),
+            // These messages already say what to do; installing a service would not help.
+            match text(data, "reason").as_str() {
+                "daemon_elevated" | "endpoint_taken" => None,
+                _ => Some(Hint::command(["daemon", "install"])),
+            },
         ),
         // The daemon's message already names the command; the hint carries it instead.
         "helper_version_mismatch" => (
@@ -951,7 +955,7 @@ fn unsafe_home(data: &Value) -> (String, Option<Hint>) {
             Some(owner) => format!("it is owned by {}, not you", display_value(owner)),
             None => "another user owns it".into(),
         },
-        "symlink" => "it is a symlink".into(),
+        "symlink" => "it is a symlink or junction".into(),
         "not_a_directory" => "it is not a directory".into(),
         _ => text(data, "message"),
     };

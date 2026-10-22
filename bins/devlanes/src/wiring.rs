@@ -118,6 +118,7 @@ pub async fn engine(
     integ.metrics = metrics_sources();
     integ.ports = Arc::new(SysPorts);
     integ.processes = Arc::new(SysProcesses);
+    integ.shell = devlanes_daemon::integrations::detect_shell().await;
     integ.ca_env = ca_env;
     integ.ca_status = ca_status;
     integ.ca_permitted = ca_permitted;
@@ -1026,8 +1027,53 @@ struct ContainerInfra {
 
 /// The daemon variables the `docker` CLI needs: where to find binaries and its
 /// config, which engine to talk to, locale and proxies. A daemon started by hand
-/// may carry a full shell environment; none of the rest reaches Compose.
+/// may carry a full shell environment; none of the rest reaches Compose. Windows
+/// also keeps the variables Windows programs need to start (a missing
+/// `SystemRoot` breaks Winsock) and matches names ignoring case (`Path`).
 fn compose_base_env(vars: impl Iterator<Item = (String, String)>) -> BTreeMap<String, String> {
+    #[cfg(unix)]
+    mod os {
+        /// No extra variables on Unix.
+        pub const NAMES: &[&str] = &[];
+
+        /// Unix names are case-sensitive.
+        pub fn same(name: &str, wanted: &str) -> bool {
+            name == wanted
+        }
+    }
+    #[cfg(windows)]
+    mod os {
+        /// What Windows processes and the docker CLI read on top of `PATH`.
+        pub const NAMES: &[&str] = &[
+            "SystemRoot",
+            "SystemDrive",
+            "windir",
+            "ComSpec",
+            "PATHEXT",
+            "USERPROFILE",
+            "USERNAME",
+            "USERDOMAIN",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "ProgramData",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramW6432",
+            "CommonProgramFiles",
+            "TEMP",
+            "TMP",
+            "PROCESSOR_ARCHITECTURE",
+            "NUMBER_OF_PROCESSORS",
+            "OS",
+        ];
+
+        /// Windows names ignore case.
+        pub fn same(name: &str, wanted: &str) -> bool {
+            name.eq_ignore_ascii_case(wanted)
+        }
+    }
     const NAMES: &[&str] = &[
         "PATH",
         "HOME",
@@ -1046,7 +1092,14 @@ fn compose_base_env(vars: impl Iterator<Item = (String, String)>) -> BTreeMap<St
     ];
     const PREFIXES: &[&str] = &["LC_", "XDG_", "DOCKER_"];
     vars.filter(|(name, _)| {
-        NAMES.contains(&name.as_str()) || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+        NAMES
+            .iter()
+            .chain(os::NAMES)
+            .any(|wanted| os::same(name, wanted))
+            || PREFIXES.iter().any(|prefix| {
+                name.get(..prefix.len())
+                    .is_some_and(|start| os::same(start, prefix))
+            })
     })
     .collect()
 }
@@ -1891,6 +1944,35 @@ mod tests {
         assert_eq!(
             kept,
             ["DOCKER_CONFIG", "DOCKER_HOST", "HOME", "LC_ALL", "PATH"]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// Windows keeps `Path` and the variables Windows programs need, matching
+    /// names ignoring case.
+    fn compose_base_env_keeps_windows_variables() {
+        let vars = [
+            ("Path", r"C:\Windows"),
+            ("SystemRoot", r"C:\Windows"),
+            ("ComSpec", r"C:\Windows\System32\cmd.exe"),
+            ("USERPROFILE", r"C:\Users\acme"),
+            ("LocalAppData", r"C:\Users\acme\AppData\Local"),
+            ("Docker_Host", "npipe:////./pipe/docker_engine"),
+            ("GITHUB_TOKEN", "secret"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        let kept: Vec<String> = compose_base_env(vars.into_iter()).into_keys().collect();
+        assert_eq!(
+            kept,
+            [
+                "ComSpec",
+                "Docker_Host",
+                "LocalAppData",
+                "Path",
+                "SystemRoot",
+                "USERPROFILE"
+            ]
         );
     }
 

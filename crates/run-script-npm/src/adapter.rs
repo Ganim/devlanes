@@ -88,6 +88,9 @@ pub fn needs_npm_separator(command: &DraftCommand, pending: &[String]) -> bool {
     match command {
         DraftCommand::Shell(text) => {
             // Appended args land on the last line, after its last simple command.
+            // The split is POSIX sh syntax, which Git for Windows' sh shares; the
+            // cmd.exe fallback separates commands with the same `&&`, `||`, `|`
+            // and `&`, so the answer holds there too.
             let last_line = text
                 .lines()
                 .rev()

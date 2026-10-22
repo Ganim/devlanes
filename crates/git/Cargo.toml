@@ -10,10 +10,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+devlanes-core = { path = "../core" }
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 notify = "8"
 
 [dev-dependencies]
+dunce.workspace = true
 tempfile.workspace = true

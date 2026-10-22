@@ -17,6 +17,7 @@ use bytes::Bytes;
 use devlanes_config::UserConfig;
 use devlanes_core::{
     LaneId, ProjectId,
+    paths::path_starts_with,
     refs::{LaneCandidate, LaneRef, ReferenceError, ResolveContext, UnitRef},
 };
 use devlanes_proto::{Context, Method, Request, RpcError};
@@ -200,13 +201,14 @@ impl Handler for Engine {
     }
 }
 
-/// Resolves symlinks (macOS `/tmp`) so cwd matches the paths git reports.
+/// Resolves symlinks (macOS `/tmp`) so cwd matches the paths git reports. dunce
+/// keeps Windows paths in the `C:\...` form Git and stored lane paths use.
 async fn canonical(path: &Path) -> PathBuf {
     if path.as_os_str().is_empty() {
         return PathBuf::new();
     }
     let owned = path.to_path_buf();
-    tokio::task::spawn_blocking(move || std::fs::canonicalize(&owned).unwrap_or(owned))
+    tokio::task::spawn_blocking(move || dunce::canonicalize(&owned).unwrap_or(owned))
         .await
         .unwrap_or_else(|_| path.to_path_buf())
 }
@@ -444,8 +446,7 @@ impl Inner {
             home: context
                 .env
                 .as_ref()
-                .and_then(|env| env.get("HOME"))
-                .map(PathBuf::from),
+                .and_then(devlanes_core::paths::client_home),
         };
         let found = devlanes_core::refs::resolve_lane(&parsed, &candidates, &resolve)
             .map_err(reference_error)
@@ -528,7 +529,7 @@ impl Inner {
             let mut best: Option<(usize, Arc<LaneRt>)> = None;
             for lane in project.lanes() {
                 let st = lane.st();
-                if st.present && context.cwd.starts_with(&st.path) {
+                if st.present && path_starts_with(&context.cwd, &st.path) {
                     let depth = st.path.components().count();
                     if best.as_ref().is_none_or(|(d, _)| depth > *d) {
                         best = Some((depth, lane.clone()));

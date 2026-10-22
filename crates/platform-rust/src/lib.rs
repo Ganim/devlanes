@@ -14,6 +14,7 @@ use devlanes_core::{
         CA_BUNDLE_ENV, ContribCx, Contributor, DETECT_MANIFEST, DETECT_SCRIPT_SOURCE, DetectCx,
         LaunchDraft,
     },
+    env,
 };
 
 /// Platform name matched against `platform:` (explicit or inferred).
@@ -62,8 +63,8 @@ impl Contributor for RustContributor {
         if cx.platform != Some(PLATFORM) {
             return Ok(());
         }
-        if !cx.client_env.contains_key("CARGO_TERM_COLOR")
-            && !cx.client_env.contains_key("NO_COLOR")
+        if !env::contains_key(cx.client_env, "CARGO_TERM_COLOR")
+            && !env::contains_key(cx.client_env, "NO_COLOR")
         {
             draft
                 .env
@@ -71,7 +72,7 @@ impl Contributor for RustContributor {
         }
         if let Some(bundle) = cx.ca_env.get(CA_BUNDLE_ENV) {
             // SSL_CERT_FILE replaces the trust store, so a shell value is dropped; say so.
-            if let Some(previous) = cx.client_env.get("SSL_CERT_FILE")
+            if let Some(previous) = env::get(cx.client_env, "SSL_CERT_FILE")
                 && previous != bundle
             {
                 draft.notes.push(format!(

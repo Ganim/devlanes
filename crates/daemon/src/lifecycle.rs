@@ -155,7 +155,7 @@ async fn write_files(
             } else {
                 lane_path.join(&file.path)
             };
-            if !path.starts_with(&lane_path)
+            if !devlanes_core::paths::path_starts_with(&path, &lane_path)
                 || path
                     .components()
                     .any(|c| c == std::path::Component::ParentDir)
@@ -184,8 +184,12 @@ async fn write_files(
 }
 
 /// Maps a resolved readiness spec to the checker's form. `env` is the unit's launch
-/// environment, which a `cmd` probe runs with.
-pub(crate) fn readiness(spec: &ReadySpec, env: BTreeMap<String, String>) -> Readiness {
+/// environment, which a `cmd` probe runs with through `shell`.
+pub(crate) fn readiness(
+    spec: &ReadySpec,
+    env: BTreeMap<String, String>,
+    shell: &devlanes_core::shell::Shell,
+) -> Readiness {
     match spec {
         ReadySpec::Started => Readiness::Started,
         ReadySpec::Tcp { port } => Readiness::Tcp { port: *port },
@@ -197,10 +201,11 @@ pub(crate) fn readiness(spec: &ReadySpec, env: BTreeMap<String, String>) -> Read
         ReadySpec::Log { pattern } => Readiness::Log {
             pattern: pattern.clone(),
         },
-        ReadySpec::Cmd { shell, cwd } => Readiness::Cmd {
-            command: shell.clone(),
+        ReadySpec::Cmd { shell: text, cwd } => Readiness::Cmd {
+            command: text.clone(),
             cwd: cwd.clone(),
             env,
+            shell: shell.clone(),
         },
     }
 }
@@ -1075,7 +1080,8 @@ impl Inner {
             unit: request.name.clone(),
             program: request.spec.program.clone(),
             cwd: request.spec.cwd.clone(),
-            path: request.spec.env.get("PATH").cloned(),
+            // Windows spells it `Path`; the lookup ignores case there.
+            path: devlanes_core::env::get(&request.spec.env, "PATH").cloned(),
         };
         // Keys only: values can hold secrets.
         tracing::debug!(
@@ -2863,7 +2869,15 @@ impl Inner {
                         .await
                         .unwrap_or_default()
                 };
-                crate::ready::container_ready(&container.name, ready, &ports, env, logs).await
+                crate::ready::container_ready(
+                    &container.name,
+                    ready,
+                    &ports,
+                    env,
+                    &self.integ.shell,
+                    logs,
+                )
+                .await
             })
         });
         join_all(checks).await.into_iter().collect()

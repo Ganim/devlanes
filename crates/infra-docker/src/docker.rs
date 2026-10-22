@@ -570,20 +570,18 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
-    )]
     fn create_body_binds_ports_and_volumes() {
         let spec = spec();
         let mounts = validate(&spec).expect("valid");
         let body = create_body(&spec, &mounts, "hash");
         let host = body.host_config.expect("host config");
+        // Relative sources resolve to host paths, `\`-separated on Windows.
+        let policies = "/work/acme/policies".replace('/', std::path::MAIN_SEPARATOR_STR);
         assert_eq!(
             host.binds.expect("binds"),
             [
-                "/work/acme/policies:/policies:ro",
-                "devlanes-acme-lane1-data:/data"
+                format!("{policies}:/policies:ro"),
+                "devlanes-acme-lane1-data:/data".to_owned()
             ]
         );
         let bindings = host.port_bindings.expect("bindings");

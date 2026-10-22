@@ -4,7 +4,7 @@ use devlanes_config::{
     ExpressionContext, Extensions, HostConfig, HostHeader, ProjectConfig, Scalar, ServiceConfig,
     Templated,
 };
-use devlanes_core::{color::unit_color, ports::PortName};
+use devlanes_core::{color::unit_color, env, ports::PortName};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 
@@ -50,7 +50,8 @@ impl Namespaces {
 }
 
 /// `${{ env.X }}` lookup order is client env, then secrets, then `.env`, so the
-/// map is built lowest first.
+/// map is built lowest first. On Windows a higher source replaces a differently
+/// spelled name (the client's `Path` over a `.env` `PATH`) under the first spelling.
 pub(crate) fn env_namespace(
     client: &BTreeMap<String, String>,
     secrets: Option<&BTreeMap<String, String>>,
@@ -59,7 +60,8 @@ pub(crate) fn env_namespace(
     let mut map = serde_json::Map::new();
     for source in [Some(dotenv), secrets, Some(client)].into_iter().flatten() {
         for (key, value) in source {
-            map.insert(key.clone(), value.clone().into());
+            let key = env::other_spelling(map.keys(), key).unwrap_or(key).clone();
+            map.insert(key, value.clone().into());
         }
     }
     Value::Object(map)

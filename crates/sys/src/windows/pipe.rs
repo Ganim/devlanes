@@ -1,7 +1,7 @@
 //! Named-pipe endpoints that only the current user can open, and checks of who is
 //! on the other end.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::ptr;
@@ -23,45 +23,86 @@ use super::token::{self, Sid};
 /// before the daemon starts. Later instances of the same server pass `false`.
 /// Must run inside a tokio runtime with I/O enabled.
 pub fn create_server(name: &OsStr, first: bool) -> io::Result<NamedPipeServer> {
-    let mut attributes = SecurityAttributes::current_user_only()?;
-    let mut options = ServerOptions::new();
-    options
-        .first_pipe_instance(first)
-        .reject_remote_clients(true)
-        .access_inbound(true)
-        .access_outbound(true);
-    // SAFETY: `attributes` points at a valid SECURITY_ATTRIBUTES whose descriptor
-    // lives until it is dropped after this call; the pipe copies it.
-    unsafe { options.create_with_security_attributes_raw(name, attributes.as_mut_ptr().cast()) }
+    PipeFactory::new(name)?.create(first)
 }
 
-/// Whether the client connected to `server` runs as the current user.
+/// A pipe name and the user-only security descriptor its instances get, built
+/// once so a server does not redo the token and SDDL work on every accept.
+pub struct PipeFactory {
+    name: OsString,
+    attributes: SecurityAttributes,
+}
+
+impl PipeFactory {
+    /// Prepares instances of the pipe `name`.
+    pub fn new(name: &OsStr) -> io::Result<Self> {
+        Ok(Self {
+            name: name.to_owned(),
+            attributes: SecurityAttributes::current_user_only()?,
+        })
+    }
+
+    /// Creates one instance, as [`create_server`] describes.
+    pub fn create(&mut self, first: bool) -> io::Result<NamedPipeServer> {
+        let mut options = ServerOptions::new();
+        options
+            .first_pipe_instance(first)
+            .reject_remote_clients(true)
+            .access_inbound(true)
+            .access_outbound(true);
+        // SAFETY: the attributes and their descriptor live in `self` past this
+        // call; the pipe copies the descriptor.
+        unsafe {
+            options.create_with_security_attributes_raw(
+                &self.name,
+                self.attributes.as_mut_ptr().cast(),
+            )
+        }
+    }
+}
+
+/// Whether the client connected to `server` is as trusted as this process: the
+/// same user, not sandboxed, at no lower integrity level.
 ///
 /// Windows only lets a server impersonate a client after reading from the pipe, so
 /// call this after the first message. Impersonation is per thread; it starts and
 /// ends inside this call with no await in between.
 pub fn client_is_current_user(server: &NamedPipeServer) -> io::Result<bool> {
-    let me = token::current_user()?;
-    Ok(client_user(server.as_raw_handle())? == me)
+    let own = token::current_facts()?;
+    Ok(client_facts(server.as_raw_handle())?.as_trusted_as(&own))
 }
 
-/// Whether the process serving `client` runs as the current user. Catches a pipe
-/// name created first by another account.
+/// Whether the process serving `client` is as trusted as this process. Catches a
+/// pipe name created first by another account, or by a sandboxed or
+/// lower-integrity process of the same user, before anything is sent to it.
 pub fn server_is_current_user(client: &NamedPipeClient) -> io::Result<bool> {
-    Ok(server_user(client)? == token::current_user()?)
+    let own = token::current_facts()?;
+    match server_facts(client) {
+        Ok(facts) => Ok(facts.as_trusted_as(&own)),
+        // Another account's process refuses the query; that is the answer.
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// The account that serves `client`'s pipe.
 pub fn server_user(client: &NamedPipeClient) -> io::Result<Sid> {
+    Ok(server_facts(client)?.user)
+}
+
+/// Token facts of the process serving `client`'s pipe.
+fn server_facts(client: &NamedPipeClient) -> io::Result<token::TokenFacts> {
     let mut pid = 0;
     // SAFETY: the handle belongs to `client`, which outlives the call.
     if unsafe { GetNamedPipeServerProcessId(client.as_raw_handle(), &raw mut pid) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    token::process_user(pid)
+    token::process_facts(pid)
 }
 
-fn client_user(pipe: HANDLE) -> io::Result<Sid> {
+/// Token facts of the client on `pipe`, read by impersonating it for the moment
+/// it takes to open the thread token.
+fn client_facts(pipe: HANDLE) -> io::Result<token::TokenFacts> {
     // SAFETY: `pipe` is a connected server end owned by the caller.
     if unsafe { ImpersonateNamedPipeClient(pipe) } == 0 {
         return Err(io::Error::last_os_error());
@@ -81,7 +122,7 @@ fn client_user(pipe: HANDLE) -> io::Result<Sid> {
     if let Some(error) = open_error {
         return Err(error);
     }
-    token::token_user(&token::owned(thread_token)?)
+    token::token_facts(&token::owned(thread_token)?)
 }
 
 #[cfg(test)]

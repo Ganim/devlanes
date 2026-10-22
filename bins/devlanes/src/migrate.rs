@@ -96,7 +96,7 @@ fn execute(runtime: &Runtime, plan: &MigratePlan) -> Result<u8, Box<Failure>> {
         refuse_overwrite(&output, &dir, plan.to.is_none(), &plan.cwd)?;
     }
     let options = Options {
-        home: std::env::var_os("HOME").map(PathBuf::from),
+        home: devlanes_client::user_home(),
         ..Options::default()
     };
     let migration = match devlanes_migrate::migrate(&dir, &found, &options) {

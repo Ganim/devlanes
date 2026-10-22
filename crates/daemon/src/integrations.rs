@@ -9,6 +9,7 @@ use bytes::Bytes;
 use devlanes_core::{
     ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopPolicy, TerminalSize, Unit,
     contrib::{Contributor, ScriptRunner, SecretsProvider},
+    shell::Shell,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -623,6 +624,70 @@ pub struct Integrations {
     pub pressure: Option<Arc<dyn devlanes_core::gate::PressureSource>>,
     /// Checks the OS resolver file for the `resolver` hostname strategy.
     pub resolver_files: Option<Arc<dyn ResolverFiles>>,
+    /// Runs `run:` strings and `ready.cmd` probes. Defaults to
+    /// [`Shell::default`]; the composition root sets [`detect_shell`]'s result.
+    pub shell: Shell,
+}
+
+/// Finds the shell for `run:` strings once, at daemon startup. Unix always uses
+/// `/bin/sh` and looks nothing up.
+#[cfg(unix)]
+pub async fn detect_shell() -> Shell {
+    Shell::posix()
+}
+
+/// Finds the shell for `run:` strings once, at daemon startup: Git for Windows'
+/// `sh.exe` next to the `git` on `PATH`, else `cmd.exe`, which `config check`
+/// and launch notes warn about.
+#[cfg(windows)]
+pub async fn detect_shell() -> Shell {
+    use std::process::Stdio;
+    /// `CREATE_NO_WINDOW`: the daemon has no console, so a console program
+    /// would otherwise open a window.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = tokio::process::Command::new("git")
+        .arg("--exec-path")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .kill_on_drop(true)
+        .output();
+    let exec_path = match tokio::time::timeout(Duration::from_secs(10), output).await {
+        Ok(Ok(output)) if output.status.success() => {
+            // Git prints `C:/Program Files/Git/mingw64/libexec/git-core`.
+            Some(
+                String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .replace('/', "\\"),
+            )
+        }
+        Ok(Ok(output)) => {
+            tracing::debug!(status = %output.status, "git --exec-path failed");
+            None
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "cannot run git --exec-path");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("git --exec-path timed out");
+            None
+        }
+    };
+    if let Some(exec_path) = exec_path {
+        for candidate in devlanes_core::shell::git_sh_candidates(std::path::Path::new(&exec_path)) {
+            if tokio::fs::try_exists(&candidate).await.unwrap_or(false) {
+                tracing::info!(shell = %candidate.display(), "run strings use Git for Windows' sh");
+                return Shell::git_sh(&candidate);
+            }
+        }
+    }
+    let fallback = Shell::default();
+    tracing::warn!(
+        shell = %fallback.program,
+        "Git for Windows' sh.exe was not found; run strings fall back to cmd.exe"
+    );
+    fallback
 }
 
 /// Reports whether the OS forwards the devlanes TLD to the embedded DNS server.
@@ -728,6 +793,7 @@ impl Integrations {
             start_gate: None,
             pressure: None,
             resolver_files: None,
+            shell: Shell::default(),
         }
     }
 }

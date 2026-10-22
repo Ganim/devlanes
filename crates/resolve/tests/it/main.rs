@@ -14,15 +14,17 @@ use devlanes_core::{
     contrib::{Contributor, DetectCx, ScriptRunner, SecretsProvider, UnitKind},
     env::EnvLayer,
     ports::{PortBlock, PortName},
+    shell::Shell,
 };
 use devlanes_resolve::{
-    ReadySpec, ResolveError, ResolveInput, detect_platform, lane_layout, port_needs,
+    ReadySpec, ResolveError, ResolveInput, ResolvedLane, detect_platform, lane_layout, port_needs,
     profile_summaries, resolve_lane, select, select_profiles,
 };
 use serde_json::json;
 use support::*;
 
-/// Resolves `config` for `facts` with the fake script runner only.
+/// Resolves `config` for `facts` with the fake script runner only, running
+/// `run:` strings with `/bin/sh` on every OS.
 async fn plain(yaml: &str, index: u32) -> devlanes_resolve::ResolvedLane {
     let config = parse(yaml);
     let facts = facts(&config.project, index, Some("main"));
@@ -30,10 +32,12 @@ async fn plain(yaml: &str, index: u32) -> devlanes_resolve::ResolvedLane {
     let infra = infra();
     let runners: [Arc<dyn ScriptRunner>; 1] = [Arc::new(FakeRunner::new())];
     let client = client_env();
+    let shell = Shell::posix();
     let mut input = ResolveInput::new(&config, &facts, block, &offsets);
     input.infra = &infra;
     input.script_runners = &runners;
     input.client_env = &client;
+    input.shell = &shell;
     let lane = resolve_lane(input).await.expect("resolves");
     assert!(lane.errors.is_empty(), "{:?}", lane.errors);
     lane
@@ -714,8 +718,11 @@ services:
     let mut input = ResolveInput::new(&config, &facts, block, &offsets);
     input.contributors = &contributors;
     input.script_runners = &runners;
+    let shell = Shell::posix();
+    input.shell = &shell;
     let lane = resolve_lane(input).await.expect("resolves");
     let port = |unit: &str| lane.services[unit].port.to_string();
+    assert_eq!(lane.services["shell"].launch.program, "/bin/sh");
     assert_eq!(
         lane.services["shell"].launch.args,
         [
@@ -747,6 +754,122 @@ services:
     assert_eq!(calls.len(), 2);
     assert!(calls[0].2.is_empty());
     assert_eq!(calls[1].2, ["--port".to_owned(), port("script")]);
+}
+
+/// Resolves `yaml` (lane 1) with `shell` and a contributor that appends `args`
+/// to every unit.
+async fn with_shell(yaml: &str, shell: &Shell, args: &[&'static str]) -> ResolvedLane {
+    let config = parse(yaml);
+    let facts = facts("demo", 1, None);
+    let flags: Arc<dyn Contributor> = Arc::new(FakeContributor {
+        args: args.to_vec(),
+        ..FakeContributor::env("flags", 100, vec![])
+    });
+    let contributors = [flags];
+    let (block, offsets) = allocation(&config, 21_000, &contributors);
+    let mut input = ResolveInput::new(&config, &facts, block, &offsets);
+    input.contributors = &contributors;
+    input.shell = shell;
+    resolve_lane(input).await.expect("resolves")
+}
+
+#[tokio::test]
+/// Git for Windows' sh keeps POSIX quoting and gets MSYS_NO_PATHCONV; the
+/// cmd.exe fallback quotes for cmd, notes the fallback and refuses arguments it
+/// cannot pass safely. Argv `run:` never goes through a shell.
+async fn run_strings_use_the_given_shell() {
+    let yaml = r#"
+project: demo
+services:
+  web:
+    run: npm run dev
+    ready:
+      cmd: [curl, -fsS, "http://127.0.0.1/a b"]
+  argv:
+    run: [vite]
+"#;
+    let git_sh = Shell::git_sh(std::path::Path::new("sh.exe"));
+    let lane = with_shell(yaml, &git_sh, &["--name", "a b"]).await;
+    let web = &lane.services["web"];
+    assert_eq!(web.launch.program, "sh.exe");
+    assert_eq!(web.launch.args, ["-c", "npm run dev --name 'a b'"]);
+    assert_eq!(web.launch.env.values["MSYS_NO_PATHCONV"], "1");
+    assert_eq!(
+        web.launch.env.sources["MSYS_NO_PATHCONV"],
+        EnvLayer::Devlanes
+    );
+    assert!(web.launch.notes.is_empty(), "{:?}", web.launch.notes);
+    assert!(matches!(
+        &web.ready.check,
+        ReadySpec::Cmd { shell, .. } if shell == "curl -fsS 'http://127.0.0.1/a b'"
+    ));
+    let argv = &lane.services["argv"].launch;
+    assert_eq!(argv.program, "vite");
+    assert!(!argv.env.values.contains_key("MSYS_NO_PATHCONV"));
+
+    let cmd = Shell::cmd(std::path::Path::new("W"));
+    let lane = with_shell(yaml, &cmd, &["--name", "a b"]).await;
+    let web = &lane.services["web"];
+    assert_eq!(web.launch.program, cmd.program);
+    assert_eq!(
+        web.launch.args,
+        ["/d", "/s", "/c", r#"npm run dev --name "a b""#]
+    );
+    assert!(!web.launch.env.values.contains_key("MSYS_NO_PATHCONV"));
+    assert!(
+        web.launch
+            .notes
+            .iter()
+            .any(|note| note.contains("Git for Windows")),
+        "{:?}",
+        web.launch.notes
+    );
+    assert!(matches!(
+        &web.ready.check,
+        ReadySpec::Cmd { shell, .. } if shell == r#"curl -fsS "http://127.0.0.1/a b""#
+    ));
+    assert!(lane.services["argv"].launch.notes.is_empty());
+
+    let lane = with_shell(yaml, &cmd, &["100%"]).await;
+    let error = lane.errors["services.web"].to_string();
+    assert!(error.contains("cmd.exe cannot take safely"), "{error}");
+    assert!(!error.contains("100%"), "{error}");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+/// On Windows a profile's `PATH` replaces the client's `Path` instead of
+/// sitting next to it, and keeps the client's spelling.
+async fn windows_env_names_layer_ignoring_case() {
+    let config = parse(
+        r#"
+project: demo
+services:
+  web:
+    run: [vite]
+    env:
+      PATH: from-config
+"#,
+    );
+    let facts = facts("demo", 1, None);
+    let (block, offsets) = allocation(&config, 21_000, &[]);
+    let client = BTreeMap::from([
+        ("Path".to_owned(), r"C:\Windows".to_owned()),
+        ("SystemRoot".to_owned(), r"C:\Windows".to_owned()),
+    ]);
+    let mut input = ResolveInput::new(&config, &facts, block, &offsets);
+    input.client_env = &client;
+    let lane = resolve_lane(input).await.expect("resolves");
+    let env = &lane.services["web"].launch.env;
+    let paths: Vec<_> = env
+        .values
+        .keys()
+        .filter(|key| key.eq_ignore_ascii_case("path"))
+        .collect();
+    assert_eq!(paths, ["Path"]);
+    assert_eq!(env.values["Path"], "from-config");
+    assert_eq!(env.sources["Path"], EnvLayer::Service);
+    assert_eq!(env.values["SystemRoot"], r"C:\Windows");
 }
 
 #[tokio::test]
@@ -1097,10 +1220,6 @@ services:
 }
 
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
-)]
 /// Snapshot of examples/minimal.yaml in lane 1 with fake integrations.
 async fn snapshot_minimal() {
     let config = parse(MINIMAL);
@@ -1124,16 +1243,14 @@ async fn snapshot_minimal() {
     input.infra = &infra;
     input.client_env = &client;
     input.ca_env = &ca;
+    let shell = Shell::posix();
+    input.shell = &shell;
     let lane = resolve_lane(input).await.expect("resolves");
     assert!(lane.errors.is_empty(), "{:?}", lane.errors);
     insta::assert_json_snapshot!(lane_view(&lane));
 }
 
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
-)]
 /// Snapshot of examples/devlanes.yaml in lane 2 with fake integrations and secrets.
 async fn snapshot_reference() {
     let config = parse(FULL);
@@ -1177,6 +1294,8 @@ async fn snapshot_reference() {
     input.infra = &infra;
     input.client_env = &client;
     input.secrets = Some(&secrets as &dyn SecretsProvider);
+    let shell = Shell::posix();
+    input.shell = &shell;
     let lane = resolve_lane(input).await.expect("resolves");
     assert!(lane.errors.is_empty(), "{:?}", lane.errors);
     insta::assert_json_snapshot!(lane_view(&lane));

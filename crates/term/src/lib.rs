@@ -128,7 +128,8 @@ mod windows_path {
 }
 
 /// True when a macOS app bundle such as `kitty.app` is in `/Applications` or
-/// `~/Applications`.
+/// `~/Applications`. macOS only: elsewhere launchers look on `PATH`.
+#[cfg(target_os = "macos")]
 pub fn app_installed(bundle: &str) -> bool {
     let mut dirs = vec![PathBuf::from("/Applications")];
     if let Some(home) = std::env::var_os("HOME") {

@@ -35,7 +35,7 @@ impl Drop for Cleanup {
                     "--volumes",
                     "--remove-orphans",
                 ])
-                .current_dir("/")
+                .current_dir(std::env::temp_dir())
                 .output();
         }
         for container in &self.containers {

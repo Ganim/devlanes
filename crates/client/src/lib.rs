@@ -212,6 +212,7 @@ impl Client {
         let begun = Instant::now();
         let owned_paths = paths.clone();
         tokio::task::spawn_blocking(move || {
+            refuse_elevation()?;
             owned_paths.prepare()?;
             probe_socket(&owned_paths)
         })
@@ -479,6 +480,23 @@ pub mod diagnostics {
     }
 }
 
+/// Unix spawns the daemon whoever the user is.
+#[cfg(unix)]
+fn refuse_elevation() -> Result<()> {
+    Ok(())
+}
+
+/// The daemon would refuse to run elevated anyway; failing here, before
+/// `prepare()`, also keeps an elevated shell from creating the home.
+#[cfg(windows)]
+fn refuse_elevation() -> Result<()> {
+    use devlanes_sys::windows::token::{ELEVATED_REASON, elevation_refused};
+    if elevation_refused()? {
+        return Err(Error::Startup(ELEVATED_REASON.into()));
+    }
+    Ok(())
+}
+
 /// Starts the daemon; on Unix it leaves the terminal's session itself (`setsid`).
 #[cfg(unix)]
 fn spawn_daemon(command: &mut Command) -> std::io::Result<tokio::process::Child> {
@@ -503,6 +521,9 @@ fn spawn_daemon(command: &mut Command) -> std::io::Result<tokio::process::Child>
         command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
         match command.spawn() {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                tracing::debug!(
+                    "the terminal's job refuses breakaway; the daemon starts inside it"
+                );
                 command.creation_flags(DETACHED_PROCESS);
                 command.spawn()
             }

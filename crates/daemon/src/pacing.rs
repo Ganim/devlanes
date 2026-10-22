@@ -373,14 +373,12 @@ impl Inner {
                 let checked = host.clone();
                 // In the unit's span, so a verbose start shows the probe attempts.
                 let span = tracing::debug_span!("readiness");
+                let check = readiness(&ready.check, probe_env, &self.integ.shell);
                 tokio::spawn(tracing::Instrument::instrument(
                     async move {
-                        run_check(
-                            &checked,
-                            readiness(&ready.check, probe_env),
-                            ready.timeout,
-                            || async move { managed.listening_ports().await },
-                        )
+                        run_check(&checked, check, ready.timeout, || async move {
+                            managed.listening_ports().await
+                        })
                         .await;
                     },
                     span,

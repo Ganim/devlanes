@@ -241,7 +241,7 @@ pub fn interrupted_ownership(
             .find(|summary| summary.reference == lane || summary.branch.as_deref() == Some(lane)),
         None => after
             .iter()
-            .filter(|summary| cwd.starts_with(&summary.path))
+            .filter(|summary| devlanes_core::paths::path_starts_with(cwd, &summary.path))
             .max_by_key(|summary| summary.path.as_os_str().len()),
     }?;
     let previous = before
@@ -429,13 +429,14 @@ pub fn unsafe_directory(path: &Path) -> RpcError {
 #[cfg(windows)]
 pub fn unsafe_directory(path: &Path) -> RpcError {
     use devlanes_sys::windows::security::{DirProblem, check_private_dir};
-    let problem = match check_private_dir(path) {
-        Err(_) => "unreadable",
-        Ok(Err(DirProblem::ReparsePoint)) => "symlink",
-        Ok(Err(DirProblem::NotADirectory)) => "not_a_directory",
-        Ok(Err(DirProblem::Owner)) => "owner",
+    let (problem, others) = match check_private_dir(path) {
+        Err(_) => ("unreadable", Vec::new()),
+        Ok(Err(DirProblem::ReparsePoint)) => ("symlink", Vec::new()),
+        Ok(Err(DirProblem::NotADirectory)) => ("not_a_directory", Vec::new()),
+        Ok(Err(DirProblem::Owner)) => ("owner", Vec::new()),
+        Ok(Err(DirProblem::Acl(others))) => ("acl", others),
         // A directory that checks out now was refused for its access list.
-        Ok(Err(DirProblem::Acl) | Ok(())) => "acl",
+        Ok(Ok(())) => ("acl", Vec::new()),
     };
     let mut data = json!({
         "message": format!("unsafe devlanes home: {}", path.display()),
@@ -443,25 +444,33 @@ pub fn unsafe_directory(path: &Path) -> RpcError {
         "problem": problem,
     });
     if problem == "acl"
-        && let Some(fix) = acl_fix(path)
+        && let Some(fix) = acl_fix(path, &others)
     {
         data["fix"] = json!(fix);
     }
     RpcError::new("unsafe_home", data, 4)
 }
 
-/// `icacls` arguments that leave `path` to this user, SYSTEM and Administrators.
-/// SIDs instead of names, which Windows translates per display language. The
-/// quotes work in both cmd and PowerShell.
+/// An `icacls` command that leaves `path` to this user, SYSTEM and Administrators:
+/// stops inheritance, grants those three, and removes the explicit grants of
+/// `others` (SIDs), which `/grant:r` would keep. SIDs instead of names, which
+/// Windows translates per display language. The quotes work in cmd and PowerShell.
 #[cfg(windows)]
-fn acl_fix(path: &Path) -> Option<String> {
+pub(crate) fn acl_fix(path: &Path, others: &[String]) -> Option<String> {
     let user = devlanes_sys::windows::token::current_user()
         .and_then(|sid| sid.to_sddl())
         .ok()?;
-    Some(format!(
+    let mut fix = format!(
         r#"icacls "{}" /inheritance:r /grant:r "*{user}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F""#,
         path.display()
-    ))
+    );
+    if !others.is_empty() {
+        fix.push_str(" /remove:g");
+        for sid in others {
+            fix.push_str(&format!(r#" "*{sid}""#));
+        }
+    }
+    Some(fix)
 }
 
 #[async_trait]
@@ -1035,13 +1044,24 @@ mod tests {
         assert_eq!(error(&file)["problem"], "not_a_directory");
         assert!(error(&file).get("fix").is_none());
         assert_eq!(error(&tmp.path().join("missing"))["problem"], "unreadable");
-        let open = error(tmp.path());
+        let open_dir = tmp.path().join("open");
+        std::fs::create_dir(&open_dir).expect("dir");
+        // Everyone, read access.
+        let granted = std::process::Command::new("icacls")
+            .arg(&open_dir)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)R"])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("icacls runs");
+        assert!(granted.success());
+        let open = error(&open_dir);
         assert_eq!(open["problem"], "acl");
         let fix = open["fix"].as_str().expect("fix");
         assert!(
             fix.starts_with("icacls \"") && fix.contains("/inheritance:r"),
             "{fix}"
         );
+        assert!(fix.ends_with(r#"/remove:g "*S-1-1-0""#), "{fix}");
     }
 
     #[cfg(windows)]

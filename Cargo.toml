@@ -16,6 +16,9 @@ anyhow = "1"
 base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
+# std::fs::canonicalize on Windows returns verbatim `\\?\C:\...` paths that never
+# match what Git prints; dunce strips the prefix when safe and is std on Unix.
+dunce = "1"
 futures-util = { version = "0.3", features = ["sink"] }
 serde = { version = "1", features = ["derive"] }
 # preserve_order: JSON output follows struct field order, and the feature is pinned

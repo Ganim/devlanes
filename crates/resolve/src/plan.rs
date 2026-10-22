@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::Duration,
 };
@@ -17,7 +17,8 @@ use devlanes_core::{
         ContribCx, ContribMemo, Contributor, DetectCx, DraftCommand, LaunchDraft, ScriptInfo,
         ScriptPlan, ScriptRequest, ScriptRunner, SecretEnv, SecretsError, SecretsRequest, UnitKind,
     },
-    env::{EnvLayer, assemble},
+    env::{self, EnvLayer, assemble},
+    shell::ShellKind,
 };
 use indexmap::IndexMap;
 use serde_json::{Value, json};
@@ -27,7 +28,7 @@ use crate::{
     ResolvedLane, ResolvedService, ResolvedTask, ServiceLayout, SyncSpec,
     layout::{self, Namespaces, env_namespace, replica_value},
     select::{active_profiles, merge_options},
-    util::{shell_quote, signal_number},
+    util::{cmd_quote, shell_quote, signal_number},
 };
 
 /// Plans every service replica, task and infra command of a lane.
@@ -366,6 +367,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
             &service.effective_ready(),
             layout,
             &launch.cwd,
+            self.input.shell.kind,
             &context,
             &path,
         )?;
@@ -558,7 +560,9 @@ impl<E: Extensions> Planner<'_, '_, E> {
         // Later profiles win over earlier ones within the profile layer.
         let mut profile = BTreeMap::new();
         for (env_path, env) in &self.profile_envs {
-            profile.extend(env_map(env, context, env_path)?);
+            for (key, value) in env_map(env, context, env_path)? {
+                env::insert(&mut profile, key, value);
+            }
         }
         let cwd = match spec.cwd {
             Some(value) => lane_path.join(
@@ -668,19 +672,25 @@ impl<E: Extensions> Planner<'_, '_, E> {
             files,
             mut notes,
         } = draft;
+        let shell = input.shell;
+        let mut shell_env = BTreeMap::new();
         let (argv, cwd) = match drafted {
             DraftCommand::Shell(text) => {
                 let text = if args.is_empty() {
                     text
                 } else {
                     // Appending to the last line keeps multi-line scripts valid shell.
-                    let quoted: Vec<_> = args.iter().map(|a| shell_quote(a)).collect();
+                    let quoted = args
+                        .iter()
+                        .map(|a| quote_for(shell.kind, a, &run_path))
+                        .collect::<Result<Vec<_>, _>>()?;
                     format!("{} {}", text.trim_end(), quoted.join(" "))
                 };
-                (
-                    vec!["/bin/sh".to_owned(), "-c".to_owned(), text],
-                    drafted_cwd,
-                )
+                if shell.is_fallback() {
+                    notes.push(CMD_FALLBACK_NOTE.to_owned());
+                }
+                shell_env.clone_from(&shell.env);
+                (shell.argv(&text), drafted_cwd)
             }
             DraftCommand::Argv(mut argv) => {
                 argv.extend(args);
@@ -713,7 +723,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
         };
         let mut client = input.client_env.clone();
         for key in remove.iter().chain(&secrets.remove) {
-            client.remove(key);
+            env::remove(&mut client, key);
         }
         if !secrets.files.is_empty() {
             let keys: Vec<_> = secrets.files.keys().map(String::as_str).collect();
@@ -723,6 +733,9 @@ impl<E: Extensions> Planner<'_, '_, E> {
             ));
         }
         let mut devlanes = self.devlanes.clone();
+        // What the shell itself needs (MSYS_NO_PATHCONV for Git's sh) sits with
+        // the devlanes variables, so `env --explain` shows where it came from.
+        devlanes.extend(shell_env);
         if let (UnitKind::Service, Some(layout)) = (spec.kind, spec.layout) {
             devlanes.insert("PORT".into(), layout.port.to_string());
             devlanes.insert("HOST".into(), "127.0.0.1".into());
@@ -798,13 +811,15 @@ impl<E: Extensions> Planner<'_, '_, E> {
         let facts = self.input.facts;
         let path = format!("{path}.sync");
         let home = || {
-            self.input
-                .client_env
-                .get("HOME")
-                .map(PathBuf::from)
-                .ok_or_else(|| {
-                    ResolveError::invalid(&path, "HOME is not set in the client environment")
-                })
+            devlanes_core::paths::client_home(self.input.client_env).ok_or_else(|| {
+                ResolveError::invalid(
+                    &path,
+                    format!(
+                        "{} is not set in the client environment",
+                        devlanes_core::paths::HOME_VAR
+                    ),
+                )
+            })
         };
         let mut specs = Vec::new();
         for entry in entries {
@@ -892,7 +907,7 @@ fn env_map(
         let value = value
             .evaluate(context)
             .map_err(|e| ResolveError::expression(format!("{path}.{key}"), e))?;
-        result.insert(key.clone(), value.to_string());
+        env::insert(&mut result, key.clone(), value.to_string());
     }
     Ok(result)
 }
@@ -925,8 +940,31 @@ fn duration(
         .transpose()
 }
 
-/// Renders a `run` value as one shell command line.
-fn shell_line(run: &Run, context: &ExpressionContext, path: &str) -> Result<String, ResolveError> {
+/// Launch note for `run:` strings that go through the `cmd.exe` fallback.
+const CMD_FALLBACK_NOTE: &str = "runs with cmd.exe because Git for Windows' sh.exe was not found; run strings use POSIX shell syntax that cmd.exe may not understand. Install Git for Windows";
+
+/// Quotes one argument appended to shell text for `kind`. `cmd.exe` cannot take
+/// some characters safely, so those fail the unit instead of running something else.
+fn quote_for(kind: ShellKind, value: &str, path: &str) -> Result<String, ResolveError> {
+    match kind {
+        ShellKind::Posix => Ok(shell_quote(value)),
+        ShellKind::Cmd => cmd_quote(value).ok_or_else(|| {
+            // The value stays out of the message: arguments can carry secrets.
+            ResolveError::invalid(
+                path,
+                "an argument contains characters cmd.exe cannot take safely (\", %, ! or a line break); install Git for Windows so run strings use sh",
+            )
+        }),
+    }
+}
+
+/// Renders a `run` value as one command line for `kind`.
+fn shell_line(
+    run: &Run,
+    kind: ShellKind,
+    context: &ExpressionContext,
+    path: &str,
+) -> Result<String, ResolveError> {
     match run {
         Run::Shell(text) => text
             .evaluate(context)
@@ -937,7 +975,7 @@ fn shell_line(run: &Run, context: &ExpressionContext, path: &str) -> Result<Stri
                 let word = item
                     .evaluate(context)
                     .map_err(|e| ResolveError::expression(path, e))?;
-                words.push(shell_quote(&word));
+                words.push(quote_for(kind, &word, path)?);
             }
             Ok(words.join(" "))
         }
@@ -947,10 +985,12 @@ fn shell_line(run: &Run, context: &ExpressionContext, path: &str) -> Result<Stri
 /// Converts `infra.containers.<name>.ready` (`path` is that key). `None` for
 /// `started`, which `up` already waits for. Port names stay unresolved: the
 /// container's host ports are allocated with its infra. An http-specific
-/// timeout wins over the check-level one.
+/// timeout wins over the check-level one. A `cmd` check runs on the host with
+/// `shell`, which decides how an argv form is quoted.
 pub fn container_ready(
     config: &ReadyConfig,
     cwd: &Path,
+    shell: ShellKind,
     context: &ExpressionContext,
     path: &str,
 ) -> Result<Option<crate::ContainerReady>, ResolveError> {
@@ -998,7 +1038,7 @@ pub fn container_ready(
         }
     } else if let Some(cmd) = &check.cmd {
         ContainerCheck::Cmd {
-            shell: shell_line(cmd, context, path)?,
+            shell: shell_line(cmd, shell, context, path)?,
             cwd: cwd.to_path_buf(),
         }
     } else {
@@ -1011,11 +1051,12 @@ pub fn container_ready(
 }
 
 /// Converts the effective `ready` config. An http-specific timeout wins over the
-/// check-level one.
+/// check-level one; a `cmd` argv form is quoted for `shell`.
 fn ready(
     config: &ReadyConfig,
     layout: &ServiceLayout,
     cwd: &Path,
+    shell: ShellKind,
     context: &ExpressionContext,
     path: &str,
 ) -> Result<Ready, ResolveError> {
@@ -1072,7 +1113,7 @@ fn ready(
         }
     } else if let Some(cmd) = &check.cmd {
         ReadySpec::Cmd {
-            shell: shell_line(cmd, context, &path)?,
+            shell: shell_line(cmd, shell, context, &path)?,
             cwd: cwd.to_path_buf(),
         }
     } else {

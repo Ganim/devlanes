@@ -44,7 +44,10 @@ impl TerminalLauncher for Iterm2 {
 
     /// iTerm.app in an Applications folder; never off macOS.
     fn available(&self) -> bool {
-        cfg!(target_os = "macos") && devlanes_term::app_installed("iTerm.app")
+        #[cfg(target_os = "macos")]
+        return devlanes_term::app_installed("iTerm.app");
+        #[cfg(not(target_os = "macos"))]
+        return false;
     }
 }
 

@@ -631,9 +631,11 @@ fn doctor_without_a_daemon() {
     );
 }
 
-/// Windows terminal facts: an elevated shell fails doctor, a job that kills on
-/// close without breakaway is a warning, and an ordinary shell adds nothing. An
-/// open home is a warning the daemon fixes.
+/// Windows terminal facts. Without a daemon an elevated shell fails doctor and a
+/// job that kills on close without breakaway is a warning; with one running, the
+/// elevated shell is only a warning and the job is not mentioned. An ordinary
+/// shell adds nothing. An open home is a warning the daemon fixes, with the fix
+/// `home_check` carries, if any.
 #[test]
 fn doctor_terminal_and_acl_checks() {
     let base = json!({
@@ -642,26 +644,112 @@ fn doctor_terminal_and_acl_checks() {
         "home_check": {"path": r"C:\Users\u\.devlanes", "exists": true, "problem": "acl"},
         "sandbox": {"codex_sandbox": false, "app_sandbox": false},
     });
-    let with = |terminal: Value| {
+    let data = |running: bool, terminal: Value| {
         let mut data = base.clone();
+        data["running"] = json!(running);
         data["terminal"] = terminal;
-        render_text(Method::Doctor, &data)
+        if running {
+            // A running daemon reports its schema; without it doctor fails.
+            data["schema_version"] = json!(1);
+            data["supported_schema_version"] = json!(1);
+        }
+        data
     };
-    let plain = with(json!({"elevated": false, "job": null}));
+    let with =
+        |running: bool, terminal: Value| render_text(Method::Doctor, &data(running, terminal));
+    // The agent line after the one containing `needle`, where a fix would go.
+    let after = |text: &str, needle: &str| {
+        let agent = text.split("--- agent").nth(1).unwrap_or_default();
+        let mut lines = agent.lines().skip_while(|line| !line.contains(needle));
+        assert!(lines.next().is_some(), "{needle} missing\n{text}");
+        lines.next().unwrap_or_default().to_owned()
+    };
+    let killing = json!({"elevated": false, "job": {"kill_on_close": true, "breakaway_ok": false}});
+
+    let plain = with(false, json!({"elevated": false, "job": null}));
     assert!(!plain.contains("terminal"), "{plain}");
-    assert!(plain.contains("lets other accounts in"), "{plain}");
-    let elevated = with(json!({"elevated": true, "job": null}));
-    assert!(elevated.contains("--- plain (exit 1)"), "{elevated}");
-    assert!(elevated.contains("runs as administrator"), "{elevated}");
-    let killing =
-        with(json!({"elevated": false, "job": {"kill_on_close": true, "breakaway_ok": false}}));
+    assert!(plain.contains("--- plain (exit 0)"), "{plain}");
     assert!(
-        killing.contains("stops every process it started"),
-        "{killing}"
+        plain.contains("warn home: C:\\Users\\u\\.devlanes lets other accounts in"),
+        "{plain}"
     );
-    let escapable =
-        with(json!({"elevated": false, "job": {"kill_on_close": true, "breakaway_ok": true}}));
+    assert!(
+        !after(&plain, "lets other accounts in").contains("fix:"),
+        "{plain}"
+    );
+    let mut fixable = data(false, json!({"elevated": false, "job": null}));
+    fixable["home_check"]["fix"] = json!(r"icacls C:\Users\u\.devlanes /inheritance:r");
+    let fixable = render_text(Method::Doctor, &fixable);
+    assert_eq!(
+        after(&fixable, "lets other accounts in"),
+        r"  fix: icacls C:\Users\u\.devlanes /inheritance:r",
+        "{fixable}"
+    );
+
+    let elevated = with(false, json!({"elevated": true, "job": null}));
+    for mode in ["human", "plain", "agent"] {
+        assert!(
+            elevated.contains(&format!("--- {mode} (exit 1)")),
+            "{elevated}"
+        );
+    }
+    assert!(
+        elevated.contains(
+            "fail terminal: this terminal runs as administrator; the daemon refuses to run elevated"
+        ),
+        "{elevated}"
+    );
+    assert_eq!(
+        after(&elevated, "runs as administrator"),
+        "  fix: run devlanes from a terminal that is not running as administrator",
+        "{elevated}"
+    );
+    let elevated_running = with(true, json!({"elevated": true, "job": null}));
+    assert!(
+        elevated_running.contains("--- agent (exit 0)"),
+        "{elevated_running}"
+    );
+    assert!(
+        elevated_running.contains(
+            "warn terminal: this terminal runs as administrator; it cannot start the daemon"
+        ),
+        "{elevated_running}"
+    );
+    assert!(
+        !after(&elevated_running, "runs as administrator").contains("fix:"),
+        "{elevated_running}"
+    );
+
+    let stopped = with(false, killing.clone());
+    assert!(
+        stopped.contains("warn terminal: this terminal stops every process it started"),
+        "{stopped}"
+    );
+    assert_eq!(
+        after(&stopped, "stops every process"),
+        "  fix: start the daemon from a terminal outside this one (for example Windows Terminal), then devlanes daemon restart",
+        "{stopped}"
+    );
+    let running = with(true, killing);
+    assert!(!running.contains("stops every process"), "{running}");
+    let escapable = with(
+        false,
+        json!({"elevated": false, "job": {"kill_on_close": true, "breakaway_ok": true}}),
+    );
     assert!(!escapable.contains("stops every process"), "{escapable}");
+
+    // JSON prints the facts unchanged; the exit code follows the same checks.
+    for (running, exit_code) in [(false, 1), (true, 0)] {
+        let data = data(running, json!({"elevated": true, "job": null}));
+        let json = runtime(OutputMode::Json)
+            .reporter()
+            .result(&Report::new(Method::Doctor, &data))
+            .expect("json");
+        assert_eq!(json.exit_code, exit_code, "running: {running}");
+        let printed = serde_json::from_str::<Value>(&json.stdout).expect("json output");
+        assert_eq!(printed["terminal"], data["terminal"]);
+        assert_eq!(printed["home_check"], data["home_check"]);
+    }
 }
 
 #[test]

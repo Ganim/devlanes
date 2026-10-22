@@ -401,13 +401,22 @@ async fn daemon_gone(paths: &Paths, pid: Option<i32>) -> bool {
 async fn daemon_gone(paths: &Paths, pid: Option<i32>) -> bool {
     match pid.and_then(|pid| u32::try_from(pid).ok()) {
         // A zero timeout only polls, so this does not block the executor.
-        Some(pid) => {
-            devlanes_sys::windows::process::wait_exit(pid, Duration::ZERO).unwrap_or(false)
-        }
-        None => Client::connect_any(paths)
-            .await
-            .is_err_and(|error| error.is_not_running()),
+        Some(pid) => match devlanes_sys::windows::process::wait_exit(pid, Duration::ZERO) {
+            Ok(gone) => gone,
+            // Without a handle to the process (access denied, say), the pipe is
+            // the only sign left.
+            Err(_) => pipe_gone(paths).await,
+        },
+        None => pipe_gone(paths).await,
     }
+}
+
+/// Whether the daemon pipe stopped answering.
+#[cfg(windows)]
+async fn pipe_gone(paths: &Paths) -> bool {
+    Client::connect_any(paths)
+        .await
+        .is_err_and(|error| error.is_not_running())
 }
 
 /// One-shot request returning the data, for actions that post-process it locally.
@@ -866,12 +875,17 @@ fn read_tty(prompt: &str, kind: &str) -> Option<String> {
 }
 
 /// Reading a prompt answer from the console is not supported on Windows yet, so
-/// every prompt is cancelled (`None`), as when no terminal is available on Unix.
+/// every question is cancelled (`None`), as when no terminal is available on Unix.
 /// The prompt is still shown with a note, so a cancelled answer is not a mystery.
+/// A `notify` prompt is shown and acknowledged as on Unix, since ssh does not
+/// wait for an answer to it.
 #[cfg(windows)]
-fn read_tty(prompt: &str, _kind: &str) -> Option<String> {
+fn read_tty(prompt: &str, kind: &str) -> Option<String> {
     eprintln!("{prompt}");
-    eprintln!("devlanes cannot read answers from the console on Windows yet; answering no");
+    if kind == "notify" {
+        return Some("\n".into());
+    }
+    eprintln!("devlanes cannot read console input on Windows yet; cancelled");
     None
 }
 
@@ -1115,13 +1129,14 @@ mod tests {
 
     /// Without a daemon, `daemon status` says so in each mode and exits 1.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
-    )]
     fn daemon_not_running_in_every_mode() {
         let paths = Paths::new("/home/u/.devlanes").expect("paths");
         let socket = paths.socket.display().to_string();
+        // On Windows `/home/...` has no drive, so `Paths` makes it absolute
+        // against the cwd; Unix keeps it as given.
+        let home = paths.home.display().to_string();
+        #[cfg(unix)]
+        assert_eq!(home, "/home/u/.devlanes");
         let mode = |name: &str| {
             let cli = Cli::parse_from(["devlanes", "--output", name]);
             Runtime::resolve(&cli, devlanes_cli::Signals::default()).expect("runtime")
@@ -1131,7 +1146,7 @@ mod tests {
         let value: Value = serde_json::from_str(&json.stdout).expect("json");
         assert_eq!(value["running"], false);
         assert_eq!(value["socket"], socket);
-        assert_eq!(value["home"], "/home/u/.devlanes");
+        assert_eq!(value["home"], home);
         assert_eq!(
             daemon_not_running(&mode("plain"), &paths).stdout,
             format!(

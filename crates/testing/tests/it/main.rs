@@ -253,13 +253,14 @@ async fn escaped_grandchild() -> Result {
 /// Descendants announce their PID and exit with the inherited deadline.
 #[tokio::test]
 async fn spawned_grandchild_announces_itself() -> Result {
-    let mut server = Server::start_with_deadline("1s", &["--spawn-grandchild"]).await?;
+    let mut server = Server::start_with_deadline("2s", &["--spawn-grandchild"]).await?;
     let mut announced = server
         .startup
         .iter()
         .any(|line| line.starts_with("grandchild pid="));
-    // Every holder of stdout exits at the 1 s deadline, which ends the stream.
-    timeout(Duration::from_secs(5), async {
+    // Every holder of stdout exits at the 2 s deadline, which ends the stream.
+    // The timeout leaves room for slow process startup on loaded CI machines.
+    timeout(Duration::from_secs(8), async {
         while let Some(line) = server.lines.next_line().await? {
             announced |= line.starts_with("grandchild pid=");
         }

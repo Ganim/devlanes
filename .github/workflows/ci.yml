@@ -51,6 +51,10 @@ jobs:
       # Every nextest step runs all tests and repeats failed output at the end, so
       # one failure neither hides the others nor gets buried in the PASS lines.
       - run: cargo nextest run --workspace --all-features --locked --no-fail-fast --failure-output immediate-final
+        env:
+          # GitHub's Windows runners only run as administrator, which the daemon
+          # refuses outside tests. Ignored on other OSes.
+          DEVLANES_ALLOW_ELEVATED: "1"
       - run: cargo test --workspace --doc --all-features --locked
       - run: cargo build --workspace --all-targets --all-features --locked
       - name: kache stats

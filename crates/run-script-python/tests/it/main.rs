@@ -43,10 +43,6 @@ fn request<'a>(
 
 /// Runner choice, entry points and notes for each project layout.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
-)]
 fn runner_selection_table() {
     let uv_only = "[project]\nname = \"acme\"\n[project.scripts]\nserve = \"acme:main\"\n[tool.uv]\ndev-dependencies = []\n";
     let uv_packaged = "[project]\nname = \"acme\"\n[project.scripts]\nserve = \"acme:main\"\n[tool.uv]\npackage = true\n";
@@ -90,11 +86,13 @@ fn runner_selection_table() {
                 }
                 line
             }
+            // Messages show the host's absolute path; only the shape is checked.
             Err(error) => format!(
                 "error: {}",
                 error
                     .to_string()
                     .replace(&temp.path().display().to_string(), "<lane>")
+                    .replace('\\', "/")
             ),
         };
         rendered.push_str(&format!("{label}: {line}\n"));
@@ -130,10 +128,6 @@ fn uv_workspace_member() {
 
 /// Missing scripts list both tables; bad sources and names are rejected.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "snapshots expect `/` path separators, ported in the Windows path step"
-)]
 fn errors() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_files(
@@ -144,9 +138,11 @@ fn errors() {
         )],
     );
     let error = plan(&request(temp.path(), "pyproject.toml", "migrate", &[])).expect_err("missing");
+    // The message shows the host's absolute path; only the shape is checked.
     let message = error
         .to_string()
-        .replace(&temp.path().display().to_string(), "<lane>");
+        .replace(&temp.path().display().to_string(), "<lane>")
+        .replace('\\', "/");
     insta::assert_snapshot!(message, @"`<lane>/pyproject.toml` has no script `migrate` in [project.scripts] or [tool.poetry.scripts] (scripts: serve, worker)");
     assert!(matches!(
         plan(&request(temp.path(), "../pyproject.toml", "serve", &[])),

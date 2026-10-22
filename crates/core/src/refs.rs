@@ -1,11 +1,89 @@
 //! Pure parsing and resolution of CLI lane and unit references.
 
-use crate::{LaneId, ProjectId};
+use crate::{
+    LaneId, ProjectId,
+    paths::{path_starts_with, same_path},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Component, Path, PathBuf},
     str::FromStr,
 };
+
+/// Host path spellings a lane selector may use. Unix only knows `/`; Windows
+/// adds drive letters, UNC and `\`, whose `C:` colon must not be read as the
+/// `lane:unit` separator.
+#[cfg(unix)]
+mod os {
+    /// Bytes at the start of `input` that belong to a drive prefix (none on Unix).
+    pub(super) fn drive_prefix_len(_input: &str) -> usize {
+        0
+    }
+
+    /// Where the search for the `lane:unit` colon starts.
+    pub(super) fn unit_separator_start(_input: &str) -> usize {
+        0
+    }
+
+    /// Absolute lane path forms.
+    pub(super) fn is_absolute(selector: &str) -> bool {
+        selector.starts_with('/')
+    }
+
+    /// Cwd-relative lane path forms.
+    pub(super) fn is_relative(selector: &str) -> bool {
+        selector.starts_with("./")
+    }
+
+    /// The part of a `~/...` selector below the home directory.
+    pub(super) fn below_home(selector: &str) -> Option<&str> {
+        selector.strip_prefix("~/")
+    }
+}
+
+#[cfg(windows)]
+mod os {
+    use std::path::Path;
+
+    /// Length of a leading `C:\` or `C:/` drive letter and colon, else 0.
+    pub(super) fn drive_prefix_len(input: &str) -> usize {
+        match input.as_bytes() {
+            [letter, b':', b'\\' | b'/', ..] if letter.is_ascii_alphabetic() => 2,
+            _ => 0,
+        }
+    }
+
+    /// Skips a drive prefix at the start or right after `project@`, so
+    /// `C:\src\acme:web` and `acme@C:\src\acme:web` split before `web`.
+    pub(super) fn unit_separator_start(input: &str) -> usize {
+        match drive_prefix_len(input) {
+            0 => input
+                .split_once('@')
+                .map_or(0, |(project, lane)| match drive_prefix_len(lane) {
+                    0 => 0,
+                    drive => project.len() + 1 + drive,
+                }),
+            drive => drive,
+        }
+    }
+
+    /// Absolute lane path forms: POSIX `/` as on Unix, plus drive and UNC paths.
+    pub(super) fn is_absolute(selector: &str) -> bool {
+        selector.starts_with('/') || Path::new(selector).is_absolute()
+    }
+
+    /// Cwd-relative lane path forms with either separator.
+    pub(super) fn is_relative(selector: &str) -> bool {
+        selector.starts_with("./") || selector.starts_with(".\\")
+    }
+
+    /// The part of a `~/...` or `~\...` selector below the home directory.
+    pub(super) fn below_home(selector: &str) -> Option<&str> {
+        selector
+            .strip_prefix("~/")
+            .or_else(|| selector.strip_prefix("~\\"))
+    }
+}
 
 /// Parsed `[project@]lane` input. Numeric selectors never fall back to names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,7 +139,7 @@ impl FromStr for LaneRef {
             None => (None, input),
         };
         if selector.is_empty()
-            || selector.contains(['@', ':'])
+            || selector[os::drive_prefix_len(selector)..].contains(['@', ':'])
             || selector.chars().any(char::is_control)
         {
             return Err(ReferenceError::Invalid(input.into()));
@@ -78,8 +156,12 @@ impl FromStr for UnitRef {
 
     /// Retains the unit selector for the caller's name/glob/tag matching.
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let (lane, selector) = match input.split_once(':') {
-            Some((lane, unit)) => (Some(lane.parse()?), unit),
+        let start = os::unit_separator_start(input);
+        let (lane, selector) = match input[start..].find(':') {
+            Some(colon) => (
+                Some(input[..start + colon].parse()?),
+                &input[start + colon + 1..],
+            ),
             None => (None, input),
         };
         if selector.is_empty()
@@ -201,7 +283,7 @@ pub fn resolve_lane<'a>(
                 3 => lane.path.file_name().is_some_and(|name| name == selector),
                 _ => path
                     .as_ref()
-                    .is_some_and(|path| normalize(&lane.path) == *path),
+                    .is_some_and(|path| same_path(&normalize(&lane.path), path)),
             })
             .collect();
         match matches.as_slice() {
@@ -237,9 +319,10 @@ pub fn resolve_unit<'a, 'r>(
                 context
                     .project
                     .is_none_or(|project| project == lane.project_id)
-                    && context
-                        .lane
-                        .map_or_else(|| context.cwd.starts_with(&lane.path), |id| id == lane.id)
+                    && context.lane.map_or_else(
+                        || path_starts_with(&context.cwd, &lane.path),
+                        |id| id == lane.id,
+                    )
             })
             .collect();
         match matches.as_slice() {
@@ -274,14 +357,14 @@ fn candidate_names(lanes: &[&LaneCandidate]) -> Vec<String> {
 
 /// Expands only documented path forms without reading the host environment.
 fn expand_path(selector: &str, context: &ResolveContext) -> Option<PathBuf> {
-    let path = if selector.starts_with('/') {
+    let path = if os::is_absolute(selector) {
         PathBuf::from(selector)
-    } else if selector.starts_with("./") {
+    } else if os::is_relative(selector) {
         context.cwd.join(selector)
     } else if selector == "~" {
         context.home.clone()?
     } else {
-        context.home.as_ref()?.join(selector.strip_prefix("~/")?)
+        context.home.as_ref()?.join(os::below_home(selector)?)
     };
     Some(normalize(&path))
 }
@@ -376,6 +459,105 @@ mod tests {
                 .selector,
             "+api"
         );
+    }
+
+    /// Splits a unit reference into (project, lane selector, unit selector).
+    fn unit_parts(input: &str) -> Option<(Option<String>, Option<String>, String)> {
+        let reference: UnitRef = input.parse().ok()?;
+        let (project, lane) = match reference.lane {
+            Some(lane) => (lane.project, Some(lane.selector)),
+            None => (None, None),
+        };
+        Some((project, lane, reference.selector))
+    }
+
+    #[test]
+    /// POSIX lane paths and plain names split the same way on every OS.
+    fn unit_refs_split_on_the_lane_colon() {
+        let some = |value: &str| Some(value.to_owned());
+        for (input, expected) in [
+            ("web", Some((None, None, "web".to_owned()))),
+            ("2:web", Some((None, some("2"), "web".into()))),
+            ("demo@2:web", Some((some("demo"), some("2"), "web".into()))),
+            (
+                "/src/acme:web",
+                Some((None, some("/src/acme"), "web".into())),
+            ),
+            ("./acme:+api", Some((None, some("./acme"), "+api".into()))),
+            ("~/acme:web", Some((None, some("~/acme"), "web".into()))),
+            ("2:web:extra", None),
+            ("2:", None),
+        ] {
+            assert_eq!(unit_parts(input), expected, "{input}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    /// A drive-letter spelling has no meaning on Unix and stays invalid there.
+    fn unix_drive_letters_are_not_paths() {
+        assert!(r"C:\src\acme:web".parse::<UnitRef>().is_err());
+        assert!(r"C:\src\acme".parse::<LaneRef>().is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// The drive colon is part of the lane path, not the `lane:unit` separator.
+    fn windows_drive_letters_belong_to_the_lane() {
+        let some = |value: &str| Some(value.to_owned());
+        for (input, expected) in [
+            (
+                r"C:\src\acme:web",
+                Some((None, some(r"C:\src\acme"), "web".into())),
+            ),
+            (
+                "d:/src/acme:web",
+                Some((None, some("d:/src/acme"), "web".into())),
+            ),
+            (
+                r"demo@C:\src\acme:+api",
+                Some((some("demo"), some(r"C:\src\acme"), "+api".into())),
+            ),
+            (r".\acme:web", Some((None, some(r".\acme"), "web".into()))),
+            (r"C:\src\acme", None),
+            (r"C:\src:acme:web", None),
+            // Drive-relative `C:web` is not a lane path form: lane `C`, unit `web`.
+            ("C:web", Some((None, some("C"), "web".into()))),
+        ] {
+            assert_eq!(unit_parts(input), expected, "{input}");
+        }
+        assert!(r"C:\src\acme".parse::<LaneRef>().is_ok());
+        assert!(r"C:\src\a:b".parse::<LaneRef>().is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    /// Drive, UNC, `.\` and `~\` lane paths resolve, ignoring case.
+    fn windows_path_forms_resolve() {
+        let mut lanes = [lane(0, "main", "main"), lane(1, "feature", "feature")];
+        lanes[0].path = PathBuf::from(r"C:\Work\main");
+        lanes[1].path = PathBuf::from(r"\\server\share\feature");
+        let context = ResolveContext {
+            cwd: r"C:\Work".into(),
+            home: Some(r"C:\Work".into()),
+            ..Default::default()
+        };
+        for (input, expected) in [
+            (r"C:\Work\main", 0),
+            ("c:/work/MAIN", 0),
+            (r".\main", 0),
+            (r"~\main", 0),
+            (r"\\server\share\feature", 1),
+        ] {
+            let reference = input.parse().expect("valid reference");
+            assert_eq!(
+                resolve_lane(&reference, &lanes, &context)
+                    .expect("resolved")
+                    .index,
+                expected,
+                "{input}"
+            );
+        }
     }
 
     #[test]

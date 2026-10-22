@@ -331,7 +331,8 @@ impl Inner {
             })?;
         let canonical = tokio::task::spawn_blocking({
             let destination = destination.clone();
-            move || std::fs::canonicalize(&destination).unwrap_or(destination)
+            // dunce: Git lists `C:\...`, never the verbatim `\\?\C:\...` form.
+            move || dunce::canonicalize(&destination).unwrap_or(destination)
         })
         .await
         .unwrap_or(destination);
@@ -340,7 +341,7 @@ impl Inner {
         let lane = project
             .lanes()
             .into_iter()
-            .find(|lane| lane.st().path == canonical)
+            .find(|lane| devlanes_core::paths::same_path(&lane.st().path, &canonical))
             .ok_or_else(|| RpcError::new("not_found", json!({"reference": canonical}), 3))?;
         let summary = lane_summary(&name, &lane.st());
         let mut result = json!({"lane": summary});
@@ -1001,13 +1002,20 @@ impl Inner {
         let checks = self.config_checks();
         let known = crate::platforms::known(&self.integ.contributors);
         let path = file.clone();
+        let shell = self.integ.shell.clone();
         let (report, unknown) = tokio::task::spawn_blocking(move || {
             let config = devlanes_config::load_project_with::<OpaqueExtensions>(&path)?;
             let report = crate::registry::check_config(&config, &checks)?;
-            Ok::<_, devlanes_config::ConfigError>((
-                report,
-                crate::platforms::unknown(&config, &known),
-            ))
+            let mut extra = crate::platforms::unknown(&config, &known);
+            // Windows without Git for Windows: run strings go to cmd.exe.
+            extra.extend(
+                devlanes_resolve::shell_warnings(&config, &shell)
+                    .into_iter()
+                    .map(
+                        |w| json!({"path": w.path, "message": w.message, "code": "shell_fallback"}),
+                    ),
+            );
+            Ok::<_, devlanes_config::ConfigError>((report, extra))
         })
         .await
         .map_err(|error| internal("config_check", error))?

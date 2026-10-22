@@ -26,6 +26,12 @@ pub fn run() -> ExitCode {
         return ExitCode::from(1);
     }
     let readiness = Readiness::from_env();
+    // Before `prepare`, so an elevated run creates nothing under the home.
+    if let Err(error) = devlanes_daemon::refuse_elevation() {
+        eprintln!("error: {error}");
+        let _ = readiness.failed(&error.to_string());
+        return ExitCode::from(1);
+    }
     let paths = match Paths::discover() {
         Ok(paths) => paths,
         Err(error) => {

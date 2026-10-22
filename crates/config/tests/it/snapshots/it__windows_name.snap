@@ -1,0 +1,12 @@
+---
+source: crates/config/tests/it/main.rs
+expression: output
+---
+  × services.aux: `aux` is a reserved device name on Windows and cannot name a file, and
+  │ configs are shared across operating systems; pick another name
+   ╭─[devlanes.yaml:6:5]
+ 5 │   aux:
+ 6 │     run: worker
+   ·     ┬
+   ·     ╰── services.aux: `aux` is a reserved device name on Windows and cannot name a file, and configs are shared across operating systems; pick another name
+   ╰────

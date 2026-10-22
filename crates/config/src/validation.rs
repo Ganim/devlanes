@@ -120,6 +120,49 @@ fn literal_port(value: &crate::Scalar) -> bool {
     }
 }
 
+/// Device names Windows reserves in every directory, with or without an extension.
+const WINDOWS_RESERVED_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Characters Windows refuses in file names (besides control characters).
+const WINDOWS_INVALID_CHARACTERS: &[char] = &['<', '>', ':', '"', '|', '?', '*', '\\'];
+
+/// Rejects project, service and task names that cannot be file names on Windows,
+/// where logs and state files are named after them. Checked on every OS because
+/// one config is shared by machines running different ones.
+fn windows_file_name(path: &str, name: &str) -> Result<(), ConfigError> {
+    let mut suggestion = "pick another name".to_owned();
+    let problem = if let Some(found) = name
+        .chars()
+        .find(|c| WINDOWS_INVALID_CHARACTERS.contains(c))
+    {
+        format!("`{name}` contains `{found}`, which Windows does not allow in file names")
+    } else if name.chars().any(char::is_control) {
+        format!("`{name}` contains a control character, which Windows does not allow in file names")
+    } else if let Some(last @ ('.' | ' ')) = name.chars().last() {
+        let trimmed = name.trim_end_matches(['.', ' ']);
+        if !trimmed.is_empty() {
+            suggestion = format!("did you mean `{trimmed}`?");
+        }
+        let shown = if last == '.' { "`.`" } else { "a space" };
+        format!("`{name}` ends with {shown}, which Windows drops from file names")
+    } else if name.split('.').next().is_some_and(|stem| {
+        WINDOWS_RESERVED_NAMES
+            .iter()
+            .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+    }) {
+        format!("`{name}` is a reserved device name on Windows and cannot name a file")
+    } else {
+        return Ok(());
+    };
+    Err(fail(
+        path,
+        format!("{problem}, and configs are shared across operating systems; {suggestion}"),
+    ))
+}
+
 /// Check executable declarations uniformly for services, tasks, and infra commands.
 fn command(
     path: &str,
@@ -242,6 +285,7 @@ fn validate_inner<E: Extensions>(
     {
         return Err(fail("project", "expected [a-z0-9][a-z0-9._-]* (no @ or :)"));
     }
+    windows_file_name("project", name)?;
     if config.lanes.matrix.is_some() && !config.lanes.vars.is_empty() {
         return Err(fail(
             "lanes.matrix",
@@ -277,6 +321,7 @@ fn validate_inner<E: Extensions>(
         }
     }
     for name in config.services.keys() {
+        windows_file_name(&format!("services.{name}"), name)?;
         if !aliases.insert(name.replace('-', "_")) {
             return Err(fail(
                 &format!("services.{name}"),
@@ -345,6 +390,7 @@ fn validate_inner<E: Extensions>(
     let mut task_graph = IndexMap::new();
     for (name, task) in &config.tasks {
         let path = format!("tasks.{name}");
+        windows_file_name(&path, name)?;
         command(&path, &task.run, &task.run_script, task.steps.is_some())?;
         if task.when.is_some()
             && matches!(

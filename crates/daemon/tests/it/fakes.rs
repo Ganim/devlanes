@@ -80,10 +80,15 @@ impl FakeRunner {
     }
 }
 
-/// Extracts the script from `/bin/sh -c <script>` or argv.
+/// Extracts the script from a run string under the default shell (`/bin/sh -c
+/// <script>` on Unix, `cmd.exe /d /s /c <script>` on Windows) or from argv.
 fn script_of(spec: &LaunchSpec) -> String {
-    if spec.program == "/bin/sh" && spec.args.first().is_some_and(|a| a == "-c") {
-        return spec.args.get(1).cloned().unwrap_or_default();
+    let shell = devlanes_core::shell::Shell::default();
+    if spec.program == shell.program
+        && let Some((script, leading)) = spec.args.split_last()
+        && leading == shell.args.as_slice()
+    {
+        return script.clone();
     }
     std::iter::once(spec.program.clone())
         .chain(spec.args.iter().cloned())

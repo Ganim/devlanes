@@ -124,9 +124,7 @@ pub async fn annotate_doctor(client: Option<&mut Client>, data: &mut Value) {
                 "version": OWN,
                 "build": Hello::current(0).build_id,
                 "daemon_version": daemon_version,
-                "install_method": method.describe(
-                    std::env::var_os("HOME").map(std::path::PathBuf::from).as_deref()
-                ),
+                "install_method": method.describe(devlanes_client::user_home().as_deref()),
                 "command": method.upgrade_command(target),
                 "check": check.state,
                 "check_off_reason": check.reason,

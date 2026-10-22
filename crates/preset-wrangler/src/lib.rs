@@ -304,10 +304,6 @@ mod tests {
 
     /// Flags, vars (sorted by key) and user args render in a fixed order.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
-    )]
     fn renders_ports_vars_and_args() {
         let options = WranglerOptions {
             vars: BTreeMap::from([
@@ -330,9 +326,10 @@ mod tests {
         })
         .expect("valid input");
         insta::assert_snapshot!(result.args.join(" "), @"--port 20010 --inspector-port 20011 --var A:1 --var PUBLIC_BASE_URL:https://api.acme-1.localhost --env-file .dev.vars.stripe");
+        // Compared as paths: Windows joins with `\`, and both separators match.
         assert_eq!(
-            result.env.get(REGISTRY_ENV).map(String::as_str),
-            Some("/lanes/acme-1/.devlanes/wrangler-registry")
+            result.env.get(REGISTRY_ENV).map(Path::new),
+            Some(Path::new("/lanes/acme-1/.devlanes/wrangler-registry"))
         );
     }
 

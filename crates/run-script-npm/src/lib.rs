@@ -65,11 +65,9 @@ impl LaunchPlan {
     /// One line on how the manager was chosen, with paths relative to
     /// `worktree`, e.g. `pnpm 10.4.1 (packageManager in package.json)`.
     pub fn detail(&self, worktree: &Path) -> String {
-        let shown = |path: &Path| {
-            path.strip_prefix(worktree)
-                .unwrap_or(path)
-                .display()
-                .to_string()
+        let shown = |path: &Path| match path.strip_prefix(worktree) {
+            Ok(rest) => detect::worktree_relative(rest),
+            Err(_) => path.display().to_string(),
         };
         let manager = match (&self.version, self.manager) {
             (Some(version), manager) => format!("{} {version}", manager.field_name()),

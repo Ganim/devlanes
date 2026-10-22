@@ -761,6 +761,8 @@ impl Cli {
     /// Captures cwd and captures environment only for process-starting methods.
     pub fn action(&self, runtime: &Runtime) -> Result<Action, Error> {
         self.action_with(runtime, std::env::current_dir()?, || {
+            // Names keep the spelling the OS reports (`Path` on Windows); the
+            // daemon matches them case-insensitively there when it layers env.
             std::env::vars_os()
                 .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
                 .collect()

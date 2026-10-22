@@ -54,9 +54,8 @@ pub fn accept_ctrl_c() -> io::Result<()> {
 /// every inheritable handle of this process, not only the stdio it was given. A
 /// long-lived child (the daemon) would then hold the caller's stdout pipe, and a
 /// shell reading it (`$(devlanes status)`) would wait for end of file forever.
-/// Children given `Stdio::inherit` need these handles, so spawn only such a child
-/// inside, one with explicit stdio. Another thread spawning meanwhile would not
-/// inherit them either; the CLI spawns the daemon before any other child.
+/// Children given `Stdio::inherit`, here or on other threads, are unaffected:
+/// std passes them inheritable duplicates of the standard handles.
 pub fn without_inherited_std_handles<T>(spawn: impl FnOnce() -> T) -> T {
     use windows_sys::Win32::Foundation::{
         GetHandleInformation, HANDLE_FLAG_INHERIT, SetHandleInformation,
@@ -158,8 +157,13 @@ pub fn job_of_self() -> io::Result<Option<JobInfo>> {
 /// Points standard output at `NUL` and closes the original handle, so the reader
 /// of an inherited pipe sees end of file. std looks up the standard handle on each
 /// write, so later writes go to `NUL`.
+///
+/// A parent may pass one handle as several standard streams; every slot holding
+/// the original is swapped too, or closing it would leave that slot naming a
+/// handle value the next open file could reuse.
 pub fn release_stdout() -> io::Result<()> {
-    let null = File::options().write(true).open("NUL")?;
+    use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, STD_INPUT_HANDLE};
+    let null = File::options().read(true).write(true).open("NUL")?;
     // SAFETY: reads the current standard handle without taking ownership.
     let original = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
     let null = null.into_raw_handle();
@@ -171,11 +175,23 @@ pub fn release_stdout() -> io::Result<()> {
         unsafe { CloseHandle(null) };
         return Err(error);
     }
-    if !original.is_null() && original as isize != -1 {
-        // SAFETY: nothing refers to the original handle any more; closing it
-        // releases the pipe end the spawning client waits on.
-        unsafe { CloseHandle(original) };
+    if original.is_null() || original as isize == -1 {
+        return Ok(());
     }
+    for which in [STD_INPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: reads a standard handle without taking ownership.
+        if unsafe { GetStdHandle(which) } == original
+            // SAFETY: `null` stays open in the standard handle table.
+            && unsafe { SetStdHandle(which, null) } == 0
+        {
+            // Closing would leave this slot dangling; keeping the pipe open only
+            // delays the client's end of file until the daemon exits.
+            return Err(io::Error::last_os_error());
+        }
+    }
+    // SAFETY: no standard slot refers to the original handle any more; closing it
+    // releases the pipe end the spawning client waits on.
+    unsafe { CloseHandle(original) };
     Ok(())
 }
 

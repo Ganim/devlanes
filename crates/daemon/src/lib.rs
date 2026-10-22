@@ -66,11 +66,13 @@ pub enum Error {
     #[error("a daemon already owns the lock")]
     AlreadyRunning,
     /// Windows only: every unit would inherit administrator rights, and the
-    /// unelevated CLI could not inspect the daemon's process.
-    #[error(
-        "the daemon refuses to run elevated; run devlanes from a terminal that is not running as administrator"
-    )]
-    Elevated,
+    /// unelevated CLI could not inspect the daemon's process. Reads `CODE: message`.
+    #[error("{0}")]
+    Elevated(&'static str),
+    /// Windows only: another process created the pipe name first. The lock is
+    /// already held at that point, so it is not a devlanes daemon of this home.
+    #[error("ENDPOINT_TAKEN: another process already serves {0}; devlanes cannot start its daemon")]
+    EndpointTaken(PathBuf),
     #[error("unsafe daemon directory: {0}")]
     UnsafeDirectory(PathBuf),
     #[error("startup worker failed: {0}")]
@@ -205,7 +207,7 @@ impl Server {
         let lock = tokio::task::spawn_blocking(move || prepare(&prepared)).await??;
         let listener = match LocalListener::bind(&options.socket).await {
             Ok(listener) => listener,
-            Err(BindError::AlreadyListening(_)) => return Err(Error::AlreadyRunning),
+            Err(BindError::AlreadyListening(path)) => return Err(already_listening(path)),
             Err(BindError::Io(error)) => return Err(error.into()),
         };
         Ok(Self {
@@ -322,17 +324,32 @@ fn startup_reason(error: &RpcError) -> String {
     format!("{}: {message}", error.code.to_uppercase())
 }
 
+/// A live socket under the lock belongs to a daemon that predates the lock file.
+#[cfg(unix)]
+fn already_listening(_path: PathBuf) -> Error {
+    Error::AlreadyRunning
+}
+
+/// Pipe names live outside the home, so under the lock an existing one was
+/// created by some other process.
+#[cfg(windows)]
+fn already_listening(path: PathBuf) -> Error {
+    Error::EndpointTaken(path)
+}
+
 /// Unix does not refuse root, matching how the daemon always behaved there.
 #[cfg(unix)]
-fn refuse_elevation() -> Result<(), Error> {
+pub fn refuse_elevation() -> Result<(), Error> {
     Ok(())
 }
 
-/// Refuses an elevated token before anything is created under the home.
+/// Refuses an elevated token. `daemon run` calls it before creating anything
+/// under the home, and [`Server::bind`] again for other callers.
 #[cfg(windows)]
-fn refuse_elevation() -> Result<(), Error> {
-    if devlanes_sys::windows::token::elevated()? {
-        return Err(Error::Elevated);
+pub fn refuse_elevation() -> Result<(), Error> {
+    use devlanes_sys::windows::token::{ELEVATED_REASON, elevation_refused};
+    if elevation_refused()? {
+        return Err(Error::Elevated(ELEVATED_REASON));
     }
     Ok(())
 }
@@ -437,18 +454,23 @@ fn secure_directory(path: &Path) -> Result<(), Error> {
 /// it may not be ours to change.
 #[cfg(windows)]
 fn secure_directory(path: &Path) -> Result<(), Error> {
-    use devlanes_sys::windows::security::{DirProblem, ensure_private_dir, tighten_private_dir};
+    use devlanes_sys::windows::security::{PrivateDir, ensure_private_dir};
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    match ensure_private_dir(path)? {
-        Ok(()) => Ok(()),
-        Err(DirProblem::Acl) => {
-            tighten_private_dir(path)?;
+    match ensure_private_dir(path, true) {
+        Ok(Ok(PrivateDir::Tightened)) => {
             tracing::warn!(path = %path.display(), "tightened a devlanes directory to this user, SYSTEM and Administrators");
             Ok(())
         }
-        Err(_) => Err(Error::UnsafeDirectory(path.into())),
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) => Err(Error::UnsafeDirectory(path.into())),
+        // Access denied while tightening is reported like a refusal, so the client
+        // names the access list problem and offers its icacls fix.
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(Error::UnsafeDirectory(path.into()))
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -763,6 +785,33 @@ mod tests {
         secure_directory(&home)?;
         assert_eq!(check_private_dir(&home)?, Ok(()));
         Ok(())
+    }
+
+    /// A pipe name another process created first is reported as taken, not as a
+    /// running daemon, and nothing is served on it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn squatted_pipe_is_endpoint_taken() -> Result<(), Box<dyn std::error::Error>> {
+        let (_temp, options) = short_options();
+        let _squatter =
+            devlanes_sys::windows::pipe::create_server(options.socket.as_os_str(), true)?;
+        assert!(matches!(
+            Server::bind(options).await,
+            Err(Error::EndpointTaken(_))
+        ));
+        Ok(())
+    }
+
+    /// An elevated process does not bind, unless `DEVLANES_ALLOW_ELEVATED=1` is set.
+    #[cfg(windows)]
+    #[ignore = "needs an elevated terminal without DEVLANES_ALLOW_ELEVATED"]
+    #[tokio::test]
+    async fn refuses_to_run_elevated() {
+        let (_temp, options) = short_options();
+        assert!(matches!(
+            Server::bind(options).await,
+            Err(Error::Elevated(_))
+        ));
     }
 
     /// A junction is refused; creating one needs no privilege.

@@ -392,10 +392,6 @@ mod tests {
 
     /// Each replica gets its own overlay file, `--config` and env pointer.
     #[tokio::test]
-    #[cfg_attr(
-        windows,
-        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
-    )]
     async fn adapter_prepares_overlay_per_replica() {
         let memo = ContribMemo::default();
         for replica in [1_u16, 2] {
@@ -408,7 +404,12 @@ mod tests {
             let draft = apply_replica(&memo, Some(options), replica)
                 .await
                 .expect("apply");
-            let expected = format!("/lanes/acme-1/.devlanes/tauri/desktop.{replica}.conf.json");
+            let expected = Path::new("/lanes/acme-1")
+                .join(".devlanes")
+                .join("tauri")
+                .join(format!("desktop.{replica}.conf.json"))
+                .display()
+                .to_string();
             assert_eq!(draft.args, ["--config", expected.as_str()]);
             assert_eq!(draft.env.get(CONFIG_ENV), Some(&expected));
             let [file] = draft.files.as_slice() else {
@@ -501,10 +502,6 @@ mod tests {
 
     /// `--config` and the env variable point at the same file.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "Unix path fixtures render with `\\` on Windows, ported in the Windows path step"
-    )]
     fn contribution_points_at_overlay() {
         let options = options("com.acme.app.dev.client1");
         let path = overlay_path(Path::new("/lanes/acme"), "desktop", 1);
@@ -513,11 +510,18 @@ mod tests {
             overlay_path: &path,
         })
         .expect("valid options");
-        insta::assert_snapshot!(launch.contribution.args.join(" "), @"--config /lanes/acme/.devlanes/tauri/desktop.1.conf.json");
+        // Built with the host separator, so the expectation is too.
+        let expected = Path::new("/lanes/acme")
+            .join(".devlanes")
+            .join("tauri")
+            .join("desktop.1.conf.json")
+            .display()
+            .to_string();
         assert_eq!(
-            launch.contribution.env.get(CONFIG_ENV).map(String::as_str),
-            Some("/lanes/acme/.devlanes/tauri/desktop.1.conf.json")
+            launch.contribution.args.join(" "),
+            format!("--config {expected}")
         );
+        assert_eq!(launch.contribution.env.get(CONFIG_ENV), Some(&expected));
     }
 
     /// Identifier problems are reported before anything starts.

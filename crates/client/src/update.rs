@@ -73,13 +73,13 @@ impl InstallMethod {
     /// calls it from a blocking task.
     pub fn current() -> Self {
         let exe = std::env::current_exe()
-            .and_then(std::fs::canonicalize)
+            .and_then(dunce::canonicalize)
             .unwrap_or_else(|_| PathBuf::from("devlanes"));
         let cargo_home = std::env::var_os("CARGO_HOME")
             .filter(|home| !home.is_empty())
             .map(PathBuf::from)
             .or_else(|| crate::user_home().map(|home| home.join(".cargo")));
-        let cargo_home = cargo_home.map(|home| std::fs::canonicalize(&home).unwrap_or(home));
+        let cargo_home = cargo_home.map(|home| dunce::canonicalize(&home).unwrap_or(home));
         let listed = cargo_home.as_deref().is_some_and(|home| {
             std::fs::read_to_string(home.join("binstall/crates-v1.json"))
                 .is_ok_and(|text| binstall_lists_devlanes(&text))
@@ -111,7 +111,7 @@ impl InstallMethod {
                 let default = home.map(|home| home.join(".local/bin"));
                 let default = default
                     .as_deref()
-                    .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()));
+                    .map(|path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_owned()));
                 if default.as_deref() == Some(dir.as_path()) {
                     "install.sh".into()
                 } else {

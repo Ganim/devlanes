@@ -120,13 +120,34 @@ fn socket_path(home: &Path, _run: &Path, _runtime: Option<&Path>, _temporary: &P
     ))
 }
 
-/// The home in one spelling: canonical when it exists, else absolute, without the
-/// verbatim prefix, with `\` separators and no trailing separator.
+/// The home in one spelling: its deepest existing ancestor canonical, the rest as
+/// given, without the verbatim prefix, with `\` separators and no trailing
+/// separator.
+///
+/// Canonicalizing only the existing part keeps the name stable while the home is
+/// created: the CLI computes it before `prepare()` makes the directory and the
+/// daemon after, and 8.3 names, `subst` drives or junctions in an ancestor would
+/// otherwise give the two different pipes.
 #[cfg(windows)]
 fn pipe_key(home: &Path) -> PathBuf {
-    let resolved = fs::canonicalize(home)
-        .or_else(|_| std::path::absolute(home))
-        .unwrap_or_else(|_| home.to_owned());
+    let absolute = std::path::absolute(home).unwrap_or_else(|_| home.to_owned());
+    let mut missing = Vec::new();
+    let mut existing = absolute.as_path();
+    let resolved = loop {
+        if let Ok(canonical) = fs::canonicalize(existing) {
+            break missing
+                .iter()
+                .rev()
+                .fold(canonical, |path, part| path.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name);
+                existing = parent;
+            }
+            _ => break absolute.clone(),
+        }
+    };
     let text = resolved.to_string_lossy().replace('/', r"\");
     let text = match text.strip_prefix(r"\\?\UNC\") {
         Some(share) => format!(r"\\{share}"),
@@ -240,8 +261,8 @@ fn private_directory(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    match ensure_private_dir(path)? {
-        Ok(()) | Err(DirProblem::Acl) => Ok(()),
+    match ensure_private_dir(path, false)? {
+        Ok(_) | Err(DirProblem::Acl(_)) => Ok(()),
         Err(_) => Err(Error::UnsafeDirectory(path.to_owned())),
     }
 }
@@ -274,6 +295,31 @@ mod windows_tests {
             let other = Paths::with_environment(Path::new(spelling), None, &temporary)?;
             assert_eq!(other.socket, first.socket, "{spelling}");
         }
+        Ok(())
+    }
+
+    /// A home reached through a junction keeps its pipe name once it is created,
+    /// as when the CLI hashes it before spawning the daemon and the daemon after.
+    #[test]
+    fn pipe_name_survives_creating_the_home() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let target = directory.path().join("target");
+        fs::create_dir(&target)?;
+        let link = directory.path().join("link");
+        let status = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        assert!(status.success(), "mklink /J failed");
+        let home = link.join("home");
+        let before = Paths::with_environment(&home, None, directory.path())?;
+        fs::create_dir(&home)?;
+        let after = Paths::with_environment(&home, None, directory.path())?;
+        assert_eq!(before.socket, after.socket);
+        let direct = Paths::with_environment(&target.join("home"), None, directory.path())?;
+        assert_eq!(after.socket, direct.socket);
         Ok(())
     }
 

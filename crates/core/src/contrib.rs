@@ -46,7 +46,7 @@ pub enum UnitKind {
 /// Command before contributor arguments are appended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DraftCommand {
-    /// Shell text, run with `/bin/sh -c`.
+    /// Shell text, run with the lane's [`crate::shell::Shell`] (`/bin/sh -c` on Unix).
     Shell(String),
     /// Executable and arguments, run without a shell.
     Argv(Vec<String>),
@@ -116,7 +116,8 @@ pub struct ContribCx<'a> {
     pub public_url: Option<&'a str>,
     pub pty: bool,
     pub script: Option<&'a ScriptInfo>,
-    /// Environment of the client that started the lane.
+    /// Environment of the client that started the lane. Look names up with
+    /// [`crate::env::get`], since Windows names ignore case.
     pub client_env: &'a BTreeMap<String, String>,
     /// Trust variables from the CA, keyed by [`CA_CERT_ENV`] and [`CA_BUNDLE_ENV`].
     pub ca_env: &'a BTreeMap<String, String>,

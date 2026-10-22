@@ -312,7 +312,10 @@ pub(crate) fn relative_dir(
         } else {
             PathBuf::from(raw)
         };
-    let relative = if expanded.is_absolute() {
+    // `has_root`, not `is_absolute`: imported configs come from Unix tools, and
+    // on Windows `/srv/x` has a root but no drive, yet still points outside.
+    // On Unix the two are the same.
+    let relative = if expanded.has_root() {
         match expanded.strip_prefix(project) {
             Ok(inside) => inside.to_path_buf(),
             Err(_) => {

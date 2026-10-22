@@ -29,7 +29,8 @@ fn main() -> Result<(), AllocationError> {
 
 - `ports`: block sizing, stable named offsets, reservations, and explicit offset GC.
 - `refs`: lane and unit reference parsing, context-aware resolution, globs, and tags.
-- `env::assemble`: environment precedence with source-layer attribution.
+- `env::assemble`: environment precedence with source-layer attribution. `env::{get, insert, remove}` treat names case-insensitively on Windows (`Path` and `PATH` are one variable).
+- `shell::Shell`: the shell for `run:` strings and `ready.cmd` (`/bin/sh -c`, Git for Windows' `sh.exe`, or the `cmd.exe` fallback).
 - `Runner` and `Unit`: process launch, terminal I/O, stopping, exit waiting, and tracked process identities.
 - `contrib::{Contributor, SecretsProvider, ScriptRunner}`: launch customization, secret lookup, and script command rendering.
 - `gate::{StartGate, PressureSource}`: startup pacing slots and queue snapshots, and system CPU and memory pressure readings.
