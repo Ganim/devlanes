@@ -49,62 +49,232 @@ impl From<devlanes_client::Error> for ApiError {
     }
 }
 
-/// One unit's resource usage from `Method::Metrics`.
+/// What the monitor asks `metrics` for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetricsQuery {
+    /// How far back histories reach.
+    pub range_ms: u64,
+    /// Buckets per history, about the width of the widest graph.
+    pub points: usize,
+}
+
+/// One bucket of a history with its spread: `[start_ms, cpu_min, cpu_avg,
+/// cpu_max, mem_min, mem_avg, mem_max]` on the wire.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Window {
+    pub start_ms: u64,
+    pub cpu_min: f64,
+    pub cpu_avg: f64,
+    pub cpu_max: f64,
+    pub mem_min: u64,
+    pub mem_avg: u64,
+    pub mem_max: u64,
+}
+
+/// One unit's or container's resource usage from `Method::Metrics`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UnitMetrics {
+    /// The lane, or `<project> (shared)` for a project-wide container.
     pub lane: String,
     pub unit: String,
+    /// `service`, `task`, `exec` or `container`; empty from older daemons.
+    pub kind: String,
+    pub role: Option<String>,
+    /// The Docker container name, on container rows.
+    pub container: Option<String>,
+    pub shared: bool,
+    /// Lanes that use a container.
+    pub lanes: Vec<String>,
     pub cpu_percent: Option<f64>,
     pub memory_bytes: Option<u64>,
-    /// `(ts_ms, cpu_percent, memory_bytes)`, oldest first.
+    /// Highest CPU and memory since the lane started.
+    pub peak_cpu_percent: Option<f64>,
+    pub peak_memory_bytes: Option<u64>,
+    /// `(ts_ms, cpu_percent, memory_bytes)`, oldest first; with buckets, the
+    /// highest CPU and the average memory of each.
     pub history: Vec<(u64, f64, u64)>,
-    /// Typical memory of recent runs (M13.5 baseline), when the daemon sends one.
+    pub windows: Vec<Window>,
+    /// Typical memory of recent runs, when the daemon sends one.
     pub baseline_memory_bytes: Option<u64>,
 }
 
 impl UnitMetrics {
-    /// Parses `{units: [{lane, unit, cpu_percent, memory_bytes, history}]}` leniently:
-    /// a daemon without metrics yet returns `{}` or `null`, which is an empty list.
-    pub fn parse_list(value: &Value) -> Vec<Self> {
-        let Some(units) = value.get("units").and_then(Value::as_array) else {
-            return Vec::new();
-        };
-        units
-            .iter()
-            .filter_map(|unit| {
-                let history = unit
-                    .get("history")
-                    .and_then(Value::as_array)
-                    .map(|points| {
-                        points
-                            .iter()
-                            .filter_map(|point| {
-                                let point = point.as_array()?;
-                                Some((
-                                    point.first()?.as_f64()? as u64,
-                                    point.get(1)?.as_f64()?,
-                                    point.get(2)?.as_f64()? as u64,
-                                ))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some(Self {
-                    lane: unit.get("lane")?.as_str()?.to_owned(),
-                    unit: unit.get("unit")?.as_str()?.to_owned(),
-                    cpu_percent: unit.get("cpu_percent").and_then(Value::as_f64),
-                    memory_bytes: unit
-                        .get("memory_bytes")
-                        .and_then(Value::as_f64)
-                        .map(|bytes| bytes as u64),
-                    history,
-                    baseline_memory_bytes: unit
-                        .get("baseline_memory_bytes")
-                        .and_then(Value::as_f64)
-                        .map(|bytes| bytes as u64),
+    /// True for an infra container row.
+    pub fn is_container(&self) -> bool {
+        self.kind == "container"
+    }
+}
+
+/// A lane's totals from its `Lane` series: its units and its own containers,
+/// without shared ones.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LaneMetrics {
+    pub lane: String,
+    pub cpu_percent: Option<f64>,
+    pub memory_bytes: Option<u64>,
+    pub peak_cpu_percent: Option<f64>,
+    pub peak_memory_bytes: Option<u64>,
+    pub history: Vec<(u64, f64, u64)>,
+    pub windows: Vec<Window>,
+}
+
+/// The whole machine, when the daemon reads it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SystemMetrics {
+    pub cpus: Option<u32>,
+    pub memory_total_bytes: Option<u64>,
+    pub available_memory_bytes: Option<u64>,
+    /// Every process on the machine, 0 to 100.
+    pub cpu_percent: Option<f64>,
+    /// `normal`, `warn` or `critical`.
+    pub memory_pressure: Option<String>,
+    pub cpu_stall_percent: Option<f64>,
+    /// `(ts_ms, cpu_percent, available_memory_bytes)`, oldest first.
+    pub history: Vec<(u64, f64, u64)>,
+}
+
+/// Everything one `metrics` call returns.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Metrics {
+    /// The range the histories cover; `None` from daemons that ignore `range_ms`.
+    pub range_ms: Option<u64>,
+    pub units: Vec<UnitMetrics>,
+    pub lanes: Vec<LaneMetrics>,
+    pub system: Option<SystemMetrics>,
+}
+
+/// A number field as `u64`; JSON numbers may arrive as floats.
+fn number(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(Value::as_f64).map(|n| n as u64)
+}
+
+/// `[[ts, cpu, bytes], ...]`, skipping points that do not parse.
+fn points(value: &Value) -> Vec<(u64, f64, u64)> {
+    value
+        .get("history")
+        .and_then(Value::as_array)
+        .map(|points| {
+            points
+                .iter()
+                .filter_map(|point| {
+                    let point = point.as_array()?;
+                    Some((
+                        point.first()?.as_f64()? as u64,
+                        point.get(1)?.as_f64()?,
+                        point.get(2)?.as_f64()? as u64,
+                    ))
                 })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `windows` rows, skipping ones that do not parse.
+fn windows(value: &Value) -> Vec<Window> {
+    value
+        .get("windows")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let row = row.as_array()?;
+                    let at = |i: usize| row.get(i).and_then(Value::as_f64);
+                    Some(Window {
+                        start_ms: at(0)? as u64,
+                        cpu_min: at(1)?,
+                        cpu_avg: at(2)?,
+                        cpu_max: at(3)?,
+                        mem_min: at(4)? as u64,
+                        mem_avg: at(5)? as u64,
+                        mem_max: at(6)? as u64,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+impl Metrics {
+    /// Parses a `metrics` reply leniently: a daemon without metrics yet
+    /// returns `{}` or `null`, which is empty, and older daemons send only
+    /// `units` with `lane`, `unit`, `cpu_percent`, `memory_bytes`, `history`.
+    pub fn parse(value: &Value) -> Self {
+        let text = |row: &Value, key: &str| row.get(key).and_then(Value::as_str).map(str::to_owned);
+        let units = value
+            .get("units")
+            .and_then(Value::as_array)
+            .map(|units| {
+                units
+                    .iter()
+                    .filter_map(|unit| {
+                        Some(UnitMetrics {
+                            lane: text(unit, "lane")?,
+                            unit: text(unit, "unit")?,
+                            kind: text(unit, "kind").unwrap_or_default(),
+                            role: text(unit, "role"),
+                            container: text(unit, "container"),
+                            shared: unit.get("shared").and_then(Value::as_bool) == Some(true),
+                            lanes: unit
+                                .get("lanes")
+                                .and_then(Value::as_array)
+                                .map(|lanes| {
+                                    lanes
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .map(str::to_owned)
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            cpu_percent: unit.get("cpu_percent").and_then(Value::as_f64),
+                            memory_bytes: number(unit, "memory_bytes"),
+                            peak_cpu_percent: unit.get("peak_cpu_percent").and_then(Value::as_f64),
+                            peak_memory_bytes: number(unit, "peak_memory_bytes"),
+                            history: points(unit),
+                            windows: windows(unit),
+                            baseline_memory_bytes: number(unit, "baseline_memory_bytes"),
+                        })
+                    })
+                    .collect()
             })
-            .collect()
+            .unwrap_or_default();
+        let lanes = value
+            .get("lanes")
+            .and_then(Value::as_array)
+            .map(|lanes| {
+                lanes
+                    .iter()
+                    .filter_map(|lane| {
+                        Some(LaneMetrics {
+                            lane: text(lane, "lane")?,
+                            cpu_percent: lane.get("cpu_percent").and_then(Value::as_f64),
+                            memory_bytes: number(lane, "memory_bytes"),
+                            peak_cpu_percent: lane.get("peak_cpu_percent").and_then(Value::as_f64),
+                            peak_memory_bytes: number(lane, "peak_memory_bytes"),
+                            history: points(lane),
+                            windows: windows(lane),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let system = value
+            .get("system")
+            .filter(|s| s.is_object())
+            .map(|system| SystemMetrics {
+                cpus: number(system, "cpus").and_then(|n| u32::try_from(n).ok()),
+                memory_total_bytes: number(system, "memory_total_bytes"),
+                available_memory_bytes: number(system, "available_memory_bytes"),
+                cpu_percent: system.get("cpu_percent").and_then(Value::as_f64),
+                memory_pressure: text(system, "memory_pressure"),
+                cpu_stall_percent: system.get("cpu_stall_percent").and_then(Value::as_f64),
+                history: points(system),
+            });
+        Self {
+            range_ms: number(value, "range_ms"),
+            units,
+            lanes,
+            system,
+        }
     }
 }
 
@@ -138,7 +308,10 @@ pub enum AttachInput {
 #[derive(Debug, Clone)]
 pub enum AttachEvent {
     Output(Bytes),
+    /// The stream failed; it closes next.
     Error(ApiError),
+    /// The daemon refused a resize; the stream goes on (a pipe unit has no terminal).
+    ResizeRefused(ApiError),
 }
 
 /// An open terminal stream. Dropping it detaches; the unit keeps running.
@@ -190,12 +363,13 @@ pub trait DaemonApi: Send + Sync {
         lane: String,
         selection: Selection,
     ) -> Result<Value, ApiError>;
-    /// Runs a task in a lane.
-    async fn run_task(&self, lane: String, params: RunParams) -> Result<Value, ApiError>;
+    /// Runs a task in a lane; `yes` answers the task's `confirm` after the user did.
+    async fn run_task(&self, lane: String, params: RunParams, yes: bool)
+    -> Result<Value, ApiError>;
     /// Reads persisted log lines for deep scrollback.
     async fn logs(&self, lane: String, query: LogQuery) -> Result<Page<LogLine>, ApiError>;
-    /// Resource samples; an empty list when the daemon has none.
-    async fn metrics(&self) -> Result<Vec<UnitMetrics>, ApiError>;
+    /// Resource samples over `query`'s range; empty when the daemon has none.
+    async fn metrics(&self, query: MetricsQuery) -> Result<Metrics, ApiError>;
     /// `daemon.status`: version, pid, uptime, socket, managed processes.
     async fn daemon_status(&self) -> Result<Value, ApiError>;
     /// `doctor`: the daemon's raw facts; the TUI words them as checks.
@@ -213,6 +387,10 @@ pub trait DaemonApi: Send + Sync {
     async fn start_daemon(&self) -> Result<Value, ApiError>;
     /// `profile.list` for a lane: the profiles its config defines.
     async fn profile_list(&self, lane: String) -> Result<ProfileList, ApiError>;
+    /// `task.list` for a lane: every task its config defines, run or not.
+    async fn task_list(&self, _lane: String) -> Result<Vec<TaskInfo>, ApiError> {
+        Ok(Vec::new())
+    }
     /// The daemon's own log file, read directly because the TUI runs on the
     /// same machine. `None` when there is no local file.
     fn daemon_log(&self) -> Option<PathBuf> {
@@ -239,6 +417,53 @@ pub struct ProfileInfo {
     pub skips_infra: bool,
     #[serde(default)]
     pub is_default: bool,
+}
+
+/// One task from `task.list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct TaskInfo {
+    pub name: String,
+    /// The lifecycle hook that runs it (`lane.start`, `lane.create`, ...).
+    #[serde(default)]
+    pub when: Option<String>,
+    #[serde(default)]
+    pub steps: Option<Vec<String>>,
+    /// The config asks before it runs.
+    #[serde(default)]
+    pub confirm: bool,
+    #[serde(default)]
+    pub interactive: bool,
+    /// The newest run the daemon stored, across daemon restarts; `None`
+    /// when the task never ran in this lane.
+    #[serde(default)]
+    pub last_run: Option<LastRun>,
+}
+
+/// A task's newest run from `task.list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct LastRun {
+    /// `running`, `done`, `failed` or `interrupted`.
+    pub state: String,
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
+    #[serde(default)]
+    pub finished_at_ms: Option<u64>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+}
+
+impl TaskInfo {
+    /// Runs as part of every start or the first one.
+    pub fn runs_at_start(&self) -> bool {
+        matches!(self.when.as_deref(), Some("lane.start" | "lane.create"))
+    }
+}
+
+/// `task.list`: `{items: [TaskInfo]}`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct TaskListResult {
+    #[serde(default)]
+    items: Vec<TaskInfo>,
 }
 
 /// `profile.list`: `{lane, items: [ProfileInfo]}`.
@@ -495,7 +720,7 @@ impl DaemonApi for ClientApi {
                             Ok(_) => {}
                             // A refused resize leaves the stream usable; report and go on.
                             Err(devlanes_client::Error::Rpc(error)) => {
-                                let event = AttachEvent::Error(ApiError::Rpc(error));
+                                let event = AttachEvent::ResizeRefused(ApiError::Rpc(error));
                                 if output_tx.send(event).await.is_err() {
                                     return;
                                 }
@@ -543,13 +768,15 @@ impl DaemonApi for ClientApi {
     }
 
     /// Calls `run` on a dedicated connection.
-    async fn run_task(&self, lane: String, params: RunParams) -> Result<Value, ApiError> {
-        self.oneshot(
-            Method::Run,
-            to_value(&params)?,
-            self.context(Some(lane), true),
-        )
-        .await
+    async fn run_task(
+        &self,
+        lane: String,
+        params: RunParams,
+        yes: bool,
+    ) -> Result<Value, ApiError> {
+        let mut context = self.context(Some(lane), true);
+        context.yes = yes;
+        self.oneshot(Method::Run, to_value(&params)?, context).await
     }
 
     /// Calls `logs` on the shared connection.
@@ -565,11 +792,16 @@ impl DaemonApi for ClientApi {
     }
 
     /// Calls `metrics` on the shared connection.
-    async fn metrics(&self) -> Result<Vec<UnitMetrics>, ApiError> {
+    async fn metrics(&self, query: MetricsQuery) -> Result<Metrics, ApiError> {
+        let params = json!({
+            "range_ms": query.range_ms,
+            "points": query.points,
+            "windows": true,
+        });
         let value = self
-            .shared_request(Method::Metrics, json!({}), self.context(None, false))
+            .shared_request(Method::Metrics, params, self.context(None, false))
             .await?;
-        Ok(UnitMetrics::parse_list(&value))
+        Ok(Metrics::parse(&value))
     }
 
     /// Calls `daemon.status` on the shared connection.
@@ -654,6 +886,13 @@ impl DaemonApi for ClientApi {
         from_value(value)
     }
 
+    async fn task_list(&self, lane: String) -> Result<Vec<TaskInfo>, ApiError> {
+        let value = self
+            .shared_request(Method::TaskList, json!({}), self.context(Some(lane), false))
+            .await?;
+        from_value::<TaskListResult>(value).map(|list| list.items)
+    }
+
     /// `$DEVLANES_HOME/logs/daemon.log`.
     fn daemon_log(&self) -> Option<PathBuf> {
         Some(self.paths.logs.join("daemon.log"))
@@ -671,17 +910,46 @@ mod tests {
 
     #[test]
     fn metrics_parse_tolerates_missing_and_partial_data() {
-        assert!(UnitMetrics::parse_list(&Value::Null).is_empty());
-        assert!(UnitMetrics::parse_list(&json!({})).is_empty());
-        let parsed = UnitMetrics::parse_list(&json!({"units": [
+        assert_eq!(Metrics::parse(&Value::Null), Metrics::default());
+        assert_eq!(Metrics::parse(&json!({})), Metrics::default());
+        let parsed = Metrics::parse(&json!({"units": [
             {"lane": "acme@0", "unit": "api", "cpu_percent": 12.5, "memory_bytes": 1024,
              "history": [[1, 1.0, 10], [2, 2.5, 20], ["bad"]]},
             {"lane": "acme@0"},
             {"lane": "acme@0", "unit": "web"}
         ]}));
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].history, vec![(1, 1.0, 10), (2, 2.5, 20)]);
-        assert_eq!(parsed[1].cpu_percent, None);
+        assert_eq!(parsed.units.len(), 2);
+        assert_eq!(parsed.units[0].history, vec![(1, 1.0, 10), (2, 2.5, 20)]);
+        assert_eq!(parsed.units[1].cpu_percent, None);
+        assert_eq!(parsed.system, None);
+    }
+
+    #[test]
+    fn metrics_parse_reads_containers_lanes_windows_and_the_system() {
+        let parsed = Metrics::parse(&json!({
+            "range_ms": 900000,
+            "units": [{"lane": "acme (shared)", "unit": "postgres", "kind": "container",
+                       "container": "acme-postgres-1", "shared": true, "lanes": ["acme@0", "acme@1"],
+                       "cpu_percent": 6.0, "memory_bytes": 598000000.0,
+                       "windows": [[1, 0.5, 2.0, 9.0, 10, 20, 30], [2, "bad"]]}],
+            "lanes": [{"lane": "acme@0", "cpu_percent": 395.0, "memory_bytes": 7000,
+                       "peak_cpu_percent": 410.0, "history": [[1, 300.0, 6000]]}],
+            "system": {"cpus": 10, "memory_total_bytes": 34359738368u64, "cpu_percent": 80.0,
+                       "memory_pressure": "normal", "history": [[1, 70.0, 9000]]}
+        }));
+        assert_eq!(parsed.range_ms, Some(900_000));
+        let postgres = &parsed.units[0];
+        assert!(postgres.is_container() && postgres.shared);
+        assert_eq!(postgres.lanes, ["acme@0", "acme@1"]);
+        assert_eq!(postgres.memory_bytes, Some(598_000_000));
+        assert_eq!(postgres.windows.len(), 1);
+        assert_eq!(postgres.windows[0].cpu_max, 9.0);
+        assert_eq!(parsed.lanes[0].peak_cpu_percent, Some(410.0));
+        let system = parsed
+            .system
+            .as_ref()
+            .map(|s| (s.cpus, s.memory_pressure.as_deref()));
+        assert_eq!(system, Some((Some(10), Some("normal"))));
     }
 
     #[test]

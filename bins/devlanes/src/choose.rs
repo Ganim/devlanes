@@ -125,7 +125,7 @@ pub async fn choose(
 
 /// Only a person at a terminal is asked: human mode outside CI, with stdin,
 /// stdout and stderr (where the picker draws) all terminals.
-pub(crate) fn interactive(runtime: &Runtime) -> bool {
+fn interactive(runtime: &Runtime) -> bool {
     use std::io::IsTerminal;
     runtime.mode == OutputMode::Human
         && runtime.ci.is_none()
@@ -172,7 +172,7 @@ async fn has_config(dir: &Path) -> bool {
 }
 
 /// Runs the picker on stderr in raw mode; `None` when cancelled. Blocking.
-pub(crate) fn pick(mut picker: Picker) -> std::io::Result<Option<Vec<String>>> {
+fn pick(mut picker: Picker) -> std::io::Result<Option<Vec<String>>> {
     let mut out = std::io::stderr();
     terminal::enable_raw_mode()?;
     let height = terminal::size().map_or(12, |(_, rows)| usize::from(rows).clamp(4, 14));

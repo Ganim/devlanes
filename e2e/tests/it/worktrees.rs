@@ -1,6 +1,6 @@
-//! Worktree detection while the daemon runs (plan M5): `git worktree add`, `move` and
-//! `remove` reach `status` through the daemon's watcher, without a command that
-//! re-lists worktrees.
+//! Worktrees while the daemon runs: a worktree becomes a lane once devlanes runs
+//! in it; `git worktree move` and `remove` reach `status` through the daemon's
+//! watcher, without a command that re-lists worktrees.
 
 use std::{path::Path, time::Duration};
 
@@ -42,9 +42,10 @@ fn same_path(lane: &Value, expected: &Path) -> bool {
 }
 
 /// Add, move and remove worktrees while lane 0 runs: a new branch worktree and a
-/// detached one appear as idle lanes with ports and hostnames; a move keeps the lane;
-/// removing a running worktree stops its lane and keeps its record and logs; lane 0
-/// is never touched.
+/// detached one are no lanes until `status` runs in them, then idle lanes with
+/// ports and hostnames; a move keeps the lane; removing a running worktree stops
+/// its lane, and once idle it is cleaned at the next re-list while its logs stay
+/// on disk; lane 0 is never touched.
 #[test]
 fn worktree_add_move_and_remove_reach_the_running_daemon() -> Result<()> {
     let lab = Lab::new("two-services", BUDGET)?;
@@ -63,6 +64,14 @@ fn worktree_add_move_and_remove_reach_the_running_daemon() -> Result<()> {
 
     // Add: a branch with a slash, then a detached HEAD.
     let first = lab.add_worktree("feat/watch")?;
+    // The watcher sees it, yet existing does not make it a lane.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        watched(&lab)?.len(),
+        1,
+        "a new worktree is no lane by itself"
+    );
+    lab.lanes(&first)?;
     let one = lane_where(&lab, "the new worktree as lane 1", "fixture-two@1", |l| {
         same_path(l, &first)
     })?;
@@ -89,6 +98,7 @@ fn worktree_add_move_and_remove_reach_the_running_daemon() -> Result<()> {
         "--detach",
         &detached.to_string_lossy(),
     ])?;
+    lab.lanes(&detached)?;
     let two = lane_where(
         &lab,
         "the detached worktree as lane 2",
@@ -155,6 +165,19 @@ fn worktree_add_move_and_remove_reach_the_running_daemon() -> Result<()> {
             .as_array()
             .is_some_and(|items| items.iter().any(|l| l["text"] == "api-ready")),
         "a removed lane keeps its logs: {logs}"
+    );
+
+    // The next re-list cleans the idle lane whose folder is gone; its logs stay.
+    lab.json(lab.repo(), &["lane", "ls"])?;
+    // The daemon waits 5 s before it cleans, in case the folder comes back.
+    lab.eventually("lane 1 to be cleaned", Duration::from_secs(20), || {
+        Ok(lane(&watched(&lab)?, "fixture-two@1")
+            .is_none()
+            .then_some(()))
+    })?;
+    assert!(
+        lab.home().join("logs/fixture-two/1/api").is_dir(),
+        "a cleaned lane keeps its logs"
     );
 
     // The detached lane and lane 0 are untouched.

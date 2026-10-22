@@ -1,6 +1,6 @@
 # Design
 
-A lane corresponds to a Git worktree. Lane 0 follows the primary branch; other worktrees keep persisted indexes. Worktree identity uses the Git common directory and worktree administration entry, so moving a worktree preserves its identity. Non-Git projects have one lane.
+A lane corresponds to a Git worktree. Lane 0 follows the primary branch; other worktrees keep persisted indexes. A worktree other than the primary one gets its lane the first time devlanes runs in it, and a lane whose folder is gone is cleaned once nothing runs in it. Worktree identity uses the Git common directory and worktree administration entry, so moving a worktree preserves its identity. `lane new --name` adds another lane for one folder: a worktree row whose identity is the folder's plus `#lane=<name>`, which follows that folder and never takes lane 0. Non-Git projects have one lane per folder unless extra lanes are added.
 
 The daemon owns processes, ports, proxy routes and SQLite. CLI and TUI clients exchange structured requests and events with it. Closing a client does not stop services. Integration crates implement core traits and are registered by the binary; Docker containers belong to infrastructure adapters rather than process runners.
 

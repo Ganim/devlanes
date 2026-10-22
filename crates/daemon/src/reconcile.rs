@@ -15,6 +15,38 @@ use crate::{
 };
 
 impl Inner {
+    /// Keeps `ContainerSummary.state` current: the event's container gets the
+    /// state it leaves, in every lane that uses it, and those lanes are published.
+    pub(crate) fn apply_container_event(&self, event: &crate::integrations::InfraEvent) {
+        let state = event.container_state();
+        for (project, lane) in self.all_lanes() {
+            let changed = {
+                let mut st = lane.st();
+                let mut changed = false;
+                for container in st
+                    .infra_containers
+                    .iter_mut()
+                    .filter(|container| container.docker == event.container)
+                {
+                    // `stop` follows `die`, which already carried the exit code.
+                    let keeps_code = state == "exited"
+                        && container
+                            .state
+                            .as_deref()
+                            .is_some_and(|old| old.starts_with("exited "));
+                    if !keeps_code && container.state.as_deref() != Some(state.as_str()) {
+                        container.state = Some(state.clone());
+                        changed = true;
+                    }
+                }
+                changed
+            };
+            if changed {
+                self.emit_lane(&project, &lane);
+            }
+        }
+    }
+
     /// Reloads known projects, records surviving units as orphans and starts
     /// background loops. Never terminates anything.
     pub(crate) async fn reconcile(self: &Arc<Self>) -> Result<(), RpcError> {
@@ -147,7 +179,10 @@ impl Inner {
                         event = events.recv() => event,
                     };
                     match event {
-                        Ok(event) => engine.bus.emit("infra.changed", json!(event)),
+                        Ok(event) => {
+                            engine.apply_container_event(&event);
+                            engine.bus.emit("infra.changed", json!(event));
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                     }

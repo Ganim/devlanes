@@ -30,7 +30,6 @@ Commands:
   url          Print, open and list service URLs and routed hostnames
   infra        Start, stop and inspect the project's containers
   config       Validate devlanes.yaml
-  migrate      Convert mprocs, dekit, Procfile, pm2 and similar setups into devlanes.yaml
   certs        Trust the devlanes CA and install the /etc/hosts helper
   secrets      Hand secrets from fnox to the daemon
   remote       Connect to boxes over SSH and mirror their lanes here

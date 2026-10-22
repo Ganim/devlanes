@@ -6,7 +6,7 @@ use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
 use devlanes_proto::{AttachResult, RpcError, UnitSummary, events};
 use devlanes_tui::{
     ApiError, DaemonApi, Options,
-    app::{App, Dialog, Msg, Tab, Target, areas, error_panel_area},
+    app::{App, Msg, Target, View, areas},
     drive, ui,
 };
 use futures_util::stream;
@@ -85,13 +85,9 @@ async fn portal_app(width: u16, height: u16) -> Result<App, Box<dyn std::error::
     let api = FakeApi::with_lanes(lanes());
     let mut app = App::new(width, height);
     app.update(Msg::Status(api.status().await));
-    for _ in 0..10 {
-        if app.selected_lane().is_some_and(|l| l.reference == "acme@1") {
-            break;
-        }
-        app.update(key(KeyCode::Char('j')));
-    }
-    app.update(key(KeyCode::Char('l')));
+    // The next lane, then down to its unit: whole lane, services, portal.
+    app.update(key(KeyCode::Char(']')));
+    app.update(key(KeyCode::Char('j')));
     app.update(key(KeyCode::Char('j')));
     let generation = app
         .attached
@@ -141,26 +137,15 @@ fn check_layout(app: &mut App) -> Result<Buffer, Box<dyn std::error::Error>> {
             "row {y} changed with the notice"
         );
     }
-    assert!(row(&with_notice, 0).contains("! start acme@1:portal"));
+    assert!(row(&with_notice, 0).contains("✕ start acme@1:portal failed"));
     assert!(
-        row(&with_notice, 0).ends_with("… "),
+        row(&with_notice, 0).contains('…'),
         "notice is clipped: {}",
         row(&with_notice, 0)
     );
+    assert!(row(&with_notice, 0).ends_with("M monitor   D daemon "));
     let layout = areas(width, height, false).ok_or("too small")?;
-    let pane = layout.pane;
-    for y in pane.y + 1..pane.bottom() - 1 {
-        assert_eq!(
-            with_notice[(pane.x, y)].symbol(),
-            "│",
-            "left pane border at row {y}"
-        );
-        assert_eq!(
-            with_notice[(pane.right() - 1, y)].symbol(),
-            "│",
-            "right pane border at row {y}"
-        );
-    }
+    assert_boxes(&with_notice, width, height, "notice");
     let pane_text: Vec<String> = (layout.pane_inner.y..layout.pane_inner.bottom())
         .map(|y| {
             (layout.pane_inner.x..layout.pane_inner.right())
@@ -169,34 +154,40 @@ fn check_layout(app: &mut App) -> Result<Buffer, Box<dyn std::error::Error>> {
         })
         .collect();
     let joined = pane_text.join("\n");
-    assert!(joined.contains("start acme@1:portal failed"), "{joined}");
+    assert!(joined.contains("Start acme@1:portal failed"), "{joined}");
+    // A narrow pane wraps the summary.
+    let flat = joined.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        joined.contains("compose failed (exit status: 1)"),
+        flat.contains("docker compose failed (exit status 1)"),
         "{joined}"
     );
     // stderr comes before the command: it says what went wrong.
-    assert!(joined.contains("error: open"), "{joined}");
-    assert!(joined.contains("file or directory"), "{joined}");
+    assert!(flat.contains("error: open"), "{joined}");
+    assert!(flat.contains("file or directory"), "{joined}");
     if height >= 40 {
         assert!(
-            joined.contains("command: docker compose -p acme"),
+            joined.contains("command  docker compose -p acme"),
             "{joined}"
         );
-        assert!(joined.contains("hint: devlanes infra status"), "{joined}");
         assert!(
-            joined.contains("    compose could not load"),
+            joined.contains("run      devlanes infra status"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("      compose could not load"),
             "stderr indent: {joined}"
         );
     } else {
-        assert!(joined.contains("… e shows the full error"), "{joined}");
+        assert!(joined.contains("… z shows the rest"), "{joined}");
     }
-    // The badge may be clipped by a narrow list, never pushed past its border.
+    // The badge may be clipped by a narrow list, never pushed past the separator.
     let list = layout.list.ok_or("no list")?;
     let rows: Vec<String> = (list.y..list.bottom())
         .map(|y| row(&with_notice, y))
         .collect();
     assert!(
-        rows.iter().any(|r| r.contains("portal  idle  ! start")),
+        rows.iter()
+            .any(|r| r.contains("portal") && r.contains("start failed")),
         "row badge missing: {rows:#?}"
     );
     Ok(with_notice)
@@ -221,48 +212,24 @@ async fn compose_failure_at_160x45() -> TestResult {
 }
 
 #[tokio::test]
-async fn error_list_shows_full_text_and_scrolls() -> TestResult {
-    let mut app = portal_app(80, 24).await?;
+async fn failures_show_inline_without_an_overlay() -> TestResult {
+    let mut app = portal_app(120, 40).await?;
     fail_start(&mut app);
-    app.update(Msg::Failed {
-        what: "open https://acme.localhost".into(),
-        message: "xdg-open exited with exit status: 3".into(),
-    });
+    // `e` no longer opens anything; the failure is on the row and in the pane.
     app.update(key(KeyCode::Char('e')));
-    assert!(matches!(app.dialog, Some(Dialog::Errors { scroll: 0 })));
-    let buffer = render(&app)?;
-    let panel = error_panel_area(app.size);
-    assert_eq!(buffer[(panel.x, panel.y)].symbol(), "┌");
-    assert_eq!(
-        buffer[(panel.right() - 1, panel.bottom() - 1)].symbol(),
-        "┘"
-    );
-    insta::assert_snapshot!("error_list_80x24", screen(&buffer));
-    // Enough errors to need scrolling; it stops once the last line is at the bottom.
-    for index in 0..6 {
-        app.update(Msg::Failed {
-            what: format!("open terminal {index}"),
-            message: "set terminal in the user config".into(),
-        });
-    }
-    app.update(key(KeyCode::Esc));
-    app.update(key(KeyCode::Char('e')));
-    for _ in 0..200 {
-        app.update(key(KeyCode::Char('j')));
-    }
-    let Some(Dialog::Errors { scroll }) = app.dialog else {
-        return Err("error list closed".into());
-    };
-    let total = app.error_panel_lines(usize::from(panel.width - 2)).len();
-    let height = usize::from(panel.height - 2);
-    assert!(total > height, "the list must overflow for this test");
-    assert_eq!(scroll, total - height);
-    let bottom = render(&app)?;
-    let last = row(&bottom, panel.bottom() - 2);
-    assert!(last.contains("hint: devlanes infra status"), "{last}");
-    app.update(key(KeyCode::Esc));
     assert!(app.dialog.is_none());
-    assert_eq!(app.errors.len(), 8, "closing keeps the list");
+    let text = screen(&render(&app)?);
+    assert!(text.contains("start failed"), "row badge: {text}");
+    assert!(
+        text.contains("docker compose failed (exit status 1)"),
+        "{text}"
+    );
+    assert!(text.contains("last line of stderr"), "stderr tail: {text}");
+    assert!(text.contains("run      devlanes infra status"), "{text}");
+    assert!(
+        !text.contains("e errors"),
+        "no key for the old overlay: {text}"
+    );
     Ok(())
 }
 
@@ -336,13 +303,13 @@ async fn every_failure_goes_to_the_list() -> TestResult {
         whats,
         [
             "daemon connection",
-            "terminal acme@1:portal",
+            "terminal of acme@1:portal",
             "copy",
             "run seed in acme@1",
-            "metrics",
-            "status",
+            "resource samples",
+            "daemon status",
             "daemon connection",
-            "subscribe",
+            "live updates",
         ]
     );
     for entry in &app.errors {
@@ -429,46 +396,38 @@ pub fn assert_clean(buffer: &Buffer, context: &str) {
     }
 }
 
-/// Block corners and side borders of the list and the pane.
-fn assert_borders(buffer: &Buffer, width: u16, height: u16, context: &str) {
-    let Some(layout) = areas(width, height, false) else {
+/// The list and pane boxes are whole: corners in place and side borders on
+/// every row, so no text from either side spilled over them. The pane's
+/// `├─ last output ─┤` divider counts as a border.
+pub fn assert_boxes(buffer: &Buffer, width: u16, height: u16, context: &str) {
+    // The first-run strip, when it shows, moves the boxes up one row.
+    let strip = (0..height).any(|y| row(buffer, y).contains("enter types into a service"));
+    let Some(layout) = devlanes_tui::app::areas_with(width, height, false, strip) else {
         return;
     };
-    let list = layout.list.unwrap_or_default();
-    for rect in [list, layout.pane] {
+    for rect in layout.list_box.into_iter().chain([layout.pane_box]) {
         let (left, right) = (rect.x, rect.right() - 1);
         let (top, bottom) = (rect.y, rect.bottom() - 1);
-        assert_eq!(
-            buffer[(left, top)].symbol(),
-            "┌",
-            "{context}: top-left of {rect:?}"
-        );
-        assert_eq!(
-            buffer[(right, top)].symbol(),
-            "┐",
-            "{context}: top-right of {rect:?}"
-        );
-        assert_eq!(
-            buffer[(left, bottom)].symbol(),
-            "└",
-            "{context}: bottom-left of {rect:?}"
-        );
-        assert_eq!(
-            buffer[(right, bottom)].symbol(),
-            "┘",
-            "{context}: bottom-right of {rect:?}"
-        );
+        for (x, y, corner) in [
+            (left, top, "┌"),
+            (right, top, "┐"),
+            (left, bottom, "└"),
+            (right, bottom, "┘"),
+        ] {
+            assert_eq!(
+                buffer[(x, y)].symbol(),
+                corner,
+                "{context}: corner of {rect:?}"
+            );
+        }
         for y in top + 1..bottom {
-            assert_eq!(
-                buffer[(left, y)].symbol(),
-                "│",
-                "{context}: left border row {y}"
-            );
-            assert_eq!(
-                buffer[(right, y)].symbol(),
-                "│",
-                "{context}: right border row {y}"
-            );
+            for (x, side) in [(left, ["│", "├"]), (right, ["│", "┤"])] {
+                let symbol = buffer[(x, y)].symbol();
+                assert!(
+                    side.contains(&symbol),
+                    "{context}: border of {rect:?} at row {y}: {symbol:?}"
+                );
+            }
         }
     }
 }
@@ -521,7 +480,7 @@ async fn random_long_text_never_breaks_borders() -> TestResult {
         });
         let buffer = render(&app)?;
         assert_clean(&buffer, &context);
-        assert_borders(&buffer, width, height, &context);
+        assert_boxes(&buffer, width, height, &context);
 
         // A unit row whose terminal received random bytes.
         app.update(key(KeyCode::Char('l')));
@@ -550,28 +509,18 @@ async fn random_long_text_never_breaks_borders() -> TestResult {
         });
         let buffer = render(&app)?;
         assert_clean(&buffer, &context);
-        assert_borders(&buffer, width, height, &context);
+        assert_boxes(&buffer, width, height, &context);
 
-        // The task prompt, the error list and the monitor with the same text.
-        app.update(key(KeyCode::Char('t')));
+        // The clean dialog, the monitor and the daemon page with the same text.
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('C'),
+            KeyModifiers::SHIFT,
+        )));
         assert_clean(&render(&app)?, &context);
         app.update(key(KeyCode::Esc));
-        app.update(key(KeyCode::Char('e')));
-        let buffer = render(&app)?;
-        assert_clean(&buffer, &context);
-        let panel = error_panel_area(app.size);
-        assert_eq!(
-            buffer[(panel.x, panel.y)].symbol(),
-            "┌",
-            "{context}: error list"
-        );
-        assert_eq!(
-            buffer[(panel.right() - 1, panel.bottom() - 1)].symbol(),
-            "┘",
-            "{context}"
-        );
-        app.update(key(KeyCode::Esc));
-        app.tab = Tab::Monitor;
+        app.view = View::Monitor;
+        assert_clean(&render(&app)?, &context);
+        app.view = View::Daemon;
         assert_clean(&render(&app)?, &context);
     }
     Ok(())
@@ -606,7 +555,8 @@ async fn drive_shows_a_failed_start_in_the_header_and_on_the_row() -> TestResult
                     KeyModifiers::NONE,
                 )))
             };
-            for c in ['j', 'j', 'l', 'j', 's'] {
+            // The next lane, down to portal, start it.
+            for c in [']', 'j', 'j', 's'] {
                 keys_tx.send(press(c)).await.ok();
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -634,11 +584,11 @@ async fn drive_shows_a_failed_start_in_the_header_and_on_the_row() -> TestResult
     );
     let buffer = terminal.backend().buffer().clone();
     assert!(
-        row(&buffer, 0).contains("! start acme@1:portal"),
+        row(&buffer, 0).contains("✕ start acme@1:portal failed"),
         "{}",
         row(&buffer, 0)
     );
     assert_clean(&buffer, "drive");
-    assert_borders(&buffer, 80, 24, "drive");
+    assert_boxes(&buffer, 80, 24, "drive");
     Ok(())
 }

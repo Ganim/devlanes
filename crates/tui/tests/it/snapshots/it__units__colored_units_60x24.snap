@@ -1,0 +1,30 @@
+---
+source: crates/tui/tests/it/units.rs
+expression: "styled(&buffer, 2..15)"
+---
+"┌ main @0 ───────────────────┐┌ worker  failed ────────────┐"
+    0..0 DarkGray/-, 10..30 DarkGray/-, 40..45 Red/-, 47..59 DarkGray/-
+"│ ● whole lane      1 failed ││ failed    exited with code │"
+    0..0 DarkGray/-, 2..3 Green/-, 20..27 Red/-, 29..30 DarkGray/-, 42..57 Red/-, 59..59 DarkGray/-
+"│                            ││           1                │"
+    0..0 DarkGray/-, 29..30 DarkGray/-, 42..42 Red/-, 59..59 DarkGray/-
+"│ ▾ services               5 ││ next      r restarts it    │"
+    0..0 DarkGray/-, 29..30 DarkGray/-, 59..59 DarkGray/-
+"│ ▍ ● Api                    ││           devlanes logs    │"
+    0..0 DarkGray/-, 2..2 Blue/-, 4..5 Green/-, 29..30 DarkGray/-, 59..59 DarkGray/-
+"│ ▍ ● web                    ││           acme@0:worker    │"
+    0..0 DarkGray/-, 2..2 Green/-, 4..5 Green/-, 29..30 DarkGray/-, 59..59 DarkGray/-
+"│ ▍ ✕ worker failed · exit 1 ││           prints the whole │"
+    0..0 DarkGray/-, 29..30 DarkGray/-, 59..59 DarkGray/-
+"│   ▾ ad-hoc         2 ready ││           log              │"
+    0..0 DarkGray/-, 29..30 DarkGray/-, 59..59 DarkGray/-
+"│     ● adhoc                │├─ last output ──────────────┤"
+    0..0 DarkGray/-, 6..7 Green/-, 29..59 DarkGray/-
+"│     ● zz-shell             ││                            │"
+    0..0 DarkGray/-, 6..7 Green/-, 29..30 DarkGray/-, 59..59 DarkGray/-
+"│                            ││                            │"
+    0..0 DarkGray/-, 29..30 DarkGray/-, 59..59 DarkGray/-
+"│ ▾ tasks                  1 ││                            │"
+    0..0 DarkGray/-, 29..30 DarkGray/-, 59..59 DarkGray/-
+"│   ■ migrate          ended ││                            │"
+    0..0 DarkGray/-, 29..30 DarkGray/-, 59..59 DarkGray/-

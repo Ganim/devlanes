@@ -297,6 +297,11 @@ impl HostsClient {
         Ok(version)
     }
 
+    /// Whether the helper is installed: one `lstat`, no sudo.
+    pub fn helper_installed(&self) -> bool {
+        self.ensure_installed().is_ok()
+    }
+
     /// Fails with [`HostsError::HelperMissing`] unless the helper is a regular file.
     fn ensure_installed(&self) -> Result<(), HostsError> {
         match self.fs.lstat(&self.helper) {

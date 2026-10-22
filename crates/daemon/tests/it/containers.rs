@@ -295,3 +295,134 @@ async fn infra_containers_are_sampled() {
     .await
     .expect("timeout");
 }
+
+/// `ContainerSummary.state` of the lane's `db` container.
+async fn db_state(h: &crate::Harness, main: &std::path::Path) -> Option<String> {
+    let status = h.call(Method::Status, json!({}), cx(main)).await.ok()?;
+    let lanes: Page<LaneSummary> = serde_json::from_value(status).ok()?;
+    lanes.items[0]
+        .containers
+        .iter()
+        .find(|c| c.name == "db")
+        .and_then(|c| c.state.clone())
+}
+
+/// A machine at 37% CPU with 4 GiB of 16 GiB available, under warn pressure.
+struct FakeMachine;
+
+#[async_trait]
+impl devlanes_core::gate::PressureSource for FakeMachine {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+    async fn sample(&self) -> Result<devlanes_core::gate::PressureSample, devlanes_core::Error> {
+        Ok(devlanes_core::gate::PressureSample {
+            cpu_percent: Some(37.0),
+            memory: Some(devlanes_core::gate::MemoryPressure::Warn),
+            cpu_stall_percent: None,
+        })
+    }
+    async fn available_memory(&self) -> Result<Option<u64>, devlanes_core::Error> {
+        Ok(Some(4 << 30))
+    }
+    async fn total_memory(&self) -> Result<Option<u64>, devlanes_core::Error> {
+        Ok(Some(16 << 30))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// `metrics` sends the machine, lane totals with peaks since the start, the
+/// lanes of each container, windows and bucketed histories on request; a
+/// container event changes `ContainerSummary.state`.
+async fn metrics_carry_system_lanes_and_container_state() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                infra: true,
+                metrics: vec![Arc::new(FakeDocker::default())],
+                system: Some(Arc::new(FakeMachine)),
+                ..Setup::default()
+            },
+        )
+        .await;
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        let metrics = h
+            .call(
+                Method::Metrics,
+                json!({"range_ms": 3_600_000, "points": 30}),
+                cx(&main),
+            )
+            .await
+            .expect("metrics");
+        assert_eq!(metrics["range_ms"], 3_600_000);
+        let system = &metrics["system"];
+        assert_eq!(system["cpu_percent"], 37.0, "{system}");
+        assert_eq!(system["memory_pressure"], "warn");
+        assert_eq!(system["available_memory_bytes"], 4_u64 << 30);
+        assert_eq!(system["memory_total_bytes"], 16_u64 << 30);
+        assert!(system["cpus"].as_u64().is_some_and(|cpus| cpus > 0));
+        assert!(!system["history"].as_array().expect("history").is_empty());
+
+        let lane = metrics["lanes"]
+            .as_array()
+            .expect("lanes")
+            .iter()
+            .find(|lane| lane["lane"] == "demo@0")
+            .expect("lane total");
+        assert_eq!(
+            lane["memory_bytes"], 1000,
+            "per-lane containers count: {lane}"
+        );
+        assert_eq!(lane["peak_memory_bytes"], 1000, "{lane}");
+        assert!(
+            lane["windows"].is_array(),
+            "past 15 minutes windows come along: {lane}"
+        );
+
+        let rows = metrics["units"].as_array().expect("units");
+        let cache = rows
+            .iter()
+            .find(|row| row["unit"] == "cache")
+            .expect("cache");
+        assert_eq!(cache["lanes"], json!(["demo@0"]));
+        let api = rows.iter().find(|row| row["unit"] == "api").expect("api");
+        assert_eq!(
+            (&api["kind"], &api["role"]),
+            (&json!("service"), &json!("service"))
+        );
+
+        let short = h
+            .call(Method::Metrics, json!({}), cx(&main))
+            .await
+            .expect("metrics");
+        assert_eq!(short["range_ms"], 900_000, "the default is the raw ring");
+        assert!(short["lanes"][0].get("windows").is_none());
+
+        assert_eq!(db_state(&h, &main).await.as_deref(), Some("healthy"));
+        h.infra.emit(devlanes_daemon::integrations::InfraEvent {
+            project: "demo".into(),
+            lane: Some(0),
+            container: "demo-lane0-db-1".into(),
+            state: "died".into(),
+            exit_code: Some(137),
+        });
+        let exited = crate::eventually(std::time::Duration::from_secs(5), || async {
+            db_state(&h, &main)
+                .await
+                .filter(|state| state == "exited 137")
+        })
+        .await;
+        assert!(exited.is_some(), "the event reaches the summary");
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}

@@ -95,10 +95,10 @@ is used, so rebuilding or replacing the original file mid-install has no effect.
 
 It then asks for your password once (sudo caches it for the remaining commands)
 and runs the commands below, shown for macOS. Linux uses group `root` instead
-of `wheel`.
+of `wheel` and `/usr/bin/test` instead of `/bin/test`.
 
 ```sh
-sudo /usr/bin/test -e /etc/sudoers.d/devlanes    # is there a rule to back up?
+sudo /bin/test -e /etc/sudoers.d/devlanes    # is there a rule to back up?
 sudo /usr/bin/install -d -o root -g wheel -m 0755 -- /usr/local/libexec    # only if missing
 sudo /usr/bin/install -o root -g wheel -m 0755 -- <copy> /usr/local/libexec/.devlanes-hosts.new
 sudo /usr/bin/install -o root -g wheel -m 0440 -- <rule> /etc/sudoers.d/.devlanes.new

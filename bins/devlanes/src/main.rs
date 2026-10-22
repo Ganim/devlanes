@@ -12,7 +12,6 @@ mod driver;
 mod hosts;
 mod local;
 mod local_doctor;
-mod migrate;
 mod notices;
 mod output;
 mod progress;
@@ -80,15 +79,6 @@ fn main() -> ExitCode {
         version = env!("CARGO_PKG_VERSION"),
         "output mode"
     );
-    // Plain file work with no daemon and no async I/O; it never needs the tokio runtime.
-    let action = match action {
-        Action::Migrate(plan) => {
-            let code = migrate::run(&runtime, &plan);
-            verbose::finish(verbose, code);
-            return ExitCode::from(code);
-        }
-        other => other,
-    };
     let tokio = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

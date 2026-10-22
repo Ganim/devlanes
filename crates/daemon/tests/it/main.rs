@@ -7,6 +7,7 @@ mod containers;
 mod engine;
 mod failures;
 mod fakes;
+mod folders;
 mod hosts;
 mod lanes;
 mod leftovers;
@@ -150,6 +151,8 @@ pub struct Setup {
     pub metrics: Vec<Arc<dyn devlanes_metrics::MetricsSource>>,
     /// Port holder lookups; none identifies no holder.
     pub ports: Option<Arc<dyn devlanes_daemon::integrations::PortInspector>>,
+    /// Machine CPU and memory for `metrics.system`.
+    pub system: Option<Arc<dyn devlanes_core::gate::PressureSource>>,
 }
 
 /// Opens an engine over `home` (reusing its state.db when present).
@@ -168,6 +171,7 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
     }
     integ.ca_permitted = setup.ca_permitted;
     integ.metrics = setup.metrics;
+    integ.system_pressure = setup.system;
     if let Some(ports) = setup.ports {
         integ.ports = ports;
     }

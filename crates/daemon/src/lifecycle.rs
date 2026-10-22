@@ -76,6 +76,12 @@ pub(crate) struct SpawnRequest {
     pub color: Option<String>,
     /// Folders mirrored while the unit runs (services only).
     pub sync: Vec<devlanes_resolve::SyncSpec>,
+    /// `services.<name>.name` (services only).
+    pub display_name: Option<String>,
+    /// The readiness check word (services only).
+    pub ready_check: Option<&'static str>,
+    /// `UnitSummary.role`: `service`, `task`, `setup`, `teardown` or `exec`.
+    pub role: &'static str,
 }
 
 /// Copies an environment with its provenance (the type is deliberately not `Clone`).
@@ -110,6 +116,9 @@ impl SpawnRequest {
             preset: service.preset.clone(),
             color: Some(service.color.clone()),
             sync: service.sync.clone(),
+            display_name: service.display_name.clone(),
+            ready_check: Some(ready_word(&service.ready.check)),
+            role: "service",
         }
     }
 
@@ -142,7 +151,21 @@ impl SpawnRequest {
             preset: None,
             color: None,
             sync: Vec::new(),
+            display_name: None,
+            ready_check: None,
+            role: kind.word(),
         }
+    }
+}
+
+/// `UnitSummary.ready_check` for a resolved check.
+fn ready_word(spec: &ReadySpec) -> &'static str {
+    match spec {
+        ReadySpec::Started => "started",
+        ReadySpec::Tcp { .. } => "tcp",
+        ReadySpec::Http { .. } => "http",
+        ReadySpec::Log { .. } => "log",
+        ReadySpec::Cmd { .. } => "cmd",
     }
 }
 
@@ -1095,6 +1118,7 @@ impl Inner {
             env_keys = %request.spec.env.keys().map(String::as_str).collect::<Vec<_>>().join(","),
             "spawning"
         );
+        let pty = request.spec.pty;
         let spawned = if request.kind == Kind::Task {
             runner.spawn_task(request.spec).await
         } else {
@@ -1122,6 +1146,7 @@ impl Inner {
             started_at_ms: now_ms(),
             log_dir: log_dir.clone(),
             retention: crate::units::LogRetention::from_config(&self.opts.user.logs.retention),
+            pty,
         };
         let unit: Arc<dyn Unit> = managed.clone();
         let host = match UnitHost::start(info, unit, identity).await {
@@ -1182,6 +1207,9 @@ impl Inner {
                 color: Some(color),
                 managed: managed.clone(),
                 syncs: Vec::new(),
+                display_name: request.display_name,
+                ready_check: request.ready_check,
+                role: request.role,
             },
         );
         if request.kind == Kind::Service {
@@ -1363,6 +1391,9 @@ impl Inner {
         if let Some(reason) = reason {
             data["reason"] = reason;
         }
+        if matches!(state, "done" | "failed") {
+            data["finished_at_ms"] = json!(now_ms());
+        }
         self.bus.emit(events::TASK, data);
     }
 
@@ -1383,7 +1414,8 @@ impl Inner {
             "start_id": cx.start_id,
         });
         if let Some(reason) = reason {
-            data["reason"] = json!({"code": reason.code, "data": reason.data});
+            // A whole error, so clients can word it as they word any other.
+            data["reason"] = json!(reason);
         }
         if let Some(units) = units {
             data["units"] = json!(units);
@@ -1467,8 +1499,13 @@ impl Inner {
     ) -> Result<(ExitOutcome, UnitHost), RpcError> {
         let extra = lane.st().setup_env.clone();
         let name = format!("{phase}.{}", command.name);
-        let request =
+        let mut request =
             SpawnRequest::oneshot(&name, Kind::Task, &command.launch, false, &extra, actor);
+        request.role = if phase == "teardown" {
+            "teardown"
+        } else {
+            "setup"
+        };
         let (host, _) = self.spawn_unit(project, lane, request).await?;
         let outcome = finish(&host, command.timeout, cancel).await;
         Ok((outcome, host))
@@ -2109,6 +2146,14 @@ impl Inner {
         // Before the lock: a start holding it may be waiting on these queued units,
         // or on a task that never ends (a whole-lane stop interrupts that start).
         let queued_reference = lane.st().reference(&project.name());
+        // Interrupted starts and tasks are otherwise hard to explain after the fact.
+        tracing::info!(
+            lane = %queued_reference,
+            units = %selectors.as_deref().map(|s| s.join(",")).unwrap_or_default(),
+            mine = mine.is_some(),
+            interrupts_start = lane.running_start().is_some(),
+            "stop requested"
+        );
         self.cancel_queued(lane, &queued_reference, selectors.as_deref(), mine);
         let named = selectors.as_ref().is_some_and(|s| !s.is_empty());
         if !named {
@@ -2707,6 +2752,8 @@ impl Inner {
         let present = {
             let mut st = lane.st();
             st.record = None;
+            // Cleaned, the worktree is no lane until devlanes runs in it again.
+            st.wanted = false;
             st.allocation = None;
             st.view = None;
             st.units.clear();

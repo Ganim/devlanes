@@ -52,8 +52,18 @@ const MV: &str = "/bin/mv";
 const CP: &str = "/bin/cp";
 const RM: &str = "/bin/rm";
 const CAT: &str = "/bin/cat";
-const TEST: &str = "/usr/bin/test";
+/// macOS ships `test` only in `/bin`; Linux coreutils installs it in `/usr/bin`,
+/// which merged-`/usr` systems also reach as `/bin`.
+const TEST: &str = if cfg!(target_os = "macos") {
+    "/bin/test"
+} else {
+    "/usr/bin/test"
+};
 const ID: &str = "/usr/bin/id";
+
+/// Every absolute program the install and uninstall plans run as root; each must
+/// exist on the platform this binary was built for.
+pub const SYSTEM_TOOLS: [&str; 8] = [INSTALL, VISUDO, MV, CP, RM, CAT, TEST, ID];
 
 /// Platforms with an install layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,7 +326,8 @@ pub struct InstallPlan {
     pub verify: CommandSpec,
 }
 
-/// `sudo /usr/bin/test -e /etc/sudoers.d/devlanes`: exit 0 when a rule is installed.
+/// `sudo /bin/test -e /etc/sudoers.d/devlanes` (`/usr/bin/test` on Linux): exit 0
+/// when a rule is installed.
 /// Users often cannot list `/etc/sudoers.d` (Debian: `0750`), so this needs sudo.
 pub fn rule_exists_command() -> CommandSpec {
     sudo(TEST, &["-e", SUDOERS_PATH])
@@ -1081,6 +1092,17 @@ mod tests {
     }
 
     #[test]
+    /// A path that does not exist fails under sudo as "command not found", so every
+    /// tool must be where this platform keeps it.
+    fn system_tools_exist_on_this_platform() {
+        let missing: Vec<&str> = SYSTEM_TOOLS
+            .into_iter()
+            .filter(|tool| !Path::new(tool).is_file())
+            .collect();
+        assert!(missing.is_empty(), "missing on this OS: {missing:?}");
+    }
+
+    #[test]
     fn uninstall_plan_snapshot() {
         assert_eq!(
             argvs(&uninstall_plan(true)),
@@ -1406,7 +1428,7 @@ mod tests {
         assert_eq!(
             ran[2..],
             [
-                "sudo /usr/bin/test -e /etc/sudoers.d/devlanes",
+                &*format!("sudo {TEST} -e /etc/sudoers.d/devlanes"),
                 &format!(
                     "sudo /usr/bin/install -d -o root -g {group} -m 0755 -- /usr/local/libexec"
                 ),

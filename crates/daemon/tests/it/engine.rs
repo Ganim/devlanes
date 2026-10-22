@@ -120,8 +120,9 @@ async fn start(h: &crate::Harness, context: Context, params: Value) -> StartResu
 }
 
 #[tokio::test(flavor = "multi_thread")]
-/// Lane 0 follows the primary branch; others keep persisted indices; a worktree
-/// moving onto the primary branch takes lane 0 at its next start.
+/// Lane 0 follows the primary branch; other worktrees get a lane once devlanes
+/// runs in them and keep its index; a worktree moving onto the primary branch
+/// takes lane 0 at its next start; an idle lane whose folder is gone is cleaned.
 async fn lane_indices_and_primary_moves() {
     tokio::time::timeout(LIMIT, async {
         let tmp = temp();
@@ -136,6 +137,12 @@ async fn lane_indices_and_primary_moves() {
         let h = harness(&tmp.path.join("home"), Setup::default()).await;
         let list = lanes(&h, &main).await;
         assert_eq!(lane_at(&list, &main).index, Some(0));
+        assert!(
+            list.iter().all(|lane| lane.path != a && lane.path != b),
+            "existing is not enough: {list:?}"
+        );
+        lanes(&h, &a).await;
+        let list = lanes(&h, &b).await;
         assert_eq!(lane_at(&list, &a).index, Some(1));
         assert_eq!(lane_at(&list, &b).index, Some(2));
         assert_eq!(lane_at(&list, &b).reference, "demo@2");
@@ -161,14 +168,17 @@ async fn lane_indices_and_primary_moves() {
             &["worktree", "remove", "--force", &a.display().to_string()],
         );
         worktree(&main, &c, "feat/c");
-        let list = lanes(&h, &main).await;
-        let gone = lane_at(&list, &a);
-        assert_eq!(gone.index, Some(1), "a removed worktree keeps its lane");
-        assert_eq!(
-            gone.reason.as_ref().map(|r| r.code.as_str()),
-            Some("worktree_missing")
+        let cleaned = eventually(Duration::from_secs(10), || async {
+            let list = lanes(&h, &main).await;
+            list.iter().all(|lane| lane.path != a).then_some(())
+        })
+        .await;
+        assert!(
+            cleaned.is_some(),
+            "an idle lane whose folder is gone is cleaned"
         );
-        assert_eq!(lane_at(&list, &c).index, Some(2), "lowest free index");
+        let list = lanes(&h, &c).await;
+        assert_eq!(lane_at(&list, &c).index, Some(1), "lowest free index");
         h.close().await;
     })
     .await
@@ -176,7 +186,8 @@ async fn lane_indices_and_primary_moves() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-/// Added, moved and removed worktrees appear in `status` without a re-list request.
+/// A worktree devlanes ran in, moved and removed, shows in `status` without a
+/// re-list request; once removed and idle, its lane is cleaned.
 async fn worktrees_are_picked_up_live() {
     tokio::time::timeout(LIMIT, async {
         let tmp = temp();
@@ -192,12 +203,13 @@ async fn worktrees_are_picked_up_live() {
         assert_eq!(status(&h, cx(&main), json!({})).await.len(), 1);
         let x = tmp.path.join("wt-x");
         worktree(&main, &x, "feat/x");
+        // The watcher sees the worktree, but only a command run in it makes a lane.
         let index = eventually(Duration::from_secs(10), || async {
-            let all = status(&h, cx(&main), json!({})).await;
+            let all = status(&h, cx(&x), json!({})).await;
             all.iter().find(|l| l.path == x).and_then(|l| l.index)
         })
         .await
-        .expect("new worktree shows up");
+        .expect("the worktree devlanes ran in shows up");
         let y = tmp.path.join("wt-y");
         git(
             &main,
@@ -216,15 +228,15 @@ async fn worktrees_are_picked_up_live() {
         .expect("moved worktree shows up");
         assert_eq!(moved, index, "a move keeps the lane");
         git(&main, &["worktree", "remove", &y.display().to_string()]);
-        let missing = eventually(Duration::from_secs(10), || async {
+        let cleaned = eventually(Duration::from_secs(10), || async {
             let all = status(&h, cx(&main), json!({})).await;
-            all.iter()
-                .find(|l| l.path == y)
-                .and_then(|l| l.reason.clone())
-                .filter(|r| r.code == "worktree_missing")
+            all.iter().all(|l| l.path != y).then_some(())
         })
         .await;
-        assert_eq!(missing.expect("removal is noticed").exit_code, 3);
+        assert!(
+            cleaned.is_some(),
+            "the idle lane of a removed worktree is cleaned"
+        );
         let start = h
             .call(
                 Method::Start,
@@ -235,11 +247,8 @@ async fn worktrees_are_picked_up_live() {
                 },
             )
             .await
-            .expect_err("no worktree to start in");
-        assert_eq!(
-            (start.code.as_str(), start.exit_code),
-            ("worktree_missing", 3)
-        );
+            .expect_err("the lane is gone");
+        assert_eq!((start.code.as_str(), start.exit_code), ("not_found", 3));
         h.close().await;
     })
     .await
@@ -337,6 +346,17 @@ async fn start_pipeline_order_and_idempotence() {
             port.parse::<u16>().is_ok(),
             "infra port reaches the service env: {port}"
         );
+        let lanes = status(&h, cx(&main), json!({})).await;
+        let role = |name: &str| {
+            lanes[0]
+                .units
+                .iter()
+                .find(|u| u.name == name)
+                .and_then(|u| u.role.clone())
+        };
+        assert_eq!(role("setup.database").as_deref(), Some("setup"));
+        assert_eq!(role("migrate").as_deref(), Some("task"));
+        assert_eq!(role("api").as_deref(), Some("service"));
 
         let again = start(&h, cx(&main), json!({})).await;
         assert_eq!(again.already_running, ["pipe@0:api"]);
@@ -758,12 +778,13 @@ async fn status_scope() {
 
 #[tokio::test(flavor = "multi_thread")]
 /// `run` needs `yes` for confirm tasks, streams logs, and hands interactive tasks
-/// to an attaching terminal.
+/// to an attaching terminal; `task.list` has each task's last run (none for a
+/// task that never ran) and ended runs carry `finished_at_ms`.
 async fn run_confirm_and_interactive() {
     tokio::time::timeout(LIMIT, async {
         let tmp = temp();
         let config = format!(
-            "{BASIC}tasks:\n  reset: {{ run: \"echo resetting\", confirm: \"Drops it\" }}\n  login: {{ run: sleep, interactive: true }}\n  broken: {{ run: \"exit 3\" }}\n"
+            "{BASIC}tasks:\n  reset: {{ run: \"echo resetting\", confirm: \"Drops it\" }}\n  login: {{ run: sleep, interactive: true }}\n  broken: {{ run: \"exit 3\" }}\n  never: {{ run: \"echo never\" }}\n"
         );
         let main = repo(&tmp.path, "r", &config);
         let h = harness(&tmp.path.join("home"), Setup::default()).await;
@@ -788,7 +809,22 @@ async fn run_confirm_and_interactive() {
         assert_eq!(interactive["interactive"], true);
         assert_eq!(interactive["unit"], "login");
         let tasks = h.call(Method::TaskList, json!({}), cx(&main)).await.expect("task list");
-        assert_eq!(tasks["items"].as_array().map(Vec::len), Some(3));
+        let items = tasks["items"].as_array().expect("items");
+        assert_eq!(items.len(), 4);
+        let last = |name: &str| items.iter().find(|t| t["name"] == name).expect(name)["last_run"].clone();
+        assert_eq!(last("reset")["state"], "done");
+        assert_eq!(last("reset")["exit_code"], 0);
+        assert!(last("reset")["finished_at_ms"].as_i64().is_some());
+        assert_eq!((last("broken")["state"].clone(), last("broken")["exit_code"].clone()), (json!("failed"), json!(3)));
+        assert_eq!(last("login")["state"], "running");
+        assert!(last("login")["finished_at_ms"].is_null());
+        assert!(last("never").is_null(), "a task that never ran has no last run");
+        let lanes: Page<LaneSummary> =
+            serde_json::from_value(h.call(Method::Status, json!({}), cx(&main)).await.expect("status")).expect("page");
+        let broken = lanes.items[0].units.iter().find(|u| u.name == "broken").expect("broken");
+        assert!(broken.finished_at_ms.is_some_and(|ms| ms >= broken.started_at_ms.unwrap_or(0)));
+        assert_eq!(broken.role.as_deref(), Some("task"));
+        h.call(Method::Stop, json!({}), cx(&main)).await.expect("stop");
         h.close().await;
     })
     .await
@@ -867,7 +903,8 @@ async fn logs_since_lane_start() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-/// Worktrees without a config show `no-config`; reset-state needs `yes`.
+/// A worktree devlanes ran in without a config shows `no-config`; one it never
+/// ran in is not listed; reset-state needs `yes`.
 async fn no_config_and_reset_state() {
     tokio::time::timeout(LIMIT, async {
         let tmp = temp();
@@ -877,6 +914,8 @@ async fn no_config_and_reset_state() {
         std::fs::remove_file(bare.join("devlanes.yaml")).expect("remove config");
         let h = harness(&tmp.path.join("home"), Setup::default()).await;
         let list = lanes(&h, &main).await;
+        assert!(list.iter().all(|lane| lane.path != bare), "{list:?}");
+        let list = lanes(&h, &bare).await;
         assert_eq!(lane_at(&list, &bare).state, "no-config");
         assert_eq!(lane_at(&list, &bare).index, None);
         let refused = h

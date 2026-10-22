@@ -339,6 +339,7 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       }
     },
     "crm-api": {
+      "name": "CRM API",
       "extends": "fastify-api",
       "run": "pnpm --silent -F @acme/crm dev",
       "platform": "node",

@@ -759,7 +759,7 @@ async fn with_timed_out_start_reports_every_unready_unit() {
     acme@0 · main
     failed services  1 of 3 ready
       failed  api     exited 1   missing config
-      failed  worker  did not become ready in time   waiting for queue
+      failed  worker  wasn't ready in time   waiting for queue
       ok      db      https://db.acme.localhost
     timed out before every unit was ready
 

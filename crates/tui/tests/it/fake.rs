@@ -9,7 +9,8 @@ use devlanes_proto::{
     Page, RpcError, RunParams, Selection, UnitSummary,
 };
 use devlanes_tui::{
-    ApiError, AttachEvent, AttachInput, AttachSession, DaemonApi, EventStream, UnitMetrics,
+    ApiError, AttachEvent, AttachInput, AttachSession, DaemonApi, EventStream, Metrics,
+    MetricsQuery,
     api::{ProfileInfo, ProfileList},
 };
 use serde_json::{Value, json};
@@ -19,7 +20,7 @@ use tokio::sync::mpsc;
 #[derive(Default)]
 pub struct FakeApi {
     pub lanes: Mutex<Vec<LaneSummary>>,
-    pub metrics: Vec<UnitMetrics>,
+    pub metrics: Metrics,
     pub screen: Vec<u8>,
     /// When set, start/stop/restart fail with this daemon error.
     pub control_error: Option<RpcError>,
@@ -136,8 +137,14 @@ impl DaemonApi for FakeApi {
         }
     }
 
-    async fn run_task(&self, lane: String, params: RunParams) -> Result<Value, ApiError> {
-        self.record(format!("run {} {lane}", params.task));
+    async fn run_task(
+        &self,
+        lane: String,
+        params: RunParams,
+        yes: bool,
+    ) -> Result<Value, ApiError> {
+        let yes = if yes { " yes" } else { "" };
+        self.record(format!("run {} {lane}{yes}", params.task));
         Ok(json!({}))
     }
 
@@ -146,8 +153,8 @@ impl DaemonApi for FakeApi {
         Ok(Page::complete(Vec::new()))
     }
 
-    async fn metrics(&self) -> Result<Vec<UnitMetrics>, ApiError> {
-        self.record("metrics".into());
+    async fn metrics(&self, query: MetricsQuery) -> Result<Metrics, ApiError> {
+        self.record(format!("metrics {}", query.range_ms));
         Ok(self.metrics.clone())
     }
 

@@ -202,6 +202,10 @@ macro_rules! service_fields {
 }
 
 service_fields! {
+    /// Display name shown in the TUI and human output instead of the service key;
+    /// any text, spaces allowed. Commands, references and `svc.<key>` keep using the key.
+    #[schemars(extend("examples" = ["Admin API","Storefront (web)"]))]
+    name: String,
     /// Template name; resolved after devlanes.local.yaml is merged.
     #[schemars(extend("examples" = ["fastify-api"]))]
     extends: String,

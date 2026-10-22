@@ -57,6 +57,8 @@ expression: user
     "check": true
   },
   "tui": {
-    "open_on_start": true
+    "open_on_start": true,
+    "theme": "auto",
+    "glyphs": "auto"
   }
 }

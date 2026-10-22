@@ -382,6 +382,12 @@ pub trait PressureSource: Send + Sync {
     /// `Ok(None)` means the platform cannot tell; gates then skip their memory
     /// check rather than wait. `Err` is a failed read of a supported value.
     async fn available_memory(&self) -> Result<Option<u64>, Error>;
+
+    /// Physical memory of the machine in bytes, for monitors; `Ok(None)` when the
+    /// platform cannot tell.
+    async fn total_memory(&self) -> Result<Option<u64>, Error> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

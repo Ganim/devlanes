@@ -328,6 +328,14 @@ fn validate_inner<E: Extensions>(
         if matches!(service.replicas, Some(Templated::Literal(0))) {
             return Err(fail(&format!("{path}.replicas"), "must be positive"));
         }
+        if let Some(display) = &service.name
+            && (display.trim().is_empty() || display.chars().any(char::is_control))
+        {
+            return Err(fail(
+                &format!("{path}.name"),
+                "must be non-empty text without control characters",
+            ));
+        }
         hosts(&format!("{path}.hosts"), service.hosts.iter().flatten())?;
         if let Some(stop) = &service.stop
             && let Some(signal) = &stop.signal

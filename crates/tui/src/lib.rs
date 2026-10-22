@@ -6,12 +6,16 @@
 pub mod api;
 pub mod app;
 pub mod doctor;
+pub mod graph;
 pub mod input;
 pub mod logfile;
+pub mod monitor;
 mod runtime;
 pub mod screen;
 pub mod start;
 pub mod text;
+pub mod theme;
+pub mod tree;
 pub mod ui;
 pub mod words;
 
@@ -19,7 +23,7 @@ use std::{io::IsTerminal, sync::Arc};
 
 pub use api::{
     ApiError, AttachEvent, AttachInput, AttachSession, ClientApi, DaemonApi, EventStream,
-    UnitMetrics,
+    LaneMetrics, Metrics, MetricsQuery, SystemMetrics, UnitMetrics, Window,
 };
 pub use devlanes_client::Paths;
 pub use devlanes_term::TerminalLauncher;
@@ -32,7 +36,7 @@ pub enum Error {
     NotATerminal,
     #[error(transparent)]
     Client(#[from] devlanes_client::Error),
-    #[error("terminal I/O: {0}")]
+    #[error("terminal error: {0}")]
     Io(#[from] std::io::Error),
     /// A background task panicked; its message is already on stderr.
     #[error("the terminal UI stopped after an internal error; units keep running")]
@@ -49,15 +53,36 @@ pub struct Options {
     /// How to draw start progress in the tab's progress bar, from
     /// [`devlanes_term::progress_support`]; `None` draws nothing.
     pub progress: Option<devlanes_term::Wrap>,
+    /// `tui.theme` from the user config: `auto` (or unset), `dark`, `light` or `ansi`.
+    pub theme: Option<String>,
+    /// `tui.glyphs` from the user config: `auto` (or unset), `unicode` or `ascii`.
+    pub glyphs: Option<String>,
 }
 
 impl Options {
-    /// The configured launcher; without one, Terminal.app where it exists, else
+    /// The colors and glyphs for this terminal, from the environment and
+    /// the user config.
+    pub fn theme(&self) -> theme::Theme {
+        theme::Theme::detect(self.theme.as_deref(), self.glyphs.as_deref(), |key| {
+            std::env::var(key).ok()
+        })
+    }
+
+    /// [`Options::pick_launcher_with`] with the process environment.
+    fn pick_launcher(&self) -> Result<Arc<dyn TerminalLauncher>, String> {
+        self.pick_launcher_with(|key| std::env::var(key).ok())
+    }
+
+    /// The configured launcher; without one, the terminal this TUI runs in when
+    /// a launcher for it is registered, else Terminal.app where it exists, else
     /// the first registered launcher that is installed. Checks the filesystem,
     /// so the runtime calls it from a blocking task.
-    fn pick_launcher(&self) -> Result<Arc<dyn TerminalLauncher>, String> {
+    fn pick_launcher_with(
+        &self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Arc<dyn TerminalLauncher>, String> {
         if self.launchers.is_empty() {
-            return Err("no terminal launchers are available in this build".into());
+            return Err("this build can't open terminal windows".into());
         }
         let names: Vec<&str> = self.launchers.iter().map(|l| l.name()).collect();
         if let Some(wanted) = &self.terminal {
@@ -67,23 +92,46 @@ impl Options {
                 .find(|launcher| launcher.name().eq_ignore_ascii_case(wanted))
                 .cloned()
                 .ok_or_else(|| {
-                    format!("unknown terminal {wanted}; use one of {}", names.join(", "))
+                    format!(
+                        "unknown terminal {wanted}; pick one of {}",
+                        names.join(", ")
+                    )
                 });
         }
-        let preferred = self
-            .launchers
-            .iter()
-            .find(|launcher| launcher.name() == "terminal" && launcher.available());
-        preferred
+        let named = |name: &str| self.launchers.iter().find(|l| l.name() == name);
+        // The terminal the user is in now is the one they expect a new window in.
+        let current = current_terminal(&env).and_then(named);
+        let preferred = named("terminal").filter(|launcher| launcher.available());
+        current
+            .or(preferred)
             .or_else(|| self.launchers.iter().find(|launcher| launcher.available()))
             .cloned()
             .ok_or_else(|| {
                 format!(
-                    "no terminal app found; set terminal in the user config to one of {}",
+                    "no supported terminal app found; set terminal in ~/.devlanes/config.yaml to one of {}",
                     names.join(", ")
                 )
             })
     }
+}
+
+/// The launcher name of the terminal this process runs in, from the variables
+/// each terminal sets. `LC_TERMINAL` and the terminals' own variables survive
+/// tmux and ssh, where `TERM_PROGRAM` names tmux or nothing.
+fn current_terminal(env: &impl Fn(&str) -> Option<String>) -> Option<&'static str> {
+    let set = |key: &str| env(key).is_some_and(|value| !value.is_empty());
+    let program = env("TERM_PROGRAM").unwrap_or_default();
+    Some(match program.as_str() {
+        "iTerm.app" => "iterm2",
+        "ghostty" => "ghostty",
+        "WezTerm" => "wezterm",
+        "Apple_Terminal" => "terminal",
+        _ if env("LC_TERMINAL").as_deref() == Some("iTerm2") => "iterm2",
+        _ if set("KITTY_WINDOW_ID") || env("TERM").as_deref() == Some("xterm-kitty") => "kitty",
+        _ if set("GHOSTTY_RESOURCES_DIR") => "ghostty",
+        _ if set("WEZTERM_EXECUTABLE") || set("WEZTERM_PANE") => "wezterm",
+        _ => return None,
+    })
 }
 
 /// Opens the TUI for bare `devlanes` and `devlanes ui`, without terminal launchers.
@@ -173,13 +221,14 @@ mod tests {
                 .map(|(name, there)| Arc::new(Fake(name, *there)) as Arc<dyn TerminalLauncher>)
                 .collect(),
             terminal: terminal.map(str::to_owned),
-            progress: None,
+            ..Options::default()
         }
     }
 
     #[test]
     fn default_launcher_is_terminal_app_else_the_first_installed() {
-        let picked = |o: Options| o.pick_launcher().map(|l| l.name());
+        // Outside any known terminal, whatever runs the tests.
+        let picked = |o: Options| o.pick_launcher_with(|_| None).map(|l| l.name());
         // macOS: Terminal.app is always there and wins over other installed apps.
         let mac = [("iterm2", true), ("kitty", true), ("terminal", true)];
         assert_eq!(picked(options(None, &mac)), Ok("terminal"));
@@ -195,5 +244,56 @@ mod tests {
         assert_eq!(picked(options(Some("Ghostty"), &linux)), Ok("ghostty"));
         assert!(picked(options(Some("xterm"), &linux)).is_err());
         assert!(picked(options(None, &[("terminal", false)])).is_err());
+    }
+
+    #[test]
+    fn the_terminal_the_tui_runs_in_is_preferred() {
+        let mac = [
+            ("iterm2", true),
+            ("ghostty", true),
+            ("wezterm", true),
+            ("kitty", true),
+            ("terminal", true),
+        ];
+        let picked = |terminal: Option<&str>, pairs: &[(&str, &str)]| {
+            let env: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            options(terminal, &mac)
+                .pick_launcher_with(|key| {
+                    env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+                })
+                .map(|l| l.name())
+        };
+        for (pairs, expected) in [
+            (&[("TERM_PROGRAM", "iTerm.app")][..], "iterm2"),
+            (&[("TERM_PROGRAM", "ghostty")][..], "ghostty"),
+            (&[("TERM_PROGRAM", "WezTerm")][..], "wezterm"),
+            (&[("TERM_PROGRAM", "Apple_Terminal")][..], "terminal"),
+            (
+                &[("KITTY_WINDOW_ID", "3"), ("TERM", "xterm-kitty")][..],
+                "kitty",
+            ),
+            // Inside tmux TERM_PROGRAM says tmux; iTerm2 still sets LC_TERMINAL.
+            (
+                &[("TERM_PROGRAM", "tmux"), ("LC_TERMINAL", "iTerm2")][..],
+                "iterm2",
+            ),
+            (
+                &[("TERM_PROGRAM", "tmux"), ("GHOSTTY_RESOURCES_DIR", "/x")][..],
+                "ghostty",
+            ),
+            // Unknown terminals fall back to the default.
+            (&[("TERM_PROGRAM", "vscode")][..], "terminal"),
+            (&[("WT_SESSION", "abc")][..], "terminal"),
+        ] {
+            assert_eq!(picked(None, pairs), Ok(expected), "{pairs:?}");
+        }
+        // An explicit choice in the user config still wins.
+        assert_eq!(
+            picked(Some("kitty"), &[("TERM_PROGRAM", "iTerm.app")]),
+            Ok("kitty")
+        );
     }
 }

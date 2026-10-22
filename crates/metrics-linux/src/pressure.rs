@@ -120,22 +120,29 @@ pub fn parse_psi(text: &str) -> Result<Psi, Error> {
 
 /// `MemAvailable` of `/proc/meminfo` in bytes.
 pub fn parse_meminfo_available(text: &str) -> Result<u64, Error> {
+    parse_meminfo(text, "MemAvailable")
+}
+
+/// `MemTotal` of `/proc/meminfo` in bytes.
+pub fn parse_meminfo_total(text: &str) -> Result<u64, Error> {
+    parse_meminfo(text, "MemTotal")
+}
+
+/// One `kB` field of `/proc/meminfo` in bytes.
+fn parse_meminfo(text: &str, key: &str) -> Result<u64, Error> {
     let what = "/proc/meminfo";
     let line = text
         .lines()
-        .find_map(|line| line.strip_prefix("MemAvailable:"))
-        .ok_or_else(|| malformed(what, "missing MemAvailable"))?;
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
+        .ok_or_else(|| malformed(what, format!("missing {key}")))?;
     let mut parts = line.split_ascii_whitespace();
     let value: u64 = parts
         .next()
         .and_then(|value| value.parse().ok())
-        .ok_or_else(|| malformed(what, "bad MemAvailable value"))?;
+        .ok_or_else(|| malformed(what, format!("bad {key} value")))?;
     match parts.next() {
         Some("kB") => Ok(value.saturating_mul(1024)),
-        other => Err(malformed(
-            what,
-            format!("unexpected MemAvailable unit {other:?}"),
-        )),
+        other => Err(malformed(what, format!("unexpected {key} unit {other:?}"))),
     }
 }
 
@@ -295,6 +302,17 @@ mod source {
         async fn available_memory(&self) -> Result<Option<u64>, devlanes_core::Error> {
             let source = self.clone();
             blocking(move || source.available_memory_blocking()).await
+        }
+
+        /// `MemTotal`.
+        async fn total_memory(&self) -> Result<Option<u64>, devlanes_core::Error> {
+            blocking(|| {
+                let text = std::fs::read_to_string("/proc/meminfo")?;
+                super::parse_meminfo_total(&text)
+                    .map(Some)
+                    .map_err(integration)
+            })
+            .await
         }
     }
 }

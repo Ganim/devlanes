@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-mod migrate;
-
 /// Config and state remain independent crates but must agree on retention defaults.
 #[test]
 fn config_and_state_retention_defaults_match() {

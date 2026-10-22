@@ -35,6 +35,13 @@ fn keychain_store(executor: Arc<FakeExecutor>, keychain: &Path) -> KeychainStore
     KeychainStore::new(executor, keychain, TrustTarget::System)
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+/// The keychain tool runs by absolute path; it must be where macOS keeps it.
+fn security_tool_exists() {
+    assert!(Path::new(SECURITY).is_file(), "{SECURITY} is missing");
+}
+
 #[tokio::test]
 async fn install_adds_to_login_keychain_with_root_trust() {
     let ca = ca();

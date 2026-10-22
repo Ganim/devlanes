@@ -14,8 +14,8 @@ use devlanes_core::gate::MemoryPressure;
 use devlanes_metrics::Error;
 use devlanes_metrics_linux::{
     pressure::{
-        CpuTimes, MEMORY_CRITICAL_FULL_AVG10, Psi, parse_meminfo_available, parse_proc_stat_cpu,
-        parse_psi,
+        CpuTimes, MEMORY_CRITICAL_FULL_AVG10, Psi, parse_meminfo_available, parse_meminfo_total,
+        parse_proc_stat_cpu, parse_psi,
     },
     procfs::{
         ProcStat, cpu_percent, lifetime_cpu_percent, parse_smaps_rollup_pss, parse_stat,
@@ -134,6 +134,10 @@ fn meminfo_fixture_gives_available_bytes() {
     );
     assert!(parse_meminfo_available("MemFree: 1 kB\n").is_err());
     assert!(parse_meminfo_available("MemAvailable: 1 pages\n").is_err());
+    assert_eq!(
+        parse_meminfo_total(include_str!("../../fixtures/meminfo.txt")).expect("meminfo"),
+        12_305_368 * 1024
+    );
 }
 
 #[test]

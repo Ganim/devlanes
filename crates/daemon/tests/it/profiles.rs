@@ -243,7 +243,7 @@ async fn units_and_containers_have_colors() {
             )
             .await
             .expect("exec");
-        assert_eq!(exec["color"], "yellow");
+        assert_eq!(exec["color"], "cyan");
 
         let live = lane(&h, &main).await;
         assert_eq!(color(&live, "api").as_deref(), Some("bright-magenta"));
@@ -257,13 +257,13 @@ async fn units_and_containers_have_colors() {
                 &none
             ))
         );
-        assert_eq!(color(&live, "db-shell").as_deref(), Some("yellow"));
+        assert_eq!(color(&live, "db-shell").as_deref(), Some("cyan"));
         let db = live
             .containers
             .iter()
             .find(|c| c.name == "db")
             .expect("db container");
-        assert_eq!(db.color.as_deref(), Some("yellow"));
+        assert_eq!(db.color.as_deref(), Some("cyan"));
         h.call(Method::Stop, json!({}), cx(&main))
             .await
             .expect("stop");

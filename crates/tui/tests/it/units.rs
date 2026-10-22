@@ -7,7 +7,7 @@ use devlanes_proto::{Event, LaneSummary, Method, RpcError, events};
 use devlanes_tui::{
     ApiError, DaemonApi,
     app::{App, Dialog, Effect, Msg, ProfilesState},
-    ui::palette_color,
+    theme::palette_color,
 };
 use ratatui::{
     buffer::Buffer,
@@ -20,11 +20,6 @@ use crate::errors::{assert_clean, key, render, row, screen};
 use crate::fake::{FakeApi, lane, mixed_lanes, unit};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-/// Selection highlight (brand paint) and failure red, as `ui` draws them.
-const PAINT: Color = Color::Rgb(0xf5, 0xc5, 0x42);
-const ON_PAINT: Color = Color::Rgb(0x1a, 0x19, 0x17);
-const FAILED: Color = Color::Rgb(0xd9, 0x4f, 0x3d);
 
 /// One lane whose units arrive in declaration order with colors.
 fn colored_lane() -> LaneSummary {
@@ -66,6 +61,40 @@ fn row_of(buffer: &Buffer, needle: &str) -> Option<u16> {
 }
 
 #[tokio::test]
+async fn display_names_and_running_replace_names_and_ready() -> TestResult {
+    let mut gateway = unit("acme@0", "api-gateway", "ready");
+    gateway.display_name = Some("Gateway API".into());
+    let mut worker = unit("acme@0", "wrk-email", "ready");
+    // No readiness check: a live process is all `ready` means.
+    worker.ready_check = Some("started".into());
+    let api = FakeApi::with_lanes(vec![lane(
+        "acme",
+        Some(0),
+        "main",
+        "running",
+        vec![gateway, worker],
+    )]);
+    let mut app = App::new(100, 24);
+    app.update(Msg::Status(api.status().await));
+    let buffer = render(&app)?;
+    // Ready (a check passed) and running (no check) are told apart by the
+    // glyph alone; neither prints its word in the list.
+    let list = |y: u16| row(&buffer, y).chars().take(40).collect::<String>();
+    let gateway = row_of(&buffer, "● Gateway API").ok_or("no Gateway API row")?;
+    assert!(!list(gateway).contains("ready"), "{}", list(gateway));
+    let worker = row_of(&buffer, "◉ wrk-email").ok_or("no wrk-email row")?;
+    assert!(!list(worker).contains("running"), "{}", list(worker));
+    // The pane title shows the label, the real name and the state word.
+    let text = screen(&buffer);
+    assert!(text.contains("Gateway API  api-gateway · ready"), "{text}");
+    assert_eq!(
+        app.selected_unit().map(|u| u.name.as_str()),
+        Some("api-gateway")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn units_sort_by_name_with_exec_units_last() -> TestResult {
     let mut app = App::new(80, 24);
     app.update(Msg::Status(Ok(vec![colored_lane()])));
@@ -101,43 +130,57 @@ fn palette_names_map_to_terminal_colors() {
 }
 
 #[tokio::test]
-async fn unit_colors_keep_failures_red_and_the_highlight_readable() -> TestResult {
-    let mut app = App::new(60, 12);
+async fn unit_colors_are_bars_and_state_is_glyph_and_word() -> TestResult {
+    let mut app = App::new(60, 24);
     app.update(Msg::Status(Ok(vec![colored_lane()])));
     let buffer = render(&app)?;
     assert_clean(&buffer, "colored units");
 
-    // Name and marker take the unit color.
-    let y = row_of(&buffer, "web  ready").ok_or("web row")?;
+    // The unit's color is the bar; the name stays default; the glyph is the state's.
+    let y = row_of(&buffer, "web").ok_or("web row")?;
     let x = find(&buffer, y, "web").ok_or("web name")?;
-    assert_eq!(buffer[(x, y)].fg, Color::Green);
-    assert_eq!(buffer[(x - 2, y)].fg, Color::Green, "marker");
+    assert_eq!(
+        buffer[(x, y)].fg,
+        Color::Reset,
+        "names keep the default color"
+    );
+    assert_eq!(buffer[(x - 2, y)].fg, Color::Green, "ready glyph");
+    assert_eq!(buffer[(x - 4, y)].symbol(), "▍");
+    assert_eq!(buffer[(x - 4, y)].fg, Color::Green, "bar");
 
-    // A failed unit keeps its color on the name but a red marker and state word.
-    let y = row_of(&buffer, "worker").ok_or("worker row")?;
+    // The selected row (the failed worker, the lane's first problem) is plain
+    // reverse video in 16 colors: a colored glyph would turn into a block.
+    let y = row_of(&buffer, "✕ worker").ok_or("worker row")?;
     let x = find(&buffer, y, "worker").ok_or("worker name")?;
-    assert_eq!(buffer[(x, y)].fg, Color::LightMagenta);
-    assert_eq!(buffer[(x - 2, y)].fg, FAILED, "failed marker");
-    let state = find(&buffer, y, "failed 1").ok_or("state word")?;
-    assert_eq!(buffer[(state, y)].fg, FAILED, "failed state word");
+    for column in [x - 4, x - 2, x] {
+        let cell = &buffer[(column, y)];
+        assert_eq!(cell.fg, Color::Reset, "column {column}");
+        assert!(cell.modifier.contains(ratatui::style::Modifier::REVERSED));
+    }
+    insta::assert_snapshot!("colored_units_60x24", styled(&buffer, 2..15));
 
-    // No color, or one this client does not know, means the default style.
+    // Unselected, a failed unit keeps its own bar, a red glyph and state word.
+    app.update(key(KeyCode::Char('g')));
+    let buffer = render(&app)?;
+    // The lane overview in the pane lists the worker too; take the list's row.
+    let (y, x) = (0..buffer.area.height)
+        .find_map(|y| {
+            find(&buffer, y, "✕ worker")
+                .filter(|x| *x < 20)
+                .map(|x| (y, x + 2))
+        })
+        .ok_or("worker row")?;
+    assert_eq!(buffer[(x - 4, y)].fg, Color::LightMagenta, "bar");
+    assert_eq!(buffer[(x - 2, y)].fg, Color::Red, "failed glyph");
+    let state = find(&buffer, y, "failed").ok_or("state word")?;
+    assert_eq!(buffer[(state, y)].fg, Color::Red, "failed state word");
+
+    // Tasks have no bar; a color this client does not know draws none.
     for name in ["migrate", "adhoc"] {
         let y = row_of(&buffer, name).ok_or("row")?;
         let x = find(&buffer, y, name).ok_or("name")?;
-        assert_eq!(buffer[(x, y)].fg, Color::Reset, "{name}");
+        assert_eq!(buffer[(x - 4, y)].symbol(), " ", "{name}");
     }
-
-    // The selected row drops unit colors for one high-contrast style.
-    app.update(key(KeyCode::Char('j')));
-    let buffer = render(&app)?;
-    let y = row_of(&buffer, "Api  ready").ok_or("Api row")?;
-    let x = find(&buffer, y, "Api").ok_or("Api name")?;
-    for column in (x - 2)..(x + 10) {
-        let cell = &buffer[(column, y)];
-        assert_eq!((cell.fg, cell.bg), (ON_PAINT, PAINT), "column {column}");
-    }
-    insta::assert_snapshot!("colored_units_60x12", styled(&buffer, 1..10));
     Ok(())
 }
 
@@ -231,9 +274,21 @@ async fn profile_picker_preselects_toggles_and_starts_checked_profiles() -> Test
     let buffer = render(&app)?;
     assert_clean(&buffer, "profile picker");
     let text = screen(&buffer);
-    assert!(text.contains("[x] web  default  web, api"), "{text}");
-    assert!(text.contains("> [x] e2e  +e2e, web, api, worker"), "{text}");
-    assert!(text.contains("[ ] frontend  no infra  web"), "{text}");
+    let line = |needle: &str| {
+        text.lines()
+            .find(|line| line.contains(needle))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let web = line("[x] web");
+    assert!(
+        web.contains("default") && web.contains("web, api"),
+        "{text}"
+    );
+    let e2e = line("▌[x] e2e");
+    assert!(e2e.contains("+e2e, web, api, worker"), "{text}");
+    let frontend = line("[ ] frontend");
+    assert!(frontend.contains("no infra"), "{text}");
     insta::assert_snapshot!("profiles_80x24", text);
     let effects = app.update(key(KeyCode::Enter));
     let [
@@ -267,7 +322,8 @@ async fn every_profile_of_the_last_start_is_preselected() -> TestResult {
     let api = FakeApi::with_lanes(lanes);
     let mut app = App::new(80, 24);
     app.update(Msg::Status(api.status().await));
-    assert!(screen(&render(&app)?).contains("profiles  e2e, frontend"));
+    app.update(key(KeyCode::Char('g')));
+    assert!(screen(&render(&app)?).contains("profile   e2e, frontend"));
     app.update(key(KeyCode::Char('p')));
     app.update(Msg::Profiles {
         lane: "acme@0".into(),
@@ -330,7 +386,7 @@ async fn without_a_default_profile_nothing_checked_means_no_profile() -> TestRes
             items,
         }),
     });
-    assert!(screen(&render(&app)?).contains("nothing checked starts the lane without a profile"));
+    assert!(screen(&render(&app)?).contains("With none checked, enter starts the lane without"));
     // The lane last ran with web; uncheck it.
     app.update(key(KeyCode::Char(' ')));
     let effects = app.update(key(KeyCode::Enter));
@@ -386,7 +442,10 @@ async fn an_older_daemon_gets_a_plain_message() -> TestResult {
         })
     ));
     let text = screen(&render(&app)?);
-    assert!(text.contains("profiles need a newer daemon"), "{text}");
+    assert!(
+        text.contains("This daemon is too old for profiles."),
+        "{text}"
+    );
     insta::assert_snapshot!("profiles_unsupported_80x24", text);
     assert!(app.errors.is_empty(), "an older daemon is not an error");
     // Space and enter do nothing there; esc closes.
@@ -413,10 +472,10 @@ async fn other_profile_list_failures_use_the_error_path() -> TestResult {
     });
     assert!(app.dialog.is_none());
     let entry = app.errors.front().ok_or("no error")?;
-    assert_eq!(entry.what, "profiles of acme@0");
+    assert_eq!(entry.what, "load profiles of acme@0");
     assert_eq!(
         entry.worded.summary,
-        "invalid config: profiles.e2e: unknown unit worker"
+        "devlanes.yaml is invalid: profiles.e2e: unknown unit worker"
     );
     // A late answer after the picker was closed is dropped.
     app.update(Msg::Profiles {
@@ -448,9 +507,6 @@ async fn drive_starts_with_the_profiles_checked_in_the_picker() -> TestResult {
         "{calls:?}"
     );
     let header = row(terminal.backend().buffer(), 0);
-    assert!(
-        header.contains("start acme@0 with web, frontend: ok"),
-        "{header}"
-    );
+    assert!(header.contains("started acme@0 with"), "{header}");
     Ok(())
 }

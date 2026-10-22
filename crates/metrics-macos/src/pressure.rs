@@ -147,6 +147,13 @@ impl PressureSource for MacosPressure {
             .map_err(|error| devlanes_core::Error::Integration(error.to_string()))?
             .map_err(devlanes_core::Error::Io)
     }
+
+    /// `hw.memsize`; one sysctl, cheap enough inline.
+    async fn total_memory(&self) -> Result<Option<u64>, devlanes_core::Error> {
+        sysctl::<u64>(c"hw.memsize")
+            .map(Some)
+            .map_err(devlanes_core::Error::Io)
+    }
 }
 
 #[cfg(test)]
@@ -210,5 +217,18 @@ mod tests {
             .expect("sysctls")
             .expect("level in range");
         assert!(available > 0);
+    }
+
+    #[tokio::test]
+    /// Total memory is the machine's and at least what is available.
+    async fn total_memory_is_reported() {
+        let source = MacosPressure::new();
+        let total = source.total_memory().await.expect("sysctl").expect("total");
+        let available = source
+            .available_memory()
+            .await
+            .expect("sysctls")
+            .expect("level in range");
+        assert!(total >= available && total > 0, "{total} {available}");
     }
 }

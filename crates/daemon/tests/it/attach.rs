@@ -111,3 +111,57 @@ async fn ownership_passes_to_the_newest_interactive_viewer() {
     .await
     .expect("timeout");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+/// A client reopening its stream at a new size (the TUI's zoom) closes the old
+/// connection while the new one attaches. Whatever order the daemon sees them
+/// in, the unit ends at the new size, never at the 120x40 of "nobody owns it".
+async fn a_reopened_stream_keeps_its_new_size_whatever_the_order() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        let attach = |session: Session, columns: u16| {
+            let h = &h;
+            let main = main.clone();
+            async move {
+                h.call_on(
+                    Method::Attach,
+                    json!({"unit": "app", "interactive": true, "columns": columns, "rows": 30}),
+                    cx(&main),
+                    &session,
+                )
+                .await
+                .expect("attach");
+            }
+        };
+        let (mut old, _frames) = h.session();
+        attach(old.clone(), 105).await;
+        sized(&h, "105x30").await;
+        for round in 0..20u16 {
+            let columns = 150 + round;
+            let (new, _new_frames) = h.session();
+            let closing = old.clone();
+            tokio::join!(async move { closing.close() }, attach(new.clone(), columns));
+            sized(&h, &format!("{columns}x30")).await;
+            // Nothing late overrides it.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(
+                last_size(&h),
+                Some(format!("{columns}x30")),
+                "round {round}"
+            );
+            old = new;
+        }
+        old.close();
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}

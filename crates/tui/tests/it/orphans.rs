@@ -79,7 +79,7 @@ async fn apply(app: &mut App, api: &FakeApi, effect: Effect) -> Result<(), Strin
 #[tokio::test]
 async fn an_orphan_shows_its_pid_and_has_no_terminal() -> TestResult {
     let api = FakeApi::with_lanes(lanes());
-    let (app, effects) = orphan_selected(&api).await;
+    let (mut app, effects) = orphan_selected(&api).await;
     assert!(app.selected_unit().is_some_and(|u| u.name == "api"));
     assert!(
         !effects.iter().any(|e| matches!(e, Effect::Attach { .. })),
@@ -89,15 +89,21 @@ async fn an_orphan_shows_its_pid_and_has_no_terminal() -> TestResult {
     let buffer = render(&app)?;
     let text = screen(&buffer);
     for expected in [
-        "@0 main  ◆ 1 orphaned",
-        "◆ api  orphaned pid 4242",
-        "acme@0:api · orphaned pid 4242",
-        "orphaned process (pid 4242) left",
-        "press x",
+        "◆ 1 orphaned",
+        "1 orphaned",
+        "◆ api",
+        "orphaned · pid 4242",
+        "┌ api  orphaned · pid 4242",
+        "An earlier daemon started this",
+        "x stops it.",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    insta::assert_snapshot!("orphan_80x24", text);
     // Amber, not red and not the unit's own color: red stays for failures.
+    // Off the selected row, which is plain reverse video in 16 colors.
+    app.update(key(KeyCode::Char('g')));
+    let buffer = render(&app)?;
     let y = (0..buffer.area.height)
         .find(|y| row(&buffer, *y).contains("◆ api"))
         .ok_or("no api row")?;
@@ -106,26 +112,24 @@ async fn an_orphan_shows_its_pid_and_has_no_terminal() -> TestResult {
         .ok_or("no marker")?;
     let marker = buffer[(x, y)].fg;
     assert!(!matches!(marker, Color::Blue | Color::Reset), "{marker:?}");
-    assert_ne!(marker, Color::Rgb(0xd9, 0x4f, 0x3d), "not the failure red");
-    insta::assert_snapshot!("orphan_80x24", text);
+    assert_ne!(marker, Color::Red, "not the failure red");
     Ok(())
 }
 
 #[tokio::test]
-async fn shift_tab_on_an_orphan_says_there_is_no_terminal() -> TestResult {
+async fn enter_on_an_orphan_says_there_is_no_terminal() -> TestResult {
     let api = FakeApi::with_lanes(lanes());
     let (mut app, _) = orphan_selected(&api).await;
-    let effects = app.update(Msg::Key(crossterm::event::KeyEvent::new(
-        KeyCode::BackTab,
-        crossterm::event::KeyModifiers::SHIFT,
-    )));
+    let effects = app.update(key(KeyCode::Enter));
     assert!(effects.is_empty(), "{effects:?}");
     assert_eq!(app.focus, devlanes_tui::app::Focus::List);
     assert!(
         app.notice
             .as_ref()
-            .is_some_and(|n| n.text.contains("has no terminal"))
+            .is_some_and(|n| n.text == "no terminal: an earlier daemon started this process")
     );
+    // s does not start what already runs.
+    assert!(app.update(key(KeyCode::Char('s'))).is_empty());
     Ok(())
 }
 
@@ -168,6 +172,9 @@ async fn lane_stop_and_clean_cover_orphans() -> TestResult {
         app.selected_lane().map(|l| l.reference.as_str()),
         Some("acme@0")
     );
+    // The lane opens on its problem; the whole-lane row is the first row.
+    assert!(app.selected_unit().is_some_and(|u| u.name == "api"));
+    app.update(key(KeyCode::Char('g')));
     assert!(app.selected_unit().is_none());
     // Stop on the lane: the daemon terminates its orphans with the rest.
     let effect = app
@@ -192,11 +199,8 @@ async fn lane_stop_and_clean_cover_orphans() -> TestResult {
     };
     assert_eq!(*method, Method::Restart);
     assert_eq!(selection.units, ["acme@0:api", "acme@0:web"]);
-    // Clean asks for the lane name, then sends the normal clean.
+    // Clean asks first, then sends the normal clean.
     app.update(shifted('C'));
-    for c in "acme@0".chars() {
-        app.update(key(KeyCode::Char(c)));
-    }
     let effects = app.update(key(KeyCode::Enter));
     assert!(
         matches!(effects.as_slice(), [Effect::CleanLane { lane }] if lane == "acme@0"),
@@ -221,24 +225,35 @@ async fn starting_an_orphan_shows_the_daemons_refusal() -> TestResult {
         1,
     ));
     let (mut app, _) = orphan_selected(&api).await;
-    let effect = app
-        .update(key(KeyCode::Char('s')))
-        .pop()
-        .ok_or("s sent nothing")?;
+    // `s` on an orphan sends nothing; a start from elsewhere (an older
+    // client, a group) comes back refused.
+    let effect = Effect::Control {
+        method: Method::Start,
+        lane: "acme@0".into(),
+        selection: devlanes_proto::Selection {
+            units: vec!["acme@0:api".into()],
+            ..Default::default()
+        },
+        label: "start acme@0:api".into(),
+        target: devlanes_tui::app::Target::Unit {
+            lane: "acme@0".into(),
+            unit: "api".into(),
+        },
+    };
     apply(&mut app, &api, effect).await?;
-    // The status line carries the refusal; the error list keeps the full text.
+    // The status line carries the refusal; the pane keeps the full text.
     let notice = app.notice.as_ref().ok_or("no notice")?;
     assert!(notice.error);
     assert!(
         notice
             .text
-            .contains("acme@0:api is still running as pid 4242"),
+            .contains("acme@0:api is already running as pid 4242"),
         "{}",
         notice.text
     );
     let header = row(&render(&app)?, 0);
     assert!(
-        header.contains("! start acme@0:api: acme@0:api is still"),
+        header.contains("✕ start acme@0:api failed: acme@0:"),
         "{header}"
     );
     let entry = app.errors.front().ok_or("not in the error list")?;
@@ -246,9 +261,13 @@ async fn starting_an_orphan_shows_the_daemons_refusal() -> TestResult {
         entry
             .worded
             .summary
-            .ends_with("left by a previous daemon; x stops it"),
+            .ends_with("started by an earlier daemon; x stops it"),
         "{}",
         entry.worded.summary
+    );
+    assert_eq!(
+        entry.worded.command.as_deref(),
+        Some("devlanes stop api --lane acme@0")
     );
     assert!(matches!(
         app.errors.front().map(|e| &e.worded.code),

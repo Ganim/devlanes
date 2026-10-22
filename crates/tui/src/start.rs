@@ -228,39 +228,47 @@ impl StartRun {
         Some(lane)
     }
 
-    /// The header line while the start runs: `start acme@1 · tasks: migrate`.
+    /// `starting` or `restarting`, from the command's verb.
+    fn running_verb(&self) -> String {
+        match self.label.as_str() {
+            "restart" => "restarting".into(),
+            "start" => "starting".into(),
+            other => format!("{other}:"),
+        }
+    }
+
+    /// The top-bar line while the start runs: `starting acme@1: task migrate`.
     pub fn running_line(&self, lanes: &[LaneSummary]) -> String {
-        let mut line = self.label.clone();
-        if let Some(lane) = self.lanes.first() {
-            line.push(' ');
-            line.push_str(lane);
-            if self.lanes.len() > 1 {
-                line.push_str(&format!(" and {} more", self.lanes.len() - 1));
-            }
+        let mut line = self.running_verb();
+        match self.lanes.as_slice() {
+            [] => {}
+            [lane] => line.push_str(&format!(" {lane}")),
+            [lane, rest @ ..] => line.push_str(&format!(" {lane} and {} more lanes", rest.len())),
         }
         let Some(phase) = &self.phase else {
-            return line;
+            return format!("{line}…");
         };
-        line.push_str(" · ");
-        line.push_str(&text::clean(phase));
         // The same words as the CLI's progress lines.
-        if let Some(detail) = &self.detail {
-            line.push_str(&format!(": {}", text::clean(detail)));
+        let what = if let Some(detail) = &self.detail {
+            match phase.as_str() {
+                "setup" => format!("setup {}", text::clean(detail)),
+                _ => text::clean(detail),
+            }
         } else if let Some(task) = &self.task {
-            line.push_str(&format!(": {}", text::clean(task)));
+            format!("task {}", text::clean(task))
         } else if phase == "infra" {
-            line.push_str(": starting containers, waiting until they are healthy");
-        } else if phase == "setup" {
-            line.push_str(": running infra.setup");
+            "containers".into()
         } else if phase == "services" && !self.units.is_empty() {
             let ready = self
                 .units
                 .iter()
                 .filter(|unit| unit_ready(lanes, self.lanes.first(), unit))
                 .count();
-            line.push_str(&format!(" {ready} of {} ready", self.units.len()));
-        }
-        line
+            format!("{ready} of {} services ready", self.units.len())
+        } else {
+            text::clean(phase)
+        };
+        format!("{line}: {what}")
     }
 
     /// Records the result and returns what to report: the services that
@@ -275,13 +283,13 @@ impl StartRun {
         let value = match result {
             Ok(value) => value,
             Err(error) => {
+                let what = match self.lanes.first() {
+                    Some(lane) => format!("{} {lane}", self.label),
+                    None => self.label.clone(),
+                };
                 self.outcome = Some(StartOutcome {
                     ok: false,
-                    line: format!(
-                        "{} failed: {}",
-                        self.running_line(&[]),
-                        crate::words::api(error).one_line()
-                    ),
+                    line: format!("✕ {what} failed: {}", crate::words::api(error).one_line()),
                 });
                 return (Vec::new(), Some(error.clone()));
             }
@@ -309,7 +317,11 @@ impl StartRun {
             }
         }
         if parts.is_empty() {
-            parts.push(format!("{} done", self.label));
+            parts.push(match self.label.as_str() {
+                "restart" => "restarted".into(),
+                "start" => "started".into(),
+                other => format!("{other} done"),
+            });
         }
         self.outcome = Some(StartOutcome {
             ok,
@@ -319,7 +331,8 @@ impl StartRun {
     }
 }
 
-/// `acme@1 ready · 5 of 5 services`, `acme@1: web failed · 4 of 5 ready`.
+/// `acme@1 up: 5 of 5 services ready`, `✕ acme@1: web failed, 4 of 5
+/// services ready`.
 fn result_line(start: &StartResult) -> String {
     let services: Vec<_> = start
         .units
@@ -330,18 +343,18 @@ fn result_line(start: &StartResult) -> String {
         .iter()
         .filter(|unit| matches!(unit.state.as_str(), "ready" | "running"))
         .count();
-    let count = format!("{ready} of {} ready", services.len());
+    let count = format!("{ready} of {} services ready", services.len());
     let failed: Vec<&str> = start.failures.iter().map(|f| f.unit.as_str()).collect();
     if !failed.is_empty() {
-        format!("{}: {} failed · {count}", start.lane, failed.join(", "))
+        format!("✕ {}: {} failed, {count}", start.lane, failed.join(", "))
     } else if start.timed_out {
-        format!("{} timed out · {count}", start.lane)
+        format!("✕ {} timed out: {count}", start.lane)
     } else if !start.ready {
-        format!("{} not ready · {count}", start.lane)
+        format!("{} not ready: {count}", start.lane)
     } else if services.is_empty() {
-        format!("{} ready", start.lane)
+        format!("{} up", start.lane)
     } else {
-        format!("{} ready · {} services", start.lane, services.len())
+        format!("{} up: {count}", start.lane)
     }
 }
 
@@ -446,7 +459,7 @@ mod tests {
     #[test]
     fn the_line_follows_phases_tasks_and_ready_services() {
         let mut run = StartRun::new("start".into());
-        assert_eq!(run.running_line(&[]), "start");
+        assert_eq!(run.running_line(&[]), "starting…");
         let phase = |phase, state| {
             event(
                 events::PHASE,
@@ -454,17 +467,14 @@ mod tests {
             )
         };
         assert_eq!(run.event(&phase("infra", "started")), Some("acme@1".into()));
-        assert_eq!(
-            run.running_line(&[]),
-            "start acme@1 · infra: starting containers, waiting until they are healthy"
-        );
+        assert_eq!(run.running_line(&[]), "starting acme@1: containers");
         run.event(&phase("infra", "done"));
         run.event(&phase("tasks", "started"));
         run.event(&event(
             events::TASK,
             json!({"lane": "acme@1", "task": "migrate", "state": "started"}),
         ));
-        assert_eq!(run.running_line(&[]), "start acme@1 · tasks: migrate");
+        assert_eq!(run.running_line(&[]), "starting acme@1: task migrate");
         run.event(&phase("tasks", "done"));
         run.event(&phase("services", "started"));
         let lanes = [LaneSummary {
@@ -479,7 +489,7 @@ mod tests {
         }];
         assert_eq!(
             run.running_line(&lanes),
-            "start acme@1 · services 1 of 2 ready"
+            "starting acme@1: 1 of 2 services ready"
         );
     }
 
@@ -504,15 +514,12 @@ mod tests {
         ));
         assert_eq!(
             run.running_line(&[]),
-            "start acme@1 · infra: waiting for postgres (healthy 1 of 2)"
+            "starting acme@1: waiting for postgres (1 of 2 healthy)"
         );
         // The next phase starts without detail of its own.
         run.event(&phase("infra", "done", json!({})));
         run.event(&phase("setup", "started", json!({})));
-        assert_eq!(
-            run.running_line(&[]),
-            "start acme@1 · setup: running infra.setup"
-        );
+        assert_eq!(run.running_line(&[]), "starting acme@1: setup");
         run.event(&phase(
             "setup",
             "progress",
@@ -520,10 +527,10 @@ mod tests {
         ));
         assert_eq!(
             run.running_line(&[]),
-            "start acme@1 · setup: database (2 of 3)"
+            "starting acme@1: setup database (2 of 3)"
         );
         run.event(&phase("setup", "done", json!({})));
-        assert_eq!(run.running_line(&[]), "start acme@1");
+        assert_eq!(run.running_line(&[]), "starting acme@1…");
     }
 
     #[test]
@@ -537,7 +544,7 @@ mod tests {
             run.outcome,
             Some(StartOutcome {
                 ok: true,
-                line: "acme@1 ready · 2 services".into()
+                line: "acme@1 up: 2 of 2 services ready".into()
             })
         );
         let failed = json!({"lane": "acme@1", "ready": false, "units": [unit("api", "ready"), unit("web", "failed")],
@@ -546,7 +553,7 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(
             run.outcome.map(|o| (o.ok, o.line)),
-            Some((false, "acme@1: web failed · 1 of 2 ready".into()))
+            Some((false, "✕ acme@1: web failed, 1 of 2 services ready".into()))
         );
     }
 }

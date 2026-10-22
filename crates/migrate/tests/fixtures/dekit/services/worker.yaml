@@ -1,6 +1,0 @@
-tasks:
-  worker:
-    cmd: ["node", "worker.js"]
-    cwd: .
-    deps: [/db]
-    autostart: true

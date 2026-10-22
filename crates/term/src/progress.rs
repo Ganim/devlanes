@@ -594,7 +594,7 @@ fn memory_hold(unit: &UnitSummary) -> bool {
 }
 
 /// What a running phase is doing, from the `containers` or `step` of a
-/// `lane.phase` `progress` event: `waiting for postgres (healthy 1 of 2)`,
+/// `lane.phase` `progress` event: `waiting for postgres (1 of 2 healthy)`,
 /// `migrate (2 of 3)`. The CLI's phase lines and the TUI's header both say it
 /// this way. `None` when the event carries neither.
 pub fn phase_detail(data: &Value) -> Option<String> {
@@ -646,7 +646,7 @@ fn containers_detail(containers: &[PhaseContainer]) -> String {
     if waiting.len() > 1 {
         line.push_str(&format!(" and {} more", waiting.len() - 1));
     }
-    line.push_str(&format!(" (healthy {healthy} of {total})"));
+    line.push_str(&format!(" ({healthy} of {total} healthy)"));
     line
 }
 
@@ -1066,7 +1066,7 @@ mod tests {
                 {"name": "redis", "state": "healthy", "health": "healthy"},
                 {"name": "postgres", "state": "waiting_healthy", "health": "starting"},
             ]))),
-            Some("waiting for postgres (healthy 1 of 2)".into())
+            Some("waiting for postgres (1 of 2 healthy)".into())
         );
         assert_eq!(
             phase_detail(&containers(json!([
@@ -1074,7 +1074,7 @@ mod tests {
                 {"name": "redis", "state": "starting", "health": "restarting"},
                 {"name": "mail", "state": "a_newer_state"},
             ]))),
-            Some("creating postgres and 2 more (healthy 0 of 3)".into())
+            Some("creating postgres and 2 more (0 of 3 healthy)".into())
         );
         assert_eq!(
             phase_detail(&containers(json!([

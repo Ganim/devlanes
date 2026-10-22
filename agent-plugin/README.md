@@ -1,10 +1,12 @@
 # devlanes agent plugin
 
-Instructions that teach coding agents to run dev services through the devlanes CLI instead of backgrounding them in a shell.
+Instructions that teach coding agents to run dev services through the devlanes CLI instead of backgrounding them in a shell, to write `devlanes.yaml`, and to migrate other process-manager setups to it.
 
 | Path | Content |
 |---|---|
-| `skills/devlanes/SKILL.md` | The skill. Claude Code, the skills CLI and Codex all use this file. |
+| `skills/devlanes/SKILL.md` | The skill: daily use. Claude Code, the skills CLI and Codex all use this file. |
+| `skills/devlanes/references/configuration.md` | How to write a good `devlanes.yaml`; the skill tells agents to read it before editing the config. |
+| `skills/devlanes/references/migration.md` | Mapping from mprocs, dekit, process-compose, Procfile runners, pm2, tmuxinator, tmuxp, package.json parallel scripts, mise and Docker Compose. |
 | `.claude-plugin/plugin.json` | Claude Code plugin manifest. |
 | `hooks/hooks.json`, `scripts/block-background.sh` | Optional Claude Code `PreToolUse` hook that rejects backgrounded dev servers; `scripts/test-block-background.sh` tests it. |
 | `codex/AGENTS.md` | Short form of the skill for an `AGENTS.md` file. |

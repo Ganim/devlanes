@@ -4,7 +4,7 @@ expression: draw(&app)?.backend()
 ---
 "                              "
 "                              "
-"      terminal too small      "
-"     need 40x8, have 30x6     "
+"       terminal is 30x6       "
+" devlanes needs 40x8 or larger"
 "                              "
 "                              "

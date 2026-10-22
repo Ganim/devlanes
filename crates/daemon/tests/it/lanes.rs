@@ -104,8 +104,9 @@ async fn renaming_the_project_renames_its_lanes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-/// Writing a config into a worktree without one, while another lane runs,
-/// assigns the new lane and marks no worktree missing, in memory or in state.db.
+/// Writing a config into a worktree devlanes ran in without one, while another
+/// lane runs, assigns the new lane and marks no worktree missing, in memory or
+/// in state.db.
 async fn new_config_assigns_without_marking_anything_missing() {
     tokio::time::timeout(LIMIT, async {
         let tmp = temp();
@@ -121,7 +122,9 @@ async fn new_config_assigns_without_marking_anything_missing() {
             },
         )
         .await;
-        assert_eq!(lane_at(&h, &main, &wt).await.state, "no-config");
+        // The primary worktree registers the project; then devlanes runs in wt.
+        lanes(&h, &main).await;
+        assert_eq!(lane_at(&h, &wt, &wt).await.state, "no-config");
         h.call(Method::Start, json!({}), cx(&main))
             .await
             .expect("start main");

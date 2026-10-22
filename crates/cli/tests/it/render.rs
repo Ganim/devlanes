@@ -711,6 +711,55 @@ fn doctor_warns_about_stop_timeouts_past_the_service_window() {
     );
 }
 
+/// Splits [`render_text`] output into its human, plain and agent parts.
+fn modes(text: &str) -> Vec<&str> {
+    text.split("--- ").filter(|part| !part.is_empty()).collect()
+}
+
+#[test]
+/// People see the display name and `running` for a unit without a readiness
+/// check; plain and agent output keep the key and the state word.
+fn human_status_shows_display_names_and_running() {
+    let mut api = unit("api", "ready");
+    api["display_name"] = json!("Billing API");
+    api["ready_check"] = json!("started");
+    let mut web = unit("web", "ready");
+    web["ready_check"] = json!("tcp");
+    let data = json!({"items": [lane(Some(2), "feat/billing", "running", vec![api, web])],
+                      "truncated": false, "next_cursor": null});
+    let text = render_text(Method::Status, &data);
+    let parts = modes(&text);
+    let human = parts[0];
+    assert!(
+        human.contains("Billing API") && human.contains("running"),
+        "{human}"
+    );
+    assert!(!human.contains(" api "), "{human}");
+    for other in &parts[1..] {
+        assert!(!other.contains("Billing API"), "{other}");
+    }
+}
+
+#[test]
+/// A start that found everything up says so instead of looking like a fresh start.
+fn start_of_a_running_lane_says_already_running() {
+    let data = json!({
+        "lane": "acme@2", "branch": "feat/billing", "started": [],
+        "already_running": ["acme@2:api"], "whole_lane": false, "ready": true, "timed_out": false,
+        "failures": [], "skipped_tasks": [], "units": [unit("api", "ready")],
+    });
+    let text = render_text(Method::Start, &data);
+    let parts = modes(&text);
+    assert!(
+        parts[0].contains("already running; nothing was started"),
+        "{text}"
+    );
+    assert!(
+        parts[2].contains("already running (nothing started)"),
+        "{text}"
+    );
+}
+
 #[test]
 fn doctor_says_how_to_recreate_an_unconstrained_ca() {
     let data = json!({

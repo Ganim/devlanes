@@ -32,6 +32,14 @@ use crate::{
     },
 };
 
+/// How long a lane's worktree folder must stay gone before an idle lane is cleaned.
+pub(crate) const MISSING_GRACE: Duration = Duration::from_secs(5);
+
+/// A lane with a record whose folder is gone and that runs nothing.
+fn sweepable(st: &LaneSt) -> bool {
+    !st.present && st.record.is_some() && !st.any_running() && st.busy.is_none()
+}
+
 /// Worktree as reported by git (or the single non-git root).
 #[derive(Debug, Clone)]
 pub(crate) struct Tree {
@@ -498,7 +506,10 @@ impl Inner {
             if lane.index() == Some(0) {
                 return lane.path.clone();
             }
-            if lane.present && lane.branch.as_deref() == Some(primary.as_str()) {
+            if lane.present
+                && lane.alias().is_none()
+                && lane.branch.as_deref() == Some(primary.as_str())
+            {
                 fallback = Some(lane.path.clone());
             }
         }
@@ -511,8 +522,20 @@ impl Inner {
             .map_or(root, |lane| lane.st().path.clone())
     }
 
-    /// Re-lists worktrees from git (or the single non-git root) and applies the diff.
+    /// Re-lists worktrees from git and applies the diff, then cleans idle lanes
+    /// whose folder is gone, in the background.
     pub(crate) async fn relist(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+    ) -> Result<SyncReport, RpcError> {
+        let report = self.relist_only(project).await?;
+        self.sweep_missing(project);
+        Ok(report)
+    }
+
+    /// [`Self::relist`] without the clean, for `lane gc`, which collects those
+    /// lanes itself and asks first.
+    pub(crate) async fn relist_only(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
     ) -> Result<SyncReport, RpcError> {
@@ -595,6 +618,9 @@ impl Inner {
                 st.path = tree.path.clone();
                 st.branch = tree.branch.clone();
                 st.present = tree.present;
+                if tree.present {
+                    st.missing_since = None;
+                }
                 (was_present, moved, rebranched)
             };
             if tree.present
@@ -611,6 +637,57 @@ impl Inner {
             if moved || rebranched || tree.present != was_present {
                 changed.push(lane.clone());
             }
+        }
+        // Extra lanes of a folder are not git worktrees: they follow their base.
+        let lanes = project.lanes();
+        for alias in &lanes {
+            let Some(base_identity) = alias.st().alias().map(|(base, _)| base.to_owned()) else {
+                continue;
+            };
+            let base = lanes
+                .iter()
+                .find(|lane| lane.st().identity == base_identity)
+                .map(|base| {
+                    let st = base.st();
+                    (st.path.clone(), st.branch.clone(), st.present)
+                });
+            let (path, branch, present) = {
+                let st = alias.st();
+                base.unwrap_or_else(|| (st.path.clone(), st.branch.clone(), false))
+            };
+            let identity = alias.st().identity.clone();
+            let (was_present, moved) = {
+                let mut st = alias.st();
+                let was_present = st.present;
+                let moved = st.path != path || st.branch != branch;
+                st.path = path.clone();
+                st.branch = branch.clone();
+                st.present = present;
+                if present {
+                    st.missing_since = None;
+                }
+                (was_present, moved)
+            };
+            seen.insert(alias.worktree);
+            if !moved && present == was_present {
+                continue;
+            }
+            self.store
+                .upsert_worktree(WorktreeInput {
+                    project_id: project.id,
+                    identity,
+                    path,
+                    branch,
+                    present,
+                })
+                .await
+                .map_err(store_error)?;
+            if present {
+                self.reload_config(project, alias).await;
+            } else if was_present {
+                report.removed.push(alias.clone());
+            }
+            changed.push(alias.clone());
         }
         for lane in project.lanes() {
             if seen.contains(&lane.worktree) {
@@ -663,15 +740,22 @@ impl Inner {
         lanes.sort_by_key(|lane| lane.st().path.clone());
         let mut assigned = Vec::new();
         for lane in lanes {
-            let (config, branch) = {
+            let (config, branch, alias) = {
                 let st = lane.st();
                 if !st.present || st.record.is_some() {
+                    continue;
+                }
+                // Only the primary worktree gets a lane by existing; any other
+                // gets one once devlanes runs in it.
+                let primary_tree = st.alias().is_none()
+                    && (st.identity == "main" || st.branch.as_deref() == Some(primary.as_str()));
+                if !primary_tree && !st.wanted {
                     continue;
                 }
                 let Some(config) = st.config.loaded().cloned() else {
                     continue;
                 };
-                (config, st.branch.clone())
+                (config, st.branch.clone(), st.alias().is_some())
             };
             let used: BTreeSet<u32> = project
                 .lanes()
@@ -688,11 +772,13 @@ impl Inner {
                 ));
                 continue;
             }
-            let index = if branch.as_deref() == Some(primary.as_str()) && !used.contains(&0) {
-                0
-            } else {
-                (1..).find(|i| !used.contains(i)).unwrap_or(1)
-            };
+            // An extra lane of a folder never takes lane 0 from its first lane.
+            let index =
+                if !alias && branch.as_deref() == Some(primary.as_str()) && !used.contains(&0) {
+                    0
+                } else {
+                    (1..).find(|i| !used.contains(i)).unwrap_or(1)
+                };
             let record = self
                 .store
                 .upsert_lane(LaneInput {
@@ -744,6 +830,10 @@ impl Inner {
                 st.moves_to = None;
                 continue;
             };
+            if st.alias().is_some() {
+                st.moves_to = None;
+                continue;
+            }
             let on_primary = st.branch.as_deref() == Some(primary.as_str());
             st.moves_to = match (on_primary, index) {
                 (true, 0) | (false, 1..) => None,
@@ -1371,6 +1461,7 @@ impl Inner {
                 hidden: service.hidden,
                 autostart: service.autostart,
                 color: service.color.clone(),
+                display_name: service.display_name.clone(),
             })
             .collect();
         let infra_routes = infra_routes(&config, &facts, &layout, &infra, &client_env, &dotenv);
@@ -1399,6 +1490,11 @@ impl Inner {
     pub(crate) fn emit_lane_event(&self, project: &ProjectRt, lane: &LaneRt) {
         let name = project.name();
         let _publish = lock(&lane.publish);
+        // A worktree without a lane is nobody's business; a cleaned lane already
+        // sent `lane.removed`.
+        if !lane.st().listed() {
+            return;
+        }
         let mut summary = lane_summary(&name, &lane.st());
         self.fill_queued(&mut summary);
         self.bus
@@ -1531,13 +1627,62 @@ impl Inner {
         }
     }
 
-    /// Runs `new_worktrees` / `removed_worktrees` for one re-list.
-    pub(crate) async fn apply_policies(
-        self: &Arc<Self>,
-        project: &Arc<ProjectRt>,
-        report: SyncReport,
-    ) {
-        for lane in report.added {
+    /// The present worktree of `project` holding `cwd`, deepest first; a
+    /// folder's first lane wins over its extra lanes.
+    pub(crate) fn lane_at(project: &ProjectRt, cwd: &Path) -> Option<Arc<LaneRt>> {
+        let mut best: Option<(usize, bool, Arc<LaneRt>)> = None;
+        for lane in project.lanes() {
+            let st = lane.st();
+            if st.present && cwd.starts_with(&st.path) {
+                let rank = (st.path.components().count(), st.alias().is_none());
+                if best
+                    .as_ref()
+                    .is_none_or(|(depth, base, _)| rank > (*depth, *base))
+                {
+                    best = Some((rank.0, rank.1, lane.clone()));
+                }
+            }
+        }
+        best.map(|(_, _, lane)| lane)
+    }
+
+    /// devlanes runs in `lane`'s worktree: it gets a lane once its config loads,
+    /// and `lanes.new_worktrees` applies to it. A lane that has a record already,
+    /// or a folder that is gone, is left alone.
+    pub(crate) async fn claim_lane(self: &Arc<Self>, project: &Arc<ProjectRt>, lane: &Arc<LaneRt>) {
+        {
+            let mut st = lane.st();
+            if st.wanted || st.record.is_some() || !st.present {
+                return;
+            }
+            st.wanted = true;
+        }
+        let assigned = {
+            let _sync = project.sync.lock().await;
+            let assigned = match self.assign_lanes(project).await {
+                Ok(assigned) => assigned,
+                Err(error) => {
+                    tracing::warn!(code = %error.code, "lane assignment failed");
+                    Vec::new()
+                }
+            };
+            self.update_moves(project);
+            assigned
+        };
+        self.refresh_views(project).await;
+        if !assigned.iter().any(|other| Arc::ptr_eq(other, lane)) {
+            // Still waiting (lanes.max, config error): it shows with its reason.
+            self.emit_lane(project, lane);
+        }
+        for other in &assigned {
+            self.emit_lane(project, other);
+        }
+        self.new_lane_policies(project, assigned);
+    }
+
+    /// Runs `lanes.new_worktrees` for lanes that just got their record.
+    fn new_lane_policies(self: &Arc<Self>, project: &Arc<ProjectRt>, lanes: Vec<Arc<LaneRt>>) {
+        for lane in lanes {
             let Some(config) = lane.st().config.loaded().cloned() else {
                 continue;
             };
@@ -1571,7 +1716,65 @@ impl Inner {
                 }
             });
         }
+    }
+
+    /// Cleans, in the background, the lanes of `project` whose worktree folder has
+    /// been gone for [`MISSING_GRACE`] and that run nothing; their logs stay until
+    /// retention removes them. Lanes that still run something keep showing as
+    /// missing. The grace covers `git worktree move`, which removes the old
+    /// folder before git's record names the new one.
+    pub(crate) fn sweep_missing(self: &Arc<Self>, project: &Arc<ProjectRt>) {
+        let idle: Vec<(Arc<LaneRt>, Duration)> = project
+            .lanes()
+            .into_iter()
+            .filter_map(|lane| {
+                let mut st = lane.st();
+                if !sweepable(&st) || st.sweeping {
+                    return None;
+                }
+                st.sweeping = true;
+                let since = *st.missing_since.get_or_insert_with(std::time::Instant::now);
+                drop(st);
+                Some((lane, MISSING_GRACE.saturating_sub(since.elapsed())))
+            })
+            .collect();
+        for (lane, wait) in idle {
+            let engine = self.clone();
+            let project = project.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {}
+                    () = engine.shutdown.cancelled() => return,
+                }
+                if sweepable(&lane.st()) {
+                    let reference = lane.st().reference(&project.name());
+                    match engine.clean_lane(&project, &lane, None).await {
+                        Ok(_) => {
+                            tracing::info!(lane = %reference, "cleaned a lane whose worktree is gone")
+                        }
+                        Err(error) => {
+                            tracing::warn!(lane = %reference, code = %error.code, "cleaning a lane whose worktree is gone failed")
+                        }
+                    }
+                }
+                lane.st().sweeping = false;
+            });
+        }
+    }
+
+    /// Runs `removed_worktrees` for lanes of one re-list whose folder went away
+    /// while they ran something, then cleans the idle ones.
+    pub(crate) async fn apply_policies(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        report: SyncReport,
+    ) {
+        self.new_lane_policies(project, report.added);
         for lane in report.removed {
+            // Idle lanes are cleaned by the sweep below.
+            if !lane.st().any_running() {
+                continue;
+            }
             // The config poller can read the removed worktree's config as missing
             // before this runs; its running units still stop, but only a config
             // that says so cleans.
@@ -1603,11 +1806,12 @@ impl Inner {
                 }
             });
         }
+        self.sweep_missing(project);
     }
 }
 
 /// Creates a lane runtime around its state.
-fn new_lane(worktree: WorktreeId, st: LaneSt) -> Arc<LaneRt> {
+pub(crate) fn new_lane(worktree: WorktreeId, st: LaneSt) -> Arc<LaneRt> {
     Arc::new(LaneRt {
         worktree,
         op: tokio::sync::Mutex::new(()),
