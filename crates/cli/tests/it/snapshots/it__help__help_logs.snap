@@ -21,6 +21,9 @@ Options:
       --tail <N>
           Show the last N lines [default: 100 in agent mode or without a terminal]
 
+      --head <N>
+          Show the first N lines of the selected range
+
   -f, --follow
           Keep streaming new lines; agent mode requires --timeout
 

@@ -97,7 +97,7 @@
       "examples": [
         {
           "remote_hosts_retention": "90d",
-          "retention": "30d"
+          "retention": "7d"
         }
       ],
       "properties": {
@@ -112,11 +112,11 @@
         },
         "retention": {
           "$ref": "#/$defs/ConfigDuration",
-          "default": "2592000000ms",
-          "description": "Maximum age since a unit or task finished; defaults to 30d. Disk pressure may prune it sooner.",
+          "default": "604800000ms",
+          "description": "Maximum age since a unit or task finished; defaults to 7d. Disk pressure may prune it sooner.",
           "examples": [
-            "30d",
-            "14d"
+            "7d",
+            "30d"
           ]
         }
       },
@@ -307,15 +307,16 @@
       "description": "Retention for monitor history used by graphs and service baselines, including database aggregates.",
       "examples": [
         {
-          "retention": "30d"
+          "retention": "7d"
         }
       ],
       "properties": {
         "retention": {
           "$ref": "#/$defs/ConfigDuration",
-          "default": "2592000000ms",
-          "description": "Maximum age of persisted monitor samples and database run summaries; defaults to 30d.",
+          "default": "604800000ms",
+          "description": "Maximum age of persisted monitor samples and database run summaries; defaults to 7d.",
           "examples": [
+            "7d",
             "30d"
           ]
         }
@@ -601,83 +602,28 @@
         "${{ lane.index }}"
       ]
     },
-    "Terminal": {
-      "description": "Terminal application used by open-in-terminal actions.",
-      "examples": [
-        "iterm2",
-        "ghostty",
-        "wezterm",
-        "kitty",
-        "terminal"
-      ],
-      "oneOf": [
-        {
-          "const": "iterm2",
-          "description": "Open a session in iTerm2 on macOS.",
-          "examples": [
-            "iterm2"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "ghostty",
-          "description": "Open a session in Ghostty.",
-          "examples": [
-            "ghostty"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "wezterm",
-          "description": "Open a session in WezTerm.",
-          "examples": [
-            "wezterm"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "kitty",
-          "description": "Open a session in kitty.",
-          "examples": [
-            "kitty"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "terminal",
-          "description": "Open a session in macOS Terminal.app.",
-          "examples": [
-            "terminal"
-          ],
-          "type": "string"
-        }
-      ]
-    },
     "TerminalConfig": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Terminal",
-          "description": "Terminal app used by open-in-terminal actions; progress stays on auto.",
+          "description": "A terminal app name from when devlanes opened units in a new terminal\nwindow; that feature is gone, so the name is ignored with a warning.",
           "examples": [
             "ghostty"
-          ]
+          ],
+          "type": "string"
         },
         {
           "$ref": "#/$defs/TerminalSettings",
-          "description": "Terminal app and progress-bar setting written as separate fields.",
+          "description": "How devlanes uses the terminal's own progress bar.",
           "examples": [
             {
-              "app": "wezterm",
               "progress": "never"
             }
           ]
         }
       ],
-      "description": "The terminal app name alone, or a mapping with the app and the progress-bar setting.",
+      "description": "How devlanes uses the terminal, or (from older configs) a terminal app\nname, which is ignored.",
       "examples": [
-        "ghostty",
         {
-          "app": "ghostty",
           "progress": "auto"
         }
       ]
@@ -718,10 +664,9 @@
     },
     "TerminalSettings": {
       "additionalProperties": false,
-      "description": "Terminal app and how devlanes uses the terminal's own progress bar.",
+      "description": "How devlanes uses the terminal's own progress bar.",
       "examples": [
         {
-          "app": "ghostty",
           "progress": "auto"
         },
         {
@@ -729,22 +674,6 @@
         }
       ],
       "properties": {
-        "app": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Terminal"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, else the first one installed.",
-          "examples": [
-            "ghostty",
-            "iterm2"
-          ]
-        },
         "progress": {
           "$ref": "#/$defs/TerminalProgress",
           "default": "auto",
@@ -869,6 +798,9 @@
         {
           "glyphs": "ascii",
           "theme": "light"
+        },
+        {
+          "on_quit": "keep"
         }
       ],
       "properties": {
@@ -880,6 +812,16 @@
             "auto",
             "unicode",
             "ascii"
+          ]
+        },
+        "on_quit": {
+          "$ref": "#/$defs/TuiOnQuit",
+          "default": "ask",
+          "description": "What quitting the TUI does while lanes of the project on screen run; defaults to ask. The quit dialog's \"remember\" box writes it.",
+          "examples": [
+            "ask",
+            "keep",
+            "stop"
           ]
         },
         "open_on_start": {
@@ -934,6 +876,40 @@
           "description": "Plain ASCII, for fonts or terminals that draw Unicode symbols badly.",
           "examples": [
             "ascii"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TuiOnQuit": {
+      "description": "What quitting the TUI does with running lanes.",
+      "examples": [
+        "ask",
+        "keep",
+        "stop"
+      ],
+      "oneOf": [
+        {
+          "const": "ask",
+          "description": "Ask each time whether to keep the lanes running or stop them.",
+          "examples": [
+            "ask"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "keep",
+          "description": "Close the TUI and leave every lane running in the daemon.",
+          "examples": [
+            "keep"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "stop",
+          "description": "Stop the running lanes of the project on screen, then close the TUI.",
+          "examples": [
+            "stop"
           ],
           "type": "string"
         }
@@ -1016,7 +992,9 @@
       "ports": {
         "range": "20000-32767"
       },
-      "terminal": "ghostty"
+      "terminal": {
+        "progress": "auto"
+      }
     }
   ],
   "properties": {
@@ -1024,13 +1002,13 @@
       "$ref": "#/$defs/HistoryConfig",
       "default": {
         "remote_hosts_retention": "7776000000ms",
-        "retention": "2592000000ms"
+        "retention": "604800000ms"
       },
       "description": "Retention for finished unit/task history and disconnected remote hosts in the database.",
       "examples": [
         {
           "remote_hosts_retention": "90d",
-          "retention": "30d"
+          "retention": "7d"
         }
       ]
     },
@@ -1076,12 +1054,12 @@
     "metrics": {
       "$ref": "#/$defs/MetricsConfig",
       "default": {
-        "retention": "2592000000ms"
+        "retention": "604800000ms"
       },
       "description": "Retention for monitor history, including aggregates stored in the database.",
       "examples": [
         {
-          "retention": "30d"
+          "retention": "7d"
         }
       ]
     },
@@ -1161,11 +1139,9 @@
         }
       ],
       "default": null,
-      "description": "Terminal app for open-in-terminal actions, alone or with the progress-bar setting.",
+      "description": "How devlanes uses the terminal tab's progress bar during starts.",
       "examples": [
-        "ghostty",
         {
-          "app": "ghostty",
           "progress": "auto"
         }
       ]
@@ -1191,6 +1167,7 @@
       "$ref": "#/$defs/TuiConfig",
       "default": {
         "glyphs": "auto",
+        "on_quit": "ask",
         "open_on_start": true,
         "theme": "auto"
       },
@@ -1202,6 +1179,9 @@
         {
           "glyphs": "ascii",
           "theme": "light"
+        },
+        {
+          "on_quit": "keep"
         }
       ]
     },

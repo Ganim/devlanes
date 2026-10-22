@@ -18,7 +18,7 @@ This page covers daily use. Read a reference first when the task is about the co
 
 - Never start a long-running process with `&`, `nohup`, `setsid` or a background shell. Use `devlanes start` for the services in `devlanes.yaml` and `devlanes exec --name NAME -- COMMAND` for anything else.
 - `start`, `restart` and `wait` return once units are ready or have failed. Do not poll with `sleep` or `curl` loops.
-- Read logs with `--tail`, `--grep` or `--since`. Output is capped at 16 KiB per command, and truncated output ends with the command that fetches the rest. Follow logs (`-f`) only together with `--timeout`.
+- Read logs with `--tail`, `--head` (the first lines, such as how a start began), `--grep` or `--since`. Output is capped at 16 KiB per command, and truncated output ends with the command that fetches the rest. Follow logs (`-f`) only together with `--timeout`.
 - A command that needs confirmation exits 2 and names the flag. Rerun it with `--yes` only when the user asked for that action.
 - A command run without the unit, task or lane it needs (`devlanes url open`, `devlanes run`, `devlanes logs`) exits 2 and lists the options with a command to run; with `--json` they are in `error.data.options`. Pick one from that list. Exit 3 there means nothing can be chosen, such as no devlanes.yaml in this directory or its parents.
 - Clean up with `devlanes stop --mine`. It stops only what your session started. Stopping or restarting a unit a human started works, and the result says so; do it only when the task requires it.
@@ -52,8 +52,6 @@ Output prints lanes as `acme@2 (feat/billing)`. Paste references back unchanged.
 | Tests against the stack | `devlanes with -- pnpm test:e2e` |
 | Stop what you started | `devlanes stop --mine` |
 | Setup problems | `devlanes doctor` |
-
-`devlanes agent-guide` prints a short version of this page.
 
 ## Running tests
 

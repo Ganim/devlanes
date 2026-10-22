@@ -339,14 +339,27 @@ impl StartTracker {
         self
     }
 
-    /// Takes a status snapshot, as after subscribing or a `resync`. A restarted
-    /// daemon numbers its starts from 1 again, so the known start ids go too.
+    /// Takes a status snapshot, as after subscribing or a `resync`. A lane
+    /// still starting keeps its start (id, plan, phase): the snapshot comes
+    /// from the same daemon, and dropping the id would make the start's next
+    /// event look like a new start and forget the plan. Other lanes forget
+    /// theirs. After reconnecting to a possibly new daemon, which numbers its
+    /// starts from 1 again, call [`StartTracker::reset`] first.
     pub fn seed(&mut self, lanes: &[LaneSummary]) {
         for lane in lanes {
             let followed = self.lanes.entry(lane.reference.clone()).or_default();
+            let starting = lane.state == "starting" || followed.phase.is_some();
             followed.summary = Some(lane.clone());
-            followed.start = None;
+            if !starting {
+                followed.start = None;
+            }
         }
+    }
+
+    /// Forgets every lane and start, for a connection to a daemon that may
+    /// have restarted.
+    pub fn reset(&mut self) {
+        self.lanes.clear();
     }
 
     /// Applies one event; others are ignored.
@@ -1016,6 +1029,44 @@ mod tests {
             tracker.unit_filter(&tracker.followed()),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn a_status_refresh_in_the_middle_of_a_start_keeps_its_plan() {
+        let mut tracker = StartTracker::viewer();
+        let starting = |units| lane("acme@1", "/work/acme-1", "starting", units);
+        tracker.seed(&[starting(vec![
+            unit("acme@1", "api", "starting"),
+            unit("acme@1", "web", "starting"),
+            unit("acme@1", "docs", "ready"),
+        ])]);
+        // The start plans api and web; docs ran already and is not its share.
+        tracker.event(&phase_of(
+            "acme@1",
+            "services",
+            "started",
+            4,
+            &["api", "web"],
+        ));
+        tracker.event(&changed(unit("acme@1", "api", "ready")));
+        assert_eq!(tracker.progress(), Progress::Percent(50));
+        // A `resync` (the subscriber fell behind while output flooded): the
+        // snapshot must not turn the start's next event into a new start.
+        tracker.seed(&[starting(vec![
+            unit("acme@1", "api", "ready"),
+            unit("acme@1", "web", "starting"),
+            unit("acme@1", "docs", "ready"),
+        ])]);
+        assert_eq!(tracker.progress(), Progress::Percent(50));
+        tracker.event(&phase_of("acme@1", "services", "progress", 4, &[]));
+        assert_eq!(tracker.progress(), Progress::Percent(50));
+        tracker.event(&changed(unit("acme@1", "web", "ready")));
+        assert_eq!(tracker.progress(), Progress::Percent(100));
+        // After a reconnect the ids start over: reset, then the new start.
+        tracker.reset();
+        tracker.seed(&[starting(vec![unit("acme@1", "api", "starting")])]);
+        tracker.event(&phase_of("acme@1", "services", "started", 1, &["api"]));
+        assert_eq!(tracker.progress(), Progress::Percent(0));
     }
 
     #[test]

@@ -78,14 +78,14 @@ async fn daemon_tab_at_80x24() -> TestResult {
     assert_clean(&buffer, "daemon tab");
     let text = screen(&buffer);
     for expected in [
-        "0.1.0  pid 4242  up 2h 5m",
-        "3 processes  2 projects  4 clients",
+        // Below 100 columns the facts are two lines in the checks' box.
+        "0.1.0 · pid 4242 · up 2h 5m · 3 managed",
         "https on fallback port 8443: port 443 needs root",
-        "fix  devlanes certs trust",
-        "Compose 2.29.1",
-        "live",
-        // The long log lines wrap instead of running past the edge.
-        "lifecycle: compose failed",
+        "fix: devlanes certs trust",
+        "following · all levels · repeats folded",
+        // Parsed: level tag, target without `devlanes_`, the message, fields.
+        "ERROR daemon::lifecycle",
+        "compose failed",
         "lane=acme@1",
     ] {
         assert!(text.contains(expected), "missing {expected:?}:\n{text}");
@@ -100,8 +100,9 @@ async fn daemon_log_pauses_when_scrolled_and_follows_again() -> TestResult {
     app.update(key(KeyCode::Char('k')));
     app.update(key(KeyCode::Char('k')));
     assert_eq!(app.daemon.scroll, 2);
+    assert!(app.daemon.paused, "scrolling up pauses");
     app.update(Msg::DaemonLog(Ok(LogChunk {
-        lines: vec!["new line".into()],
+        lines: vec!["2026-10-21T09:15:00.000Z  INFO devlanes_daemon: new entry".into()],
         position: LogPosition {
             offset: 950,
             file: (1, 2),
@@ -110,12 +111,26 @@ async fn daemon_log_pauses_when_scrolled_and_follows_again() -> TestResult {
     })));
     assert_eq!(
         app.daemon.scroll, 3,
-        "a paused view stays on the same lines"
+        "a paused view stays on the same entries"
     );
     let text = screen(&render(&app)?);
-    assert!(text.contains("3 lines up  G jumps to newest"), "{text}");
+    assert!(text.contains("paused · 1 new · G follows"), "{text}");
     app.update(key(KeyCode::Char('G')));
     assert_eq!(app.daemon.scroll, 0);
+    assert!(!app.daemon.paused);
+    // F pauses at the bottom: arriving entries no longer scroll the view.
+    app.update(key(KeyCode::Char('F')));
+    app.update(Msg::DaemonLog(Ok(LogChunk {
+        lines: vec!["2026-10-21T09:16:00.000Z  INFO devlanes_daemon: newer entry".into()],
+        position: LogPosition {
+            offset: 950,
+            file: (1, 2),
+        },
+        reset: false,
+    })));
+    assert_eq!(app.daemon.scroll, 1);
+    app.update(key(KeyCode::Char('F')));
+    assert_eq!((app.daemon.scroll, app.daemon.paused), (0, false));
     // Every tick reads the log; every third also refreshes the facts.
     let ticks: Vec<Vec<Effect>> = (0..3).map(|_| app.update(Msg::Tick)).collect();
     assert!(ticks.iter().all(|e| {
@@ -134,6 +149,54 @@ async fn daemon_log_pauses_when_scrolled_and_follows_again() -> TestResult {
 }
 
 #[tokio::test]
+async fn the_log_filters_by_level_and_text_and_folds_repeats() -> TestResult {
+    let mut app = daemon_app(120, 40).await?;
+    // A repeat of the first warning folds into it.
+    let repeat = log_lines()[2].replace("09:12:01.121Z", "09:20:00.000Z");
+    app.update(Msg::DaemonLog(Ok(LogChunk {
+        lines: vec![repeat],
+        position: LogPosition {
+            offset: 950,
+            file: (1, 2),
+        },
+        reset: false,
+    })));
+    let text = screen(&render(&app)?);
+    assert!(text.contains("×2 since 09:12"), "{text}");
+    assert_eq!(app.daemon_shown().1.len(), 5);
+    app.update(key(KeyCode::Char('d')));
+    assert_eq!(app.daemon_shown().1.len(), 6, "d shows every repeat");
+    app.update(key(KeyCode::Char('d')));
+    // w: warn and above, then errors only, then all again.
+    app.update(key(KeyCode::Char('w')));
+    assert_eq!(app.daemon_shown().1.len(), 2);
+    assert!(screen(&render(&app)?).contains("warn and above"));
+    app.update(key(KeyCode::Char('w')));
+    assert_eq!(app.daemon_shown().1.len(), 1);
+    app.update(key(KeyCode::Char('w')));
+    // /: words that must all match; Enter keeps it, Esc clears it before
+    // leaving the page.
+    app.update(key(KeyCode::Char('/')));
+    for c in "LANE acme@0".chars() {
+        app.update(key(KeyCode::Char(c)));
+    }
+    app.update(key(KeyCode::Enter));
+    assert_eq!(app.daemon_shown().1.len(), 1);
+    assert!(screen(&render(&app)?).contains("/LANE acme@0 1 of 6"));
+    app.update(key(KeyCode::Esc));
+    assert!(app.daemon.filters.text.is_empty());
+    assert_eq!(app.view, View::Daemon);
+    // i lists the passing checks one per line.
+    let before = screen(&render(&app)?);
+    app.update(key(KeyCode::Char('i')));
+    let after = screen(&render(&app)?);
+    assert!(!before.contains("Compose 2.29.1") && after.contains("Compose 2.29.1"));
+    app.update(key(KeyCode::Esc));
+    assert_eq!(app.view, View::Project);
+    Ok(())
+}
+
+#[tokio::test]
 async fn restart_and_stop_ask_first_and_enter_does_not_confirm() -> TestResult {
     let mut app = daemon_app(80, 24).await?;
     assert!(app.update(shifted('R')).is_empty());
@@ -148,7 +211,10 @@ async fn restart_and_stop_ask_first_and_enter_does_not_confirm() -> TestResult {
     };
     assert_eq!(prompt, "Restart the daemon?");
     assert!(detail[0].contains("It stops 3 processes"), "{detail:?}");
-    assert!(detail[0].contains("devlanes lane resume"), "{detail:?}");
+    assert!(
+        detail[0].contains("The new daemon starts the running lanes again"),
+        "{detail:?}"
+    );
     assert!(*strict);
     insta::assert_snapshot!("restart_confirm_80x24", screen(&render(&app)?));
     assert!(
@@ -241,18 +307,19 @@ async fn a_small_window_keeps_the_dialog_keys() -> TestResult {
 #[tokio::test]
 async fn daemon_log_lines_can_be_selected_and_copied() -> TestResult {
     let mut app = daemon_app(100, 30).await?;
-    let lines = app.daemon.log.len();
+    let entries = app.daemon.log.len();
     assert!(app.update(key(KeyCode::Char('c'))).is_empty());
     assert_eq!(
         app.daemon.copy.map(|c| c.cursor),
-        Some(lines - 1),
-        "starts on the newest line"
+        Some(entries - 1),
+        "starts on the newest entry"
     );
     let text = screen(&render(&app)?);
     assert!(text.contains("v mark"), "{text}");
     app.update(key(KeyCode::Char('k')));
     app.update(key(KeyCode::Char('v')));
     app.update(key(KeyCode::Char('k')));
+    // y: the entries as they are in the file, timestamps and all.
     let effects = app.update(key(KeyCode::Char('y')));
     let [Effect::Copy(copied)] = effects.as_slice() else {
         return Err(format!("unexpected {effects:?}").into());
@@ -260,12 +327,25 @@ async fn daemon_log_lines_can_be_selected_and_copied() -> TestResult {
     let expected: Vec<String> = app
         .daemon
         .log
-        .range(lines - 3..lines - 1)
+        .range(entries - 3..entries - 1)
         .cloned()
         .collect();
     assert_eq!(copied, &expected.join("\n"));
     assert!(!copied.contains('\x1b'), "colors are not copied");
     assert!(app.daemon.copy.is_none());
+    // Y: as shown, local time and the parsed columns. G first: the copy
+    // left the view where the selection was.
+    app.update(key(KeyCode::Char('G')));
+    app.update(key(KeyCode::Char('c')));
+    let effects = app.update(key(KeyCode::Char('Y')));
+    let [Effect::Copy(copied)] = effects.as_slice() else {
+        return Err(format!("unexpected {effects:?}").into());
+    };
+    assert!(
+        copied.contains("ERROR daemon::lifecycle") && copied.contains("compose failed"),
+        "{copied}"
+    );
+    assert!(!copied.contains("2026-10-21T"), "{copied}");
     // Esc leaves without copying; q there does not quit.
     app.update(key(KeyCode::Char('c')));
     assert!(app.update(key(KeyCode::Char('q'))).is_empty());
@@ -378,7 +458,7 @@ async fn help_lists_clean_and_the_daemon_page() -> TestResult {
     let text = screen(&render(&app)?);
     for expected in [
         "clean the lane (asks first)",
-        "select log lines, open the log in less",
+        "copy mode: v select, y copy as in the file, Y as shown",
         "restart, stop or start the daemon",
         "clean every lane whose worktree is gone",
         "hide the hint strip or version notice",
@@ -427,7 +507,11 @@ pub async fn run_keys(
                 .ok();
         }
     };
-    let options = Options::default();
+    // The closing q quits at once; the quit dialog has its own tests.
+    let options = Options {
+        on_quit: Some("keep".into()),
+        ..Options::default()
+    };
     let run = drive(
         &mut terminal,
         driver_api,
@@ -478,8 +562,12 @@ async fn drive_tails_the_daemon_log_file() -> TestResult {
     let api = Arc::new(fake);
     let terminal = run_keys(Arc::clone(&api), vec![shifted('D')]).await?;
     let text = screen(terminal.backend().buffer());
-    assert!(text.contains("lifecycle: compose failed"), "{text}");
-    assert!(text.contains("Compose 2.29.1"), "{text}");
+    assert!(text.contains("ERROR daemon::lifecycle"), "{text}");
+    assert!(text.contains("compose failed"), "{text}");
+    assert!(
+        text.contains("2 fail · 1 warn") || text.contains("fail"),
+        "{text}"
+    );
     assert_clean(terminal.backend().buffer(), "drive daemon tab");
     assert!(!api.calls().iter().any(|c| c.starts_with("daemon.shutdown")));
     Ok(())

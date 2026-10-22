@@ -120,6 +120,45 @@ async fn a_folder_can_hold_several_lanes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+/// Cleaning every lane of a project forgets it: a restarted daemon does not bring
+/// it back, and the next command in its folder registers it again.
+async fn a_project_whose_lanes_were_all_cleaned_is_forgotten() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let home = tmp.path.join("home");
+        let h = harness(&home, Setup::default()).await;
+        start(&h, cx(&main), json!({"units": ["worker"]})).await;
+        h.call(
+            Method::LaneClean,
+            json!({}),
+            Context {
+                yes: true,
+                ..cx(&main)
+            },
+        )
+        .await
+        .expect("clean");
+        // Outside any project, status lists every project the daemon knows.
+        assert!(status(&h, cx(&tmp.path)).await.is_empty());
+        h.close().await;
+        drop(h);
+
+        let h = harness(&home, Setup::default()).await;
+        assert!(
+            status(&h, cx(&tmp.path)).await.is_empty(),
+            "a restart does not bring it back"
+        );
+        let lanes = status(&h, cx(&main)).await;
+        assert_eq!(lanes.len(), 1, "a command in the folder does");
+        assert_eq!(lanes[0].reference, "demo@0");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 /// A worktree that only exists is no lane; running devlanes in it makes one, and
 /// a reference by its directory name reaches a worktree that has none.
 async fn worktrees_become_lanes_when_devlanes_runs_in_them() {
@@ -165,6 +204,16 @@ async fn summaries_and_pipe_units() {
         let idle = status(&h, cx(&main)).await;
         let web = idle[0].units.iter().find(|u| u.name == "web").expect("web");
         assert_eq!(web.display_name.as_deref(), Some("Web shop"));
+        assert_eq!(
+            web.public_url.as_deref(),
+            Some("https://web.demo.localhost")
+        );
+        let orders: Vec<(&str, Option<u32>)> = idle[0]
+            .units
+            .iter()
+            .map(|u| (u.name.as_str(), u.order))
+            .collect();
+        assert_eq!(orders, [("web", Some(0)), ("worker", Some(1))]);
 
         let result = start(&h, cx(&main), json!({})).await;
         assert!(result.ready, "{result:?}");
@@ -182,6 +231,9 @@ async fn summaries_and_pipe_units() {
             "alive is not a passed check"
         );
         assert!(web.pty && !worker.pty);
+        assert_eq!(web.urls.get(1), web.public_url.as_ref(), "{:?}", web.urls);
+        assert_eq!((web.order, worker.order), (Some(0), Some(1)));
+        assert_eq!(worker.public_url, None);
 
         let (session, _frames) = h.session();
         let attached = h

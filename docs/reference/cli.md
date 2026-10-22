@@ -128,6 +128,7 @@ devlanes logs [OPTIONS] [UNIT]...
 - `[UNIT]...`: Units to read ([lane:]unit, globs, +tag) [default: pick from a list]
 - `--all`: Read every unit of the lane, grouped by unit
 - `--tail <N>`: Show the last N lines [default: 100 in agent mode or without a terminal]
+- `--head <N>`: Show the first N lines of the selected range
 - `-f, --follow`: Keep streaming new lines; agent mode requires --timeout
 - `--since <WHEN>`: Only lines newer than a duration (5m), a time in milliseconds, or start (the lane's last start)
 - `--grep <REGEX>`: Only lines matching this regular expression
@@ -615,7 +616,7 @@ devlanes daemon stop [OPTIONS]
 
 ### devlanes daemon restart
 
-Restart the daemon; asks first when processes are running
+Restart the daemon and start again, with this shell's environment, the services that ran; asks first when processes are running
 
 ```text
 devlanes daemon restart [OPTIONS]
@@ -662,14 +663,6 @@ Check the daemon, Docker, proxy, CA, hosts file and output mode, each with a fix
 
 ```text
 devlanes doctor [OPTIONS]
-```
-
-### devlanes agent-guide
-
-Print the short guide for AI agents that use devlanes
-
-```text
-devlanes agent-guide [OPTIONS]
 ```
 
 ### devlanes completions

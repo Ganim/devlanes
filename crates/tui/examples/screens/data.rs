@@ -201,13 +201,19 @@ fn monorepo() -> LaneSummary {
                 task
             }),
     );
+    // pgbouncer is in `infra.hidden`: listed dimmed under shared.
+    let mut containers = containers(&[
+        ("localstack", 4566, false),
+        ("postgres", 5432, true),
+        ("rabbitmq", 5672, false),
+        ("redis", 6379, true),
+        ("pgbouncer", 6432, true),
+    ]);
+    if let Some(pgbouncer) = containers.iter_mut().find(|c| c.name == "pgbouncer") {
+        pgbouncer.hidden = true;
+    }
     LaneSummary {
-        containers: containers(&[
-            ("localstack", 4566, false),
-            ("postgres", 5432, true),
-            ("rabbitmq", 5672, false),
-            ("redis", 6379, true),
-        ]),
+        containers,
         reference: reference.into(),
         project: "acme".into(),
         index: Some(0),
@@ -424,32 +430,33 @@ pub fn log_page(unit: &str) -> Vec<LogLine> {
                 )
             },
             level: Some(if seq % 17 == 11 { "warn" } else { "info" }.into()),
+            styled: None,
         })
         .collect()
 }
 
 /// The fake's clock: every history ends here.
 pub const NOW_MS: u64 = 1_792_000_000_000;
-/// Samples every 5 s over the default 15 minute range.
-const STEP_MS: u64 = 5_000;
-const POINTS: u64 = 180;
+/// One sample a second for 15 minutes, the daemon's raw ring.
+const STEP_MS: u64 = 1_000;
+const POINTS: u64 = 900;
 
 /// A deterministic wobble in 0..1 for sample `t` of series `seed`.
 fn wobble(seed: u64, t: u64) -> f64 {
     let x = (seed * 7919 + t * 104_729) % 1000;
-    let wave = ((t as f64 + seed as f64 * 3.0) / 9.0).sin() * 0.5 + 0.5;
+    let wave = ((t as f64 + seed as f64 * 15.0) / 45.0).sin() * 0.5 + 0.5;
     (wave * 0.7 + x as f64 / 1000.0 * 0.3).clamp(0.0, 1.0)
 }
 
 /// 15 minutes of `(ts, cpu, memory)` around `cpu` and `memory`, with a
-/// spike in the middle when `spike`.
+/// spike a minute ago when `spike`, so even a narrow graph shows it.
 fn history(seed: u64, cpu: f64, memory: u64, spike: bool) -> Vec<(u64, f64, u64)> {
     (0..POINTS)
         .map(|i| {
             let ts = NOW_MS - (POINTS - 1 - i) * STEP_MS;
             let mut c = cpu * (0.4 + wobble(seed, i) * 0.9);
-            if spike && (80..110).contains(&i) {
-                c += cpu * 2.5 * (1.0 - ((i as f64 - 95.0) / 15.0).abs());
+            if spike && (820..860).contains(&i) {
+                c += cpu * 2.5 * (1.0 - ((i as f64 - 840.0) / 20.0).abs());
             }
             let m = memory as f64
                 * (0.92 + i as f64 / POINTS as f64 * 0.08 + wobble(seed + 1, i) * 0.02);

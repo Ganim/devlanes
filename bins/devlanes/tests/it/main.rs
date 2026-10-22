@@ -10,6 +10,10 @@ fn config_and_state_retention_defaults_match() {
         devlanes_state::DEFAULT_RUN_HISTORY_RETENTION
     );
     assert_eq!(
+        devlanes_config::DEFAULT_METRICS_RETENTION,
+        devlanes_state::DEFAULT_METRICS_RETENTION
+    );
+    assert_eq!(
         devlanes_config::DEFAULT_REMOTE_HOST_RETENTION,
         devlanes_state::DEFAULT_REMOTE_HOST_RETENTION
     );

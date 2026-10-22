@@ -711,6 +711,81 @@ fn doctor_warns_about_stop_timeouts_past_the_service_window() {
     );
 }
 
+#[test]
+/// A human terminal with colors gets a unit's colors back, each line ending in a
+/// reset and nothing but SGR kept; every other output gets plain text.
+fn logs_keep_colors_only_where_they_show() {
+    let line = json!({"unit": "api", "seq": 7, "timestamp_ms": 1, "level": "info",
+        "text": "INFO ready", "styled": "\u{1b}[32mINFO\u{1b}[0m \u{1b}[2Kready\u{1b}[0m"});
+    let page = json!({"items": [line], "truncated": false, "next_cursor": null});
+    let text = colored_runtime()
+        .reporter()
+        .result(&Report::new(Method::Logs, &page))
+        .expect("render")
+        .stdout;
+    assert_eq!(text, "api#7 \u{1b}[32mINFO\u{1b}[0m ready\u{1b}[0m\n");
+    for mode in [OutputMode::Human, OutputMode::Plain, OutputMode::Agent] {
+        let text = runtime(mode)
+            .reporter()
+            .result(&Report::new(Method::Logs, &page))
+            .expect("render")
+            .stdout;
+        assert!(!text.contains('\u{1b}'), "{mode:?}: {text:?}");
+        assert!(text.contains("api#7 INFO ready"), "{mode:?}: {text:?}");
+    }
+}
+
+/// A human runtime on a terminal, with colors.
+fn colored_runtime() -> Runtime {
+    let cli = Cli::parse_from(["devlanes"]);
+    Runtime::resolve(
+        &cli,
+        Signals {
+            env_output: Some("human".into()),
+            stdout_tty: true,
+            stdin_tty: true,
+            ..Signals::default()
+        },
+    )
+    .expect("runtime")
+}
+
+#[test]
+/// Failure tails of `start` and `wait` show the unit's colors on a colored
+/// terminal, and plain text everywhere else.
+fn failure_tails_keep_colors_only_where_they_show() {
+    let styled = "\u{1b}[31mError\u{1b}[0m: boom\u{1b}[0m";
+    let start = json!({
+        "lane": "acme@0", "ready": false, "started": ["api"],
+        "failures": [{"lane": "acme@0", "unit": "api", "exit_code": 1,
+            "log_tail": ["Error: boom"], "log_tail_styled": [styled]}],
+    });
+    let wait = json!({
+        "lane": "acme@0", "unit": "api", "state": "failed", "ready": false, "failed": ["api"],
+        "exit_code": 1, "log_tail": ["Error: boom"], "log_tail_styled": [styled],
+    });
+    for (method, data) in [(Method::Start, &start), (Method::Wait, &wait)] {
+        let text = colored_runtime()
+            .reporter()
+            .result(&Report::new(method, data))
+            .expect("render")
+            .stdout;
+        assert!(text.contains(styled), "{method:?}: {text:?}");
+        for mode in [OutputMode::Human, OutputMode::Plain, OutputMode::Agent] {
+            let text = runtime(mode)
+                .reporter()
+                .result(&Report::new(method, data))
+                .expect("render")
+                .stdout;
+            assert!(!text.contains('\u{1b}'), "{method:?} {mode:?}: {text:?}");
+            assert!(
+                text.contains("Error: boom"),
+                "{method:?} {mode:?}: {text:?}"
+            );
+        }
+    }
+}
+
 /// Splits [`render_text`] output into its human, plain and agent parts.
 fn modes(text: &str) -> Vec<&str> {
     text.split("--- ").filter(|part| !part.is_empty()).collect()

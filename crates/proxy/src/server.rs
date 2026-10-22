@@ -101,22 +101,25 @@ struct Routes {
 
 impl CertificatePolicy for Routes {
     /// Certificate SANs and authorization are taken from the same route generation.
+    /// The requested name comes first so it becomes the leaf's common name.
     fn lookup(&self, server_name: &str) -> Option<CertificateIdentity> {
         let snapshot = self.snapshot.load();
         let route = snapshot.table.lookup(server_name)?;
         let mut names = route.certificate_names.clone();
-        names.push(server_name.to_string());
         if let Some(parent) = route.host.strip_prefix("*.") {
             if parent.contains('.') {
                 names.push(route.host.clone());
             }
             names.push(parent.to_string());
         }
+        names.retain(|name| name != server_name);
         names.sort();
         names.dedup();
+        names.insert(0, server_name.to_string());
         Some(CertificateIdentity {
             generation: snapshot.generation,
             names,
+            owner: route.owner.clone(),
         })
     }
 }

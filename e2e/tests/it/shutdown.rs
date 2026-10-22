@@ -73,6 +73,40 @@ fn sigterm_stops_units_without_lane_stop_tasks() -> Result<()> {
     Ok(())
 }
 
+/// `devlanes daemon restart` starts what ran again on the new daemon, with the
+/// lane's profiles; `daemon stop` then leaves it stopped for the next daemon.
+#[test]
+fn daemon_restart_brings_back_what_ran() -> Result<()> {
+    let lab = Lab::with_config(CONFIG, BUDGET)?;
+    let (api, _) = start(&lab)?;
+    let daemon = need(lab.daemon_pid()?, "daemon pid")?;
+    let restarted = lab.json(lab.repo(), &["daemon", "restart", "--yes"])?;
+    let resumed = restarted["resumed"].as_array().cloned().unwrap_or_default();
+    assert_eq!(resumed.len(), 1, "{restarted}");
+    assert_eq!(resumed[0]["lane"], "fixture-shutdown@0", "{restarted}");
+    assert_eq!(
+        resumed[0]["started"],
+        json!(["fixture-shutdown@0:api"]),
+        "{restarted}"
+    );
+    assert!(!alive(api), "the old run (pid {api}) stopped");
+    let lanes = lab.lanes(lab.repo())?;
+    let zero = need(lane(&lanes, "fixture-shutdown@0"), "lane 0")?;
+    assert_eq!(units_in(zero, "ready"), ["api"], "{zero}");
+    assert_ne!(need(lab.daemon_pid()?, "new daemon pid")?, daemon);
+
+    let new_daemon = need(lab.daemon_pid()?, "daemon pid")?;
+    lab.json(lab.repo(), &["daemon", "stop", "--yes"])?;
+    wait_for_exit(&lab, new_daemon)?;
+    let lanes = lab.lanes(lab.repo())?;
+    let zero = need(lane(&lanes, "fixture-shutdown@0"), "lane 0")?;
+    assert!(
+        units_in(zero, "ready").is_empty(),
+        "stop keeps it stopped: {zero}"
+    );
+    Ok(())
+}
+
 /// `devlanes daemon stop` runs the stop task, then stops the service, and
 /// reports both.
 #[test]

@@ -28,6 +28,8 @@ pub struct FakeApi {
     pub clean_error: Option<RpcError>,
     /// The daemon log the TUI tails.
     pub log_path: Option<PathBuf>,
+    /// `DEVLANES_HOME`, where config.yaml is written.
+    pub home: Option<PathBuf>,
     /// When set, `profile.list` fails with this daemon error.
     pub profiles_error: Option<RpcError>,
     pub calls: Mutex<Vec<String>>,
@@ -217,6 +219,10 @@ impl DaemonApi for FakeApi {
 
     fn daemon_log(&self) -> Option<PathBuf> {
         self.log_path.clone()
+    }
+
+    fn home(&self) -> Option<PathBuf> {
+        self.home.clone()
     }
 }
 

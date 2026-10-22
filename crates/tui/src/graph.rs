@@ -112,6 +112,11 @@ pub fn braille(
                             fill |= bit;
                         }
                     }
+                    // A zero sample is one dim dot on the bottom row, so it
+                    // is not mistaken for a second without data.
+                    if level == 0 && from_bottom == 0 {
+                        extra |= bits[0];
+                    }
                 }
                 if let Some(level) = sample(overlay, column, side)
                     && level > 0
@@ -142,14 +147,14 @@ pub fn braille(
     }
 }
 
-/// One block per value (0 to 1), `None` for a bucket without a sample.
+/// One block per value (0 to 1); a column without a sample stays blank.
+/// Zero is a sample too: it draws the lowest block (callers dim it), so an
+/// idle unit is never mistaken for one without data.
 pub fn blocks(value: Option<f64>, glyphs: Glyphs) -> char {
     let Some(value) = value else {
         return ' ';
     };
-    let level = (value.clamp(0.0, 1.0) * 8.0).round() as usize;
-    // Anything above zero shows, so a quiet unit is not mistaken for no data.
-    let level = if value > 0.0 { level.max(1) } else { level };
+    let level = ((value.clamp(0.0, 1.0) * 8.0).round() as usize).max(1);
     match glyphs {
         Glyphs::Unicode => BLOCKS[level],
         Glyphs::Ascii => ASCII_BLOCKS[level],
@@ -180,39 +185,67 @@ pub fn meter(
     spans
 }
 
-/// Splits `[since, since + range)` into `count` buckets and folds the
-/// samples of each: the highest when `max`, else the average. Buckets
-/// without a sample are `None`.
-pub fn buckets(
-    samples: &[(u64, f64)],
-    since: u64,
-    range: u64,
-    count: usize,
-    max: bool,
-) -> Vec<Option<f64>> {
-    if count == 0 || range == 0 {
-        return Vec::new();
-    }
-    let mut sums = vec![(0.0f64, 0u32); count];
-    for (ts, value) in samples {
-        let Some(offset) = ts.checked_sub(since) else {
-            continue;
-        };
-        let index = ((u128::from(offset) * count as u128) / u128::from(range)) as usize;
-        let Some(bucket) = sums.get_mut(index.min(count - 1)) else {
-            continue;
-        };
-        if max {
-            bucket.0 = if bucket.1 == 0 {
-                *value
-            } else {
-                bucket.0.max(*value)
-            };
-        } else {
-            bucket.0 += value;
+/// Graph columns pinned to the clock, as btop draws them: column `n` holds
+/// the samples of `[n * step, (n + 1) * step)`, and the last one the newest
+/// sample. While time passes inside a step no column moves; when a step
+/// ends, everything shifts left by exactly one column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeline {
+    /// Milliseconds per column: the range over the column count, rounded up.
+    pub step: u64,
+    /// The newest column's number, `now / step`.
+    pub last: u64,
+    pub count: usize,
+}
+
+impl Timeline {
+    /// `count` columns over `range` milliseconds ending at `now`.
+    pub fn new(now: u64, range: u64, count: usize) -> Self {
+        let step = range.div_ceil(count.max(1) as u64).max(1);
+        Self {
+            step,
+            last: now / step,
+            count,
         }
-        bucket.1 += 1;
     }
+
+    /// The oldest column's number.
+    pub fn first(&self) -> u64 {
+        (self.last + 1).saturating_sub(self.count as u64)
+    }
+
+    /// Folds `samples` into the columns: the highest when `max`, else the
+    /// average. Columns without a sample are `None`.
+    pub fn fold(&self, samples: &[(u64, f64)], max: bool) -> Vec<Option<f64>> {
+        let first = self.first();
+        let mut sums = vec![(0.0f64, 0u32); self.count];
+        for (ts, value) in samples {
+            let Some(index) = (ts / self.step).checked_sub(first) else {
+                continue;
+            };
+            let Some(bucket) = sums.get_mut(index as usize) else {
+                continue;
+            };
+            fold_into(bucket, *value, max);
+        }
+        finish(sums, max)
+    }
+}
+
+fn fold_into(bucket: &mut (f64, u32), value: f64, max: bool) {
+    if max {
+        bucket.0 = if bucket.1 == 0 {
+            value
+        } else {
+            bucket.0.max(value)
+        };
+    } else {
+        bucket.0 += value;
+    }
+    bucket.1 += 1;
+}
+
+fn finish(sums: Vec<(f64, u32)>, max: bool) -> Vec<Option<f64>> {
     sums.into_iter()
         .map(|(value, n)| match n {
             0 => None,
@@ -220,6 +253,74 @@ pub fn buckets(
             n => Some(value / f64::from(n)),
         })
         .collect()
+}
+
+/// Series past this many are dropped together; the page shows far fewer.
+const CACHED_SERIES: usize = 512;
+
+/// Finished graph columns and sticky scales, kept between frames so a column
+/// is computed once, when its step ends, and never redrawn differently: a
+/// later reply that buckets or trims history differently does not make the
+/// past wobble. Interior mutability because drawing borrows the app shared.
+#[derive(Debug, Default)]
+pub struct Columns {
+    inner: std::cell::RefCell<ColumnsInner>,
+}
+
+#[derive(Debug, Default)]
+struct ColumnsInner {
+    /// Raw (not normalized) finished columns by series key and step.
+    series: std::collections::HashMap<(String, u64), std::collections::BTreeMap<u64, Option<f64>>>,
+    /// Scales that only grow, by key.
+    sticky: std::collections::HashMap<String, f64>,
+}
+
+impl Columns {
+    /// The columns of `samples` on `timeline`, raw: finished columns from
+    /// the cache once computed, the newest one always from `samples`. `key`
+    /// names the series and how it folds (`max`).
+    pub fn values(
+        &self,
+        key: &str,
+        samples: &[(u64, f64)],
+        timeline: &Timeline,
+        max: bool,
+    ) -> Vec<Option<f64>> {
+        let fresh = timeline.fold(samples, max);
+        let mut inner = self.inner.borrow_mut();
+        if inner.series.len() >= CACHED_SERIES {
+            inner.series.clear();
+        }
+        let done = inner
+            .series
+            .entry((format!("{key}/{max}"), timeline.step))
+            .or_default();
+        let first = timeline.first();
+        // Columns that scrolled off are not needed again.
+        done.retain(|column, _| *column >= first);
+        fresh
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let column = first + index as u64;
+                if column >= timeline.last {
+                    return value;
+                }
+                *done.entry(column).or_insert(value)
+            })
+            .collect()
+    }
+
+    /// `value` or the largest value seen for `key` before, whichever is
+    /// larger: a scale that grows with a peak and never shrinks back.
+    pub fn sticky(&self, key: &str, value: f64) -> f64 {
+        let mut inner = self.inner.borrow_mut();
+        let entry = inner.sticky.entry(key.to_owned()).or_insert(value);
+        if value > *entry {
+            *entry = value;
+        }
+        *entry
+    }
 }
 
 #[cfg(test)]
@@ -261,7 +362,9 @@ mod tests {
         // One cell, four dots high: left full, right half.
         assert_eq!(draw(1, 1, &[Some(1.0), Some(0.5)], &[]), ["⣧"]);
         assert_eq!(draw(1, 1, &[Some(1.0), Some(1.0)], &[]), ["⣿"]);
-        assert_eq!(draw(1, 1, &[Some(0.0), Some(0.0)], &[]), [" "]);
+        // Zero is one dot at the bottom; no sample, nothing.
+        assert_eq!(draw(1, 1, &[Some(0.0), Some(0.0)], &[]), ["⣀"]);
+        assert_eq!(draw(1, 1, &[None, None], &[]), [" "]);
         // Two rows: 0.5 fills the bottom row only.
         assert_eq!(draw(1, 2, &[Some(0.5), Some(0.5)], &[]), [" ", "⣿"]);
     }
@@ -269,10 +372,11 @@ mod tests {
     #[test]
     fn braille_aligns_the_newest_sample_to_the_right_edge() {
         assert_eq!(draw(3, 1, &[Some(1.0), Some(1.0)], &[]), ["  ⣿"]);
-        // Too many samples: the oldest drop off the left.
+        // Too many samples: the oldest drop off the left (the zero is the
+        // bottom-left dot).
         assert_eq!(
             draw(1, 1, &[Some(1.0), Some(1.0), Some(0.0), Some(1.0)], &[]),
-            ["⢸"]
+            ["⣸"]
         );
     }
 
@@ -328,9 +432,10 @@ mod tests {
     }
 
     #[test]
-    fn blocks_show_any_load_and_leave_gaps_empty() {
+    fn blocks_tell_zero_from_missing() {
+        // No sample: blank. A zero sample: the baseline block.
         assert_eq!(blocks(None, Glyphs::Unicode), ' ');
-        assert_eq!(blocks(Some(0.0), Glyphs::Unicode), ' ');
+        assert_eq!(blocks(Some(0.0), Glyphs::Unicode), '▁');
         assert_eq!(blocks(Some(0.01), Glyphs::Unicode), '▁');
         assert_eq!(blocks(Some(1.0), Glyphs::Unicode), '█');
         assert_eq!(blocks(Some(1.0), Glyphs::Ascii), '#');
@@ -345,12 +450,79 @@ mod tests {
     }
 
     #[test]
-    fn buckets_keep_the_highest_or_the_average() {
+    fn columns_keep_the_highest_or_the_average() {
+        // Two columns of 5ms ending at 9: [0, 5) and [5, 10).
+        let timeline = Timeline::new(9, 10, 2);
+        assert_eq!((timeline.step, timeline.first(), timeline.last), (5, 0, 1));
         let samples = [(0, 1.0), (4, 3.0), (5, 10.0), (9, 2.0)];
-        assert_eq!(buckets(&samples, 0, 10, 2, true), [Some(3.0), Some(10.0)]);
-        assert_eq!(buckets(&samples, 0, 10, 2, false), [Some(2.0), Some(6.0)]);
-        assert_eq!(buckets(&samples, 0, 10, 4, true)[1], Some(3.0));
-        assert_eq!(buckets(&[], 0, 10, 2, true), [None, None]);
-        assert!(buckets(&samples, 0, 10, 0, true).is_empty());
+        assert_eq!(timeline.fold(&samples, true), [Some(3.0), Some(10.0)]);
+        assert_eq!(timeline.fold(&samples, false), [Some(2.0), Some(6.0)]);
+        assert_eq!(timeline.fold(&[], true), [None, None]);
+    }
+
+    #[test]
+    fn columns_are_pinned_to_the_clock() {
+        let samples: Vec<(u64, f64)> = (0..100).map(|ts| (ts, ts as f64)).collect();
+        // Within one step the columns do not move, whatever `now` is.
+        let early = Timeline::new(40, 50, 5);
+        let late = Timeline::new(49, 50, 5);
+        assert_eq!(early.first(), late.first());
+        let (a, b) = (early.fold(&samples, true), late.fold(&samples, true));
+        assert_eq!(a[..4], b[..4], "finished columns match");
+        // The next step shifts everything left by exactly one column.
+        let next = Timeline::new(50, 50, 5).fold(&samples, true);
+        assert_eq!(b[1..], next[..4]);
+    }
+
+    #[test]
+    fn a_finished_column_is_identical_across_frames() {
+        // Six columns of 10s; samples every second for 30s.
+        let base = 1_000_000;
+        let cache = Columns::default();
+        let samples: Vec<(u64, f64)> = (0..30).map(|s| (base + s * 1000, 50.0)).collect();
+        let timeline = Timeline::new(base + 29_999, 60_000, 6);
+        let first = cache.values("api", &samples, &timeline, true);
+        // A later reply has the past differently (a spike the first reply
+        // did not have, early samples trimmed); finished columns stay.
+        let mut later: Vec<(u64, f64)> = samples.iter().skip(3).copied().collect();
+        later.push((base + 12_500, 99.0));
+        later.push((base + 31_000, 70.0));
+        let timeline = Timeline::new(base + 31_000, 60_000, 6);
+        let second = cache.values("api", &later, &timeline, true);
+        // One step later every column moved left by one, unchanged.
+        assert_eq!(first[1..], second[..5], "{first:?} {second:?}");
+        // Only the newest column follows the data.
+        assert_eq!(second[5], Some(70.0));
+        // A fresh cache sees the spike: only the cache kept the past fixed.
+        let third = Columns::default().values("api", &later, &timeline, true);
+        assert_eq!(third[3], Some(99.0));
+    }
+
+    #[test]
+    fn one_second_columns_shift_left_one_per_second() {
+        // Each column is one second: a graph of 5 columns shows 5 seconds.
+        let base = 1_000_000;
+        let samples: Vec<(u64, f64)> = (0..10).map(|s| (base + s * 1000, s as f64)).collect();
+        let at = |now: u64| Timeline::new(base + now, 5_000, 5).fold(&samples, true);
+        assert_eq!(at(9_000), [5.0, 6.0, 7.0, 8.0, 9.0].map(Some));
+        // A wider graph shows more history, the same newest second.
+        assert_eq!(
+            Timeline::new(base + 9_000, 8_000, 8).fold(&samples, true)[7],
+            Some(9.0)
+        );
+        // A second later the newest enters on the right; the rest moved left.
+        let mut more = samples.clone();
+        more.push((base + 10_000, 10.0));
+        let next = Timeline::new(base + 10_000, 5_000, 5).fold(&more, true);
+        assert_eq!(next, [6.0, 7.0, 8.0, 9.0, 10.0].map(Some));
+    }
+
+    #[test]
+    fn sticky_scales_only_grow() {
+        let cache = Columns::default();
+        assert_eq!(cache.sticky("mem", 100.0), 100.0);
+        assert_eq!(cache.sticky("mem", 50.0), 100.0);
+        assert_eq!(cache.sticky("mem", 200.0), 200.0);
+        assert_eq!(cache.sticky("cpu", 50.0), 50.0);
     }
 }

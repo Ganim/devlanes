@@ -11,6 +11,7 @@
 //! # Ok::<(), devlanes_config::ConfigError>(())
 //! ```
 
+mod edit;
 mod error;
 mod expression;
 mod extensions;
@@ -25,6 +26,7 @@ mod tags;
 mod user;
 mod validation;
 
+pub use edit::{edit_user_source, parse_user_value, remove_user_value, set_user_value};
 pub use error::{ConfigError, SourceLocation};
 pub use expression::{
     ExpressionContext, evaluate, evaluate_env, evaluate_typed, references, resolve_lane_vars,

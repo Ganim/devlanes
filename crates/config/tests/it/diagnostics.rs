@@ -66,13 +66,13 @@ fn did_you_mean_outside_services() {
 /// error, and every other key keeps its value.
 #[test]
 fn lenient_user_config_keeps_valid_keys() {
-    let source = "proxy:\n  htps_port: 8443\n  http_port: 8081\nstate:\n  max_size: 0B\nterminal: kitty\nports:\n  range: [not, a, range]\n";
+    let source = "proxy:\n  htps_port: 8443\n  http_port: 8081\nstate:\n  max_size: 0B\nterminal: { progress: never }\nports:\n  range: [not, a, range]\n";
     let (config, issues) = parse_user_lenient("config.yaml", source);
     assert_eq!(config.proxy.http_port, 8081);
-    assert!(matches!(
-        config.terminal.as_ref().and_then(TerminalConfig::app),
-        Some(Terminal::Kitty)
-    ));
+    assert_eq!(
+        config.terminal.as_ref().map(TerminalConfig::progress),
+        Some(TerminalProgress::Never)
+    );
     assert_eq!(
         config.state.max_size.0,
         UserConfig::default().state.max_size.0
@@ -105,22 +105,24 @@ fn lenient_user_config_keeps_valid_keys() {
     assert_eq!(issues.len(), 1);
 }
 
-/// `terminal` is the app name alone or a mapping with the progress setting.
+/// `terminal` is a mapping with the progress setting; an older config's
+/// terminal app (alone or as `app:`) still loads, ignored with a warning.
 #[test]
-fn terminal_takes_a_name_or_a_mapping() {
-    let bare = parse_user("terminal: kitty\n").expect("name");
-    let terminal = bare.terminal.expect("terminal");
-    assert!(matches!(terminal.app(), Some(Terminal::Kitty)));
-    assert_eq!(terminal.progress(), TerminalProgress::Auto);
-    let mapped = parse_user("terminal:\n  app: ghostty\n  progress: never\n").expect("mapping");
-    let terminal = mapped.terminal.expect("terminal");
-    assert!(matches!(terminal.app(), Some(Terminal::Ghostty)));
-    assert_eq!(terminal.progress(), TerminalProgress::Never);
+fn terminal_takes_progress_and_ignores_an_old_app() {
     let progress_only = parse_user("terminal: { progress: always }\n").expect("progress only");
+    assert!(progress_only.warnings().is_empty());
     let terminal = progress_only.terminal.expect("terminal");
-    assert!(terminal.app().is_none());
     assert_eq!(terminal.progress(), TerminalProgress::Always);
-    let source = "terminal:\n  app: ghostty\n  progres: never\n";
+    let bare = parse_user("terminal: kitty\n").expect("old app name");
+    assert_eq!(bare.warnings()[0].path, "terminal");
+    assert!(bare.warnings()[0].message.contains("kitty is ignored"));
+    let terminal = bare.terminal.expect("terminal");
+    assert_eq!(terminal.progress(), TerminalProgress::Auto);
+    let mapped = parse_user("terminal:\n  app: ghostty\n  progress: never\n").expect("old mapping");
+    assert_eq!(mapped.warnings()[0].path, "terminal.app");
+    let terminal = mapped.terminal.expect("terminal");
+    assert_eq!(terminal.progress(), TerminalProgress::Never);
+    let source = "terminal:\n  progress: never\n  progres: never\n";
     let error = parse_user(source).expect_err("typo");
     assert!(
         error
@@ -130,7 +132,6 @@ fn terminal_takes_a_name_or_a_mapping() {
         error.message
     );
     assert_eq!(error.location.line, 3);
-    assert!(parse_user("terminal: xterm\n").is_err());
 }
 
 /// Values with several YAML forms report the chosen form's own unknown keys.

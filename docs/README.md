@@ -17,7 +17,7 @@ Start with [getting started](getting-started.md). The two references are generat
 - [Hostnames and HTTPS](guides/https.md): the proxy, the CA, trusting it per OS and runtime, resolver strategies, LAN access.
 - [Infra](guides/infra.md): Compose and plain containers, shared versus per-lane, recipes for Postgres, MySQL, Redis, RabbitMQ, MinIO and Mailpit.
 - [Service patterns](guides/services.md): APIs behind a frontend, workers, several ports, wildcards, replicas, lifecycle tasks, CI.
-- [Terminals](guides/terminals.md): open-in-terminal, tab progress bars, clipboard.
+- [Terminals](guides/terminals.md): tab progress bars, clipboard.
 - [Remote setup](guides/remote-setup.md): preparing a box and a client for `devlanes remote connect`.
 
 ## Other

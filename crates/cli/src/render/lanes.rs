@@ -5,8 +5,8 @@ use devlanes_proto::{LaneSummary, RpcError, StartResult, UnitFailureData, UnitSu
 use serde_json::Value;
 
 use super::{
-    Ctx, Outcome, bytes, cap_line, clean, display_value, int, leftover_notes, leftover_notes_of,
-    list, percent, plural, table, tail_lines, text, tree, words,
+    Ctx, Outcome, bytes, clean, display_value, int, leftover_notes, leftover_notes_of, list,
+    percent, plural, table, tail_lines, text, tree, words,
 };
 use crate::Hint;
 
@@ -105,7 +105,7 @@ pub(crate) fn unit_line(unit: &UnitSummary, cx: &Ctx<'_>) -> String {
 }
 
 /// A unit with its reason, failure tail and, for agents, the command to see more.
-fn unit_block(unit: &UnitSummary, tail: &[Value], cx: &Ctx<'_>) -> Vec<String> {
+fn unit_block(unit: &UnitSummary, tail: &[Value], styled: &[Value], cx: &Ctx<'_>) -> Vec<String> {
     let mut lines = vec![unit_line(unit, cx)];
     if let Some(reason) = &unit.reason {
         lines.push(format!("  {}", words::error_message(reason).0));
@@ -115,7 +115,7 @@ fn unit_block(unit: &UnitSummary, tail: &[Value], cx: &Ctx<'_>) -> Vec<String> {
     }
     lines.extend(leftover_notes("  ", &unit.left_running, &unit.escaped));
     if unit.state == "failed" {
-        lines.extend(tail_lines(tail));
+        lines.extend(super::tail_lines_in(tail, styled, cx));
         if cx.agent() {
             lines.push(format!(
                 "  more: {}",
@@ -152,16 +152,22 @@ fn units(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         None if data.get("unit").is_some_and(Value::is_object) => vec![&data["unit"]],
         None => return tree(data),
     };
-    let mut parsed: Vec<(UnitSummary, &[Value])> = items
+    let mut parsed: Vec<(UnitSummary, &[Value], &[Value])> = items
         .into_iter()
-        .filter_map(|value| Some((loose_unit(value)?, list(value, "log_tail"))))
+        .filter_map(|value| {
+            Some((
+                loose_unit(value)?,
+                list(value, "log_tail"),
+                list(value, "log_tail_styled"),
+            ))
+        })
         .collect();
     if cx.agent() {
-        parsed.sort_by_key(|(unit, _)| unit.state != "failed");
+        parsed.sort_by_key(|(unit, _, _)| unit.state != "failed");
     }
     parsed
         .iter()
-        .flat_map(|(unit, tail)| unit_block(unit, tail, cx))
+        .flat_map(|(unit, tail, styled)| unit_block(unit, tail, styled, cx))
         .collect()
 }
 
@@ -419,15 +425,23 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
                 .unwrap_or_else(|| "failed".into()),
         };
         // The last line that is not a stack frame usually names the error.
-        let tail: Vec<&String> =
-            own_lines(failure.map_or(&[][..], |f| f.log_tail.as_slice())).collect();
-        if let Some(line) = tail
+        let (tail, styled) = failure.map_or((&[][..], &[][..]), |f| {
+            (f.log_tail.as_slice(), f.log_tail_styled.as_slice())
+        });
+        let own: Vec<(usize, &String)> = tail
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| !line.starts_with("[devlanes] "))
+            .collect();
+        if let Some((index, line)) = own
             .iter()
             .rev()
-            .find(|line| !clean(line).trim_start().starts_with("at "))
-            .or(tail.last())
+            .find(|(_, line)| !clean(line).trim_start().starts_with("at "))
+            .or(own.last())
         {
-            detail.push_str(&format!("   {}", cap_line(&clean(line), 120)));
+            // `log_tail_styled` matches `log_tail` line for line when present.
+            let styled = (styled.len() == tail.len()).then(|| styled[*index].as_str());
+            detail.push_str(&format!("   {}", super::styled_line(line, styled, 120, cx)));
         }
         rows.push(vec![cx.mark(Outcome::Fail), clean(name), detail]);
     }
@@ -762,7 +776,7 @@ pub(super) fn status(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
                 let mut units: Vec<&UnitSummary> = lane.units.iter().collect();
                 units.sort_by_key(|unit| unit.state != "failed");
                 for unit in units {
-                    lines.extend(unit_block(unit, &[], cx));
+                    lines.extend(unit_block(unit, &[], &[], cx));
                 }
             }
         }
@@ -1120,7 +1134,11 @@ pub(super) fn wait(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             {
                 lines.push(format!("  {}", words::error_message(&reason).0));
             }
-            lines.extend(tail_lines(list(data, "log_tail")));
+            lines.extend(super::tail_lines_in(
+                list(data, "log_tail"),
+                list(data, "log_tail_styled"),
+                cx,
+            ));
             let first = failed.first().cloned().unwrap_or(unit);
             if !first.is_empty() {
                 lines.push(format!("  more: {}", Hint::logs(&lane, &first, 200).0));
@@ -1189,7 +1207,11 @@ pub(super) fn errors(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
                 ),
             });
         }
-        lines.extend(tail_lines(list(item, "error_lines")));
+        lines.extend(super::tail_lines_in(
+            list(item, "error_lines"),
+            list(item, "error_lines_styled"),
+            cx,
+        ));
         if cx.agent() {
             lines.push(format!("  more: {}", Hint::logs(&lane, &unit, 200).0));
         }

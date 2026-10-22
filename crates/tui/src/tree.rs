@@ -1,10 +1,10 @@
-//! The rows of one lane: the whole-lane row, then services, tasks and infra.
-//! Services are one alphabetical list (the color bar shows families) with
-//! the ones not running folded away while the lane runs. Pure functions of
-//! the lane, its task list and the fold decisions, so the list, the mouse
-//! and the tests agree.
+//! The rows of one lane: services, tasks and infra. Services keep the order
+//! of devlanes.yaml, running or not (the name's color shows the family).
+//! The lane itself is selected through the list's title, not a row. Pure
+//! functions of the lane, its task list and the fold decisions, so the list,
+//! the mouse and the tests agree.
 
-use devlanes_proto::{LaneSummary, ORPHANED, UnitSummary};
+use devlanes_proto::{ContainerSummary, LaneSummary, ORPHANED, UnitSummary};
 
 use crate::api::TaskInfo;
 use crate::app::is_active;
@@ -31,6 +31,7 @@ impl Section {
 /// A row by identity, so live updates and folds never move the selection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RowId {
+    /// The lane itself: its title in the list box, never a row.
     WholeLane,
     Section(Section),
     /// One of the fixed groups below, inside a section.
@@ -45,11 +46,12 @@ pub enum RowId {
     Gap(u8),
 }
 
-/// Services that are not running while the lane runs.
-pub const STOPPED: &str = "not started";
-/// Exec units, after every service group.
+/// Exec units, after the services.
 pub const AD_HOC: &str = "ad-hoc";
+/// The lane's own containers.
 pub const CONTAINERS: &str = "containers";
+/// The project's shared containers, in every lane.
+pub const SHARED: &str = "shared";
 pub const SETUP: &str = "setup";
 pub const TEARDOWN: &str = "teardown";
 
@@ -163,89 +165,96 @@ pub fn matches(filter: &str, name: &str, label: &str, tags: &[String]) -> bool {
     name.to_lowercase().contains(&filter) || label.to_lowercase().contains(&filter)
 }
 
-/// `(name, id)` pairs as leaves in name order, ignoring case.
-fn sorted(mut items: Vec<(String, RowId)>) -> Vec<Node> {
-    items.sort_by_key(|item| item.0.to_lowercase());
-    items.into_iter().map(|(_, id)| Node::leaf(id)).collect()
-}
-
-/// The lane's rows as a tree, before folding. With a filter only matching
+/// The lane's rows as a tree, before folding. `shared` are the project's
+/// shared containers, listed in every lane. With a filter only matching
 /// leaves and their headers remain.
-pub fn tree(lane: &LaneSummary, tasks: Option<&[TaskInfo]>, filter: Option<&str>) -> Vec<Node> {
+pub fn tree(
+    lane: &LaneSummary,
+    shared: &[ContainerSummary],
+    tasks: Option<&[TaskInfo]>,
+    filter: Option<&str>,
+) -> Vec<Node> {
     let filter = filter.filter(|f| !f.trim().is_empty());
     let keep = |unit: &UnitSummary| {
         filter.is_none_or(|f| matches(f, &unit.name, unit.label(), &unit.tags))
     };
-    let live = lane_is_live(lane);
-    let mut nodes = vec![Node::leaf(RowId::WholeLane)];
+    let mut nodes = Vec::new();
 
-    // Services: what runs or needs a look, then what does not, then exec units.
-    let mut running = Vec::new();
-    let mut stopped = Vec::new();
+    // Services in devlanes.yaml order, as the daemon lists them, running or
+    // not; then exec units.
+    let mut services = Vec::new();
     let mut ad_hoc = Vec::new();
     for unit in lane.units.iter().filter(|u| keep(u)) {
-        let item = (unit.name.clone(), RowId::Unit(unit.name.clone()));
+        let leaf = Node::leaf(RowId::Unit(unit.name.clone()));
         match role(unit) {
-            Role::Service if live && !is_active(&unit.state) && !is_problem(unit) => {
-                stopped.push(item);
-            }
-            Role::Service => running.push(item),
-            Role::Exec => ad_hoc.push(item),
+            Role::Service => services.push(leaf),
+            Role::Exec => ad_hoc.push(leaf),
             _ => {}
         }
     }
-    let mut services = sorted(running);
-    for (name, members, folded) in [(STOPPED, stopped, true), (AD_HOC, ad_hoc, false)] {
-        if members.is_empty() {
-            continue;
-        }
-        let mut members = members;
-        members.sort_by_key(|member| member.0.to_lowercase());
+    if !ad_hoc.is_empty() {
         services.push(Node {
-            id: RowId::Group(Section::Services, name.into()),
-            children: members.into_iter().map(|(_, id)| Node::leaf(id)).collect(),
-            folded_by_default: folded,
+            id: RowId::Group(Section::Services, AD_HOC.into()),
+            children: ad_hoc,
+            folded_by_default: false,
         });
     }
     if !services.is_empty() {
         nodes.push(section(Section::Services, services));
     }
 
-    // Tasks: the ones that ran (a unit), then the rest of `task.list`.
-    let ran: Vec<(String, RowId)> = lane
+    // Tasks in config order (`task.list`), then any that ran without being
+    // listed there (an older daemon).
+    let mut tasks_rows = Vec::new();
+    let ran = |name: &str| {
+        lane.units
+            .iter()
+            .any(|u| u.name == name && role(u) == Role::Task)
+    };
+    for task in tasks.unwrap_or_default() {
+        let setup = task.name.starts_with("setup.") || task.name.starts_with("teardown.");
+        let shown = filter.is_none_or(|f| matches(f, &task.name, &task.name, &[]));
+        if !setup && shown {
+            let id = if ran(&task.name) {
+                RowId::Unit(task.name.clone())
+            } else {
+                RowId::Task(task.name.clone())
+            };
+            tasks_rows.push(Node::leaf(id));
+        }
+    }
+    for unit in lane
         .units
         .iter()
         .filter(|u| role(u) == Role::Task && keep(u))
-        .map(|u| (u.name.clone(), RowId::Unit(u.name.clone())))
-        .collect();
-    let mut rest = Vec::new();
-    for task in tasks.unwrap_or_default() {
-        let setup = task.name.starts_with("setup.") || task.name.starts_with("teardown.");
-        let listed = ran.iter().any(|(name, _)| *name == task.name);
-        let shown = filter.is_none_or(|f| matches(f, &task.name, &task.name, &[]));
-        if !setup && !listed && shown {
-            rest.push((task.name.clone(), RowId::Task(task.name.clone())));
+    {
+        let id = RowId::Unit(unit.name.clone());
+        if !tasks_rows.iter().any(|node| node.id == id) {
+            tasks_rows.push(Node::leaf(id));
         }
     }
-    if !ran.is_empty() || !rest.is_empty() {
-        let mut children = sorted(ran);
-        children.extend(sorted(rest));
-        nodes.push(section(Section::Tasks, children));
+    if !tasks_rows.is_empty() {
+        nodes.push(section(Section::Tasks, tasks_rows));
     }
 
-    // Infra: containers, then the setup and teardown steps that prepare them.
+    // Infra: the lane's own containers, the project's shared ones (hidden
+    // ones too, drawn dimmed), then the setup and teardown steps.
     let mut infra = Vec::new();
-    let mut containers: Vec<&devlanes_proto::ContainerSummary> = lane
+    let shown = |c: &&ContainerSummary| filter.is_none_or(|f| matches(f, &c.name, &c.name, &[]));
+    let own: Vec<&ContainerSummary> = lane
         .containers
         .iter()
-        .filter(|c| !c.hidden)
-        .filter(|c| filter.is_none_or(|f| matches(f, &c.name, &c.name, &[])))
+        .filter(|c| !c.shared)
+        .filter(shown)
         .collect();
-    containers.sort_by(|a, b| a.name.cmp(&b.name));
-    if !containers.is_empty() {
+    let shared: Vec<&ContainerSummary> = shared.iter().filter(shown).collect();
+    for (name, list) in [(CONTAINERS, own), (SHARED, shared)] {
+        if list.is_empty() {
+            continue;
+        }
         infra.push(Node {
-            id: RowId::Group(Section::Infra, CONTAINERS.into()),
-            children: containers
+            id: RowId::Group(Section::Infra, name.into()),
+            children: list
                 .iter()
                 .map(|c| Node::leaf(RowId::Container(c.name.clone())))
                 .collect(),
@@ -261,7 +270,11 @@ pub fn tree(lane: &LaneSummary, tasks: Option<&[TaskInfo]>, filter: Option<&str>
         if steps.is_empty() {
             continue;
         }
-        steps.sort_by(|a, b| a.name.cmp(&b.name));
+        // devlanes.yaml order; by name for daemons that do not send it.
+        steps.sort_by(|a, b| {
+            let key = |u: &UnitSummary| (u.order.unwrap_or(u32::MAX), u.name.clone());
+            key(a).cmp(&key(b))
+        });
         // Folded unless it runs now or a step failed.
         let busy = steps.iter().any(|u| is_active(&u.state) || is_problem(u));
         infra.push(Node {
@@ -462,64 +475,75 @@ mod tests {
         }
     }
 
+    fn container(name: &str, shared: bool, hidden: bool) -> ContainerSummary {
+        ContainerSummary {
+            name: name.into(),
+            shared,
+            hidden,
+            ..ContainerSummary::default()
+        }
+    }
+
     #[test]
-    fn services_are_one_alphabetical_list_under_their_section() {
+    fn services_keep_the_daemon_order_with_stopped_ones_inline() {
+        // The daemon lists services in devlanes.yaml order; the list keeps it
+        // and never moves a stopped service into a group of its own.
         let lane = lane(
             vec![
-                unit("api-users", "ready", "service"),
-                unit("Web", "ready", "service"),
-                unit("api-auth", "ready", "service"),
-                unit("proxy", "ready", "service"),
+                unit("web", "ready", "service"),
+                unit("api-users", "idle", "service"),
+                unit("api-auth", "failed", "service"),
+                unit("shell", "running", "exec"),
                 unit("migrate", "exited", "task"),
                 unit("setup.db", "exited", "task"),
             ],
             "running",
         );
-        let rows = flatten(&tree(&lane, None, None), &|_| None, false);
+        let rows = flatten(&tree(&lane, &[], None, None), &|_| None, false);
         assert_eq!(
             ids(&rows),
             [
-                "whole lane",
                 "services",
-                "  api-auth",
+                "  web",
                 "  api-users",
-                "  proxy",
-                "  Web",
+                "  api-auth",
+                "  [ad-hoc]",
+                "    shell",
                 "tasks",
                 "  migrate",
                 "infra",
                 "  [setup]",
             ]
         );
+        assert!(!rows.iter().any(|row| row.id == RowId::WholeLane));
     }
 
     #[test]
-    fn stopped_services_fold_away_only_while_the_lane_runs() {
-        let units = vec![
-            unit("api-a", "ready", "service"),
-            unit("api-b", "idle", "service"),
-            unit("web", "failed", "service"),
+    fn shared_containers_are_a_group_in_every_lane() {
+        let mut own = lane(Vec::new(), "running");
+        own.containers = vec![container("cache", false, false)];
+        let shared = [
+            container("postgres", true, false),
+            container("pgbouncer", true, true),
         ];
-        let running = lane(units.clone(), "running");
-        let rows = flatten(&tree(&running, None, None), &|_| None, false);
+        let rows = flatten(&tree(&own, &shared, None, None), &|_| None, false);
         assert_eq!(
             ids(&rows),
             [
-                "whole lane",
-                "services",
-                "  api-a",
-                "  web",
-                "  [not started]"
+                "infra",
+                "  [containers]",
+                "    cache",
+                "  [shared]",
+                "    postgres",
+                "    pgbouncer",
             ]
         );
-        assert_eq!(rows[4].folded, Some(true));
-        let mut stopped = lane(units, "idle");
-        stopped.units[0].state = "idle".into();
-        stopped.units[2].state = "idle".into();
-        let rows = flatten(&tree(&stopped, None, None), &|_| None, false);
+        // A lane with no containers of its own still lists the shared ones.
+        let bare = lane(Vec::new(), "idle");
+        let rows = flatten(&tree(&bare, &shared, None, None), &|_| None, false);
         assert_eq!(
             ids(&rows),
-            ["whole lane", "services", "  api-a", "  api-b", "  web"]
+            ["infra", "  [shared]", "    postgres", "    pgbouncer"]
         );
     }
 
@@ -537,10 +561,10 @@ mod tests {
             },
         ];
         // Tasks that ran come first, then the ones that never did.
-        let rows = flatten(&tree(&lane, Some(&tasks), None), &|_| None, false);
-        assert_eq!(ids(&rows), ["whole lane", "tasks", "  migrate", "  lint"]);
-        assert_eq!(rows[2].id, RowId::Unit("migrate".into()));
-        assert_eq!(rows[3].id, RowId::Task("lint".into()));
+        let rows = flatten(&tree(&lane, &[], Some(&tasks), None), &|_| None, false);
+        assert_eq!(ids(&rows), ["tasks", "  migrate", "  lint"]);
+        assert_eq!(rows[1].id, RowId::Unit("migrate".into()));
+        assert_eq!(rows[2].id, RowId::Task("lint".into()));
     }
 
     #[test]
@@ -556,11 +580,11 @@ mod tests {
             ],
             "running",
         );
-        let nodes = tree(&lane, None, Some("api"));
+        let nodes = tree(&lane, &[], None, Some("api"));
         let rows = flatten(&nodes, &|_| Some(true), true);
-        assert_eq!(ids(&rows), ["whole lane", "services", "  api-a", "  api-b"]);
-        let rows = flatten(&tree(&lane, None, Some("+front")), &|_| None, true);
-        assert_eq!(ids(&rows), ["whole lane", "services", "  web-app"]);
+        assert_eq!(ids(&rows), ["services", "  api-a", "  api-b"]);
+        let rows = flatten(&tree(&lane, &[], None, Some("+front")), &|_| None, true);
+        assert_eq!(ids(&rows), ["services", "  web-app"]);
     }
 
     #[test]
@@ -569,19 +593,20 @@ mod tests {
             vec![
                 unit("api-a", "ready", "service"),
                 unit("api-b", "idle", "service"),
-                unit("web", "ready", "service"),
+                unit("shell", "running", "exec"),
             ],
             "running",
         );
-        let nodes = tree(&lane, None, None);
-        let stopped = RowId::Group(Section::Services, STOPPED.into());
+        let nodes = tree(&lane, &[], None, None);
+        let ad_hoc = RowId::Group(Section::Services, AD_HOC.into());
         let services = RowId::Section(Section::Services);
         let rows = flatten(&nodes, &|node| (node.id == services).then_some(true), false);
-        assert_eq!(ids(&rows), ["whole lane", "services"]);
-        assert_eq!(rows[1].members.len(), 3);
+        assert_eq!(ids(&rows), ["services"]);
+        assert_eq!(rows[0].members.len(), 3);
         assert_eq!(
-            parents(&nodes, &RowId::Unit("api-b".into())),
-            [stopped, services]
+            parents(&nodes, &RowId::Unit("shell".into())),
+            [ad_hoc, services.clone()]
         );
+        assert_eq!(parents(&nodes, &RowId::Unit("api-b".into())), [services]);
     }
 }

@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
 /// Default lifetime of finished process and task history.
-pub const DEFAULT_RUN_HISTORY_RETENTION: Duration = Duration::from_secs(30 * 86_400);
+pub const DEFAULT_RUN_HISTORY_RETENTION: Duration = Duration::from_secs(7 * 86_400);
 /// Default metrics lifetime; the daemon overrides this from `metrics.retention`.
-pub const DEFAULT_METRICS_RETENTION: Duration = Duration::from_secs(30 * 86_400);
+pub const DEFAULT_METRICS_RETENTION: Duration = Duration::from_secs(7 * 86_400);
 /// Default segment metadata lifetime; the daemon overrides this from log retention.
 pub const DEFAULT_LOG_RETENTION: Duration = Duration::from_secs(7 * 86_400);
 /// Default lifetime since a remote host's last successful connection.

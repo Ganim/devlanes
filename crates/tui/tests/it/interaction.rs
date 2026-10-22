@@ -50,10 +50,10 @@ fn row_of(app: &App, id: &RowId) -> Option<usize> {
     app.rows().iter().position(|row| row.id == *id)
 }
 
-/// A running lane of `count` services: `api-*` run, `wrk-*` do not, so
-/// they fold under `not started`.
+/// A running lane of `count` services (`api-*` run, `wrk-*` do not) and a
+/// finished setup step, folded under infra's `setup` group.
 fn big_lane(count: usize) -> Vec<devlanes_proto::LaneSummary> {
-    let units = (0..count)
+    let mut units: Vec<_> = (0..count)
         .map(|i| {
             let (family, state) = if i % 2 == 0 {
                 ("api", "ready")
@@ -63,6 +63,10 @@ fn big_lane(count: usize) -> Vec<devlanes_proto::LaneSummary> {
             crate::fake::unit("acme@0", &format!("{family}-{i:02}"), state)
         })
         .collect();
+    let mut setup = crate::fake::unit("acme@0", "setup.db", "exited");
+    setup.kind = "task".into();
+    setup.exit_code = Some(0);
+    units.push(setup);
     vec![crate::fake::lane("acme", Some(0), "main", "running", units)]
 }
 
@@ -85,16 +89,16 @@ async fn clicks_select_rows_and_fold_sections_and_groups() -> TestResult {
     assert!(row_of(&app, &RowId::Unit("api-00".into())).is_none());
     app.update(click(text, y));
     // A click on another header's arrow unfolds it at once.
-    let stopped = RowId::Group(Section::Services, "not started".into());
-    let index = row_of(&app, &stopped).ok_or("no not started group")?;
+    let setup = RowId::Group(Section::Infra, "setup".into());
+    let index = row_of(&app, &setup).ok_or("no setup group")?;
     assert!(
-        row_of(&app, &RowId::Unit("wrk-01".into())).is_none(),
+        row_of(&app, &RowId::Unit("setup.db".into())).is_none(),
         "folded at first"
     );
     let (y, _, arrow) = place(&app, index)?;
     app.update(click(arrow, y));
-    assert_eq!(app.selected_id(), Some(&stopped));
-    assert!(row_of(&app, &RowId::Unit("wrk-01".into())).is_some());
+    assert_eq!(app.selected_id(), Some(&setup));
+    assert!(row_of(&app, &RowId::Unit("setup.db".into())).is_some());
     // A click on a unit selects it and the pane follows.
     let index = row_of(&app, &RowId::Unit("api-02".into())).ok_or("no api-02")?;
     let (y, text, _) = place(&app, index)?;
@@ -165,20 +169,37 @@ async fn tabs_chips_and_footer_hints_are_clickable() -> TestResult {
     let monitor = column(top, "M monitor").ok_or("no monitor button")?;
     app.update(click(monitor, 0));
     assert_eq!(app.view, devlanes_tui::app::View::Monitor);
+    // shop has one lane, so no lane bar: the list starts under the top bar.
+    let text = draw(&app)?.backend().to_string();
+    assert!(
+        !text.lines().nth(1).unwrap_or_default().contains("lanes"),
+        "{text}"
+    );
     app.update(key(KeyCode::Esc));
-    app.update(key(KeyCode::Char('1')));
+    app.update(key(KeyCode::Char('!')));
     let text = draw(&app)?.backend().to_string();
     let bar = text.lines().nth(1).ok_or("no lane bar")?.trim_matches('"');
+    assert!(bar.contains("2 feat/login @1"), "{bar}");
     let chip = column(bar, "feat/login").ok_or("no chip")?;
     app.update(click(chip, 1));
     assert_eq!(
         app.selected_lane().map(|l| l.reference.as_str()),
         Some("acme@1")
     );
+    // The chip selects the lane itself, as a click on the list's title does.
+    assert_eq!(app.selected_id(), Some(&RowId::WholeLane));
+    let index = row_of(&app, &RowId::Section(Section::Services)).ok_or("no services")?;
+    let (y, text_x, _) = place(&app, index)?;
+    app.update(click(text_x, y));
+    assert_eq!(app.selected_id(), Some(&RowId::Section(Section::Services)));
+    let list = app.areas().and_then(|a| a.list).ok_or("no list")?;
+    draw(&app)?;
+    app.update(click(list.x + 3, list.y - 1));
+    assert_eq!(app.selected_id(), Some(&RowId::WholeLane));
     // The footer's `s start lane` presses s.
     let text = draw(&app)?.backend().to_string();
     let footer = text.lines().last().ok_or("no footer")?.trim_matches('"');
-    let start = column(footer, "s start lane").ok_or("no start hint")?;
+    let start = column(footer, "s start lane").ok_or(format!("no start hint: {footer}"))?;
     let effects = app.update(click(start, 29));
     assert!(
         matches!(effects.as_slice(), [Effect::Control { lane, .. }] if lane == "acme@1"),

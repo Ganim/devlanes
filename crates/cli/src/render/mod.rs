@@ -354,6 +354,82 @@ pub(crate) fn duration(ms: u64) -> String {
 }
 
 /// Last ≤20 tail lines as `  | line`, each capped at 300 characters.
+/// `value` with its SGR color sequences (`ESC [ … m`) and nothing else that a
+/// terminal would act on, ending in a reset so its colors stop with the line.
+pub(crate) fn keep_colors(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 4);
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                let mut params = String::new();
+                while let Some(&next) = chars.peek() {
+                    if next.is_ascii_digit() || next == ';' || next == ':' {
+                        params.push(next);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                // Anything but SGR (cursor moves, clears) is dropped up to its final byte.
+                let mut sgr = true;
+                for last in chars.by_ref() {
+                    if ('@'..='~').contains(&last) {
+                        if last == 'm' && sgr {
+                            out.push_str("\x1b[");
+                            out.push_str(&params);
+                            out.push('m');
+                        }
+                        break;
+                    }
+                    // A private or intermediate byte: not SGR, whatever ends it.
+                    sgr = false;
+                }
+            }
+            continue;
+        }
+        if !c.is_control() || c == '\t' {
+            out.push(c);
+        }
+    }
+    if !out.ends_with(RESET) {
+        out.push_str(RESET);
+    }
+    out
+}
+
+/// Resets every SGR attribute.
+const RESET: &str = "\x1b[0m";
+
+/// [`tail_lines`], in color when the output shows colors and the daemon sent
+/// the colored form (`styled`, line for line with `tail`).
+pub(crate) fn tail_lines_in(tail: &[Value], styled: &[Value], cx: &Ctx<'_>) -> Vec<String> {
+    if !cx.color || cx.agent() || styled.len() != tail.len() {
+        return tail_lines(tail);
+    }
+    let skip = tail.len().saturating_sub(20);
+    tail.iter()
+        .zip(styled)
+        .skip(skip)
+        .filter_map(|(plain, styled)| Some((plain.as_str()?, styled.as_str())))
+        .map(|(plain, styled)| format!("  | {}", styled_line(plain, styled, 300, cx)))
+        .collect()
+}
+
+/// One log line capped at `limit` characters; in color when the output shows
+/// colors, the line has a colored form and it fits uncut, since a cap could
+/// split an escape sequence.
+pub(crate) fn styled_line(plain: &str, styled: Option<&str>, limit: usize, cx: &Ctx<'_>) -> String {
+    let plain = clean(plain);
+    match styled {
+        Some(styled) if cx.color && !cx.agent() && plain.chars().count() <= limit => {
+            keep_colors(styled)
+        }
+        _ => cap_line(&plain, limit),
+    }
+}
+
 pub(crate) fn tail_lines(tail: &[Value]) -> Vec<String> {
     let skip = tail.len().saturating_sub(20);
     tail.iter()

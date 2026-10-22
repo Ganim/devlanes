@@ -74,8 +74,9 @@ pub enum View {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Click {
     Project(String),
+    /// A lane chip: the lane's status.
     Lane(String),
-    /// The start in the top bar: that lane's whole-lane row.
+    /// The start in the top bar, or the list's title: the lane's status.
     StartLane(String),
     /// The problem counter in the top bar.
     FirstProblem,
@@ -140,9 +141,19 @@ pub struct DaemonView {
     pub log_position: crate::logfile::LogPosition,
     /// Why the log cannot be read, shown in place of the tail.
     pub log_error: Option<String>,
-    /// Log lines scrolled up from the newest; 0 follows the file.
+    /// Shown entries scrolled up from the newest.
     pub scroll: usize,
-    /// Copy mode on the log, like the unit terminal's: whole lines.
+    /// Not following the file: arriving lines leave the view where it is.
+    pub paused: bool,
+    /// Lines that arrived while paused, for the title.
+    pub new_lines: usize,
+    /// Level floor, text filter and folding of the log.
+    pub filters: crate::daemonlog::Filters,
+    /// Keys go to the text filter until Enter or Esc.
+    pub filter_editing: bool,
+    /// `i`: every check, not only the problems.
+    pub all_checks: bool,
+    /// Copy mode on the log, over the shown entries.
     pub copy: Option<LogCopy>,
     /// The restart, stop, start or gc in flight.
     pub busy: Option<&'static str>,
@@ -155,8 +166,9 @@ pub struct DaemonView {
     background: u8,
 }
 
-/// The cursor and selection of copy mode on the daemon log, as log line indexes
-/// (0 is the oldest kept line). The view ends at the selection's newest line.
+/// The cursor and selection of copy mode on the daemon log, as indexes into
+/// the shown entries (0 is the oldest). The view ends at the selection's
+/// newest entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogCopy {
     pub cursor: usize,
@@ -272,7 +284,58 @@ pub enum Dialog {
         state: ProfilesState,
     },
     Help,
+    /// The Esc menu (`crate::menu`).
+    Menu(crate::menu::Menu),
+    /// The options page of the Esc menu (`crate::settings`).
+    Settings(Box<crate::settings::Settings>),
+    /// q while lanes of the project run: keep them, stop them or stay.
+    Quit(QuitDialog),
 }
+
+/// What quitting does with running lanes: `tui.on_quit` from the user config.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OnQuit {
+    #[default]
+    Ask,
+    Keep,
+    Stop,
+}
+
+impl OnQuit {
+    /// The config word; anything else asks.
+    pub fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("keep") => Self::Keep,
+            Some("stop") => Self::Stop,
+            _ => Self::Ask,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Keep => "keep",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+/// The quit dialog: the running lanes it would stop, the highlighted choice
+/// and the "remember this choice" box.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuitDialog {
+    pub lanes: Vec<String>,
+    /// [`QUIT_CHOICES`] index.
+    pub index: usize,
+    pub remember: bool,
+}
+
+/// The quit dialog's choices, in order.
+pub const QUIT_CHOICES: [&str; 3] = [
+    "Close the TUI; lanes keep running",
+    "Close and stop the running lanes",
+    "Cancel",
+];
 
 /// The profile picker while `profile.list` loads and after.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +411,11 @@ const RESIZE_SETTLE_MS: u64 = 200;
 /// Inputs to [`App::update`].
 #[derive(Debug)]
 pub enum Msg {
+    /// [`Effect::QuitWith`] is done. With an `error` (a stop or the config
+    /// write failed) the TUI stays open to show it.
+    QuitReady {
+        error: Option<String>,
+    },
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
@@ -439,11 +507,20 @@ pub enum Msg {
     },
     /// A spinner frame passed; sent only while something spins.
     Spin,
+    /// config.yaml as read for the options page.
+    Settings(crate::settings::Reply),
 }
 
 /// Side effects the runtime performs; results come back as [`Msg`].
 #[derive(Debug)]
 pub enum Effect {
+    /// Writes `tui.on_quit` when `remember` is set, stops `stop`'s lanes,
+    /// then sends [`Msg::QuitReady`]. Quitting waits for it, so the stops
+    /// reach the daemon before the process ends.
+    QuitWith {
+        stop: Vec<String>,
+        remember: Option<OnQuit>,
+    },
     Refresh,
     Subscribe,
     ScheduleReconnect {
@@ -494,12 +571,6 @@ pub enum Effect {
     /// Samples over the monitor's range.
     FetchMetrics(MetricsQuery),
     OpenUrl(String),
-    /// `attach` is a unit ref to run `devlanes attach` on; `None` opens a shell.
-    OpenTerminal {
-        cwd: PathBuf,
-        attach: Option<String>,
-        title: String,
-    },
     Copy(String),
     /// Sends `yes`; only produced by a confirmed dialog.
     CleanLane {
@@ -523,17 +594,19 @@ pub enum Effect {
     FetchProfiles {
         lane: String,
     },
+    /// Reads or edits config.yaml for the options page.
+    Settings(crate::settings::Request),
     Quit,
 }
 
-/// Screen regions shared by rendering, mouse hit-testing and PTY sizing. No
-/// boxes: one header row per panel and a `│` column between them.
+/// Screen regions shared by rendering, mouse hit-testing and PTY sizing: the
+/// top bar, the lane bar, the list and pane boxes, the footer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Areas {
     /// Row 0: devlanes, project tabs, messages, the view buttons.
     pub header: Rect,
-    /// Row 1 in the project view: the lane chips.
-    pub lane_bar: Rect,
+    /// Row 1 in the project view when the project has several lanes.
+    pub lane_bar: Option<Rect>,
     /// The list's box, its title in the top border, and its rows inside.
     pub list_box: Option<Rect>,
     pub list: Option<Rect>,
@@ -550,11 +623,17 @@ pub struct Areas {
 
 /// Splits the screen, or `None` when it is below the minimum size.
 pub fn areas(width: u16, height: u16, zoom: bool) -> Option<Areas> {
-    areas_with(width, height, zoom, false)
+    areas_with(width, height, zoom, false, true)
 }
 
 /// [`areas`] with the first-run hint strip above the footer when `strip`.
-pub fn areas_with(width: u16, height: u16, zoom: bool, strip: bool) -> Option<Areas> {
+pub fn areas_with(
+    width: u16,
+    height: u16,
+    zoom: bool,
+    strip: bool,
+    lane_bar: bool,
+) -> Option<Areas> {
     if width < MIN_WIDTH || height < MIN_HEIGHT {
         return None;
     }
@@ -563,9 +642,10 @@ pub fn areas_with(width: u16, height: u16, zoom: bool, strip: bool) -> Option<Ar
     let footer = Rect::new(0, height - 1, width, 1);
     let bottom = height - 1 - u16::from(strip);
     let body = Rect::new(0, 1, width, bottom - 1);
-    let lane_bar = Rect::new(0, 1, width, 1);
+    // A project with one lane has nothing to switch to: no lane bar.
+    let lane_bar = lane_bar.then(|| Rect::new(0, 1, width, 1));
     // Two boxes under the lane bar, as the navigation.md mockups draw them.
-    let top = 2;
+    let top = 1 + u16::from(lane_bar.is_some());
     let panel_height = bottom - top;
     let inner = |rect: Rect| Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2);
     let (list_box, pane_x) = if zoom {
@@ -637,6 +717,11 @@ pub struct App {
     /// The latest `metrics` reply; `None` until one arrives or after an error.
     pub metrics: Option<Metrics>,
     pub monitor: MonitorView,
+    /// The monitor graphs' finished columns and sticky scales.
+    pub graphs: crate::graph::Columns,
+    /// Seconds the widest monitor graph showed in the last frame (one per
+    /// column); the next `metrics` call asks for that much history.
+    pub monitor_seconds: std::cell::Cell<usize>,
     pub list_offset: usize,
     pub notice: Option<Notice>,
     /// Recent errors, newest first.
@@ -668,6 +753,13 @@ pub struct App {
     start_error_ticks: u8,
     /// The start this TUI was opened for (`devlanes start` on a terminal).
     pub start_run: Option<StartRun>,
+    /// `tui.on_quit`; the quit dialog's "remember" box updates it.
+    pub on_quit: OnQuit,
+    /// Where daemon.log times are shown: UTC until the runtime sets the
+    /// system's zone, so tests draw the same everywhere.
+    pub time_zone: jiff::tz::TimeZone,
+    /// [`Effect::QuitWith`] runs; q again quits at once.
+    quitting: bool,
 }
 
 /// Ticks (seconds) a failed start stays red in the tab's progress bar.
@@ -703,6 +795,8 @@ impl App {
             attached: None,
             metrics: None,
             monitor: MonitorView::default(),
+            graphs: crate::graph::Columns::default(),
+            monitor_seconds: std::cell::Cell::new(0),
             list_offset: 0,
             notice: None,
             errors: VecDeque::new(),
@@ -722,6 +816,9 @@ impl App {
             starts: StartTracker::viewer(),
             start_error_ticks: 0,
             start_run: None,
+            on_quit: OnQuit::Ask,
+            time_zone: jiff::tz::TimeZone::UTC,
+            quitting: false,
         }
     }
 
@@ -866,6 +963,16 @@ impl App {
         let mut effects = Vec::new();
         self.track_starts(&msg);
         match msg {
+            Msg::QuitReady { error: None } => effects.push(Effect::Quit),
+            Msg::QuitReady { error: Some(error) } => {
+                self.quitting = false;
+                self.set_notice(format!("{error}; q quits anyway"));
+                if let Some(notice) = &mut self.notice {
+                    notice.error = true;
+                }
+                // Asked once; the next q closes without asking again.
+                self.on_quit = OnQuit::Keep;
+            }
             Msg::Key(key) => self.key(key, &mut effects),
             Msg::Mouse(mouse) => self.mouse(mouse, &mut effects),
             Msg::Paste(text) => self.paste(&text, &mut effects),
@@ -874,6 +981,16 @@ impl App {
                 self.resize_pane(&mut effects);
             }
             Msg::Tick => self.tick(&mut effects),
+            Msg::Settings(reply) => match self.dialog.as_mut() {
+                Some(Dialog::Settings(settings)) => settings.reply(reply),
+                // The page closed before the write finished; only a failure matters.
+                _ => {
+                    let crate::settings::Reply::Loaded { error, .. } = reply;
+                    if let Some(error) = error {
+                        self.set_notice(format!("options not saved: {error}"));
+                    }
+                }
+            },
             Msg::Status(Ok(lanes)) => {
                 self.connection = Connection::Online;
                 self.loaded = true;
@@ -886,6 +1003,10 @@ impl App {
             Msg::Start(frame) => self.start_frame(frame, &mut effects),
             Msg::Subscribed(Ok(())) => {
                 let reconnected = matches!(self.connection, Connection::Reconnecting { .. });
+                if reconnected {
+                    // The daemon may be a new one, numbering its starts from 1.
+                    self.starts.reset();
+                }
                 self.connection = Connection::Online;
                 // Someone may have started the daemon this TUI stopped.
                 self.daemon.stopped = false;
@@ -1124,32 +1245,43 @@ impl App {
             Msg::DaemonLog(Ok(chunk)) => {
                 self.daemon.log_error = None;
                 let added = chunk.lines.len();
+                let before = if chunk.reset {
+                    0
+                } else {
+                    self.daemon_shown().1.len()
+                };
                 if chunk.reset {
                     self.daemon.log.clear();
                     self.daemon.scroll = 0;
-                } else if self.daemon.scroll > 0 {
-                    // A paused view keeps showing the same lines while new ones arrive.
-                    self.daemon.scroll += added;
+                    self.daemon.new_lines = 0;
                 }
                 self.daemon
                     .log
                     .extend(chunk.lines.iter().map(|line| text::clean(line)));
-                let mut dropped = 0;
                 while self.daemon.log.len() > MAX_DAEMON_LOG {
                     self.daemon.log.pop_front();
-                    dropped += 1;
                 }
-                self.daemon.scroll = self.daemon.scroll.min(self.daemon.log.len());
                 self.daemon.log_position = chunk.position;
-                // Copy mode stays on the same lines; a rotated log ends it.
+                let after = self.daemon_shown().1.len();
+                // Positions counted from the newest entry stay put while new
+                // entries arrive below them.
+                let moved = |index: usize| {
+                    let from_end = before.saturating_sub(1 + index);
+                    after.saturating_sub(1 + from_end)
+                };
+                if self.daemon.paused && !chunk.reset {
+                    self.daemon.scroll =
+                        (self.daemon.scroll + after.saturating_sub(before)).min(after);
+                    self.daemon.new_lines += added;
+                }
+                // Copy mode stays on the same entries; a rotated log ends it.
                 self.daemon.copy = match self.daemon.copy {
-                    Some(copy) if !chunk.reset && copy.cursor >= dropped => {
+                    Some(copy) if !chunk.reset && after > 0 => {
                         let copy = LogCopy {
-                            cursor: copy.cursor - dropped,
-                            anchor: copy.anchor.map(|a| a.saturating_sub(dropped)),
+                            cursor: moved(copy.cursor),
+                            anchor: copy.anchor.map(moved),
                         };
-                        let last = self.daemon.log.len().saturating_sub(1);
-                        self.daemon.scroll = last.saturating_sub(copy.range().1);
+                        self.daemon.scroll = (after - 1).saturating_sub(copy.range().1);
                         Some(copy)
                     }
                     _ => None,
@@ -1494,16 +1626,26 @@ impl App {
             .as_ref()
             .is_some_and(|s| self.lanes.iter().any(|lane| lane.reference == s.lane));
         if !lane_known {
-            self.selected = self.initial_lane().map(|lane| Selected {
-                row: self.default_row(&lane),
-                lane,
-            });
+            // A lane that went away (cleaned, removed) leaves the selection
+            // in its project, on the lane numbered closest to it.
+            let neighbour = self
+                .selected
+                .as_ref()
+                .and_then(|s| self.neighbour_of(&s.lane));
+            self.selected = neighbour
+                .or_else(|| self.initial_lane())
+                .map(|lane| Selected {
+                    row: self.default_row(&lane),
+                    lane,
+                });
         }
         if let Some(lane) = self.selected.as_ref().map(|s| s.lane.clone()) {
             self.auto_fold(&lane);
             let rows = self.rows();
             let row = self.selected.as_ref().map(|s| s.row.clone());
+            // The lane itself is selected through its title, not a row.
             if let Some(row) = row
+                && row != RowId::WholeLane
                 && !rows.iter().any(|r| r.id == row)
             {
                 // A task that just ran becomes a unit, and the other way round.
@@ -1524,7 +1666,7 @@ impl App {
                         // Under a filter: the first match.
                         self.filter.as_ref().and_then(|_| {
                             rows.iter()
-                                .find(|r| r.folded.is_none() && r.id != RowId::WholeLane)
+                                .find(|r| r.folded.is_none() && !matches!(r.id, RowId::Gap(_)))
                                 .map(|r| r.id.clone())
                         })
                     })
@@ -1594,7 +1736,7 @@ impl App {
             return RowId::Unit(problem.name.clone());
         }
         if matches!(summary.state.as_str(), "running" | "failed") {
-            let nodes = tree::tree(summary, self.task_list(lane), None);
+            let nodes = self.lane_tree(summary, None);
             if let Some(first) = nodes
                 .iter()
                 .find(|node| node.id == RowId::Section(Section::Services))
@@ -1697,7 +1839,51 @@ impl App {
             return Vec::new();
         };
         let filter = self.filter.as_ref().map(|f| f.text.as_str());
-        tree::tree(lane, self.task_list(&lane.reference), filter)
+        self.lane_tree(lane, filter)
+    }
+
+    /// A lane's tree with the project's shared containers.
+    fn lane_tree(&self, lane: &LaneSummary, filter: Option<&str>) -> Vec<Node> {
+        let shared = self.shared_containers(&lane.project);
+        tree::tree(lane, &shared, self.task_list(&lane.reference), filter)
+    }
+
+    /// The project's shared containers, once each, from whichever of its
+    /// lanes reports them, so every lane lists them even when its own infra
+    /// is not up.
+    pub fn shared_containers(&self, project: &str) -> Vec<devlanes_proto::ContainerSummary> {
+        let mut shared: Vec<devlanes_proto::ContainerSummary> = Vec::new();
+        for container in self
+            .lanes
+            .iter()
+            .filter(|lane| lane.project == project)
+            .flat_map(|lane| lane.containers.iter())
+            .filter(|c| c.shared)
+        {
+            if !shared.iter().any(|c| c.name == container.name) {
+                shared.push(container.clone());
+            }
+        }
+        shared.sort_by(|a, b| a.name.cmp(&b.name));
+        shared
+    }
+
+    /// A container by name: the lane's own, else a shared one another lane
+    /// of the project reports.
+    pub fn find_container(
+        &self,
+        lane: &LaneSummary,
+        name: &str,
+    ) -> Option<devlanes_proto::ContainerSummary> {
+        lane.containers
+            .iter()
+            .find(|c| c.name == name)
+            .cloned()
+            .or_else(|| {
+                self.shared_containers(&lane.project)
+                    .into_iter()
+                    .find(|c| c.name == name)
+            })
     }
 
     /// The selected lane's visible rows.
@@ -1740,7 +1926,7 @@ impl App {
         let Some(summary) = self.lanes.iter().find(|l| l.reference == lane) else {
             return false;
         };
-        let nodes = tree::tree(summary, self.task_list(lane), None);
+        let nodes = self.lane_tree(summary, None);
         let Some(node) = tree::headers(&nodes).into_iter().find(|n| n.id == *id) else {
             return false;
         };
@@ -1779,7 +1965,7 @@ impl App {
             return;
         }
         let height = self.list_height();
-        let nodes = tree::tree(summary, self.task_list(lane), None);
+        let nodes = self.lane_tree(summary, None);
         let user = self.folds.get(lane).cloned().unwrap_or_default();
         let selected = self.selected.as_ref().map(|s| s.row.clone());
         let mut folded: HashSet<RowId> = HashSet::new();
@@ -1865,7 +2051,25 @@ impl App {
         if rows.is_empty() {
             return;
         }
-        let current = self.selected_row().unwrap_or(0);
+        // The lane title sits above the first row: k from the top selects
+        // the lane, j from the lane the first row.
+        let current = match self.selected_row() {
+            Some(current) => current,
+            None if delta > 0 => {
+                let first = rows
+                    .iter()
+                    .position(|r| !matches!(r.id, RowId::Gap(_)))
+                    .unwrap_or(0);
+                let next = first.saturating_add_signed(delta - 1).min(rows.len() - 1);
+                self.select_row(rows[next].id.clone(), effects);
+                return;
+            }
+            None => return,
+        };
+        if delta < 0 && current.checked_add_signed(delta).is_none() {
+            self.select_row(RowId::WholeLane, effects);
+            return;
+        }
         let mut next = current.saturating_add_signed(delta).min(rows.len() - 1);
         let step: isize = if delta < 0 { -1 } else { 1 };
         while matches!(rows[next].id, RowId::Gap(_)) {
@@ -1889,7 +2093,7 @@ impl App {
             .lanes
             .iter()
             .find(|l| l.reference == lane)
-            .map(|summary| tree::tree(summary, self.task_list(&lane), None))
+            .map(|summary| self.lane_tree(summary, None))
             .unwrap_or_default();
         for parent in tree::parents(&nodes, &target.row) {
             self.folds
@@ -1922,7 +2126,13 @@ impl App {
     /// Shows project `name` on the lane shown there last.
     pub fn select_project(&mut self, name: &str, effects: &mut Vec<Effect>) {
         self.view = View::Project;
-        let lane = self.project_lane.get(name).cloned().or_else(|| {
+        // The lane shown there last, unless it is gone since.
+        let remembered = self
+            .project_lane
+            .get(name)
+            .filter(|lane| self.lanes.iter().any(|l| l.reference == **lane))
+            .cloned();
+        let lane = remembered.or_else(|| {
             self.lanes
                 .iter()
                 .find(|lane| lane.project == name)
@@ -1931,6 +2141,30 @@ impl App {
         if let Some(lane) = lane {
             self.select_lane(&lane, effects);
         }
+    }
+
+    /// A lane of the project `gone` belonged to, numbered closest to it (the
+    /// lower one on a tie); `None` when that project has no lanes left.
+    fn neighbour_of(&self, gone: &str) -> Option<String> {
+        let project = self
+            .project_lane
+            .iter()
+            .find(|(_, lane)| lane.as_str() == gone)
+            .map(|(project, _)| project.clone())?;
+        let index = |reference: &str| {
+            reference
+                .rsplit_once('@')
+                .and_then(|(_, n)| n.parse::<i64>().ok())
+        };
+        let target = index(gone).unwrap_or(0);
+        self.lanes
+            .iter()
+            .filter(|lane| lane.project == project)
+            .min_by_key(|lane| {
+                let n = lane.index.map_or(i64::MAX / 2, i64::from);
+                ((n - target).abs(), n)
+            })
+            .map(|lane| lane.reference.clone())
     }
 
     /// The previous or next project tab, wrapping.
@@ -1978,7 +2212,7 @@ impl App {
             {
                 out.push(Selected::lane(&lane.reference));
             }
-            let nodes = tree::tree(lane, self.task_list(&lane.reference), None);
+            let nodes = self.lane_tree(lane, None);
             for row in tree::flatten(&nodes, &|_| Some(false), true) {
                 if self.is_problem_row(lane, &row.id) {
                     out.push(Selected {
@@ -2042,7 +2276,19 @@ impl App {
 
     /// The screen's regions, with the first-run strip when it shows.
     pub fn areas(&self) -> Option<Areas> {
-        areas_with(self.size.0, self.size.1, self.zoom, self.first_run_strip())
+        self.areas_sized(self.size.0, self.size.1)
+    }
+
+    /// [`App::areas`] for a frame of `width` x `height`: the lane bar only
+    /// when the project has several lanes.
+    pub fn areas_sized(&self, width: u16, height: u16) -> Option<Areas> {
+        areas_with(
+            width,
+            height,
+            self.zoom,
+            self.first_run_strip(),
+            self.project_lanes().len() > 1,
+        )
     }
 
     /// Whether the first-run strip shows: once the dismissals loaded, until
@@ -2268,6 +2514,19 @@ impl App {
             self.daemon_copy_key(key, page, effects);
             return;
         }
+        if self.view == View::Daemon && self.daemon.filter_editing {
+            self.daemon_filter_key(key, effects);
+            return;
+        }
+        // Esc clears the log filter before it leaves the page.
+        if self.view == View::Daemon
+            && key.code == KeyCode::Esc
+            && !self.daemon.filters.text.is_empty()
+        {
+            self.daemon.filters.text.clear();
+            self.daemon_filters_changed();
+            return;
+        }
         if self.view == View::Monitor && self.monitor.editing {
             self.monitor_filter_key(key, effects);
             return;
@@ -2306,8 +2565,8 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Char('c') if ctrl => effects.push(Effect::Quit),
-            KeyCode::Char('q') if plain => effects.push(Effect::Quit),
+            KeyCode::Char('c') if ctrl => self.quit(effects),
+            KeyCode::Char('q') if plain => self.quit(effects),
             KeyCode::Char('u') if plain => {
                 if !self.dismiss_release(effects) && self.first_run_strip() {
                     self.release.1.push(FIRST_RUN_KEY.into());
@@ -2320,11 +2579,23 @@ impl App {
                 self.step_project(1, effects);
             }
             KeyCode::BackTab => self.step_project(-1, effects),
-            KeyCode::Char(digit @ '1'..='9') if plain => {
-                let index = usize::from(digit as u8 - b'1');
+            // Shift+1-9 picks a project. Without the kitty keyboard protocol
+            // the terminal sends the shifted symbol instead; these are the
+            // US layout's.
+            KeyCode::Char(c) if !ctrl && project_digit(c, key.modifiers).is_some() => {
+                let index = project_digit(c, key.modifiers).unwrap_or_default();
                 if let Some(name) = self.projects().get(index).cloned() {
                     self.learned.1 = true;
                     self.select_project(&name, effects);
+                }
+            }
+            // 1-9 picks a lane of the project: one project with many lanes
+            // is the common case.
+            KeyCode::Char(digit @ '1'..='9') if plain => {
+                let index = usize::from(digit as u8 - b'1');
+                if let Some(lane) = self.project_lanes().get(index).map(|l| l.reference.clone()) {
+                    self.view = View::Project;
+                    self.select_lane(&lane, effects);
                 }
             }
             KeyCode::Char('M') => self.set_view(View::Monitor, effects),
@@ -2377,7 +2648,7 @@ impl App {
                 filter.text.pop();
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                effects.push(Effect::Quit);
+                self.quit(effects);
                 return;
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -2398,26 +2669,45 @@ impl App {
     fn daemon_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let page = usize::from(self.size.1 / 2).max(1);
-        let log_len = self.daemon.log.len();
+        let shown = self.daemon_shown().1.len();
+        let scroll = self.daemon.scroll;
+        // Scrolling up pauses following; G or F follows again.
+        let scroll_to = |view: &mut DaemonView, scroll: usize| {
+            view.scroll = scroll.min(shown);
+            if view.scroll > 0 {
+                view.paused = true;
+            }
+        };
         match key.code {
-            // The bottom visible line; moving keeps the cursor on the last row.
-            KeyCode::Char('c') if !ctrl && log_len > 0 => {
+            // The bottom visible entry; moving keeps the cursor on the last row.
+            KeyCode::Char('c') if !ctrl && shown > 0 => {
                 self.daemon.copy = Some(LogCopy {
-                    cursor: log_len.saturating_sub(1 + self.daemon.scroll),
+                    cursor: shown.saturating_sub(1 + self.daemon.scroll),
                     anchor: None,
                 });
+                self.daemon.paused = true;
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.daemon.scroll = (self.daemon.scroll + 1).min(log_len);
-            }
+            KeyCode::Char('k') | KeyCode::Up => scroll_to(&mut self.daemon, scroll + 1),
             KeyCode::Char('j') | KeyCode::Down => {
-                self.daemon.scroll = self.daemon.scroll.saturating_sub(1);
+                scroll_to(&mut self.daemon, scroll.saturating_sub(1));
             }
-            KeyCode::PageUp => self.daemon.scroll = (self.daemon.scroll + page).min(log_len),
-            KeyCode::PageDown => self.daemon.scroll = self.daemon.scroll.saturating_sub(page),
-            // g/G mean top/bottom on every tab: the oldest line, then following again.
-            KeyCode::Home | KeyCode::Char('g') => self.daemon.scroll = log_len,
-            KeyCode::End | KeyCode::Char('G') => self.daemon.scroll = 0,
+            KeyCode::PageUp => scroll_to(&mut self.daemon, scroll + page),
+            KeyCode::PageDown => scroll_to(&mut self.daemon, scroll.saturating_sub(page)),
+            // g/G mean top/bottom on every tab: the oldest entry, then following again.
+            KeyCode::Home | KeyCode::Char('g') => scroll_to(&mut self.daemon, shown),
+            KeyCode::End | KeyCode::Char('G') => self.daemon_follow(),
+            KeyCode::Char('F') if self.daemon.paused => self.daemon_follow(),
+            KeyCode::Char('F') => self.daemon.paused = true,
+            KeyCode::Char('w') => {
+                self.daemon.filters.floor = self.daemon.filters.floor.next();
+                self.daemon_filters_changed();
+            }
+            KeyCode::Char('d') => {
+                self.daemon.filters.unfolded = !self.daemon.filters.unfolded;
+                self.daemon_filters_changed();
+            }
+            KeyCode::Char('/') => self.daemon.filter_editing = true,
+            KeyCode::Char('i') => self.daemon.all_checks = !self.daemon.all_checks,
             KeyCode::Char('R') => self.daemon_prompt(
                 "restart the daemon",
                 "Restart the daemon?",
@@ -2483,13 +2773,18 @@ impl App {
             self.set_notice("daemon stopped: S starts it".into());
             return;
         }
+        // A restart starts the running lanes again in the new daemon; a stop
+        // leaves that to `devlanes lane resume`.
+        let again = if action == "restart" {
+            "The new daemon starts the running lanes again."
+        } else {
+            "devlanes lane resume starts a lane again."
+        };
         let processes = match self.daemon.managed_processes() {
             Some(0) => "Nothing is running.".to_owned(),
-            Some(1) => "It stops 1 process. Start it again with devlanes lane resume.".to_owned(),
-            Some(n) => {
-                format!("It stops {n} processes. Start them again with devlanes lane resume.")
-            }
-            None => "It stops every process the daemon runs.".to_owned(),
+            Some(1) => format!("It stops 1 process. {again}"),
+            Some(n) => format!("It stops {n} processes. {again}"),
+            None => format!("It stops every process the daemon runs. {again}"),
         };
         self.dialog = Some(Dialog::Confirm {
             title: title.into(),
@@ -2592,10 +2887,56 @@ impl App {
         }
     }
 
+    /// The parsed daemon log and the entries the page shows, oldest first.
+    pub fn daemon_shown(&self) -> (Vec<crate::daemonlog::Entry>, Vec<crate::daemonlog::Shown>) {
+        let entries = crate::daemonlog::parse(&self.daemon.log);
+        let shown = crate::daemonlog::shown(&entries, &self.daemon.filters);
+        (entries, shown)
+    }
+
+    /// Follows the file again from its newest entry.
+    fn daemon_follow(&mut self) {
+        self.daemon.scroll = 0;
+        self.daemon.paused = false;
+        self.daemon.new_lines = 0;
+    }
+
+    /// Another level floor, text or folding shows other entries: the view
+    /// goes back to the newest of them, still paused if it was.
+    fn daemon_filters_changed(&mut self) {
+        self.daemon.scroll = 0;
+        self.daemon.copy = None;
+    }
+
+    /// Keys while the log's text filter takes typing: Enter keeps it, Esc
+    /// clears it.
+    fn daemon_filter_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
+        match key.code {
+            KeyCode::Esc => {
+                self.daemon.filters.text.clear();
+                self.daemon.filter_editing = false;
+            }
+            KeyCode::Enter => self.daemon.filter_editing = false,
+            KeyCode::Backspace => {
+                self.daemon.filters.text.pop();
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.quit(effects);
+                return;
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.daemon.filters.text.push(c);
+            }
+            _ => return,
+        }
+        self.daemon_filters_changed();
+    }
+
     /// Keys in copy mode on the daemon log: move, `v` selects, `y` copies the
-    /// selected lines without their colors, Esc leaves.
+    /// selected entries as they are in the file, `Y` as shown, Esc leaves.
     fn daemon_copy_key(&mut self, key: KeyEvent, page: usize, effects: &mut Vec<Effect>) {
-        let last = self.daemon.log.len().saturating_sub(1);
+        let (entries, shown) = self.daemon_shown();
+        let last = shown.len().saturating_sub(1);
         let Some(mut copy) = self.daemon.copy else {
             return;
         };
@@ -2612,14 +2953,20 @@ impl App {
                     None => Some(copy.cursor),
                 };
             }
-            KeyCode::Char('y') | KeyCode::Enter => {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                 let (first, last) = copy.range();
-                let text: Vec<String> = self
-                    .daemon
-                    .log
-                    .range(first..=last)
-                    .map(|line| text::clean(line))
-                    .collect();
+                let raw = key.code != KeyCode::Char('Y');
+                let mut text: Vec<String> = Vec::new();
+                for row in shown.get(first..=last).unwrap_or_default() {
+                    let Some(entry) = entries.get(row.entry) else {
+                        continue;
+                    };
+                    if raw {
+                        text.extend(entry.raw.iter().map(|line| text::clean(line)));
+                    } else {
+                        text.push(crate::daemonlog::display(entry, row, &self.time_zone));
+                    }
+                }
                 effects.push(Effect::Copy(text.join("\n")));
                 self.daemon.copy = None;
                 self.set_notice("copied (OSC 52; some terminals block it)".into());
@@ -2685,6 +3032,7 @@ impl App {
             // Shift+C: Option chords become characters in many macOS terminals.
             KeyCode::Char('C') => self.clean_prompt(),
             KeyCode::Char('s') => self.control(Method::Start, effects),
+            KeyCode::Char('S') => self.start_everything(effects),
             KeyCode::Char('x') => self.control(Method::Stop, effects),
             KeyCode::Char('r') => self.control(Method::Restart, effects),
             KeyCode::Char('p') => self.profile_prompt(effects),
@@ -2705,7 +3053,6 @@ impl App {
                 }
             }
             KeyCode::Char('o') => self.open_url(effects),
-            KeyCode::Char('O') => self.open_terminal(effects),
             KeyCode::Char('c') => self.enter_copy(),
             KeyCode::PageUp => {
                 let page = self.page();
@@ -2715,12 +3062,19 @@ impl App {
                 let page = self.page();
                 self.scroll(-page, effects);
             }
-            // One step back: the kept filter, then a scrolled pane.
+            // One step back: the kept filter, then a scrolled pane; with
+            // nothing left to cancel, the Esc menu.
             KeyCode::Esc => {
                 if self.filter.take().is_some() {
                     self.after_change(effects);
-                } else if let Some(attached) = self.attached.as_mut() {
+                } else if let Some(attached) = self
+                    .attached
+                    .as_mut()
+                    .filter(|attached| attached.screen.scroll_offset() > 0)
+                {
                     attached.screen.scroll_to_bottom();
+                } else {
+                    self.dialog = Some(Dialog::Menu(crate::menu::Menu::default()));
                 }
             }
             _ => {}
@@ -2817,6 +3171,73 @@ impl App {
                 if matches!(key.code, KeyCode::Char('n' | 'q') | KeyCode::Esc) => {}
             dialog @ Dialog::Confirm { .. } => self.dialog = Some(dialog),
             Dialog::Profiles { lane, state } => self.profiles_key(key, lane, state, effects),
+            Dialog::Menu(mut menu) => {
+                let action = menu.key(key);
+                self.menu_action(action, menu, effects);
+            }
+            Dialog::Settings(mut settings) => {
+                let outcome = settings.key(key, &mut self.theme, effects);
+                self.settings_outcome(outcome, settings, effects);
+            }
+            dialog @ Dialog::Quit(_) => {
+                self.dialog = Some(dialog);
+                self.quit_dialog_key(key, effects);
+            }
+        }
+    }
+
+    /// What a key or click in the Esc menu asked for.
+    fn menu_action(
+        &mut self,
+        action: crate::menu::Action,
+        menu: crate::menu::Menu,
+        effects: &mut Vec<Effect>,
+    ) {
+        use crate::menu::{Action, Item};
+        match action {
+            Action::Stay => self.dialog = Some(Dialog::Menu(menu)),
+            Action::Close => {}
+            Action::Pick(Item::Options) => {
+                self.dialog = Some(Dialog::Settings(Box::default()));
+                effects.push(Effect::Settings(crate::settings::Request::Load));
+            }
+            Action::Pick(Item::Help) => self.dialog = Some(Dialog::Help),
+            // The same path as q, so quitting asks what q asks.
+            Action::Pick(Item::Quit) => {
+                self.global_key(
+                    KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                    effects,
+                );
+            }
+        }
+    }
+
+    /// What a key or click on the options page asked for.
+    fn settings_outcome(
+        &mut self,
+        outcome: crate::settings::Outcome,
+        settings: Box<crate::settings::Settings>,
+        effects: &mut Vec<Effect>,
+    ) {
+        use crate::settings::Outcome;
+        if outcome != Outcome::Stay && !settings.restart.is_empty() {
+            self.set_notice("changed settings apply after a daemon restart: D, then R".into());
+        }
+        match outcome {
+            Outcome::Stay => self.dialog = Some(Dialog::Settings(settings)),
+            Outcome::Menu => self.dialog = Some(Dialog::Menu(crate::menu::Menu::default())),
+            Outcome::Close => {}
+            Outcome::Quit => {
+                let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+                self.global_key(ctrl_c, effects);
+            }
+            Outcome::RestartDaemon => self.daemon_prompt(
+                "restart the daemon",
+                "Restart the daemon?",
+                "restart",
+                "This TUI reconnects on its own.",
+                Effect::RestartDaemon,
+            ),
         }
     }
 
@@ -2944,12 +3365,18 @@ impl App {
         }
     }
 
-    /// What the monitor asks `metrics` for: its range, in about as many
-    /// buckets as the widest graph has samples.
+    /// What the monitor asks `metrics` for: one raw sample per second for as
+    /// many seconds as the widest graph has columns (before the first frame,
+    /// two per terminal column), at most the daemon's raw ring.
     pub fn metrics_query(&self) -> MetricsQuery {
+        let seconds = match self.monitor_seconds.get() {
+            0 => usize::from(self.size.0) * 2,
+            seconds => seconds,
+        };
+        let range_ms = (seconds as u64 * 1000).clamp(60_000, crate::monitor::RAW_RANGE_MS);
         MetricsQuery {
-            range_ms: self.monitor.range().0,
-            points: usize::from(self.size.0).clamp(60, 400),
+            range_ms,
+            points: 0,
         }
     }
 
@@ -2973,15 +3400,6 @@ impl App {
             KeyCode::Char('e') => self.monitor.flat = !self.monitor.flat,
             KeyCode::Char('/') => self.monitor.editing = true,
             KeyCode::Char('z') => self.monitor.zoom = !self.monitor.zoom,
-            KeyCode::Char('+' | '=') | KeyCode::Char('-') => {
-                let last = crate::monitor::RANGES.len() - 1;
-                self.monitor.range = match key.code {
-                    KeyCode::Char('-') => self.monitor.range.saturating_sub(1),
-                    _ => (self.monitor.range + 1).min(last),
-                };
-                self.set_notice(format!("range {}", self.monitor.range().1));
-                effects.push(Effect::FetchMetrics(self.metrics_query()));
-            }
             KeyCode::Char('h') | KeyCode::Left => match rows.get(index) {
                 Some(MonitorRow::Group(group)) => {
                     self.monitor.folded.insert(group.key.clone());
@@ -3093,6 +3511,36 @@ impl App {
         }
     }
 
+    /// `S`: every service of the shown lane that does not run yet, autostart
+    /// or not, named one by one.
+    fn start_everything(&mut self, effects: &mut Vec<Effect>) {
+        let Some(lane) = self.selected_lane() else {
+            return;
+        };
+        let reference = lane.reference.clone();
+        let units: Vec<String> = lane
+            .units
+            .iter()
+            .filter(|u| tree::role(u) == tree::Role::Service && !is_active(&u.state))
+            .map(|u| unit_ref(&reference, &u.name))
+            .collect();
+        if units.is_empty() {
+            self.set_notice(format!("every service in {reference} already runs"));
+            return;
+        }
+        self.pending_begin(&reference);
+        effects.push(Effect::Control {
+            method: Method::Start,
+            lane: reference.clone(),
+            selection: Selection {
+                units,
+                ..Selection::default()
+            },
+            label: format!("start every service in {reference}"),
+            target: Target::Lane(reference),
+        });
+    }
+
     /// Keys while the monitor filter takes typing.
     fn monitor_filter_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
         match key.code {
@@ -3105,7 +3553,7 @@ impl App {
                 self.monitor.filter.pop();
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                effects.push(Effect::Quit);
+                self.quit(effects);
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.monitor.filter.push(c);
@@ -3236,12 +3684,20 @@ impl App {
             ),
             RowId::Gap(_) => return,
         };
+        // `s` on the lane starts what the default profile (or autostart)
+        // selects, whatever the last start chose; `S` starts everything.
+        let profiles = if method == Method::Start && row == RowId::WholeLane {
+            vec![devlanes_proto::DEFAULT_PROFILE.to_owned()]
+        } else {
+            Vec::new()
+        };
         self.pending_begin(&reference);
         effects.push(Effect::Control {
             method,
             lane: reference,
             selection: Selection {
                 units,
+                profiles,
                 ..Selection::default()
             },
             label: format!("{verb} {target}"),
@@ -3335,13 +3791,23 @@ impl App {
         }
     }
 
-    /// Opens the unit's first URL, or the lane's first unit URL.
+    /// Opens the unit's address, or the lane's first unit address.
     fn open_url(&mut self, effects: &mut Vec<Effect>) {
+        // `public_url` is the first host of `hosts` over https (with the
+        // proxy's https port when it is not 443), the address people use;
+        // older daemons only list it among `urls`, after the plain URL.
+        let preferred = |unit: &UnitSummary| {
+            unit.public_url
+                .as_ref()
+                .or_else(|| unit.urls.iter().find(|url| url.starts_with("https://")))
+                .or_else(|| unit.urls.first())
+                .cloned()
+        };
         let url = match self.selected_unit() {
-            Some(unit) => unit.urls.first().cloned(),
+            Some(unit) => preferred(unit),
             None => self
                 .selected_lane()
-                .and_then(|lane| lane.units.iter().find_map(|u| u.urls.first().cloned())),
+                .and_then(|lane| lane.units.iter().find_map(preferred)),
         };
         match url {
             Some(url) => effects.push(Effect::OpenUrl(url)),
@@ -3354,22 +3820,6 @@ impl App {
                 self.set_notice(notice);
             }
         }
-    }
-
-    /// Opens a terminal attached to the unit, or a shell in the lane's worktree.
-    fn open_terminal(&mut self, effects: &mut Vec<Effect>) {
-        let Some(lane) = self.selected_lane() else {
-            return;
-        };
-        let attach = self
-            .selected_unit()
-            .map(|u| unit_ref(&lane.reference, &u.name));
-        let title = attach.clone().unwrap_or_else(|| lane.reference.clone());
-        effects.push(Effect::OpenTerminal {
-            cwd: lane.path.clone(),
-            attach,
-            title,
-        });
     }
 
     // ---- scrollback and copy ---------------------------------------------
@@ -3544,6 +3994,19 @@ impl App {
     fn mouse(&mut self, mouse: MouseEvent, effects: &mut Vec<Effect>) {
         let press = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
         let position: Position = (mouse.column, mouse.row).into();
+        match self.dialog.take() {
+            Some(Dialog::Menu(mut menu)) => {
+                let action = menu.mouse(mouse);
+                self.menu_action(action, menu, effects);
+                return;
+            }
+            Some(Dialog::Settings(mut settings)) => {
+                let outcome = settings.mouse(mouse, &mut self.theme, effects);
+                self.settings_outcome(outcome, settings, effects);
+                return;
+            }
+            other => self.dialog = other,
+        }
         if self.dialog.is_some() {
             // A click outside a dialog closes it; nothing it guards happens.
             let inside = self
@@ -3593,9 +4056,10 @@ impl App {
                 self.learned.1 = true;
                 self.select_project(&name, effects);
             }
+            // A chip, like the list's title, shows the lane's status.
             Click::Lane(lane) => {
                 self.view = View::Project;
-                self.select_lane(&lane, effects);
+                self.select(Selected::lane(&lane), effects);
             }
             Click::StartLane(lane) => {
                 self.view = View::Project;
@@ -3836,6 +4300,106 @@ impl App {
         true
     }
 
+    /// q, Ctrl+C or the menu's quit: closes at once unless lanes of the
+    /// project on screen run, then does what `tui.on_quit` says (asks by
+    /// default). Pressed again while stopping, it closes without waiting.
+    pub fn quit(&mut self, effects: &mut Vec<Effect>) {
+        let running: Vec<String> = self
+            .project_lanes()
+            .into_iter()
+            .filter(|lane| tree::lane_is_live(lane))
+            .map(|lane| lane.reference.clone())
+            .collect();
+        if self.quitting || running.is_empty() {
+            effects.push(Effect::Quit);
+            return;
+        }
+        match self.on_quit {
+            OnQuit::Keep => effects.push(Effect::Quit),
+            OnQuit::Stop => self.quit_with(running, None, effects),
+            OnQuit::Ask => {
+                self.dialog = Some(Dialog::Quit(QuitDialog {
+                    lanes: running,
+                    index: 0,
+                    remember: false,
+                }));
+            }
+        }
+    }
+
+    /// Saves the remembered choice and stops `stop`, then quits.
+    fn quit_with(
+        &mut self,
+        stop: Vec<String>,
+        remember: Option<OnQuit>,
+        effects: &mut Vec<Effect>,
+    ) {
+        if stop.is_empty() && remember.is_none() {
+            effects.push(Effect::Quit);
+            return;
+        }
+        self.quitting = true;
+        if !stop.is_empty() {
+            self.set_notice(format!("stopping {}… q closes now", stop.join(", ")));
+        }
+        effects.push(Effect::QuitWith { stop, remember });
+    }
+
+    /// Keys of the quit dialog: up and down pick, space ticks "remember",
+    /// enter acts, esc or n stays, q closes keeping the lanes, Ctrl+C closes.
+    fn quit_dialog_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
+        let Some(Dialog::Quit(dialog)) = &mut self.dialog else {
+            return;
+        };
+        let last = QUIT_CHOICES.len() - 1;
+        let choice = match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.dialog = None;
+                effects.push(Effect::Quit);
+                return;
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                dialog.index = (dialog.index + 1).min(last);
+                return;
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                dialog.index = dialog.index.saturating_sub(1);
+                return;
+            }
+            KeyCode::Char(' ' | 'r') => {
+                dialog.remember = !dialog.remember;
+                return;
+            }
+            KeyCode::Esc | KeyCode::Char('n') => last,
+            KeyCode::Char('q') => 0,
+            KeyCode::Enter => dialog.index,
+            _ => return,
+        };
+        self.choose_quit(choice, effects);
+    }
+
+    /// Acts on quit dialog choice `index` (see [`QUIT_CHOICES`]).
+    pub fn choose_quit(&mut self, index: usize, effects: &mut Vec<Effect>) {
+        let Some(Dialog::Quit(dialog)) = self.dialog.take() else {
+            return;
+        };
+        let choice = match index {
+            0 => OnQuit::Keep,
+            1 => OnQuit::Stop,
+            _ => return,
+        };
+        let remember = dialog.remember.then_some(choice);
+        if let Some(choice) = remember {
+            self.on_quit = choice;
+        }
+        let stop = if choice == OnQuit::Stop {
+            dialog.lanes
+        } else {
+            Vec::new()
+        };
+        self.quit_with(stop, remember, effects);
+    }
+
     /// Shows a short status message in the header; errors go through [`App::report`].
     pub fn set_notice(&mut self, notice: String) {
         self.notice = Some(Notice {
@@ -3869,12 +4433,21 @@ impl App {
     }
 }
 
-/// `rows` with a blank row before each section, as the mockups draw them.
+/// The project index for Shift+1-9: the digit with SHIFT (kitty keyboard
+/// protocol), or the US layout's shifted symbol.
+fn project_digit(c: char, modifiers: KeyModifiers) -> Option<usize> {
+    if c.is_ascii_digit() && c != '0' && modifiers.contains(KeyModifiers::SHIFT) {
+        return Some(usize::from(c as u8 - b'1'));
+    }
+    "!@#$%^&*(".find(c)
+}
+
+/// `rows` with a blank row between sections, as the mockups draw them.
 fn with_gaps(rows: Vec<Row>) -> Vec<Row> {
     let mut out = Vec::with_capacity(rows.len() + 3);
     let mut gaps = 0u8;
     for row in rows {
-        if matches!(row.id, RowId::Section(_)) {
+        if matches!(row.id, RowId::Section(_)) && !out.is_empty() {
             out.push(Row {
                 id: RowId::Gap(gaps),
                 depth: 0,
@@ -3924,14 +4497,11 @@ pub fn is_orphaned(unit: &UnitSummary) -> bool {
     unit.state == ORPHANED
 }
 
-/// Display order: services and tasks together by name, ad-hoc exec units
-/// after them. Only the TUI's copy is sorted; the daemon starts units in
-/// declaration order.
+/// Display order: devlanes.yaml's (`order`), with ad-hoc exec units after
+/// the declared ones. The sort is stable, so units without an `order` (an
+/// older daemon, exec units) keep the daemon's order at the end of their kind.
 pub fn sort_units(units: &mut [UnitSummary]) {
-    units.sort_by(|a, b| {
-        let key = |unit: &UnitSummary| (unit.kind == "exec", unit.name.to_lowercase());
-        key(a).cmp(&key(b)).then_with(|| a.name.cmp(&b.name))
-    });
+    units.sort_by_key(|unit| (unit.kind == "exec", unit.order.unwrap_or(u32::MAX)));
 }
 
 /// The notice for a finished action: `restarted acme@0:api`, or `acme@0:api

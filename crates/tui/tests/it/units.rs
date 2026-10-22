@@ -95,16 +95,16 @@ async fn display_names_and_running_replace_names_and_ready() -> TestResult {
 }
 
 #[tokio::test]
-async fn units_sort_by_name_with_exec_units_last() -> TestResult {
+async fn units_keep_the_daemon_order_with_exec_units_last() -> TestResult {
     let mut app = App::new(80, 24);
     app.update(Msg::Status(Ok(vec![colored_lane()])));
     let names: Vec<&str> = app.lanes[0].units.iter().map(|u| u.name.as_str()).collect();
     assert_eq!(
         names,
-        ["Api", "migrate", "web", "worker", "adhoc", "zz-shell"],
-        "services and tasks by name, exec units after"
+        ["web", "migrate", "Api", "worker", "zz-shell", "adhoc"],
+        "devlanes.yaml order as the daemon sends it, exec units after"
     );
-    // A unit that appears later lands in its sorted place.
+    // A unit that appears later goes after the others of its kind.
     app.update(Msg::Event(Event {
         seq: 2,
         event: events::UNIT_CHANGED.into(),
@@ -114,8 +114,28 @@ async fn units_sort_by_name_with_exec_units_last() -> TestResult {
     assert_eq!(
         names,
         [
-            "Api", "cache", "migrate", "web", "worker", "adhoc", "zz-shell"
+            "web", "migrate", "Api", "worker", "cache", "zz-shell", "adhoc"
         ]
+    );
+    // With `order` (its place in devlanes.yaml) a late unit takes that place.
+    let mut lane = colored_lane();
+    for (index, unit) in lane.units.iter_mut().enumerate() {
+        if unit.kind != "exec" {
+            unit.order = Some(u32::try_from(index)? * 2);
+        }
+    }
+    app.update(Msg::Status(Ok(vec![lane])));
+    let mut db = unit("acme@0", "db", "starting");
+    db.order = Some(1);
+    app.update(Msg::Event(Event {
+        seq: 3,
+        event: events::UNIT_CHANGED.into(),
+        data: json!({ "unit": db }),
+    }));
+    let names: Vec<&str> = app.lanes[0].units.iter().map(|u| u.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["web", "db", "migrate", "Api", "worker", "zz-shell", "adhoc"]
     );
     Ok(())
 }
@@ -130,36 +150,36 @@ fn palette_names_map_to_terminal_colors() {
 }
 
 #[tokio::test]
-async fn unit_colors_are_bars_and_state_is_glyph_and_word() -> TestResult {
+async fn unit_colors_are_names_and_state_is_glyph_and_word() -> TestResult {
     let mut app = App::new(60, 24);
     app.update(Msg::Status(Ok(vec![colored_lane()])));
     let buffer = render(&app)?;
     assert_clean(&buffer, "colored units");
 
-    // The unit's color is the bar; the name stays default; the glyph is the state's.
-    let y = row_of(&buffer, "web").ok_or("web row")?;
+    // The unit's color is its name's; the glyph is the state's; no bar.
+    let y = row_of(&buffer, "● web").ok_or("web row")?;
     let x = find(&buffer, y, "web").ok_or("web name")?;
-    assert_eq!(
-        buffer[(x, y)].fg,
-        Color::Reset,
-        "names keep the default color"
-    );
+    assert_eq!(buffer[(x, y)].fg, Color::Green, "name in the family color");
     assert_eq!(buffer[(x - 2, y)].fg, Color::Green, "ready glyph");
-    assert_eq!(buffer[(x - 4, y)].symbol(), "▍");
-    assert_eq!(buffer[(x - 4, y)].fg, Color::Green, "bar");
+    assert!(
+        !row(&buffer, y).contains('▍'),
+        "no color bar: {}",
+        row(&buffer, y)
+    );
 
     // The selected row (the failed worker, the lane's first problem) is plain
     // reverse video in 16 colors: a colored glyph would turn into a block.
     let y = row_of(&buffer, "✕ worker").ok_or("worker row")?;
     let x = find(&buffer, y, "worker").ok_or("worker name")?;
-    for column in [x - 4, x - 2, x] {
+    for column in [x - 2, x] {
         let cell = &buffer[(column, y)];
         assert_eq!(cell.fg, Color::Reset, "column {column}");
         assert!(cell.modifier.contains(ratatui::style::Modifier::REVERSED));
     }
     insta::assert_snapshot!("colored_units_60x24", styled(&buffer, 2..15));
 
-    // Unselected, a failed unit keeps its own bar, a red glyph and state word.
+    // Unselected, a failed unit keeps its own name color, a red glyph and
+    // state word.
     app.update(key(KeyCode::Char('g')));
     let buffer = render(&app)?;
     // The lane overview in the pane lists the worker too; take the list's row.
@@ -170,16 +190,16 @@ async fn unit_colors_are_bars_and_state_is_glyph_and_word() -> TestResult {
                 .map(|x| (y, x + 2))
         })
         .ok_or("worker row")?;
-    assert_eq!(buffer[(x - 4, y)].fg, Color::LightMagenta, "bar");
+    assert_eq!(buffer[(x, y)].fg, Color::LightMagenta, "name");
     assert_eq!(buffer[(x - 2, y)].fg, Color::Red, "failed glyph");
     let state = find(&buffer, y, "failed").ok_or("state word")?;
     assert_eq!(buffer[(state, y)].fg, Color::Red, "failed state word");
 
-    // Tasks have no bar; a color this client does not know draws none.
+    // Tasks keep the default color; so does a color this client does not know.
     for name in ["migrate", "adhoc"] {
         let y = row_of(&buffer, name).ok_or("row")?;
         let x = find(&buffer, y, name).ok_or("name")?;
-        assert_eq!(buffer[(x - 4, y)].symbol(), " ", "{name}");
+        assert_eq!(buffer[(x, y)].fg, Color::Reset, "{name}");
     }
     Ok(())
 }

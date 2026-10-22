@@ -204,6 +204,41 @@ impl Theme {
         base.patch(self.selection())
     }
 
+    /// The active project tab: paint behind dark text, reverse video
+    /// without color.
+    pub fn tab(&self) -> Style {
+        let style = match self.tier {
+            Tier::Dark | Tier::Light => Style::new()
+                .bg(Color::Rgb(0xf5, 0xc5, 0x42))
+                .fg(Color::Rgb(0x1a, 0x19, 0x17)),
+            Tier::Ansi => Style::new().bg(Color::Yellow).fg(Color::Black),
+            Tier::Plain => Style::new().add_modifier(Modifier::REVERSED),
+        };
+        style.add_modifier(Modifier::BOLD)
+    }
+
+    /// The color of letter `index` of `count` in the `devlanes` title: paint
+    /// yellow to orange. 16-color terminals get the 256-color cube's yellows
+    /// and oranges, which every terminal that draws this TUI supports.
+    pub fn brand(&self, index: usize, count: usize) -> Style {
+        let t = index as f64 / count.saturating_sub(1).max(1) as f64;
+        let mix = |a: (u8, u8, u8), b: (u8, u8, u8)| {
+            let channel =
+                |x: u8, y: u8| (f64::from(x) + (f64::from(y) - f64::from(x)) * t).round() as u8;
+            Color::Rgb(channel(a.0, b.0), channel(a.1, b.1), channel(a.2, b.2))
+        };
+        let color = match self.tier {
+            Tier::Plain => return Style::new().add_modifier(Modifier::BOLD),
+            Tier::Dark => mix((0xf5, 0xc5, 0x42), (0xe8, 0x8a, 0x3c)),
+            Tier::Light => mix((0x9a, 0x6b, 0x00), (0xb3, 0x5c, 0x00)),
+            // 220 gold, 214 orange-yellow, 208 orange.
+            Tier::Ansi => {
+                Color::Indexed([220, 220, 221, 214, 214, 215, 208, 208][(t * 7.0).round() as usize])
+            }
+        };
+        Style::new().fg(color).add_modifier(Modifier::BOLD)
+    }
+
     /// Keys in the footer, dialogs and help.
     pub fn key(&self) -> Style {
         Style::new().add_modifier(Modifier::BOLD)

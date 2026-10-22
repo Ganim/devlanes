@@ -13,9 +13,13 @@ base64 = "0.22"
 bytes.workspace = true
 crossterm = { version = "0.29", features = ["event-stream"] }
 devlanes-client = { path = "../client" }
+# The options page reads the user config schema and edits config.yaml in place.
+devlanes-config = { path = "../config" }
 devlanes-proto = { path = "../proto" }
 devlanes-term = { path = "../term" }
 futures-util.workspace = true
+# daemon.log timestamps shown in local time.
+jiff = "0.2"
 ratatui = "0.30"
 serde.workspace = true
 serde_json.workspace = true

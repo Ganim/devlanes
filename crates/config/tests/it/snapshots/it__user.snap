@@ -32,10 +32,10 @@ expression: user
     }
   },
   "metrics": {
-    "retention": "2592000000ms"
+    "retention": "604800000ms"
   },
   "history": {
-    "retention": "2592000000ms",
+    "retention": "604800000ms",
     "remote_hosts_retention": "7776000000ms"
   },
   "state": {
@@ -50,7 +50,6 @@ expression: user
     "slot_timeout": "20000ms"
   },
   "terminal": {
-    "app": "ghostty",
     "progress": "auto"
   },
   "updates": {
@@ -59,6 +58,7 @@ expression: user
   "tui": {
     "open_on_start": true,
     "theme": "auto",
-    "glyphs": "auto"
+    "glyphs": "auto",
+    "on_quit": "ask"
   }
 }

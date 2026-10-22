@@ -486,7 +486,7 @@ impl FakeInfra {
     /// Namespace from the allocated port.
     fn namespace(spec: &InfraSpec) -> Value {
         let port = spec.ports.get("infra.db/5432").copied();
-        json!({"db": {"port": port, "ports": {"5432": port}}})
+        json!({"db": {"port": port, "ports": {"5432": port}}, "cache": {"port": 6379, "ports": {"6379": 6379}}})
     }
 
     /// The lane's `db` container and a shared `cache`, named like compose would.

@@ -33,8 +33,9 @@ Configuration examples and design notes are in `docs/` at the repository root. T
 proxy:
   https_port: 443
   http_port: 80
-# Terminal app the TUI's O key opens a unit in.
-terminal: ghostty
+# Start progress in the terminal tab's progress bar: auto, always or never.
+terminal:
+  progress: auto
 ```
 
 Project settings live in each repository's `devlanes.yaml`; `docs/examples/user-config.yaml` lists every user setting.

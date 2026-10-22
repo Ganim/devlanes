@@ -23,7 +23,6 @@ use ratatui::{
 
 use crate::app::{
     App, AttachState, Click, Connection, Focus, MIN_HEIGHT, MIN_WIDTH, PaneMode, Target, View,
-    areas_with,
 };
 use crate::text::{self, clean, clip};
 use crate::theme::{Glyph, Theme, Tone};
@@ -37,7 +36,7 @@ pub fn render(app: &App, frame: &mut Frame) {
     app.hits.borrow_mut().clear();
     *app.dialog_area.borrow_mut() = None;
     let size = frame.area();
-    let Some(layout) = areas_with(size.width, size.height, app.zoom, app.first_run_strip()) else {
+    let Some(layout) = app.areas_sized(size.width, size.height) else {
         render_too_small(frame, size);
         return;
     };
@@ -47,7 +46,9 @@ pub fn render(app: &App, frame: &mut Frame) {
             if app.lanes.is_empty() {
                 render_welcome(app, frame, layout.body);
             } else {
-                render_lane_bar(app, frame, layout.lane_bar);
+                if let Some(bar) = layout.lane_bar {
+                    render_lane_bar(app, frame, bar);
+                }
                 if let (Some(boxed), Some(rows)) = (layout.list_box, layout.list) {
                     list::render(app, frame, boxed, rows);
                 }
@@ -414,6 +415,9 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let width = usize::from(area.width);
     // The view buttons, right-aligned.
     let badge = daemon_badge(app);
+    // Below 100 columns the badge's words would crowd out the message, so
+    // the buttons of other views drop their labels; their keys stay.
+    let compact = badge.is_some() && width < 100;
     let mut buttons: Vec<(Vec<Span<'static>>, KeyCode)> = Vec::new();
     for (key, label, view) in [
         ('M', "monitor", View::Monitor),
@@ -427,17 +431,15 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             theme.quiet()
         };
-        let mut spans = vec![
-            Span::styled(key.to_string(), theme.key()),
-            Span::styled(format!(" {label}"), label_style),
-        ];
+        let mut spans = vec![Span::styled(key.to_string(), theme.key())];
+        if active || !compact {
+            spans.push(Span::styled(format!(" {label}"), label_style));
+        }
+        // `D daemon · 1 issue`, `D daemon · update`: a count alone said nothing.
         if view == View::Daemon
-            && let Some((count, tone)) = badge
+            && let Some((text, tone)) = &badge
         {
-            spans.push(Span::styled(
-                format!(" {}{count}", theme.glyph(Glyph::Attention)),
-                theme.tone(tone),
-            ));
+            spans.push(Span::styled(format!(" · {text}"), theme.tone(*tone)));
         }
         buttons.push((spans, KeyCode::Char(key)));
     }
@@ -460,11 +462,14 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     }
     right.push(Span::raw(" "));
 
-    // Brand and project tabs.
-    let mut left = vec![Span::styled(
-        " devlanes",
-        Style::new().add_modifier(Modifier::BOLD),
-    )];
+    // Brand, letter by letter from yellow to orange, and project tabs.
+    let mut left = vec![Span::raw(" ")];
+    let brand = "devlanes";
+    left.extend(
+        brand.chars().enumerate().map(|(index, letter)| {
+            Span::styled(letter.to_string(), theme.brand(index, brand.len()))
+        }),
+    );
     let mut used = 9;
     let projects = app.projects();
     let current = app.project().map(str::to_owned);
@@ -478,34 +483,36 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             let (glyph, tone) =
                 worst.map_or(("", Tone::Quiet), |lane| lane_glyph(theme, lane, app.spin));
             let active = app.view == View::Project && current.as_deref() == Some(name.as_str());
-            let name_style = if active {
-                theme
-                    .focus()
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-            } else {
-                Style::new()
-            };
             let number = if index < 9 {
                 format!("{} ", index + 1)
             } else {
                 String::new()
             };
-            (
-                name.clone(),
+            // The active tab is one yellow block: number, name and glyph.
+            let spans = if active {
+                let tab = theme.tab();
                 vec![
-                    Span::styled(number, theme.quiet()),
-                    Span::styled(clean(name), name_style),
+                    Span::styled(format!(" {number}{} ", clean(name)), tab),
+                    Span::styled(format!("{glyph} "), tab),
+                ]
+            } else {
+                vec![
                     Span::raw(" "),
-                    Span::styled(glyph, theme.tone(tone)),
-                ],
-            )
+                    Span::styled(number, theme.quiet()),
+                    Span::raw(clean(name)),
+                    Span::raw(" "),
+                    Span::styled(format!("{glyph} "), theme.tone(tone)),
+                ]
+            };
+            (name.clone(), spans)
         })
         .collect();
     // The message takes what is left; tabs come first and scroll to keep the
     // shown project in view.
     let message = header_message(app);
     let room = width.saturating_sub(buttons_width + used);
-    let tab_widths: Vec<usize> = tabs.iter().map(|(_, s)| spans_width(s) + 3).collect();
+    // Each tab pads itself; one space separates them.
+    let tab_widths: Vec<usize> = tabs.iter().map(|(_, s)| spans_width(s) + 1).collect();
     let active = current
         .as_ref()
         .and_then(|c| projects.iter().position(|p| p == c))
@@ -525,10 +532,10 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             used += 2;
             break;
         }
-        left.push(Span::raw("   "));
+        left.push(Span::raw(" "));
         hit(
             app,
-            Rect::new(area.x + used as u16 + 3, area.y, (w - 3) as u16, 1),
+            Rect::new(area.x + used as u16 + 1, area.y, (w - 1) as u16, 1),
             Click::Project(name),
         );
         left.extend(spans);
@@ -560,7 +567,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Failing and warning doctor checks, plus a daemon that runs another
 /// version or a newer release: the count and tone of the daemon button's `!`.
-fn daemon_badge(app: &App) -> Option<(usize, Tone)> {
+fn daemon_badge(app: &App) -> Option<(String, Tone)> {
     let mut fail = 0;
     let mut warn = 0;
     if let Some(doctor) = &app.daemon.doctor {
@@ -572,14 +579,23 @@ fn daemon_badge(app: &App) -> Option<(usize, Tone)> {
             }
         }
     }
-    if app.release_badge().is_some() {
-        warn += 1;
+    let update = app.release_badge().is_some();
+    let issues = fail + warn;
+    let mut text = match issues {
+        0 if !update => return None,
+        0 => "update".to_owned(),
+        1 => "1 issue".to_owned(),
+        n => format!("{n} issues"),
+    };
+    if update && issues > 0 {
+        text.push_str(", update");
     }
-    match (fail, warn) {
-        (0, 0) => None,
-        (0, warn) => Some((warn, Tone::Attention)),
-        (fail, warn) => Some((fail + warn, Tone::Failure)),
-    }
+    let tone = if fail > 0 {
+        Tone::Failure
+    } else {
+        Tone::Attention
+    };
+    Some((text, tone))
 }
 
 /// The one message the top bar shows, the first that applies.
@@ -695,9 +711,9 @@ fn render_lane_bar(app: &App, frame: &mut Frame, area: Rect) {
     let current = app.selected.as_ref().map(|s| s.lane.clone());
     let hint = if lanes.len() > 1 {
         vec![
-            Span::styled("[", theme.key()),
-            Span::styled(" and ", theme.quiet()),
-            Span::styled("]", theme.key()),
+            Span::styled("1-9", theme.key()),
+            Span::styled(" or ", theme.quiet()),
+            Span::styled("[ ]", theme.key()),
             Span::styled(" switch lanes ", theme.quiet()),
         ]
     } else {
@@ -711,7 +727,12 @@ fn render_lane_bar(app: &App, frame: &mut Frame, area: Rect) {
     let mut used = 6;
     let budget = width.saturating_sub(hint_width + 2);
     for (index, lane) in lanes.iter().enumerate() {
-        let chip = lane_chip(app, lane);
+        // `1 trunk @0 ●`: 1-9 jump to a lane.
+        let mut chip = Vec::new();
+        if index < 9 {
+            chip.push(Span::styled(format!("{} ", index + 1), theme.quiet()));
+        }
+        chip.extend(lane_chip(app, lane));
         let w = spans_width(&chip) + 2;
         let more = lanes.len() - index;
         if used + 3 + w > budget && more > 0 {
@@ -859,20 +880,43 @@ fn hints(app: &App) -> Vec<Hint> {
                 ("j k", "move", ch('j')),
                 ("v", "mark", ch('v')),
                 ("y", "copy", ch('y')),
+                ("Y", "copy as shown", ch('Y')),
                 ("esc", "cancel", KeyCode::Esc),
             ];
         }
+        View::Daemon if app.daemon.filter_editing => {
+            return vec![
+                ("type", "to filter", KeyCode::Null),
+                ("enter", "keep", KeyCode::Enter),
+                ("esc", "clear", KeyCode::Esc),
+            ];
+        }
         View::Daemon => {
+            let follow = if app.daemon.paused {
+                ("G", "follow", ch('G'))
+            } else {
+                ("F", "pause", ch('F'))
+            };
+            let fold = if app.daemon.filters.unfolded {
+                ("d", "fold", ch('d'))
+            } else {
+                ("d", "unfold", ch('d'))
+            };
             let mut hints = vec![
                 ("j k", "scroll", ch('k')),
-                ("c", "select", ch('c')),
+                follow,
+                ("w", "level", ch('w')),
+                ("/", "filter", ch('/')),
+                ("c", "copy", ch('c')),
+                ("i", "checks", ch('i')),
+                fold,
                 ("R", "restart", ch('R')),
                 ("S", "stop", ch('S')),
-                ("X", "clean gone lanes", ch('X')),
-                ("esc", "back", KeyCode::Esc),
             ];
+            // Stopped, starting it is what matters: first, and S no longer stops.
             if app.daemon.stopped {
-                hints[3] = ("S", "start daemon", ch('S'));
+                hints.pop();
+                hints.insert(0, ("S", "start daemon", ch('S')));
             }
             return hints;
         }
@@ -933,11 +977,10 @@ fn hints(app: &App) -> Vec<Hint> {
             let mut hints = if live {
                 vec![("x", "stop lane", ch('x')), ("r", "restart lane", ch('r'))]
             } else {
-                vec![("s", "start lane", ch('s'))]
+                vec![("s", "start lane", ch('s')), ("S", "start all", ch('S'))]
             };
             hints.extend([
                 ("p", "start with profiles", ch('p')),
-                ("O", "shell in worktree", ch('O')),
                 ("C", "clean lane", ch('C')),
                 switch,
                 filter,
@@ -965,7 +1008,6 @@ fn hints(app: &App) -> Vec<Hint> {
                     ("n", "next problem", ch('n')),
                     ("pgup", "scroll back", KeyCode::PageUp),
                     ("c", "select text", ch('c')),
-                    ("O", "new terminal", ch('O')),
                     filter,
                 ],
                 state if crate::app::is_active(state) && task => vec![
@@ -979,7 +1021,6 @@ fn hints(app: &App) -> Vec<Hint> {
                     ("x", "stop", ch('x')),
                     ("r", "restart", ch('r')),
                     ("o", "open in browser", ch('o')),
-                    ("O", "new terminal", ch('O')),
                     ("c", "select text", ch('c')),
                     ("z", "zoom", ch('z')),
                     filter,

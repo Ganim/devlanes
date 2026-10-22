@@ -10,6 +10,7 @@ publish.workspace = true
 rcgen = { version = "0.14", features = ["x509-parser", "zeroize"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
+rustix = { version = "1", features = ["process", "system"] }
 thiserror.workspace = true
 time = "0.3"
 x509-parser = "0.18"

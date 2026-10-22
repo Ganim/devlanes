@@ -47,7 +47,7 @@ The end-to-end harness (`devlanes-e2e`) already gives each test an isolated home
 
 Scenarios, each repeated (10 runs, then median and p90):
 
-- Cold CLI: `devlanes agent-guide` and `devlanes --version`, which start no daemon. Process start and argument parsing.
+- Cold CLI: `devlanes --version`, which starts no daemon. Process start and argument parsing.
 - Auto-spawn: the first `devlanes status` in a fresh home. The client's `daemon spawn until ready` timing separates the spawn from the request.
 - Warm request: `devlanes status` with the daemon up, from the `request status` timing.
 - Start to ready: `devlanes start` on `fixtures/two-services` and `fixtures/many-services` (40 services), and `docker_`-prefixed variants on `fixtures/compose-pg-redis`. The daemon's `phase` span durations give infra, setup, tasks and services separately.

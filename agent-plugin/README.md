@@ -11,7 +11,7 @@ Instructions that teach coding agents to run dev services through the devlanes C
 | `hooks/hooks.json`, `scripts/block-background.sh` | Optional Claude Code `PreToolUse` hook that rejects backgrounded dev servers; `scripts/test-block-background.sh` tests it. |
 | `codex/AGENTS.md` | Short form of the skill for an `AGENTS.md` file. |
 
-The short form's source is `crates/cli/agent-guide.md`, which `devlanes agent-guide` prints. `codex/AGENTS.md` is a copy of it, and a `devlanes-cli` test fails when the two differ or when a command in it no longer parses. When the skill changes, edit `agent-guide.md` and copy it over.
+When the skill changes, update `codex/AGENTS.md` to match. A `devlanes-cli` test fails when a command in it no longer parses.
 
 ## Usage
 

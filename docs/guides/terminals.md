@@ -1,30 +1,13 @@
 # Terminals
 
-devlanes integrates with the terminal in three places: opening a unit in a new terminal window, a progress bar in the tab during starts, and the clipboard from the TUI. All of it is optional and configured in `~/.devlanes/config.yaml`:
+devlanes integrates with the terminal in two places: a progress bar in the tab during starts, and the clipboard from the TUI. Both are optional and configured in `~/.devlanes/config.yaml`:
 
 ```yaml
 terminal:
-  app: ghostty          # iterm2, ghostty, wezterm, kitty or terminal
   progress: auto        # auto, always or never
 ```
 
-`terminal: ghostty` alone is accepted too.
-
-## Open in a new terminal
-
-In the TUI, `O` on a unit opens a new window of your terminal app running `devlanes attach <lane>:<unit>` in the lane's worktree; `O` on a lane opens your shell there. There is no CLI command for it; `devlanes attach` and `devlanes env shell` are the equivalents from a shell you already have.
-
-| App | macOS | Linux |
-| --- | --- | --- |
-| iTerm2 | AppleScript: new window, title set, command written | not available |
-| Terminal.app | AppleScript `do script`, title set | not available |
-| Ghostty | `open -na Ghostty.app --args --working-directory … -e …` | `ghostty --working-directory … -e …` |
-| kitty | `open -na kitty.app --args --directory … --title …` | `kitty --single-instance --directory …` |
-| WezTerm | `open -na WezTerm.app --args start --cwd … -- …` | `wezterm start --cwd … -- …` |
-
-No remote-control protocol is used, so kitty needs no `allow_remote_control` and WezTerm no mux server. iTerm2 and Terminal.app go through `osascript`, which asks macOS once for Automation permission for the terminal that runs the TUI; a denied permission shows up as `osascript exited with status 1`.
-
-When `terminal.app` is unset, the TUI uses the terminal it is running in (from `TERM_PROGRAM`, `KITTY_WINDOW_ID`, `WEZTERM_PANE` and similar), then Terminal.app on macOS, then the first installed app in the order iTerm2, Ghostty, WezTerm, kitty. Those variables survive ssh and tmux, so a TUI on a Linux box opened from iTerm2 tries iTerm2 and fails; set `terminal.app` on the box. GNOME Terminal, Konsole, Alacritty and foot have no launcher yet.
+To work in a unit from another terminal, run `devlanes attach <lane>:<unit>` there, or `devlanes env shell` for a shell with the lane's environment. Older configs that name a terminal app (`terminal: ghostty`, `terminal.app`) still load; the name is ignored and `devlanes doctor` warns about it.
 
 ## Progress in the tab
 

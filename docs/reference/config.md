@@ -259,9 +259,9 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 
 | Path | Type | Description | Example |
 | --- | --- | --- | --- |
-| `history` | object | Retention for finished unit/task history and disconnected remote hosts in the database. | `{"remote_hosts_retention":"90d","retention":"30d"}` |
+| `history` | object | Retention for finished unit/task history and disconnected remote hosts in the database. | `{"remote_hosts_retention":"90d","retention":"7d"}` |
 | `history.remote_hosts_retention` | duration | Maximum age since a remote host last connected successfully; defaults to 90d. Records without a timestamp are retained. | `90d` |
-| `history.retention` | duration | Maximum age since a unit or task finished; defaults to 30d. Disk pressure may prune it sooner. | `30d` |
+| `history.retention` | duration | Maximum age since a unit or task finished; defaults to 7d. Disk pressure may prune it sooner. | `7d` |
 
 ### hostnames
 
@@ -289,8 +289,8 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 
 | Path | Type | Description | Example |
 | --- | --- | --- | --- |
-| `metrics` | object | Retention for monitor history, including aggregates stored in the database. | `{"retention":"30d"}` |
-| `metrics.retention` | duration | Maximum age of persisted monitor samples and database run summaries; defaults to 30d. | `30d` |
+| `metrics` | object | Retention for monitor history, including aggregates stored in the database. | `{"retention":"7d"}` |
+| `metrics.retention` | duration | Maximum age of persisted monitor samples and database run summaries; defaults to 7d. | `7d` |
 
 ### ports
 
@@ -331,8 +331,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 
 | Path | Type | Description | Example |
 | --- | --- | --- | --- |
-| `terminal` | `iterm2` or `ghostty` or `wezterm` or `kitty` or `terminal` or object | Terminal app for open-in-terminal actions, alone or with the progress-bar setting. | `ghostty` |
-| `terminal.app` | `iterm2` or `ghostty` or `wezterm` or `kitty` or `terminal` | Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, else the first one installed. | `ghostty` |
+| `terminal` | string or object | How devlanes uses the terminal tab's progress bar during starts. | `{"progress":"auto"}` |
 | `terminal.progress` | `auto` or `always` or `never` | Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto. | `auto` |
 
 ### tls
@@ -349,6 +348,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | --- | --- | --- | --- |
 | `tui` | object | How commands use the terminal UI. | `{"open_on_start":false}` |
 | `tui.glyphs` | `auto` or `unicode` or `ascii` | Symbols the TUI draws states and markers with; defaults to auto. | `auto` |
+| `tui.on_quit` | `ask` or `keep` or `stop` | What quitting the TUI does while lanes of the project on screen run; defaults to ask. The quit dialog's "remember" box writes it. | `ask` |
 | `tui.open_on_start` | boolean | Run `start`, `restart`, `lane resume` and `lane new --start` inside the TUI when typed at a terminal; defaults to true. false prints them as text, like `--no-ui` or DEVLANES_NO_UI=1. | `true` |
 | `tui.theme` | `auto` or `dark` or `light` or `ansi` | Colors of the TUI; defaults to auto. NO_COLOR always turns colors off. | `auto` |
 

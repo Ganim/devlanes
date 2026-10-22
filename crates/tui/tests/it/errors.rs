@@ -402,7 +402,9 @@ pub fn assert_clean(buffer: &Buffer, context: &str) {
 pub fn assert_boxes(buffer: &Buffer, width: u16, height: u16, context: &str) {
     // The first-run strip, when it shows, moves the boxes up one row.
     let strip = (0..height).any(|y| row(buffer, y).contains("enter types into a service"));
-    let Some(layout) = devlanes_tui::app::areas_with(width, height, false, strip) else {
+    // The lane bar shows only for projects with several lanes.
+    let lane_bar = row(buffer, 1).starts_with(" lanes");
+    let Some(layout) = devlanes_tui::app::areas_with(width, height, false, strip, lane_bar) else {
         return;
     };
     for rect in layout.list_box.into_iter().chain([layout.pane_box]) {
@@ -564,7 +566,11 @@ async fn drive_shows_a_failed_start_in_the_header_and_on_the_row() -> TestResult
             keys_tx.send(press('q')).await.ok();
         }
     };
-    let options = Options::default();
+    // The closing q quits at once; the quit dialog has its own tests.
+    let options = Options {
+        on_quit: Some("keep".into()),
+        ..Options::default()
+    };
     let run = drive(
         &mut terminal,
         driver_api,

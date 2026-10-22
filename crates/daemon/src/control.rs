@@ -819,6 +819,10 @@ impl Inner {
         }
         let background = task.interactive || run.detach;
         if background {
+            // A previous run of the task stays listed until the new one replaces it.
+            let previous = unit
+                .as_ref()
+                .and_then(|unit| lane.st().units.get(unit).map(|rec| rec.host.clone()));
             let engine = self.clone();
             let actor = context.actor.clone();
             let name = run.task.clone();
@@ -843,15 +847,17 @@ impl Inner {
                     )
                     .await;
             });
-            // The client attaches to this unit, so it must exist before we answer.
+            // The client attaches to this unit, so this run of it must exist before
+            // we answer; an earlier run that ended does not count, or the client
+            // would attach to its finished screen.
             if let Some(unit) = &unit {
                 for _ in 0..100 {
-                    if lane
-                        .st()
-                        .units
-                        .get(unit)
-                        .is_some_and(|rec| rec.host.is_alive() || rec.host.exit_outcome().is_some())
-                    {
+                    let spawned = lane.st().units.get(unit).is_some_and(|rec| {
+                        previous
+                            .as_ref()
+                            .is_none_or(|previous| !rec.host.same_run(previous))
+                    });
+                    if spawned {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;

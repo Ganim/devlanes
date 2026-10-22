@@ -10,6 +10,7 @@ mod lifecycle;
 mod proxy;
 mod shutdown;
 mod tasks;
+mod tui_zoom;
 mod with;
 mod worktrees;
 

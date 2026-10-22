@@ -725,3 +725,81 @@ fn trim_to_enforces_a_byte_budget() {
     log.ingest(b"after\n", 4000).unwrap();
     assert_eq!(seqs(&mut log, &LogQuery::default()), [3001]);
 }
+
+#[test]
+/// SGR colors survive in `styled`, end in a reset, carry over to the next line
+/// while they stay set, and other escapes never reach either form.
+fn styled_lines_keep_only_colors() {
+    let mut framer = Framer::default();
+    let mut frames = Vec::new();
+    let input = b"\x1b[32mINFO\x1b[0m ready \x1b[2K\x1b[1;34mblue\nstill blue\x1b[0m\nplain\n";
+    for split in 0..=input.len() {
+        frames.clear();
+        let mut framer_split = Framer::default();
+        feed(&mut framer_split, &input[..split], 1, &mut frames);
+        feed(&mut framer_split, &input[split..], 2, &mut frames);
+        let texts: Vec<&str> = frames.iter().map(|f| f.text.as_str()).collect();
+        assert_eq!(texts, ["INFO ready blue", "still blue", "plain"]);
+        let styled: Vec<Option<&str>> = frames.iter().map(|f| f.styled.as_deref()).collect();
+        assert_eq!(
+            styled,
+            [
+                Some("\x1b[32mINFO\x1b[0m ready \x1b[1;34mblue\x1b[0m"),
+                Some("\x1b[1;34mstill blue\x1b[0m\x1b[0m"),
+                None,
+            ]
+        );
+    }
+    feed(&mut framer, b"no color\n", 3, &mut frames);
+    assert_eq!(frames.last().unwrap().styled, None);
+}
+
+#[test]
+/// Stored colored lines read back with plain `text` for grep and levels, and
+/// with `styled` only when the query asks for it.
+fn styled_lines_round_trip_through_storage() {
+    let (_directory, mut log) = store(LogOptions::default());
+    log.ingest(b"\x1b[31mERROR\x1b[0m boom\nplain\n", 1)
+        .unwrap();
+    let plain = log.query(&LogQuery::default()).unwrap();
+    assert_eq!(plain.items[0].text, "ERROR boom");
+    assert_eq!(plain.items[0].level.as_deref(), Some("error"));
+    assert!(plain.items.iter().all(|line| line.styled.is_none()));
+    let colored = log
+        .query(&LogQuery {
+            styled: true,
+            grep: Some("boom".into()),
+            ..LogQuery::default()
+        })
+        .unwrap();
+    assert_eq!(colored.items.len(), 1);
+    assert_eq!(
+        colored.items[0].styled.as_deref(),
+        Some("\x1b[31mERROR\x1b[0m boom\x1b[0m")
+    );
+    assert_eq!(crate::strip_sgr("\x1b[1;31ma\x1b[0mb"), "ab");
+}
+
+#[test]
+/// `head` returns the first lines of the range, and cannot go with `tail`.
+fn head_returns_the_first_lines() {
+    let (_directory, mut log) = store(LogOptions::default());
+    log.ingest(b"one\ntwo\nthree\nfour\n", 1).unwrap();
+    let page = log
+        .query(&LogQuery {
+            head: Some(2),
+            ..LogQuery::default()
+        })
+        .unwrap();
+    let texts: Vec<&str> = page.items.iter().map(|line| line.text.as_str()).collect();
+    assert_eq!(texts, ["one", "two"]);
+    assert!(page.truncated);
+    assert!(
+        log.query(&LogQuery {
+            head: Some(1),
+            tail: Some(1),
+            ..LogQuery::default()
+        })
+        .is_err()
+    );
+}

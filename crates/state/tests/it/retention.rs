@@ -9,6 +9,11 @@ use std::time::Duration;
 const DAY: i64 = 86_400_000;
 const NOW: i64 = 100 * DAY;
 
+/// The oldest timestamp `retention` keeps at `NOW`: rows exactly this old stay.
+fn boundary_ms(retention: Duration) -> i64 {
+    NOW - i64::try_from(retention.as_millis()).expect("retention fits")
+}
+
 /// Supplies attribution without reading the test runner's environment.
 fn human() -> Actor {
     Actor {
@@ -124,7 +129,7 @@ async fn age_retention_preserves_live_rows_and_once_markers() {
         .execute(&mut c)
         .expect("old clock");
     diesel::update(schema::unit_runs::table.find(boundary.id.0))
-        .set(schema::unit_runs::ended_at.eq(70 * DAY))
+        .set(schema::unit_runs::ended_at.eq(boundary_ms(DEFAULT_RUN_HISTORY_RETENTION)))
         .execute(&mut c)
         .expect("boundary clock");
     diesel::update(schema::task_runs::table.find(task.id.0))
@@ -166,7 +171,7 @@ async fn age_retention_preserves_live_rows_and_once_markers() {
     store
         .insert_rollups(vec![
             metric("web".into(), DAY as u64),
-            metric("web".into(), (70 * DAY) as u64),
+            metric("web".into(), boundary_ms(DEFAULT_METRICS_RETENTION) as u64),
         ])
         .await
         .expect("metrics");

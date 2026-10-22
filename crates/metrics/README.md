@@ -44,10 +44,10 @@ let summary = runs.finish(UnitRunId(1), 120_000); // p50/p95/peak for the run
 # ~/.devlanes/config.yaml
 metrics:
   # How long CPU and memory roll-ups are kept.
-  retention: 30d
+  retention: 7d
 history:
   # How long finished unit and task runs are kept.
-  retention: 30d
+  retention: 7d
 ```
 
 The daemon deletes one-minute roll-ups older than `metrics.retention` and finished runs older than `history.retention` when it prunes the database.

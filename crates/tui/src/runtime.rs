@@ -6,7 +6,6 @@
 
 use std::{
     io::{self, Write},
-    path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicU8, Ordering},
@@ -23,8 +22,8 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use devlanes_proto::AttachParams;
-use devlanes_term::{LaunchRequest, Progress, ProgressBar, Wrap};
+use devlanes_proto::{AttachParams, Method, Selection};
+use devlanes_term::{Progress, ProgressBar, Wrap};
 use futures_util::{Stream, StreamExt};
 use ratatui::{Terminal, backend::Backend};
 use tokio::{
@@ -213,6 +212,8 @@ where
     let size = terminal.size().map_err(backend_error)?;
     let mut app = App::new(size.width, size.height);
     app.theme = options.theme();
+    app.on_quit = crate::app::OnQuit::parse(options.on_quit.as_deref());
+    app.time_zone = jiff::tz::TimeZone::system();
     if let Ok(cwd) = std::env::current_dir() {
         app.prefer_path(cwd);
     }
@@ -271,7 +272,13 @@ where
             continue;
         };
         dirty = true;
-        let ticked = matches!(msg, Msg::Tick);
+        // The bar is written again every second and after anything the user
+        // does (switching lanes, pages, resizing), so a terminal that dropped
+        // it gets it back at once.
+        let resend = matches!(
+            msg,
+            Msg::Tick | Msg::Key(_) | Msg::Mouse(_) | Msg::Resize(..)
+        );
         if !executor.apply(&mut app, msg) {
             return Ok(app);
         }
@@ -285,7 +292,7 @@ where
                 return Ok(app);
             }
         }
-        executor.show_progress(app.start_progress(), ticked);
+        executor.show_progress(app.start_progress(), resend);
     }
 }
 
@@ -319,8 +326,6 @@ fn deliver_blocking(sender: &mpsc::Sender<Msg>, msg: Msg) -> bool {
 struct Executor {
     api: Arc<dyn DaemonApi>,
     sender: mpsc::Sender<Msg>,
-    /// Launchers and the configured terminal; picked per launch, off the loop.
-    options: Options,
     /// The terminal output for OSC sequences: clipboard copies and the tab's
     /// progress bar, which clears when the executor drops.
     out: ProgressBar<Box<dyn Write + Send>>,
@@ -338,7 +343,7 @@ struct Executor {
 }
 
 impl Executor {
-    /// Keeps the options for launching terminals later.
+    /// Writes OSC sequences to `clipboard` with the configured progress bar.
     fn new(
         api: Arc<dyn DaemonApi>,
         sender: mpsc::Sender<Msg>,
@@ -351,7 +356,6 @@ impl Executor {
         Self {
             api,
             sender,
-            options: options.clone(),
             out: ProgressBar::new(clipboard, options.progress),
             in_tmux: std::env::var_os("TMUX").is_some(),
             subscription: None,
@@ -363,11 +367,11 @@ impl Executor {
         }
     }
 
-    /// Writes the tab's progress bar when it changed, and every second while it
+    /// Writes the tab's progress bar when it changed, and on `resend` while it
     /// shows: Ghostty drops a bar that is not repeated.
-    fn show_progress(&mut self, progress: Progress, tick: bool) {
+    fn show_progress(&mut self, progress: Progress, resend: bool) {
         let shown = self.out.shown().unwrap_or(Progress::Clear);
-        if shown != progress || tick && shown != Progress::Clear {
+        if shown != progress || resend && shown != Progress::Clear {
             // The bar is decoration; a failed write is not worth a notice.
             let _ = self.out.set(progress);
         }
@@ -415,6 +419,46 @@ impl Executor {
             Effect::Quit => {
                 self.detach();
                 return false;
+            }
+            Effect::QuitWith { stop, remember } => {
+                let home = api.home();
+                tokio::spawn(async move {
+                    let mut errors = Vec::new();
+                    if let Some(choice) = remember {
+                        let written = match home {
+                            Some(home) => tokio::task::spawn_blocking(move || {
+                                devlanes_config::set_user_value(
+                                    &home.join("config.yaml"),
+                                    "tui.on_quit",
+                                    &serde_json::Value::from(choice.as_str()),
+                                )
+                                .map_err(|error| error.message)
+                            })
+                            .await
+                            .unwrap_or_else(|error| Err(error.to_string())),
+                            None => Err("no devlanes home to write config.yaml in".into()),
+                        };
+                        if let Err(error) = written {
+                            errors.push(format!("could not remember the choice: {error}"));
+                        }
+                    }
+                    // The lanes stop together; each answers when it stopped.
+                    let stops = stop.into_iter().map(|lane| {
+                        let api = Arc::clone(&api);
+                        async move {
+                            api.control(Method::Stop, lane.clone(), Selection::default())
+                                .await
+                                .map_err(|error| format!("stop {lane} failed: {error}"))
+                        }
+                    });
+                    for result in futures_util::future::join_all(stops).await {
+                        if let Err(error) = result {
+                            errors.push(error);
+                        }
+                    }
+                    let error = (!errors.is_empty()).then(|| errors.join("; "));
+                    deliver(&sender, Msg::QuitReady { error }).await;
+                });
             }
             Effect::Refresh => {
                 tokio::spawn(async move {
@@ -558,7 +602,6 @@ impl Executor {
                     }
                 });
             }
-            Effect::OpenTerminal { cwd, attach, title } => self.open_terminal(cwd, attach, title),
             Effect::Copy(text) => {
                 if text.len() > MAX_COPY_BYTES {
                     self.fail(
@@ -618,6 +661,7 @@ impl Executor {
                     });
                 }
             }
+            Effect::Settings(request) => crate::settings::perform(request, api.home(), sender),
             Effect::ReadDaemonLog { from } => {
                 if self.log.as_ref().is_some_and(|task| !task.is_finished()) {
                     return true;
@@ -681,64 +725,6 @@ impl Executor {
             Err(mpsc::error::TrySendError::Closed(_)) => {}
         }
     }
-
-    /// Opens a new terminal window through the configured or default launcher.
-    fn open_terminal(&mut self, cwd: PathBuf, attach: Option<String>, title: String) {
-        let sender = self.sender.clone();
-        let options = self.options.clone();
-        let home = self.api.home();
-        tokio::task::spawn_blocking(move || {
-            let failed = |message: String| {
-                let msg = Msg::Failed {
-                    what: "open terminal".into(),
-                    message,
-                };
-                deliver_blocking(&sender, msg);
-            };
-            let launcher = match options.pick_launcher() {
-                Ok(launcher) => launcher,
-                Err(message) => {
-                    failed(message);
-                    return;
-                }
-            };
-            // The same binary attaches, so client and daemon versions match.
-            let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("devlanes"));
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-            let request = LaunchRequest {
-                cwd,
-                command: terminal_command(&exe, &shell, home.as_deref(), attach.as_deref()),
-                title: Some(title),
-            };
-            if let Err(error) = launcher.launch(&request) {
-                failed(error.to_string());
-            }
-        });
-    }
-}
-
-/// The command a new terminal runs: `devlanes attach <unit>`, or the user's
-/// shell for a lane. Terminals started through `open` or `osascript` inherit
-/// launchd's environment, not this one, so `DEVLANES_HOME` travels explicitly
-/// and the command reaches the same daemon.
-pub fn terminal_command(
-    exe: &Path,
-    shell: &str,
-    home: Option<&Path>,
-    attach: Option<&str>,
-) -> Vec<String> {
-    let mut command = Vec::new();
-    if let Some(home) = home {
-        command.extend([
-            "env".to_owned(),
-            format!("DEVLANES_HOME={}", home.display()),
-        ]);
-    }
-    match attach {
-        Some(unit) => command.extend([exe.display().to_string(), "attach".into(), unit.into()]),
-        None => command.push(shell.to_owned()),
-    }
-    command
 }
 
 impl Drop for Executor {

@@ -296,6 +296,64 @@ async fn infra_containers_are_sampled() {
     .expect("timeout");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+/// Shared containers show in every lane of the project, idle ones included,
+/// with `hidden` from `infra.hidden`; a lane's own containers only in that lane.
+async fn shared_containers_show_in_every_lane() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config = CONFIG.replace(
+            "infra:\n  containers:\n",
+            "infra:\n  hidden: [cache]\n  containers:\n    cache: { image: \"redis:7\", ports: { \"6379\": 6379 } }\n",
+        );
+        let main = repo(&tmp.path, "r", &config);
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                infra: true,
+                ..Setup::default()
+            },
+        )
+        .await;
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        h.call(Method::LaneNew, json!({"name": "idle"}), cx(&main))
+            .await
+            .expect("second lane");
+        let status = h
+            .call(Method::Status, json!({}), cx(&main))
+            .await
+            .expect("status");
+        let lanes: Page<LaneSummary> = serde_json::from_value(status).expect("page");
+        let names = |reference: &str| -> Vec<(String, bool, bool)> {
+            let lane = lanes
+                .items
+                .iter()
+                .find(|lane| lane.reference == reference)
+                .expect(reference);
+            let mut names: Vec<_> = lane
+                .containers
+                .iter()
+                .map(|c| (c.name.clone(), c.shared, c.hidden))
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            names("demo@0"),
+            [("cache".into(), true, true), ("db".into(), false, false)]
+        );
+        assert_eq!(names("demo@1"), [("cache".into(), true, true)]);
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
 /// `ContainerSummary.state` of the lane's `db` container.
 async fn db_state(h: &crate::Harness, main: &std::path::Path) -> Option<String> {
     let status = h.call(Method::Status, json!({}), cx(main)).await.ok()?;

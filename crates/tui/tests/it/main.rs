@@ -213,11 +213,11 @@ async fn snapshot_monitor_tab() -> TestResult {
     app.update(Msg::Subscribed(Ok(())));
     let effects = app.update(shifted('M'));
     assert_eq!(app.view, View::Monitor);
-    // The default range is 15 minutes.
+    // Before the first frame: two seconds of history per terminal column.
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::FetchMetrics(q) if q.range_ms == 900_000)),
+            .any(|e| matches!(e, Effect::FetchMetrics(q) if q.range_ms == 200_000)),
         "{effects:?}"
     );
     let effects = app.update(Msg::Tick);
@@ -354,9 +354,12 @@ async fn tab_switches_projects_and_reaches_the_unit_while_typing() -> TestResult
         Some("api"),
         "a project comes back on the row selected there last"
     );
-    app.update(key(KeyCode::Char('2')));
+    // Shift+2 as a terminal without the kitty protocol sends it, then Shift+1
+    // as the digit with SHIFT.
+    app.update(key(KeyCode::Char('@')));
     assert_eq!(app.project(), Some("shop"));
-    app.update(key(KeyCode::Char('1')));
+    app.update(shifted('1'));
+    assert_eq!(app.project(), Some("acme"));
     let generation = app
         .attached
         .as_ref()
@@ -382,6 +385,142 @@ async fn tab_switches_projects_and_reaches_the_unit_while_typing() -> TestResult
 }
 
 #[tokio::test]
+async fn a_cleaned_lane_leaves_the_selection_in_its_project() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    // Visit shop, then clean acme@2 from its lane.
+    app.update(key(KeyCode::Char('@')));
+    assert_eq!(app.project(), Some("shop"));
+    app.update(key(KeyCode::Char('!')));
+    app.update(key(KeyCode::Char('3')));
+    assert_eq!(
+        app.selected.as_ref().map(|s| s.lane.as_str()),
+        Some("acme@2")
+    );
+    app.update(shifted('C'));
+    let effects = app.update(key(KeyCode::Enter));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CleanLane { lane } if lane == "acme@2")),
+        "{effects:?}"
+    );
+    assert!(app.dialog.is_none());
+    // The daemon reports the lane gone: the selection stays in acme, on
+    // the lane numbered closest, although only shop runs anything now (the
+    // first lane with something running is where a fresh TUI opens).
+    let remaining: Vec<_> = mixed_lanes()
+        .into_iter()
+        .filter(|lane| lane.reference != "acme@2")
+        .map(|mut lane| {
+            if lane.project == "acme" {
+                lane.state = "idle".into();
+                for unit in &mut lane.units {
+                    unit.state = "idle".into();
+                }
+            }
+            lane
+        })
+        .collect();
+    app.update(Msg::Status(Ok(remaining)));
+    assert_eq!(app.project(), Some("acme"));
+    assert_eq!(
+        app.selected.as_ref().map(|s| s.lane.as_str()),
+        Some("acme@1")
+    );
+    // Project keys still work, both ways, and acme opens on a lane that exists.
+    app.update(key(KeyCode::Char('@')));
+    assert_eq!(app.project(), Some("shop"));
+    app.update(shifted('1'));
+    assert_eq!(app.project(), Some("acme"));
+    app.update(key(KeyCode::Tab));
+    assert_eq!(app.project(), Some("shop"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_project_whose_last_lane_went_away_still_opens() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    // acme was last shown on acme@2; then shop is on screen when acme@2
+    // goes away (cleaned from the CLI, say).
+    app.update(key(KeyCode::Char('3')));
+    app.update(key(KeyCode::Char('@')));
+    let remaining: Vec<_> = mixed_lanes()
+        .into_iter()
+        .filter(|lane| lane.reference != "acme@2")
+        .collect();
+    app.update(Msg::Status(Ok(remaining)));
+    assert_eq!(app.project(), Some("shop"));
+    // Shift+1 opens acme on a lane that exists instead of bouncing back.
+    app.update(key(KeyCode::Char('!')));
+    assert_eq!(app.project(), Some("acme"));
+    assert_eq!(
+        app.selected.as_ref().map(|s| s.lane.as_str()),
+        Some("acme@0")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn o_opens_the_public_url_first() -> TestResult {
+    let mut lanes = mixed_lanes();
+    let api_unit = lanes[0]
+        .units
+        .iter_mut()
+        .find(|u| u.name == "api")
+        .ok_or("no api")?;
+    api_unit.urls = vec![
+        "http://127.0.0.1:20001".into(),
+        "https://api.acme.localhost:8443".into(),
+    ];
+    api_unit.public_url = Some("https://api.acme.localhost:8443".into());
+    let api = FakeApi::with_lanes(lanes.clone());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    let opened = |effects: Vec<Effect>| match effects.as_slice() {
+        [Effect::OpenUrl(url)] => Some(url.clone()),
+        _ => None,
+    };
+    select(&mut app, Selected::unit("acme@0", "api"));
+    let url = opened(app.update(key(KeyCode::Char('o'))));
+    assert_eq!(url.as_deref(), Some("https://api.acme.localhost:8443"));
+    // An older daemon without `public_url`: the https entry of `urls`, else
+    // the first one.
+    lanes[0].units[0].public_url = None;
+    app.update(Msg::Status(Ok(lanes.clone())));
+    let url = opened(app.update(key(KeyCode::Char('o'))));
+    assert_eq!(url.as_deref(), Some("https://api.acme.localhost:8443"));
+    lanes[0].units[0].urls.truncate(1);
+    app.update(Msg::Status(Ok(lanes)));
+    let url = opened(app.update(key(KeyCode::Char('o'))));
+    assert_eq!(url.as_deref(), Some("http://127.0.0.1:20001"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn digits_pick_lanes_of_the_project_and_shifted_digits_projects() -> TestResult {
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    app.update(key(KeyCode::Char('2')));
+    let lane = |app: &App| app.selected.as_ref().map(|s| s.lane.clone());
+    assert_eq!(lane(&app).as_deref(), Some("acme@1"));
+    app.update(key(KeyCode::Char('3')));
+    assert_eq!(lane(&app).as_deref(), Some("acme@2"));
+    // A number past the last lane does nothing.
+    app.update(key(KeyCode::Char('9')));
+    assert_eq!(lane(&app).as_deref(), Some("acme@2"));
+    // `(` is Shift+9 and there is no ninth project either.
+    app.update(key(KeyCode::Char('(')));
+    assert_eq!(app.project(), Some("acme"));
+    app.update(key(KeyCode::Char('@')));
+    assert_eq!(app.project(), Some("shop"));
+    // The lane numbers follow the project.
+    app.update(key(KeyCode::Char('1')));
+    assert_eq!(lane(&app).as_deref(), Some("shop@0"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn monitor_and_daemon_open_from_anywhere_and_esc_returns() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 100, 24).await;
@@ -396,7 +535,7 @@ async fn monitor_and_daemon_open_from_anywhere_and_esc_returns() -> TestResult {
     app.update(key(KeyCode::Esc));
     assert_eq!(app.view, View::Project);
     app.update(shifted('D'));
-    app.update(key(KeyCode::Char('2')));
+    app.update(shifted('2'));
     assert_eq!(
         (app.view, app.project()),
         (View::Project, Some("shop")),
@@ -729,14 +868,150 @@ async fn copy_mode_copies_the_cursor_line() -> TestResult {
 }
 
 #[tokio::test]
-async fn quit_keys_never_stop_units() -> TestResult {
+async fn quit_asks_while_lanes_of_the_project_run() -> TestResult {
+    use devlanes_tui::app::{Dialog, OnQuit};
     let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    // acme@0 runs: q and Ctrl+C ask instead of quitting.
+    for press in [key(KeyCode::Char('q')), ctrl('c')] {
+        assert!(app.update(press).is_empty());
+        let Some(Dialog::Quit(dialog)) = &app.dialog else {
+            return Err(format!("no quit dialog: {:?}", app.dialog).into());
+        };
+        assert_eq!(dialog.lanes, ["acme@0"]);
+        // Esc stays.
+        app.update(key(KeyCode::Esc));
+        assert!(app.dialog.is_none());
+    }
+    let text = {
+        app.update(key(KeyCode::Char('q')));
+        draw(&app)?.backend().to_string()
+    };
+    for line in [
+        "acme@0 is running.",
+        "Close the TUI; lanes keep running",
+        "Close and stop the running lanes",
+        "[ ] remember this choice",
+    ] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    // q again closes and keeps the lanes, remembering nothing.
+    assert!(matches!(
+        app.update(key(KeyCode::Char('q'))).as_slice(),
+        [Effect::Quit]
+    ));
+    // Ctrl+C in the dialog closes at once.
+    app.update(ctrl('c'));
+    assert!(matches!(app.update(ctrl('c')).as_slice(), [Effect::Quit]));
+
+    // Stop, remembered: the lanes stop and the choice is written first.
+    app.update(key(KeyCode::Char('q')));
+    app.update(key(KeyCode::Char('j')));
+    app.update(key(KeyCode::Char(' ')));
+    let effects = app.update(key(KeyCode::Enter));
+    let [Effect::QuitWith { stop, remember }] = effects.as_slice() else {
+        return Err(format!("unexpected {effects:?}").into());
+    };
+    assert_eq!(stop, &["acme@0"]);
+    assert_eq!(*remember, Some(OnQuit::Stop));
+    assert_eq!(app.on_quit, OnQuit::Stop);
+    // A failed stop keeps the TUI open to say so; q then quits.
+    app.update(Msg::QuitReady {
+        error: Some("stop acme@0 failed: daemon gone".into()),
+    });
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.error && n.text.contains("stop acme@0 failed"))
+    );
+    assert!(matches!(
+        app.update(key(KeyCode::Char('q'))).as_slice(),
+        [Effect::Quit]
+    ));
+    // Done: quit.
+    assert!(matches!(
+        app.update(Msg::QuitReady { error: None }).as_slice(),
+        [Effect::Quit]
+    ));
+
+    // `tui.on_quit: stop` stops without asking; `keep` just closes.
+    app.on_quit = OnQuit::Stop;
+    let effects = app.update(key(KeyCode::Char('q')));
+    assert!(
+        matches!(effects.as_slice(), [Effect::QuitWith { stop, remember: None }] if stop == &["acme@0"]),
+        "{effects:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn quit_closes_at_once_when_nothing_runs() -> TestResult {
+    let idle = vec![fake::lane(
+        "acme",
+        Some(0),
+        "main",
+        "idle",
+        vec![fake::unit("acme@0", "api", "idle")],
+    )];
+    let api = FakeApi::with_lanes(idle);
     let (mut app, _) = loaded(&api, 100, 24).await;
     assert!(matches!(
         app.update(key(KeyCode::Char('q'))).as_slice(),
         [Effect::Quit]
     ));
     assert!(matches!(app.update(ctrl('c')).as_slice(), [Effect::Quit]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn drive_stops_the_lanes_and_remembers_before_closing() -> TestResult {
+    let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join("config.yaml"),
+        "# mine\ntui:\n  theme: dark\n",
+    )?;
+    let mut fake = FakeApi::with_lanes(mixed_lanes());
+    fake.home = Some(home.path().to_owned());
+    let api = Arc::new(fake);
+    let (keys_tx, keys_rx) = mpsc::channel::<std::io::Result<TermEvent>>(8);
+    let events = Box::pin(stream::unfold(keys_rx, |mut rx| async move {
+        rx.recv().await.map(|event| (event, rx))
+    }));
+    let backend = SharedBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend.clone())?;
+    let driver_api: Arc<dyn DaemonApi> = api.clone();
+    let script = {
+        let backend = backend.clone();
+        async move {
+            let press = |code| Ok(TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+            backend.wait_for("main @0").await;
+            keys_tx.send(press(KeyCode::Char('q'))).await.ok();
+            backend.wait_for("remember this choice").await;
+            for code in [KeyCode::Char('j'), KeyCode::Char(' '), KeyCode::Enter] {
+                keys_tx.send(press(code)).await.ok();
+            }
+            // The input stays open: the loop must end because the stop finished.
+            keys_tx
+        }
+    };
+    let options = Options::default();
+    let run = drive(
+        &mut terminal,
+        driver_api,
+        &options,
+        events,
+        Box::new(std::io::sink()),
+    );
+    let (result, _keys) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(run, script) }).await?;
+    result?;
+    let calls = api.calls();
+    assert!(calls.contains(&"Stop acme@0 []".to_owned()), "{calls:?}");
+    // Written through the comment-keeping editor.
+    let config = std::fs::read_to_string(home.path().join("config.yaml"))?;
+    assert!(config.starts_with("# mine\n"), "{config}");
+    assert!(config.contains("on_quit: stop"), "{config}");
+    assert!(config.contains("theme: dark"), "{config}");
     Ok(())
 }
 
@@ -978,34 +1253,6 @@ async fn status_is_queried_after_the_subscription_opens() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn opened_terminals_carry_devlanes_home() {
-    let exe = std::path::Path::new("/opt/devlanes/bin/devlanes");
-    let home = std::path::Path::new("/Users/acme/my home/.devlanes");
-    assert_eq!(
-        devlanes_tui::terminal_command(exe, "/bin/zsh", Some(home), Some("acme@0:api")),
-        [
-            "env",
-            "DEVLANES_HOME=/Users/acme/my home/.devlanes",
-            "/opt/devlanes/bin/devlanes",
-            "attach",
-            "acme@0:api",
-        ]
-    );
-    assert_eq!(
-        devlanes_tui::terminal_command(exe, "/bin/zsh", Some(home), None),
-        [
-            "env",
-            "DEVLANES_HOME=/Users/acme/my home/.devlanes",
-            "/bin/zsh"
-        ]
-    );
-    assert_eq!(
-        devlanes_tui::terminal_command(exe, "/bin/zsh", None, None),
-        ["/bin/zsh"]
-    );
-}
-
 #[tokio::test]
 async fn stale_attach_output_is_ignored() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
@@ -1157,9 +1404,16 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
             // without another frame.
             backend.wait_for("┌ api  ready").await;
             keys_tx.send(press('q')).await.ok();
+            // Returned, so the input stays open: the loop must end on q, not
+            // because the stream ended.
+            keys_tx
         }
     };
-    let options = Options::default();
+    // `tui.on_quit: keep`: q closes without asking; the dialog has its own tests.
+    let options = Options {
+        on_quit: Some("keep".into()),
+        ..Options::default()
+    };
     let run = drive(
         &mut terminal,
         driver_api,
@@ -1167,7 +1421,7 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
         events,
         Box::new(std::io::sink()),
     );
-    let (result, ()) =
+    let (result, _keys) =
         tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(run, script) }).await?;
     result?;
     let calls = api.calls();

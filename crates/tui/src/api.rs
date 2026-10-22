@@ -54,7 +54,7 @@ impl From<devlanes_client::Error> for ApiError {
 pub struct MetricsQuery {
     /// How far back histories reach.
     pub range_ms: u64,
-    /// Buckets per history, about the width of the widest graph.
+    /// Buckets per history; 0 sends every raw sample (one a second).
     pub points: usize,
 }
 
@@ -842,8 +842,15 @@ impl DaemonApi for ClientApi {
         result
     }
 
-    /// Shutdown, then a new daemon from this binary, as `devlanes daemon restart` does.
+    /// Shutdown, then a new daemon from this binary that starts again what
+    /// ran, as `devlanes daemon restart` does.
     async fn restart_daemon(&self) -> Result<Value, ApiError> {
+        // What runs now; a failure to read it only means nothing is resumed
+        // (the restart itself still goes ahead, as in the CLI).
+        let running = match self.fresh().await {
+            Ok(mut client) => client.running_lanes().await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
         self.stop_daemon().await?;
         // The old daemon releases its socket only after stopping everything.
         let mut released = false;
@@ -861,7 +868,20 @@ impl DaemonApi for ClientApi {
                 1,
             )));
         }
-        self.start_daemon().await
+        let mut status = self.start_daemon().await?;
+        if !running.is_empty() {
+            let context = self.context(None, true);
+            let mut client = Client::connect_or_spawn(&self.paths).await?;
+            let resumed = client
+                .resume_running(&running, &context.env.unwrap_or_default(), &context.actor)
+                .await;
+            // The starts' results ride along; lanes report their progress
+            // through events like any start.
+            if status.is_object() {
+                status["resumed"] = json!(resumed);
+            }
+        }
+        Ok(status)
     }
 
     /// Spawns the daemon if needed and keeps the connection as the shared one.

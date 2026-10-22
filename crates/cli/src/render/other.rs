@@ -11,8 +11,20 @@ use super::{
 };
 use crate::Hint;
 
-/// One log line as `unit#seq text`; the cursor stays copyable.
+/// One log line as `unit#seq text`; the cursor stays copyable. In color when the
+/// output shows colors and the line had them; it then ends in a reset.
 fn log_line(line: &LogLine, cx: &Ctx<'_>) -> String {
+    if cx.color
+        && !cx.agent()
+        && let Some(styled) = &line.styled
+    {
+        return format!(
+            "{}#{} {}",
+            clean(&line.unit),
+            line.seq,
+            super::keep_colors(styled)
+        );
+    }
     let text = clean(&line.text);
     let text = if cx.agent() {
         cap_line(&text, 300)

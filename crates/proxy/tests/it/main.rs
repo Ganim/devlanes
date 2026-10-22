@@ -987,23 +987,35 @@ async fn certificate_cache_survives_state_updates() -> Result {
             tokio::task::spawn_blocking(move || CertificateAuthority::load_or_create(&path))
                 .await??,
         );
-        let route = Route::new("app.lane.localhost", Upstream::Local(1));
+        let mut route = Route::new("web.lane.localhost", Upstream::Local(1));
+        route.certificate_names = vec!["lane.localhost".into()];
+        route.owner = Some("acme@0".into());
         let proxy = Proxy::new(
             ProxyConfig::default(),
             RouteTable::new(vec![route.clone()])?,
         );
         let running = run_proxy(proxy.clone(), Some(proxy.tls_config(ca.clone())?)).await?;
-        let first = presented_leaf(&ca, running.address, "app.lane.localhost").await?;
+        let first = presented_leaf(&ca, running.address, "web.lane.localhost").await?;
+        // The requested host leads the SANs, so it is the CN although the apex sorts first.
+        let (_, leaf) = x509_parser::parse_x509_certificate(&first)?;
+        let subject = leaf.subject();
+        let common_name = subject.iter_common_name().next().map(|cn| cn.as_str());
+        assert_eq!(common_name.transpose()?, Some("web.lane.localhost"));
+        let unit = subject
+            .iter_organizational_unit()
+            .next()
+            .map(|ou| ou.as_str());
+        assert_eq!(unit.transpose()?, Some("acme@0"));
         let mut starting = route.clone();
         starting.state = RouteState::Starting;
         proxy.replace_routes(RouteTable::new(vec![starting])?);
-        let same = presented_leaf(&ca, running.address, "app.lane.localhost").await?;
+        let same = presented_leaf(&ca, running.address, "web.lane.localhost").await?;
         assert_eq!(first, same);
         proxy.replace_routes(RouteTable::new(vec![
             route,
             Route::new("api.lane.localhost", Upstream::Local(2)),
         ])?);
-        let rotated = presented_leaf(&ca, running.address, "app.lane.localhost").await?;
+        let rotated = presented_leaf(&ca, running.address, "web.lane.localhost").await?;
         assert_ne!(first, rotated);
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     })

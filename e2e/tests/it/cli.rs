@@ -79,19 +79,19 @@ fn config_errors_point_at_the_line() -> Result<()> {
         // Line 5: a misspelt service key.
         (
             "project: broken\nservices:\n  api:\n    run: [fixture-server]\n    raedy: { http: { path: /healthz } }\n",
-            "devlanes.yaml:5:",
+            "devlanes.yaml is invalid at line 5,",
             Some("unknown key `raedy`; did you mean `ready`?"),
         ),
         // Line 2: a misspelt top-level key.
         (
             "project: broken\nservces:\n  api:\n    run: [fixture-server]\n",
-            "devlanes.yaml:2:",
+            "devlanes.yaml is invalid at line 2,",
             Some("unknown key `servces`; did you mean `services`?"),
         ),
         // Line 4: a port that is not a number.
         (
             "project: broken\nservices:\n  api:\n    env: { PORT: [1] }\n    run: [fixture-server]\n",
-            "devlanes.yaml:4:",
+            "devlanes.yaml is invalid at line 4,",
             None,
         ),
     ];

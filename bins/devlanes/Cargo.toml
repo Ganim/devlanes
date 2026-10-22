@@ -46,11 +46,6 @@ devlanes-pki = { path = "../../crates/pki" }
 devlanes-proto = { path = "../../crates/proto" }
 devlanes-secrets-fnox = { path = "../../crates/secrets-fnox" }
 devlanes-term = { path = "../../crates/term" }
-devlanes-term-ghostty = { path = "../../crates/term-ghostty" }
-devlanes-term-iterm2 = { path = "../../crates/term-iterm2" }
-devlanes-term-kitty = { path = "../../crates/term-kitty" }
-devlanes-term-terminal-app = { path = "../../crates/term-terminal-app" }
-devlanes-term-wezterm = { path = "../../crates/term-wezterm" }
 devlanes-trust = { path = "../../crates/trust" }
 devlanes-tui = { path = "../../crates/tui" }
 devlanes-core = { path = "../../crates/core" }

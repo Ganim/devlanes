@@ -147,11 +147,12 @@ impl Inner {
         if args.interactive && size.is_some() {
             let _ = self.apply_owner_size(&key, &host).await;
         }
-        let (snapshot, live) = host.attach();
+        // Drawn at this viewer's size: an observer's pane rarely matches the PTY.
+        let (snapshot, live) = host.attach(size).await;
         let engine = self.clone();
         let session = session.clone();
         tokio::spawn(async move {
-            pump(&session, stream_id, &host, snapshot, live).await;
+            pump(&engine, &session, stream_id, &host, snapshot, live).await;
             engine.close_stream(session.id(), stream_id).await;
         });
         serde_json::to_value(AttachResult {
@@ -252,6 +253,7 @@ impl Inner {
 
 /// Snapshot, then live bytes until exit or disconnect; redraws after lag.
 async fn pump(
+    engine: &Inner,
     session: &Session,
     stream_id: u64,
     host: &UnitHost,
@@ -275,7 +277,16 @@ async fn pump(
                 }
             }
             Some(Err(broadcast::error::RecvError::Lagged(_))) => {
-                if session.bytes(stream_id, host.redraw()).await.is_err() {
+                // The viewer's latest size, which a resize may have changed since the attach.
+                let size = lock(&engine.attach)
+                    .streams
+                    .get(&(session.id(), stream_id))
+                    .and_then(|stream| stream.size);
+                if session
+                    .bytes(stream_id, host.redraw(size).await)
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }

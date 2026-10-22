@@ -459,7 +459,7 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             None,
         ),
         "daemon_sandboxed" => (
-            // The agent guide tells agents to look for this phrase.
+            // The agent skill tells agents to look for this phrase.
             format!(
                 "auto-spawn refused in sandbox ({}); run devlanes daemon install outside the sandbox, then retry",
                 super::clean(&text(data, "message"))

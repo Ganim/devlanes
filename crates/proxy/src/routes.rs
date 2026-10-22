@@ -60,6 +60,8 @@ pub struct Route {
     pub port: Option<String>,
     /// Extra SANs, usually the lane apex. They do not authorize new routes.
     pub certificate_names: Vec<String>,
+    /// Project and lane that own the route, such as `acme@0`, shown in its TLS certificate.
+    pub owner: Option<String>,
 }
 
 impl Route {
@@ -75,6 +77,7 @@ impl Route {
             named_ports: BTreeMap::new(),
             port: None,
             certificate_names: Vec::new(),
+            owner: None,
         }
     }
 

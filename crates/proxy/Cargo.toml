@@ -26,6 +26,7 @@ tempfile.workspace = true
 tokio-tungstenite = "0.28"
 futures-util.workspace = true
 rustix = { version = "1", features = ["process"] }
+x509-parser = "0.18"
 
 [lints]
 workspace = true

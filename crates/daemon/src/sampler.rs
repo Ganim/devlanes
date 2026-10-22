@@ -344,6 +344,11 @@ impl Inner {
                     .iter()
                     .find(|s| s.subject == Subject::Unit(target.key.clone()))
                 else {
+                    // No process of the unit was read this tick: report no reading
+                    // rather than repeating the last one as if it were current.
+                    state
+                        .latest
+                        .remove(&(target.reference.clone(), target.name.clone()));
                     continue;
                 };
                 state.latest.insert(
