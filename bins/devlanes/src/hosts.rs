@@ -5,20 +5,24 @@
 //! module picks the helper binary, decides whether sudo may prompt, and reports.
 //! Windows installs the `devlanes-hosts` service instead (`crate::hosts_service`).
 
-use std::path::Path;
 #[cfg(unix)]
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
+#[cfg(unix)]
 use async_trait::async_trait;
 #[cfg(unix)]
-use devlanes_cli::Rendered;
-use devlanes_cli::Runtime;
+use devlanes_cli::{Rendered, Runtime};
 use devlanes_client::{Client, Paths};
-use devlanes_proto::{Context, Method, RpcError};
-use devlanes_resolver_hosts::{CommandOutput, CommandSpec, Executor, SystemExecutor};
+#[cfg(unix)]
+use devlanes_proto::RpcError;
+use devlanes_proto::{Context, Method};
 #[cfg(unix)]
 use devlanes_resolver_hosts::{
-    FileKind, FsProbe, INSTALL_PATH, InstallError, SystemFs,
+    CommandOutput, CommandSpec, Executor, FileKind, FsProbe, INSTALL_PATH, InstallError,
+    SystemExecutor, SystemFs,
     install::{self, HELPER_SOURCE_ENV},
 };
 use serde_json::{Value, json};
@@ -135,27 +139,12 @@ pub fn helper_source(
     }
 }
 
-/// Privileged installs go through sudo, which every supported Unix has.
-#[cfg(unix)]
-pub(crate) fn privileged_supported(_feature: &str) -> Result<(), RpcError> {
-    Ok(())
-}
-
-/// Windows has no sudo; the resolver install needs its own elevated path there,
-/// which does not exist yet (the hosts file has `crate::hosts_service`).
-/// `feature` names what was refused.
-#[cfg(windows)]
-pub(crate) fn privileged_supported(feature: &str) -> Result<(), RpcError> {
-    Err(RpcError::new(
-        "not_supported_yet",
-        json!({"feature": feature}),
-        1,
-    ))
-}
-
 /// The executor for privileged steps. sudo may prompt in an interactive terminal;
 /// agents and CI get `sudo -n` on every step, and only when it already works.
-/// `command` is what the user should run from a terminal instead.
+/// `command` is what the user should run from a terminal instead. Windows
+/// elevates through the UAC prompt instead (`crate::hosts_service`,
+/// `crate::resolver_nrpt`).
+#[cfg(unix)]
 pub(crate) async fn privileged(
     runtime: &Runtime,
     command: &str,
@@ -183,8 +172,10 @@ pub(crate) async fn privileged(
 
 /// Runs every `sudo` as `sudo -n`, so a session that cannot answer a prompt fails
 /// instead of waiting on one when the sudo timestamp lapses mid-install.
+#[cfg(unix)]
 struct NonInteractive<E>(E);
 
+#[cfg(unix)]
 #[async_trait]
 impl<E: Executor> Executor for NonInteractive<E> {
     /// Adds `-n` to sudo commands and runs them with the inner executor.
@@ -194,6 +185,7 @@ impl<E: Executor> Executor for NonInteractive<E> {
 }
 
 /// `sudo X` (or `/usr/bin/sudo X`) becomes `sudo -n X`; other commands are unchanged.
+#[cfg(unix)]
 fn non_interactive(command: &CommandSpec) -> CommandSpec {
     let mut command = command.clone();
     let sudo = Path::new(&command.program)

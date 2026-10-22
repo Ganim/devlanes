@@ -1,7 +1,6 @@
-//! System pressure for the start gate: CPU from `GetSystemTimes` deltas, the
-//! memory level from `GlobalMemoryStatusEx`'s memory load, and available memory
-//! from its available physical memory. Windows has no pressure stall information,
-//! so the level is graded from the load.
+//! System pressure for the start gate: CPU from `GetSystemTimes` deltas, and the
+//! memory level from Windows' low-memory notification and available physical
+//! memory (`GlobalMemoryStatusEx`). Windows has no pressure stall information.
 
 use std::{
     io,
@@ -10,13 +9,17 @@ use std::{
 
 use async_trait::async_trait;
 use devlanes_core::gate::{MemoryPressure, PressureSample, PressureSource};
-use devlanes_sys::windows::usage::{SystemTimes, memory_status, system_times};
+use devlanes_sys::windows::usage::{SystemTimes, low_memory, memory_status, system_times};
 
-/// Memory load (percent of physical memory in use) graded as `Warn`. Windows
-/// starts trimming working sets and paging well before memory runs out.
-pub(crate) const WARN_LOAD: u32 = 85;
-/// Memory load graded as `Critical`: new processes are mostly paged in from disk.
-pub(crate) const CRITICAL_LOAD: u32 = 95;
+/// Share of physical memory, in percent, that available memory must fall under
+/// (together with [`WARN_AVAILABLE_BYTES`]) for `Warn`. The memory load is not
+/// used: Docker Desktop's VM and Windows' cache keep it above 85% on ordinary
+/// dev machines, which would halve the adaptive start window for no reason.
+pub(crate) const WARN_AVAILABLE_PERCENT: u64 = 10;
+/// Available memory under which `Warn` applies once it is also under
+/// [`WARN_AVAILABLE_PERCENT`]: about what one or two dev servers take while
+/// starting, so on large machines a few free percent still count as room.
+pub(crate) const WARN_AVAILABLE_BYTES: u64 = 2 << 30;
 
 /// Busy share of all CPUs between `earlier` and `later`, 0-100. `None` when no
 /// time passed or a counter went backwards.
@@ -33,11 +36,15 @@ pub(crate) fn busy_percent(earlier: &SystemTimes, later: &SystemTimes) -> Option
     Some((total - idle) as f64 / total as f64 * 100.0)
 }
 
-/// Grades `GlobalMemoryStatusEx`'s `dwMemoryLoad`.
-pub(crate) fn memory_level(load_percent: u32) -> MemoryPressure {
-    if load_percent >= CRITICAL_LOAD {
-        MemoryPressure::Critical
-    } else if load_percent >= WARN_LOAD {
+/// Grades memory: `Critical` while Windows signals low memory, `Warn` when
+/// available physical memory is under both [`WARN_AVAILABLE_PERCENT`] of `total`
+/// and [`WARN_AVAILABLE_BYTES`], else `Normal`.
+pub(crate) fn memory_level(low_memory: bool, available: u64, total: u64) -> MemoryPressure {
+    if low_memory {
+        return MemoryPressure::Critical;
+    }
+    let share_floor = u128::from(total) * u128::from(WARN_AVAILABLE_PERCENT) / 100;
+    if u128::from(available) < share_floor && available < WARN_AVAILABLE_BYTES {
         MemoryPressure::Warn
     } else {
         MemoryPressure::Normal
@@ -57,7 +64,7 @@ impl WindowsPressure {
         Self::default()
     }
 
-    /// Reads synchronously; two system calls.
+    /// Reads synchronously; three system calls.
     pub fn sample_blocking(&self) -> io::Result<PressureSample> {
         let times = system_times()?;
         let cpu_percent = {
@@ -69,9 +76,14 @@ impl WindowsPressure {
             percent
         };
         let memory = memory_status()?;
+        let low = low_memory()?;
         Ok(PressureSample {
             cpu_percent,
-            memory: Some(memory_level(memory.load_percent)),
+            memory: Some(memory_level(
+                low,
+                memory.available_physical,
+                memory.total_physical,
+            )),
             cpu_stall_percent: None,
         })
     }
@@ -89,7 +101,7 @@ impl PressureSource for WindowsPressure {
         "windows"
     }
 
-    /// CPU since the previous call and the graded memory load.
+    /// CPU since the previous call and the graded memory level.
     async fn sample(&self) -> Result<PressureSample, devlanes_core::Error> {
         let source = self.clone();
         tokio::task::spawn_blocking(move || source.sample_blocking())
@@ -136,13 +148,52 @@ mod tests {
         assert_eq!(busy_percent(&earlier, &times(1_200, 2_050, 510)), None);
     }
 
+    const GIB: u64 = 1 << 30;
+
     #[test]
-    fn memory_load_grades() {
-        assert_eq!(memory_level(0), MemoryPressure::Normal);
-        assert_eq!(memory_level(84), MemoryPressure::Normal);
-        assert_eq!(memory_level(85), MemoryPressure::Warn);
-        assert_eq!(memory_level(94), MemoryPressure::Warn);
-        assert_eq!(memory_level(95), MemoryPressure::Critical);
-        assert_eq!(memory_level(100), MemoryPressure::Critical);
+    fn low_memory_notification_is_critical() {
+        assert_eq!(memory_level(true, 0, 16 * GIB), MemoryPressure::Critical);
+        // Windows' signal wins even with room by the other measures.
+        assert_eq!(
+            memory_level(true, 8 * GIB, 16 * GIB),
+            MemoryPressure::Critical
+        );
+    }
+
+    #[test]
+    fn large_machine_warns_under_the_byte_floor() {
+        // 64 GiB: 10% is 6.4 GiB, so the 2 GiB floor decides.
+        let total = 64 * GIB;
+        assert_eq!(memory_level(false, 3 * GIB, total), MemoryPressure::Normal);
+        assert_eq!(memory_level(false, 2 * GIB, total), MemoryPressure::Normal);
+        assert_eq!(
+            memory_level(false, 2 * GIB - 1, total),
+            MemoryPressure::Warn
+        );
+    }
+
+    #[test]
+    fn small_machine_warns_under_the_share() {
+        // 8 GiB: 10% is 819.2 MiB, under the 2 GiB floor, so the share decides.
+        let total = 8 * GIB;
+        assert_eq!(memory_level(false, GIB, total), MemoryPressure::Normal);
+        assert_eq!(
+            memory_level(false, 820 << 20, total),
+            MemoryPressure::Normal
+        );
+        assert_eq!(memory_level(false, 819 << 20, total), MemoryPressure::Warn);
+        assert_eq!(memory_level(false, 0, total), MemoryPressure::Warn);
+    }
+
+    #[test]
+    fn docker_desktop_machine_with_high_load_is_normal() {
+        // 32 GiB with 88% in use (the old warn grade): 3.8 GiB available.
+        let total = 32 * GIB;
+        let available = total / 100 * 12;
+        assert_eq!(
+            memory_level(false, available, total),
+            MemoryPressure::Normal
+        );
+        assert_eq!(memory_level(false, 0, 0), MemoryPressure::Normal);
     }
 }

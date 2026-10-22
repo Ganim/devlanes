@@ -1499,6 +1499,7 @@ dependencies = [
 name = "devlanes-resolver-dns"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

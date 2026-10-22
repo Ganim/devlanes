@@ -2,16 +2,17 @@
 //! child that `devlanes certs trust --hosts` starts through the UAC prompt; never
 //! in the service itself.
 //!
-//! The source binary sits in a user-writable directory, so it is read into
-//! memory once and only those bytes are trusted: they are written to a staged
-//! copy in the admin-only directory, the staged copy's `--version` is checked,
-//! and the copy is read back and compared before it replaces anything. A failure
+//! The source binary sits in a user-writable directory, so it is opened without
+//! following links, read into memory once, and only those bytes are trusted:
+//! they are written to a staged copy in the admin-only directory, the staged
+//! copy's `--version` is checked, and the copy is read back and compared before
+//! it replaces anything. Every file and key this creates gets Administrators as
+//! its owner at creation, whatever the "default owner" policy says. A failure
 //! after the old binary was moved aside puts it, the old `UserSid` and the old
 //! running state back; a service this run created is deleted.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Read as _, Write as _};
-use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -20,19 +21,52 @@ use std::time::{Duration, Instant};
 use devlanes_hosts_helper::protocol::{PIPE_PROTOCOL, VersionLine, parse_version_line};
 use devlanes_sys::windows::process::CREATE_NO_WINDOW;
 use devlanes_sys::windows::registry::machine;
-use devlanes_sys::windows::security::{create_admin_only_dir, set_owner_administrators};
+use devlanes_sys::windows::security::{
+    ADMIN_ONLY_FILE_SDDL, PlainFileProblem, SecurityDescriptor, create_admin_only_dir,
+    create_new_with_descriptor, open_plain_file,
+};
 use devlanes_sys::windows::token::{self, Sid};
 use windows_service::service::{
-    Service, ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceState,
+    Service, ServiceAccess, ServiceAction, ServiceActionType, ServiceErrorControl,
+    ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState,
     ServiceType,
 };
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use crate::checks::{self, CheckError};
 use crate::config::{
-    self, ConfigError, DESCRIPTION, DISPLAY_NAME, PARAMETERS_KEY, SERVICE_BINARY, SERVICE_NAME,
-    USER_SID_VALUE,
+    self, BACKUP_BINARY, ConfigError, DESCRIPTION, DISPLAY_NAME, PARAMETERS_KEY, SERVICE_BINARY,
+    SERVICE_NAME, STAGED_BINARY, USER_SID_VALUE,
 };
+
+/// The only privilege the service keeps in its token; the service manager
+/// removes the rest of LocalSystem's at start.
+///
+/// The service needs none for what it does: SYSTEM's file and registry access
+/// comes from access lists, the pipe's owner is its own account and its label is
+/// below its own level, and `ipconfig` runs with the same token. Impersonating a
+/// pipe client needs `SeImpersonatePrivilege` only for an impersonation-level
+/// client; the daemon connects at identification level
+/// (`devlanes_sys::windows::pipe::open_client`), which needs none, and any other
+/// client is downgraded to identification, which is enough to read its token.
+/// `SeChangeNotifyPrivilege` (traverse checking) every process keeps anyway.
+pub const REQUIRED_PRIVILEGES: [&str; 1] = ["SeChangeNotifyPrivilege"];
+
+/// Restarts after a failure or a refusal: three, five seconds apart, counted
+/// over a day. A process that held the pipe name while the service was down has
+/// usually let go by then.
+fn failure_actions() -> ServiceFailureActions {
+    let restart = ServiceAction {
+        action_type: ServiceActionType::Restart,
+        delay: Duration::from_secs(5),
+    };
+    ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
+        reboot_msg: None,
+        command: None,
+        actions: Some(vec![restart.clone(), restart.clone(), restart]),
+    }
+}
 
 /// Largest service binary accepted; a release build is a few MiB.
 const MAX_BINARY_BYTES: u64 = 64 << 20;
@@ -52,6 +86,9 @@ pub enum InstallError {
     /// This process is not elevated.
     #[error("installing the hosts service needs administrator rights")]
     NotElevated,
+    /// The SID to serve is not a person's user account.
+    #[error("{0} is not a user account's SID; the service serves one user account")]
+    NotAnAccount(String),
     /// The install directory or binary could be changed by others.
     #[error("refusing to install: {0}")]
     UnsafeDirectory(#[source] CheckError),
@@ -109,6 +146,7 @@ impl InstallError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::NotElevated => "hosts_install_not_elevated",
+            Self::NotAnAccount(_) => "hosts_install_user_rejected",
             Self::UnsafeDirectory(_) => "hosts_unsafe_directory",
             Self::SourceMissing { .. } => "service_source_missing",
             Self::SourceRejected { .. } => "service_source_rejected",
@@ -148,8 +186,8 @@ impl Layout {
         let directory = config::install_dir()?;
         Ok(Self {
             binary: directory.join(SERVICE_BINARY),
-            staged: directory.join(".devlanes-hosts-service.new.exe"),
-            backup: directory.join(".devlanes-hosts-service.old.exe"),
+            staged: directory.join(STAGED_BINARY),
+            backup: directory.join(BACKUP_BINARY),
             directory,
         })
     }
@@ -188,11 +226,12 @@ pub fn install(
     if !token::elevated().map_err(|error| InstallError::io("reading the elevation", error))? {
         return Err(InstallError::NotElevated);
     }
+    check_user(user)?;
     let layout = Layout::new()?;
     create_admin_only_dir(&layout.directory).map_err(|error| {
         InstallError::io(format!("creating {}", layout.directory.display()), error)
     })?;
-    checks::admin_only(&layout.directory, true).map_err(InstallError::UnsafeDirectory)?;
+    checks::check_install_directory(&layout.directory).map_err(InstallError::UnsafeDirectory)?;
     let bytes = read_source(source)?;
     let version = stage(&layout, source, &bytes)?;
 
@@ -307,6 +346,26 @@ fn activate(
     };
     // A missing description only makes the Services console less helpful.
     let _ = service.set_description(DESCRIPTION);
+    if let Err(source) = service
+        .update_failure_actions(failure_actions())
+        .and_then(|()| service.set_failure_actions_on_non_crash_failures(true))
+    {
+        return Err((
+            InstallError::Service {
+                action: "setting the restart after failures",
+                source,
+            },
+            Some(service),
+        ));
+    }
+    if let Err(error) =
+        devlanes_sys::windows::service::set_required_privileges(SERVICE_NAME, &REQUIRED_PRIVILEGES)
+    {
+        return Err((
+            InstallError::io("limiting the service's privileges", error),
+            Some(service),
+        ));
+    }
     let sid = match user.to_sddl() {
         Ok(sid) => sid,
         Err(error) => {
@@ -316,7 +375,11 @@ fn activate(
             ));
         }
     };
-    if let Err(error) = machine::write_string(PARAMETERS_KEY, USER_SID_VALUE, &sid) {
+    // Recreated rather than reused, so the key is owned by Administrators even
+    // if an earlier install created it under another default owner.
+    if let Err(error) = machine::delete_tree(PARAMETERS_KEY)
+        .and_then(|()| machine::write_string(PARAMETERS_KEY, USER_SID_VALUE, &sid))
+    {
         return Err((InstallError::io("writing UserSid", error), Some(service)));
     }
     if let Err(source) = service.start::<&str>(&[]) {
@@ -435,22 +498,46 @@ fn service_info(binary: &Path) -> ServiceInfo {
     }
 }
 
-/// Reads the source once; only these bytes are trusted from here on.
+/// Refuses a SID that is not a person's user account: by shape (a built-in
+/// account or a well-known group), then by the account database (a domain
+/// group). The service would open its pipe to that SID.
+fn check_user(user: &Sid) -> Result<(), InstallError> {
+    let text = user
+        .to_sddl()
+        .map_err(|error| InstallError::io("formatting the user SID", error))?;
+    if !user.has_account_shape() {
+        return Err(InstallError::NotAnAccount(text));
+    }
+    match user.names_a_user() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(InstallError::NotAnAccount(text)),
+        Err(error) => Err(InstallError::io(format!("looking up {text}"), error)),
+    }
+}
+
+/// Reads the source once; only these bytes are trusted from here on. The file
+/// itself is opened, never a link's target, and must have a single name.
 fn read_source(source: &Path) -> Result<Vec<u8>, InstallError> {
     let missing = |error| InstallError::SourceMissing {
         path: source.to_owned(),
         source: error,
     };
-    let mut bytes = Vec::new();
-    fs::File::open(source)
-        .map_err(missing)?
-        .take(MAX_BINARY_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(missing)?;
     let reject = |reason: &str| InstallError::SourceRejected {
         path: source.to_owned(),
         reason: reason.to_owned(),
     };
+    let file = match open_plain_file(source).map_err(missing)? {
+        Ok(file) => file,
+        Err(PlainFileProblem::ReparsePoint) => return Err(reject("it is a symlink or junction")),
+        Err(PlainFileProblem::NotAFile) => return Err(reject("it is not a file")),
+        Err(PlainFileProblem::HardLinks(_)) => {
+            return Err(reject("it has more than one name (hard link)"));
+        }
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_BINARY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(missing)?;
     if bytes.len() as u64 > MAX_BINARY_BYTES {
         return Err(reject("it is larger than 64 MiB"));
     }
@@ -460,23 +547,16 @@ fn read_source(source: &Path) -> Result<Vec<u8>, InstallError> {
     Ok(bytes)
 }
 
-/// Writes `bytes` to the staged name (owned by Administrators, inheriting the
-/// directory's access list), runs its `--version`, and compares it with `bytes`.
+/// Writes `bytes` to the staged name, created with [`ADMIN_ONLY_FILE_SDDL`]
+/// (owned by Administrators from the first moment), runs its `--version`, and
+/// compares it with `bytes`.
 fn stage(layout: &Layout, source: &Path, bytes: &[u8]) -> Result<VersionLine, InstallError> {
     let staged = &layout.staged;
     let _ = fs::remove_file(staged);
-    // GENERIC_WRITE, plus WRITE_OWNER to make Administrators the owner whatever
-    // the "default owner" policy says, plus READ_CONTROL.
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .access_mode(0x4000_0000 | 0x8_0000 | 0x2_0000)
-        .open(staged)
+    let mut file = SecurityDescriptor::from_sddl(ADMIN_ONLY_FILE_SDDL)
+        .and_then(|descriptor| create_new_with_descriptor(staged, &descriptor))
         .map_err(|error| InstallError::io(format!("creating {}", staged.display()), error))?;
-    let written = file
-        .write_all(bytes)
-        .and_then(|()| set_owner_administrators(&file))
-        .and_then(|()| file.sync_all());
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
     let cleanup = |error: InstallError| {
         let _ = fs::remove_file(staged);
@@ -637,6 +717,39 @@ mod tests {
             read_source(&text).expect_err("text").code(),
             "service_source_rejected"
         );
+        let program = temp.path().join("program.exe");
+        fs::write(&program, "MZ").expect("program");
+        assert_eq!(read_source(&program).expect("one name"), b"MZ");
+        fs::hard_link(&program, temp.path().join("other.exe")).expect("hard link");
+        let error = read_source(&program).expect_err("two names");
+        assert_eq!(error.code(), "service_source_rejected");
+        assert!(error.to_string().contains("hard link"), "{error}");
+        assert_eq!(
+            read_source(temp.path()).expect_err("directory").code(),
+            "service_source_rejected"
+        );
+    }
+
+    /// Only a person's account is served; SYSTEM, groups and built-in aliases
+    /// are refused before anything is installed.
+    #[test]
+    fn only_user_accounts_are_served() {
+        check_user(&token::current_user().expect("user")).expect("this user");
+        for other in ["S-1-5-18", "S-1-5-32-544", "S-1-1-0", "S-1-5-11"] {
+            let error = check_user(&Sid::parse(other).expect("sid")).expect_err(other);
+            assert_eq!(error.code(), "hosts_install_user_rejected", "{other}");
+        }
+    }
+
+    #[test]
+    fn failures_restart_the_service_three_times() {
+        let actions = failure_actions().actions.expect("actions");
+        assert_eq!(actions.len(), 3);
+        assert!(actions.iter().all(|action| {
+            action.action_type == ServiceActionType::Restart
+                && action.delay == Duration::from_secs(5)
+        }));
+        assert_eq!(REQUIRED_PRIVILEGES, ["SeChangeNotifyPrivilege"]);
     }
 
     #[test]

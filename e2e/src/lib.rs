@@ -430,7 +430,8 @@ impl Lab {
         self.run(command, COMMAND_TIMEOUT)
     }
 
-    /// Docker reads its context from `$HOME/.docker`, which the isolated `HOME` hides.
+    /// Docker reads its context from `.docker` in the user's home (`$HOME`, or
+    /// `%USERPROFILE%` on Windows), which the isolated home hides.
     fn docker_env(&self, command: &mut Command) {
         for key in ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG"] {
             if let Some(value) = std::env::var_os(key) {
@@ -438,7 +439,7 @@ impl Lab {
             }
         }
         if std::env::var_os("DOCKER_CONFIG").is_none()
-            && let Some(home) = std::env::var_os("HOME")
+            && let Some(home) = std::env::var_os(os::HOME_VAR)
         {
             let config = Path::new(&home).join(".docker");
             if config.is_dir() {
@@ -794,6 +795,9 @@ mod os {
 
     pub const PATH_SEPARATOR: &str = ":";
 
+    /// The outer environment's home, where the Docker CLI keeps `.docker`.
+    pub const HOME_VAR: &str = "HOME";
+
     /// `/tmp/devlanes-e2e-ports-<euid>`, private to the user.
     pub fn ports_dir() -> std::io::Result<PathBuf> {
         let dir = Path::new("/tmp").join(format!(
@@ -923,6 +927,10 @@ mod os {
     ];
 
     pub const PATH_SEPARATOR: &str = ";";
+
+    /// The outer environment's profile, where the Docker CLI keeps `.docker`;
+    /// Windows shells may not set `HOME`, and Docker ignores it there.
+    pub const HOME_VAR: &str = "USERPROFILE";
 
     /// Exit code of processes the harness terminates.
     const KILLED: u32 = 1;

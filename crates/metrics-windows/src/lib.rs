@@ -5,7 +5,8 @@
 //! Manager's Memory column) as the footprint, and the working set as RSS.
 //!
 //! `WindowsPressure` is the start gate's `PressureSource`: system CPU from
-//! `GetSystemTimes`, the memory level from `GlobalMemoryStatusEx`'s memory load.
+//! `GetSystemTimes`, the memory level from Windows' low-memory notification and
+//! `GlobalMemoryStatusEx`'s available physical memory.
 //!
 //! All system calls go through the safe wrappers in `devlanes_sys::windows::usage`.
 //! On other platforms this crate is empty.

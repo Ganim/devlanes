@@ -125,9 +125,9 @@ pub async fn engine(
     integ.contributors = contributors();
     integ.script_runners = script_runners();
     integ.secrets = Some(Arc::new(devlanes_secrets_fnox::FnoxProvider::default()));
+    integ.metrics = metrics_sources(infra.docker.as_ref());
     integ.infra = infra;
     integ.routes = routes;
-    integ.metrics = metrics_sources();
     integ.ports = Arc::new(SysPorts);
     integ.processes = crate::orphans::process_table();
     integ.shell = devlanes_daemon::integrations::detect_shell().await;
@@ -413,8 +413,12 @@ fn start_gate(
     }
 }
 
-/// Process collectors for this OS plus Docker container stats.
-fn metrics_sources() -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
+/// Process collectors for this OS plus Docker container stats. Container stats share
+/// the infra client, so they reach the engine `DOCKER_HOST` or the Docker context
+/// selects; without that client there is no engine to sample.
+fn metrics_sources(
+    docker: Option<&devlanes_infra_docker::DockerInfra>,
+) -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
     let mut sources: Vec<Arc<dyn devlanes_metrics::MetricsSource>> = Vec::new();
     #[cfg(target_os = "macos")]
     match devlanes_metrics_macos::MacosSource::new() {
@@ -425,9 +429,11 @@ fn metrics_sources() -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
     sources.push(Arc::new(devlanes_metrics_linux::LinuxSource::new()));
     #[cfg(windows)]
     sources.push(Arc::new(devlanes_metrics_windows::WindowsSource::new()));
-    match devlanes_metrics_docker::DockerSource::connect() {
-        Ok(source) => sources.push(Arc::new(source)),
-        Err(error) => tracing::debug!(%error, "container metrics unavailable"),
+    match docker {
+        Some(docker) => sources.push(Arc::new(devlanes_metrics_docker::DockerSource::new(
+            docker.client().clone(),
+        ))),
+        None => tracing::debug!("container metrics unavailable: no Docker client"),
     }
     sources
 }
@@ -446,9 +452,10 @@ async fn open_store(db: &Path) -> anyhow::Result<devlanes_state::Store> {
     }
 }
 
-/// Checks the file `devlanes certs trust --resolver` writes.
+/// Checks the file (the NRPT rule on Windows) `devlanes certs trust --resolver` writes.
 struct OsResolverFiles;
 
+#[cfg(unix)]
 impl devlanes_daemon::integrations::ResolverFiles for OsResolverFiles {
     /// `{path, installed, matches}`; `matches` is false when the file routes the TLD
     /// elsewhere (another port, a stale install), `{error}` when the OS has no form.
@@ -464,6 +471,16 @@ impl devlanes_daemon::integrations::ResolverFiles for OsResolverFiles {
             }
             Err(error) => json!({"error": error}),
         }
+    }
+}
+
+#[cfg(windows)]
+impl devlanes_daemon::integrations::ResolverFiles for OsResolverFiles {
+    /// `{namespace, server, installed, matches, foreign, group_policy}` for the
+    /// NRPT rule; `foreign` when another program's rule routes the namespace,
+    /// `group_policy` when Group Policy rules make Windows ignore local ones.
+    fn status(&self, tld: &str, server: std::net::SocketAddr) -> Value {
+        crate::resolver_nrpt::status(tld, server)
     }
 }
 
@@ -1376,10 +1393,7 @@ fn docker_error(operation: &str) -> impl FnOnce(devlanes_infra_docker::Error) ->
     let command = format!("docker API: {operation}");
     move |error| {
         let text = error.to_string();
-        if matches!(error, devlanes_infra_docker::Error::Io(_))
-            || text.contains("connect")
-            || text.contains("No such file")
-        {
+        if error.is_unreachable() {
             return InfraError::new("docker_unavailable", text);
         }
         let (status, stderr) = match &error {
@@ -2151,6 +2165,20 @@ mod tests {
         );
         assert_eq!(data["status"], "HTTP 404");
         assert_eq!(data["stderr"], "No such image: postgres:16");
+    }
+
+    #[test]
+    /// An engine nobody serves is `docker_unavailable`, not a failed call.
+    fn unreachable_engine_is_unavailable() {
+        let refused = docker_error("list containers of acme")(devlanes_infra_docker::Error::Io(
+            std::io::ErrorKind::ConnectionRefused.into(),
+        ));
+        assert_eq!(refused.code, "docker_unavailable");
+        let missing =
+            docker_error("list containers of acme")(devlanes_infra_docker::Error::Docker(
+                bollard::errors::Error::SocketNotFoundError("/var/run/docker.sock".into()),
+            ));
+        assert_eq!(missing.code, "docker_unavailable");
     }
 
     #[test]

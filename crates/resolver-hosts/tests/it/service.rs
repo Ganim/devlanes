@@ -42,6 +42,7 @@ impl Server {
             target: Target {
                 hosts: hosts.clone(),
                 flush: false,
+                check_directory: false,
             },
         };
         let task = tokio::spawn(async move {

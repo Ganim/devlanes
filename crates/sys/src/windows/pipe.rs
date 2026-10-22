@@ -26,6 +26,34 @@ pub fn create_server(name: &OsStr, first: bool) -> io::Result<NamedPipeServer> {
     PipeFactory::new(name)?.create(first)
 }
 
+/// Creates the only instance of the pipe `name`, for one exchange with another
+/// process of this user, refusing remote clients and lower-integrity processes.
+///
+/// The user gets only [`CLIENT_RIGHTS`], so no process of the user can add a
+/// server instance and answer in this one's place; open the client end with
+/// [`open_client`]. An `OWNER RIGHTS` entry replaces the owner's implicit right
+/// to change the access list, which would otherwise give that right back. Must
+/// run inside a tokio runtime with I/O enabled.
+pub fn create_single_server(name: &OsStr) -> io::Result<NamedPipeServer> {
+    let user = token::current_user()?.to_sddl()?;
+    let descriptor = SecurityDescriptor::from_sddl(&format!(
+        "D:P(A;;{CLIENT_RIGHTS:#x};;;OW)(A;;{CLIENT_RIGHTS:#x};;;{user})S:(ML;;NWNR;;;ME)"
+    ))?;
+    PipeFactory::with_descriptor(name, descriptor).create(true)
+}
+
+/// The process ID of the client connected to `server`, as the pipe recorded it
+/// when the client opened its end.
+pub fn client_process_id(server: &NamedPipeServer) -> io::Result<u32> {
+    use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+    let mut pid = 0;
+    // SAFETY: the handle belongs to `server`, which outlives the call.
+    if unsafe { GetNamedPipeClientProcessId(server.as_raw_handle(), &raw mut pid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(pid)
+}
+
 /// A pipe name and the user-only security descriptor its instances get, built
 /// once so a server does not redo the token and SDDL work on every accept.
 pub struct PipeFactory {
@@ -262,6 +290,34 @@ mod tests {
         let _client = open_client(OsStr::new(&limited))?;
         let error = factory.create(false).err().map(|error| error.kind());
         assert_eq!(error, Some(io::ErrorKind::PermissionDenied));
+        Ok(())
+    }
+
+    /// A single-instance pipe: this user opens it with `CLIENT_RIGHTS` only,
+    /// cannot add a server instance or open it for writing in general, and the
+    /// server sees the client's PID.
+    #[tokio::test]
+    async fn single_servers_admit_no_second_instance() -> io::Result<()> {
+        let name = name();
+        let server = create_single_server(OsStr::new(&name))?;
+        let mut factory = PipeFactory::new(OsStr::new(&name))?;
+        assert_eq!(
+            factory.create(false).err().map(|error| error.kind()),
+            Some(io::ErrorKind::PermissionDenied),
+            "another instance"
+        );
+        assert!(
+            ClientOptions::new().open(&name).is_err(),
+            "GENERIC_WRITE includes creating instances"
+        );
+        let mut client = open_client(OsStr::new(&name))?;
+        server.connect().await?;
+        assert_eq!(client_process_id(&server)?, std::process::id());
+        client.write_all(b"hi").await?;
+        let mut server = server;
+        let mut buffer = [0; 2];
+        server.read_exact(&mut buffer).await?;
+        assert_eq!(&buffer, b"hi");
         Ok(())
     }
 }

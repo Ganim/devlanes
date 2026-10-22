@@ -91,6 +91,60 @@ impl Sid {
         Self(vec![1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 0x02, 0, 0])
     }
 
+    /// Whether the SID has the shape of a person's account rather than a
+    /// built-in account or a well-known group: a local, Microsoft or domain
+    /// account (`S-1-5-21-` and four numbers) or a Microsoft Entra ID account
+    /// (`S-1-12-1-` and four numbers). Domain groups share the first shape;
+    /// [`Sid::names_a_user`] tells them apart when the account database answers.
+    pub fn has_account_shape(&self) -> bool {
+        let Ok(text) = self.to_sddl() else {
+            return false;
+        };
+        ["S-1-5-21-", "S-1-12-1-"].iter().any(|prefix| {
+            text.strip_prefix(prefix)
+                .is_some_and(|rest| rest.split('-').count() == 4)
+        })
+    }
+
+    /// Whether the account database (`LookupAccountSidW`) says the SID is a
+    /// user, not a group, alias or well-known SID. Needs the account's domain to
+    /// answer, which is the case for the logged-on user; an unknown SID is an
+    /// error.
+    pub fn names_a_user(&self) -> io::Result<bool> {
+        use windows_sys::Win32::Security::{LookupAccountSidW, SID_NAME_USE, SidTypeUser};
+        let mut name = vec![0u16; 256];
+        let mut domain = vec![0u16; 256];
+        for _ in 0..2 {
+            let mut name_len = name.len() as u32;
+            let mut domain_len = domain.len() as u32;
+            let mut kind: SID_NAME_USE = 0;
+            // SAFETY: the SID points into `self`; both buffers hold the lengths
+            // passed, which the call updates; `kind` is writable.
+            let ok = unsafe {
+                LookupAccountSidW(
+                    ptr::null(),
+                    self.as_psid(),
+                    name.as_mut_ptr(),
+                    &raw mut name_len,
+                    domain.as_mut_ptr(),
+                    &raw mut domain_len,
+                    &raw mut kind,
+                )
+            };
+            if ok != 0 {
+                return Ok(kind == SidTypeUser);
+            }
+            let error = io::Error::last_os_error();
+            // ERROR_INSUFFICIENT_BUFFER: the lengths now hold what is needed.
+            if error.raw_os_error() != Some(122) {
+                return Err(error);
+            }
+            name.resize(name_len as usize, 0);
+            domain.resize(domain_len as usize, 0);
+        }
+        Err(io::Error::other("account name kept growing"))
+    }
+
     /// The string form, such as `S-1-5-21-...`, used in SDDL and for display.
     pub fn to_sddl(&self) -> io::Result<String> {
         let mut text: *mut u16 = ptr::null_mut();
@@ -385,6 +439,25 @@ mod tests {
                 "{bad:?}"
             );
         }
+        Ok(())
+    }
+
+    /// The current user is an account; SYSTEM, Administrators, Everyone and
+    /// Authenticated Users are not, by shape or by the account database.
+    #[test]
+    fn accounts_are_told_from_groups_and_services() -> io::Result<()> {
+        let me = current_user()?;
+        assert!(me.has_account_shape(), "{me:?}");
+        assert!(me.names_a_user()?, "{me:?}");
+        for other in ["S-1-5-18", "S-1-5-32-544", "S-1-1-0", "S-1-5-11"] {
+            let sid = Sid::parse(other)?;
+            assert!(!sid.has_account_shape(), "{other}");
+            assert!(!sid.names_a_user()?, "{other}");
+        }
+        assert!(Sid::parse("S-1-5-21-1-2-3-1001")?.has_account_shape());
+        assert!(Sid::parse("S-1-12-1-1-2-3-4")?.has_account_shape());
+        assert!(!Sid::parse("S-1-5-21-1-2-3")?.has_account_shape());
+        assert!(!Sid::parse("S-1-5-21-1-2-3-4-5")?.has_account_shape());
         Ok(())
     }
 }

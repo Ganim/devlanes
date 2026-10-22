@@ -19,7 +19,9 @@ use windows_sys::Win32::System::Registry::{
     RegSetValueExW,
 };
 
-use super::security::wide;
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+use super::security::{SecurityAttributes, SecurityDescriptor, wide};
 
 /// Maps a registry status to a result.
 fn check(status: WIN32_ERROR) -> io::Result<()> {
@@ -45,13 +47,20 @@ pub fn read_binary(subkey: &str, name: &str) -> io::Result<Option<Vec<u8>>> {
 /// Writes `value` as the `REG_SZ` value `name` of `HKCU\<subkey>`, creating the
 /// key when it is missing.
 pub fn write_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
-    write_string_in(HKEY_CURRENT_USER, subkey, name, value)
+    write_string_in(HKEY_CURRENT_USER, subkey, name, value, ptr::null_mut())
 }
 
 /// Writes `value` as the `REG_BINARY` value `name` of `HKCU\<subkey>`, creating
 /// the key when it is missing.
 pub fn write_binary(subkey: &str, name: &str, value: &[u8]) -> io::Result<()> {
-    write_raw(HKEY_CURRENT_USER, subkey, name, REG_BINARY, value)
+    write_raw(
+        HKEY_CURRENT_USER,
+        subkey,
+        name,
+        REG_BINARY,
+        value,
+        ptr::null_mut(),
+    )
 }
 
 /// Deletes the value `name` of `HKCU\<subkey>`; `false` when there was none.
@@ -79,9 +88,21 @@ pub mod machine {
     }
 
     /// Writes `value` as the `REG_SZ` value `name` of `HKLM\<subkey>`, creating
-    /// the key when it is missing. The key inherits its parent's access list.
+    /// the key when it is missing. A created key is owned by Administrators from
+    /// the start and inherits its parent's access list; the default owner would
+    /// be the elevated user under the "default owner: object creator" policy,
+    /// and the `CREATOR OWNER` entry on `Services` would then give that user full
+    /// control. An existing key keeps its owner.
     pub fn write_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
-        write_string_in(HKEY_LOCAL_MACHINE, subkey, name, value)
+        // An owner and no access list: the access list is still inherited.
+        let mut attributes = SecurityAttributes::new(SecurityDescriptor::from_sddl("O:BA")?);
+        write_string_in(
+            HKEY_LOCAL_MACHINE,
+            subkey,
+            name,
+            value,
+            attributes.as_mut_ptr(),
+        )
     }
 
     /// Deletes the value `name` of `HKLM\<subkey>`; `false` when there was none.
@@ -186,26 +207,36 @@ fn read_raw(
     Err(io::Error::other("registry value kept changing size"))
 }
 
-/// Writes `value` as a `REG_SZ` value.
-fn write_string_in(hive: HKEY, subkey: &str, name: &str, value: &str) -> io::Result<()> {
+/// Writes `value` as a `REG_SZ` value; `security` as in [`write_raw`].
+fn write_string_in(
+    hive: HKEY,
+    subkey: &str,
+    name: &str,
+    value: &str,
+    security: *mut SECURITY_ATTRIBUTES,
+) -> io::Result<()> {
     let data = wide(OsStr::new(value));
     let bytes: Vec<u8> = data.iter().flat_map(|unit| unit.to_le_bytes()).collect();
     // `data` ends with the terminating NUL that REG_SZ needs.
-    write_raw(hive, subkey, name, REG_SZ, &bytes)
+    write_raw(hive, subkey, name, REG_SZ, &bytes, security)
 }
 
-/// Writes `data` as a value of type `kind`, creating the key when it is missing.
+/// Writes `data` as a value of type `kind`, creating the key when it is missing
+/// with `security` (null: the default owner and inherited access list), which
+/// must stay valid for the call.
 fn write_raw(
     hive: HKEY,
     subkey: &str,
     name: &str,
     kind: REG_VALUE_TYPE,
     data: &[u8],
+    security: *mut SECURITY_ATTRIBUTES,
 ) -> io::Result<()> {
     let key_name = wide(OsStr::new(subkey));
     let name = wide(OsStr::new(name));
     let mut key: HKEY = ptr::null_mut();
-    // SAFETY: the key name outlives the call; `key` receives an open handle.
+    // SAFETY: the key name outlives the call, and the caller keeps `security`
+    // (null or valid) alive across it; `key` receives an open handle.
     check(unsafe {
         RegCreateKeyExW(
             hive,
@@ -214,7 +245,7 @@ fn write_raw(
             ptr::null(),
             REG_OPTION_NON_VOLATILE,
             KEY_SET_VALUE,
-            ptr::null(),
+            security,
             &raw mut key,
             ptr::null_mut(),
         )

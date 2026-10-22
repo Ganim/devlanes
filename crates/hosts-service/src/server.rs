@@ -27,6 +27,18 @@ use crate::handler::{self, Target};
 /// Longest a client may take to send its request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Longest a client may take to read its response.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connections handled at once. Requests are written one at a time anyway; the
+/// cap bounds the memory and tasks a flood of connections can hold.
+const MAX_CONNECTIONS: usize = 4;
+
+/// How long the first instance is retried when the name is taken. A process that
+/// held the name while the service was stopped may be on its way out (the
+/// service manager restarts the service after a failure too).
+const FIRST_INSTANCE_WAIT: Duration = Duration::from_secs(5);
+
 /// What the server answers and for whom.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -67,9 +79,10 @@ pub fn pipe_sddl(user: &Sid) -> io::Result<String> {
 }
 
 /// Serves until `shutdown` completes. Requests are handled one at a time, since
-/// each rewrites the whole file. The first instance is created with
-/// `FILE_FLAG_FIRST_PIPE_INSTANCE`, so this fails if anything else already
-/// created the name.
+/// each rewrites the whole file, and at most [`MAX_CONNECTIONS`] connections are
+/// open at once. The first instance is created with
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE`, so this fails if anything else holds the
+/// name for longer than [`FIRST_INSTANCE_WAIT`].
 pub async fn serve(
     config: ServerConfig,
     shutdown: impl std::future::Future<Output = ()>,
@@ -89,14 +102,35 @@ pub async fn serve_with(
         .map_err(ServeError::Security)?;
     let name = config.pipe_name.to_string_lossy().into_owned();
     let mut factory = PipeFactory::with_descriptor(&config.pipe_name, descriptor);
-    let mut instance = factory
-        .create(true)
-        .map_err(|source| ServeError::Create { name, source })?;
+    tokio::pin!(shutdown);
+    let deadline = tokio::time::Instant::now() + FIRST_INSTANCE_WAIT;
+    let mut instance = loop {
+        match factory.create(true) {
+            Ok(instance) => break instance,
+            Err(source) if tokio::time::Instant::now() >= deadline => {
+                return Err(ServeError::Create { name, source });
+            }
+            Err(_) => tokio::select! {
+                () = &mut shutdown => return Ok(()),
+                () = tokio::time::sleep(Duration::from_millis(250)) => {}
+            },
+        }
+    };
     listening();
     let config = Arc::new(config);
     let one_at_a_time = Arc::new(Mutex::new(()));
-    tokio::pin!(shutdown);
+    let connections = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
+        // Waiting for a free slot before accepting: while all are busy, at most
+        // one more client gets the listening instance and waits.
+        let permit = tokio::select! {
+            () = &mut shutdown => return Ok(()),
+            permit = connections.clone().acquire_owned() => match permit {
+                Ok(permit) => permit,
+                // Never closed; nothing to serve with if it were.
+                Err(_) => return Ok(()),
+            },
+        };
         tokio::select! {
             () = &mut shutdown => return Ok(()),
             connected = instance.connect() => {
@@ -118,7 +152,11 @@ pub async fn serve_with(
                 let pipe = std::mem::replace(&mut instance, next);
                 // A client that left before the connect finished is simply dropped.
                 if connected.is_ok() {
-                    tokio::spawn(answer(pipe, config.clone(), one_at_a_time.clone()));
+                    let (config, lock) = (config.clone(), one_at_a_time.clone());
+                    tokio::spawn(async move {
+                        answer(pipe, config, lock).await;
+                        drop(permit);
+                    });
                 }
             }
         }
@@ -175,9 +213,12 @@ async fn answer(mut pipe: NamedPipeServer, config: Arc<ServerConfig>, lock: Arc<
         )
     });
     if let Ok(framed) = framed {
-        // The client may already be gone; nothing else to do then.
-        let _ = pipe.write_all(&framed).await;
-        let _ = pipe.flush().await;
+        // The client may already be gone, or not read; nothing else to do then.
+        let _ = tokio::time::timeout(RESPONSE_TIMEOUT, async {
+            pipe.write_all(&framed).await?;
+            pipe.flush().await
+        })
+        .await;
     }
 }
 
@@ -190,7 +231,8 @@ pub enum FrameError {
     Protocol(ProtocolError),
 }
 
-/// Reads one length-prefixed frame of at most `limit` bytes.
+/// Reads one length-prefixed frame of at most `limit` bytes. Memory grows with
+/// what actually arrives, not with what the prefix announces.
 pub async fn read_frame(
     reader: &mut (impl tokio::io::AsyncRead + Unpin),
     limit: usize,
@@ -201,10 +243,16 @@ pub async fn read_frame(
         .await
         .map_err(FrameError::Io)?;
     let length = protocol::frame_length(prefix, limit).map_err(FrameError::Protocol)?;
-    let mut payload = vec![0; length];
+    let mut payload = Vec::new();
     reader
-        .read_exact(&mut payload)
+        .take(length as u64)
+        .read_to_end(&mut payload)
         .await
         .map_err(FrameError::Io)?;
+    if payload.len() < length {
+        return Err(FrameError::Io(io::Error::from(
+            io::ErrorKind::UnexpectedEof,
+        )));
+    }
     Ok(payload)
 }

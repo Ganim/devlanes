@@ -12,7 +12,20 @@ use tokio_util::sync::CancellationToken;
 use crate::{DnsError, Zone, answer};
 
 /// Default port: unprivileged, so the daemon never needs root to serve DNS.
+#[cfg(unix)]
 pub const DEFAULT_PORT: u16 = 15353;
+
+/// Default port: NRPT rules name DNS servers by address only, so the server must
+/// answer on 53. Windows has no privileged ports, so this needs no admin.
+#[cfg(windows)]
+pub const DEFAULT_PORT: u16 = 53;
+
+/// The Windows listen address: a loopback address of its own, because
+/// `127.0.0.1:53` and `0.0.0.0:53` are often held already (Internet Connection
+/// Sharing, Docker, WSL), and an exact-address bind coexists with those
+/// wildcard binds. Windows routes all of `127.0.0.0/8` to loopback.
+#[cfg(windows)]
+const WINDOWS_LISTEN_IP: Ipv4Addr = Ipv4Addr::new(127, 53, 0, 1);
 
 /// Large enough for any query a stub resolver sends, EDNS options included.
 const UDP_BUFFER: usize = 4096;
@@ -29,9 +42,16 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// Attempts to find a free port for both UDP and TCP when binding port 0.
 const EPHEMERAL_ATTEMPTS: usize = 16;
 
-/// `127.0.0.1:15353`.
+/// `127.0.0.1:15353`, the address the OS resolver file names.
+#[cfg(unix)]
 pub fn default_listen() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT)
+}
+
+/// `127.53.0.1:53`, the address the NRPT rule names.
+#[cfg(windows)]
+pub fn default_listen() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(WINDOWS_LISTEN_IP), DEFAULT_PORT)
 }
 
 /// A bound DNS server over UDP and TCP on the same port.
@@ -208,5 +228,31 @@ mod tests {
         assert!(retry_ephemeral(io::ErrorKind::PermissionDenied));
         #[cfg(not(windows))]
         assert!(!retry_ephemeral(io::ErrorKind::PermissionDenied));
+    }
+
+    /// Unix resolver files name a port; NRPT rules cannot, so Windows uses 53 on
+    /// an address of its own.
+    #[test]
+    fn default_listen_follows_the_os() {
+        #[cfg(unix)]
+        assert_eq!(default_listen(), "127.0.0.1:15353".parse().expect("addr"));
+        #[cfg(windows)]
+        assert_eq!(default_listen(), "127.53.0.1:53".parse().expect("addr"));
+        assert!(default_listen().ip().is_loopback());
+    }
+
+    /// The Windows address binds UDP and TCP without admin rights, next to
+    /// whatever holds `0.0.0.0:53` (Internet Connection Sharing on many machines).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_windows_address_binds_without_admin() {
+        match DnsServer::bind(default_listen(), Zone::new("test").expect("zone")).await {
+            Ok(server) => assert_eq!(server.local_addr().expect("addr"), default_listen()),
+            // A devlanes daemon with the resolver strategy holds it on this machine.
+            Err(DnsError::Bind { source, .. }) if source.kind() == io::ErrorKind::AddrInUse => {
+                eprintln!("skipped: {source}");
+            }
+            Err(error) => panic!("binding {}: {error}", default_listen()),
+        }
     }
 }

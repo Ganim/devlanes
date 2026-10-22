@@ -19,6 +19,7 @@ pub mod process;
 pub mod registry;
 pub mod replace;
 pub mod security;
+pub mod service;
 pub mod session;
 pub mod shell;
 pub mod spawn;

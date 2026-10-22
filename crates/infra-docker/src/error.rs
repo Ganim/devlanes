@@ -67,4 +67,37 @@ impl Error {
             })
         )
     }
+
+    /// Whether no engine answered: the socket or pipe is missing, nobody listens on it
+    /// or the connection broke. A stopped Docker Desktop on Windows leaves bollard's
+    /// pipe client intact and fails every call with a connect error, so this looks
+    /// at the error kind, not at whether a client could be built.
+    pub fn is_unreachable(&self) -> bool {
+        use bollard::errors::Error as Bollard;
+        match self {
+            Error::Io(error) | Error::Docker(Bollard::IOError { err: error }) => {
+                is_connection_failure(error)
+            }
+            Error::Docker(Bollard::HyperLegacyError { err }) => err.is_connect(),
+            Error::Docker(Bollard::SocketNotFoundError(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+/// I/O kinds that mean the engine endpoint is absent or not accepting connections.
+fn is_connection_failure(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::NotFound
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::NotConnected
+            | ErrorKind::BrokenPipe
+            | ErrorKind::AddrNotAvailable
+            | ErrorKind::HostUnreachable
+            | ErrorKind::NetworkUnreachable
+    )
 }

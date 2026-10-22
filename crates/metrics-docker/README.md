@@ -10,7 +10,7 @@ use devlanes_metrics::{ContainerTarget, MetricsSource, SampleRequest};
 use devlanes_metrics_docker::DockerSource;
 
 async fn sample_postgres() -> Result<(), Box<dyn std::error::Error>> {
-    let source = DockerSource::connect()?; // DOCKER_HOST or the default socket
+    let source = DockerSource::connect()?; // DOCKER_HOST or the default socket, no contexts
     let request = SampleRequest {
         units: Vec::new(),
         containers: vec![ContainerTarget {
@@ -28,7 +28,7 @@ async fn sample_postgres() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API
 
-- `DockerSource`: one `one-shot` stats request per container per tick, run concurrently with a 5 second timeout.
+- `DockerSource`: one `one-shot` stats request per container per tick, run concurrently with a 5 second timeout. `DockerSource::new` wraps an existing client; the daemon passes the `devlanes-infra-docker` one so stats follow the Docker context.
 - `cpu_percent_unix`, `memory_usage_no_cache`, `reading`: the docker CLI math on bollard's stats types, usable without an engine.
 - `DockerVmInfo`: name, OS, server version, CPUs, total memory and running containers from `docker info`.
 

@@ -523,7 +523,7 @@ pub enum CertsCommand {
         #[arg(long)]
         hosts: bool,
         /// Also send lookups for hostnames.tld to the devlanes DNS server (/etc/resolver on
-        /// macOS, systemd-resolved on Linux)
+        /// macOS, systemd-resolved on Linux, an NRPT rule on Windows)
         #[arg(long)]
         resolver: bool,
     },
@@ -533,7 +533,7 @@ pub enum CertsCommand {
         /// Also remove the hosts file writer (its sudo rule, or the Windows service) and the devlanes block in the hosts file
         #[arg(long)]
         hosts: bool,
-        /// Also remove the OS resolver file for hostnames.tld
+        /// Also remove the OS resolver file for hostnames.tld (the NRPT rule on Windows)
         #[arg(long)]
         resolver: bool,
         /// Keep the CA trusted; with --hosts or --resolver, remove only those

@@ -67,8 +67,8 @@ pub fn service_source(current_exe: std::io::Result<PathBuf>) -> Result<PathBuf, 
 
 /// The UAC prompt needs a terminal the user watches and a visible desktop;
 /// agents, CI, SSH sessions and services have neither. `command` is what to
-/// run from a terminal instead.
-fn require_prompt(runtime: &Runtime, command: &str) -> Result<(), RpcError> {
+/// run from a terminal instead. Shared with the NRPT resolver install.
+pub(crate) fn require_prompt(runtime: &Runtime, command: &str) -> Result<(), RpcError> {
     // An unreadable window station counts as visible, as the trust store does.
     let desktop = devlanes_sys::windows::cert::interactive_desktop().unwrap_or(true);
     if runtime.can_prompt() && desktop {
@@ -218,14 +218,14 @@ async fn elevate(subcommand: &str, mut arguments: Vec<OsString>) -> Result<Value
     let exe = std::env::current_exe()
         .map_err(|error| failed(format!("finding devlanes.exe: {error}")))?;
     let name = report_pipe_name();
-    let server = devlanes_sys::windows::pipe::create_server(OsStr::new(&name), true)
+    let server = devlanes_sys::windows::pipe::create_single_server(OsStr::new(&name))
         .map_err(|error| failed(format!("creating {name}: {error}")))?;
     arguments.push("--report".into());
     arguments.push(name.into());
     let parameters = command_line(subcommand, &arguments);
     let reader = tokio::spawn(read_report(server));
     let exit = tokio::task::spawn_blocking(move || {
-        devlanes_sys::windows::shell::run_elevated(&exe, &parameters)
+        devlanes_sys::windows::shell::run_elevated_child(&exe, &parameters)
     })
     .await
     .map_err(|error| failed(error.to_string()))?;
@@ -247,12 +247,13 @@ async fn elevate(subcommand: &str, mut arguments: Vec<OsString>) -> Result<Value
         }
     };
     // The child wrote its report before exiting; a child that never connected
-    // (it could not open the pipe) leaves only its exit code.
+    // (it could not open the pipe) leaves only its exit code. A report from any
+    // other process (one that found the name first) is ignored.
     let report = match tokio::time::timeout(Duration::from_secs(2), reader).await {
-        Ok(Ok(Some(report))) => report,
-        Ok(_) => Value::Null,
-        Err(_) => Value::Null,
+        Ok(Ok(Some((pid, report)))) if pid == exit.pid => report,
+        _ => Value::Null,
     };
+    let exit = exit.code;
     if exit == 0 {
         return Ok(report);
     }
@@ -275,18 +276,20 @@ fn report_pipe_name() -> String {
     format!("{REPORT_PREFIX}{}-{nanos}", std::process::id())
 }
 
-/// Waits for the elevated child and reads its JSON report.
+/// Waits for the elevated child and reads its JSON report, with the PID of the
+/// process that sent it, for the caller to compare with the child's.
 async fn read_report(
     mut server: tokio::net::windows::named_pipe::NamedPipeServer,
-) -> Option<Value> {
+) -> Option<(u32, Value)> {
     server.connect().await.ok()?;
+    let pid = devlanes_sys::windows::pipe::client_process_id(&server).ok()?;
     let mut bytes = Vec::new();
     (&mut server)
         .take(MAX_REPORT_BYTES)
         .read_to_end(&mut bytes)
         .await
         .ok()?;
-    serde_json::from_slice(&bytes).ok()
+    Some((pid, serde_json::from_slice(&bytes).ok()?))
 }
 
 /// The command line for `subcommand` and `arguments`, quoted the way the Rust
@@ -514,9 +517,10 @@ fn same_file_name(a: &Path, b: &Path) -> bool {
 }
 
 /// Writes `value` to the report pipe, checking that this user (unelevated)
-/// serves it. A report that cannot be sent leaves the exit code.
+/// serves it. The pipe grants only the client rights, so it is opened with those.
+/// A report that cannot be sent leaves the exit code.
 async fn send_report(name: &str, value: &Value) {
-    let Ok(mut client) = tokio::net::windows::named_pipe::ClientOptions::new().open(name) else {
+    let Ok(mut client) = devlanes_sys::windows::pipe::open_client(OsStr::new(name)) else {
         return;
     };
     if !devlanes_sys::windows::pipe::server_is_current_user(&client).unwrap_or(false) {
@@ -641,12 +645,17 @@ mod tests {
         assert_eq!(error.exit_code, 2);
     }
 
-    /// The report pipe carries the child's JSON to the parent.
+    /// The report pipe carries the child's JSON to the parent, with the
+    /// sender's PID; nobody can add a second instance of it.
     #[tokio::test]
     async fn reports_reach_the_parent() {
         let name = report_pipe_name();
         let server =
-            devlanes_sys::windows::pipe::create_server(OsStr::new(&name), true).expect("server");
+            devlanes_sys::windows::pipe::create_single_server(OsStr::new(&name)).expect("server");
+        assert!(
+            devlanes_sys::windows::pipe::create_server(OsStr::new(&name), false).is_err(),
+            "a second instance"
+        );
         let reader = tokio::spawn(read_report(server));
         let report = json!({"ok": false, "code": "hosts_unsafe_directory", "message": "m"});
         send_report(&name, &report).await;
@@ -654,6 +663,6 @@ mod tests {
             .await
             .expect("in time")
             .expect("reader");
-        assert_eq!(read, Some(report));
+        assert_eq!(read, Some((std::process::id(), report)));
     }
 }

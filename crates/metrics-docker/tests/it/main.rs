@@ -112,35 +112,37 @@ fn docker_info_fixture_gives_vm_capacity() {
 }
 
 /// A client whose every request fails: a regular file passes bollard's
-/// existence check for a socket. `dir` must outlive the client.
+/// existence check for a socket. The returned directory must outlive the client.
 #[cfg(unix)]
-fn unreachable_engine(dir: &std::path::Path) -> bollard::Docker {
-    let path = dir.join("docker.sock");
+fn unreachable_engine() -> (bollard::Docker, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("docker.sock");
     std::fs::write(&path, b"").expect("placeholder");
-    bollard::Docker::connect_with_unix(
+    let docker = bollard::Docker::connect_with_unix(
         path.to_str().expect("utf-8 path"),
         1,
         bollard::API_DEFAULT_VERSION,
     )
-    .expect("client")
+    .expect("client");
+    (docker, dir)
 }
 
 /// A client whose every request fails: a named pipe nobody serves (bollard
-/// connects on the first request).
+/// connects on the first request). Nothing on disk needs to outlive it.
 #[cfg(windows)]
-fn unreachable_engine(_dir: &std::path::Path) -> bollard::Docker {
+fn unreachable_engine() -> (bollard::Docker, ()) {
     let pipe = format!(
         r"npipe:////./pipe/devlanes-test-no-engine-{}",
         std::process::id()
     );
-    bollard::Docker::connect_with_named_pipe(&pipe, 1, bollard::API_DEFAULT_VERSION)
-        .expect("client")
+    let docker = bollard::Docker::connect_with_named_pipe(&pipe, 1, bollard::API_DEFAULT_VERSION)
+        .expect("client");
+    (docker, ())
 }
 
 #[tokio::test]
 async fn empty_request_makes_no_engine_calls() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let docker = unreachable_engine(dir.path());
+    let (docker, _placeholder) = unreachable_engine();
     let source = DockerSource::new(docker);
     assert!(
         source

@@ -46,10 +46,16 @@ pub fn resolve_host(
     if let Some(host) = env("DOCKER_HOST").filter(|host| !host.is_empty()) {
         return Ok(host);
     }
+    let explicit = env("DOCKER_CONTEXT").filter(|context| !context.is_empty());
     let Some(config_dir) = config_dir else {
-        return Ok(DEFAULT_HOST.to_owned());
+        // A named context cannot be looked up without a config directory; falling
+        // back to the default engine would silently talk to the wrong one.
+        return match explicit.filter(|context| context != "default") {
+            Some(context) => Err(Error::UnknownContext(context)),
+            None => Ok(DEFAULT_HOST.to_owned()),
+        };
     };
-    let context = match env("DOCKER_CONTEXT").filter(|context| !context.is_empty()) {
+    let context = match explicit {
         Some(context) => Some(context),
         None => read_current_context(&config_dir.join("config.json"))?,
     };
@@ -139,6 +145,12 @@ mod tests {
         for (digest, name, host) in [
             ("aa", "orbstack", "unix:///home/u/.orbstack/run/docker.sock"),
             ("bb", "colima", "unix:///home/u/.colima/default/docker.sock"),
+            // Docker Desktop on Windows writes this context and selects it.
+            (
+                "cc",
+                "desktop-linux",
+                "npipe:////./pipe/dockerDesktopLinuxEngine",
+            ),
         ] {
             let meta = dir.path().join("contexts/meta").join(digest);
             std::fs::create_dir_all(&meta).expect("mkdir");
@@ -187,6 +199,37 @@ mod tests {
         let dir = docker_config();
         let host = resolve_host(env(&[("DOCKER_CONTEXT", "nope")]), Some(dir.path()));
         assert!(matches!(host, Err(Error::UnknownContext(name)) if name == "nope"));
+    }
+
+    #[test]
+    fn desktop_linux_context_uses_its_pipe() {
+        let dir = docker_config();
+        let host = resolve_host(
+            env(&[("DOCKER_CONTEXT", "desktop-linux")]),
+            Some(dir.path()),
+        );
+        assert_eq!(
+            host.ok().as_deref(),
+            Some("npipe:////./pipe/dockerDesktopLinuxEngine")
+        );
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"auths":{},"currentContext":"desktop-linux"}"#,
+        )
+        .expect("write config");
+        let host = resolve_host(env(&[]), Some(dir.path()));
+        assert_eq!(
+            host.ok().as_deref(),
+            Some("npipe:////./pipe/dockerDesktopLinuxEngine")
+        );
+    }
+
+    #[test]
+    fn named_context_without_config_dir_is_unknown() {
+        let host = resolve_host(env(&[("DOCKER_CONTEXT", "desktop-linux")]), None);
+        assert!(matches!(host, Err(Error::UnknownContext(name)) if name == "desktop-linux"));
+        let host = resolve_host(env(&[("DOCKER_CONTEXT", "default")]), None);
+        assert_eq!(host.ok().as_deref(), Some(DEFAULT_HOST));
     }
 
     #[test]

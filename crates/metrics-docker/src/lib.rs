@@ -179,8 +179,9 @@ pub struct DockerSource {
 }
 
 impl DockerSource {
-    /// Connects using `DOCKER_HOST` or the platform's default socket. No request is
-    /// made until the first sample.
+    /// Connects using `DOCKER_HOST` or the platform's default socket, ignoring Docker
+    /// contexts; the daemon uses [`DockerSource::new`] with the infra client instead.
+    /// No request is made until the first sample.
     pub fn connect() -> Result<Self, Error> {
         Docker::connect_with_defaults()
             .map(Self::new)

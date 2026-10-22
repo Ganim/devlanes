@@ -548,7 +548,7 @@ devlanes certs trust [OPTIONS]
 ```
 
 - `--hosts`: Also install the hosts file writer (a sudo helper on macOS and Linux, a service on Windows) for programs that cannot resolve *.localhost
-- `--resolver`: Also send lookups for hostnames.tld to the devlanes DNS server (/etc/resolver on macOS, systemd-resolved on Linux)
+- `--resolver`: Also send lookups for hostnames.tld to the devlanes DNS server (/etc/resolver on macOS, systemd-resolved on Linux, an NRPT rule on Windows)
 
 ### devlanes certs untrust
 
@@ -559,7 +559,7 @@ devlanes certs untrust [OPTIONS]
 ```
 
 - `--hosts`: Also remove the hosts file writer (its sudo rule, or the Windows service) and the devlanes block in the hosts file
-- `--resolver`: Also remove the OS resolver file for hostnames.tld
+- `--resolver`: Also remove the OS resolver file for hostnames.tld (the NRPT rule on Windows)
 - `--keep-ca`: Keep the CA trusted; with --hosts or --resolver, remove only those
 
 ### devlanes secrets

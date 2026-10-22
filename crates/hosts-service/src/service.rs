@@ -37,6 +37,8 @@ pub enum Refusal {
     Pipe = 4,
     /// The async runtime could not start.
     Runtime = 5,
+    /// The hosts file's directory is not admin-only.
+    UnsafeHostsDirectory = 6,
 }
 
 /// `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT`: started from a console, not by
@@ -140,6 +142,10 @@ fn run(stop: Arc<tokio::sync::Notify>, running: impl FnOnce()) -> Result<(), Ref
     crate::checks::check_install(&exe).map_err(|_| Refusal::UnsafeInstall)?;
     let user = config::configured_user().map_err(|_| Refusal::Config)?;
     let hosts = config::hosts_path().map_err(|_| Refusal::Config)?;
+    crate::checks::check_hosts_directory(&hosts).map_err(|_| Refusal::UnsafeHostsDirectory)?;
+    // A crash mid-replace may have left the content under a backup name. Not
+    // fatal here: the next write tries again and reports what it finds.
+    let _ = crate::write::recover(&hosts);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -147,7 +153,11 @@ fn run(stop: Arc<tokio::sync::Notify>, running: impl FnOnce()) -> Result<(), Ref
     let config = ServerConfig {
         pipe_name: PIPE_NAME.into(),
         user,
-        target: Target { hosts, flush: true },
+        target: Target {
+            hosts,
+            flush: true,
+            check_directory: true,
+        },
     };
     let result = runtime.block_on(async move {
         let (created, ready) = tokio::sync::oneshot::channel();

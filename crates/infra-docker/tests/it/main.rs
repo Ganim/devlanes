@@ -101,6 +101,58 @@ fn redis_spec(
     }
 }
 
+/// A named pipe nobody serves, like Docker Desktop's while it is stopped: building
+/// the client succeeds and every call fails to connect.
+#[cfg(windows)]
+#[tokio::test]
+async fn pipe_nobody_serves_is_unreachable() {
+    let pipe = format!(
+        "npipe:////./pipe/devlanes-test-no-engine-{}",
+        std::process::id()
+    );
+    let docker = bollard::Docker::connect_with_named_pipe(&pipe, 5, bollard::API_DEFAULT_VERSION)
+        .expect("client");
+    let infra = DockerInfra::from_client(docker);
+    let error = tokio::time::timeout(Duration::from_secs(30), infra.server_version())
+        .await
+        .expect("finished in time")
+        .expect_err("nobody serves the pipe");
+    assert!(error.is_unreachable(), "{error:?}");
+}
+
+/// A socket file left behind by an engine that is no longer listening.
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_nobody_listens_on_is_unreachable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("docker.sock");
+    // Dropping the listener closes it but leaves the socket file in place.
+    drop(std::os::unix::net::UnixListener::bind(&path).expect("bind"));
+    let docker = bollard::Docker::connect_with_unix(
+        path.to_str().expect("utf-8 path"),
+        5,
+        bollard::API_DEFAULT_VERSION,
+    )
+    .expect("client");
+    let infra = DockerInfra::from_client(docker);
+    let error = tokio::time::timeout(Duration::from_secs(30), infra.server_version())
+        .await
+        .expect("finished in time")
+        .expect_err("nobody listens");
+    assert!(error.is_unreachable(), "{error:?}");
+}
+
+#[test]
+fn engine_answers_are_not_unreachability() {
+    let answered = Error::Docker(bollard::errors::Error::DockerResponseServerError {
+        status_code: 500,
+        message: "boom".into(),
+    });
+    assert!(!answered.is_unreachable());
+    assert!(!Error::Io(std::io::ErrorKind::InvalidData.into()).is_unreachable());
+    assert!(Error::Io(std::io::ErrorKind::ConnectionRefused.into()).is_unreachable());
+}
+
 #[tokio::test]
 #[ignore = "needs docker"]
 async fn docker_lane_container_lifecycle() {

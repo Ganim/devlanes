@@ -28,6 +28,16 @@ pub const PARAMETERS_KEY: &str = r"SYSTEM\CurrentControlSet\Services\devlanes-ho
 /// The value holding the SID of the user the service answers.
 pub const USER_SID_VALUE: &str = "UserSid";
 
+/// The installer's staged copy of a new binary, in the install directory.
+pub const STAGED_BINARY: &str = ".devlanes-hosts-service.new.exe";
+
+/// Where the installer keeps the previous binary until the new one runs.
+pub const BACKUP_BINARY: &str = ".devlanes-hosts-service.old.exe";
+
+/// Everything the install directory may hold. Anything else (a DLL above all,
+/// which the service would load before System32's) is refused.
+pub const INSTALL_ENTRIES: [&str; 3] = [SERVICE_BINARY, STAGED_BINARY, BACKUP_BINARY];
+
 /// Windows' TCP/IP settings, where `DataBasePath` names the hosts file's directory.
 const TCPIP_KEY: &str = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters";
 
@@ -62,6 +72,11 @@ pub enum ConfigError {
         #[source]
         source: io::Error,
     },
+    /// `UserSid` is a SID, but not of a person's account.
+    #[error(
+        "HKLM\\{PARAMETERS_KEY}\\{USER_SID_VALUE} is {0}, not a user account's SID (S-1-5-21-... or S-1-12-1-...)"
+    )]
+    NotAnAccount(String),
     /// `DataBasePath` is not an absolute, expanded path.
     #[error("the hosts file directory {0:?} (DataBasePath) is not an absolute path")]
     HostsDirectory(String),
@@ -100,7 +115,9 @@ pub fn hosts_path() -> Result<PathBuf, ConfigError> {
     Ok(path.join("hosts"))
 }
 
-/// The user the service answers, from `Parameters\UserSid`.
+/// The user the service answers, from `Parameters\UserSid`. Only the SID's shape
+/// is checked: the installer also asked the account database, which may not
+/// answer for a domain account at boot.
 pub fn configured_user() -> Result<Sid, ConfigError> {
     let value = machine::read_string(PARAMETERS_KEY, USER_SID_VALUE)
         .map_err(|source| ConfigError::Registry {
@@ -112,7 +129,14 @@ pub fn configured_user() -> Result<Sid, ConfigError> {
             key: PARAMETERS_KEY,
             value: USER_SID_VALUE,
         })?;
-    Sid::parse(&value).map_err(|source| ConfigError::InvalidSid { value, source })
+    let user = Sid::parse(&value).map_err(|source| ConfigError::InvalidSid {
+        value: value.clone(),
+        source,
+    })?;
+    if !user.has_account_shape() {
+        return Err(ConfigError::NotAnAccount(value));
+    }
+    Ok(user)
 }
 
 #[cfg(test)]

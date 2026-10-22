@@ -235,6 +235,54 @@ pub fn check_private_file(path: &Path) -> io::Result<Result<(), FileProblem>> {
     Ok(unsafe { inspect(&file, None) }?.map_err(FileProblem::from))
 }
 
+/// Why [`open_plain_file`] refused a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlainFileProblem {
+    /// A symlink or other reparse point, which could point anywhere.
+    ReparsePoint,
+    /// A directory or device is in the way.
+    NotAFile,
+    /// The file has this many names; another one may sit in a directory other
+    /// accounts can write.
+    HardLinks(u32),
+}
+
+impl From<PlainFileProblem> for FileProblem {
+    /// The same finding about a private file.
+    fn from(problem: PlainFileProblem) -> Self {
+        match problem {
+            PlainFileProblem::ReparsePoint => Self::ReparsePoint,
+            PlainFileProblem::NotAFile => Self::NotAFile,
+            PlainFileProblem::HardLinks(links) => Self::HardLinks(links),
+        }
+    }
+}
+
+/// Opens `path` for reading if it is a regular file with a single name. The
+/// entry itself is opened, never a link's target, and the checks run on the
+/// opened handle, so the path cannot be swapped in between. Other processes may
+/// keep reading, writing, renaming and deleting it meanwhile, as with a plain
+/// open. A missing file is an error of kind `NotFound`.
+pub fn open_plain_file(path: &Path) -> io::Result<Result<File, PlainFileProblem>> {
+    let file = File::options()
+        .read(true)
+        // Backup semantics lets a directory open too, so it is reported, not denied.
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.file_attributes() & REPARSE_POINT != 0 {
+        return Ok(Err(PlainFileProblem::ReparsePoint));
+    }
+    if !metadata.is_file() {
+        return Ok(Err(PlainFileProblem::NotAFile));
+    }
+    let links = link_count(&file)?;
+    if links > 1 {
+        return Ok(Err(PlainFileProblem::HardLinks(links)));
+    }
+    Ok(Ok(file))
+}
+
 /// How many names (hard links) the open file has.
 fn link_count(file: &File) -> io::Result<u32> {
     let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
@@ -722,28 +770,55 @@ pub fn create_admin_only_dir(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Makes Administrators the owner of `file`, which must be open with
-/// `WRITE_OWNER`. An elevated process may do this; its files are otherwise owned
-/// by its user when the "default owner" policy says so.
-pub fn set_owner_administrators(file: &File) -> io::Result<()> {
-    let administrators = Sid::administrators();
-    // SAFETY: the handle is owned by `file` and stays open for the call; the SID
-    // lives in `administrators` across it.
-    let status = unsafe {
-        SetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION,
-            administrators.as_psid(),
+/// The access list of a program file that runs as SYSTEM: owned by
+/// Administrators, full control for SYSTEM and Administrators, read and execute
+/// for Users, and nothing inherited from its directory.
+pub const ADMIN_ONLY_FILE_SDDL: &str = "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)";
+
+/// Creates the file `path`, which must not exist (a link of that name counts),
+/// with `descriptor` as its owner and access list from the start, and opens it
+/// for reading and writing. Setting them after creation would leave a moment in
+/// which the file has the default owner: under the "default owner: object
+/// creator" policy that is the elevated user, who could change the access list.
+///
+/// Naming an owner other than this account (Administrators in
+/// [`ADMIN_ONLY_FILE_SDDL`]) needs an elevated process; otherwise it fails with
+/// `ERROR_INVALID_OWNER` (1307) and nothing is created.
+pub fn create_new_with_descriptor(
+    path: &Path,
+    descriptor: &SecurityDescriptor,
+) -> io::Result<File> {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ,
+    };
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let wide_path = wide(path.as_os_str());
+    // SAFETY: `wide_path` is NUL-terminated and `attributes` (with the descriptor
+    // it points to, borrowed from the caller) outlives the call; the template
+    // handle is null as allowed. CREATE_NEW with OPEN_REPARSE_POINT fails on any
+    // existing name instead of following it.
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ,
+            &raw const attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
             ptr::null_mut(),
-            ptr::null(),
-            ptr::null(),
         )
     };
-    if status != 0 {
-        return Err(io::Error::from_raw_os_error(status as i32));
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
     }
-    Ok(())
+    // SAFETY: the handle was just created, is valid, and is owned by the File.
+    Ok(unsafe { File::from_raw_handle(handle) })
 }
 
 /// The owner of the kernel object behind `handle` (a pipe, for instance), which
@@ -939,6 +1014,72 @@ mod tests {
             judge_admin_only(&unjudged),
             Err(AdminOnlyProblem::Writers(Vec::new()))
         );
+        Ok(())
+    }
+
+    /// Plain files open; a directory, a second name or a junction is reported,
+    /// and a missing file is `NotFound`.
+    #[test]
+    fn plain_files_open_and_others_are_reported() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let file = temp.path().join("hosts");
+        std::fs::write(&file, "x")?;
+        assert!(open_plain_file(&file)?.is_ok());
+        assert_eq!(
+            open_plain_file(temp.path())?.err(),
+            Some(PlainFileProblem::NotAFile)
+        );
+        assert_eq!(
+            open_plain_file(&temp.path().join("missing"))
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::NotFound)
+        );
+        std::fs::hard_link(&file, temp.path().join("second"))?;
+        assert_eq!(
+            open_plain_file(&file)?.err(),
+            Some(PlainFileProblem::HardLinks(2))
+        );
+        let target = temp.path().join("target");
+        std::fs::create_dir(&target)?;
+        let link = temp.path().join("link");
+        let status = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        assert!(status.success(), "mklink /J failed");
+        assert_eq!(
+            open_plain_file(&link)?.err(),
+            Some(PlainFileProblem::ReparsePoint)
+        );
+        Ok(())
+    }
+
+    /// A file created with a descriptor has that owner and protected access list
+    /// from the start; an existing name is refused. Naming Administrators as the
+    /// owner needs elevation, and without it nothing is created.
+    #[test]
+    fn files_are_created_with_their_descriptor() -> io::Result<()> {
+        let user = token::current_user()?.to_sddl()?;
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("staged.exe");
+        let own = SecurityDescriptor::from_sddl(&format!("O:{user}D:P(A;;FA;;;{user})"))?;
+        let mut file = create_new_with_descriptor(&path, &own)?;
+        std::io::Write::write_all(&mut file, b"MZ")?;
+        drop(file);
+        assert_eq!(std::fs::read(&path)?, b"MZ");
+        assert_eq!(check_private_file(&path)?, Ok(()));
+        let error = create_new_with_descriptor(&path, &own).expect_err("exists");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        if !token::elevated()? {
+            let admin = SecurityDescriptor::from_sddl(ADMIN_ONLY_FILE_SDDL)?;
+            let refused = temp.path().join("admin.exe");
+            let error = create_new_with_descriptor(&refused, &admin).expect_err("not elevated");
+            assert_eq!(error.raw_os_error(), Some(1307), "{error}");
+            assert!(!refused.exists());
+        }
         Ok(())
     }
 

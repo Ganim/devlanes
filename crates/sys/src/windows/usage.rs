@@ -1,5 +1,5 @@
 //! Resource readings for `devlanes-metrics-windows`: CPU time and memory of one
-//! process, and the machine's CPU times and memory load.
+//! process, and the machine's CPU times, memory load and low-memory state.
 //!
 //! Processes are opened with `PROCESS_QUERY_LIMITED_INFORMATION` only, the
 //! least access these calls take, so every process of the daemon's user can be
@@ -7,9 +7,17 @@
 
 use std::io;
 use std::os::windows::io::OwnedHandle;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, FILETIME};
+use windows_sys::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_BAD_LENGTH, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER,
+    FILETIME,
+};
+use windows_sys::Win32::System::Memory::{
+    CreateMemoryResourceNotification, LowMemoryResourceNotification,
+    QueryMemoryResourceNotification,
+};
 use windows_sys::Win32::System::ProcessStatus::{
     GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
     PROCESS_MEMORY_COUNTERS_EX2,
@@ -20,12 +28,16 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::proc::{exited, open};
-use super::token::raw;
+use super::token::{owned, raw};
 use crate::ProcessIdentity;
 
-/// Set once `PROCESS_MEMORY_COUNTERS_EX2` was refused, so older systems (before
-/// Windows 10 build 20348) make one memory call per process instead of two.
+/// Set once `PROCESS_MEMORY_COUNTERS_EX2` was refused for its size, so systems
+/// without it make one memory call per process instead of two.
 static EX2_UNSUPPORTED: AtomicBool = AtomicBool::new(false);
+
+/// The low-memory notification object, created on first use and kept for the
+/// process's life: the object is shared system state, so one handle is enough.
+static LOW_MEMORY: OnceLock<OwnedHandle> = OnceLock::new();
 
 /// CPU time and memory of one process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,8 +47,10 @@ pub struct ProcessUsage {
     /// Working set: resident pages, shared ones (DLLs, shared memory) included.
     pub working_set: u64,
     /// Private working set: resident pages no other process shares, what Task
-    /// Manager's Memory column shows. `None` before Windows 10 build 20348,
-    /// which does not report it.
+    /// Manager's Memory column shows. `PROCESS_MEMORY_COUNTERS_EX2` reports it from
+    /// Windows 10 22H2 and Windows 11 22H2 with the September 2023 update. `None`
+    /// on older systems, and when it reads 0: a running process always has some
+    /// private pages resident, so 0 means the field was not filled in.
     pub private_working_set: Option<u64>,
     /// Private bytes (commit charge): private memory whether resident or paged out.
     pub private_bytes: u64,
@@ -118,6 +132,35 @@ pub fn memory_status() -> io::Result<MemoryStatus> {
     })
 }
 
+/// Whether Windows reports low physical memory
+/// (`QueryMemoryResourceNotification` on a `LowMemoryResourceNotification`
+/// object). The system sets it when available memory falls below its own
+/// threshold, about 32 MB per 4 GB of RAM and at most 64 MB, so it means memory
+/// is nearly exhausted.
+pub fn low_memory() -> io::Result<bool> {
+    let handle = match LOW_MEMORY.get() {
+        Some(handle) => handle,
+        None => {
+            // SAFETY: plain call with a valid notification type; the result is
+            // checked for null and owned below.
+            let created =
+                owned(unsafe { CreateMemoryResourceNotification(LowMemoryResourceNotification) })?;
+            // A racing caller may have stored its handle first; either one works and
+            // the loser's is closed on drop.
+            let _ = LOW_MEMORY.set(created);
+            LOW_MEMORY
+                .get()
+                .ok_or_else(|| io::Error::other("low-memory notification missing"))?
+        }
+    };
+    let mut state = 0;
+    // SAFETY: `handle` is a live notification object; `state` is writable.
+    if unsafe { QueryMemoryResourceNotification(raw(handle), &raw mut state) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(state != 0)
+}
+
 const ZERO_FILETIME: FILETIME = FILETIME {
     dwLowDateTime: 0,
     dwHighDateTime: 0,
@@ -151,8 +194,8 @@ fn process_times(handle: &OwnedHandle) -> io::Result<ProcessTimes> {
 }
 
 /// Memory counters of an open process, CPU time left at 0. Asks for the `EX2`
-/// layout first and falls back to `EX` (no private working set) when the system
-/// refuses its size.
+/// layout first and falls back to `EX` (no private working set) when that call
+/// fails; only a size refusal marks `EX2` unsupported for later calls.
 fn memory_counters(handle: &OwnedHandle) -> io::Result<ProcessUsage> {
     if !EX2_UNSUPPORTED.load(Ordering::Relaxed) {
         let mut counters = PROCESS_MEMORY_COUNTERS_EX2 {
@@ -174,9 +217,14 @@ fn memory_counters(handle: &OwnedHandle) -> io::Result<ProcessUsage> {
             return Ok(ProcessUsage {
                 cpu_time: 0,
                 working_set: counters.WorkingSetSize as u64,
-                private_working_set: Some(counters.PrivateWorkingSetSize as u64),
+                private_working_set: Some(counters.PrivateWorkingSetSize as u64)
+                    .filter(|&private| private != 0),
                 private_bytes: counters.PrivateUsage as u64,
             });
+        }
+        let error = io::Error::last_os_error();
+        if is_size_refusal(&error) {
+            EX2_UNSUPPORTED.store(true, Ordering::Relaxed);
         }
     }
     let mut counters = PROCESS_MEMORY_COUNTERS_EX {
@@ -195,13 +243,26 @@ fn memory_counters(handle: &OwnedHandle) -> io::Result<ProcessUsage> {
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    // The same handle answered the smaller layout, so the EX2 refusal was its size.
-    EX2_UNSUPPORTED.store(true, Ordering::Relaxed);
     Ok(ProcessUsage {
         cpu_time: 0,
         working_set: counters.WorkingSetSize as u64,
         private_working_set: None,
         private_bytes: counters.PrivateUsage as u64,
+    })
+}
+
+/// The errors `GetProcessMemoryInfo` gives for a structure size it does not
+/// know; any other failure (a process ending mid-call, say) says nothing about
+/// `EX2` support.
+fn is_size_refusal(error: &io::Error) -> bool {
+    error.raw_os_error().is_some_and(|code| {
+        [
+            ERROR_BAD_LENGTH,
+            ERROR_INSUFFICIENT_BUFFER,
+            ERROR_INVALID_PARAMETER,
+        ]
+        .iter()
+        .any(|&refusal| code == refusal as i32)
     })
 }
 
@@ -311,5 +372,30 @@ mod tests {
             "{status:?}"
         );
         Ok(())
+    }
+
+    /// The low-memory query answers repeatedly through the one shared object.
+    #[test]
+    fn low_memory_answers() -> io::Result<()> {
+        low_memory()?;
+        low_memory()?;
+        assert!(LOW_MEMORY.get().is_some());
+        Ok(())
+    }
+
+    /// Only size errors mark `EX2` unsupported.
+    #[test]
+    fn size_refusals() {
+        for code in [
+            ERROR_BAD_LENGTH,
+            ERROR_INSUFFICIENT_BUFFER,
+            ERROR_INVALID_PARAMETER,
+        ] {
+            assert!(is_size_refusal(&io::Error::from_raw_os_error(code as i32)));
+        }
+        assert!(!is_size_refusal(&io::Error::from_raw_os_error(
+            ERROR_ACCESS_DENIED as i32
+        )));
+        assert!(!is_size_refusal(&io::Error::other("no code")));
     }
 }

@@ -71,10 +71,26 @@ pub const ERROR_CANCELLED: i32 = 1223;
 /// needs a visible desktop; check `cert::interactive_desktop` first. `parameters`
 /// is passed as is, so quote arguments the way the program parses them.
 pub fn run_elevated(program: &std::path::Path, parameters: &str) -> io::Result<u32> {
+    run_elevated_child(program, parameters).map(|exit| exit.code)
+}
+
+/// How an elevated program ended, and which process it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElevatedExit {
+    /// The elevated process's ID, for matching it with a pipe client
+    /// (`pipe::client_process_id`). It was alive, and its handle held, from the
+    /// start until the exit, so no other process had this ID meanwhile.
+    pub pid: u32,
+    /// Its exit code.
+    pub code: u32,
+}
+
+/// [`run_elevated`], also returning the elevated process's ID.
+pub fn run_elevated_child(program: &std::path::Path, parameters: &str) -> io::Result<ElevatedExit> {
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, INFINITE, WaitForSingleObject,
+        GetExitCodeProcess, GetProcessId, INFINITE, WaitForSingleObject,
     };
     use windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -107,6 +123,11 @@ pub fn run_elevated(program: &std::path::Path, parameters: &str) -> io::Result<u
     }
     // SAFETY: the handle was just returned to us and is closed once, on drop.
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
+    // SAFETY: `process` is a valid process handle with query access.
+    let pid = unsafe { GetProcessId(info.hProcess) };
+    if pid == 0 {
+        return Err(io::Error::last_os_error());
+    }
     // SAFETY: `process` is a valid process handle with SYNCHRONIZE access.
     if unsafe { WaitForSingleObject(info.hProcess, INFINITE) } != WAIT_OBJECT_0 {
         return Err(io::Error::last_os_error());
@@ -117,7 +138,7 @@ pub fn run_elevated(program: &std::path::Path, parameters: &str) -> io::Result<u
         return Err(io::Error::last_os_error());
     }
     drop(process);
-    Ok(code)
+    Ok(ElevatedExit { pid, code })
 }
 
 /// Accepts only `http` and `https` URLs made of printable ASCII other than space

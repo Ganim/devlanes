@@ -12,7 +12,7 @@ use devlanes_hosts_helper::protocol::{
     self, DENIED, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Response,
 };
 use devlanes_hosts_service::handler::Target;
-use devlanes_hosts_service::server::{ServerConfig, read_frame, serve};
+use devlanes_hosts_service::server::{FrameError, ServerConfig, read_frame, serve};
 use devlanes_sys::windows::pipe::{ERROR_PIPE_BUSY, open_client};
 use devlanes_sys::windows::token::{self, Sid};
 use tokio::io::AsyncWriteExt as _;
@@ -67,6 +67,7 @@ impl Running {
             target: Target {
                 hosts: hosts.clone(),
                 flush: false,
+                check_directory: false,
             },
         };
         let task = tokio::spawn(async move {
@@ -234,13 +235,44 @@ async fn a_taken_pipe_name_is_refused() {
         target: Target {
             hosts: dir.path().join("hosts"),
             flush: false,
+            check_directory: false,
         },
     };
+    let started = std::time::Instant::now();
     let result = tokio::time::timeout(TIMEOUT, serve(config, std::future::pending()))
         .await
         .expect("refused in time");
     assert!(result.is_err(), "{result:?}");
+    // The name is retried for a few seconds first, in case its holder is leaving.
+    assert!(started.elapsed() >= Duration::from_secs(4));
     server.stop().await;
+}
+
+/// A frame announcing far more than it sends fails as a short read, holding
+/// only what arrived.
+#[tokio::test]
+async fn short_frames_fail_without_the_announced_allocation() {
+    let mut framed = u32::try_from(MAX_REQUEST_BYTES)
+        .expect("limit fits")
+        .to_le_bytes()
+        .to_vec();
+    framed.extend_from_slice(b"version\n");
+    let mut reader = framed.as_slice();
+    let error = read_frame(&mut reader, MAX_REQUEST_BYTES)
+        .await
+        .expect_err("short");
+    assert!(
+        matches!(&error, FrameError::Io(error) if error.kind() == std::io::ErrorKind::UnexpectedEof),
+        "{error:?}"
+    );
+    let whole = protocol::frame(b"version\n", MAX_REQUEST_BYTES).expect("frame");
+    let mut reader = whole.as_slice();
+    assert_eq!(
+        read_frame(&mut reader, MAX_REQUEST_BYTES)
+            .await
+            .expect("whole"),
+        b"version\n"
+    );
 }
 
 /// Runs the built service binary with `args`, killed after the timeout.

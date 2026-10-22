@@ -9,6 +9,7 @@ use devlanes_hosts_helper::exit;
 use devlanes_hosts_helper::names::{self, Suffixes};
 use devlanes_hosts_helper::protocol::{Request, Response, version_line};
 
+use crate::checks;
 use crate::write::{self, Outcome, UpdateError, WriteError};
 
 /// The file requests edit.
@@ -19,17 +20,34 @@ pub struct Target {
     pub hosts: PathBuf,
     /// Flush the DNS Client cache after a change; only for the real file.
     pub flush: bool,
+    /// Check before each write that the file's directory is admin-only
+    /// ([`checks::check_hosts_directory`]); only for the real file, since a temp
+    /// directory belongs to the user.
+    pub check_directory: bool,
 }
 
 /// A [`Response`] for `error`, with the helper's exit code.
 fn write_failure(error: WriteError) -> Response {
     let code = match error {
-        WriteError::Io { .. } => exit::IO,
-        WriteError::ReparsePoint(_) | WriteError::NotRegular(_) | WriteError::Changed(_) => {
-            exit::REFUSED_FILE
-        }
+        WriteError::Io { .. } | WriteError::LeftAtBackup { .. } => exit::IO,
+        WriteError::ReparsePoint(_)
+        | WriteError::NotRegular(_)
+        | WriteError::HardLinks(..)
+        | WriteError::ReadOnly(_)
+        | WriteError::Changed(_)
+        | WriteError::Backups { .. } => exit::REFUSED_FILE,
     };
     Response::failure(code, error.to_string())
+}
+
+/// The directory check before a write, when `target` asks for it.
+fn directory_refusal(target: &Target) -> Option<Response> {
+    if !target.check_directory {
+        return None;
+    }
+    checks::check_hosts_directory(&target.hosts)
+        .err()
+        .map(|error| Response::failure(exit::REFUSED_FILE, error.to_string()))
 }
 
 /// A [`Response`] for a failed update.
@@ -52,12 +70,17 @@ pub fn handle(request: &Request, target: &Target) -> Response {
                 Ok(current) => Response::ok(String::from_utf8_lossy(current.unwrap_or_default())),
             },
         },
-        Request::Clear => match write::update(&target.hosts, |bytes| {
-            block::rewrite(bytes, &BTreeSet::new())
-        }) {
-            Ok(outcome) => finish(target, outcome, 0),
-            Err(error) => update_failure(error),
-        },
+        Request::Clear => {
+            if let Some(refusal) = directory_refusal(target) {
+                return refusal;
+            }
+            match write::update(&target.hosts, |bytes| {
+                block::rewrite(bytes, &BTreeSet::new())
+            }) {
+                Ok(outcome) => finish(target, outcome, 0),
+                Err(error) => update_failure(error),
+            }
+        }
         Request::Apply { tld, names } => {
             let suffixes = match Suffixes::new(tld.as_deref()) {
                 Ok(suffixes) => suffixes,
@@ -67,6 +90,9 @@ pub fn handle(request: &Request, target: &Target) -> Response {
                 Ok(names) => names,
                 Err(error) => return Response::failure(exit::INVALID_NAMES, error.to_string()),
             };
+            if let Some(refusal) = directory_refusal(target) {
+                return refusal;
+            }
             match write::update(&target.hosts, |bytes| block::rewrite(bytes, &names)) {
                 Ok(outcome) => finish(target, outcome, names.len()),
                 Err(error) => update_failure(error),
@@ -107,8 +133,26 @@ mod tests {
             Target {
                 hosts,
                 flush: false,
+                check_directory: false,
             },
         )
+    }
+
+    /// With the directory check on, a directory the user owns (a temp one here)
+    /// refuses writes; reads still work.
+    #[test]
+    fn writes_need_an_admin_only_directory_when_checked() {
+        let (_dir, target) = target();
+        let checked = Target {
+            check_directory: true,
+            ..target
+        };
+        for request in [apply(None, "a.localhost\n"), Request::Clear] {
+            let response = handle(&request, &checked);
+            assert_eq!(response.code, exit::REFUSED_FILE, "{response:?}");
+        }
+        assert_eq!(handle(&Request::Status, &checked), Response::ok(""));
+        assert_eq!(fs::read_to_string(&checked.hosts).expect("read"), STOCK);
     }
 
     fn apply(tld: Option<&str>, names: &str) -> Request {
@@ -192,6 +236,7 @@ mod tests {
         let directory = Target {
             hosts: target.hosts.parent().expect("parent").to_owned(),
             flush: false,
+            check_directory: false,
         };
         assert_eq!(
             handle(&Request::Status, &directory).code,

@@ -60,24 +60,28 @@ mod windows {
 
     /// A `cmd` spinning one core until killed.
     fn busy() -> Owned {
-        spawn("/d /c \"for /l %i in (0,0,1) do @rem\"")
+        let mut command = Command::new("cmd");
+        command.raw_arg("/d /c \"for /l %i in (0,0,1) do @rem\"");
+        spawn(command)
     }
 
-    /// A `cmd` waiting about 30 seconds without using CPU.
+    /// A `ping` waiting about 30 seconds without using CPU. Started directly, not
+    /// through `cmd`, so the process the test samples and kills is the one waiting.
     fn idle() -> Owned {
-        spawn("/d /c \"ping -n 30 127.0.0.1 >nul\"")
+        let mut command = Command::new("ping");
+        command.args(["-n", "30", "127.0.0.1"]);
+        spawn(command)
     }
 
-    /// Starts `cmd` with a raw command line and no inherited output.
-    fn spawn(arguments: &str) -> Owned {
+    /// Starts `command` with no inherited input or output.
+    fn spawn(mut command: Command) -> Owned {
         Owned(
-            Command::new("cmd")
-                .raw_arg(arguments)
+            command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .expect("spawn cmd"),
+                .expect("spawn test child"),
         )
     }
 

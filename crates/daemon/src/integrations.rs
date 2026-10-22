@@ -770,8 +770,9 @@ async fn git_sh_from_exec_path() -> Option<std::path::PathBuf> {
 /// Reports whether the OS forwards the devlanes TLD to the embedded DNS server.
 /// OS-specific file locations live in the implementation, not the engine.
 pub trait ResolverFiles: Send + Sync {
-    /// `{path, installed, matches}` for the file that routes `tld` to `server`.
-    /// Called on a blocking thread.
+    /// `{path, installed, matches}` for the file that routes `tld` to `server`
+    /// (`{namespace, installed, matches, ...}` for the Windows NRPT rule).
+    /// Called on a blocking thread inside the runtime.
     fn status(&self, tld: &str, server: std::net::SocketAddr) -> Value;
 }
 

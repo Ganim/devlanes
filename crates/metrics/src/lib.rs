@@ -163,7 +163,8 @@ pub struct UnitTarget {
     pub unit: UnitKey,
     /// Session ids whose members belong to the unit (normally the leader's).
     /// Collectors ignore 0 and 1 so a bad id cannot sweep in system sessions.
-    /// Empty on Windows, which has no sessions; `processes` lists the job's members.
+    /// Empty on Windows, which has no sessions; `processes` lists the runner's
+    /// tracked processes (job members plus descendants by parent PID).
     pub sessions: Vec<u32>,
     /// Leader and tracked descendants. Entries whose start time no longer
     /// matches are skipped because the PID was reused.

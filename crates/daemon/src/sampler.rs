@@ -473,7 +473,8 @@ fn unit_sessions(leader: Option<ProcessIdentity>) -> Vec<u32> {
 }
 
 /// None: Windows has no sessions to group by (an identity's `sid` is its own
-/// PID). The unit's job members arrive as tracked processes instead.
+/// PID). The runner's tracked processes (job members plus descendants by parent
+/// PID) arrive as `processes` instead.
 #[cfg(windows)]
 fn unit_sessions(_leader: Option<ProcessIdentity>) -> Vec<u32> {
     Vec::new()

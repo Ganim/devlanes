@@ -12,6 +12,9 @@ use devlanes_sys::windows::usage::{ProcessUsage, process_usage};
 /// 100 ns ticks between 1601-01-01 (the `FILETIME` epoch) and 1970-01-01.
 const FILETIME_UNIX_OFFSET: u64 = 116_444_736_000_000_000;
 
+/// Age, in 100 ns ticks (one second), below which a first sighting reports no CPU.
+const MIN_FIRST_SIGHT_AGE: u64 = 10_000_000;
+
 /// Previous CPU reading of one process, keyed by (pid, creation time).
 #[derive(Debug, Clone, Copy)]
 struct CpuReading {
@@ -22,9 +25,11 @@ struct CpuReading {
 
 /// Samples the processes the daemon tracks for each unit.
 ///
-/// A unit's processes are its job's members as the runner last listed them (at
-/// most half a second old), so the collector measures exactly the identities it
-/// is given and ignores session ids, which Windows does not have. Identities
+/// A unit's processes are the runner's tracked processes as of its last
+/// snapshot (at most half a second old): the job's members plus their
+/// descendants by parent PID, including those outside the job. The collector
+/// measures exactly the identities it is given and ignores session ids, which
+/// Windows does not have. Identities
 /// whose PID now names a process started at another time, exited processes and
 /// processes that refuse to be opened are skipped. A process listed by several
 /// targets counts for the first one.
@@ -107,11 +112,10 @@ fn collect(previous: &mut HashMap<(u32, u64), CpuReading>, units: &[UnitTarget])
                     usage.cpu_time.saturating_sub(last.cpu_time),
                     now.duration_since(last.at).as_nanos(),
                 ),
-                // First sight: lifetime average, so a busy process is not reported
-                // idle for a tick. Creation time is wall-clock `FILETIME`.
-                None => percent(
+                // Creation time is wall-clock `FILETIME`.
+                None => first_sight_percent(
                     usage.cpu_time,
-                    u128::from(now_filetime.saturating_sub(identity.start_time)) * 100,
+                    now_filetime.saturating_sub(identity.start_time),
                 ),
             };
             readings.insert(
@@ -147,6 +151,18 @@ fn footprint(usage: &ProcessUsage) -> u64 {
     usage.private_working_set.unwrap_or(usage.private_bytes)
 }
 
+/// CPU of a process seen for the first time: its lifetime average, so a busy
+/// process is not reported idle for a tick. Younger than [`MIN_FIRST_SIGHT_AGE`]
+/// it reads 0: process startup burns CPU in a burst, and over a few milliseconds
+/// of age (with creation and clock times of coarse, different resolutions) the
+/// average can read many cores' worth.
+fn first_sight_percent(cpu_ticks: u64, age_ticks: u64) -> f64 {
+    if age_ticks < MIN_FIRST_SIGHT_AGE {
+        return 0.0;
+    }
+    percent(cpu_ticks, u128::from(age_ticks) * 100)
+}
+
 /// CPU time (100 ns units) over wall time (ns) as a percentage of one core; 0
 /// when no time elapsed.
 fn percent(cpu_ticks: u64, wall_ns: u128) -> f64 {
@@ -177,6 +193,17 @@ mod tests {
         // Two busy cores over one second.
         assert!((percent(20_000_000, 1_000_000_000) - 200.0).abs() < 1e-9);
         assert_eq!(percent(5, 0), 0.0);
+    }
+
+    #[test]
+    fn first_sight_is_lifetime_average_once_a_second_old() {
+        // 50 ms of startup CPU at 10 ms of age would read 500%.
+        assert_eq!(first_sight_percent(500_000, 100_000), 0.0);
+        assert_eq!(first_sight_percent(500_000, MIN_FIRST_SIGHT_AGE - 1), 0.0);
+        assert_eq!(first_sight_percent(500_000, 0), 0.0);
+        // One second of CPU over four seconds of life.
+        assert!((first_sight_percent(10_000_000, 40_000_000) - 25.0).abs() < 1e-9);
+        assert!((first_sight_percent(5_000_000, MIN_FIRST_SIGHT_AGE) - 50.0).abs() < 1e-9);
     }
 
     #[test]

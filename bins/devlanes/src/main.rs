@@ -21,6 +21,8 @@ mod orphans;
 mod output;
 mod progress;
 mod remote;
+#[cfg(windows)]
+mod resolver_nrpt;
 mod start_ui;
 mod verbose;
 mod wiring;

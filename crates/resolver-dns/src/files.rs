@@ -130,12 +130,17 @@ fn restart_resolved() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::default_listen;
+
+    /// The Unix default listen address, spelled out so the tests also run on
+    /// Windows, whose default differs.
+    fn unix_listen() -> SocketAddr {
+        "127.0.0.1:15353".parse().expect("addr")
+    }
 
     #[test]
     fn macos_file() {
         let zone = Zone::new("test").expect("zone");
-        let file = macos_resolver(&zone, default_listen());
+        let file = macos_resolver(&zone, unix_listen());
         assert_eq!(file.path, PathBuf::from("/etc/resolver/test"));
         assert_eq!(
             file.contents,
@@ -149,7 +154,7 @@ mod tests {
     #[test]
     fn systemd_needs_dns_delegates() {
         let zone = Zone::new("dev.internal").expect("zone");
-        let server = default_listen();
+        let server = unix_listen();
         let delegate = systemd_resolver(&zone, server, 258).expect("delegate");
         assert_eq!(
             delegate.path,

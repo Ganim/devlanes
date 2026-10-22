@@ -1,10 +1,12 @@
 //! Actions that must run in the user's terminal, never in the daemon: CA trust, the
-//! hosts helper and the OS resolver file (they prompt for a password) and
+//! hosts helper and the OS resolver file or NRPT rule (they prompt for a password
+//! or administrator approval) and
 //! `secrets unlock` (fnox asks for the vault there).
 
+#[cfg(unix)]
+use std::net::SocketAddr;
 use std::{
     collections::BTreeSet,
-    net::SocketAddr,
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -13,7 +15,9 @@ use std::{
 use devlanes_cli::{Action, Rendered, Runtime};
 use devlanes_client::{Client, Paths};
 use devlanes_proto::{Context, Method, RpcError};
+#[cfg(unix)]
 use devlanes_resolver_dns::ResolverFile;
+#[cfg(unix)]
 use devlanes_resolver_hosts::CommandSpec;
 use devlanes_sys::NoWindow;
 use devlanes_trust::{CaCertificate, TrustStatus, TrustStore, TrustTarget};
@@ -555,13 +559,6 @@ pub fn resolver_file(tld: &str, server: SocketAddr) -> Result<ResolverFile, Stri
     }
 }
 
-/// No OS resolver file on Windows: the resolver strategy there needs NRPT rules,
-/// which devlanes does not write yet.
-#[cfg(windows)]
-pub fn resolver_file(_tld: &str, _server: SocketAddr) -> Result<ResolverFile, String> {
-    Err("the resolver strategy is not supported on Windows yet".into())
-}
-
 /// The version from `systemctl --version`'s first line, `systemd 255 (255.4-1)`.
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
 fn systemd_version(output: &str) -> Option<u32> {
@@ -571,6 +568,7 @@ fn systemd_version(output: &str) -> Option<u32> {
 }
 
 /// Absolute path of a root-run program from the system directories, never `PATH`.
+#[cfg(unix)]
 fn system_program(name: &str) -> Result<String, RpcError> {
     devlanes_trust::find_system_program(&devlanes_trust::SystemExecutor, name)
         .map(|path| path.display().to_string())
@@ -585,11 +583,13 @@ fn system_program(name: &str) -> Result<String, RpcError> {
 
 /// Where `certs trust --resolver` records the file it wrote, so `untrust` removes
 /// that file even after `hostnames.tld` changes.
+#[cfg(unix)]
 fn resolver_record(paths: &Paths) -> PathBuf {
     paths.home.join("resolver-file")
 }
 
 /// What occupies a resolver file path now.
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Occupant {
     Absent,
@@ -600,6 +600,7 @@ enum Occupant {
 }
 
 /// Reads `path` to see whose file it is. Blocking.
+#[cfg(unix)]
 fn occupant(path: &Path) -> Result<Occupant, String> {
     match std::fs::read_to_string(path) {
         Ok(contents) if devlanes_resolver_dns::is_managed(&contents) => Ok(Occupant::Devlanes),
@@ -611,6 +612,7 @@ fn occupant(path: &Path) -> Result<Occupant, String> {
 }
 
 /// Files to remove and the file to write for one `--resolver` run.
+#[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 struct ResolverPlan {
     remove: Vec<ResolverFile>,
@@ -620,6 +622,7 @@ struct ResolverPlan {
 /// Decides what `--resolver` changes. `configured` is the file for the current
 /// `hostnames.tld`, `recorded` the file the last install wrote. Only files that
 /// start with the devlanes marker are overwritten or removed.
+#[cfg(unix)]
 fn resolver_plan(
     install: bool,
     configured: Option<ResolverFile>,
@@ -669,7 +672,7 @@ fn resolver_plan(
 }
 
 /// The error for `--resolver` without the strategy configured or a recorded install.
-fn not_configured() -> RpcError {
+pub(crate) fn not_configured() -> RpcError {
     RpcError::new(
         "resolver_not_configured",
         json!({"message": "set hostnames.resolver: resolver and hostnames.tld in the user config first"}),
@@ -677,20 +680,30 @@ fn not_configured() -> RpcError {
     )
 }
 
+/// `hostnames.tld` from the user config when `hostnames.resolver` selects the
+/// resolver strategy, unvalidated.
+pub(crate) fn resolver_tld(paths: &Paths) -> Option<String> {
+    let config = devlanes_config::load_user(paths.home.join("config.yaml")).unwrap_or_default();
+    let hostnames = config.hostnames;
+    (hostnames.resolver == devlanes_config::Resolver::Resolver)
+        .then_some(hostnames.tld)
+        .flatten()
+        .filter(|tld| !tld.is_empty())
+}
+
+// Windows routes the TLD with an NRPT rule instead of a resolver file.
+#[cfg(windows)]
+use crate::resolver_nrpt::apply as resolver_install;
+
 /// `certs trust --resolver` writes the OS resolver file for `hostnames.tld` with
 /// sudo; `certs untrust --resolver` removes the file the last install recorded.
 /// Either way the OS is told to reload. Files without the devlanes marker are
 /// never touched.
+#[cfg(unix)]
 async fn resolver_install(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
-    crate::hosts::privileged_supported("the resolver strategy on Windows")?;
     let paths = Paths::discover()
         .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
-    let config = devlanes_config::load_user(paths.home.join("config.yaml")).unwrap_or_default();
-    let hostnames = config.hostnames;
-    let tld = (hostnames.resolver == devlanes_config::Resolver::Resolver)
-        .then_some(hostnames.tld)
-        .flatten()
-        .filter(|tld| !tld.is_empty());
+    let tld = resolver_tld(&paths);
     // The daemon listens on the default address; there is no setting for it.
     let server = devlanes_resolver_dns::default_listen();
     let record = resolver_record(&paths);
@@ -1216,6 +1229,7 @@ oA==
     }
 
     /// A resolver file at `path` (contents are irrelevant to planning).
+    #[cfg(unix)]
     fn file(path: &str) -> ResolverFile {
         ResolverFile {
             path: PathBuf::from(path),
@@ -1225,6 +1239,7 @@ oA==
     }
 
     /// Occupants by path for planning tests.
+    #[cfg(unix)]
     fn occupants(
         entries: &'static [(&'static str, Occupant)],
     ) -> impl Fn(&Path) -> Result<Occupant, String> {
@@ -1236,6 +1251,8 @@ oA==
         }
     }
 
+    // Resolver files are Unix only; `crate::resolver_nrpt` has the Windows tests.
+    #[cfg(unix)]
     #[test]
     /// Valet's or puma-dev's `/etc/resolver/test` is neither overwritten nor removed.
     fn foreign_resolver_files_are_refused() {
@@ -1248,6 +1265,7 @@ oA==
         assert_eq!(error.code, "resolver_file_foreign");
     }
 
+    #[cfg(unix)]
     #[test]
     /// Install writes the configured file and drops the recorded one after a TLD
     /// change; untrust removes the recorded file, not the configured one.
@@ -1309,6 +1327,7 @@ oA==
         );
     }
 
+    #[cfg(unix)]
     #[test]
     /// Only marker-first files count as devlanes'.
     fn occupant_reads_the_marker() {
