@@ -248,10 +248,14 @@ pub fn profiles() -> Vec<ProfileInfo> {
     ]
 }
 
+/// The fake daemon's version: this build's, so no version-skew notice shows
+/// unless a test sets another version on purpose.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// `daemon.status` as the daemon sends it.
 pub fn daemon_status() -> Value {
     json!({
-        "version": "0.1.0",
+        "version": VERSION,
         "pid": 4242,
         "uptime_ms": 7_500_000,
         "managed_processes": 3,
@@ -262,7 +266,7 @@ pub fn daemon_status() -> Value {
 /// `doctor` facts with a fallback port, a missing CA and an applied hosts file.
 pub fn doctor_facts() -> Value {
     json!({
-        "version": "0.1.0",
+        "version": VERSION,
         "pid": 4242,
         "home": "/home/acme/.devlanes",
         "db_path": "/home/acme/.devlanes/state.db",

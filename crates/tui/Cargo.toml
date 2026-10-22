@@ -36,7 +36,7 @@ vt100 = "0.18"
 # The `screens` example draws every TUI page to PNG for design review.
 ab_glyph = "0.2"
 devlanes-core = { path = "../core" }
-insta = "1"
+insta = { version = "1", features = ["filters"] }
 png = "0.17"
 tempfile.workspace = true
 

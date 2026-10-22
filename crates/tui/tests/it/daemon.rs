@@ -77,9 +77,10 @@ async fn daemon_tab_at_80x24() -> TestResult {
     let buffer = render(&app)?;
     assert_clean(&buffer, "daemon tab");
     let text = screen(&buffer);
+    let facts = format!("{} · pid 4242 · up 2h 5m · 3 managed", crate::fake::VERSION);
     for expected in [
         // Below 100 columns the facts are two lines in the checks' box.
-        "0.1.0 · pid 4242 · up 2h 5m · 3 managed",
+        facts.as_str(),
         "https on fallback port 8443: port 443 needs root",
         "fix: devlanes certs trust",
         "following · all levels · repeats folded",
@@ -90,7 +91,7 @@ async fn daemon_tab_at_80x24() -> TestResult {
     ] {
         assert!(text.contains(expected), "missing {expected:?}:\n{text}");
     }
-    insta::assert_snapshot!("daemon_tab_80x24", text);
+    assert_screen!("daemon_tab_80x24", text);
     Ok(())
 }
 
@@ -274,7 +275,7 @@ async fn restart_and_stop_ask_first_and_enter_does_not_confirm() -> TestResult {
         "{detail:?}"
     );
     assert!(*strict);
-    insta::assert_snapshot!("restart_confirm_80x24", screen(&render(&app)?));
+    assert_screen!("restart_confirm_80x24", screen(&render(&app)?));
     assert!(
         app.update(key(KeyCode::Enter)).is_empty(),
         "enter must not restart"
@@ -358,7 +359,7 @@ async fn a_small_window_keeps_the_dialog_keys() -> TestResult {
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    insta::assert_snapshot!("clean_confirm_50x8", text);
+    assert_screen!("clean_confirm_50x8", text);
     Ok(())
 }
 
@@ -463,7 +464,7 @@ async fn clean_asks_y_or_enter() -> TestResult {
     assert!(app.update(key(KeyCode::Char('n'))).is_empty());
     assert!(app.dialog.is_none());
     app.update(shifted('C'));
-    insta::assert_snapshot!("clean_confirm_80x24", screen(&render(&app)?));
+    assert_screen!("clean_confirm_80x24", screen(&render(&app)?));
     let effects = app.update(key(KeyCode::Enter));
     assert!(matches!(effects.as_slice(), [Effect::CleanLane { lane }] if lane == "acme@0"));
     assert!(app.is_cleaning("acme@0"));

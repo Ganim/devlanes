@@ -1,5 +1,18 @@
 //! TUI tests against a fake daemon: rendering snapshots, key handling and resync.
 
+/// `insta::assert_snapshot!` with this build's version written as `X.Y.Z`:
+/// the fake daemon reports it, and a release bump must not change a
+/// snapshot. Versions a test sets on purpose must differ from it (`0.0.1`).
+macro_rules! assert_screen {
+    ($($arg:tt)*) => {{
+        let version = format!(r"\b{}\b", env!("CARGO_PKG_VERSION").replace('.', r"\."));
+        let mut settings = insta::Settings::clone_current();
+        settings.add_filter(&version, "X.Y.Z");
+        let _bound = settings.bind_to_scope();
+        insta::assert_snapshot!($($arg)*);
+    }};
+}
+
 mod daemon;
 mod errors;
 mod fake;
@@ -156,7 +169,7 @@ async fn snapshot_mixed_lanes_with_live_unit() -> TestResult {
         generation,
         b"\x1b[1mapi\x1b[0m listening on :20001\r\nGET /health 200\r\n",
     );
-    insta::assert_snapshot!("mixed_lanes", draw(&app)?.backend());
+    assert_screen!("mixed_lanes", draw(&app)?.backend());
     Ok(())
 }
 
@@ -170,7 +183,7 @@ async fn snapshot_failed_unit() -> TestResult {
         generation,
         b"Error: connect ECONNREFUSED 127.0.0.1:5432\r\n",
     );
-    insta::assert_snapshot!("failed_unit", draw(&app)?.backend());
+    assert_screen!("failed_unit", draw(&app)?.backend());
     Ok(())
 }
 
@@ -179,7 +192,7 @@ async fn snapshot_idle_lane_details() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 100, 20).await;
     select(&mut app, Selected::lane("acme@2"));
-    insta::assert_snapshot!("lane_details", draw(&app)?.backend());
+    assert_screen!("lane_details", draw(&app)?.backend());
     Ok(())
 }
 
@@ -188,7 +201,7 @@ async fn snapshot_empty_project() -> TestResult {
     let api = FakeApi::with_lanes(Vec::new());
     let (app, effects) = loaded(&api, 80, 12).await;
     assert!(effects.is_empty());
-    insta::assert_snapshot!("empty", draw(&app)?.backend());
+    assert_screen!("empty", draw(&app)?.backend());
     Ok(())
 }
 
@@ -196,7 +209,7 @@ async fn snapshot_empty_project() -> TestResult {
 async fn snapshot_tiny_terminal() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (app, _) = loaded(&api, 30, 6).await;
-    insta::assert_snapshot!("tiny", draw(&app)?.backend());
+    assert_screen!("tiny", draw(&app)?.backend());
     Ok(())
 }
 
@@ -246,7 +259,7 @@ async fn snapshot_monitor_tab() -> TestResult {
         .map(|cell| cell.symbol())
         .collect();
     assert!(text.contains("3.9G"), "3G + 900M summed: {text}");
-    insta::assert_snapshot!("monitor", terminal.backend());
+    assert_screen!("monitor", terminal.backend());
     Ok(())
 }
 
@@ -256,7 +269,7 @@ async fn snapshot_monitor_without_metrics_uses_status_numbers() -> TestResult {
     let (mut app, _) = loaded(&api, 80, 12).await;
     app.update(shifted('M'));
     app.update(Msg::Metrics(api.metrics(app.metrics_query()).await));
-    insta::assert_snapshot!("monitor_fallback", draw(&app)?.backend());
+    assert_screen!("monitor_fallback", draw(&app)?.backend());
     Ok(())
 }
 
@@ -267,7 +280,7 @@ async fn snapshot_run_confirm_and_reconnecting() -> TestResult {
     select(&mut app, Selected::lane("acme@1"));
     app.update(shifted('C'));
     app.update(Msg::EventsEnded(None));
-    insta::assert_snapshot!("confirm_reconnecting", draw(&app)?.backend());
+    assert_screen!("confirm_reconnecting", draw(&app)?.backend());
     Ok(())
 }
 
@@ -1473,6 +1486,6 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
             }
         })
         .collect();
-    insta::assert_snapshot!("drive_after_resync", screen);
+    assert_screen!("drive_after_resync", screen);
     Ok(())
 }

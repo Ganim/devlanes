@@ -196,7 +196,7 @@ async fn compose_failure_at_80x24() -> TestResult {
     let mut app = portal_app(80, 24).await?;
     fail_start(&mut app);
     let buffer = check_layout(&mut app)?;
-    insta::assert_snapshot!("compose_failure_80x24", screen(&buffer));
+    assert_screen!("compose_failure_80x24", screen(&buffer));
     Ok(())
 }
 
@@ -205,7 +205,7 @@ async fn compose_failure_at_160x45() -> TestResult {
     let mut app = portal_app(160, 45).await?;
     fail_start(&mut app);
     let buffer = check_layout(&mut app)?;
-    insta::assert_snapshot!("compose_failure_160x45", screen(&buffer));
+    assert_screen!("compose_failure_160x45", screen(&buffer));
     Ok(())
 }
 

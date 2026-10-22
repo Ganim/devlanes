@@ -4,7 +4,7 @@ expression: text
 ---
 " devlanes  1 acme ●   2 shop ●              ✕ 1 failed  M   D daemon · 2 issues "
 "┌ daemon ───────────────────────────────────────────── 1 fail · 1 warn · i all ┐"
-"│daemon    0.1.0 · pid 4242 · up 2h 5m · 3 managed                             │"
+"│daemon    X.Y.Z · pid 4242 · up 2h 5m · 3 managed                             │"
 "│socket    /home/acme/.devlanes/run/daemon.sock                                │"
 "│fail tls     no CA: no CA has been created yet                                │"
 "│             fix: devlanes certs trust                                        │"

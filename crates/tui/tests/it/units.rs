@@ -176,7 +176,7 @@ async fn unit_colors_are_names_and_state_is_glyph_and_word() -> TestResult {
         assert_eq!(cell.fg, Color::Reset, "column {column}");
         assert!(cell.modifier.contains(ratatui::style::Modifier::REVERSED));
     }
-    insta::assert_snapshot!("colored_units_60x24", styled(&buffer, 2..15));
+    assert_screen!("colored_units_60x24", styled(&buffer, 2..15));
 
     // Unselected, a failed unit keeps its own name color, a red glyph and
     // state word.
@@ -309,7 +309,7 @@ async fn profile_picker_preselects_toggles_and_starts_checked_profiles() -> Test
     assert!(e2e.contains("+e2e, web, api, worker"), "{text}");
     let frontend = line("[ ] frontend");
     assert!(frontend.contains("no infra"), "{text}");
-    insta::assert_snapshot!("profiles_80x24", text);
+    assert_screen!("profiles_80x24", text);
     let effects = app.update(key(KeyCode::Enter));
     let [
         Effect::Control {
@@ -466,7 +466,7 @@ async fn an_older_daemon_gets_a_plain_message() -> TestResult {
         text.contains("This daemon is too old for profiles."),
         "{text}"
     );
-    insta::assert_snapshot!("profiles_unsupported_80x24", text);
+    assert_screen!("profiles_unsupported_80x24", text);
     assert!(app.errors.is_empty(), "an older daemon is not an error");
     // Space and enter do nothing there; esc closes.
     assert!(app.update(key(KeyCode::Enter)).is_empty());
