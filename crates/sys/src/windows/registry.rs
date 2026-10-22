@@ -1,5 +1,6 @@
-//! String values under `HKEY_CURRENT_USER`, for `daemon install`'s logon entry
-//! (`Software\Microsoft\Windows\CurrentVersion\Run`). Only the current user's
+//! String and binary values under `HKEY_CURRENT_USER`, for `daemon install`'s
+//! logon entry (`Software\Microsoft\Windows\CurrentVersion\Run`) and its Task
+//! Manager state (`...\Explorer\StartupApproved\Run`). Only the current user's
 //! hive is reachable, so nothing here needs elevation.
 
 use std::ffi::OsStr;
@@ -9,8 +10,9 @@ use std::ptr;
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
-    RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_BINARY, REG_OPTION_NON_VOLATILE, REG_ROUTINE_FLAGS,
+    REG_SZ, REG_VALUE_TYPE, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
+    RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetValueExW,
 };
 
 use super::security::wide;
@@ -27,6 +29,35 @@ fn check(status: WIN32_ERROR) -> io::Result<()> {
 /// The `REG_SZ` value `name` of `HKCU\<subkey>`, or `None` when the key or the
 /// value does not exist. Other value types are an error.
 pub fn read_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
+    let Some(bytes) = read_raw(subkey, name, RRF_RT_REG_SZ)? else {
+        return Ok(None);
+    };
+    let text: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    // RegGetValueW guarantees the terminating NUL for REG_SZ.
+    let end = text
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(text.len());
+    std::ffi::OsString::from_wide(&text[..end])
+        .into_string()
+        .map(Some)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "value is not Unicode"))
+}
+
+/// The `REG_BINARY` value `name` of `HKCU\<subkey>`, or `None` when the key or
+/// the value does not exist. Other value types are an error.
+pub fn read_binary(subkey: &str, name: &str) -> io::Result<Option<Vec<u8>>> {
+    read_raw(subkey, name, RRF_RT_REG_BINARY)
+}
+
+/// The bytes of a value whose type `flags` allows, or `None` when the key or the
+/// value does not exist.
+fn read_raw(subkey: &str, name: &str, flags: REG_ROUTINE_FLAGS) -> io::Result<Option<Vec<u8>>> {
     let key = wide(OsStr::new(subkey));
     let name = wide(OsStr::new(name));
     let mut bytes: u32 = 0;
@@ -37,7 +68,7 @@ pub fn read_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
             HKEY_CURRENT_USER,
             key.as_ptr(),
             name.as_ptr(),
-            RRF_RT_REG_SZ,
+            flags,
             ptr::null_mut(),
             ptr::null_mut(),
             &raw mut bytes,
@@ -50,7 +81,7 @@ pub fn read_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
     // The value may grow between the two calls; one retry with the new size is
     // enough for a value nobody else writes in a loop.
     for _ in 0..2 {
-        let mut buffer = vec![0u16; (bytes as usize).div_ceil(2)];
+        let mut buffer = vec![0u8; bytes as usize];
         let mut size = bytes;
         // SAFETY: `buffer` holds `size` writable bytes; the strings outlive the call.
         let status = unsafe {
@@ -58,7 +89,7 @@ pub fn read_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
                 HKEY_CURRENT_USER,
                 key.as_ptr(),
                 name.as_ptr(),
-                RRF_RT_REG_SZ,
+                flags,
                 ptr::null_mut(),
                 buffer.as_mut_ptr().cast(),
                 &raw mut size,
@@ -72,17 +103,8 @@ pub fn read_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
             }
             status => check(status)?,
         }
-        // RegGetValueW guarantees the terminating NUL for REG_SZ.
-        let units = (size as usize / 2).min(buffer.len());
-        let text = &buffer[..units];
-        let end = text
-            .iter()
-            .position(|&unit| unit == 0)
-            .unwrap_or(text.len());
-        return std::ffi::OsString::from_wide(&text[..end])
-            .into_string()
-            .map(Some)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "value is not Unicode"));
+        buffer.truncate(size as usize);
+        return Ok(Some(buffer));
     }
     Err(io::Error::other("registry value kept changing size"))
 }
@@ -90,9 +112,22 @@ pub fn read_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
 /// Writes `value` as the `REG_SZ` value `name` of `HKCU\<subkey>`, creating the
 /// key when it is missing.
 pub fn write_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
+    let data = wide(OsStr::new(value));
+    let bytes: Vec<u8> = data.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+    // `data` ends with the terminating NUL that REG_SZ needs.
+    write_raw(subkey, name, REG_SZ, &bytes)
+}
+
+/// Writes `value` as the `REG_BINARY` value `name` of `HKCU\<subkey>`, creating
+/// the key when it is missing.
+pub fn write_binary(subkey: &str, name: &str, value: &[u8]) -> io::Result<()> {
+    write_raw(subkey, name, REG_BINARY, value)
+}
+
+/// Writes `data` as a value of type `kind`, creating the key when it is missing.
+fn write_raw(subkey: &str, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> io::Result<()> {
     let key_name = wide(OsStr::new(subkey));
     let name = wide(OsStr::new(name));
-    let data = wide(OsStr::new(value));
     let mut key: HKEY = ptr::null_mut();
     // SAFETY: the key name outlives the call; `key` receives an open handle.
     check(unsafe {
@@ -108,12 +143,16 @@ pub fn write_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
             ptr::null_mut(),
         )
     })?;
-    let bytes = u32::try_from(data.len() * 2)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "value is too long"))?;
-    // SAFETY: `key` is open with KEY_SET_VALUE; `data` holds `bytes` bytes
-    // including the terminating NUL that REG_SZ needs.
-    let status =
-        unsafe { RegSetValueExW(key, name.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), bytes) };
+    let Ok(bytes) = u32::try_from(data.len()) else {
+        // SAFETY: `key` was opened above and is closed once.
+        unsafe { RegCloseKey(key) };
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "value is too long",
+        ));
+    };
+    // SAFETY: `key` is open with KEY_SET_VALUE; `data` holds `bytes` bytes.
+    let status = unsafe { RegSetValueExW(key, name.as_ptr(), 0, kind, data.as_ptr(), bytes) };
     // SAFETY: `key` was opened above and is closed once.
     unsafe { RegCloseKey(key) };
     check(status)
@@ -192,6 +231,38 @@ mod tests {
         );
         assert!(delete_value(&scratch.0, "devlanes")?);
         assert_eq!(read_string(&scratch.0, "devlanes")?, None);
+        delete_tree(&scratch.0)?;
+        delete_tree(&scratch.0)?;
+        assert!(delete_tree(r"\").is_err());
+        Ok(())
+    }
+
+    /// Binary values round-trip, including an empty one; a value of the other
+    /// type is an error rather than a misread.
+    #[test]
+    fn binary_values_round_trip() -> io::Result<()> {
+        let scratch = Scratch::new();
+        assert_eq!(read_binary(&scratch.0, "devlanes")?, None);
+        let value = [3, 0, 0, 0, 0x2c, 0xf1, 0x65, 0x7f, 0x99, 0xed, 0xd9, 0x01];
+        write_binary(&scratch.0, "devlanes", &value)?;
+        assert_eq!(
+            read_binary(&scratch.0, "devlanes")?.as_deref(),
+            Some(&value[..])
+        );
+        write_binary(&scratch.0, "empty", &[])?;
+        assert_eq!(read_binary(&scratch.0, "empty")?.as_deref(), Some(&[][..]));
+        assert!(read_string(&scratch.0, "devlanes").is_err());
+        write_string(&scratch.0, "text", "x")?;
+        assert!(read_binary(&scratch.0, "text").is_err());
+        Ok(())
+    }
+
+    /// An empty string, stored as only its terminating NUL, reads back empty.
+    #[test]
+    fn empty_string_round_trips() -> io::Result<()> {
+        let scratch = Scratch::new();
+        write_string(&scratch.0, "devlanes", "")?;
+        assert_eq!(read_string(&scratch.0, "devlanes")?.as_deref(), Some(""));
         delete_tree(&scratch.0)?;
         delete_tree(&scratch.0)?;
         assert!(delete_tree(r"\").is_err());

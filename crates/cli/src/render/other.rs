@@ -159,7 +159,7 @@ pub(super) fn run(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             cx.state(if failed { "failed" } else { "exited" })
         );
         if let Some(code) = int(data, "exit_code") {
-            line.push_str(&exit_field(code));
+            line.push_str(&exit_field(code, cx.agent()));
         }
         let mut lines = vec![line];
         for leftovers in list(data, "leftovers") {
@@ -437,7 +437,7 @@ pub(super) fn metrics(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
 }
 
 /// One event as `name subject state`, for `events` and streams without progress lines.
-pub(crate) fn event_line(event: &Event) -> String {
+pub(crate) fn event_line(event: &Event, cx: &Ctx<'_>) -> String {
     let data = &event.data;
     let name = clean(&event.event);
     match event.event.as_str() {
@@ -468,7 +468,7 @@ pub(crate) fn event_line(event: &Event) -> String {
                 text(data, "state")
             );
             if let Some(code) = int(data, "exit_code") {
-                line.push_str(&exit_field(code));
+                line.push_str(&exit_field(code, cx.agent()));
             }
             line
         }
@@ -489,7 +489,7 @@ pub(crate) fn event_line(event: &Event) -> String {
 }
 
 /// `events` without `-f`: the recent events.
-pub(super) fn events_page(data: &Value) -> Vec<String> {
+pub(super) fn events_page(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
     let items = list(data, "items");
     if items.is_empty() {
         return vec!["no recent events".into()];
@@ -497,7 +497,7 @@ pub(super) fn events_page(data: &Value) -> Vec<String> {
     items
         .iter()
         .filter_map(|item| serde_json::from_value::<Event>(item.clone()).ok())
-        .map(|event| event_line(&event))
+        .map(|event| event_line(&event, cx))
         .collect()
 }
 
@@ -561,7 +561,9 @@ pub(super) fn task_line(data: &Value, cx: &Ctx<'_>) -> Option<String> {
         "failed" => Some(format!(
             "{} {task}{}",
             cx.mark(Outcome::Fail),
-            int(data, "exit_code").map(exit_field).unwrap_or_default()
+            int(data, "exit_code")
+                .map(|code| exit_field(code, cx.agent()))
+                .unwrap_or_default()
         )),
         "skipped" => Some(cx.skipped(&task, data.get("reason").and_then(reason_text).as_deref())),
         _ => None,
@@ -1551,7 +1553,15 @@ pub(super) fn daemon_status(data: &Value) -> Vec<String> {
 /// on Windows), for `daemon status` and `doctor`. `None` without the facts.
 fn autostart_check(autostart: &Value) -> Option<Check> {
     let entry = text(autostart, "entry");
+    let disabled = autostart.get("disabled").and_then(Value::as_bool) == Some(true);
     let check = match autostart.get("installed").and_then(Value::as_bool) {
+        // Startup apps turned off in Task Manager or Settings keep their entry.
+        Some(true) if disabled => Check::new(
+            "daemon",
+            Outcome::Skip,
+            format!("the logon entry ({entry}) is turned off in Task Manager"),
+        )
+        .fix("devlanes daemon install"),
         Some(true) if autostart.get("current").and_then(Value::as_bool) == Some(true) => {
             Check::new("daemon", Outcome::Ok, format!("starts at logon ({entry})"))
         }

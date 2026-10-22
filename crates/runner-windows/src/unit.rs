@@ -22,7 +22,7 @@ use devlanes_core::{
 use devlanes_sys::windows::{
     conpty::PseudoConsole,
     job::Job,
-    proc::terminate_verified,
+    proc::{Held, terminate_verified},
     spawn::{Child, Spawn, Stdio, spawn},
 };
 use devlanes_sys::{DescendantTracker, ListeningSocket, ProcessInfo};
@@ -32,7 +32,7 @@ use tokio::{
     time::{self, Instant, MissedTickBehavior},
 };
 
-use crate::ctrl::{ConsoleHelper, Request};
+use crate::ctrl::{Anchor, ConsoleHelper, Request};
 use crate::{WindowsRunner, command};
 
 /// Read size per call; large enough for bursty build output.
@@ -43,6 +43,11 @@ const SWEEP_POLL: Duration = Duration::from_millis(25);
 const TERMINATED: u32 = 1;
 /// How long a pseudo console's output must stay quiet before it is closed.
 const OUTPUT_PAUSE: Duration = Duration::from_millis(100);
+/// How long the same `cmd.exe` processes must be all that runs before they count
+/// as shims waiting at "Terminate batch job (Y/N)?".
+const SHIM_SETTLE: Duration = Duration::from_millis(500);
+/// The console host every console has; it ends with the console.
+const CONSOLE_HOST: &str = "conhost.exe";
 /// Poll period while a stop waits for the unit to exit.
 const EXIT_POLL: Duration = Duration::from_millis(100);
 /// Ctrl-C as a key, which a console in processed-input mode turns into
@@ -60,16 +65,17 @@ pub struct ExitReport {
     pub swept: Vec<ProcessInfo>,
     /// Tracked processes still alive at the end, after the sweep gave up.
     pub escaped: Vec<ProcessInfo>,
-    /// Descendants outside the unit's job, deliberately left running by
-    /// [`ExitSweep::KeepDaemonized`] after a natural exit.
+    /// Descendants deliberately left running by [`ExitSweep::KeepDaemonized`]
+    /// after a natural exit: those not on the task's console, or every one when
+    /// the console could not be listed. Console hosts are not listed.
     pub left_running: Vec<ProcessInfo>,
 }
 
 /// How an explicit stop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StopOutcome {
-    /// The processes were terminated rather than asked to exit. Always true until
-    /// console control events are sent (graceful stop comes with the lifecycle work).
+    /// Processes were still running at the stop timeout and were terminated,
+    /// or the unit could not be asked (`SIGKILL`, no way to reach it).
     pub escalated: bool,
 }
 
@@ -101,13 +107,14 @@ struct Inner {
     /// When the readers last published output, for closing the console only once
     /// it went quiet.
     last_output: Arc<Mutex<Instant>>,
-    /// Sends console control events and lists console members; `None` disables
-    /// graceful stops of pipe units.
+    /// Sends console control events; `None` disables graceful stops of pipe
+    /// units.
     helper: Option<ConsoleHelper>,
-    /// Processes seen attached to the unit's own console (PID and start time),
-    /// for deciding what a task keeps after it exits. `None` until a listing
-    /// succeeded; only recorded for pipe tasks with a helper.
-    on_console: Mutex<Option<BTreeSet<(u32, u64)>>>,
+    /// The helper that stays on a pipe task's console, so what is still on it
+    /// can be listed after the task exits (decision Q9).
+    anchor: Arc<Mutex<ConsoleAnchor>>,
+    /// `cmd.exe` processes seen alone at the last shim check, and since when.
+    shims: Mutex<Option<SeenShims>>,
     leader_exited: AtomicBool,
     /// Set when the supervisor ended without publishing a real report.
     crashed: AtomicBool,
@@ -216,8 +223,8 @@ pub(crate) async fn spawn_unit(
     let (stops, requests) = mpsc::unbounded_channel();
     let mut tracker = DescendantTracker::new(identity);
     // `child` keeps the leader's PID from reuse for as long as the tracker
-    // lives, so breakaway children it started just before exiting are still
-    // found by parent once snapshots stop listing it.
+    // lives, so children it started just before exiting are still found by
+    // parent once snapshots stop listing it.
     tracker.hold_root(true);
     let inner = Arc::new(Inner {
         identity,
@@ -230,7 +237,8 @@ pub(crate) async fn spawn_unit(
         terminal: Mutex::new(launched.terminal),
         last_output,
         helper: runner.helper.clone(),
-        on_console: Mutex::new(None),
+        anchor: Arc::new(Mutex::new(ConsoleAnchor::NotWanted)),
+        shims: Mutex::new(None),
         leader_exited: AtomicBool::new(false),
         crashed: AtomicBool::new(false),
         stops,
@@ -261,9 +269,11 @@ fn launch(spec: &LaunchSpec, stderr: StderrMode) -> Result<Launched, Error> {
     let args: Vec<OsString> = spec.args.iter().map(OsString::from).collect();
     let command = command::build(OsStr::new(&spec.program), &args, &spec.env, &spec.cwd)
         .map_err(command_error)?;
-    // Breakaway is allowed: some tools start helpers with CREATE_BREAKAWAY_FROM_JOB
-    // and fail outright when refused. Those helpers are still tracked by parent.
-    let job = Job::create(true)?;
+    // Breakaway is refused: Git for Windows' MSYS2 runtime breaks every child out
+    // of a job that allows it, and a child whose short-lived parent (a fork
+    // before exec) was never seen escapes tracking by parent too. A tool that
+    // insists on CREATE_BREAKAWAY_FROM_JOB gets access denied instead.
+    let job = Job::create(false)?;
     let cwd = plain_drive_path(&spec.cwd);
     if spec.pty {
         return launch_in_console(spec, &command, job, &cwd);
@@ -463,6 +473,7 @@ async fn supervise(
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut stopping: Option<Stopping> = None;
     let mut waiter_alive = true;
+    inner.attach_anchor().await;
 
     let outcome = loop {
         let asking = stopping.filter(|s| !s.escalated);
@@ -482,7 +493,6 @@ async fn supervise(
                     break inner.leader_outcome(code);
                 }
                 inner.refresh_logged(timing.track_interval / 2).await;
-                inner.record_console().await;
             }
             Some(policy) = requests.recv() => {
                 let deadline = Instant::now() + policy.timeout;
@@ -517,12 +527,22 @@ async fn supervise(
         }
     };
     // A stop that arrived as the leader exited still counts, so a task's kept
-    // daemons are not spared from an explicit stop.
-    while requests.try_recv().is_ok() {
-        stopping.get_or_insert(Stopping {
-            deadline: Instant::now(),
-            escalated: false,
-        });
+    // daemons are not spared from an explicit stop; they are asked first too.
+    while let Ok(policy) = requests.try_recv() {
+        let deadline = Instant::now() + policy.timeout;
+        match &mut stopping {
+            Some(current) => current.deadline = current.deadline.min(deadline),
+            None => {
+                let asked = inner.ask_to_stop(policy.signal).await;
+                if !asked {
+                    inner.terminate_all().await;
+                }
+                stopping = Some(Stopping {
+                    deadline,
+                    escalated: !asked,
+                });
+            }
+        }
     }
     if let Some(current) = &mut stopping {
         // Members that outlive the leader get the rest of the grace period.
@@ -535,10 +555,6 @@ async fn supervise(
                 time::sleep(EXIT_POLL).await;
             }
         }
-    } else {
-        // The last look at the console's members before deciding what a task
-        // keeps; the leader is gone, but the others may still share it.
-        inner.record_console().await;
     }
     let stopped = stopping.is_some();
 
@@ -552,8 +568,14 @@ async fn supervise(
     if inner.pty {
         // Some ConPTY versions drop what they still hold on close, so the last
         // frame is given until the output pauses (bounded by the drain timeout).
-        let deadline = Instant::now() + timing.drain_timeout;
-        while Instant::now() < deadline && lock(&inner.last_output).elapsed() < OUTPUT_PAUSE {
+        // The pause counts from the sweep at the earliest: what a process wrote
+        // just before it was ended may not have been painted yet.
+        let swept_at = Instant::now();
+        let deadline = swept_at + timing.drain_timeout;
+        while Instant::now() < deadline
+            && (swept_at.elapsed() < OUTPUT_PAUSE
+                || lock(&inner.last_output).elapsed() < OUTPUT_PAUSE)
+        {
             time::sleep(OUTPUT_PAUSE / 4).await;
         }
     }
@@ -571,6 +593,56 @@ async fn supervise(
         escaped: sweep.escaped,
         left_running: sweep.left_running,
     });
+}
+
+/// Identities (PID, start time) of the `cmd.exe` processes running alone, and
+/// when that was first seen.
+type SeenShims = (BTreeSet<(u32, u64)>, Instant);
+
+/// The helper on a pipe task's console.
+enum ConsoleAnchor {
+    /// Not a pipe task in `KeepDaemonized` mode, or no helper configured.
+    NotWanted,
+    /// Wanted, but it could not attach.
+    Failed,
+    Attached(Anchor),
+    /// Used by the sweep or closed with the unit.
+    Closed,
+}
+
+/// What a task's exit sweep ends.
+enum KeepRule {
+    /// Everything: services, explicit stops, `pty: true` tasks.
+    KillAll,
+    /// Job members, without a helper to list the console.
+    ByJob,
+    /// Processes whose PID the console listed at the sweep.
+    ByConsole(BTreeSet<u32>),
+    /// Nothing: the console should have been listed and could not be.
+    KeepAll,
+}
+
+/// Sends `event` to `target`'s console through a one-off helper while holding
+/// `target` open, so the helper's attach by bare PID cannot reach a stranger
+/// that got the PID meanwhile. Blocking.
+fn send_held(helper: &ConsoleHelper, target: &ProcessIdentity, event: Request) -> bool {
+    let held = match Held::open(target) {
+        Ok(Some(held)) => held,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::debug!(%error, pid = target.pid, "console control event not sent");
+            return false;
+        }
+    };
+    let sent = helper.send(target.pid, event);
+    drop(held);
+    match sent {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::debug!(%error, pid = target.pid, "console control event not sent");
+            false
+        }
+    }
 }
 
 /// Stop progress owned by the supervisor.
@@ -703,23 +775,21 @@ impl Inner {
                     .await
                     .is_ok();
             }
+        } else if let Some(sent) = self.send_through_anchor(event).await {
+            asked = sent;
         } else if let Some(helper) = self.helper.clone() {
             // The leader's console is the unit's; after it exited, any member
             // still running shares it unless it made its own.
             let leader_alive = matches!(self.child.exit_code(), Ok(None));
             let target = if leader_alive {
-                Some(self.identity.pid)
+                Some(self.identity)
             } else {
-                live.first().map(|p| p.pid)
+                live.first().map(ProcessInfo::identity)
             };
-            if let Some(pid) = target {
-                match blocking(move || helper.send(pid, event)).await {
-                    Ok(Ok(())) => asked = true,
-                    Ok(Err(error)) => {
-                        tracing::debug!(%error, pid, "console control event not sent")
-                    }
-                    Err(error) => tracing::debug!(%error, pid, "console control event not sent"),
-                }
+            if let Some(target) = target {
+                asked = blocking(move || send_held(&helper, &target, event))
+                    .await
+                    .unwrap_or(false);
             }
         }
         let pids: Vec<u32> = live.iter().map(|p| p.pid).collect();
@@ -729,15 +799,54 @@ impl Inner {
         asked || closed > 0
     }
 
+    /// Sends `event` through the task's anchor; `None` without one.
+    async fn send_through_anchor(self: &Arc<Self>, event: Request) -> Option<bool> {
+        if !matches!(*lock(&self.anchor), ConsoleAnchor::Attached(_)) {
+            return None;
+        }
+        let anchor = Arc::clone(&self.anchor);
+        let sent = blocking(move || match &mut *lock(&anchor) {
+            ConsoleAnchor::Attached(anchor) => anchor.send(event).map_err(|error| {
+                tracing::debug!(%error, "console control event not sent through the anchor");
+            }),
+            _ => Err(()),
+        })
+        .await;
+        Some(matches!(sent, Ok(Ok(()))))
+    }
+
     /// Ends `cmd.exe` processes left waiting at "Terminate batch job (Y/N)?" once
     /// everything they ran has exited: a `.cmd` shim (`npm.cmd`) asks that after
     /// Ctrl-C or Ctrl-Break and would otherwise hold the stop until its timeout.
     /// This is expected cleanup, so it does not count as escalation.
+    ///
+    /// Only a pseudo console asks: with the `NUL` input of a pipe unit, `cmd`
+    /// reads no answer and goes on with the batch, so a lone `cmd.exe` there is
+    /// working (a builtin like `copy`, or between `a & b`). Even then, the same
+    /// processes must be alone for [`SHIM_SETTLE`] before they are ended.
     async fn end_waiting_shims(self: &Arc<Self>) {
+        if !self.pty {
+            return;
+        }
         let live = self.live_members().await;
         let shims_only =
             !live.is_empty() && live.iter().all(|p| p.name.eq_ignore_ascii_case("cmd.exe"));
-        if shims_only {
+        let current: BTreeSet<(u32, u64)> = live.iter().map(|p| (p.pid, p.start_time)).collect();
+        let settled = {
+            let mut seen = lock(&self.shims);
+            match &*seen {
+                _ if !shims_only => {
+                    *seen = None;
+                    false
+                }
+                Some((shims, since)) if *shims == current => since.elapsed() >= SHIM_SETTLE,
+                _ => {
+                    *seen = Some((current, Instant::now()));
+                    false
+                }
+            }
+        };
+        if settled {
             let _ = blocking(move || {
                 for shim in &live {
                     let _ = terminate_verified(&shim.identity(), TERMINATED);
@@ -747,43 +856,58 @@ impl Inner {
         }
     }
 
-    /// Records which processes are attached to the unit's console, for a pipe
-    /// task (`ExitSweep::KeepDaemonized`) with a helper: after the task exits,
-    /// those are its leftovers, and members with their own console or none are
-    /// daemons it started. Asks through the leader, or after it exited through a
-    /// recorded member that still runs.
-    async fn record_console(self: &Arc<Self>) {
+    /// Starts the anchor of a pipe task (`ExitSweep::KeepDaemonized`) with a
+    /// helper, while the leader is held open, so its PID still names it.
+    async fn attach_anchor(self: &Arc<Self>) {
         if self.pty || self.timing.exit_sweep != ExitSweep::KeepDaemonized {
             return;
         }
         let Some(helper) = self.helper.clone() else {
             return;
         };
-        let leader_alive = matches!(self.child.exit_code(), Ok(None));
-        let tracked: Vec<ProcessInfo> = lock(&self.tracker).live().cloned().collect();
-        let anchor = if leader_alive {
-            Some(self.identity.pid)
-        } else {
-            let known = lock(&self.on_console).clone().unwrap_or_default();
-            tracked
-                .iter()
-                .find(|p| known.contains(&(p.pid, p.start_time)))
-                .map(|p| p.pid)
+        let pid = self.identity.pid;
+        let attached = blocking(move || helper.anchor(pid)).await;
+        *lock(&self.anchor) = match attached {
+            Ok(Ok(anchor)) => ConsoleAnchor::Attached(anchor),
+            Ok(Err(error)) => {
+                tracing::warn!(%error, pid, "cannot watch the task's console; everything it leaves running is kept");
+                ConsoleAnchor::Failed
+            }
+            Err(error) => {
+                tracing::warn!(%error, pid, "cannot watch the task's console; everything it leaves running is kept");
+                ConsoleAnchor::Failed
+            }
         };
-        let Some(anchor) = anchor else {
-            return;
-        };
-        let Ok(Ok(pids)) = blocking(move || helper.list(anchor)).await else {
-            return;
-        };
-        let mut known = lock(&self.on_console);
-        let set = known.get_or_insert_with(BTreeSet::new);
-        set.extend(
-            tracked
-                .iter()
-                .filter(|p| pids.contains(&p.pid))
-                .map(|p| (p.pid, p.start_time)),
-        );
+    }
+
+    /// How the sweep decides what a task keeps, closing the anchor: from a final
+    /// listing of the console through it, or without one.
+    async fn keep_rule(self: &Arc<Self>) -> KeepRule {
+        let anchor = std::mem::replace(&mut *lock(&self.anchor), ConsoleAnchor::Closed);
+        let listed = blocking(move || match anchor {
+            ConsoleAnchor::NotWanted => KeepRule::ByJob,
+            ConsoleAnchor::Attached(mut anchor) => match anchor.list() {
+                Ok(pids) => KeepRule::ByConsole(pids.into_iter().collect()),
+                Err(error) => {
+                    tracing::warn!(%error, "listing the task's console failed; everything it left running is kept");
+                    KeepRule::KeepAll
+                }
+            },
+            ConsoleAnchor::Failed | ConsoleAnchor::Closed => KeepRule::KeepAll,
+        })
+        .await;
+        listed.unwrap_or(KeepRule::KeepAll)
+    }
+
+    /// Closes the anchor without waiting for it, for paths that cannot block.
+    fn close_anchor(&self) {
+        let anchor = std::mem::replace(&mut *lock(&self.anchor), ConsoleAnchor::Closed);
+        if let ConsoleAnchor::Attached(anchor) = anchor {
+            // Dropping it waits for the helper to exit.
+            let _ = std::thread::Builder::new()
+                .name("devlanes-anchor-close".into())
+                .spawn(move || drop(anchor));
+        }
     }
 
     /// Terminates the job and every tracked process that left it.
@@ -794,7 +918,7 @@ impl Inner {
     }
 
     /// Ends the job's members, then each target by verified identity, which
-    /// reaches processes that broke away. Blocking.
+    /// reaches any tracked process the job does not hold. Blocking.
     fn terminate_blocking(&self, targets: &[ProcessInfo]) {
         if let Err(error) = self.job.terminate(TERMINATED) {
             tracing::debug!(%error, pid = self.identity.pid, "terminating the unit's job failed");
@@ -811,24 +935,29 @@ impl Inner {
     /// Ends live tracked processes until none remain or the sweep times out.
     ///
     /// After a natural exit in [`ExitSweep::KeepDaemonized`] mode (decision Q9),
-    /// processes still attached to the unit's console are leftovers and end, while
-    /// those that made their own console, run without one, or broke away from the
-    /// job are daemons the task started and are reported as left running. When the
-    /// console's members were never listed (no helper), the job stands in for it:
-    /// members end, processes outside it are kept.
+    /// processes still attached to the task's console are leftovers and end,
+    /// while those that made their own console or run without one are daemons
+    /// the task started and are reported as left running. The anchor lists the console once, now. Without a helper the job
+    /// stands in for the console (members end, processes outside it are kept);
+    /// when the console could not be listed, everything is kept and reported, so
+    /// nothing is ended on a guess.
     async fn sweep(self: &Arc<Self>, explicit_stop: bool) -> Sweep {
-        // Processes kept outside the job are still attached to a pseudo console,
-        // which ends them when it closes, so `pty: true` tasks keep nothing.
-        let keep_daemonized =
-            !explicit_stop && self.timing.exit_sweep == ExitSweep::KeepDaemonized && !self.pty;
-        let on_console = lock(&self.on_console).clone().filter(|_| keep_daemonized);
+        let rule = self.keep_rule().await;
+        // `pty: true` tasks keep nothing: their console closes after the sweep,
+        // which ends every process still attached to it.
+        let rule =
+            if explicit_stop || self.timing.exit_sweep != ExitSweep::KeepDaemonized || self.pty {
+                KeepRule::KillAll
+            } else {
+                rule
+            };
         let deadline = Instant::now() + self.timing.sweep_timeout;
         let mut ended = BTreeMap::new();
         // Unless some job members are kept, the job holds only processes that must
         // end. Ending it first also reaches members started after the last
         // snapshot, which the loop below cannot see. Live members seen before are
         // reported as swept.
-        if on_console.is_none() {
+        if matches!(rule, KeepRule::KillAll | KeepRule::ByJob) {
             let live = self.live_members().await;
             let inner = Arc::clone(self);
             let in_job = blocking(move || {
@@ -853,13 +982,16 @@ impl Inner {
             let live = self.live_members().await;
             let in_job: BTreeSet<u32> =
                 self.job.members().unwrap_or_default().into_iter().collect();
-            let (targets, kept): (Vec<_>, Vec<_>) =
-                live.into_iter()
-                    .partition(|p| match (&on_console, keep_daemonized) {
-                        (_, false) => true,
-                        (Some(console), true) => console.contains(&(p.pid, p.start_time)),
-                        (None, true) => in_job.contains(&p.pid),
-                    });
+            let (targets, kept): (Vec<_>, Vec<_>) = live.into_iter().partition(|p| match &rule {
+                KeepRule::KillAll => true,
+                KeepRule::ByJob => in_job.contains(&p.pid),
+                // Job membership says nothing here: Git for Windows' MSYS2 runtime
+                // breaks every child out of a job that allows it, so a `run:`
+                // string's leftovers are outside the job too. Leaving the console
+                // is what a daemon does.
+                KeepRule::ByConsole(console) => console.contains(&p.pid),
+                KeepRule::KeepAll => false,
+            });
             if targets.is_empty() || Instant::now() >= deadline {
                 for process in &targets {
                     ended.remove(&process.pid);
@@ -867,19 +999,25 @@ impl Inner {
                 return Sweep {
                     swept: ended.into_values().collect(),
                     escaped: targets,
-                    left_running: kept,
+                    // A console host belongs to a console, not to the task; it
+                    // ends with the last process on it.
+                    left_running: kept
+                        .into_iter()
+                        .filter(|p| !p.name.eq_ignore_ascii_case(CONSOLE_HOST))
+                        .collect(),
                 };
             }
             let inner = Arc::clone(self);
-            let precise = on_console.is_some();
+            let by_console = matches!(rule, KeepRule::ByConsole(_));
+            let by_job = matches!(rule, KeepRule::ByJob);
             // Survivors show up in the next round and end as escaped at the deadline.
             let ended_now = blocking(move || {
-                if precise {
+                if by_console {
                     // Kept members share the job, so only the targets end.
                     for process in &targets {
                         let _ = terminate_verified(&process.identity(), TERMINATED);
                     }
-                } else if keep_daemonized {
+                } else if by_job {
                     // The job holds exactly the processes to end; kept ones are outside.
                     if let Err(error) = inner.job.terminate(TERMINATED) {
                         tracing::debug!(%error, "terminating the unit's job failed");
@@ -905,6 +1043,7 @@ impl Inner {
     fn finish(&self, report: ExitReport) {
         lock(&self.sender).take();
         lock(&self.terminal).take();
+        self.close_anchor();
         self.exit.send_replace(Some(report));
     }
 }
@@ -954,11 +1093,11 @@ impl WindowsUnit {
 
     /// Stops the unit and returns its report.
     ///
-    /// Every process is terminated at once: the job's members, then tracked
-    /// processes that left the job, each checked by identity first. Asking them to
-    /// exit with Ctrl-C or Ctrl-Break first, honouring `policy`, comes with the
-    /// lifecycle work. Cancelling this future does not cancel the stop; stopping an
-    /// exited unit returns its existing report.
+    /// The unit is asked first as `policy.signal` maps on Windows (Ctrl-C,
+    /// Ctrl-Break, `WM_CLOSE`); what still runs at `policy.timeout` is terminated:
+    /// the job's members, then tracked processes that left the job, each checked
+    /// by identity first. Cancelling this future does not cancel the stop;
+    /// stopping an exited unit returns its existing report.
     pub async fn stop_with_report(&self, policy: StopPolicy) -> Result<ExitReport, Error> {
         // A closed channel means the supervisor ended; only a crash leaves work undone.
         if self.inner.stops.send(policy).is_err() && self.inner.crashed.load(Ordering::SeqCst) {
@@ -996,8 +1135,9 @@ impl WindowsUnit {
             }
             time::sleep(SWEEP_POLL).await;
         };
-        // The supervisor would have closed the console after its sweep.
+        // The supervisor would have closed the console and the anchor after its sweep.
         lock(&self.inner.terminal).take();
+        self.inner.close_anchor();
         let outcome = match self.inner.child.exit_code() {
             Ok(Some(code)) => exit_outcome(code),
             _ => UNKNOWN,

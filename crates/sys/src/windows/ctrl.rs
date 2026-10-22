@@ -32,10 +32,10 @@ pub enum CtrlEvent {
 /// Why attaching to a process's console failed.
 #[derive(Debug, thiserror::Error)]
 pub enum CtrlError {
-    /// This process is already attached to a console; the helper must start
-    /// without one.
-    #[error("the helper already has a console")]
-    AlreadyAttached,
+    /// Windows refused the attach (`ERROR_ACCESS_DENIED`): the target is a
+    /// process this one may not attach to, or the console is going away.
+    #[error("attaching to the console was refused")]
+    AttachDenied,
     /// The target process has no console (a GUI program or `DETACHED_PROCESS`).
     #[error("the process has no console")]
     NoConsole,
@@ -51,7 +51,7 @@ impl CtrlError {
     /// apart without parsing text.
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::AlreadyAttached => 3,
+            Self::AttachDenied => 3,
             Self::NoConsole => 4,
             Self::NoProcess => 5,
             Self::Io(_) => 1,
@@ -61,7 +61,7 @@ impl CtrlError {
     /// The error a helper exit code stands for, the inverse of [`Self::exit_code`].
     pub fn from_exit_code(code: i32) -> Option<Self> {
         match code {
-            3 => Some(Self::AlreadyAttached),
+            3 => Some(Self::AttachDenied),
             4 => Some(Self::NoConsole),
             5 => Some(Self::NoProcess),
             _ => None,
@@ -73,70 +73,80 @@ impl CtrlError {
 /// Only call it from a process started without a console: it attaches to the
 /// target's, which a process can only do while it has none of its own.
 pub fn send(pid: u32, event: CtrlEvent) -> Result<(), CtrlError> {
-    let _attached = Attached::to(pid)?;
-    let event = match event {
-        CtrlEvent::CtrlC => CTRL_C_EVENT,
-        CtrlEvent::CtrlBreak => CTRL_BREAK_EVENT,
-    };
-    // SAFETY: plain call; group 0 is every process attached to this console.
-    if unsafe { GenerateConsoleCtrlEvent(event, 0) } == 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    Ok(())
+    Attached::to(pid)?.send(event)
 }
 
 /// PIDs of every process attached to the console of process `pid`, this helper
 /// excluded. Same precondition as [`send`].
 pub fn console_processes(pid: u32) -> Result<Vec<u32>, CtrlError> {
-    let _attached = Attached::to(pid)?;
-    let mut pids = vec![0_u32; 64];
-    loop {
-        // SAFETY: `pids` holds `len` writable u32s.
-        let count = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
-        if count == 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        let count = count as usize;
-        if count <= pids.len() {
-            pids.truncate(count);
-            let me = std::process::id();
-            pids.retain(|&listed| listed != me);
-            return Ok(pids);
-        }
-        pids.resize(count, 0);
-    }
+    Attached::to(pid)?.processes()
 }
 
 /// This process attached to another's console, with control events ignored,
-/// until dropped.
-struct Attached;
+/// until dropped. Staying attached keeps the console, and so its process list,
+/// alive after the process it was reached through exits.
+#[derive(Debug)]
+pub struct Attached(());
 
 impl Attached {
-    /// Attaches to `pid`'s console and makes this process survive the events it
-    /// is about to send.
-    fn to(pid: u32) -> Result<Self, CtrlError> {
+    /// Attaches to `pid`'s console, ignoring the events sent to it from here on.
+    /// Same precondition as [`send`].
+    pub fn to(pid: u32) -> Result<Self, CtrlError> {
+        // Installed first: once attached, an event someone else sends to the
+        // console would otherwise end this process with the default handler. A
+        // real handler is needed, since `SetConsoleCtrlHandler(NULL, TRUE)` only
+        // ignores Ctrl-C.
+        // SAFETY: `ignore` is a valid handler for the life of the process; adding
+        // it again only adds another entry that does the same.
+        if unsafe { SetConsoleCtrlHandler(Some(ignore), 1) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
         // SAFETY: harmless without a console.
         unsafe { FreeConsole() };
         // SAFETY: plain call; failures are mapped below.
         if unsafe { AttachConsole(pid) } == 0 {
             let error = io::Error::last_os_error();
             return Err(match error.raw_os_error().map(|code| code as u32) {
-                Some(ERROR_ACCESS_DENIED) => CtrlError::AlreadyAttached,
+                Some(ERROR_ACCESS_DENIED) => CtrlError::AttachDenied,
                 Some(ERROR_INVALID_HANDLE) => CtrlError::NoConsole,
                 Some(ERROR_INVALID_PARAMETER) => CtrlError::NoProcess,
                 _ => CtrlError::Io(error),
             });
         }
-        // A real handler is needed: `SetConsoleCtrlHandler(NULL, TRUE)` only
-        // ignores Ctrl-C, and Ctrl-Break would end this helper with the unit.
-        // SAFETY: `ignore` is a valid handler for the life of the process.
-        if unsafe { SetConsoleCtrlHandler(Some(ignore), 1) } == 0 {
-            let error = io::Error::last_os_error();
-            // SAFETY: detaches from the console attached just above.
-            unsafe { FreeConsole() };
-            return Err(error.into());
+        Ok(Self(()))
+    }
+
+    /// Sends `event` to every process attached to the console.
+    pub fn send(&self, event: CtrlEvent) -> Result<(), CtrlError> {
+        let event = match event {
+            CtrlEvent::CtrlC => CTRL_C_EVENT,
+            CtrlEvent::CtrlBreak => CTRL_BREAK_EVENT,
+        };
+        // SAFETY: plain call; group 0 is every process attached to this console.
+        if unsafe { GenerateConsoleCtrlEvent(event, 0) } == 0 {
+            return Err(io::Error::last_os_error().into());
         }
-        Ok(Self)
+        Ok(())
+    }
+
+    /// PIDs of every process attached to the console now, this one excluded.
+    pub fn processes(&self) -> Result<Vec<u32>, CtrlError> {
+        let mut pids = vec![0_u32; 64];
+        loop {
+            // SAFETY: `pids` holds `len` writable u32s.
+            let count = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
+            if count == 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            let count = count as usize;
+            if count <= pids.len() {
+                pids.truncate(count);
+                let me = std::process::id();
+                pids.retain(|&listed| listed != me);
+                return Ok(pids);
+            }
+            pids.resize(count, 0);
+        }
     }
 }
 

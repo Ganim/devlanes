@@ -1,0 +1,27 @@
+[package]
+name = "devlanes-logon-launcher"
+description = "devlanesw.exe: starts the devlanes daemon at Windows logon without a console window"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# A package of its own, so `cargo run -p devlanes` has one binary to run and
+# `cargo install devlanes` on Unix installs no Windows-only launcher.
+[[bin]]
+name = "devlanesw"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[target.'cfg(windows)'.dependencies]
+devlanes-client = { path = "../client" }
+devlanes-sys = { path = "../sys" }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+tempfile.workspace = true

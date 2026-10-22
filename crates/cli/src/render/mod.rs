@@ -9,6 +9,7 @@ mod lanes;
 mod other;
 mod words;
 
+pub(crate) use devlanes_proto::exit::{INTERRUPTED, ctrl_c_exit};
 use devlanes_proto::{Event, LeftProcess, Method, events};
 use serde_json::Value;
 
@@ -174,7 +175,7 @@ pub(crate) fn result(method: Method, data: &Value, cx: &Ctx<'_>) -> Vec<String> 
         Method::Env => other::env(data),
         Method::Url => other::url(data),
         Method::Metrics => other::metrics(data, cx),
-        Method::Subscribe => other::events_page(data),
+        Method::Subscribe => other::events_page(data, cx),
         Method::InfraUp | Method::InfraStatus | Method::InfraDown => other::infra(method, data),
         Method::Doctor => other::doctor(data, cx),
         Method::ConfigCheck => other::config_check(data, cx),
@@ -218,7 +219,7 @@ pub(crate) fn event(method: Method, event: &Event, cx: &Ctx<'_>) -> Vec<String> 
             &text(&event.data, "code"),
             &event.data,
         ))],
-        _ => vec![other::event_line(event)],
+        _ => vec![other::event_line(event, cx)],
     }
 }
 
@@ -275,27 +276,17 @@ pub(crate) fn text(value: &Value, key: &str) -> String {
         .unwrap_or_default()
 }
 
-/// `STATUS_CONTROL_C_EXIT` (0xC000013A): the exit code of a Windows process that
-/// Ctrl-C or Ctrl-Break ended, as the signed number units record. The unsigned
-/// spelling is accepted too.
-const CTRL_C_EXIT: i64 = -1_073_741_510;
-
-/// What a Ctrl-C exit reads as instead of its number.
-pub(crate) const INTERRUPTED: &str = "interrupted (Ctrl-C)";
-
-/// Whether `code` is a Windows Ctrl-C exit. Unix exit codes never reach it.
-pub(crate) fn ctrl_c_exit(code: impl Into<i64>) -> bool {
+/// ` exit=<code>`, appended to status lines. A Ctrl-C exit reads
+/// ` interrupted (Ctrl-C)`, except for `agent` output, whose readers scan the
+/// `key=value` pairs and get ` exit=<code> (Ctrl-C)`.
+pub(crate) fn exit_field(code: impl Into<i64>, agent: bool) -> String {
     let code = code.into();
-    code == CTRL_C_EXIT || code == CTRL_C_EXIT + (1 << 32)
-}
-
-/// ` exit=<code>`, or ` interrupted (Ctrl-C)`, appended to status lines.
-pub(crate) fn exit_field(code: impl Into<i64>) -> String {
-    let code = code.into();
-    if ctrl_c_exit(code) {
-        format!(" {INTERRUPTED}")
-    } else {
+    if !ctrl_c_exit(code) {
         format!(" exit={code}")
+    } else if agent {
+        format!(" exit={code} (Ctrl-C)")
+    } else {
+        format!(" {INTERRUPTED}")
     }
 }
 

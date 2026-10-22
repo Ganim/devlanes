@@ -110,6 +110,50 @@ async fn the_header_follows_the_start_and_the_failure_lands_on_its_unit() -> Tes
     Ok(())
 }
 
+/// A unit Ctrl-C ended on Windows (`STATUS_CONTROL_C_EXIT`) is worded, never
+/// shown as `-1073741510`, in its row and in the start error.
+#[tokio::test]
+async fn a_ctrl_c_exit_reads_as_interrupted() -> TestResult {
+    // Rows come from the lane list, so the listed unit carries the code too.
+    let mut lanes = mixed_lanes();
+    let listed = lanes
+        .iter_mut()
+        .find(|lane| lane.reference == "acme@1")
+        .and_then(|lane| lane.units.iter_mut().find(|unit| unit.name == "api"))
+        .ok_or("acme@1:api is listed")?;
+    listed.state = "failed".into();
+    listed.exit_code = Some(-1_073_741_510);
+    let api = FakeApi::with_lanes(lanes);
+    let mut app = App::new(100, 24);
+    app.open_start("start".into());
+    app.update(Msg::Status(api.status().await));
+    let mut result = failed_result();
+    result["units"][0]["exit_code"] = json!(-1_073_741_510);
+    result["failures"][0]["exit_code"] = json!(-1_073_741_510);
+    app.update(Msg::Start(StartFrame::Done(Ok(result))));
+    let entry = app
+        .target_error(&Target::Unit {
+            lane: "acme@1".into(),
+            unit: "api".into(),
+        })
+        .ok_or("no error on the unit")?;
+    assert_eq!(entry.worded.summary, "interrupted (Ctrl-C)");
+    app.notice = None;
+    let buffer = render(&app)?;
+    let screen: Vec<String> = (0..buffer.area.height).map(|y| row(&buffer, y)).collect();
+    assert!(
+        screen
+            .iter()
+            .any(|line| line.contains("api  failed (Ctrl-C)")),
+        "{screen:#?}"
+    );
+    assert!(
+        !screen.iter().any(|line| line.contains("1073741510")),
+        "{screen:#?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_successful_start_ends_ready() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());

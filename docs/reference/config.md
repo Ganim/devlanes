@@ -144,7 +144,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | `services.<name>.run_script.name` | string | Script, target, or recipe name within the source file. Required, unless an override or extends child keeps the inherited name. | `dev` |
 | `services.<name>.run_script.source` | string | Script source relative to the worktree, such as package.json, Makefile, or justfile. Required, unless an override or extends child keeps the inherited source. | `apps/api/package.json` |
 | `services.<name>.stop` | object | Stop signal and grace period before killing the process tree. | `{"signal":"SIGINT","timeout":"15s"}` |
-| `services.<name>.stop.signal` | string | Initial stop signal; defaults to SIGTERM, followed by SIGKILL if the grace period expires. | `SIGTERM` |
+| `services.<name>.stop.signal` | string | Initial stop signal; defaults to SIGTERM, followed by SIGKILL if the grace period expires. On Windows, SIGINT sends Ctrl-C, other signals send Ctrl-Break plus WM_CLOSE to visible windows, SIGKILL terminates at once, and processes still running when the grace period expires are terminated. | `SIGTERM` |
 | `services.<name>.stop.timeout` | duration (templated) | Grace period before SIGKILL; defaults to 10s. | `15s` |
 | `services.<name>.sync` | list of object | Folders copied to stable local or remote-client paths. | `[{"from":"apps/extension/.output/chrome-mv3","ignore":["*.map"]}]` |
 | `services.<name>.sync[].from` | string (templated) | Directory to copy, relative to the lane's worktree. | `apps/extension/.output/chrome-mv3` |
@@ -230,7 +230,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | `templates.<name>.run_script.name` | string | Script, target, or recipe name within the source file. Required, unless an override or extends child keeps the inherited name. | `dev` |
 | `templates.<name>.run_script.source` | string | Script source relative to the worktree, such as package.json, Makefile, or justfile. Required, unless an override or extends child keeps the inherited source. | `apps/api/package.json` |
 | `templates.<name>.stop` | object | Stop signal and grace period before killing the process tree. | `{"signal":"SIGINT","timeout":"15s"}` |
-| `templates.<name>.stop.signal` | string | Initial stop signal; defaults to SIGTERM, followed by SIGKILL if the grace period expires. | `SIGTERM` |
+| `templates.<name>.stop.signal` | string | Initial stop signal; defaults to SIGTERM, followed by SIGKILL if the grace period expires. On Windows, SIGINT sends Ctrl-C, other signals send Ctrl-Break plus WM_CLOSE to visible windows, SIGKILL terminates at once, and processes still running when the grace period expires are terminated. | `SIGTERM` |
 | `templates.<name>.stop.timeout` | duration (templated) | Grace period before SIGKILL; defaults to 10s. | `15s` |
 | `templates.<name>.sync` | list of object | Folders copied to stable local or remote-client paths. | `[{"from":"apps/extension/.output/chrome-mv3","ignore":["*.map"]}]` |
 | `templates.<name>.sync[].from` | string (templated) | Directory to copy, relative to the lane's worktree. | `apps/extension/.output/chrome-mv3` |

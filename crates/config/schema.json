@@ -2193,7 +2193,7 @@
       ],
       "properties": {
         "signal": {
-          "description": "Initial stop signal; defaults to SIGTERM, followed by SIGKILL if the grace period expires.",
+          "description": "Initial stop signal; defaults to SIGTERM, followed by SIGKILL if the grace period expires.\nOn Windows, SIGINT sends Ctrl-C, other signals send Ctrl-Break plus WM_CLOSE to visible\nwindows, SIGKILL terminates at once, and processes still running when the grace period\nexpires are terminated.",
           "examples": [
             "SIGTERM",
             "SIGINT"

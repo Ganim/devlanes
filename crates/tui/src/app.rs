@@ -2780,7 +2780,7 @@ pub fn unit_ref(lane: &str, unit: &str) -> String {
 fn failure_words(failure: &devlanes_proto::UnitFailureData) -> Worded {
     let mut worded = match (&failure.reason, failure.exit_code) {
         (Some(reason), _) => words::rpc(reason),
-        (None, Some(code)) => Worded::local(&format!("exited with code {code}")),
+        (None, Some(code)) => Worded::local(&words::exited_with(code)),
         (None, None) => Worded::local("did not become ready"),
     };
     worded

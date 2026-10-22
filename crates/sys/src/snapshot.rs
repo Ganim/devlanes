@@ -95,6 +95,8 @@ pub fn shared_processes(max_age: Duration) -> Result<Arc<Vec<ProcessInfo>>, Erro
 static SCAN_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Number of scans started so far, for tests that count scans.
+// Public only because runner tests in other crates count scans; not API.
+#[doc(hidden)]
 pub fn scans_started() -> u64 {
     lock().started
 }

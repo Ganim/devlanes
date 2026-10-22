@@ -1,6 +1,6 @@
 # devlanes-sys
 
-Process-table queries for macOS and Linux. `devlanes-runner-pty` uses it to track and signal unit processes, and the daemon uses it to reconcile processes left by a crashed daemon and to report listening ports when a ready check times out.
+Process-table queries for macOS, Linux and Windows, plus the operating-system calls the other crates may not make themselves: safe Win32 wrappers (`windows`), the `NoWindow` spawn helper, logoff and shutdown notice (`windows::session`) and the logon entry in the registry (`windows::registry`). The runners use it to track and stop unit processes, and the daemon to reconcile processes left by a crashed daemon and to report listening ports when a ready check times out.
 
 ## Usage
 
@@ -42,11 +42,11 @@ All functions block. Call them from `spawn_blocking` in async code.
 
 ## Behaviour
 
-Start times are clock ticks since boot on Linux and microseconds since the epoch on macOS. Only compare them on the machine that recorded them. Identity checks ignore the session ID, because a process can move to a new session after it was recorded.
+Start times are clock ticks since boot on Linux, microseconds since the epoch on macOS and process creation times (100 ns units since 1601) on Windows. Only compare them on the machine that recorded them. Identity checks ignore the session ID, because a process can move to a new session after it was recorded.
 
-On macOS, `listening_tcp` runs `/usr/sbin/lsof`, and zombies are read through `sysctl` because libproc no longer reports them. Linux reads everything from procfs.
+On macOS, `listening_tcp` runs `/usr/sbin/lsof`, and zombies are read through `sysctl` because libproc no longer reports them. Linux reads everything from procfs. Windows reads the process list from a Toolhelp snapshot and listeners from the IP helper TCP tables.
 
-`unsafe` code is confined to the macOS modules (libproc, mach and sysctl calls) and the Windows module (Win32 calls). On Windows the process queries are not implemented yet and return `Error::Unsupported`; signalling, sessions and descriptor holders are Unix-only.
+`unsafe` code is confined to the macOS modules (libproc, mach and sysctl calls) and the Windows module (Win32 calls). Signalling, sessions and descriptor holders are Unix-only and not compiled on Windows.
 
 ## License
 

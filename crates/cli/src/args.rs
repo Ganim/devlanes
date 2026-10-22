@@ -696,9 +696,9 @@ pub enum DaemonCommand {
         #[arg(long, value_name = "N")]
         tail: Option<usize>,
     },
-    /// Install a login service so the daemon starts at login and outside agent sandboxes
+    /// Start the daemon at login (launchd agent, systemd user unit, or a Windows logon entry)
     Install,
-    /// Remove the login service; a running daemon keeps running
+    /// Stop starting the daemon at login; a running daemon keeps running
     Uninstall,
     /// Stop everything and empty the state database; lanes get new numbers and ports (needs --yes)
     ResetState,

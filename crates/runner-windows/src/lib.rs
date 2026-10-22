@@ -1,10 +1,11 @@
 //! Runner for daemon-owned units on Windows: each unit's leader starts inside its
-//! own Job Object and is waited on through its process handle. The Win32 calls live in `devlanes-sys`; this crate has no
+//! own Job Object, which processes may not leave, and is waited on through its
+//! process handle. The Win32 calls live in `devlanes-sys`; this crate has no
 //! `unsafe`.
 //!
 //! Descendants are tracked from job membership plus periodic process snapshots by
-//! parent, so stops and exit sweeps also reach processes that broke away from the
-//! job. `pty: true` units run in a pseudo console (ConPTY), the others over pipes.
+//! parent. `pty: true` units run in a pseudo console (ConPTY), the others over
+//! pipes.
 //!
 //! [`command`] (resolving a program and building its command line) is pure and
 //! compiled on every OS, so its rules are tested everywhere.

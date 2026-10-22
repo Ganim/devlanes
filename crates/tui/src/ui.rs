@@ -4,7 +4,7 @@
 //! reaches the buffer (see [`crate::text`]), so long or hostile text cannot
 //! spill into another widget or move the real terminal's cursor.
 
-use devlanes_proto::{LaneSummary, ORPHANED, UnitSummary};
+use devlanes_proto::{LaneSummary, ORPHANED, UnitSummary, exit::ctrl_c_exit};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -363,11 +363,13 @@ fn unit_spans(unit: &UnitSummary, error: Option<&ErrorEntry>) -> Vec<Span<'stati
     spans
 }
 
-/// Lowercase state word, with the exit code for failed and exited units and
+/// Lowercase state word, with the exit code for failed and exited units
+/// (`(Ctrl-C)` for a Windows Ctrl-C exit, as in the CLI's status table) and
 /// the pid for orphans, which can only be found by it.
 pub fn unit_state(unit: &UnitSummary) -> String {
     let state = clean(&unit.state);
     match (state.as_str(), unit.exit_code, unit.pid) {
+        ("failed" | "exited", Some(code), _) if ctrl_c_exit(code) => format!("{state} (Ctrl-C)"),
         ("failed" | "exited", Some(code), _) => format!("{state} {code}"),
         (ORPHANED, _, Some(pid)) => format!("{state} pid {pid}"),
         _ => state,

@@ -220,7 +220,8 @@ async fn cmd_succeeds(
         .min(CMD_ATTEMPT);
     // The shell's own variables go first so a value in the unit's env wins,
     // as it does for the unit itself.
-    let status = os::shell_command(shell, command)
+    let mut process = os::shell_command(shell, command);
+    process
         .current_dir(cwd)
         .env_clear()
         .envs(&shell.env)
@@ -228,9 +229,13 @@ async fn cmd_succeeds(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .status();
-    matches!(timeout(limit, status).await, Ok(Ok(status)) if status.success())
+        .kill_on_drop(true);
+    let Ok(mut probe) = os::Probe::spawn(&mut process) else {
+        return false;
+    };
+    // Dropping the probe ends what is left of it on timeout (or when the check
+    // itself is dropped).
+    matches!(timeout(limit, probe.child.wait()).await, Ok(Ok(status)) if status.success())
 }
 
 #[cfg(unix)]
@@ -244,12 +249,27 @@ mod os {
         process.no_window().args(&shell.args).arg(command);
         process
     }
+
+    /// A running probe attempt; dropping it kills the shell (`kill_on_drop`).
+    pub(super) struct Probe {
+        pub(super) child: tokio::process::Child,
+    }
+
+    impl Probe {
+        /// Starts `process`.
+        pub(super) fn spawn(process: &mut tokio::process::Command) -> std::io::Result<Self> {
+            Ok(Self {
+                child: process.spawn()?,
+            })
+        }
+    }
 }
 
 #[cfg(windows)]
 mod os {
     use devlanes_core::shell::{Shell, ShellKind};
     use devlanes_sys::NoWindow;
+    use devlanes_sys::windows::job::Job;
 
     /// `<shell> <args> <command>`. `cmd.exe` does not undo the `\"` escaping
     /// std applies, so its text goes verbatim inside the quotes `/s` strips.
@@ -263,6 +283,61 @@ mod os {
         // The daemon has no console, so each probe attempt would open a window.
         process.no_window();
         process
+    }
+
+    /// A running probe attempt in a job of its own.
+    ///
+    /// Killing the shell alone is not enough on Windows: Git's `sh.exe` is a
+    /// launcher that starts the real shell, and nothing ends a process's
+    /// children with it. Dropping a probe that still runs (a timeout, or the
+    /// check being dropped) therefore ends its whole job. One that exited on
+    /// its own leaves background processes alone, as on Unix.
+    pub(super) struct Probe {
+        pub(super) child: tokio::process::Child,
+        /// `None` when no job could be made or joined; the shell alone is then
+        /// killed, as before.
+        job: Option<Job>,
+    }
+
+    impl Probe {
+        /// Starts `process` inside a new job when possible.
+        ///
+        /// Unlike a unit's job, this one forbids breaking away: the MSYS2
+        /// runtime behind Git's `sh.exe` adds `CREATE_BREAKAWAY_FROM_JOB` to
+        /// every program it starts when the job allows that and leaves it off
+        /// otherwise, so with breakaway allowed a probe's `sleep` or `curl`
+        /// would leave the job. A program that insists on breaking away fails
+        /// to start here, which only fails that attempt.
+        pub(super) fn spawn(process: &mut tokio::process::Command) -> std::io::Result<Self> {
+            let jobbed = Job::create(false).and_then(|job| {
+                let child = job.spawn_helper(process)?;
+                Ok(Self {
+                    child,
+                    job: Some(job),
+                })
+            });
+            match jobbed {
+                Ok(probe) => Ok(probe),
+                Err(error) => {
+                    tracing::debug!(%error, "ready probe runs outside a job; a timeout ends only its shell");
+                    Ok(Self {
+                        child: process.spawn()?,
+                        job: None,
+                    })
+                }
+            }
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            if let Some(job) = &self.job
+                && matches!(self.child.try_wait(), Ok(None))
+                && let Err(error) = job.terminate(1)
+            {
+                tracing::debug!(%error, "ending a ready probe's job failed");
+            }
+        }
     }
 }
 
@@ -600,9 +675,8 @@ mod tests {
 
     /// Git for Windows' sh runs probes with POSIX syntax and quoting and sees the
     /// unit's env with MSYS path conversion off. Needs Git for Windows, which
-    /// building devlanes on Windows already does. The deadline is not exercised
-    /// here: killing `sh.exe` leaves its children running on Windows, so a
-    /// `sleep` would outlive the test.
+    /// building devlanes on Windows already does. The deadline is
+    /// [`timed_out_probe_ends_its_tree`]'s.
     #[cfg(windows)]
     #[tokio::test]
     async fn git_sh_probe_uses_posix_syntax_and_unit_env() {
@@ -614,6 +688,80 @@ mod tests {
         assert!(cmd_succeeds(&sh, r#"test "$DL_READY" = 'a "b" c'"#, &cwd, &env, soon).await);
         assert!(cmd_succeeds(&sh, r#"test "$MSYS_NO_PATHCONV" = 1"#, &cwd, &env, soon).await);
         assert!(!cmd_succeeds(&sh, "test -n \"$DL_NOT_SET\"", &cwd, &env, soon).await);
+    }
+
+    /// Processes known by identity, terminated (if still theirs) when dropped,
+    /// so a failing test leaves nothing running.
+    #[cfg(windows)]
+    struct Owned(Vec<devlanes_sys::ProcessInfo>);
+
+    #[cfg(windows)]
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            for process in &self.0 {
+                let _ = devlanes_sys::windows::proc::terminate_verified(&process.identity(), 1);
+            }
+        }
+    }
+
+    /// A probe that times out ends its whole tree: Git's `sh.exe` launcher, the
+    /// shell it starts and that shell's `sleep`, not only the launcher. Needs
+    /// Git for Windows.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn timed_out_probe_ends_its_tree() -> Result<(), Box<dyn std::error::Error>> {
+        let sh = crate::integrations::detect_shell().await;
+        assert_eq!(sh.kind, devlanes_core::shell::ShellKind::Posix, "{sh:?}");
+        let cwd = std::env::temp_dir();
+        let env = windows_env(&[]);
+        let me = devlanes_sys::identity(std::process::id())?.ok_or("no identity of its own")?;
+        // Long enough for the shell to start `sleep` before the timeout.
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let probe = cmd_succeeds(&sh, "sleep 37", &cwd, &env, deadline);
+        tokio::pin!(probe);
+        let mut tree = devlanes_sys::DescendantTracker::new(me);
+        let mut seen = Owned(Vec::new());
+        let passed = loop {
+            tokio::select! {
+                passed = &mut probe => break passed,
+                () = sleep(Duration::from_millis(50)) => {
+                    tree.update(&devlanes_sys::processes()?);
+                    for process in tree.live() {
+                        let known = seen.0.iter().any(|p| p.identity() == process.identity());
+                        if process.pid != me.pid && !known {
+                            seen.0.push(process.clone());
+                        }
+                    }
+                }
+            }
+        };
+        assert!(!passed, "a sleeping probe passed");
+        let names: Vec<&str> = seen.0.iter().map(|p| p.name.as_str()).collect();
+        assert!(
+            names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("sleep.exe")),
+            "the probe never reached its grandchild: {names:?}"
+        );
+        let gone = Instant::now() + Duration::from_secs(10);
+        let mut left: Vec<String> = Vec::new();
+        while Instant::now() < gone {
+            left = seen
+                .0
+                .iter()
+                .filter(|p| devlanes_sys::matches(&p.identity()).unwrap_or(false))
+                .map(|p| format!("{} ({})", p.name, p.pid))
+                .collect();
+            if left.is_empty() {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            left.is_empty(),
+            "the probe left processes running: {left:?}"
+        );
+        Ok(())
     }
 
     /// Git for Windows' MSYS rewrites POSIX-looking environment values for the

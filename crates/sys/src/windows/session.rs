@@ -6,8 +6,11 @@
 //! `WM_ENDSESSION`, which it sends to top-level windows only. A message-only
 //! window (`HWND_MESSAGE` parent) receives no broadcasts, so [`watch`] creates a
 //! hidden top-level window on a thread of its own and runs its message loop.
-//! A process attached to a console gets the console events instead (shutdown
-//! treats it as a console program), so this only helps detached processes.
+//! It also works for a process attached to a console: once a process has
+//! loaded `user32.dll` (creating the window does), Windows treats it as a GUI
+//! program, so its console handlers no longer get `CTRL_LOGOFF_EVENT` or
+//! `CTRL_SHUTDOWN_EVENT` and the window gets the session messages instead (see
+//! `SetConsoleCtrlHandler`). `CTRL_CLOSE_EVENT` still reaches console handlers.
 
 use std::cell::RefCell;
 use std::ffi::OsStr;

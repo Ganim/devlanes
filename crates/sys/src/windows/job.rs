@@ -1,7 +1,9 @@
-//! Job Objects: the Windows grouping for a unit's processes.
+//! Job Objects: the Windows grouping for a unit's processes, and for a helper
+//! whose whole tree has to end with it ([`Job::spawn_helper`]).
 //!
 //! A unit's leader starts inside its own job, and every process it starts joins
-//! the job too unless it asks to break away. The job is only for grouping and
+//! the job too: the runner's jobs refuse breakaway (see `Job::create`). The job
+//! is only for grouping and
 //! killing: no memory, CPU or process-count limits are set, and closing the last
 //! handle does not kill the members, so units outlive a daemon crash.
 
@@ -10,13 +12,17 @@ use std::os::windows::io::OwnedHandle;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, HANDLE};
-use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
-    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
-    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-    TerminateJobObject,
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+    JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+    SetInformationJobObject, TerminateJobObject,
+};
+use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
 use super::security::SecurityAttributes;
 use super::token::{owned, raw};
@@ -31,8 +37,9 @@ pub struct Job(OwnedHandle);
 
 impl Job {
     /// Creates an unnamed job. With `breakaway`, processes inside may leave it by
-    /// asking for `CREATE_BREAKAWAY_FROM_JOB` (some tools do, and fail to start
-    /// otherwise); the runner then tracks them by parent and start time.
+    /// asking for `CREATE_BREAKAWAY_FROM_JOB`. Note that Git for Windows' MSYS2
+    /// runtime then asks for every child it starts, so such a job loses track of
+    /// anything a Git `sh` runs.
     ///
     /// `DIE_ON_UNHANDLED_EXCEPTION` keeps a crashed member from waiting on an
     /// invisible Windows Error Reporting dialog.
@@ -132,10 +139,95 @@ impl Job {
         Ok(())
     }
 
+    /// Starts a helper program (see [`crate::NoWindow`]) inside this job from
+    /// its first instruction, so everything it starts is a member too unless it
+    /// breaks away. For short-lived helpers whose whole tree has to end with
+    /// them, such as a ready probe behind Git's `sh.exe` launcher.
+    ///
+    /// The child is created suspended, added to the job, then resumed. Creation
+    /// flags set on `command` before are replaced; it gets `CREATE_NO_WINDOW`
+    /// when this process has no console, as `no_window` sets. When the job
+    /// refuses the child, the child is killed, `command` is left with the flags
+    /// it would have without the job, and the error is returned, so the caller
+    /// can start it the usual way.
+    pub fn spawn_helper(
+        &self,
+        command: &mut tokio::process::Command,
+    ) -> io::Result<tokio::process::Child> {
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+        let window = if super::process::has_console() {
+            0
+        } else {
+            super::process::CREATE_NO_WINDOW
+        };
+        command.creation_flags(CREATE_SUSPENDED | window);
+        let spawned = command.spawn();
+        command.creation_flags(window);
+        let mut child = spawned?;
+        let adopted = match child.raw_handle() {
+            // SAFETY: the job handle is open, and `handle` is the child's,
+            // valid while `child` has not been waited for.
+            Some(handle) if unsafe { AssignProcessToJobObject(self.raw(), handle) } != 0 => {
+                child.id().map_or_else(
+                    || Err(io::Error::other("the new process has no ID")),
+                    resume,
+                )
+            }
+            Some(_) => Err(io::Error::last_os_error()),
+            None => Err(io::Error::other(
+                "the new process has already been waited for",
+            )),
+        };
+        if let Err(error) = adopted {
+            // Still suspended (or never resumed): it has run no code yet.
+            let _ = child.start_kill();
+            return Err(error);
+        }
+        Ok(child)
+    }
+
     /// The handle for Win32 calls; ownership stays with the job.
     pub(crate) fn raw(&self) -> HANDLE {
         raw(&self.0)
     }
+}
+
+/// Resumes the threads of process `pid`, which was created suspended and so
+/// has only its initial thread. The caller holds the process's handle, so the
+/// PID cannot name another process meanwhile.
+fn resume(pid: u32) -> io::Result<()> {
+    // SAFETY: plain call; the result is checked before use.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot as isize == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let snapshot = owned(snapshot)?;
+    let mut entry = THREADENTRY32 {
+        dwSize: size_of::<THREADENTRY32>() as u32,
+        // SAFETY: an all-zero value is valid for the rest of this plain C struct.
+        ..unsafe { std::mem::zeroed() }
+    };
+    let mut resumed = 0;
+    // SAFETY: `snapshot` is open and `entry.dwSize` is set as the API requires.
+    let mut more = unsafe { Thread32First(raw(&snapshot), &raw mut entry) } != 0;
+    while more {
+        if entry.th32OwnerProcessID == pid {
+            // SAFETY: plain call; a null result is checked by `owned`.
+            let thread =
+                owned(unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) })?;
+            // SAFETY: `thread` is open with THREAD_SUSPEND_RESUME.
+            if unsafe { ResumeThread(raw(&thread)) } == u32::MAX {
+                return Err(io::Error::last_os_error());
+            }
+            resumed += 1;
+        }
+        // SAFETY: as above, continuing the same enumeration.
+        more = unsafe { Thread32Next(raw(&snapshot), &raw mut entry) } != 0;
+    }
+    if resumed == 0 {
+        return Err(io::Error::other("the new process has no thread to resume"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -173,6 +265,48 @@ mod tests {
         job.terminate(7)?;
         assert_eq!(child.wait()?, 7);
         assert_eq!(job.active_count()?, 0);
+        Ok(())
+    }
+
+    /// A job whose members are ended when the test drops it, pass or fail.
+    struct Ending(Job);
+
+    impl Drop for Ending {
+        fn drop(&mut self) {
+            let _ = self.0.terminate(1);
+        }
+    }
+
+    /// A helper started through the job runs (it was resumed), and the
+    /// grandchild it starts joins the job, so terminating the job ends both.
+    #[tokio::test]
+    async fn helpers_start_inside_the_job() -> io::Result<()> {
+        let job = Ending(Job::create(false)?);
+        let mut command = tokio::process::Command::new("cmd.exe");
+        command
+            .args(["/d", "/c", "ping -n 30 127.0.0.1 >NUL"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = job.0.spawn_helper(&mut command)?;
+        let pid = child.id().ok_or_else(|| io::Error::other("no pid"))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while job.0.members()?.len() < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let members = job.0.members()?;
+        assert!(members.contains(&pid), "{members:?}");
+        assert!(
+            members.len() >= 2,
+            "the grandchild is not a member: {members:?}"
+        );
+        job.0.terminate(7)?;
+        let status = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+            .await
+            .map_err(|_| io::Error::other("the helper outlived its job"))??;
+        assert_eq!(status.code(), Some(7));
+        assert_eq!(job.0.active_count()?, 0);
         Ok(())
     }
 }

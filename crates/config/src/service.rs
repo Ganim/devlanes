@@ -18,6 +18,9 @@ use std::{fmt, marker::PhantomData};
 #[schemars(extend("examples" = [{"signal":"SIGINT","timeout":"15s"}]))]
 pub struct StopConfig {
     /// Initial stop signal; defaults to SIGTERM, followed by SIGKILL if the grace period expires.
+    /// On Windows, SIGINT sends Ctrl-C, other signals send Ctrl-Break plus WM_CLOSE to visible
+    /// windows, SIGKILL terminates at once, and processes still running when the grace period
+    /// expires are terminated.
     #[schemars(extend("examples" = ["SIGTERM","SIGINT"]))]
     pub signal: Option<String>,
     /// Grace period before SIGKILL; defaults to 10s.

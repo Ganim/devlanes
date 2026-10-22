@@ -100,21 +100,31 @@ fn leader(role: &str) -> Result<LaunchSpec, std::io::Error> {
     })
 }
 
-/// Not a test of its own: as a unit, starts `ping` outside the unit's job with
-/// `CREATE_BREAKAWAY_FROM_JOB`, prints `breakaway <pid>`, then waits (role
-/// `stay`) or exits (role `exit`). Without the role it does nothing.
+/// Not a test of its own: as a unit, starts `ping` asking to leave the unit's
+/// job (`CREATE_BREAKAWAY_FROM_JOB`) and, when refused, without asking, as tools
+/// that handle the refusal do. Prints `breakaway <pid>` or `fallback <pid>`,
+/// then waits (role `stay`) or exits (role `exit`). Without the role it does
+/// nothing.
 #[test]
 fn breakaway_leader() -> std::io::Result<()> {
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
     let Ok(role) = std::env::var(ROLE) else {
         return Ok(());
     };
-    let child = std::process::Command::new("ping")
-        .args(["-n", "60", "127.0.0.1"])
-        .stdout(std::process::Stdio::null())
-        .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
-        .spawn()?;
-    println!("breakaway {}", child.id());
+    let ping = || {
+        let mut command = std::process::Command::new("ping");
+        command
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null());
+        command
+    };
+    match ping().creation_flags(CREATE_BREAKAWAY_FROM_JOB).spawn() {
+        Ok(child) => println!("breakaway {}", child.id()),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            println!("fallback {}", ping().spawn()?.id());
+        }
+        Err(error) => return Err(error),
+    }
     std::io::stdout().flush()?;
     // Long enough for a snapshot to see the child under this process.
     std::thread::sleep(Duration::from_millis(if role == "exit" {
@@ -196,6 +206,23 @@ fn graceful_leader() -> std::io::Result<()> {
         }
         _ => Ok(()),
     }
+}
+
+/// The `shared` and `own` pings a `q9` leader reports, as processes.
+async fn q9_pings(
+    unit: &Guard,
+) -> Result<[devlanes_sys::ProcessInfo; 2], Box<dyn std::error::Error>> {
+    let mut output = unit.output();
+    let mut seen = String::new();
+    let mut pings = Vec::new();
+    for name in ["shared ", "own "] {
+        let pid: u32 = wait_for(&mut output, &mut seen, name)
+            .await
+            .and_then(|pid| pid.parse().ok())
+            .ok_or_else(|| format!("no {name}line in {seen:?}"))?;
+        pings.push(devlanes_sys::process(pid)?.ok_or_else(|| format!("{name}ping missing"))?);
+    }
+    pings.try_into().map_err(|_| "two pings".into())
 }
 
 /// Reads output until a line containing `marker` and returns the text after it.
@@ -310,18 +337,7 @@ async fn tasks_keep_processes_with_their_own_console() -> TestResult {
             .with_track_interval(Duration::from_millis(100))
             .with_exit_sweep(ExitSweep::KeepDaemonized);
         let unit = spawn(runner, leader("q9")?).await?;
-        let mut output = unit.output();
-        let mut seen = String::new();
-        let shared: u32 = wait_for(&mut output, &mut seen, "shared ")
-            .await
-            .and_then(|pid| pid.parse().ok())
-            .ok_or("no shared line")?;
-        let own: u32 = wait_for(&mut output, &mut seen, "own ")
-            .await
-            .and_then(|pid| pid.parse().ok())
-            .ok_or("no own line")?;
-        let shared = devlanes_sys::process(shared)?.ok_or("shared ping missing")?;
-        let own = devlanes_sys::process(own)?.ok_or("own ping missing")?;
+        let [shared, own] = q9_pings(&unit).await?;
         let _ends = (Ends(shared.identity()), Ends(own.identity()));
         let report = unit.wait_report().await?;
         assert!(
@@ -333,24 +349,110 @@ async fn tasks_keep_processes_with_their_own_console() -> TestResult {
             "{report:?}"
         );
         assert!(devlanes_sys::matches(&own.identity())?, "kept daemon ended");
+        assert!(
+            !report
+                .left_running
+                .iter()
+                .any(|p| p.name.eq_ignore_ascii_case("conhost.exe")),
+            "console hosts are not the task's daemons: {report:?}"
+        );
         Ok(())
     })
     .await?
 }
 
-/// Reads output until the `breakaway <pid>` line and returns the PID.
+/// Git for Windows' `sh.exe`, from `git --exec-path`
+/// (`<git>\mingw64\libexec\git-core`) as the daemon finds it.
+fn git_sh() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("git")
+        .arg("--exec-path")
+        .output()?;
+    let exec = std::path::PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    let sh = exec
+        .ancestors()
+        .nth(3)
+        .ok_or("unexpected git exec path")?
+        .join(r"bin\sh.exe");
+    Ok(sh)
+}
+
+/// A `run:` string's background command (`sleep &` in Git's `sh`, which breaks
+/// its children out of the job) still on the task's console is a leftover and
+/// ends with the task.
+#[tokio::test]
+async fn sh_leftovers_on_the_console_end_with_the_task() -> TestResult {
+    timeout(Duration::from_secs(60), async {
+        let runner = runner_with_helper()?.with_exit_sweep(ExitSweep::KeepDaemonized);
+        let spec = LaunchSpec {
+            program: git_sh()?.to_string_lossy().into_owned(),
+            args: vec!["-c".into(), "sleep 37 & echo \"sleep $!\"; sleep 1".into()],
+            ..cmd("")
+        };
+        let unit = spawn(runner, spec).await?;
+        let mut output = unit.output();
+        let mut seen = String::new();
+        wait_for(&mut output, &mut seen, "sleep ")
+            .await
+            .ok_or_else(|| format!("no sleep line in {seen:?}"))?;
+        let report = unit.wait_report().await?;
+        let sleeps = |list: &[devlanes_sys::ProcessInfo]| {
+            list.iter()
+                .any(|p| p.name.eq_ignore_ascii_case("sleep.exe"))
+        };
+        assert!(sleeps(&report.swept), "{report:?}");
+        assert!(!sleeps(&report.left_running), "{report:?}");
+        Ok(())
+    })
+    .await?
+}
+
+/// When the task's console cannot be listed (the helper cannot attach), nothing
+/// is ended on a guess: every process the task left running is kept and
+/// reported (decision Q9).
+#[tokio::test]
+async fn tasks_keep_everything_when_the_console_cannot_be_listed() -> TestResult {
+    timeout(Duration::from_secs(60), async {
+        let failing = devlanes_runner_windows::ConsoleHelper {
+            program: std::env::var_os("ComSpec")
+                .unwrap_or_else(|| "cmd.exe".into())
+                .into(),
+            args: ["/d", "/c", "exit 7"].map(Into::into).into(),
+        };
+        let runner = WindowsRunner::default()
+            .with_console_helper(failing)
+            .with_exit_sweep(ExitSweep::KeepDaemonized);
+        let unit = spawn(runner, leader("q9")?).await?;
+        let pings = q9_pings(&unit).await?;
+        let _ends = pings.each_ref().map(|ping| Ends(ping.identity()));
+        let report = unit.wait_report().await?;
+        for kept in &pings {
+            assert!(
+                report.left_running.iter().any(|p| p.pid == kept.pid),
+                "{report:?}"
+            );
+        }
+        assert!(report.swept.is_empty(), "{report:?}");
+        Ok(())
+    })
+    .await?
+}
+
+/// Reads output until the `breakaway <pid>` or `fallback <pid>` line and returns
+/// the word and the PID.
 async fn breakaway_pid(
     mut output: tokio::sync::broadcast::Receiver<devlanes_core::OutputChunk>,
-) -> Option<u32> {
+) -> Option<(&'static str, u32)> {
     let mut text = Vec::new();
     while let Ok(chunk) = output.recv().await {
         text.extend_from_slice(&chunk.bytes);
         // libtest prints `test breakaway_leader ... ` on the same line first.
         for line in text.lines().map_while(Result::ok) {
-            if let Some((_, pid)) = line.rsplit_once("breakaway ")
-                && let Ok(pid) = pid.trim().parse()
-            {
-                return Some(pid);
+            for word in ["breakaway", "fallback"] {
+                if let Some((_, pid)) = line.rsplit_once(&format!("{word} "))
+                    && let Ok(pid) = pid.trim().parse()
+                {
+                    return Some((word, pid));
+                }
             }
         }
     }
@@ -459,60 +561,49 @@ async fn stop_ends_the_whole_tree() -> TestResult {
     .await?
 }
 
-/// A process that broke away from the job is still tracked by parent, and a stop
-/// ends it too.
+/// Leaving the unit's job is refused; a tool that then starts its child
+/// normally keeps it in the job, where a stop ends it.
 #[tokio::test]
-async fn stop_reaches_breakaway_descendants() -> TestResult {
+async fn breakaway_is_refused_and_a_stop_ends_the_fallback() -> TestResult {
     timeout(Duration::from_secs(60), async {
         let runner = WindowsRunner::default().with_track_interval(Duration::from_millis(50));
         let unit = spawn(runner, leader("stay")?).await?;
-        let pid = breakaway_pid(unit.output())
+        let (word, pid) = breakaway_pid(unit.output())
             .await
-            .ok_or("no breakaway line")?;
-        let info = devlanes_sys::process(pid)?.ok_or("breakaway process missing")?;
+            .ok_or("no breakaway or fallback line")?;
+        let info = devlanes_sys::process(pid)?.ok_or("ping missing")?;
         let _ends = Ends(info.identity());
-        let mut tracked = false;
-        for _ in 0..100 {
-            if unit.processes().await?.iter().any(|p| p.pid == pid) {
-                tracked = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(tracked, "breakaway {pid} not tracked");
+        assert_eq!(word, "fallback", "breakaway was allowed");
         unit.stop_with_report(StopPolicy::default()).await?;
         assert!(
             !devlanes_sys::matches(&info.identity())?,
-            "breakaway {pid} survived"
+            "ping {pid} survived"
         );
         Ok(())
     })
     .await?
 }
 
-/// After a task exits on its own, a process it started outside its job keeps
-/// running and is reported as left running.
+/// Without a helper to list the task's console, job membership decides what a
+/// task keeps: its job's members end with it.
 #[tokio::test]
-async fn task_keeps_processes_outside_its_job() -> TestResult {
+async fn task_without_a_helper_ends_its_job_members() -> TestResult {
     timeout(Duration::from_secs(60), async {
         let runner = WindowsRunner::default()
             .with_track_interval(Duration::from_millis(50))
             .with_exit_sweep(ExitSweep::KeepDaemonized);
         let unit = spawn(runner, leader("exit")?).await?;
-        let pid = breakaway_pid(unit.output())
+        let (_, pid) = breakaway_pid(unit.output())
             .await
-            .ok_or("no breakaway line")?;
-        let info = devlanes_sys::process(pid)?.ok_or("breakaway process missing")?;
+            .ok_or("no breakaway or fallback line")?;
+        let info = devlanes_sys::process(pid)?.ok_or("ping missing")?;
         let _ends = Ends(info.identity());
         let report = unit.wait_report().await?;
         assert_eq!(report.outcome.code, Some(0));
+        assert!(report.swept.iter().any(|p| p.pid == pid), "{report:?}");
         assert!(
-            report.left_running.iter().any(|p| p.pid == pid),
-            "{report:?}"
-        );
-        assert!(
-            devlanes_sys::matches(&info.identity())?,
-            "kept process ended"
+            !devlanes_sys::matches(&info.identity())?,
+            "job member survived"
         );
         Ok(())
     })

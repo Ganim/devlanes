@@ -803,7 +803,8 @@ fn doctor_terminal_and_acl_checks() {
 
 /// `STATUS_CONTROL_C_EXIT` (0xC000013A as a signed exit code) reads as
 /// `interrupted (Ctrl-C)` in task results, error lists and reasons; the data
-/// stays the number.
+/// stays the number. Agent status lines keep `exit=<code>` so their
+/// `key=value` pairs still scan, and name Ctrl-C after it.
 #[test]
 fn ctrl_c_exits_read_as_interrupted() {
     const CTRL_C: i64 = -1_073_741_510;
@@ -811,23 +812,37 @@ fn ctrl_c_exits_read_as_interrupted() {
         (
             Method::Run,
             json!({"task": "test", "lane": "acme@2", "unit": "test", "interactive": false, "exit_code": CTRL_C, "state": "failed"}),
+            Some("failed acme@2:test exit=-1073741510 (Ctrl-C)\n"),
         ),
         (
             Method::Errors,
             json!({"items": [{"lane": "acme@2", "unit": "admin", "state": "failed", "exit_code": CTRL_C,
                 "crashes": 1, "reason": null, "error_lines": [], "port_conflicts": []}],
                 "truncated": false, "next_cursor": null}),
+            Some("failed acme@2:admin exit=-1073741510 (Ctrl-C) crashes=1\n"),
         ),
         (
             Method::Why,
             json!({"lane": "acme@2", "unit": "admin", "state": "failed",
                 "reasons": [{"code": "exited", "data": {"code": CTRL_C, "signal": null}}]}),
+            None,
         ),
     ];
-    for (method, data) in cases {
+    for (method, data, agent_line) in cases {
         let text = render_text(method, &data);
+        let (text, agent) = text.split_once("--- agent").expect("agent section");
         assert!(text.contains("interrupted (Ctrl-C)"), "{text}");
         assert!(!text.contains("1073741510"), "{text}");
+        match agent_line {
+            Some(line) => {
+                assert!(agent.contains(line), "{agent}");
+                assert!(!agent.contains("interrupted"), "{agent}");
+            }
+            None => {
+                assert!(agent.contains("interrupted (Ctrl-C)"), "{agent}");
+                assert!(!agent.contains("1073741510"), "{agent}");
+            }
+        }
         let json = runtime(OutputMode::Json)
             .reporter()
             .result(&Report::new(method, &data))
@@ -898,6 +913,23 @@ fn logon_entry_in_status_and_doctor() {
     assert!(text.contains("  fix: devlanes daemon install"), "{text}");
     assert!(text.contains("--- agent (exit 0)"), "{text}");
     assert!(!doctor(&Value::Null).contains("logon"));
+
+    // Turned off in Task Manager: the entry exists but Explorer skips it.
+    let mut disabled = current.clone();
+    disabled["disabled"] = json!(true);
+    let text = doctor(&disabled);
+    assert!(
+        text.contains(&format!(
+            "warn daemon: the logon entry ({entry}) is turned off in Task Manager"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("  fix: devlanes daemon install"), "{text}");
+    assert!(
+        status(&disabled).contains("logon: the logon entry"),
+        "{}",
+        status(&disabled)
+    );
 }
 
 #[test]

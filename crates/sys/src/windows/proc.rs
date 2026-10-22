@@ -197,6 +197,33 @@ pub fn terminate_verified(
     Ok(SignalOutcome::Sent)
 }
 
+/// A running process, verified by identity, whose PID cannot be reused while
+/// this is held: an open handle keeps the process object, and so its PID, alive.
+/// For acting on a process by bare PID afterwards (a console helper attaching
+/// to it) without reaching a stranger that got the PID in between.
+#[derive(Debug)]
+pub struct Held {
+    _handle: OwnedHandle,
+}
+
+impl Held {
+    /// Opens `identity`; `None` when it is gone, exited, or its PID now names
+    /// another process.
+    pub fn open(identity: &ProcessIdentity) -> Result<Option<Self>, Error> {
+        let Some(handle) = open(
+            identity.pid,
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+        )?
+        else {
+            return Ok(None);
+        };
+        if creation_time(&handle)? != identity.start_time || exited(&handle) {
+            return Ok(None);
+        }
+        Ok(Some(Self { _handle: handle }))
+    }
+}
+
 /// Opens `pid` with `access`; `None` when no process has that PID.
 pub(crate) fn open(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> io::Result<Option<OwnedHandle>> {
     if pid == 0 {
@@ -371,6 +398,24 @@ mod tests {
     use std::process::{Command, Stdio};
 
     use super::*;
+
+    /// A live identity is held; another start time or a gone PID is not.
+    #[test]
+    fn holds_only_the_recorded_process() -> Result<(), Error> {
+        let me = crate::identity(std::process::id())?.ok_or(Error::Tool {
+            tool: "identity",
+            detail: "no identity for this process".into(),
+        })?;
+        assert!(Held::open(&me)?.is_some());
+        let other = ProcessIdentity {
+            start_time: me.start_time + 1,
+            ..me
+        };
+        assert!(Held::open(&other)?.is_none());
+        let gone = ProcessIdentity { pid: 0, ..me };
+        assert!(Held::open(&gone)?.is_none());
+        Ok(())
+    }
 
     /// This process is in the snapshot with the same identity a lookup gives.
     #[test]

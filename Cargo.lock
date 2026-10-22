@@ -1183,6 +1183,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "devlanes-logon-launcher"
+version = "0.1.0"
+dependencies = [
+ "devlanes-client",
+ "devlanes-sys",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "devlanes-logs"
 version = "0.1.0"
 dependencies = [

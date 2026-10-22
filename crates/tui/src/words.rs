@@ -2,7 +2,10 @@
 //! sentences and hints are written here, following the CLI's wording
 //! (`devlanes-cli` `render/words.rs`) so both clients say the same thing.
 
-use devlanes_proto::RpcError;
+use devlanes_proto::{
+    RpcError,
+    exit::{INTERRUPTED, ctrl_c_exit},
+};
 use serde_json::Value;
 
 use crate::{api::ApiError, text};
@@ -132,6 +135,16 @@ fn compact_fields(data: &Value) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// `exited with code <code>`, or `interrupted (Ctrl-C)` for a Windows Ctrl-C exit.
+pub fn exited_with(code: impl Into<i64>) -> String {
+    let code = code.into();
+    if ctrl_c_exit(code) {
+        INTERRUPTED.into()
+    } else {
+        format!("exited with code {code}")
+    }
 }
 
 /// `logs` hint for errors that name a unit.
@@ -365,6 +378,18 @@ pub fn rpc(error: &RpcError) -> Worded {
             rest,
             logs_hint(data),
         ),
+        // `{code, signal}` of a unit that exited on its own with a failure.
+        "exited" => (
+            match data.get("code").and_then(Value::as_i64) {
+                Some(code) => exited_with(code),
+                None => match data.get("signal").and_then(Value::as_i64) {
+                    Some(signal) => format!("killed by signal {signal}"),
+                    None => "exited".into(),
+                },
+            },
+            Vec::new(),
+            logs_hint(data),
+        ),
         "git_failed" => (format!("git failed: {message}"), rest, None),
         "unsupported" | "unsupported_method" => (
             format!("daemon does not support {}", known(data, "method")),
@@ -450,6 +475,25 @@ mod tests {
         let worded = api(&ApiError::Disconnected("client I/O: broken pipe".into()));
         assert_eq!(worded.summary, "daemon unreachable");
         assert_eq!(worded.detail, ["client I/O: broken pipe"]);
+    }
+
+    /// A unit's `exited` reason reads like the CLI's; a Windows Ctrl-C exit
+    /// (`STATUS_CONTROL_C_EXIT`) is named instead of its number.
+    #[test]
+    fn exited_reasons_name_the_code_signal_or_ctrl_c() {
+        let exited = |data| rpc(&RpcError::new("exited", data, 1)).summary;
+        assert_eq!(
+            exited(json!({"code": 1, "signal": null})),
+            "exited with code 1"
+        );
+        assert_eq!(
+            exited(json!({"code": -1_073_741_510, "signal": null})),
+            "interrupted (Ctrl-C)"
+        );
+        assert_eq!(
+            exited(json!({"code": null, "signal": 9})),
+            "killed by signal 9"
+        );
     }
 
     #[test]

@@ -632,6 +632,14 @@ fn has_prefix(name: &str, prefix: &str) -> bool {
         .is_some_and(|start| same_name(start, prefix))
 }
 
+/// The part of this process's environment a daemon started from it keeps, as
+/// [`Client::connect_or_spawn`] passes it: tokens and project variables stay
+/// out. For launchers that start `devlanes daemon run` themselves (the Windows
+/// logon launcher); they clear the rest of the environment.
+pub fn daemon_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    daemon_env(std::env::vars_os(), &[])
+}
+
 /// The allowlisted part of `vars` for an auto-spawned daemon, minus `remove`.
 /// Anything else a shell carries (tokens, project variables) stays out of a
 /// process that serves every later shell.

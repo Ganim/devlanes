@@ -609,6 +609,23 @@ fn unit(name: &str, state: &str) -> UnitSummary {
     }
 }
 
+/// `Render for UnitSummary` words a Windows Ctrl-C exit like the status
+/// renderers: `interrupted (Ctrl-C)`, and `exit=<code> (Ctrl-C)` for agents.
+#[test]
+fn unit_text_words_ctrl_c_exits() {
+    let mut failed = unit("api", "failed");
+    assert_eq!(failed.text(false, false)[0], "failed acme@2:api exit=1");
+    failed.exit_code = Some(-1_073_741_510);
+    assert_eq!(
+        failed.text(false, false)[0],
+        "failed acme@2:api interrupted (Ctrl-C)"
+    );
+    assert_eq!(
+        failed.text(true, false)[0],
+        "failed acme@2:api exit=-1073741510 (Ctrl-C)"
+    );
+}
+
 #[test]
 fn reporter_mode_snapshots_preserve_json_and_prioritize_agent_failures() {
     let cli = Cli::parse_from(["devlanes", "status"]);

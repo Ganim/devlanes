@@ -185,9 +185,13 @@ async fn admin_dir(path: &Path) -> Result<Option<PathBuf>, Error> {
         .stdin(Stdio::null());
     // Git must not search above the worktree: for a worktree nested in another
     // checkout it would answer for the outer repository, and the worktree would
-    // take the outer one's identity.
-    if let Some(parent) = path.parent().filter(|parent| parent.is_absolute()) {
-        command.env("GIT_CEILING_DIRECTORIES", parent);
+    // take the outer one's identity. The variable is a path list (`:` on Unix,
+    // `;` on Windows), so a parent containing the separator would split into
+    // wrong ceilings; `join_paths` refuses those, and then none is set.
+    if let Some(parent) = path.parent().filter(|parent| parent.is_absolute())
+        && let Ok(ceiling) = std::env::join_paths([parent])
+    {
+        command.env("GIT_CEILING_DIRECTORIES", ceiling);
     }
     let output = command.output().await?;
     if output.status.success() {
@@ -555,6 +559,52 @@ mod tests {
                 &common
             ));
             assert_eq!(admin_dir(&lane).await?, None);
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    /// A directory name holding the platform's path-list separator, which
+    /// `GIT_CEILING_DIRECTORIES` cannot carry.
+    #[cfg(unix)]
+    const SEPARATED: &str = "a:b";
+    #[cfg(windows)]
+    const SEPARATED: &str = "a;b";
+
+    /// Below a directory whose name holds the path-list separator no ceiling is
+    /// set, and the lookup still finds the worktree's own administration directory.
+    #[tokio::test]
+    async fn admin_lookup_works_below_a_path_list_separator()
+    -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let dir = tempfile::tempdir()?;
+            let temp = TempPath(dunce::canonicalize(dir.path())?);
+            git(temp.path(), &["init", "-b", "main"]).await?;
+            git(
+                temp.path(),
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial",
+                ],
+            )
+            .await?;
+            let lane = temp.path().join(SEPARATED).join("lane");
+            add(temp.path(), &lane, "feat/separated").await?;
+            let common = temp.path().join(".git");
+            let admin = admin_dir(&lane).await?.ok_or("the worktree has its link")?;
+            assert!(
+                strip_path_prefix(&admin, &common.join("worktrees")).is_some(),
+                "{admin:?}"
+            );
             Ok::<_, Box<dyn std::error::Error>>(())
         })
         .await??;

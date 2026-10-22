@@ -124,17 +124,22 @@ pub fn run() -> ExitCode {
             }
         }
     });
-    // Dropping the runtime waits for every spawn_blocking task (git, getaddrinfo, file
-    // watchers), which can keep a stopped daemon alive indefinitely; bound the wait.
-    tokio.shutdown_timeout(std::time::Duration::from_secs(5));
+    // Units are stopped and state.db is closed once the server returns, so a
+    // waiting session-end answer may go now; the runtime shutdown below only
+    // waits for helper threads and must not eat into Windows' logoff budget.
     if let Some(session_end) = session_end.get() {
         session_end.finished();
     }
+    // Dropping the runtime waits for every spawn_blocking task (git, getaddrinfo, file
+    // watchers), which can keep a stopped daemon alive indefinitely; bound the wait.
+    tokio.shutdown_timeout(std::time::Duration::from_secs(5));
     ExitCode::from(code)
 }
 
-/// Logoff and shutdown on Windows: a detached daemon gets no console events, so
-/// a hidden window (`devlanes_sys::windows::session`) hears `WM_ENDSESSION`
+/// Logoff and shutdown on Windows: a detached daemon gets no console events,
+/// and one run in a console stops getting the logoff and shutdown ones once
+/// `user32.dll` is loaded, so a hidden window
+/// (`devlanes_sys::windows::session`) hears `WM_ENDSESSION`
 /// and shuts down as on a signal: units stop, no `lane.stop` tasks, and those
 /// of a `daemon stop` already running are interrupted. Windows ends the
 /// process soon after that message is answered, so the answer waits until the
@@ -244,16 +249,21 @@ fn watch_signals(shutdown: CancellationToken, interrupt: CancellationToken) {
     });
 }
 
-/// Ctrl-C and Ctrl-Break shut down a daemon run by hand in a console the way
-/// SIGTERM does on Unix: no `lane.stop` tasks, and those of a `daemon stop`
-/// already running are interrupted. A detached daemon has no console and gets
-/// neither; logoff reaches it through [`SessionEnd`].
+/// Ctrl-C, Ctrl-Break and closing the console window shut down a daemon run by
+/// hand in a console the way SIGTERM does on Unix: no `lane.stop` tasks, and
+/// those of a `daemon stop` already running are interrupted. A detached daemon
+/// has no console and gets none of them; logoff reaches it through
+/// [`SessionEnd`].
+///
+/// After a close Windows ends the process once its handler returns or about
+/// 5 seconds have passed; tokio's handler never returns, so the shutdown gets
+/// those seconds.
 #[cfg(windows)]
 fn watch_signals(shutdown: CancellationToken, interrupt: CancellationToken) {
-    use tokio::signal::windows::{ctrl_break, ctrl_c};
-    let (mut int, mut brk) = match (ctrl_c(), ctrl_break()) {
-        (Ok(int), Ok(brk)) => (int, brk),
-        (Err(error), _) | (_, Err(error)) => {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close};
+    let (mut int, mut brk, mut close) = match (ctrl_c(), ctrl_break(), ctrl_close()) {
+        (Ok(int), Ok(brk), Ok(close)) => (int, brk, close),
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
             tracing::warn!(%error, "console handlers not installed; Ctrl-C ends the daemon without a shutdown");
             return;
         }
@@ -265,6 +275,7 @@ fn watch_signals(shutdown: CancellationToken, interrupt: CancellationToken) {
             let name = tokio::select! {
                 Some(()) = int.recv() => "Ctrl-C",
                 Some(()) = brk.recv() => "Ctrl-Break",
+                Some(()) = close.recv() => "console closed",
                 else => return,
             };
             if shutdown.is_cancelled() {
@@ -684,8 +695,8 @@ pub async fn install(_: &Runtime) -> Result<u8, RpcError> {
         .await
         .map_err(|error| io(std::io::Error::other(error)))??;
     println!("installed {shown}");
-    // The client's own spawn: it leaves the terminal's job when it can and passes
-    // only the allowed environment, which a launcher started from here would not.
+    // The client's own spawn rather than the launcher: it waits for the daemon's
+    // readiness and reports a failure here, where the launcher would only log it.
     devlanes_client::Client::connect_or_spawn(&paths)
         .await
         .map_err(crate::driver::rpc_error)?;
@@ -706,9 +717,11 @@ pub async fn uninstall(_: &Runtime) -> Result<u8, RpcError> {
     Ok(0)
 }
 
-/// Whether the daemon starts at logon: `{installed, entry, command?, current}`.
-/// `current` is false when the entry names another devlanes or home, so
-/// `daemon install` would rewrite it.
+/// Whether the daemon starts at logon: `{installed, entry, command?, current,
+/// disabled?}`. `current` is false when the entry names another devlanes or
+/// home, so `daemon install` would rewrite it; `disabled` is true when the user
+/// turned the entry off in Task Manager, so it does not run at logon although
+/// it exists, until `daemon install` turns it back on.
 #[cfg(windows)]
 pub async fn autostart(paths: &Paths) -> Option<serde_json::Value> {
     let home = paths.home.clone();
@@ -736,23 +749,36 @@ mod logon {
     /// The launcher's file name, next to `devlanes.exe`.
     const LAUNCHER: &str = "devlanesw.exe";
 
-    /// A registry value under `HKEY_CURRENT_USER`; tests use a scratch key so
-    /// they never touch the real `Run` key.
+    /// A registry value under `HKEY_CURRENT_USER` and the key where Task
+    /// Manager records whether a value of that name is turned off; tests use
+    /// scratch keys so they never touch the real `Run` or `StartupApproved` keys.
     #[derive(Debug, Clone)]
     pub(super) struct RunEntry {
         pub(super) key: String,
         pub(super) name: String,
+        pub(super) approved_key: String,
     }
 
     impl RunEntry {
         /// `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `devlanes`,
-        /// which Explorer runs at logon.
+        /// which Explorer runs at logon unless the value of the same name under
+        /// `Explorer\StartupApproved\Run` says it is disabled.
         pub(super) fn user() -> Self {
             Self {
                 key: r"Software\Microsoft\Windows\CurrentVersion\Run".into(),
                 name: "devlanes".into(),
+                approved_key:
+                    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run".into(),
             }
         }
+    }
+
+    /// Whether Task Manager's record for a `Run` value says it is turned off.
+    /// The record is `REG_BINARY`: a flag byte, padding, then the time it was
+    /// turned off. An even flag (0x02, 0x06) is enabled, an odd one (0x03,
+    /// 0x07) disabled; a missing record is enabled.
+    fn disabled_by(record: &[u8]) -> bool {
+        record.first().is_some_and(|flags| flags & 1 == 1)
     }
 
     impl std::fmt::Display for RunEntry {
@@ -762,8 +788,9 @@ mod logon {
         }
     }
 
-    /// `devlanesw.exe` next to this executable; installing without it would
-    /// leave an entry that starts nothing.
+    /// `devlanesw.exe` (package `devlanes-logon-launcher`) next to this
+    /// executable; installing without it would leave an entry that starts
+    /// nothing.
     pub(super) fn launcher() -> std::io::Result<PathBuf> {
         let launcher = std::env::current_exe()?.with_file_name(LAUNCHER);
         if launcher.is_file() {
@@ -772,7 +799,7 @@ mod logon {
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
-                    "{} is missing; reinstall devlanes so the launcher sits next to devlanes.exe",
+                    "{} is missing; reinstall devlanes so the launcher sits next to devlanes.exe (from source: cargo build -p devlanes-logon-launcher)",
                     launcher.display()
                 ),
             ))
@@ -815,25 +842,35 @@ mod logon {
         Ok(quoted)
     }
 
-    /// Writes the entry for `launcher` and `home`. Blocking.
+    /// Writes the entry for `launcher` and `home` and turns it back on if Task
+    /// Manager turned it off. Blocking.
+    ///
+    /// Deleting Task Manager's record is enough to turn it on: Explorer runs a
+    /// value without one, and nothing of devlanes stays behind in that key.
     pub(super) fn install(entry: &RunEntry, launcher: &Path, home: &Path) -> Result<(), RpcError> {
         let command = command_line(launcher, home)?;
-        registry::write_string(&entry.key, &entry.name, &command).map_err(|error| {
+        let failed = |error: std::io::Error| {
             RpcError::new(
                 "service_install_failed",
                 json!({"command": entry.to_string(), "message": error.to_string()}),
                 1,
             )
-        })
+        };
+        registry::write_string(&entry.key, &entry.name, &command).map_err(failed)?;
+        registry::delete_value(&entry.approved_key, &entry.name).map_err(failed)?;
+        Ok(())
     }
 
-    /// Removes the entry; a missing one is fine. Blocking.
+    /// Removes the entry and Task Manager's record of it; missing ones are
+    /// fine. Blocking.
     pub(super) fn uninstall(entry: &RunEntry) -> std::io::Result<()> {
-        registry::delete_value(&entry.key, &entry.name).map(drop)
+        registry::delete_value(&entry.key, &entry.name)?;
+        registry::delete_value(&entry.approved_key, &entry.name).map(drop)
     }
 
-    /// `{installed, entry, command?, current}` for `entry`; `current` compares
-    /// with `expected`, the command `install` would write now. Blocking.
+    /// `{installed, entry, command?, current, disabled?}` for `entry`; `current`
+    /// compares with `expected`, the command `install` would write now, and
+    /// `disabled` is null when Task Manager's record cannot be read. Blocking.
     pub(super) fn report(entry: &RunEntry, expected: Option<&str>) -> Value {
         match registry::read_string(&entry.key, &entry.name) {
             Ok(Some(command)) => json!({
@@ -841,6 +878,10 @@ mod logon {
                 "entry": entry.to_string(),
                 "command": command,
                 "current": expected.is_some_and(|expected| expected == command),
+                "disabled": match registry::read_binary(&entry.approved_key, &entry.name) {
+                    Ok(record) => Some(record.as_deref().is_some_and(disabled_by)),
+                    Err(_) => None,
+                },
             }),
             Ok(None) => json!({"installed": false, "entry": entry.to_string(), "current": false}),
             Err(error) => json!({
@@ -856,9 +897,13 @@ mod logon {
     mod tests {
         use super::*;
 
-        /// A scratch key under `HKCU\Software`, deleted when dropped, so tests
-        /// never touch the real `Run` key.
-        struct Scratch(RunEntry);
+        /// A scratch key under `HKCU\Software` holding a `Run` and an
+        /// `Approved` key, deleted when dropped, so tests never touch the real
+        /// `Run` or `StartupApproved` keys.
+        struct Scratch {
+            root: String,
+            entry: RunEntry,
+        }
 
         impl Scratch {
             fn new() -> Self {
@@ -866,16 +911,21 @@ mod logon {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|elapsed| elapsed.subsec_nanos())
                     .unwrap_or_default();
-                Self(RunEntry {
-                    key: format!(r"Software\devlanes-test-{}-{nanos}", std::process::id()),
-                    name: "devlanes".into(),
-                })
+                let root = format!(r"Software\devlanes-test-{}-{nanos}", std::process::id());
+                Self {
+                    entry: RunEntry {
+                        key: format!(r"{root}\Run"),
+                        name: "devlanes".into(),
+                        approved_key: format!(r"{root}\Approved"),
+                    },
+                    root,
+                }
             }
         }
 
         impl Drop for Scratch {
             fn drop(&mut self) {
-                let _ = registry::delete_tree(&self.0.key);
+                let _ = registry::delete_tree(&self.root);
             }
         }
 
@@ -884,6 +934,7 @@ mod logon {
         #[test]
         fn installs_reports_and_removes_the_entry() {
             let scratch = Scratch::new();
+            let entry = &scratch.entry;
             let launcher = Path::new(r"C:\Program Files\devlanes\devlanesw.exe");
             let home = Path::new(r"C:\Users\a b\.devlanes");
             let expected = command_line(launcher, home).expect("command");
@@ -891,17 +942,53 @@ mod logon {
                 expected,
                 r#""C:\Program Files\devlanes\devlanesw.exe" --home "C:\Users\a b\.devlanes""#
             );
-            assert_eq!(report(&scratch.0, Some(&expected))["installed"], false);
-            install(&scratch.0, launcher, home).expect("install");
-            let installed = report(&scratch.0, Some(&expected));
+            assert_eq!(report(entry, Some(&expected))["installed"], false);
+            install(entry, launcher, home).expect("install");
+            let installed = report(entry, Some(&expected));
             assert_eq!(installed["installed"], true, "{installed}");
             assert_eq!(installed["command"], expected.as_str());
             assert_eq!(installed["current"], true);
+            assert_eq!(installed["disabled"], false);
             let other = command_line(launcher, Path::new(r"C:\other")).expect("command");
-            assert_eq!(report(&scratch.0, Some(&other))["current"], false);
-            uninstall(&scratch.0).expect("uninstall");
-            uninstall(&scratch.0).expect("uninstall again");
-            assert_eq!(report(&scratch.0, Some(&expected))["installed"], false);
+            assert_eq!(report(entry, Some(&other))["current"], false);
+            uninstall(entry).expect("uninstall");
+            uninstall(entry).expect("uninstall again");
+            assert_eq!(report(entry, Some(&expected))["installed"], false);
+        }
+
+        /// An entry Task Manager turned off is reported as disabled, one it
+        /// turned back on is not, and `install` turns it on again by removing
+        /// the record; `uninstall` removes the record too.
+        #[test]
+        fn task_manager_state_is_reported_and_install_reenables() {
+            let scratch = Scratch::new();
+            let entry = &scratch.entry;
+            let launcher = Path::new(r"C:\devlanes\devlanesw.exe");
+            let home = Path::new(r"C:\Users\u\.devlanes");
+            install(entry, launcher, home).expect("install");
+            // As Task Manager writes them: flag byte, padding, FILETIME.
+            let off = [3, 0, 0, 0, 0x2c, 0xf1, 0x65, 0x7f, 0x99, 0xed, 0xd9, 0x01];
+            let on = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            for (record, disabled) in [(&off, true), (&on, false)] {
+                registry::write_binary(&entry.approved_key, &entry.name, record).expect("record");
+                assert_eq!(report(entry, None)["disabled"], disabled, "{record:?}");
+            }
+            assert!(disabled_by(&[7, 0]));
+            assert!(!disabled_by(&[6, 0]));
+            assert!(!disabled_by(&[]));
+            registry::write_binary(&entry.approved_key, &entry.name, &off).expect("record");
+            install(entry, launcher, home).expect("reinstall");
+            assert_eq!(
+                registry::read_binary(&entry.approved_key, &entry.name).expect("read"),
+                None
+            );
+            assert_eq!(report(entry, None)["disabled"], false);
+            registry::write_binary(&entry.approved_key, &entry.name, &off).expect("record");
+            uninstall(entry).expect("uninstall");
+            assert_eq!(
+                registry::read_binary(&entry.approved_key, &entry.name).expect("read"),
+                None
+            );
         }
 
         /// A drive root keeps its backslash: `"C:\\"` reads back as `C:\`, not as

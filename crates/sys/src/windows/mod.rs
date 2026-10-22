@@ -8,6 +8,7 @@
 pub mod conpty;
 pub mod console;
 pub mod ctrl;
+pub mod handles;
 pub mod job;
 pub mod pipe;
 pub mod proc;
