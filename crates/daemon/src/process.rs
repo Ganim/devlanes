@@ -91,14 +91,23 @@ impl Readiness {
     }
 
     /// Redirecting stdout matters because a held pipe keeps the CLI's reader waiting forever.
+    ///
+    /// A client that stopped waiting (its start timeout passed) has closed the
+    /// pipe; that is not an error, since the daemon serves its next command.
     fn finish(self, line: &[u8]) -> std::io::Result<()> {
         if !self.enabled {
             return Ok(());
         }
         let mut stdout = std::io::stdout().lock();
-        stdout.write_all(line)?;
-        stdout.flush()?;
-        release_stdout()
+        let written = stdout.write_all(line).and_then(|()| stdout.flush());
+        release_stdout()?;
+        match written {
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                tracing::info!("the spawning client stopped waiting before the daemon was ready");
+                Ok(())
+            }
+            other => other,
+        }
     }
 }
 

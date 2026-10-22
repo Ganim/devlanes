@@ -30,10 +30,16 @@ impl Inner {
         self.load_known_projects().await?;
         self.track_orphans(runs).await;
         let names: Vec<String> = self.all_projects().iter().map(|p| p.name()).collect();
-        match self.integ.infra.adopt(&names).await {
-            Ok(adopted) => tracing::info!(%adopted, "re-adopted containers"),
-            Err(error) => tracing::debug!(code = %error.code, "container adoption skipped"),
-        }
+        // Off the startup path: the first Docker call can wait on the engine
+        // waking up (Docker Desktop's Resource Saver took 18 s), longer than a
+        // spawning client waits, and adoption only starts event watchers.
+        let infra = Arc::clone(&self.integ.infra);
+        tokio::spawn(async move {
+            match infra.adopt(&names).await {
+                Ok(adopted) => tracing::info!(%adopted, "re-adopted containers"),
+                Err(error) => tracing::debug!(code = %error.code, "container adoption skipped"),
+            }
+        });
         self.start_dns().await;
         self.start_background();
         Ok(())

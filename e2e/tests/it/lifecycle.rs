@@ -241,6 +241,46 @@ fn start_right_after_an_edit_uses_the_new_config() -> Result<()> {
     Ok(())
 }
 
+/// A daemon whose spawning client stopped waiting (closed the readiness pipe,
+/// as a client does after its start timeout) still serves: it was ready, and
+/// the client's next command connects to it.
+#[test]
+fn daemon_outlives_a_client_that_stopped_waiting() -> Result<()> {
+    let lab = Lab::with_config(EDIT_BEFORE, BUDGET)?;
+    let mut command = lab.command(lab.repo(), &["daemon", "run"])?;
+    command.env("DEVLANES_READY_FD", "1");
+    let mut daemon = lab.spawn(command)?;
+    // Before the daemon can be ready: reconcile alone takes longer than this.
+    drop(daemon.stdout.take());
+    drop(daemon.stderr.take());
+    // An answer means the accept loop runs, which only follows the readiness write.
+    let status = lab.eventually("the daemon to answer", Duration::from_secs(30), || {
+        Ok(lab
+            .json(lab.repo(), &["daemon", "status", "--json"])
+            .ok()
+            .filter(|status| status["pid"].is_number()))
+    })?;
+    std::thread::sleep(Duration::from_millis(500));
+    let pid = need_pid(
+        status["pid"]
+            .as_i64()
+            .and_then(|pid| i32::try_from(pid).ok()),
+    )?;
+    assert!(
+        alive(pid),
+        "the daemon exited after its client left: {status}"
+    );
+    assert_eq!(
+        lab.daemon_pid()?,
+        Some(pid),
+        "the client's command reached the same daemon"
+    );
+    lab.devlanes(lab.repo(), &["daemon", "stop", "--yes"])?
+        .expect_code(0)?;
+    let _ = daemon.wait();
+    Ok(())
+}
+
 /// A running daemon must report its PID.
 fn need_pid(pid: Option<i32>) -> Result<i32> {
     pid.ok_or_else(|| devlanes_e2e::Error::Unexpected("no daemon is running".into()))
