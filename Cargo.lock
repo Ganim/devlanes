@@ -937,6 +937,7 @@ dependencies = [
  "devlanes-term-kitty",
  "devlanes-term-terminal-app",
  "devlanes-term-wezterm",
+ "devlanes-term-windows-terminal",
  "devlanes-transport",
  "devlanes-transport-ssh",
  "devlanes-trust",
@@ -1694,6 +1695,14 @@ name = "devlanes-term-wezterm"
 version = "0.1.0"
 dependencies = [
  "devlanes-term",
+]
+
+[[package]]
+name = "devlanes-term-windows-terminal"
+version = "0.1.0"
+dependencies = [
+ "devlanes-term",
+ "tempfile",
 ]
 
 [[package]]

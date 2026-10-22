@@ -24,6 +24,8 @@ terminal: wezterm
 
 It runs `wezterm start --cwd <cwd> -- <command>`, through `open -na WezTerm.app --args` on macOS. `wezterm start` has no title flag, so the request's title is ignored.
 
+On Linux and Windows the request's `env` is set on the `wezterm` process, which hands it to the command. On macOS `open` starts the app with launchd's environment, so `env` is ignored there.
+
 ## License
 
 Apache-2.0

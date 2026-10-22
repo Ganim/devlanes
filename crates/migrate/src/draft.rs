@@ -276,7 +276,7 @@ fn sanitize(raw: &str) -> String {
 
 /// The project name devlanes accepts (`[a-z0-9][a-z0-9._-]*`), from a directory name. A
 /// trailing `.` is dropped too: the name is valid, but Windows would drop the dot from its
-/// directories, so devlanes would store it as `acme_`.
+/// directories, so devlanes would store it as `acme+`.
 pub(crate) fn project_name(dir: &Path) -> String {
     let raw = dir
         .file_name()
@@ -366,11 +366,6 @@ fn below_home(raw: &str) -> Option<&str> {
         .or((raw == "~").then_some(""))
 }
 
-/// Stop signals devlanes accepts.
-const SIGNALS: [&str; 7] = [
-    "SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT", "SIGKILL", "SIGUSR1", "SIGUSR2",
-];
-
 /// `SIGINT` from `SIGINT`, `INT` or `sigint`, when devlanes accepts it.
 pub(crate) fn signal_name(raw: &str) -> Option<&'static str> {
     let upper = raw.trim().to_ascii_uppercase();
@@ -379,7 +374,7 @@ pub(crate) fn signal_name(raw: &str) -> Option<&'static str> {
     } else {
         format!("SIG{upper}")
     };
-    SIGNALS.iter().copied().find(|signal| *signal == full)
+    devlanes_core::StopSignal::from_config_name(&full).map(devlanes_core::StopSignal::config_name)
 }
 
 /// The signal for a Linux signal number, when devlanes accepts it.

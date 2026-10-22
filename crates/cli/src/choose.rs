@@ -6,7 +6,7 @@ use devlanes_proto::{LaneSummary, UnitSummary};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{Hint, OutputMode, Rendered, Runtime, shell_quote};
+use crate::{Hint, OutputMode, Rendered, Runtime, hint_quote, shell_quote};
 
 /// Most options listed when no one can pick interactively.
 pub const LISTED: usize = 20;
@@ -181,19 +181,16 @@ pub fn completed_args(args: &[String], values: &[String]) -> Vec<String> {
     completed
 }
 
-/// The command `args` with the first option filled in, for the hint.
-fn example(args: &[String], options: &[ChoiceOption]) -> String {
+/// The command `args` with the first option filled in, for the hint, each word
+/// quoted with `quote`.
+fn example(args: &[String], options: &[ChoiceOption], quote: fn(&str) -> String) -> String {
     let values: Vec<String> = options
         .first()
         .map(|o| o.value.clone())
         .into_iter()
         .collect();
     std::iter::once("devlanes".to_owned())
-        .chain(
-            completed_args(args, &values)
-                .iter()
-                .map(|arg| shell_quote(arg)),
-        )
+        .chain(completed_args(args, &values).iter().map(|arg| quote(arg)))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -206,8 +203,9 @@ pub fn missing_argument(
     runtime: &Runtime,
 ) -> Rendered {
     let noun = choice.kind.noun();
-    let example = example(args, options);
     let stderr = if runtime.mode == OutputMode::Json {
+        // JSON keeps one POSIX form on every OS.
+        let example = example(args, options, shell_quote);
         let listed: Vec<&ChoiceOption> = options.iter().take(LISTED).collect();
         format!(
             "{}\n",
@@ -243,7 +241,7 @@ pub fn missing_argument(
         if options.len() > LISTED {
             text.push_str(&format!("  and {} more\n", options.len() - LISTED));
         }
-        text.push_str(&format!("hint: {example}\n"));
+        text.push_str(&format!("hint: {}\n", example(args, options, hint_quote)));
         text
     };
     Rendered {

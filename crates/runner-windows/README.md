@@ -49,9 +49,13 @@ let report = unit.stop_with_report(StopPolicy::default()).await?;
 
 ## Units
 
-A unit's leader starts inside a new job object (breakaway allowed, no limits, no kill on close, so units outlive a daemon crash). Its descendants are tracked from the job's members and from process snapshots by parent, which also catches processes that broke away. A stop terminates the job and then every tracked process outside it, each checked by PID and start time first. After a natural exit, leftovers are ended too; tasks (`ExitSweep::KeepDaemonized`) keep processes outside their job running and report them.
+A unit's leader starts inside a new job object (breakaway allowed, no limits, no kill on close, so units outlive a daemon crash). Its descendants are tracked from the job's members and from process snapshots by parent, which also catches processes that broke away. A stop terminates the job and then every tracked process outside it, each checked by PID and start time first. After a natural exit, leftovers are ended too.
 
-Not yet: units run over pipes even with `pty: true` (no input or resize), and a stop terminates without first sending Ctrl-C or Ctrl-Break.
+`pty: true` units run in a pseudo console (ConPTY): their output is one terminal stream, and input and resizes go to the console. Closing it ends the processes still attached, so the console is closed only after the final sweep. A pseudo console dies with the process that owns it, so these units stop about five seconds after the daemon does; pipe units (`pty: false`) outlive it.
+
+Not yet:
+- A stop terminates without first sending Ctrl-C or Ctrl-Break.
+- Tasks (`ExitSweep::KeepDaemonized`) keep only processes that left their job (detached with breakaway); daemons a task starts inside its job, such as `start redis-server`, are still ended when it exits.
 
 ## Program resolution
 

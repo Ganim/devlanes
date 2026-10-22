@@ -41,15 +41,33 @@ fn same_path(lane: &Value, expected: &Path) -> bool {
         .is_some_and(|path| canonical(Path::new(path)) == canonical(expected))
 }
 
+/// `git worktree remove --force` while the worktree's units run.
+#[cfg(unix)]
+fn remove_running_worktree(lab: &Lab, path: &Path) -> Result<()> {
+    lab.git(&["worktree", "remove", "--force", &path.to_string_lossy()])
+}
+
+/// `git worktree remove --force` while the worktree's units run. Windows refuses
+/// to delete a directory a running process uses as its cwd, so Git deletes the
+/// `.git` link, the files and its own record, then fails on the directories.
+/// The daemon must still see the worktree as removed.
+#[cfg(windows)]
+fn remove_running_worktree(lab: &Lab, path: &Path) -> Result<()> {
+    // The failure is expected; the assertion below checks what it left.
+    let _refused = lab.git(&["worktree", "remove", "--force", &path.to_string_lossy()]);
+    assert!(
+        !path.join(".git").exists(),
+        "git worktree remove left the .git link in {}",
+        path.display()
+    );
+    Ok(())
+}
+
 /// Add, move and remove worktrees while lane 0 runs: a new branch worktree and a
 /// detached one appear as idle lanes with ports and hostnames; a move keeps the lane;
 /// removing a running worktree stops its lane and keeps its record and logs; lane 0
 /// is never touched.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Windows refuses to remove a worktree that running units use as cwd, step 4"
-)]
 fn worktree_add_move_and_remove_reach_the_running_daemon() -> Result<()> {
     let lab = Lab::new("two-services", BUDGET)?;
     let started = lab.json(lab.repo(), &["start"])?;
@@ -139,7 +157,7 @@ fn worktree_add_move_and_remove_reach_the_running_daemon() -> Result<()> {
         .filter_map(port)
         .collect();
     assert_eq!(one_pids.len(), 2, "{running}");
-    lab.git(&["worktree", "remove", "--force", &moved.to_string_lossy()])?;
+    remove_running_worktree(&lab, &moved)?;
 
     let stopped = lab.eventually("lane 1 to stop", Duration::from_secs(20), || {
         let lanes = watched(&lab)?;
@@ -150,6 +168,11 @@ fn worktree_add_move_and_remove_reach_the_running_daemon() -> Result<()> {
     })?;
     let gone = need(lane(&stopped, "fixture-two@1"), "lane 1 after removal")?;
     assert_ne!(gone["state"], "running", "{gone}");
+    // What Git could not delete on Windows goes once the units stopped.
+    #[cfg(windows)]
+    lab.eventually("the leftover worktree directory to delete", DETECT, || {
+        Ok(std::fs::remove_dir_all(&moved).ok())
+    })?;
     let logs = lab.json(
         lab.repo(),
         &["logs", "fixture-two@1:api", "--tail", "20", "--json"],

@@ -32,6 +32,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 /// Terminal launchers for "open in terminal"; the TUI picks one by the user config name.
+#[cfg(unix)]
 fn launchers() -> Vec<Arc<dyn devlanes_term::TerminalLauncher>> {
     vec![
         Arc::new(devlanes_term_iterm2::Iterm2),
@@ -39,6 +40,17 @@ fn launchers() -> Vec<Arc<dyn devlanes_term::TerminalLauncher>> {
         Arc::new(devlanes_term_wezterm::Wezterm),
         Arc::new(devlanes_term_kitty::Kitty),
         Arc::new(devlanes_term_terminal_app::TerminalApp),
+    ]
+}
+
+/// Terminal launchers for "open in terminal"; the TUI picks one by the user
+/// config name, else the first installed, so Windows Terminal comes first.
+/// iTerm2, Terminal.app, kitty and Ghostty have no Windows version.
+#[cfg(windows)]
+fn launchers() -> Vec<Arc<dyn devlanes_term::TerminalLauncher>> {
+    vec![
+        Arc::new(devlanes_term_windows_terminal::WindowsTerminal),
+        Arc::new(devlanes_term_wezterm::Wezterm),
     ]
 }
 

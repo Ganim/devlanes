@@ -1003,10 +1003,24 @@ impl Inner {
         let known = crate::platforms::known(&self.integ.contributors);
         let path = file.clone();
         let shell = self.integ.shell.clone();
+        let user_file = self.opts.home.join("config.yaml");
         let (report, unknown) = tokio::task::spawn_blocking(move || {
             let config = devlanes_config::load_project_with::<OpaqueExtensions>(&path)?;
             let report = crate::registry::check_config(&config, &checks)?;
             let mut extra = crate::platforms::unknown(&config, &known);
+            // Read now, like doctor: the file may have changed since startup.
+            // Only settings this OS cannot honour (a macOS-only terminal on
+            // Windows); the user config's other warnings stay in doctor.
+            if user_file.exists() {
+                let (user, _) = devlanes_config::load_user_lenient(&user_file);
+                extra.extend(user.platform_warnings().into_iter().map(|w| {
+                    json!({
+                        "path": format!("user config {}", w.path),
+                        "message": w.message,
+                        "file": user_file,
+                    })
+                }));
+            }
             // Windows without Git for Windows: run strings go to cmd.exe.
             extra.extend(
                 devlanes_resolve::shell_warnings(&config, &shell)

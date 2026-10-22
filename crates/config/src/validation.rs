@@ -121,26 +121,51 @@ fn literal_port(value: &crate::Scalar) -> bool {
     }
 }
 
-/// Rejects two names of one kind (`services`, `tasks`) that devlanes would
-/// store under the same file or directory name. Logs and state are named with
-/// [`devlanes_core::paths::disk_name`], which replaces what Windows refuses in
-/// file names (`db:migrate` becomes `db_migrate`), and Windows ignores case
-/// (`Web` and `web`). Checked on every OS because one config is shared by
-/// machines running different ones.
-fn distinct_on_disk<'a>(
-    kind: &str,
-    names: impl IntoIterator<Item = &'a String>,
-) -> Result<(), ConfigError> {
-    let mut seen: HashMap<String, &str> = HashMap::new();
-    for name in names {
-        let stored = devlanes_core::paths::disk_name(name);
-        if let Some(other) = seen.insert(stored.to_ascii_lowercase(), name) {
-            return Err(fail(
-                &format!("{kind}.{name}"),
-                format!(
-                    "`{other}` and `{name}` would share the file name `{stored}` on disk (Windows ignores case and does not allow some characters in file names, and configs are shared across operating systems); rename one of them"
-                ),
-            ));
+/// Rejects two units whose logs devlanes would store under the same directory,
+/// `logs/<project>/<lane>/<disk name>`. Services, tasks and infra setup and
+/// teardown entries (units `setup.<name>` and `teardown.<name>`) share that
+/// directory. The name on disk is [`devlanes_core::paths::disk_name`], which
+/// replaces what Windows refuses in file names (`db:migrate` becomes
+/// `db_migrate`), and Windows ignores case (`Web` and `web`). Checked on every
+/// OS because one config is shared by machines running different ones.
+///
+/// The same name spelled the same way in two kinds (a service and a task both
+/// called `web`) stays allowed: it already shared one directory before names
+/// were encoded, and refusing it would break configs that work today.
+fn distinct_on_disk<E: Extensions>(config: &ProjectConfig<E>) -> Result<(), ConfigError> {
+    let infra = |phase: &'static str| {
+        move |name: &String| (format!("infra.{phase}.{name}"), format!("{phase}.{name}"))
+    };
+    let units = config
+        .services
+        .keys()
+        .map(|name| (format!("services.{name}"), name.clone()))
+        .chain(
+            config
+                .tasks
+                .keys()
+                .map(|name| (format!("tasks.{name}"), name.clone())),
+        )
+        .chain(config.infra.setup.keys().map(infra("setup")))
+        .chain(config.infra.teardown.keys().map(infra("teardown")));
+    // Lowercased disk name -> (config path, unit name) of the first unit there.
+    let mut seen: HashMap<String, (String, String)> = HashMap::new();
+    for (path, unit) in units {
+        let stored = devlanes_core::paths::disk_name(&unit);
+        let key = stored.to_lowercase();
+        match seen.get(&key) {
+            None => {
+                seen.insert(key, (path, unit));
+            }
+            Some((_, other)) if *other == unit => {}
+            Some((other_path, other)) => {
+                return Err(fail(
+                    &path,
+                    format!(
+                        "`{other}` ({other_path}) and `{unit}` would share the log directory `{stored}` (Windows ignores case and does not allow some characters in file names, and configs are shared across operating systems); rename one of them"
+                    ),
+                ));
+            }
         }
     }
     Ok(())
@@ -310,8 +335,7 @@ fn validate_inner<E: Extensions>(
             ));
         }
     }
-    distinct_on_disk("services", config.services.keys())?;
-    distinct_on_disk("tasks", config.tasks.keys())?;
+    distinct_on_disk(config)?;
     for (name, service) in &config.services {
         let path = format!("services.{name}");
         if service.run.is_none() && service.run_script.is_none() {
@@ -359,10 +383,7 @@ fn validate_inner<E: Extensions>(
         hosts(&format!("{path}.hosts"), service.hosts.iter().flatten())?;
         if let Some(stop) = &service.stop
             && let Some(signal) = &stop.signal
-            && ![
-                "SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT", "SIGKILL", "SIGUSR1", "SIGUSR2",
-            ]
-            .contains(&signal.as_str())
+            && devlanes_core::StopSignal::from_config_name(signal).is_none()
         {
             return Err(fail(
                 &format!("{path}.stop.signal"),

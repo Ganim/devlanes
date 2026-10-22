@@ -133,6 +133,71 @@ fn terminal_takes_a_name_or_a_mapping() {
     assert!(parse_user("terminal: xterm\n").is_err());
 }
 
+/// `windows-terminal` is spelled with a dash like the launcher's name, and
+/// only it and WezTerm have Windows versions.
+#[test]
+fn windows_terminal_parses_with_its_launcher_name() {
+    let config = parse_user("terminal: windows-terminal\n").expect("windows-terminal");
+    let app = config.terminal.and_then(|t| t.app()).expect("app");
+    assert!(matches!(app, Terminal::WindowsTerminal));
+    assert_eq!(app.as_str(), "windows-terminal");
+    assert_eq!(
+        serde_json::to_value(app).expect("serialize"),
+        "windows-terminal"
+    );
+    assert!(parse_user("terminal: windowsterminal\n").is_err());
+    let on_windows: Vec<&str> = [
+        Terminal::Iterm2,
+        Terminal::Ghostty,
+        Terminal::Wezterm,
+        Terminal::Kitty,
+        Terminal::Terminal,
+        Terminal::WindowsTerminal,
+    ]
+    .into_iter()
+    .filter(|app| app.runs_on_windows())
+    .map(Terminal::as_str)
+    .collect();
+    assert_eq!(on_windows, ["wezterm", "windows-terminal"]);
+}
+
+/// A terminal app without a Windows version warns on Windows (config check and
+/// doctor show it) but never fails, since configs move between machines.
+#[cfg(windows)]
+#[test]
+fn unix_only_terminals_warn_on_windows() {
+    for (source, path) in [
+        ("terminal: iterm2\n", "terminal"),
+        ("terminal:\n  app: kitty\n", "terminal.app"),
+    ] {
+        let config = parse_user(source).expect(source);
+        let paths: Vec<_> = config.warnings().iter().map(|w| w.path.as_str()).collect();
+        assert_eq!(paths, [path], "{source}");
+        assert!(
+            config.warnings()[0].message.contains("no Windows version"),
+            "{}",
+            config.warnings()[0].message
+        );
+        assert_eq!(config.platform_warnings().len(), 1);
+    }
+    for source in ["terminal: wezterm\n", "terminal: windows-terminal\n", "{}"] {
+        assert!(parse_user(source).expect(source).warnings().is_empty());
+    }
+    let (lenient, _) = parse_user_lenient("config.yaml", "terminal: ghostty\n");
+    assert_eq!(lenient.warnings().len(), 1);
+}
+
+/// Outside Windows every terminal app is accepted silently.
+#[cfg(not(windows))]
+#[test]
+fn terminals_never_warn_outside_windows() {
+    for source in ["terminal: iterm2\n", "terminal:\n  app: kitty\n"] {
+        let config = parse_user(source).expect(source);
+        assert!(config.warnings().is_empty(), "{source}");
+        assert!(config.platform_warnings().is_empty(), "{source}");
+    }
+}
+
 /// Values with several YAML forms report the chosen form's own unknown keys.
 #[test]
 fn alternative_forms_keep_struct_errors() {

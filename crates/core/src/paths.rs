@@ -125,20 +125,24 @@ pub fn slash_joined(path: &Path) -> String {
 
 /// The file or directory name a project, service, task or unit name is stored
 /// under (logs, infra state, sync folders), the same on every OS so one config
-/// lays out the same tree everywhere. Characters Windows refuses in file names
-/// (`< > : " | ? * \ /` and control characters) become `_`, as does a trailing
-/// `.` or space, which Windows drops; a reserved device name (`CON`, `aux.log`,
-/// `COM1`, `LPT¹`) gets `_` after its stem. Any other name is returned as is, so
-/// existing names keep their directories. Two names can map to one result
-/// (`db:migrate` and `db_migrate`); config validation rejects such pairs.
+/// lays out the same tree everywhere. A reserved device name (`CON`, `aux.log`,
+/// `COM1`, `LPT¹`) gets `+` after its stem, and a trailing `.` or space, which
+/// Windows drops, becomes `+`. Project names (`[a-z0-9._-]`) never contain `+`,
+/// so this is one-to-one for them: `aux`, `aux+` and `aux.` cannot meet.
+/// Characters Windows refuses in file names (`< > : " | ? * \ /` and control
+/// characters) become `_`; only service and task names can hold those, and
+/// config validation rejects names that end up equal (`db:migrate` and
+/// `db_migrate`). Any other name is returned as is, so existing names keep
+/// their directories.
 ///
 /// ```
 /// use devlanes_core::paths::disk_name;
 /// assert_eq!(disk_name("web"), "web");
 /// assert_eq!(disk_name("db:migrate"), "db_migrate");
 /// assert_eq!(disk_name("apps/web"), "apps_web");
-/// assert_eq!(disk_name("aux.2"), "aux_.2");
-/// assert_eq!(disk_name("api."), "api_");
+/// assert_eq!(disk_name("aux"), "aux+");
+/// assert_eq!(disk_name("con.x"), "con+.x");
+/// assert_eq!(disk_name("api."), "api+");
 /// ```
 pub fn disk_name(name: &str) -> String {
     let mut out: String = name
@@ -151,15 +155,16 @@ pub fn disk_name(name: &str) -> String {
             }
         })
         .collect();
-    if out.ends_with(['.', ' ']) {
-        out.pop();
-        out.push('_');
-    }
     // Windows reads the part before the first dot, without trailing spaces, as
-    // the device name: `nul.txt` and `con .log` are devices too.
+    // the device name: `nul.txt` and `con .log` are devices too. Checked before
+    // the trailing dot is replaced, so `aux.` becomes `aux++`, not `aux`'s `aux+`.
     let stem = out.find('.').unwrap_or(out.len());
     if is_device_name(out[..stem].trim_end_matches(' ')) {
-        out.insert(stem, '_');
+        out.insert(stem, '+');
+    }
+    if out.ends_with(['.', ' ']) {
+        out.pop();
+        out.push('+');
     }
     out
 }
@@ -231,6 +236,9 @@ mod tests {
             "com10",
             "lpt",
             "nul_",
+            "aux_",
+            "acme_",
+            "con_.x",
             ".hidden",
         ] {
             assert_eq!(disk_name(name), name);
@@ -239,8 +247,8 @@ mod tests {
     }
 
     #[test]
-    /// Characters Windows refuses, control characters and a trailing dot or
-    /// space become `_`.
+    /// Characters Windows refuses and control characters become `_`; a
+    /// trailing dot or space becomes `+`.
     fn disk_names_replace_what_windows_refuses() {
         for (name, expected) in [
             ("db:migrate", "db_migrate"),
@@ -251,11 +259,11 @@ mod tests {
             (r"db\seed", "db_seed"),
             ("a\tb\u{1}", "a_b_"),
             ("a\u{7f}", "a_"),
-            ("api.", "api_"),
-            ("api ", "api_"),
-            ("api..", "api._"),
-            (".", "_"),
-            ("..", "._"),
+            ("api.", "api+"),
+            ("api ", "api+"),
+            ("api..", "api.+"),
+            (".", "+"),
+            ("..", ".+"),
             ("", ""),
         ] {
             assert_eq!(disk_name(name), expected, "{name:?}");
@@ -263,28 +271,54 @@ mod tests {
     }
 
     #[test]
-    /// Device names get `_` after the stem, in any case, with or without an
+    /// Device names get `+` after the stem, in any case, with or without an
     /// extension, including `COM0`/`LPT0` and the superscript digits.
     fn disk_names_escape_device_names() {
         for (name, expected) in [
-            ("aux", "aux_"),
-            ("AUX", "AUX_"),
-            ("Con", "Con_"),
-            ("prn", "prn_"),
-            ("nul.txt", "nul_.txt"),
-            ("aux.2", "aux_.2"),
-            ("con.tar.gz", "con_.tar.gz"),
-            ("con .log", "con _.log"),
-            ("com0", "com0_"),
-            ("COM9.log", "COM9_.log"),
-            ("lpt1", "lpt1_"),
-            ("LPT¹", "LPT¹_"),
-            ("com²", "com²_"),
-            ("lpt³.x", "lpt³_.x"),
-            ("aux.", "aux_"),
+            ("aux", "aux+"),
+            ("AUX", "AUX+"),
+            ("Con", "Con+"),
+            ("prn", "prn+"),
+            ("nul.txt", "nul+.txt"),
+            ("aux.2", "aux+.2"),
+            ("con.x", "con+.x"),
+            ("con.tar.gz", "con+.tar.gz"),
+            ("con .log", "con +.log"),
+            ("com0", "com0+"),
+            ("COM9.log", "COM9+.log"),
+            ("lpt1", "lpt1+"),
+            ("LPT¹", "LPT¹+"),
+            ("com²", "com²+"),
+            ("lpt³.x", "lpt³+.x"),
+            ("aux.", "aux++"),
+            ("aux..", "aux+.+"),
             ("nul:", "nul_"),
         ] {
             assert_eq!(disk_name(name), expected, "{name:?}");
+        }
+    }
+
+    #[test]
+    /// Project names (`[a-z0-9._-]`) never share a disk name, so two projects
+    /// never share logs, infra overrides or sync folders. Checks every name of
+    /// up to five characters over an alphabet that covers the escapes.
+    fn disk_names_are_one_to_one_for_project_names() {
+        let alphabet = ['a', 'u', 'x', 'c', 'o', 'n', '1', '.', '_', '-'];
+        let mut names = vec![String::new()];
+        let mut seen = std::collections::HashMap::new();
+        for _ in 0..5 {
+            names = names
+                .iter()
+                .flat_map(|name| alphabet.iter().map(move |c| format!("{name}{c}")))
+                .collect();
+            for name in &names {
+                if let Some(other) = seen.insert(disk_name(name), name.clone()) {
+                    panic!("{other:?} and {name:?} share {:?}", disk_name(name));
+                }
+            }
+        }
+        for (a, b) in [("aux", "aux_"), ("acme.", "acme_"), ("con.x", "con_.x")] {
+            assert_ne!(disk_name(a), disk_name(b), "{a} vs {b}");
         }
     }
 

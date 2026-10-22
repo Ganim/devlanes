@@ -107,6 +107,11 @@ fn build_with(
             batch_arguments(&script, &args)?,
         )
     } else if let Some(text) = cmd_shell_text(&application, &args) {
+        // cmd.exe stops at the first line break, so the rest would silently not
+        // run; resolve refuses this already, and this keeps any other caller safe.
+        if text.trim_end().contains(['\r', '\n']) {
+            return Err(CommandError::ArgumentNotSafeForBatch(text.to_owned()));
+        }
         // `/s` makes cmd.exe strip exactly the outer quotes and run the rest as
         // written; see `ShellKind::Cmd` in devlanes-core.
         let arguments = format!("{} \"{text}\"", args[..3].join(" "));
@@ -153,11 +158,13 @@ fn resolve(
     cwd: &Path,
     exists: &dyn Fn(&Path) -> bool,
 ) -> Result<PathBuf, CommandError> {
-    if program.is_empty() || program.ends_with(['\\', '/']) {
+    // `C:tool` is relative to drive C's current directory, which would be the
+    // daemon's, not the unit's.
+    if program.is_empty() || program.ends_with(['\\', '/']) || drive_relative(program) {
         return Err(CommandError::InvalidProgram(program.to_owned()));
     }
     let extensions = extensions(env);
-    let has_extension = file_name(program).contains('.');
+    let has_extension = runnable_extension(file_name(program));
     if is_explicit(program) {
         let path = from_cwd(cwd, program);
         return candidates(path.clone(), has_extension, &extensions)
@@ -177,8 +184,21 @@ fn resolve(
         })
 }
 
-/// Files to try for `path`: as given when its name has an extension, then with
-/// each of `extensions` appended.
+/// Whether `name` already ends in an extension `CreateProcessW` can start, after
+/// the trailing dots and spaces Windows drops (`run.bat.` is `run.bat`). Others
+/// (`tool.js`, `npm.`, which Windows reads as `npm`) get the `PATHEXT` extensions
+/// appended instead of being tried as they are.
+fn runnable_extension(name: &str) -> bool {
+    let name = name.trim_end_matches(['.', ' ']);
+    name.rfind('.').is_some_and(|dot| {
+        RUNNABLE_EXTENSIONS
+            .iter()
+            .any(|runnable| name[dot..].eq_ignore_ascii_case(runnable))
+    })
+}
+
+/// Files to try for `path`: as given when its name has a runnable extension, then
+/// with each of `extensions` appended.
 fn candidates(
     path: PathBuf,
     has_extension: bool,
@@ -221,7 +241,9 @@ fn search_path(env: &BTreeMap<String, String>, cwd: &Path) -> Vec<PathBuf> {
         match character {
             '"' => quoted = !quoted,
             ';' if !quoted => {
-                if !entry.is_empty() {
+                // A `C:dir` entry depends on the daemon's current directory on that
+                // drive, so it is skipped rather than guessed.
+                if !entry.is_empty() && !drive_relative(&entry) {
                     dirs.push(from_cwd(cwd, &entry));
                 }
                 entry.clear();
@@ -261,6 +283,11 @@ fn is_explicit(program: &str) -> bool {
 /// Whether `path` starts with a drive letter and colon.
 fn has_drive(path: &str) -> bool {
     matches!(path.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic())
+}
+
+/// Whether `path` is like `C:dir`: a drive without a separator after it.
+fn drive_relative(path: &str) -> bool {
+    has_drive(path) && !is_absolute(path)
 }
 
 /// Whether `path` is absolute by Windows rules: `C:\...` or a UNC/device path
@@ -651,6 +678,40 @@ mod tests {
             build_in("tool", &["a\0b"], &env, &[file(r"C:\bin", "tool.exe")]),
             Err(CommandError::ContainsNul(_))
         ));
+        // Relative to drive C's current directory, which is the daemon's.
+        assert!(matches!(
+            build_in("C:tool", &[], &env, &[]),
+            Err(CommandError::InvalidProgram(_))
+        ));
+        // cmd.exe would run only the first line.
+        let cmd = PathBuf::from(r"C:\Windows\System32\cmd.exe");
+        let system = BTreeMap::from([("PATH".to_owned(), r"C:\Windows\System32".to_owned())]);
+        assert!(matches!(
+            build_in(
+                "cmd.exe",
+                &["/d", "/s", "/c", "echo a\r\necho b"],
+                &system,
+                &[cmd]
+            ),
+            Err(CommandError::ArgumentNotSafeForBatch(_))
+        ));
+    }
+
+    #[test]
+    /// A name is tried as given only with an extension Windows can start, and
+    /// drive-relative PATH entries are skipped.
+    fn only_runnable_names_and_usable_path_entries() {
+        let env = env(&[("PATH", r"C:dir;C:\bin")]);
+        // `npm` (an sh script) sits next to `npm.cmd`; `npm.` must not pick it.
+        let files = [file(r"C:\bin", "npm."), file(r"C:\bin", "npm.cmd")];
+        let error = build_in("npm.", &[], &env, &files).expect_err("npm. is not runnable");
+        let CommandError::NotFound { searched, .. } = error else {
+            panic!("not found expected, got {error:?}");
+        };
+        assert_eq!(searched, [PathBuf::from(r"C:\bin")]);
+        assert!(build_in("tool.js", &[], &env, &[file(r"C:\bin", "tool.js")]).is_err());
+        let exe = build_in("tool.exe", &[], &env, &[file(r"C:\bin", "tool.exe")]);
+        assert!(exe.is_ok(), "{exe:?}");
     }
 
     #[test]

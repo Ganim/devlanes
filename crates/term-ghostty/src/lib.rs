@@ -58,6 +58,7 @@ mod tests {
             cwd: "/work/acme".into(),
             command: vec!["devlanes".into(), "attach".into(), "acme@2:api".into()],
             title: None,
+            env: Vec::new(),
         })?;
         let tail: Vec<&str> = invocation
             .args

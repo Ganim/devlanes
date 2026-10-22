@@ -83,12 +83,13 @@ pub enum StderrMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ProcessIdentity {
     pub pid: u32,
-    /// The unit's group token; 0 means unknown. On Unix it is the session ID,
-    /// shared by the leader and every member that stayed in its session. Windows
-    /// has no group a process can be found or stopped by after a daemon crash, so
-    /// it is the process's own PID: every job member then differs from the
-    /// leader and is recorded on its own for orphan cleanup, which compares this
-    /// field with the leader's.
+    /// The unit's group token, as `devlanes_sys::ProcessInfo::identity` fills
+    /// it. On Unix it is the session ID, shared by the leader and every member
+    /// that stayed in its session, and 0 when the OS did not report it. Windows
+    /// has no group a process can be found or stopped by after a daemon crash,
+    /// so it is the process's own PID: every job member then differs from the
+    /// leader and is recorded on its own for orphan cleanup, which compares
+    /// this field with the leader's.
     pub sid: u32,
     pub start_time: u64,
 }

@@ -17,7 +17,7 @@ use devlanes_core::{
     },
     ports::{PortBlock, PortName, allocate_offsets, block_size},
 };
-use devlanes_resolve::{LaneFacts, Launch, ResolvedLane, port_needs};
+use devlanes_resolve::{LaneFacts, Launch, ResolvedLane, ResolvedService, port_needs};
 use serde_json::{Value, json};
 
 pub const FULL: &str = include_str!("../../../../docs/examples/devlanes.yaml");
@@ -331,12 +331,28 @@ pub fn launch_view(launch: &Launch) -> Value {
     })
 }
 
+/// A service's launch notes without the one its stop signal adds on this OS
+/// (on Windows, that stops terminate at once), so one expectation holds on
+/// every OS. The stop note has its own test.
+pub fn service_notes(service: &ResolvedService) -> Vec<String> {
+    let stop = service.stop.signal.launch_note();
+    service
+        .launch
+        .notes
+        .iter()
+        .filter(|note| Some(*note) != stop.as_ref())
+        .cloned()
+        .collect()
+}
+
 /// Snapshot view of a whole lane.
 pub fn lane_view(lane: &ResolvedLane) -> Value {
     let services: serde_json::Map<String, Value> = lane
         .services
         .iter()
         .map(|(unit, s)| {
+            let mut launch = launch_view(&s.launch);
+            launch["notes"] = json!(service_notes(s));
             (
                 unit.clone(),
                 json!({
@@ -357,7 +373,7 @@ pub fn lane_view(lane: &ResolvedLane) -> Value {
                         "SyncSpec {{ from: {:?}, to: {:?}, ignore: {:?} }}",
                         shown(&s.from), shown(&s.to), s.ignore,
                     )).collect::<Vec<_>>(),
-                    "launch": launch_view(&s.launch),
+                    "launch": launch,
                 }),
             )
         })

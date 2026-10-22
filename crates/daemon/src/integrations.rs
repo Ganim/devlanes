@@ -551,18 +551,31 @@ impl ProcessTable for SysProcesses {
         let _ = tokio::task::spawn_blocking(move || signal_all(devlanes_sys::Signal::KILL)).await;
     }
 
-    /// Terminates the recorded process if its identity still verifies. A crashed
-    /// daemon's job objects cannot be reopened, so each recorded member arrives here
-    /// on its own (see `track_escaped`). Asking it to exit first with a console
-    /// control event, honouring `grace`, comes with graceful stop.
+    /// Terminates the recorded process if its identity still verifies, and the
+    /// descendants it has now: a crashed daemon's job objects cannot be reopened,
+    /// and children started after the last recording (or after the crash) were
+    /// never recorded, so they are found by parent in a fresh snapshot, the way
+    /// Unix sweeps a session. Each recorded member arrives here on its own (see
+    /// `track_escaped`). Asking them to exit first with a console control event,
+    /// honouring `grace`, comes with graceful stop.
     #[cfg(windows)]
     async fn terminate(&self, identity: ProcessIdentity, _grace: Duration) {
         let ended = tokio::task::spawn_blocking(move || {
-            devlanes_sys::windows::proc::terminate_verified(&identity, 1)
+            let snapshot = devlanes_sys::processes()?;
+            // Descendants are only adopted under a root that still verifies.
+            let mut tree = devlanes_sys::DescendantTracker::new(identity);
+            tree.update(&snapshot);
+            for process in tree.live() {
+                let member = process.identity();
+                if let Err(error) = devlanes_sys::windows::proc::terminate_verified(&member, 1) {
+                    tracing::warn!(%error, pid = member.pid, "terminating an orphan failed");
+                }
+            }
+            Ok::<_, devlanes_sys::Error>(())
         })
         .await;
         match ended {
-            Ok(Ok(_)) => {}
+            Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 tracing::warn!(%error, pid = identity.pid, "terminating an orphan failed")
             }

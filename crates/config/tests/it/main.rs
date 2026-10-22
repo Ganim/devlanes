@@ -288,8 +288,12 @@ fn names_windows_cannot_store_as_written_are_accepted() {
         "project: demo.",
         "project: demo\nservices: { 'db:migrate': { run: a }, CON: { run: a }, 'a|b': { run: a }, 'api ': { run: a } }",
         "project: demo\ntasks: { 'build:css': { run: a }, lpt1: { run: a }, 'db\\seed': { run: a }, \"a\\tb\": { run: a } }",
-        // A service and a task may share a name, as before.
-        "project: demo\nservices: { web: { run: a } }\ntasks: { Web: { run: a } }",
+        // The same name in two kinds shared one log directory before names
+        // were encoded and stays allowed.
+        "project: demo\nservices: { web: { run: a } }\ntasks: { web: { run: a } }",
+        "project: demo\ntasks: { setup.db: { run: a } }\ninfra: { setup: { db: a } }",
+        // `+` marks escapes, so it is only refused where it meets one.
+        "project: demo\nservices: { aux: { run: a }, aux_: { run: a }, 'con.x': { run: a }, 'con_.x': { run: a } }",
     ] {
         if let Err(error) = parse_project(yaml, None) {
             panic!("{yaml}\nrejected: {}", error.message);
@@ -378,23 +382,45 @@ fn structural_validation() {
             "project: demo\nservices: { api: { tags: [x] } }",
             "services.api: service requires run or run_script",
         ),
-        // Two names of one kind stored under the same file name fail on every
-        // OS: Windows-invalid characters become `_` and case does not count.
+        // Two units whose logs would share a directory fail on every OS:
+        // Windows-invalid characters become `_` and case does not count, also
+        // across services, tasks and infra setup and teardown entries.
         (
             "project: demo\nservices: { web: { run: a }, Web: { run: a } }",
-            "services.Web: `web` and `Web` would share the file name `Web` on disk (Windows ignores case and does not allow some characters in file names, and configs are shared across operating systems); rename one of them",
+            "services.Web: `web` (services.web) and `Web` would share the log directory `Web` (Windows ignores case and does not allow some characters in file names, and configs are shared across operating systems); rename one of them",
         ),
         (
             "project: demo\ntasks: { 'db:migrate': { run: a }, db_migrate: { run: a } }",
-            "tasks.db_migrate: `db:migrate` and `db_migrate` would share the file name `db_migrate`",
+            "tasks.db_migrate: `db:migrate` (tasks.db:migrate) and `db_migrate` would share the log directory `db_migrate`",
         ),
         (
             "project: demo\ntasks: { 'seed?': { run: a }, 'SEED*': { run: a } }",
-            "tasks.SEED*: `seed?` and `SEED*` would share the file name `SEED_`",
+            "tasks.SEED*: `seed?` (tasks.seed?) and `SEED*` would share the log directory `SEED_`",
         ),
         (
-            "project: demo\nservices: { aux: { run: a }, AUX_: { run: a } }",
-            "services.AUX_: `aux` and `AUX_` would share the file name `AUX_`",
+            "project: demo\nservices: { aux: { run: a }, AUX+: { run: a } }",
+            "services.AUX+: `aux` (services.aux) and `AUX+` would share the log directory `AUX+`",
+        ),
+        (
+            "project: demo\nservices: { web: { run: a } }\ntasks: { Web: { run: a } }",
+            "tasks.Web: `web` (services.web) and `Web` would share the log directory `Web`",
+        ),
+        (
+            "project: demo\nservices: { 'db:seed': { run: a } }\ntasks: { db_seed: { run: a } }",
+            "tasks.db_seed: `db:seed` (services.db:seed) and `db_seed` would share",
+        ),
+        (
+            "project: demo\ntasks: { Setup.db: { run: a } }\ninfra: { setup: { db: a } }",
+            "infra.setup.db: `Setup.db` (tasks.Setup.db) and `setup.db` would share the log directory `setup.db`",
+        ),
+        (
+            "project: demo\nservices: { TEARDOWN.db: { run: a } }\ninfra: { teardown: { db: a } }",
+            "infra.teardown.db: `TEARDOWN.db` (services.TEARDOWN.db) and `teardown.db` would share",
+        ),
+        // Unicode letters compare without case too, as NTFS does.
+        (
+            "project: demo\nservices: { café: { run: a }, CAFÉ: { run: a } }",
+            "services.CAFÉ: `café` (services.café) and `CAFÉ` would share the log directory `CAFÉ`",
         ),
     ] {
         let error = parse_project(yaml, None).expect_err(yaml);

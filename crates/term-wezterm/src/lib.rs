@@ -19,7 +19,7 @@ impl TerminalLauncher for Wezterm {
         let mut args = vec!["start".into(), "--cwd".into(), request.cwd_arg()];
         args.push("--".into());
         args.extend(command.iter().cloned());
-        Ok(platform(args))
+        Ok(platform(args, &request.env))
     }
 
     /// WezTerm.app on macOS, the `wezterm` binary elsewhere.
@@ -31,18 +31,21 @@ impl TerminalLauncher for Wezterm {
     }
 }
 
-/// The macOS app bundle does not put `wezterm` on PATH by default.
+/// The macOS app bundle does not put `wezterm` on PATH by default. `open`
+/// starts the app with launchd's environment, so `env` cannot reach it.
 #[cfg(target_os = "macos")]
-fn platform(args: Vec<String>) -> Invocation {
+fn platform(args: Vec<String>, _env: &[(String, String)]) -> Invocation {
     let mut open = vec!["-na".into(), "WezTerm.app".into(), "--args".into()];
     open.extend(args);
     Invocation::new("open", open, true)
 }
 
-/// On Linux `wezterm start` may stay in the foreground; it is reaped in the background.
+/// On Linux and Windows `wezterm start` may stay in the foreground; it is
+/// reaped in the background. A new WezTerm process hands its environment to
+/// the command, which is how `env` reaches it on Windows.
 #[cfg(not(target_os = "macos"))]
-fn platform(args: Vec<String>) -> Invocation {
-    Invocation::new("wezterm", args, false)
+fn platform(args: Vec<String>, env: &[(String, String)]) -> Invocation {
+    Invocation::new("wezterm", args, false).with_env(env)
 }
 
 #[cfg(test)]
@@ -55,9 +58,28 @@ mod tests {
             cwd: "/work/acme".into(),
             command: vec!["devlanes".into(), "attach".into(), "acme@2:api".into()],
             title: None,
+            env: Vec::new(),
         })?;
         let args = invocation.args.join(" ");
         assert!(args.ends_with("start --cwd /work/acme -- devlanes attach acme@2:api"));
+        Ok(())
+    }
+
+    /// Outside macOS the helper itself carries the variables to the new window.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn passes_env_to_the_wezterm_process() -> Result<(), LaunchError> {
+        let env = vec![(
+            "DEVLANES_HOME".to_owned(),
+            r"C:\Users\acme\.devlanes".to_owned(),
+        )];
+        let invocation = Wezterm.invocation(&LaunchRequest {
+            cwd: "/work/acme".into(),
+            command: vec!["devlanes".into(), "attach".into(), "acme@2:api".into()],
+            title: None,
+            env: env.clone(),
+        })?;
+        assert_eq!(invocation.env, env);
         Ok(())
     }
 }

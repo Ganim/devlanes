@@ -34,7 +34,7 @@ The runner needs a tokio runtime with the IO, time and signal drivers enabled.
 - `PtyRunner`: `spawn_unit` returns the concrete `PtyUnit`, and `Runner::spawn` returns it as `Arc<dyn Unit>`. `with_stderr`, `with_track_interval` and `with_output_capacity` adjust the defaults.
 - `PtyUnit`: implements `Unit`. Also provides `identity`, `descendants`, `processes`, `listening_ports`, `size`, `wait_report` and `stop_with_report`.
 - `ExitReport`: exit outcome, stop details, processes swept after the leader exited, and processes that survived SIGKILL.
-- `StderrMode`: separate or merged stderr for pipe units.
+- `StderrMode`: separate or merged stderr for pipe units, re-exported from `devlanes-core`.
 
 ## Config example
 

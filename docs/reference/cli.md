@@ -396,6 +396,15 @@ devlanes env export [OPTIONS] [UNIT]
 ```
 
 - `[UNIT]`: Unit whose environment to export ([lane:]unit) [default: the lane's variables]
+- `--shell <SHELL>`: Syntax of the printed assignments
+  Values: `posix` (`export NAME='value'`, for sh, bash, zsh and Git Bash), `pwsh` (`$env:NAME = 'value'`, for PowerShell).
+  Default: `posix`.
+
+```text
+Examples:
+  eval "$(devlanes env export api)"
+  devlanes env export api --shell pwsh | Out-String | Invoke-Expression
+```
 
 ### devlanes env shell
 

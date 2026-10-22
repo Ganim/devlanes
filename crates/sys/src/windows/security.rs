@@ -213,7 +213,15 @@ pub fn ensure_private_dir(
     Ok(match verdict {
         Ok(()) if created => Ok(PrivateDir::Created),
         Ok(()) => Ok(PrivateDir::Present),
-        Err(DirProblem::Acl(_)) if replace.is_some() => Ok(PrivateDir::Tightened),
+        // Others could still add entries until the new list applied; anything that
+        // appeared keeps its own owner and grants, so it is refused after all.
+        Err(DirProblem::Acl(others)) if replace.is_some() => {
+            if is_empty(path, &directory)? {
+                Ok(PrivateDir::Tightened)
+            } else {
+                Err(DirProblem::Acl(others))
+            }
+        }
         Err(problem) => Err(problem),
     })
 }

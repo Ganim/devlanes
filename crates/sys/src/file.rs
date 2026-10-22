@@ -5,9 +5,10 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
-/// `std::fs::rename`, retried for up to about a second while another process
+/// `std::fs::rename`, retried for up to about 0.6 s while another process
 /// holds `from` or `to` open without delete sharing (an antivirus scan, an
-/// editor, `Get-Content -Wait`). A plain rename on Unix. Blocking: it sleeps
+/// editor, `Get-Content -Wait`). Access denied is retried once, for a file
+/// whose deletion is still pending. A plain rename on Unix. Blocking: it sleeps
 /// between attempts.
 pub fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
     retrying(|| std::fs::rename(from, to))
@@ -20,14 +21,15 @@ pub fn remove_file_retrying(path: &Path) -> io::Result<()> {
 }
 
 /// Runs `operation` until it succeeds, fails with an error other than a
-/// Windows sharing violation, or the retries run out; on Unix it runs once.
-/// For file operations std has no wrapper for here, such as a tempfile persist.
-/// Blocking: it sleeps between attempts.
+/// Windows sharing violation, or the retries run out; access denied is retried
+/// at most once. On Unix it runs once. For file operations std has no wrapper
+/// for here, such as a tempfile persist. Blocking: it sleeps between attempts.
 pub fn retrying<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     let mut delays = imp::RETRY_DELAYS.iter();
+    let mut denied_retried = false;
     loop {
         match operation() {
-            Err(error) if imp::is_transient(&error) => match delays.next() {
+            Err(error) if imp::is_transient(&error, &mut denied_retried) => match delays.next() {
                 Some(delay) => std::thread::sleep(*delay),
                 None => return Err(error),
             },
@@ -78,7 +80,7 @@ mod imp {
     pub(super) const RETRY_DELAYS: [std::time::Duration; 0] = [];
 
     /// No error is worth retrying on Unix.
-    pub(super) fn is_transient(_error: &io::Error) -> bool {
+    pub(super) fn is_transient(_error: &io::Error, _denied_retried: &mut bool) -> bool {
         false
     }
 
@@ -131,18 +133,19 @@ mod imp {
         Duration::from_millis(320),
     ];
 
-    /// Errors another process's open handle causes. Access denied is included
-    /// because a file whose deletion is still pending reports it too.
-    pub(super) fn is_transient(error: &io::Error) -> bool {
-        error.raw_os_error().is_some_and(|code| {
-            [
-                ERROR_SHARING_VIOLATION,
-                ERROR_ACCESS_DENIED,
-                ERROR_LOCK_VIOLATION,
-            ]
-            .iter()
-            .any(|transient| u32::try_from(code) == Ok(*transient))
-        })
+    /// Errors another process's open handle causes. A file whose deletion is
+    /// still pending reports access denied, but so does a real permission
+    /// problem, which no wait fixes; it gets one retry, recorded in
+    /// `denied_retried`.
+    pub(super) fn is_transient(error: &io::Error, denied_retried: &mut bool) -> bool {
+        match error
+            .raw_os_error()
+            .and_then(|code| u32::try_from(code).ok())
+        {
+            Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION) => true,
+            Some(ERROR_ACCESS_DENIED) => !std::mem::replace(denied_retried, true),
+            _ => false,
+        }
     }
 
     /// Volume serial and file id of an open file.
@@ -200,6 +203,40 @@ mod tests {
         let missing = remove_file_retrying(&to).expect_err("gone");
         assert_eq!(missing.kind(), io::ErrorKind::NotFound);
         assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    /// Calls `retrying` makes for an operation that always fails with `code`.
+    fn attempts(code: i32) -> usize {
+        let mut calls = 0;
+        let result: io::Result<()> = retrying(|| {
+            calls += 1;
+            Err(io::Error::from_raw_os_error(code))
+        });
+        assert_eq!(result.map_err(|e| e.raw_os_error()), Err(Some(code)));
+        calls
+    }
+
+    /// Access denied gets one retry on Windows (a pending deletion clears
+    /// quickly, a real permission problem never does); Unix never retries.
+    #[cfg(windows)]
+    #[test]
+    fn access_denied_is_retried_once() {
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND};
+        let code = |code: u32| i32::try_from(code).expect("fits");
+        assert_eq!(attempts(code(ERROR_ACCESS_DENIED)), 2);
+        assert_eq!(attempts(code(ERROR_FILE_NOT_FOUND)), 1);
+    }
+
+    /// Unix runs a failing operation once, whatever the error.
+    #[cfg(unix)]
+    #[test]
+    fn unix_never_retries() {
+        for code in [
+            rustix::io::Errno::ACCESS.raw_os_error(),
+            rustix::io::Errno::BUSY.raw_os_error(),
+        ] {
+            assert_eq!(attempts(code), 1);
+        }
     }
 
     /// A handle without delete sharing blocks the rename until it closes; one

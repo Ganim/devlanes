@@ -16,7 +16,8 @@ use windows_sys::Wdk::System::SystemInformation::{
 };
 use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, FILETIME, NO_ERROR, WAIT_OBJECT_0,
+    ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, FILETIME, NO_ERROR,
+    WAIT_OBJECT_0,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
@@ -164,9 +165,19 @@ pub fn terminate_verified(
 ) -> Result<SignalOutcome, Error> {
     let access = PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
     // Only a PID that names no process is gone; a live one that refuses is an error,
-    // so the caller keeps its record instead of forgetting a running process.
-    let Some(handle) = open(identity.pid, access)? else {
-        return Ok(SignalOutcome::Gone);
+    // so the caller keeps its record instead of forgetting a running process,
+    // unless the PID now belongs to a process started at another time.
+    let handle = match open(identity.pid, access) {
+        Ok(Some(handle)) => handle,
+        Ok(None) => return Ok(SignalOutcome::Gone),
+        Err(error) => {
+            return match open_query(identity.pid).map(|handle| creation_time(&handle)) {
+                Some(Ok(start_time)) if start_time != identity.start_time => {
+                    Ok(SignalOutcome::Mismatch)
+                }
+                _ => Err(error.into()),
+            };
+        }
     };
     if creation_time(&handle)? != identity.start_time {
         return Ok(SignalOutcome::Mismatch);
@@ -206,10 +217,15 @@ pub(crate) fn open(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> io::Result<Option
 /// `SYNCHRONIZE` is asked for too, because only a waitable handle tells an exited
 /// process from a running one; processes that refuse it are opened without.
 fn open_query(pid: u32) -> Option<OwnedHandle> {
-    open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE)
-        .ok()
-        .flatten()
-        .or_else(|| open(pid, PROCESS_QUERY_LIMITED_INFORMATION).ok().flatten())
+    match open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE) {
+        Ok(handle) => handle,
+        // Only a refusal of `SYNCHRONIZE` is worth a second try; protected
+        // processes refuse both, and every scan meets about a hundred of them.
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            open(pid, PROCESS_QUERY_LIMITED_INFORMATION).ok().flatten()
+        }
+        Err(_) => None,
+    }
 }
 
 /// The creation time of an open process as one 64-bit value.

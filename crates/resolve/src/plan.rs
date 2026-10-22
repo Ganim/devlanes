@@ -372,8 +372,8 @@ impl<E: Extensions> Planner<'_, '_, E> {
             &path,
         )?;
         let stop = stop_policy(service.stop.as_ref(), &context, &path)?;
-        // Nothing on Unix; on Windows it names the substitute for a signal it lacks.
-        launch.notes.extend(stop.signal.mapped_note());
+        // Nothing on Unix; on Windows it says stops terminate at once for now.
+        launch.notes.extend(stop.signal.launch_note());
         let sync = self.sync(service.sync.as_deref().unwrap_or_default(), &context, &path)?;
         Ok(ResolvedService {
             name: layout.name.clone(),

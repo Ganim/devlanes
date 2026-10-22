@@ -2,8 +2,8 @@
 //! (`mise`, `direnv`, `fnox`) where `#!/bin/sh` scripts cannot run, i.e. on Windows.
 //!
 //! [`install`] copies the binary into a directory under the tool's name and writes
-//! a [`Behaviour`] next to it (`mise.exe` reads `mise.json`), so one directory can
-//! hold several fakes that behave differently.
+//! a [`Behaviour`] next to it (`mise.exe` reads `mise.exe.json`), so one directory
+//! can hold several fakes that behave differently.
 //!
 //! ```no_run
 //! use devlanes_testing::fake_tool::{Behaviour, install};
@@ -120,19 +120,22 @@ pub fn install(dir: &Path, name: &str, behaviour: &Behaviour) -> Result<PathBuf,
     Ok(program)
 }
 
-/// The behaviour file a fake at `program` reads: the same path with a `.json`
-/// extension.
+/// The behaviour file a fake at `program` reads: its full file name plus
+/// `.json` (`mise.exe.json`, `fnox.old.json`), so names with dots of their own
+/// keep distinct files.
 pub fn sidecar(program: &Path) -> PathBuf {
-    program.with_extension("json")
+    let mut name = program.as_os_str().to_owned();
+    name.push(".json");
+    PathBuf::from(name)
 }
 
 /// The built `fake-tool`: `DEVLANES_FAKE_TOOL` when set, else the binary next to
 /// the running test's `deps` directory (`target/<profile>/fake-tool`).
 ///
-/// A workspace test run builds it with this crate's tests. When a run of another
-/// crate alone finds it missing, the first call runs `cargo build -p
-/// devlanes-testing --bin fake-tool` into the same target directory and profile,
-/// bounded by ten minutes.
+/// Without `DEVLANES_FAKE_TOOL`, the first call in a process runs `cargo build
+/// -p devlanes-testing --bin fake-tool` into the same target directory and
+/// profile, bounded by ten minutes, so a binary left from older sources is never
+/// used. Cargo makes that a quick no-op when the binary is current.
 pub fn binary() -> Result<PathBuf, Error> {
     static BINARY: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     BINARY
@@ -153,9 +156,6 @@ fn locate() -> Result<PathBuf, Error> {
         .and_then(Path::parent)
         .ok_or_else(|| Error::FakeTool(format!("no target directory above {}", exe.display())))?;
     let program = profile_dir.join(format!("fake-tool{}", std::env::consts::EXE_SUFFIX));
-    if program.is_file() {
-        return Ok(program);
-    }
     build(profile_dir)?;
     if program.is_file() {
         Ok(program)

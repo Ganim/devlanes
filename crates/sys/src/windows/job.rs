@@ -159,6 +159,7 @@ mod tests {
             stdout: Stdio::Null,
             stderr: Stdio::Null,
             job: Some(&job),
+            console: None,
         })?;
         // The ping grandchild joins shortly after cmd starts it.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

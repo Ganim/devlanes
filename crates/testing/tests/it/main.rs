@@ -391,6 +391,25 @@ async fn fake_tool_follows_its_behaviour() -> Result {
     Ok(())
 }
 
+/// Fakes whose names differ after a dot (`fnox` and `fnox.old`) keep their own
+/// behaviours: the sidecar adds `.json` to the full file name.
+#[tokio::test]
+async fn fake_tool_names_with_dots_keep_their_behaviour() -> Result {
+    use devlanes_testing::fake_tool::{Behaviour, install, sidecar};
+    let bin = tempfile::tempdir()?;
+    let current = install(bin.path(), "fnox", &Behaviour::new().stdout("current"))?;
+    let old = install(bin.path(), "fnox.old", &Behaviour::new().stdout("old"))?;
+    assert_eq!(
+        sidecar(&old).file_name().and_then(|name| name.to_str()),
+        Some(format!("fnox.old{}.json", std::env::consts::EXE_SUFFIX).as_str())
+    );
+    for (fake, expected) in [(&current, "current"), (&old, "old")] {
+        let output = run_fake(fake, bin.path(), &[]).await?;
+        assert_eq!(String::from_utf8(output.stdout)?, expected);
+    }
+    Ok(())
+}
+
 /// Runs an installed fake in `cwd` with only `MARK` in its environment.
 async fn run_fake(
     fake: &std::path::Path,

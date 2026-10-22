@@ -60,6 +60,7 @@ mod tests {
             cwd: "/work/acme".into(),
             command: vec!["devlanes".into(), "attach".into(), "acme@2:api".into()],
             title: Some("api".into()),
+            env: Vec::new(),
         })?;
         let args = invocation.args.join(" ");
         assert!(args.ends_with("--directory /work/acme --title api devlanes attach acme@2:api"));

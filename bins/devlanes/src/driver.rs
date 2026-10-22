@@ -321,10 +321,18 @@ async fn with_command(
     Ok(command)
 }
 
+/// Most `PATH` entries a `with` command's `not_found` error lists in
+/// `path_searched`, as the daemon's `spawn_failed` does; `path_more` counts the
+/// rest.
+#[cfg(windows)]
+const PATH_SHOWN: usize = 12;
+
 /// The `with` command before its environment and directory are set. std would
 /// only try `program.exe`, so the program is resolved with `PATHEXT` against the
 /// `PATH` in `env` (finding `npm.cmd`), and batch files run through `cmd.exe`
-/// with std's argument escaping.
+/// with std's argument escaping. A program that is not found fails with 127,
+/// an unusable command line (an argument a batch file cannot take, a NUL) with
+/// 2.
 #[cfg(windows)]
 async fn with_command(
     program: &str,
@@ -332,6 +340,7 @@ async fn with_command(
     env: &BTreeMap<String, String>,
     cwd: &Path,
 ) -> Result<tokio::process::Command, RpcError> {
+    use devlanes_runner_windows::command::CommandError;
     let spawn_failed = |message: String| {
         RpcError::new(
             "spawn_failed",
@@ -354,7 +363,28 @@ async fn with_command(
     })
     .await
     .map_err(|error| spawn_failed(error.to_string()))?
-    .map_err(|error| spawn_failed(error.to_string()))?;
+    .map_err(|error| match &error {
+        // Shaped like the daemon's `spawn_failed` for units, and 127 like a shell.
+        CommandError::NotFound { searched, .. } => {
+            let mut failed = spawn_failed(error.to_string());
+            failed.data["reason"] = json!("not_found");
+            failed.data["path_searched"] =
+                json!(searched.iter().take(PATH_SHOWN).collect::<Vec<_>>());
+            if searched.len() > PATH_SHOWN {
+                failed.data["path_more"] = json!(searched.len() - PATH_SHOWN);
+            }
+            failed
+        }
+        // The command line itself is unusable, which no PATH or install fixes.
+        CommandError::ArgumentNotSafeForBatch(_)
+        | CommandError::ContainsNul(_)
+        | CommandError::NotUnicode(_)
+        | CommandError::InvalidProgram(_) => RpcError::new(
+            "invalid_input",
+            json!({"message": error.to_string(), "program": program}),
+            2,
+        ),
+    })?;
     let mut command = tokio::process::Command::new(&built.application);
     if !built.arguments().is_empty() {
         command.raw_arg(built.arguments());
@@ -383,12 +413,20 @@ fn command_exit(status: std::process::ExitStatus) -> CommandExit {
 const STATUS_CONTROL_C_EXIT: i32 = 0xC000_013A_u32.cast_signed();
 
 /// The `with` command's exit code. A Ctrl-C exit reads like SIGINT on Unix, so
-/// `with` reports and exits the same way on both.
+/// `with` reports and exits the same way on both. Codes above 255, such as an
+/// NTSTATUS from a crash, become 1; the raw code goes to the debug log.
 #[cfg(windows)]
 fn command_exit(status: std::process::ExitStatus) -> CommandExit {
     match status.code() {
         Some(STATUS_CONTROL_C_EXIT) => CommandExit::Signal(Stop::Interrupt.number()),
-        Some(code) => CommandExit::Code(u8::try_from(code).unwrap_or(1)),
+        Some(code) => CommandExit::Code(u8::try_from(code).unwrap_or_else(|_| {
+            tracing::debug!(
+                code,
+                hex = %format_args!("{:#010x}", code.cast_unsigned()),
+                "with: exit code does not fit 0-255; reporting 1"
+            );
+            1
+        })),
         None => CommandExit::Code(1),
     }
 }
@@ -1141,5 +1179,48 @@ mod tests {
         assert!(matches!(exit(0), CommandExit::Code(0)));
         assert!(matches!(exit(3), CommandExit::Code(3)));
         assert!(matches!(exit(300), CommandExit::Code(1)));
+        assert!(matches!(exit(0xC000_0005), CommandExit::Code(1)));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    /// A missing program fails like the daemon's unit spawns (127, `not_found`,
+    /// the PATH searched); an unusable command line is invalid input (2).
+    async fn with_command_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let env = BTreeMap::from([("PATH".to_owned(), dir.path().display().to_string())]);
+        let missing = with_command("devlanes-no-such-program", &[], &env, dir.path())
+            .await
+            .expect_err("not found");
+        assert_eq!(
+            (missing.code.as_str(), missing.exit_code),
+            ("spawn_failed", 127)
+        );
+        assert_eq!(missing.data["reason"], "not_found");
+        assert_eq!(missing.data["program"], "devlanes-no-such-program");
+        assert_eq!(missing.data["path_searched"], json!([dir.path()]));
+        let crowded = (0..20)
+            .map(|n| dir.path().join(n.to_string()).display().to_string())
+            .collect::<Vec<_>>()
+            .join(";");
+        let env = BTreeMap::from([("PATH".to_owned(), crowded)]);
+        let missing = with_command("devlanes-no-such-program", &[], &env, dir.path())
+            .await
+            .expect_err("not found");
+        assert_eq!(
+            missing.data["path_searched"].as_array().map(Vec::len),
+            Some(PATH_SHOWN)
+        );
+        assert_eq!(missing.data["path_more"], 20 - PATH_SHOWN);
+        for (program, args) in [("", vec![]), ("tool", vec!["a\0b".to_owned()])] {
+            let invalid = with_command(program, &args, &env, dir.path())
+                .await
+                .expect_err("invalid");
+            assert_eq!(
+                (invalid.code.as_str(), invalid.exit_code),
+                ("invalid_input", 2),
+                "{program:?} {args:?}"
+            );
+        }
     }
 }

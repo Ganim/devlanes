@@ -1,6 +1,6 @@
 //! Stand-in for an external program in tests. A copy named after the tool reads
-//! its behaviour from the `.json` file next to it; see
-//! `devlanes_testing::fake_tool`.
+//! its behaviour from the file next to it named like itself plus `.json`
+//! (`mise.exe.json`); see `devlanes_testing::fake_tool::sidecar`.
 
 use std::{fs::OpenOptions, io::Write, process::ExitCode, time::Duration};
 

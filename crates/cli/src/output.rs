@@ -4,7 +4,7 @@ use devlanes_proto::{ActorKind, Event, LaneSummary, LogLine, Method, RpcError, U
 use serde_json::{Value, json};
 
 use crate::{
-    OutputMode, Runtime, exit,
+    ExportShell, OutputMode, Runtime, exit,
     render::{self, cap_line, clean, error_message},
 };
 
@@ -13,11 +13,12 @@ use crate::{
 pub struct Hint(pub String);
 
 impl Hint {
-    /// Quotes each argument separately; selectors remain opaque to the CLI.
+    /// Quotes each argument separately for the platform's shell ([`hint_quote`]);
+    /// selectors remain opaque to the CLI.
     pub fn command(args: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
         Self(
             std::iter::once("devlanes".into())
-                .chain(args.into_iter().map(|v| shell_quote(v.as_ref())))
+                .chain(args.into_iter().map(|v| hint_quote(v.as_ref())))
                 .collect::<Vec<_>>()
                 .join(" "),
         )
@@ -445,8 +446,9 @@ impl Render for LogLine {
     }
 }
 
-/// Shell assignments for `env export`, plus the names a POSIX shell cannot take
-/// (config allows names like `NEXT-PUBLIC` that `export` rejects) or values with NUL.
+/// Shell assignments for `env export`, plus the names the shell cannot take
+/// (config allows names like `NEXT-PUBLIC` that POSIX `export` rejects) or values
+/// with NUL.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Exported {
     pub script: String,
@@ -454,23 +456,32 @@ pub struct Exported {
 }
 
 /// Produces shell assignments without evaluating values received from the daemon;
-/// variables a POSIX shell cannot hold are skipped, so one name does not cost the rest.
-pub fn export_environment(values: &BTreeMap<String, String>) -> Exported {
+/// variables the shell cannot hold are skipped, so one name does not cost the rest.
+pub fn export_environment(values: &BTreeMap<String, String>, shell: ExportShell) -> Exported {
     let mut exported = Exported::default();
     for (key, value) in values {
         let mut chars = key.chars();
-        if !chars
+        let simple = chars
             .next()
             .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
-            || !chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
-            || value.contains('\0')
-        {
-            exported.skipped.push(key.clone());
-            continue;
+            && chars.all(|c| c == '_' || c.is_ascii_alphanumeric());
+        let line = match shell {
+            _ if value.contains('\0') => None,
+            ExportShell::Posix => simple.then(|| format!("export {key}={}\n", shell_quote(value))),
+            // Values are always quoted: an unquoted word after `=` would run as a
+            // command. Other names, such as Windows' `ProgramFiles(x86)`, take the
+            // braced form; names with braces, backticks, drive separators or
+            // provider wildcards are skipped rather than escaped.
+            ExportShell::Pwsh if simple => Some(format!("$env:{key} = {}\n", pwsh_literal(value))),
+            ExportShell::Pwsh => (!key.is_empty()
+                && !key.contains(['{', '}', '`', '=', ':', '*', '?', '[', ']'])
+                && !key.chars().any(char::is_control))
+            .then(|| format!("${{env:{key}}} = {}\n", pwsh_literal(value))),
+        };
+        match line {
+            Some(line) => exported.script.push_str(&line),
+            None => exported.skipped.push(key.clone()),
         }
-        exported
-            .script
-            .push_str(&format!("export {key}={}\n", shell_quote(value)));
     }
     exported
 }
@@ -490,6 +501,61 @@ pub fn shell_quote(value: &str) -> String {
     } else {
         format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
+}
+
+/// Quotes a PowerShell argument when it needs it: single quotes, with every
+/// single-quote character doubled. Besides POSIX metacharacters, PowerShell
+/// treats a leading `@` (splatting), `,` (arrays), `%` (`--%` stops parsing) and
+/// dotted words after `-` (split by Windows PowerShell 5.1) specially, so those
+/// are quoted.
+///
+/// ```
+/// assert_eq!(devlanes_cli::pwsh_quote("acme@2:api"), "acme@2:api");
+/// assert_eq!(devlanes_cli::pwsh_quote("a,b"), "'a,b'");
+/// assert_eq!(devlanes_cli::pwsh_quote("it's $x"), "'it''s $x'");
+/// ```
+pub fn pwsh_quote(value: &str) -> String {
+    let plain = value
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || b"_@+=:./-".contains(&c));
+    let special_start = value.starts_with('@')
+        || value.starts_with('-') && value.contains(['.', ':', '=', '/', '@']);
+    if !value.is_empty() && plain && !special_start {
+        value.into()
+    } else {
+        pwsh_literal(value)
+    }
+}
+
+/// A PowerShell single-quoted string holding `value` verbatim. PowerShell also
+/// ends single-quoted strings at the typographic single quotes, so those are
+/// doubled as well.
+fn pwsh_literal(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for c in value.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            quoted.push(c);
+        }
+        quoted.push(c);
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// Quotes one word of a command shown for the user to copy (hints, `more:`
+/// lines): POSIX shell syntax.
+#[cfg(unix)]
+pub fn hint_quote(value: &str) -> String {
+    shell_quote(value)
+}
+
+/// Quotes one word of a command shown for the user to copy (hints, `more:`
+/// lines): PowerShell syntax, the default shell in Windows Terminal. Words that
+/// need no quoting paste into any shell.
+#[cfg(windows)]
+pub fn hint_quote(value: &str) -> String {
+    pwsh_quote(value)
 }
 
 /// Uses a complete line budget so URLs and multibyte text are never cut mid-token.

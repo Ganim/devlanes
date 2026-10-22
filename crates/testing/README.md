@@ -41,7 +41,7 @@ Flags for the other platform exit with an error before anything is spawned.
 
 ## Fake tools
 
-`fake_tool::install(dir, "mise", &behaviour)` copies `fake-tool` to `dir/mise` (`mise.exe` on Windows) and writes the `Behaviour` to `mise.json` next to it. The copy can check its arguments, record them, sleep, print stdout/stderr and exit with a code; printed strings expand `{cwd}` (canonical working directory) and `{env:NAME}`.
+`fake_tool::install(dir, "mise", &behaviour)` copies `fake-tool` to `dir/mise` (`mise.exe` on Windows) and writes the `Behaviour` next to it under the copy's full name plus `.json` (`mise.json`, `mise.exe.json` on Windows). The copy can check its arguments, record them, sleep, print stdout/stderr and exit with a code; printed strings expand `{cwd}` (canonical working directory) and `{env:NAME}`.
 
 ```rust
 use devlanes_testing::fake_tool::{Behaviour, install};
@@ -51,7 +51,7 @@ let fake = install(dir, "mise", &Behaviour::new()
     .stdout_json(serde_json::json!({ "FROM_DIR": "{cwd}" })))?;
 ```
 
-The binary is taken from `DEVLANES_FAKE_TOOL` or next to the running test (`target/<profile>/fake-tool`). A workspace test run builds it; a test of another crate run alone builds it on first use with `cargo build -p devlanes-testing --bin fake-tool`.
+The binary is taken from `DEVLANES_FAKE_TOOL`. Without it, each test process runs `cargo build -p devlanes-testing --bin fake-tool` once on first use (a no-op when current) and takes the binary next to the running test (`target/<profile>/fake-tool`), so a stale build is never used.
 
 ## Behaviour
 

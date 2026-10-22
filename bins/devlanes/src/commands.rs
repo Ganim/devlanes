@@ -175,11 +175,11 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
             });
             Ok(0)
         }
-        Action::ExportEnv(request) => {
+        Action::ExportEnv { request, shell } => {
             let data = call(request).await?;
             let env = serde_json::from_value(data.get("env").cloned().unwrap_or_default())
                 .unwrap_or_default();
-            let exported = export_environment(&env);
+            let exported = export_environment(&env, shell);
             // On stderr, so `eval "$(devlanes env export)"` still works.
             let stderr = exported
                 .skipped
@@ -874,19 +874,53 @@ fn read_tty(prompt: &str, kind: &str) -> Option<String> {
     }
 }
 
-/// Reading a prompt answer from the console is not supported on Windows yet, so
-/// every question is cancelled (`None`), as when no terminal is available on Unix.
-/// The prompt is still shown with a note, so a cancelled answer is not a mystery.
-/// A `notify` prompt is shown and acknowledged as on Unix, since ssh does not
-/// wait for an answer to it.
+/// Shows `prompt` on the console (`CONOUT$`) and reads one line from `CONIN$`,
+/// which works when stdin and stdout are redirected, without echo for secrets.
+/// Returns the line with its newline, so an empty answer stays distinct from
+/// cancel; `None` without a console or when Ctrl-C cancels the read.
 #[cfg(windows)]
 fn read_tty(prompt: &str, kind: &str) -> Option<String> {
-    eprintln!("{prompt}");
+    use devlanes_sys::windows::console::{self, ModeGuard};
+    let input = console::open_input().ok()?;
+    let output = console::open_output().ok()?;
     if kind == "notify" {
+        console::write_output(&output, &format!("{prompt}\r\n")).ok()?;
         return Some("\n".into());
     }
-    eprintln!("devlanes cannot read console input on Windows yet; cancelled");
-    None
+    console::write_output(&output, &format!("{prompt} ")).ok()?;
+    let secret = kind == "secret";
+    let (set, clear) = if secret {
+        (0, console::ECHO_INPUT)
+    } else {
+        (console::ECHO_INPUT, 0)
+    };
+    // A line-edited read even if a program left the console raw; the guard puts
+    // back whatever mode it had.
+    let mode = ModeGuard::change(
+        &input,
+        console::LINE_INPUT | console::PROCESSED_INPUT | set,
+        clear,
+    )
+    .ok()?;
+    let mut units = Vec::new();
+    let mut buffer = [0_u16; 512];
+    let read = loop {
+        match console::read_input(&input, &mut buffer) {
+            Ok(0) => break None,
+            Ok(read) => {
+                units.extend_from_slice(&buffer[..read]);
+                if units.contains(&u16::from(b'\n')) {
+                    break Some(String::from_utf16_lossy(&units));
+                }
+            }
+            Err(_) => break None,
+        }
+    };
+    drop(mode);
+    if secret {
+        let _ = console::write_output(&output, "\r\n");
+    }
+    read.map(|line| format!("{}\n", line.trim_end_matches(['\r', '\n'])))
 }
 
 /// Renders the response data with the mode's reporter.
@@ -1066,17 +1100,24 @@ async fn open_url(url: &str) -> Result<(), RpcError> {
     Ok(())
 }
 
-/// Opening a browser is not supported on Windows yet; the error data keeps the URL.
+/// The browser is launched by the client, never the daemon. `ShellExecuteW` takes
+/// the URL as one string, so `&` and quotes in it are never parsed as a command.
 #[cfg(windows)]
 async fn open_url(url: &str) -> Result<(), RpcError> {
     if url.is_empty() {
         return Err(RpcError::new("no_url", Value::Null, 3));
     }
-    Err(RpcError::new(
-        "not_supported_yet",
-        json!({"feature": "opening a browser on Windows", "url": url}),
-        1,
-    ))
+    let owned = url.to_owned();
+    tokio::task::spawn_blocking(move || devlanes_sys::windows::shell::open_url(&owned))
+        .await
+        .map_err(|error| RpcError::new("open_failed", json!({"message": error.to_string()}), 1))?
+        .map_err(|error| {
+            RpcError::new(
+                "open_failed",
+                json!({"message": error.to_string(), "url": url}),
+                1,
+            )
+        })
 }
 
 /// Reads the daemon's own log file directly; works even when the daemon is wedged.

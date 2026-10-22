@@ -65,8 +65,17 @@ impl DnsServer {
             let addr = udp.local_addr().map_err(|e| bind_error(listen, e))?;
             match TcpListener::bind(addr).await {
                 Ok(tcp) => return Ok(Self::new(udp, tcp, zone)),
-                // The UDP port's TCP twin is taken; another ephemeral port will do.
-                Err(error) if error.kind() == io::ErrorKind::AddrInUse => last = error,
+                // The UDP port's TCP twin is taken, or (Windows, as access denied)
+                // inside a TCP range Hyper-V or WSL reserved; another ephemeral
+                // port will do.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    last = error;
+                }
                 Err(error) => return Err(bind_error(addr, error)),
             }
         }

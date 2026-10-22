@@ -64,6 +64,7 @@ mod tests {
             cwd: "/work/acme".into(),
             command: vec!["devlanes".into(), "attach".into(), "acme@2:api".into()],
             title: Some("acme@2:api".into()),
+            env: Vec::new(),
         }
     }
 

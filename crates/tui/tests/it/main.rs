@@ -874,6 +874,7 @@ async fn status_is_queried_after_the_subscription_opens() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn opened_terminals_carry_devlanes_home() {
     let exe = std::path::Path::new("/opt/devlanes/bin/devlanes");
@@ -900,6 +901,37 @@ fn opened_terminals_carry_devlanes_home() {
         devlanes_tui::terminal_command(exe, "/bin/zsh", None, None),
         ["/bin/zsh"]
     );
+    assert!(devlanes_tui::terminal_env(Some(home)).is_empty());
+}
+
+/// Windows has no `env` program: the command stays bare and the launcher sets
+/// `DEVLANES_HOME` on Windows Terminal or WezTerm, which pass it on.
+#[cfg(windows)]
+#[test]
+fn opened_terminals_carry_devlanes_home() {
+    let exe = std::path::Path::new(r"C:\Program Files\devlanes\devlanes.exe");
+    let home = std::path::Path::new(r"C:\Users\acme\my home\.devlanes");
+    let shell = r"C:\WINDOWS\system32\cmd.exe";
+    assert_eq!(
+        devlanes_tui::terminal_command(exe, shell, Some(home), Some("acme@0:api")),
+        [
+            r"C:\Program Files\devlanes\devlanes.exe",
+            "attach",
+            "acme@0:api"
+        ]
+    );
+    assert_eq!(
+        devlanes_tui::terminal_command(exe, shell, Some(home), None),
+        [shell]
+    );
+    assert_eq!(
+        devlanes_tui::terminal_env(Some(home)),
+        [(
+            "DEVLANES_HOME".to_owned(),
+            r"C:\Users\acme\my home\.devlanes".to_owned()
+        )]
+    );
+    assert!(devlanes_tui::terminal_env(None).is_empty());
 }
 
 #[tokio::test]

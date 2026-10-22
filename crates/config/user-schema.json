@@ -608,7 +608,8 @@
         "ghostty",
         "wezterm",
         "kitty",
-        "terminal"
+        "terminal",
+        "windows-terminal"
       ],
       "oneOf": [
         {
@@ -648,6 +649,14 @@
           "description": "Open a session in macOS Terminal.app.",
           "examples": [
             "terminal"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "windows-terminal",
+          "description": "Open a tab in the most recent Windows Terminal window on Windows.",
+          "examples": [
+            "windows-terminal"
           ],
           "type": "string"
         }
@@ -739,7 +748,7 @@
             }
           ],
           "default": null,
-          "description": "Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, else the first one installed.",
+          "description": "Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, Windows Terminal on Windows when installed, else the first one installed.",
           "examples": [
             "ghostty",
             "iterm2"

@@ -51,10 +51,10 @@ impl StopSignal {
         }
     }
 
-    /// The `stop_signal_mapped` launch note when this OS has no such signal and
-    /// a stop delivers something else; `None` when the signal is sent as is.
-    pub fn mapped_note(self) -> Option<String> {
-        os::mapped_note(self)
+    /// The launch note when a stop on this OS does not deliver this signal;
+    /// `None` when the signal is sent as is (always on Unix).
+    pub fn launch_note(self) -> Option<String> {
+        os::launch_note(self)
     }
 }
 
@@ -69,8 +69,8 @@ impl fmt::Display for StopSignal {
 mod os {
     use super::StopSignal;
 
-    /// Every configurable signal exists on Unix, so none is mapped.
-    pub(super) fn mapped_note(_signal: StopSignal) -> Option<String> {
+    /// Every configurable signal exists on Unix and is sent as is.
+    pub(super) fn launch_note(_signal: StopSignal) -> Option<String> {
         None
     }
 }
@@ -79,8 +79,9 @@ mod os {
 mod os {
     use super::StopSignal;
 
-    /// What a Windows stop does for a configured signal. Windows has no POSIX
-    /// signals; console processes only see Ctrl-C and Ctrl-Break.
+    /// What a Windows stop will send for a configured signal once graceful
+    /// stops exist. Windows has no POSIX signals; console processes only see
+    /// Ctrl-C and Ctrl-Break.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum WindowsStop {
         /// Ctrl-C, the closest to SIGINT from a terminal.
@@ -93,9 +94,11 @@ mod os {
     }
 
     impl StopSignal {
-        /// The Windows stop for this signal. SIGHUP, SIGQUIT, SIGUSR1 and SIGUSR2
-        /// have no equivalent and get Ctrl-Break like SIGTERM, so a config shared
-        /// with Unix machines still starts here (see [`StopSignal::mapped_note`]).
+        /// The Windows stop this signal is planned to map to once graceful stops
+        /// exist; until then the runner terminates every stop (see
+        /// [`StopSignal::launch_note`]). SIGHUP, SIGQUIT, SIGUSR1 and SIGUSR2
+        /// have no equivalent and will get Ctrl-Break like SIGTERM, so a config
+        /// shared with Unix machines still starts here.
         pub fn windows_stop(self) -> WindowsStop {
             match self {
                 Self::Interrupt => WindowsStop::CtrlC,
@@ -107,17 +110,13 @@ mod os {
         }
     }
 
-    /// Names the substitute for the signals Windows lacks. SIGTERM's Ctrl-Break
-    /// is the documented default, so it gets no note.
-    pub(super) fn mapped_note(signal: StopSignal) -> Option<String> {
-        match signal {
-            StopSignal::Hangup | StopSignal::Quit | StopSignal::User1 | StopSignal::User2 => {
-                Some(format!(
-                    "stop.signal {signal} has no Windows equivalent; stopping sends Ctrl-Break, as for SIGTERM"
-                ))
-            }
-            StopSignal::Interrupt | StopSignal::Kill | StopSignal::Terminate => None,
-        }
+    /// The Windows runner does not send Ctrl-C or Ctrl-Break yet: every stop
+    /// terminates the unit's processes at once, whatever the signal, so every
+    /// service gets this note until graceful stops land.
+    pub(super) fn launch_note(signal: StopSignal) -> Option<String> {
+        Some(format!(
+            "on Windows a stop ends the process tree immediately; stop.signal {signal} is not sent yet (graceful Ctrl-C and Ctrl-Break stops come later)"
+        ))
     }
 }
 
@@ -146,27 +145,26 @@ mod tests {
     #[cfg(unix)]
     #[test]
     /// Unix delivers every configurable signal as is.
-    fn unix_maps_nothing() {
-        assert!(StopSignal::ALL.iter().all(|s| s.mapped_note().is_none()));
+    fn unix_notes_nothing() {
+        assert!(StopSignal::ALL.iter().all(|s| s.launch_note().is_none()));
     }
 
     #[cfg(windows)]
     #[test]
-    /// SIGINT is Ctrl-C and SIGKILL terminates; everything else is Ctrl-Break,
-    /// with a note for the signals Windows lacks.
+    /// SIGINT is planned as Ctrl-C and SIGKILL terminates; everything else is
+    /// planned as Ctrl-Break. Until then every signal notes that stops
+    /// terminate at once.
     fn windows_mapping() {
         use StopSignal::*;
         assert_eq!(Interrupt.windows_stop(), WindowsStop::CtrlC);
         assert_eq!(Kill.windows_stop(), WindowsStop::Terminate);
-        assert_eq!(Terminate.windows_stop(), WindowsStop::CtrlBreak);
-        for signal in [Interrupt, Kill, Terminate] {
-            assert_eq!(signal.mapped_note(), None, "{signal}");
+        for signal in [Terminate, Hangup, Quit, User1, User2] {
+            assert_eq!(signal.windows_stop(), WindowsStop::CtrlBreak, "{signal}");
         }
-        for signal in [Hangup, Quit, User1, User2] {
-            assert_eq!(signal.windows_stop(), WindowsStop::CtrlBreak);
-            let note = signal.mapped_note().unwrap_or_default();
+        for signal in StopSignal::ALL {
+            let note = signal.launch_note().unwrap_or_default();
             assert!(note.contains(signal.config_name()), "{note}");
-            assert!(note.contains("Ctrl-Break"), "{note}");
+            assert!(note.contains("immediately"), "{note}");
         }
     }
 }

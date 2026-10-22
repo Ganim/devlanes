@@ -32,7 +32,7 @@ fn main() -> Result<(), AllocationError> {
 - `env::assemble`: environment precedence with source-layer attribution. `env::{get, insert, remove}` treat names case-insensitively on Windows (`Path` and `PATH` are one variable).
 - `shell::Shell`: the shell for `run:` strings and `ready.cmd` (`/bin/sh -c`, Git for Windows' `sh.exe`, or the `cmd.exe` fallback).
 - `Runner` and `Unit`: process launch, terminal I/O, stopping, exit waiting, and tracked process identities. `ExitSweep` and `StderrMode` are the runner options shared by every OS's runner.
-- `StopSignal`: the signals `stop.signal` accepts. On Windows, `StopSignal::windows_stop` says what a stop sends instead (Ctrl-C, Ctrl-Break or termination).
+- `StopSignal`: the signals `stop.signal` accepts. On Windows, `StopSignal::windows_stop` says what a stop will send once graceful stops exist (Ctrl-C, Ctrl-Break or termination); for now every Windows stop terminates the unit's processes, and `StopSignal::launch_note` says so.
 - `contrib::{Contributor, SecretsProvider, ScriptRunner}`: launch customization, secret lookup, and script command rendering.
 - `gate::{StartGate, PressureSource}`: startup pacing slots and queue snapshots, and system CPU and memory pressure readings.
 - `clock::{Clock, TokioClock, ManualClock}`: monotonic time for schedulers, with a manual clock for tests.

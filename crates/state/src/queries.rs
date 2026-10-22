@@ -486,6 +486,50 @@ impl Store {
         })
         .await
     }
+    /// Replaces the recorded descendants of an unfinished run with `members`, the
+    /// ones live now. Exited ones can never be stopped again, and dropping them
+    /// keeps the rows of long runs with short-lived children (watch-mode tools)
+    /// bounded. Finished runs are not changed.
+    pub async fn replace_unit_run_members(
+        &self,
+        run: UnitRunId,
+        members: Vec<ProcessIdentity>,
+    ) -> Result<(), Error> {
+        if members.iter().any(|member| member.pid == 0) {
+            return Err(Error::Invalid("member PID must be nonzero".into()));
+        }
+        self.call(move |c| {
+            c.immediate_transaction(|c| {
+                if !diesel::select(exists(
+                    unit_runs::table
+                        .find(run.0)
+                        .filter(unit_runs::ended_at.is_null()),
+                ))
+                .get_result::<bool>(c)?
+                {
+                    return Err(Error::NotFound("unfinished unit run"));
+                }
+                diesel::delete(
+                    unit_run_members::table.filter(unit_run_members::unit_run_id.eq(run.0)),
+                )
+                .execute(c)?;
+                let rows: Vec<MemberRow> = members
+                    .into_iter()
+                    .map(|member| MemberRow {
+                        unit_run_id: run.0,
+                        pid: i64::from(member.pid),
+                        sid: i64::from(member.sid),
+                        process_start_time: member.start_time.to_string(),
+                    })
+                    .collect();
+                diesel::insert_or_ignore_into(unit_run_members::table)
+                    .values(&rows)
+                    .execute(c)?;
+                Ok(())
+            })
+        })
+        .await
+    }
     /// Lists the recorded escaped descendants of a run, in PID order.
     pub async fn unit_run_members(&self, run: UnitRunId) -> Result<Vec<ProcessIdentity>, Error> {
         self.call(move |c| {

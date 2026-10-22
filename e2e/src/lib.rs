@@ -943,11 +943,25 @@ mod os {
             .any(|&(start, end)| start <= last && first <= end)
     }
 
-    /// IPv4 and IPv6 excluded ranges, read once per test process. A failing
-    /// `netsh` leaves the list empty, which only risks a bind error later.
+    /// How long the excluded ranges saved in the ports directory are trusted.
+    /// nextest runs every test in its own process, and two `netsh` calls cost
+    /// each of them a noticeable delay; Windows changes the ranges rarely
+    /// (Hyper-V, WSL or Docker starting).
+    const RANGES_FRESH: Duration = Duration::from_secs(10 * 60);
+
+    /// IPv4 and IPv6 excluded ranges, read once per test process from the copy
+    /// in the ports directory while it is fresh, else from `netsh`, saving them.
+    /// A failing `netsh` leaves the list empty and unsaved, which only risks a
+    /// bind error later.
     fn excluded_ranges() -> &'static [(u16, u16)] {
         static RANGES: OnceLock<Vec<(u16, u16)>> = OnceLock::new();
         RANGES.get_or_init(|| {
+            let saved = ports_dir().map(|dir| dir.join("excluded-ranges.txt"));
+            if let Ok(saved) = &saved
+                && let Some(ranges) = read_saved(saved)
+            {
+                return ranges;
+            }
             let mut ranges = Vec::new();
             for family in ["ipv4", "ipv6"] {
                 let mut command = Command::new("netsh");
@@ -955,14 +969,49 @@ mod os {
                     .args(["interface", family, "show", "excludedportrange"])
                     .arg("protocol=tcp")
                     .stdin(Stdio::null());
-                if let Ok(output) = crate::run_bounded(command, Duration::from_secs(10))
-                    && output.success()
-                {
-                    ranges.extend(parse_excluded(&output.stdout));
+                match crate::run_bounded(command, Duration::from_secs(10)) {
+                    Ok(output) if output.success() => {
+                        ranges.extend(parse_excluded(&output.stdout));
+                    }
+                    _ => return ranges,
                 }
+            }
+            if let Ok(saved) = &saved {
+                save(saved, &ranges);
             }
             ranges
         })
+    }
+
+    /// The ranges saved at `path` when it was written less than
+    /// [`RANGES_FRESH`] ago; `None` when missing, stale or unreadable.
+    fn read_saved(path: &std::path::Path) -> Option<Vec<(u16, u16)>> {
+        let age = std::fs::metadata(path)
+            .ok()?
+            .modified()
+            .ok()?
+            .elapsed()
+            .ok()?;
+        if age >= RANGES_FRESH {
+            return None;
+        }
+        Some(parse_excluded(&std::fs::read_to_string(path).ok()?))
+    }
+
+    /// Saves `ranges` at `path` in `netsh`'s row format, through a file of
+    /// this process renamed into place, so a concurrent reader never sees half
+    /// a list. Failures only cost the next process another `netsh` run.
+    fn save(path: &std::path::Path, ranges: &[(u16, u16)]) {
+        let text: String = ranges
+            .iter()
+            .map(|(start, end)| format!("{start} {end}\n"))
+            .collect();
+        let partial = path.with_extension(format!("{}.tmp", std::process::id()));
+        if std::fs::write(&partial, text).is_err()
+            || devlanes_sys::rename_retrying(&partial, path).is_err()
+        {
+            let _ = std::fs::remove_file(&partial);
+        }
     }
 
     /// Rows of `netsh ... show excludedportrange`: two port numbers, maybe followed

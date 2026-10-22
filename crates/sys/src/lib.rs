@@ -117,14 +117,28 @@ pub struct ProcessInfo {
 }
 
 impl ProcessInfo {
-    /// Returns the identity used for PID-reuse-safe signalling; an unknown session is 0.
+    /// Returns the identity used for PID-reuse-safe signalling, with the group
+    /// token `ProcessIdentity::sid` documents: the session (0 when unknown) on
+    /// Unix, the process's own PID on Windows.
     pub fn identity(&self) -> ProcessIdentity {
         ProcessIdentity {
             pid: self.pid,
-            sid: self.sid.unwrap_or(0),
+            sid: group_of(self),
             start_time: self.start_time,
         }
     }
+}
+
+/// The session, 0 when unknown.
+#[cfg(unix)]
+fn group_of(process: &ProcessInfo) -> u32 {
+    process.sid.unwrap_or(0)
+}
+
+/// No process group survives a daemon crash, so each process is its own.
+#[cfg(windows)]
+fn group_of(process: &ProcessInfo) -> u32 {
+    process.pid
 }
 
 /// A TCP socket in the LISTEN state owned by one of the queried processes.

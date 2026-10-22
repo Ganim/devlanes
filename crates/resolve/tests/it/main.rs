@@ -809,7 +809,7 @@ services:
     assert!(!exported.contains_key("MSYS_NO_PATHCONV"));
     assert!(!exported.contains_key("MSYS2_ARG_CONV_EXCL"));
     assert_eq!(exported["DEVLANES"], "1");
-    assert!(web.launch.notes.is_empty(), "{:?}", web.launch.notes);
+    assert!(service_notes(web).is_empty(), "{:?}", web.launch.notes);
     assert!(matches!(
         &web.ready.check,
         ReadySpec::Cmd { shell, .. } if shell == "curl -fsS 'http://127.0.0.1/a b'"
@@ -830,7 +830,7 @@ services:
     assert!(!web.launch.env.values.contains_key("MSYS_NO_PATHCONV"));
     assert!(web.launch.env.shell_env.is_empty());
     assert_eq!(
-        web.launch.notes,
+        service_notes(web),
         [
             "runs with cmd.exe: Git for Windows' sh.exe was not found, and POSIX syntax may fail there. Install Git for Windows, then run `devlanes daemon restart`."
         ]
@@ -839,7 +839,7 @@ services:
         &web.ready.check,
         ReadySpec::Cmd { shell, .. } if shell == r#"curl -fsS "http://127.0.0.1/a b""#
     ));
-    assert!(lane.services["argv"].launch.notes.is_empty());
+    assert!(service_notes(&lane.services["argv"]).is_empty());
 
     let lane = with_shell(yaml, &cmd, &["100%"]).await;
     let error = lane.errors["services.web"].to_string();
@@ -1022,9 +1022,10 @@ services:
 }
 
 #[tokio::test]
-/// `stop.signal` becomes the typed signal. Windows notes the signals it lacks
-/// (they are sent as Ctrl-Break); Unix sends every one as is, without a note.
-async fn stop_signals_parse_and_note_windows_substitutes() {
+/// `stop.signal` becomes the typed signal. Windows notes on every service that
+/// stops terminate at once for now; Unix sends every signal as is, without a
+/// note.
+async fn stop_signals_parse_and_note_windows_termination() {
     let config = parse(
         r#"
 project: demo
@@ -1047,18 +1048,24 @@ services:
     let (quit, int) = (&lane.services["quit"], &lane.services["int"]);
     assert_eq!(quit.stop.signal, StopSignal::Quit);
     assert_eq!(int.stop.signal, StopSignal::Interrupt);
-    assert!(int.launch.notes.is_empty(), "{:?}", int.launch.notes);
-    #[cfg(unix)]
-    assert!(quit.launch.notes.is_empty(), "{:?}", quit.launch.notes);
-    #[cfg(windows)]
-    assert!(
-        quit.launch
-            .notes
-            .iter()
-            .any(|note| note.contains("SIGQUIT") && note.contains("Ctrl-Break")),
-        "{:?}",
-        quit.launch.notes
-    );
+    for (service, signal) in [(quit, "SIGQUIT"), (int, "SIGINT")] {
+        #[cfg(unix)]
+        assert!(
+            service.launch.notes.is_empty(),
+            "{signal}: {:?}",
+            service.launch.notes
+        );
+        #[cfg(windows)]
+        assert!(
+            service
+                .launch
+                .notes
+                .iter()
+                .any(|note| note.contains(signal) && note.contains("immediately")),
+            "{:?}",
+            service.launch.notes
+        );
+    }
 }
 
 #[tokio::test]

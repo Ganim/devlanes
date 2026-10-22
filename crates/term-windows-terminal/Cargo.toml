@@ -1,0 +1,17 @@
+[package]
+name = "devlanes-term-windows-terminal"
+description = "Windows Terminal launcher for devlanes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+devlanes-term = { path = "../term" }
+
+[target.'cfg(windows)'.dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -12,6 +12,7 @@ fn open(launcher: &dyn TerminalLauncher) -> Result<(), devlanes_term::LaunchErro
         cwd: "/work/acme".into(),
         command: vec!["devlanes".into(), "attach".into(), "acme@2:api".into()],
         title: Some("acme@2:api".into()),
+        env: Vec::new(),
     })
 }
 ```
@@ -34,6 +35,7 @@ fn draw(tty: bool, tracker: &StartTracker) -> std::io::Result<()> {
 - `TerminalLauncher::name` is the user config value that selects the launcher (`terminal: kitty`).
 - `TerminalLauncher::invocation` plans the helper process as data; `launch` runs it.
 - `Invocation::run` starts the helper with null stdio and reaps long-lived terminal processes on a background thread.
+- `LaunchRequest::env` reaches the command only through terminals that pass their caller's environment on (Windows Terminal, WezTerm outside macOS). The TUI uses it for `DEVLANES_HOME` on Windows, which has no `env` program; on macOS and Linux it prefixes the command with `env DEVLANES_HOME=...` instead.
 - `shell_quote`, `shell_join` and `applescript_string` quote commands for terminals that take shell text.
 - `Progress::sequence` encodes `OSC 9;4` (`ESC ] 9 ; 4 ; state ; percent ESC \`).
 - `progress_support` decides whether to draw the bar from the setting, the TTY and the environment.
@@ -57,7 +59,7 @@ terminal:
   progress: auto
 ```
 
-`terminal: wezterm` alone works too and keeps progress on auto. The app is one of `ghostty`, `iterm2`, `kitty`, `wezterm` or `terminal`, and picks the launcher whose `name` matches. Without it the TUI uses Terminal.app on macOS, else the first launcher that is installed.
+`terminal: wezterm` alone works too and keeps progress on auto. The app is one of `ghostty`, `iterm2`, `kitty`, `wezterm`, `terminal` or `windows-terminal`, and picks the launcher whose `name` matches. Without it the TUI uses Terminal.app on macOS, else the first launcher that is installed. Windows builds register only Windows Terminal and WezTerm.
 
 ## License
 

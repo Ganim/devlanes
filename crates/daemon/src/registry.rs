@@ -529,7 +529,10 @@ impl Inner {
                     .lanes()
                     .into_iter()
                     .map(|lane| lane.st().path.clone())
-                    .find(|path| path.exists() && !same_path(path, &root));
+                    // A directory without `.git` is a removed worktree too: on
+                    // Windows `git worktree remove` leaves directories that
+                    // running units use as their cwd.
+                    .find(|path| path.join(".git").exists() && !same_path(path, &root));
                 match alternative {
                     Some(path) => devlanes_git::list(&path, &common_dir)
                         .await

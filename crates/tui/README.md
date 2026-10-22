@@ -76,7 +76,9 @@ In terminal focus every key except `shift+tab` goes to the unit, encoded for its
 terminal: kitty
 ```
 
-`O` then opens a kitty window in the lane's worktree, attached to the selected unit. Without `terminal:`, the TUI uses Terminal.app on macOS, else the first launcher that is installed.
+`O` then opens a kitty window in the lane's worktree, attached to the selected unit. Without `terminal:`, the TUI uses Terminal.app on macOS, else the first launcher that is installed. On a lane row it opens the user's shell instead: `$SHELL` on macOS and Linux, `%ComSpec%` on Windows.
+
+The new terminal's command uses the TUI's `DEVLANES_HOME`. On macOS and Linux it runs as `env DEVLANES_HOME=<home> ...`, because terminals started through `open` or `osascript` get launchd's environment. Windows has no `env` program, so the launcher sets the variable on `wt.exe` or `wezterm`, which pass their environment to the tab. Windows builds offer Windows Terminal (the default) and WezTerm.
 
 While lanes start, the terminal tab's progress bar shows ready services over the services starting, across every starting lane (the selected lane alone would jump while you browse). A failed start shows red for three seconds. Quitting, a panic or `terminal.progress: never` clears it; see `devlanes-term` for where it is drawn.
 

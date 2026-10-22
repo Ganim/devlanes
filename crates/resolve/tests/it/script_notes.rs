@@ -68,7 +68,7 @@ services:
         "no packageManager field; detected pnpm from pnpm-lock.yaml",
     ];
     for unit in ["plain", "preset"] {
-        assert_eq!(lane.services[unit].launch.notes, expected, "{unit}");
+        assert_eq!(service_notes(&lane.services[unit]), expected, "{unit}");
     }
     assert_eq!(lane.services["preset"].launch.args[2], "--port");
 }

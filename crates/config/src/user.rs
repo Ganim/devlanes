@@ -447,7 +447,7 @@ impl Default for MetricsConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 /// Terminal application used by open-in-terminal actions.
-#[schemars(extend("examples" = ["iterm2","ghostty","wezterm","kitty","terminal"]))]
+#[schemars(extend("examples" = ["iterm2","ghostty","wezterm","kitty","terminal","windows-terminal"]))]
 pub enum Terminal {
     /// Open a session in iTerm2 on macOS.
     #[schemars(extend("examples" = ["iterm2"]))]
@@ -464,6 +464,30 @@ pub enum Terminal {
     /// Open a session in macOS Terminal.app.
     #[schemars(extend("examples" = ["terminal"]))]
     Terminal,
+    /// Open a tab in the most recent Windows Terminal window on Windows.
+    #[serde(rename = "windows-terminal")]
+    #[schemars(extend("examples" = ["windows-terminal"]))]
+    WindowsTerminal,
+}
+
+impl Terminal {
+    /// The config value, such as `windows-terminal`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Iterm2 => "iterm2",
+            Self::Ghostty => "ghostty",
+            Self::Wezterm => "wezterm",
+            Self::Kitty => "kitty",
+            Self::Terminal => "terminal",
+            Self::WindowsTerminal => "windows-terminal",
+        }
+    }
+
+    /// Whether the app has a Windows version: iTerm2 and Terminal.app are
+    /// macOS apps, and kitty and Ghostty ship for macOS and Linux only.
+    pub fn runs_on_windows(self) -> bool {
+        matches!(self, Self::Wezterm | Self::WindowsTerminal)
+    }
 }
 
 /// The terminal app name alone, or a mapping with the app and the progress-bar setting.
@@ -484,7 +508,7 @@ pub enum TerminalConfig {
 #[serde(default, deny_unknown_fields)]
 #[schemars(extend("examples" = [{"app":"ghostty","progress":"auto"},{"progress":"never"}]))]
 pub struct TerminalSettings {
-    /// Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, else the first one installed.
+    /// Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, Windows Terminal on Windows when installed, else the first one installed.
     #[schemars(extend("examples" = ["ghostty","iterm2"]))]
     pub app: Option<Terminal>,
     /// Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto.
@@ -588,6 +612,19 @@ impl UserConfig {
         &self.warnings
     }
 
+    /// Settings this OS cannot honour, such as a macOS-only terminal app on
+    /// Windows. Configs move between machines, so these warn instead of failing.
+    /// [`UserConfig::warnings`] includes them; `config check` shows them too.
+    pub fn platform_warnings(&self) -> Vec<crate::ConfigWarning> {
+        platform::warnings(self)
+    }
+
+    /// Adds [`UserConfig::platform_warnings`] to the load warnings.
+    fn warn_platform(&mut self) {
+        let warnings = self.platform_warnings();
+        self.warnings.extend(warnings);
+    }
+
     /// Drop deferred trust targets with a warning instead of passing them to trust adapters.
     fn ignore_deferred_trust(&mut self) {
         for (index, target) in self.tls.trust.iter().enumerate() {
@@ -653,6 +690,7 @@ pub fn parse_user_lenient(file: &str, source: &str) -> (UserConfig, Vec<ConfigEr
             Ok(mut config) => match config.validate() {
                 Ok(()) => {
                     config.ignore_deferred_trust();
+                    config.warn_platform();
                     return (config, issues);
                 }
                 Err(error) => match error.message.split_once(": ") {
@@ -733,5 +771,47 @@ fn parse_user_named(file: &str, source: &str) -> Result<UserConfig, ConfigError>
         .validate()
         .map_err(|e| crate::loader::locate(e, file, source, None))?;
     config.ignore_deferred_trust();
+    config.warn_platform();
     Ok(config)
+}
+
+/// User settings every OS honours; nothing to warn about.
+#[cfg(not(windows))]
+mod platform {
+    use super::UserConfig;
+    use crate::ConfigWarning;
+
+    /// No warnings outside Windows.
+    pub(super) fn warnings(_config: &UserConfig) -> Vec<ConfigWarning> {
+        Vec::new()
+    }
+}
+
+/// User settings Windows cannot honour.
+#[cfg(windows)]
+mod platform {
+    use super::{TerminalConfig, UserConfig};
+    use crate::ConfigWarning;
+
+    /// A terminal app without a Windows version. The TUI only registers
+    /// Windows Terminal and WezTerm there, so `O` would fail later.
+    pub(super) fn warnings(config: &UserConfig) -> Vec<ConfigWarning> {
+        let Some(terminal) = config.terminal else {
+            return Vec::new();
+        };
+        let path = match terminal {
+            TerminalConfig::App(_) => "terminal",
+            TerminalConfig::Settings(_) => "terminal.app",
+        };
+        match terminal.app() {
+            Some(app) if !app.runs_on_windows() => vec![ConfigWarning {
+                path: path.into(),
+                message: format!(
+                    "{} has no Windows version; use windows-terminal or wezterm, or leave it unset",
+                    app.as_str()
+                ),
+            }],
+            _ => Vec::new(),
+        }
+    }
 }

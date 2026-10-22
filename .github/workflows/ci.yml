@@ -79,47 +79,21 @@ jobs:
       - run: shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh agent-plugin/scripts/*.sh e2e/ssh/run.sh
       - run: sh packaging/scripts/check.sh
       - run: sh agent-plugin/scripts/test-block-background.sh
+  # On Windows, tests that need a later porting step are ignored.
   e2e:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            timeout: 30
+          - os: macos-latest
+            timeout: 30
+          # Windows compiles kache from git on a cold cache (see the kache action).
+          - os: windows-latest
+            timeout: 45
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: ./.github/actions/kache
-        with:
-          store: e2e
-          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
-          s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
-          s3-region: ${{ vars.KACHE_S3_REGION }}
-          s3-access-key: ${{ secrets.KACHE_S3_ACCESS_KEY }}
-          s3-secret-key: ${{ secrets.KACHE_S3_SECRET_KEY }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          cache-targets: "false"
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
-        with:
-          tool: nextest
-      # Built once here; each nextest test process would otherwise run cargo build itself.
-      - run: cargo build -p devlanes -p devlanes-testing --locked
-      - run: cargo nextest run --profile e2e --locked --no-fail-fast --failure-output immediate-final
-        env:
-          DEVLANES_E2E_BIN_DIR: ${{ github.workspace }}/target/debug
-      - name: kache stats
-        if: ${{ !cancelled() }}
-        run: |
-          kache stats
-          # Lets the daemon finish its queued uploads before the runner goes away.
-          kache daemon stop
-  # The e2e job on Windows; tests that need a later porting step are ignored there.
-  e2e-windows:
-    runs-on: windows-latest
-    # Windows compiles kache from git on a cold cache (see the kache action).
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain
@@ -144,7 +118,8 @@ jobs:
         env:
           DEVLANES_E2E_BIN_DIR: ${{ github.workspace }}/target/debug
           # GitHub's Windows runners only run as administrator, which the daemon
-          # refuses outside tests; the harness passes this through to every command.
+          # refuses outside tests; the harness passes this through to every
+          # command. Ignored on other OSes.
           DEVLANES_ALLOW_ELEVATED: "1"
       - name: kache stats
         if: ${{ !cancelled() }}

@@ -329,8 +329,8 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 
 | Path | Type | Description | Example |
 | --- | --- | --- | --- |
-| `terminal` | `iterm2` or `ghostty` or `wezterm` or `kitty` or `terminal` or object | Terminal app for open-in-terminal actions, alone or with the progress-bar setting. | `ghostty` |
-| `terminal.app` | `iterm2` or `ghostty` or `wezterm` or `kitty` or `terminal` | Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, else the first one installed. | `ghostty` |
+| `terminal` | `iterm2` or `ghostty` or `wezterm` or `kitty` or `terminal` or `windows-terminal` or object | Terminal app for open-in-terminal actions, alone or with the progress-bar setting. | `ghostty` |
+| `terminal.app` | `iterm2` or `ghostty` or `wezterm` or `kitty` or `terminal` or `windows-terminal` | Terminal app used by open-in-terminal actions; unset picks Terminal.app on macOS, Windows Terminal on Windows when installed, else the first one installed. | `ghostty` |
 | `terminal.progress` | `auto` or `always` or `never` | Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto. | `auto` |
 
 ### tls

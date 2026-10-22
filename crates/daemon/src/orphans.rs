@@ -28,9 +28,17 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const FINISH_ATTEMPTS: u32 = 3;
 
 /// Exit recorded when this daemon terminated an orphan (SIGTERM, maybe SIGKILL).
+#[cfg(unix)]
 const TERMINATED: ExitOutcome = ExitOutcome {
     code: None,
     signal: Some(15),
+};
+/// Exit recorded when this daemon terminated an orphan: the exit code
+/// `TerminateProcess` gives it, as Windows has no signals.
+#[cfg(windows)]
+const TERMINATED: ExitOutcome = ExitOutcome {
+    code: Some(1),
+    signal: None,
 };
 /// Exit recorded for an orphan whose process ended on its own: unknown.
 const GONE: ExitOutcome = ExitOutcome {
@@ -199,39 +207,40 @@ impl Inner {
         }
     }
 
-    /// Records descendants of a running unit that left its leader's session, so a
-    /// daemon started after a crash can stop them with the run. Reads the runner's
-    /// last snapshot (no process-table scan) every few seconds until the unit
-    /// exits; each batch of new identities is one store write.
+    /// Records the live descendants of a running unit that left its leader's
+    /// session (on Windows, every descendant), so a daemon started after a crash
+    /// can stop them with the run. Reads the runner's last snapshot (no
+    /// process-table scan) every few seconds until the unit exits, and rewrites the
+    /// run's rows only when the live set changed.
     pub(crate) fn track_escaped(self: &Arc<Self>, host: UnitHost, run: UnitRunId) {
         let Some(leader) = host.identity() else {
             return;
         };
         let engine = self.clone();
         tokio::spawn(async move {
-            let mut seen: HashSet<(u32, u64)> = HashSet::new();
+            // The set last stored; the rows are only rewritten when it changes.
+            let mut recorded: HashSet<(u32, u64)> = HashSet::new();
             let mut tick = tokio::time::interval(CHECK_INTERVAL);
             while host.is_alive() {
                 tokio::select! {
                     () = engine.shutdown.cancelled() => return,
                     _ = tick.tick() => {}
                 }
+                // Only live ones: on Windows every member counts as escaped, and
+                // watch-mode tools start children all day long.
                 let escaped: Vec<ProcessIdentity> = host
                     .subjects()
                     .await
                     .into_iter()
                     .filter(|p| p.pid != leader.pid && p.sid != leader.sid)
-                    .filter(|p| !seen.contains(&(p.pid, p.start_time)))
                     .collect();
-                if escaped.is_empty() {
+                let current: HashSet<(u32, u64)> =
+                    escaped.iter().map(|p| (p.pid, p.start_time)).collect();
+                if current == recorded {
                     continue;
                 }
-                match engine
-                    .store
-                    .record_unit_run_members(run, escaped.clone())
-                    .await
-                {
-                    Ok(_) => seen.extend(escaped.iter().map(|p| (p.pid, p.start_time))),
+                match engine.store.replace_unit_run_members(run, escaped).await {
+                    Ok(()) => recorded = current,
                     // The run already ended; its descendants are no longer tracked.
                     Err(devlanes_state::Error::NotFound(_) | devlanes_state::Error::Closed) => {
                         return;

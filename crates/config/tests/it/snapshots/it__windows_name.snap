@@ -2,12 +2,13 @@
 source: crates/config/tests/it/main.rs
 expression: output
 ---
-  × services.db_migrate: `db:migrate` and `db_migrate` would share the file name
-  │ `db_migrate` on disk (Windows ignores case and does not allow some characters in
-  │ file names, and configs are shared across operating systems); rename one of them
+  × services.db_migrate: `db:migrate` (services.db:migrate) and `db_migrate` would share
+  │ the log directory `db_migrate` (Windows ignores case and does not allow some
+  │ characters in file names, and configs are shared across operating systems); rename
+  │ one of them
    ╭─[devlanes.yaml:6:5]
  5 │   db_migrate:
  6 │     run: worker
    ·     ┬
-   ·     ╰── services.db_migrate: `db:migrate` and `db_migrate` would share the file name `db_migrate` on disk (Windows ignores case and does not allow some characters in file names, and configs are shared across operating systems); rename one of them
+   ·     ╰── services.db_migrate: `db:migrate` (services.db:migrate) and `db_migrate` would share the log directory `db_migrate` (Windows ignores case and does not allow some characters in file names, and configs are shared across operating systems); rename one of them
    ╰────

@@ -23,7 +23,7 @@ pub use api::{
 };
 pub use devlanes_client::Paths;
 pub use devlanes_term::TerminalLauncher;
-pub use runtime::{TerminalGuard, drive, drive_start, terminal_command};
+pub use runtime::{TerminalGuard, drive, drive_start, terminal_command, terminal_env};
 
 /// Failures that end the TUI before or while it runs.
 #[derive(Debug, thiserror::Error)]

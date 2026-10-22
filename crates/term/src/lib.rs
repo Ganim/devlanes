@@ -25,6 +25,12 @@ pub struct LaunchRequest {
     pub command: Vec<String>,
     /// Window or tab title where the terminal supports one.
     pub title: Option<String>,
+    /// Variables `command` needs on top of the caller's environment. Only
+    /// launchers whose terminal hands its caller's environment to the command
+    /// (Windows Terminal, WezTerm outside macOS) pass them on; terminals
+    /// started through `open` or `osascript` get launchd's environment, so
+    /// callers there put variables in `command` instead.
+    pub env: Vec<(String, String)>,
 }
 
 /// A planned helper process, kept as data so launchers stay testable.
@@ -35,6 +41,8 @@ pub struct Invocation {
     /// True for helpers that exit quickly (`osascript`, `open`); false for
     /// terminal binaries that may live as long as the window.
     pub wait: bool,
+    /// Variables set on the helper process on top of the caller's environment.
+    pub env: Vec<(String, String)>,
 }
 
 /// Launch failures are shown in the TUI status line.
@@ -145,7 +153,15 @@ impl Invocation {
             program: program.into(),
             args,
             wait,
+            env: Vec::new(),
         }
+    }
+
+    /// Sets `env` on the helper process, for terminals that pass their
+    /// caller's environment on to the command they run.
+    pub fn with_env(mut self, env: &[(String, String)]) -> Self {
+        self.env.extend_from_slice(env);
+        self
     }
 
     /// Runs the helper with no inherited stdio, so it cannot draw over the TUI.
@@ -153,6 +169,7 @@ impl Invocation {
         let mut command = Command::new(&self.program);
         command
             .args(&self.args)
+            .envs(self.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -240,6 +257,7 @@ mod tests {
             cwd: PathBuf::from("/tmp/my repo"),
             command: vec!["devlanes".into(), "attach".into(), "acme@2:api".into()],
             title: None,
+            env: Vec::new(),
         }
     }
 
@@ -259,6 +277,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             command: vec!["printf".into(), "%s|%s".into(), "it's".into(), "a b".into()],
             title: None,
+            env: Vec::new(),
         };
         // The typed line is itself a shell command: run it the way a login shell would.
         let mut child = Command::new("sh")

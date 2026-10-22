@@ -688,11 +688,12 @@ impl Executor {
             };
             // The same binary attaches, so client and daemon versions match.
             let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("devlanes"));
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+            let shell = launch_env::default_shell();
             let request = LaunchRequest {
                 cwd,
                 command: terminal_command(&exe, &shell, home.as_deref(), attach.as_deref()),
                 title: Some(title),
+                env: terminal_env(home.as_deref()),
             };
             if let Err(error) = launcher.launch(&request) {
                 failed(error.to_string());
@@ -702,27 +703,79 @@ impl Executor {
 }
 
 /// The command a new terminal runs: `devlanes attach <unit>`, or the user's
-/// shell for a lane. Terminals started through `open` or `osascript` inherit
-/// launchd's environment, not this one, so `DEVLANES_HOME` travels explicitly
-/// and the command reaches the same daemon.
+/// shell for a lane. `DEVLANES_HOME` travels explicitly so the command reaches
+/// the same daemon: as an `env` prefix on macOS and Linux, through
+/// [`terminal_env`] on Windows.
 pub fn terminal_command(
     exe: &Path,
     shell: &str,
     home: Option<&Path>,
     attach: Option<&str>,
 ) -> Vec<String> {
-    let mut command = Vec::new();
-    if let Some(home) = home {
-        command.extend([
-            "env".to_owned(),
-            format!("DEVLANES_HOME={}", home.display()),
-        ]);
-    }
+    let mut command = home.map(launch_env::home_prefix).unwrap_or_default();
     match attach {
         Some(unit) => command.extend([exe.display().to_string(), "attach".into(), unit.into()]),
         None => command.push(shell.to_owned()),
     }
     command
+}
+
+/// The variables the launcher sets for [`terminal_command`]: `DEVLANES_HOME`
+/// on Windows, nothing on macOS and Linux, where the command carries it.
+pub fn terminal_env(home: Option<&Path>) -> Vec<(String, String)> {
+    home.map(launch_env::home_env).unwrap_or_default()
+}
+
+/// How `DEVLANES_HOME` and the shell reach a new terminal on macOS and Linux.
+#[cfg(unix)]
+mod launch_env {
+    use std::path::Path;
+
+    /// `env DEVLANES_HOME=<home>` before the command. Terminals started through
+    /// `open` or `osascript` inherit launchd's environment, not this one.
+    pub(super) fn home_prefix(home: &Path) -> Vec<String> {
+        vec![
+            "env".to_owned(),
+            format!("DEVLANES_HOME={}", home.display()),
+        ]
+    }
+
+    /// Nothing: [`home_prefix`] carries the home.
+    pub(super) fn home_env(_home: &Path) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// `$SHELL`, else `/bin/sh`.
+    pub(super) fn default_shell() -> String {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+    }
+}
+
+/// How `DEVLANES_HOME` and the shell reach a new terminal on Windows.
+#[cfg(windows)]
+mod launch_env {
+    use std::path::Path;
+
+    /// Nothing: Windows has no `env` program, so [`home_env`] carries the home.
+    pub(super) fn home_prefix(_home: &Path) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// `DEVLANES_HOME` for the launcher to set on its helper. Windows Terminal
+    /// and WezTerm hand their caller's environment to the command they run.
+    pub(super) fn home_env(home: &Path) -> Vec<(String, String)> {
+        vec![(
+            "DEVLANES_HOME".to_owned(),
+            home.to_string_lossy().into_owned(),
+        )]
+    }
+
+    /// `%ComSpec%` (usually `cmd.exe`); the lookup ignores case like every
+    /// Windows variable. `SHELL` is skipped: Git Bash sets it to an MSYS path
+    /// such as `/usr/bin/bash` that a new Windows Terminal tab cannot run.
+    pub(super) fn default_shell() -> String {
+        std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into())
+    }
 }
 
 impl Drop for Executor {
@@ -799,6 +852,7 @@ async fn pump_attach(
 }
 
 /// Hands a URL to the desktop's opener.
+#[cfg(unix)]
 fn open_url(url: &str) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     let program = "open";
@@ -815,4 +869,11 @@ fn open_url(url: &str) -> io::Result<()> {
     } else {
         Err(io::Error::other(format!("{program} exited with {status}")))
     }
+}
+
+/// Hands a URL to the default browser through the shell, never `cmd /c start`,
+/// which would parse `&` in the URL as a command separator.
+#[cfg(windows)]
+fn open_url(url: &str) -> io::Result<()> {
+    devlanes_sys::windows::shell::open_url(url)
 }

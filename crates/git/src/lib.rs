@@ -126,7 +126,7 @@ pub async fn list(root: &Path, common_dir: &Path) -> Result<Vec<Worktree>, Error
     let output = git(root, &["worktree", "list", "--porcelain", "-z"]).await?;
     let mut worktrees = parse_porcelain(&output)?;
     for worktree in &mut worktrees {
-        worktree.present = tokio::fs::try_exists(&worktree.path).await? && !worktree.prunable;
+        worktree.present = has_git_link(&worktree.path).await? && !worktree.prunable;
         if worktree.present {
             let admin = git(
                 &worktree.path,
@@ -163,6 +163,15 @@ pub async fn list(root: &Path, common_dir: &Path) -> Result<Vec<Worktree>, Error
         }
     }
     Ok(worktrees)
+}
+
+/// Whether `path` still holds its `.git` entry (a directory in the main
+/// worktree, a link file in linked ones). A directory without it is a removed
+/// worktree: on Windows `git worktree remove` deletes `.git` and the files but
+/// cannot delete directories a running process uses as its cwd, and in a
+/// worktree nested in another checkout Git would answer for the outer one.
+pub async fn has_git_link(path: &Path) -> Result<bool, Error> {
+    Ok(tokio::fs::try_exists(path.join(".git")).await?)
 }
 
 /// NUL records preserve spaces and newlines in worktree paths.
@@ -417,6 +426,57 @@ mod tests {
     fn windows_porcelain_paths_use_backslashes() -> Result<(), Error> {
         let trees = parse_porcelain(b"worktree C:/src/acme lanes/web\0HEAD abc\0\0")?;
         assert_eq!(trees[0].path.as_os_str(), r"C:\src\acme lanes\web");
+        Ok(())
+    }
+
+    /// A listed worktree whose `.git` link is gone but whose directory remains
+    /// (what `git worktree remove` leaves on Windows while a unit runs there) is
+    /// not present. Locking keeps Git from calling it prunable, and the
+    /// directory sits inside the main checkout, where Git would otherwise
+    /// answer for the outer repository and give it the identity `main`.
+    #[tokio::test]
+    async fn worktree_without_git_link_is_not_present() -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let dir = tempfile::tempdir()?;
+            let temp = TempPath(dunce::canonicalize(dir.path())?);
+            git(temp.path(), &["init", "-b", "main"]).await?;
+            git(
+                temp.path(),
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial",
+                ],
+            )
+            .await?;
+            let lane = temp.path().join("lane");
+            add(temp.path(), &lane, "feat/gone").await?;
+            git(temp.path(), &["worktree", "lock", &lane.to_string_lossy()]).await?;
+            std::fs::remove_file(lane.join(".git"))?;
+            assert!(lane.is_dir());
+            let common = temp.path().join(".git");
+            let trees = list(temp.path(), &common).await?;
+            let gone = trees
+                .iter()
+                .find(|tree| tree.branch.as_deref() == Some("feat/gone"))
+                .ok_or("the locked worktree is still listed")?;
+            assert!(!gone.present, "{gone:?}");
+            assert!(!gone.prunable, "locked worktrees are never prunable");
+            assert_eq!(
+                trees.iter().filter(|tree| tree.identity == "main").count(),
+                1,
+                "{trees:?}"
+            );
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
+        .await??;
         Ok(())
     }
 

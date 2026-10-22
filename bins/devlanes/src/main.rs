@@ -51,7 +51,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let runtime = match Runtime::resolve(&cli, Signals::detect()) {
+    let signals = Signals {
+        no_escapes: !output::enable_escapes(),
+        ..Signals::detect()
+    };
+    let runtime = match Runtime::resolve(&cli, signals) {
         Ok(runtime) => runtime,
         Err(error) => return output::local_error(&error.to_string(), error.exit_code()),
     };

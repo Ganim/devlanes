@@ -21,6 +21,10 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject,
 };
 
+use windows_sys::Win32::System::Console::HPCON;
+use windows_sys::Win32::System::Threading::PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE;
+
+use super::conpty::{PseudoConsole, attribute_value};
 use super::job::Job;
 use super::proc::{creation_time, exited};
 use super::security::wide;
@@ -54,6 +58,8 @@ pub struct Spawn<'a> {
     pub stderr: Stdio<'a>,
     /// The job the child runs in from its first instruction.
     pub job: Option<&'a Job>,
+    /// A pseudo console to attach the child to instead of `stdout`/`stderr`.
+    pub console: Option<&'a PseudoConsole>,
 }
 
 /// A started process. Holding it keeps the PID from being reused, the role an
@@ -101,14 +107,21 @@ impl Child {
     }
 }
 
-/// Starts `spec` without a console window (`CREATE_NO_WINDOW`: the child still
-/// gets a console, so console control events can reach it, but no window flashes).
+/// Starts `spec`.
 ///
-/// Only the three standard handles are inherited, through
-/// `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. They have to be inheritable for that, so
-/// inheritable duplicates exist from just before `CreateProcessW` until right
-/// after; a `std::process` spawn on another thread in that moment could inherit
-/// them too, which only delays end of file on a unit's pipe until that helper exits.
+/// Without a pseudo console the child runs without a console window
+/// (`CREATE_NO_WINDOW`: it still gets a console, so console control events can
+/// reach it, but no window flashes), and only its three standard handles are
+/// inherited, through `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. They have to be
+/// inheritable for that, so inheritable duplicates exist from just before
+/// `CreateProcessW` until right after; a `std::process` spawn on another thread in
+/// that moment could inherit them too, which only delays end of file on a unit's
+/// pipe until that helper exits.
+///
+/// With a pseudo console, `stdout` and `stderr` are ignored and nothing is
+/// inherited: the child's standard handles are the console's. The standard handle
+/// fields are still set (to null), or the child would write to this process's
+/// redirected output instead.
 pub fn spawn(spec: &Spawn<'_>) -> io::Result<Child> {
     // Checked first, so a bad variable fails before anything is created.
     let environment = spec.environment.map(environment_block).transpose()?;
@@ -120,18 +133,33 @@ pub fn spawn(spec: &Spawn<'_>) -> io::Result<Child> {
         Stdio::Null => null.as_raw_handle(),
         Stdio::Handle(handle) => handle.as_raw_handle(),
     };
-    let stdin = inheritable(null.as_raw_handle())?;
-    let stdout = inheritable(handle_of(spec.stdout))?;
-    let stderr = inheritable(handle_of(spec.stderr))?;
-    let inherited = [raw(&stdin), raw(&stdout), raw(&stderr)];
+    let inherited = match spec.console {
+        Some(_) => None,
+        None => Some([
+            inheritable(null.as_raw_handle())?,
+            inheritable(handle_of(spec.stdout))?,
+            inheritable(handle_of(spec.stderr))?,
+        ]),
+    };
+    let raw_inherited = inherited
+        .as_ref()
+        .map(|handles| handles.each_ref().map(raw));
 
-    let mut attributes = AttributeList::new(if spec.job.is_some() { 2 } else { 1 })?;
-    // `inherited` outlives the list's use below.
-    attributes.update(
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-        inherited.as_ptr().cast(),
-        size_of_val(&inherited),
-    )?;
+    let mut attributes = AttributeList::new(1 + u32::from(spec.job.is_some()))?;
+    // `raw_inherited` and `console` outlive the list's use below.
+    if let Some(console) = spec.console {
+        attributes.update(
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+            attribute_value(console),
+            size_of::<HPCON>(),
+        )?;
+    } else if let Some(handles) = &raw_inherited {
+        attributes.update(
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            handles.as_ptr().cast(),
+            size_of_val(handles),
+        )?;
+    }
     let job = spec.job.map(Job::raw);
     if let Some(job) = &job {
         attributes.update(
@@ -145,10 +173,16 @@ pub fn spawn(spec: &Spawn<'_>) -> io::Result<Child> {
     let mut info: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     info.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    info.StartupInfo.hStdInput = inherited[0];
-    info.StartupInfo.hStdOutput = inherited[1];
-    info.StartupInfo.hStdError = inherited[2];
+    if let Some([stdin, stdout, stderr]) = raw_inherited {
+        info.StartupInfo.hStdInput = stdin;
+        info.StartupInfo.hStdOutput = stdout;
+        info.StartupInfo.hStdError = stderr;
+    }
     info.lpAttributeList = attributes.as_mut_ptr();
+    let (inherit, window) = match spec.console {
+        Some(_) => (0, 0),
+        None => (1, CREATE_NO_WINDOW),
+    };
 
     let program = wide(spec.program.as_os_str());
     // CreateProcessW may write into the command line, so it gets its own buffer.
@@ -164,8 +198,8 @@ pub fn spawn(spec: &Spawn<'_>) -> io::Result<Child> {
             command_line.as_mut_ptr(),
             ptr::null(),
             ptr::null(),
-            1,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+            inherit,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | window,
             environment
                 .as_ref()
                 .map_or(ptr::null(), |block| block.as_ptr().cast::<c_void>()),
@@ -176,7 +210,7 @@ pub fn spawn(spec: &Spawn<'_>) -> io::Result<Child> {
     };
     let error = (ok == 0).then(io::Error::last_os_error);
     drop(attributes);
-    drop((stdin, stdout, stderr));
+    drop(inherited);
     if let Some(error) = error {
         return Err(error);
     }
@@ -287,7 +321,8 @@ fn environment_block(environment: &BTreeMap<String, String>) -> io::Result<Vec<u
     let mut entries: Vec<(&String, &String)> = environment.iter().collect();
     entries.sort_by_key(|(key, _)| key.to_uppercase());
     for pair in entries.windows(2) {
-        if pair[0].0.eq_ignore_ascii_case(pair[1].0) {
+        // Windows folds non-ASCII letters too, as the sort above does.
+        if pair[0].0.to_uppercase() == pair[1].0.to_uppercase() {
             return Err(invalid(format!(
                 "environment variables {} and {} are one variable on Windows",
                 pair[0].0, pair[1].0
@@ -341,6 +376,7 @@ mod tests {
             stdout: Stdio::Handle(std::os::windows::io::AsHandle::as_handle(&writer)),
             stderr: Stdio::Null,
             job: None,
+            console: None,
         })?;
         drop(writer);
         let mut output = String::new();

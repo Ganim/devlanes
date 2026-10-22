@@ -33,6 +33,7 @@ rustix = { version = "1", features = ["process", "termios"] }
 
 [target.'cfg(windows)'.dependencies]
 devlanes-runner-windows = { path = "../../crates/runner-windows" }
+devlanes-term-windows-terminal = { path = "../../crates/term-windows-terminal" }
 
 [dev-dependencies]
 tempfile.workspace = true

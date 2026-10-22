@@ -53,7 +53,8 @@ history:
 # Old metrics and history are pruned first; live registry and completion records are preserved.
 state:
   max_size: 512MiB
-# Terminal app the TUI's O key opens a unit in: ghostty, iterm2, kitty, wezterm or terminal.
+# Terminal app the TUI's O key opens a unit in: ghostty, iterm2, kitty, wezterm, terminal
+# or windows-terminal. On Windows only windows-terminal and wezterm work.
 # `terminal: ghostty` alone works too. progress shows start progress in the tab's
 # progress bar: auto (terminals known to draw it), always or never.
 # DEVLANES_TERM_PROGRESS=0 or 1 overrides it.
