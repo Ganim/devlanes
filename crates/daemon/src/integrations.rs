@@ -109,6 +109,10 @@ impl Unit for CoreUnit {
     async fn subjects(&self) -> Result<Vec<ProcessIdentity>, devlanes_core::Error> {
         self.unit.subjects().await
     }
+    /// Delegates to the wrapped unit.
+    fn renders_screen(&self) -> bool {
+        self.unit.renders_screen()
+    }
 }
 
 #[async_trait]

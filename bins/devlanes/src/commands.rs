@@ -924,10 +924,30 @@ fn read_tty(prompt: &str, kind: &str) -> Option<String> {
 /// Shows `prompt` on the console (`CONOUT$`) and reads one line from `CONIN$`,
 /// which works when stdin and stdout are redirected, without echo for secrets.
 /// Returns the line with its newline, so an empty answer stays distinct from
-/// cancel; `None` without a console or when Ctrl-C cancels the read.
+/// cancel; `None` when no one can type into the console (see
+/// `devlanes_sys::windows::console::keyboard`), or for a Ctrl-Z line (end of
+/// input, like Ctrl-D on Unix).
 #[cfg(windows)]
 fn read_tty(prompt: &str, kind: &str) -> Option<String> {
-    use devlanes_sys::windows::console::{self, ModeGuard};
+    use devlanes_sys::windows::console::{self, Keyboard, ModeGuard};
+    match console::keyboard() {
+        Keyboard::Console => {}
+        // Reading the console would wait forever, as it would on Unix without
+        // a terminal to open.
+        Keyboard::Unreachable => return None,
+        // Without this the prompt would wait on mintty's hidden console with no
+        // sign of why; its stderr is the window the user looks at.
+        Keyboard::Mintty => {
+            eprintln!("{prompt}");
+            if kind == "notify" {
+                return Some("\n".into());
+            }
+            eprintln!(
+                "devlanes: cancelled; mintty does not pass typed keys to Windows programs, so answer this from Windows Terminal or run devlanes through winpty"
+            );
+            return None;
+        }
+    }
     let input = console::open_input().ok()?;
     let output = console::open_output().ok()?;
     if kind == "notify" {
@@ -960,6 +980,10 @@ fn read_tty(prompt: &str, kind: &str) -> Option<String> {
                     break Some(String::from_utf16_lossy(&units));
                 }
             }
+            // Ctrl-C ends the read but, as on Unix, is not an answer: the caller's
+            // Ctrl-C handling (detach) ends the command, and the console's control
+            // handler has already put the mode back.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => break None,
         }
     };
@@ -967,7 +991,8 @@ fn read_tty(prompt: &str, kind: &str) -> Option<String> {
     if secret {
         let _ = console::write_output(&output, "\r\n");
     }
-    read.map(|line| format!("{}\n", line.trim_end_matches(['\r', '\n'])))
+    read.filter(|line| !line.starts_with('\u{1a}'))
+        .map(|line| format!("{}\n", line.trim_end_matches(['\r', '\n'])))
 }
 
 /// Renders the response data with the mode's reporter.

@@ -816,25 +816,6 @@ fn doctor_terminal_and_acl_checks() {
     );
     assert!(!escapable.contains("stops every process"), "{escapable}");
 
-    // The ConPTY units get is named, as a passing check.
-    for (conpty, line) in [
-        (
-            "system",
-            "ok terminal: units run in the system's ConPTY (no usable conpty.dll next to devlanes)",
-        ),
-        (
-            "bundled",
-            "ok terminal: units run in the bundled ConPTY (conpty.dll next to devlanes)",
-        ),
-    ] {
-        let text = with(
-            false,
-            json!({"elevated": false, "job": null, "conpty": conpty}),
-        );
-        assert!(text.contains(line), "{text}");
-        assert!(text.contains("--- agent (exit 0)"), "{text}");
-    }
-
     // JSON prints the facts unchanged; the exit code follows the same checks.
     for (running, exit_code) in [(false, 1), (true, 0)] {
         let data = data(running, json!({"elevated": true, "job": null}));
@@ -1753,6 +1734,98 @@ fn doctor_checks_the_dns_server_and_the_resolver_file() {
     );
     // Other clients get the same lines, minus this command's output mode.
     assert!(!checks.iter().any(|c| c.group == "output"));
+}
+
+/// On Windows the daemon reports the NRPT rule (`nrpt_rule`) where Unix has
+/// the resolver file: the same verdicts and fix, plus what overrides a local
+/// rule (another program's rule, Group Policy, the applied policy, rules for
+/// names under the namespace).
+#[test]
+fn doctor_checks_the_nrpt_rule() {
+    let lines = |rule: Value| {
+        let data = json!({"dns": {"tld": "test", "listen": "127.53.0.1:53", "running": true,
+            "error": null, "nrpt_rule": rule}});
+        doctor_checks_of(&data)
+            .into_iter()
+            .filter(|check| check.group == "dns")
+            .map(|check| match check.fix {
+                Some(fix) => format!("{:?} {} (fix: {fix})", check.state, check.text),
+                None => format!("{:?} {}", check.state, check.text),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let rule = |changes: Value| {
+        let mut rule = json!({"namespace": ".test", "server": "127.53.0.1", "installed": true,
+            "matches": true, "foreign": false, "group_policy": false, "more_specific": [],
+            "effective_servers": ["127.53.0.1"]});
+        for (key, value) in changes.as_object().expect("object") {
+            rule[key] = value.clone();
+        }
+        rule
+    };
+    let output = [
+        rule(json!({})),
+        rule(json!({"installed": false, "matches": false, "effective_servers": []})),
+        rule(json!({"matches": false, "effective_servers": ["10.0.0.53"]})),
+        rule(json!({"foreign": true})),
+        rule(json!({"group_policy": true, "effective_servers": []})),
+        // The administrator added the namespace to the policy.
+        rule(json!({"group_policy": true})),
+        rule(json!({"effective_servers": ["10.8.0.1"]})),
+        rule(json!({"effective_servers": []})),
+        // Unreadable applied policy: the local rule's word stands.
+        rule(json!({"effective_servers": null})),
+        rule(json!({"more_specific": [
+            {"namespace": ".api.test", "name_servers": ["10.8.0.1"]},
+            {"namespace": "host.test", "name_servers": []},
+        ]})),
+        json!({"namespace": ".test", "error": "Get-DnsClientNrptRule did not answer within 20 s"}),
+    ]
+    .into_iter()
+    .map(lines)
+    .collect::<Vec<_>>()
+    .join("\n");
+    insta::assert_snapshot!(output, @r"
+    Ok DNS server for .test on 127.53.0.1:53, NRPT rule .test
+    Warn .test lookups do not reach the devlanes DNS server: no NRPT rule for .test (fix: devlanes certs trust --resolver)
+    Warn the NRPT rule for .test sends .test lookups elsewhere, not to 127.53.0.1:53 (fix: devlanes certs trust --resolver)
+    Warn an NRPT rule for .test was not added by devlanes; it sends .test lookups elsewhere (fix: remove it yourself (Get-DnsClientNrptRule lists it) or choose another hostnames.tld)
+    Warn the NRPT rule for .test is in place, but Windows ignores it while Group Policy NRPT rules exist (fix: ask the administrator to add .test -> 127.53.0.1 to the Group Policy NRPT rules)
+    Ok DNS server for .test on 127.53.0.1:53, NRPT rule .test
+    Warn the NRPT rule for .test is in place, but .test lookups do not reach the devlanes DNS server: Windows sends them to 10.8.0.1 (fix: check the rules Windows applies with Get-DnsClientNrptPolicy -Effective; a VPN can add its own)
+    Warn the NRPT rule for .test is in place, but .test lookups do not reach the devlanes DNS server: no rule Windows applies routes them (fix: check the rules Windows applies with Get-DnsClientNrptPolicy -Effective; a VPN can add its own)
+    Ok DNS server for .test on 127.53.0.1:53, NRPT rule .test
+    Ok DNS server for .test on 127.53.0.1:53, NRPT rule .test
+    Warn other NRPT rules route names under .test: .api.test -> 10.8.0.1; host.test; Windows follows the most specific rule, so those names do not reach devlanes
+    Warn cannot read the NRPT rules for .test: Get-DnsClientNrptRule did not answer within 20 s (fix: run Get-DnsClientNrptRule in PowerShell to see them)
+    ");
+    // The CLI prints the same words, with the fix on its own line.
+    let text = render_text(
+        Method::Doctor,
+        &json!({"dns": {"tld": "test", "listen": "127.53.0.1:53", "running": true,
+            "error": null, "nrpt_rule": rule(json!({"installed": false, "matches": false}))}}),
+    );
+    assert!(
+        text.contains(
+            "warn dns: .test lookups do not reach the devlanes DNS server: no NRPT rule for .test"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("fix: devlanes certs trust --resolver"),
+        "{text}"
+    );
+    // A daemon without the rule's facts still reports its server.
+    let text = render_text(
+        Method::Doctor,
+        &json!({"dns": {"tld": "test", "listen": "127.53.0.1:53", "running": true,
+            "error": null, "nrpt_rule": null}}),
+    );
+    assert!(
+        text.contains("ok dns: DNS server for .test on 127.53.0.1:53"),
+        "{text}"
+    );
 }
 
 /// `lane.warning` events are one line in every mode; outside a start they name the lane.

@@ -20,6 +20,8 @@ thiserror.workspace = true
 # The TUI tests run `devlanes ui` in a pseudo-terminal and read its screen.
 portable-pty = "0.9"
 vt100 = "0.18"
+# The fake daemons of `protocol_mismatch_exits_4` and the prompt tests.
+tokio.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
@@ -27,7 +29,3 @@ rustix = { version = "1", features = ["process"] }
 # Process table, verified termination and listeners; Unix uses `ps` and `lsof`.
 [target.'cfg(windows)'.dependencies]
 devlanes-sys = { path = "../crates/sys" }
-
-# The fake daemon of `protocol_mismatch_exits_4` serves a named pipe.
-[target.'cfg(windows)'.dev-dependencies]
-tokio.workspace = true

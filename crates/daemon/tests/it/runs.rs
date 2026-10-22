@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use devlanes_daemon::{
     Engine, EngineOptions, Handler,
-    integrations::{CoreRunner, Integrations},
+    integrations::{CoreRunner, Integrations, detect_shell},
 };
 use devlanes_ipc::Frame;
 use devlanes_proto::{LaneSummary, Method, Page};
@@ -94,6 +94,18 @@ async fn a_detached_run_over_a_running_one_is_refused() {
     .expect("timeout");
 }
 
+/// The runner the daemon uses on this OS.
+#[cfg(unix)]
+fn real_runner() -> devlanes_runner_pty::PtyRunner {
+    devlanes_runner_pty::PtyRunner::default()
+}
+
+/// The runner the daemon uses on this OS.
+#[cfg(windows)]
+fn real_runner() -> devlanes_runner_windows::WindowsRunner {
+    devlanes_runner_windows::WindowsRunner::default()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 /// With the real runner, a pipe task's first line is on the attach screen within
 /// a second of the `run` answer.
@@ -110,9 +122,9 @@ async fn a_pipe_task_shows_its_output_right_away() {
         let store = devlanes_state::Store::open(home.join("state.db"))
             .await
             .expect("store");
-        let integ = Integrations::with_runner(Arc::new(CoreRunner(
-            devlanes_runner_pty::PtyRunner::default(),
-        )));
+        let mut integ = Integrations::with_runner(Arc::new(CoreRunner(real_runner())));
+        // The `run:` string is POSIX; on Windows that needs Git's `sh.exe`.
+        integ.shell = detect_shell().await;
         let mut options = EngineOptions::new(&home, home.join("d.sock"));
         options.watch = false;
         let engine = Engine::new(options, store, integ, CancellationToken::new());

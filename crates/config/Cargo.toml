@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 devlanes-core = { path = "../core" }
+# Renaming the edited config.yaml into place rides out Windows sharing violations.
+devlanes-sys = { path = "../sys" }
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror.workspace = true

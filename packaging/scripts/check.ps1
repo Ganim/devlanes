@@ -9,7 +9,8 @@ devlanes.exe, devlanesw.exe and devlanes-hosts-service.exe, the check also runs 
 installed devlanes.exe and reinstalls while a daemon runs from it: the running
 executable must be renamed to .old-*, the daemon must keep running, and doctor
 must delete the old file once `daemon stop` ended it. That daemon uses its own
-DEVLANES_HOME under the temporary directory, so it never meets the user's daemon.
+DEVLANES_HOME (and ports) under the temporary directory, so it never meets the
+user's daemon.
 
 install.ps1 runs in a child process of the same PowerShell (powershell.exe or pwsh)
 with DEVLANES_NO_MODIFY_PATH=1, and the check fails if the user PATH changed.
@@ -156,9 +157,9 @@ try {
     }
     $run = Invoke-Child "& '$installScript'" $environment
     Assert-Equal $run.Code 0 "install.ps1 as a file: $($run.Output)"
-    foreach ($file in @('LICENSE', 'devlanes.exe', 'devlanesw.exe', 'devlanes-hosts-service.exe')) {
-        Assert-True (Test-Path -LiteralPath (Join-Path $installed $file)) "$file installed"
-    }
+    $shipped = @('LICENSE', 'devlanes-hosts-service.exe', 'devlanes.exe', 'devlanesw.exe')
+    $present = @(Get-ChildItem -LiteralPath $installed -Force | ForEach-Object { $_.Name } | Sort-Object)
+    Assert-Equal ($present -join ' ') (($shipped | Sort-Object) -join ' ') 'installed files'
     Assert-True ($run.Output -match [Regex]::Escape("Installed devlanes $version to $installed")) "install message: $($run.Output)"
 
     # `irm | iex` runs the text in the caller's session; a pinned version this time.
@@ -176,8 +177,11 @@ try {
         $exe = Join-Path $installed 'devlanes.exe'
         Assert-Equal (Invoke-DevlanesExe $exe @('--version')).Output.Trim() "devlanes $version" 'installed devlanes --version'
 
-        # A daemon running from the installed file, with a home of its own.
+        # A daemon running from the installed file, with a home and ports of its own.
         $env:DEVLANES_HOME = Join-Path $work 'h'
+        New-Item -ItemType Directory -Path $env:DEVLANES_HOME | Out-Null
+        [IO.File]::WriteAllText((Join-Path $env:DEVLANES_HOME 'config.yaml'),
+            "ports:`n  range: 47100-47179`nproxy:`n  https_port: 47190`n  http_port: 47191`n")
         $start = New-Object Diagnostics.ProcessStartInfo $exe
         $start.Arguments = 'daemon run'
         $start.UseShellExecute = $false
@@ -210,6 +214,10 @@ try {
     Assert-Equal (Get-UserPath) $pathBefore 'user PATH'
 } finally {
     if ($daemon -and -not $daemon.HasExited) { $daemon.Kill() }
+    Remove-Item Env:DEVLANES_HOME -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 Write-Output "Windows packaging: dry run passed ($($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion))"
+# The checks above run native commands that fail on purpose (a wrong checksum), and
+# GitHub's PowerShell steps exit with the last native exit code.
+exit 0

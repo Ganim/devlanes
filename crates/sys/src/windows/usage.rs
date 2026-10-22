@@ -48,8 +48,8 @@ pub struct ProcessUsage {
     pub working_set: u64,
     /// Private working set: resident pages no other process shares, what Task
     /// Manager's Memory column shows. `PROCESS_MEMORY_COUNTERS_EX2` reports it from
-    /// Windows 10 22H2 and Windows 11 22H2 with the September 2023 update. `None`
-    /// on older systems, and when it reads 0: a running process always has some
+    /// Windows 11 22H2 with the September 2023 update. `None` on 21H2 and
+    /// unpatched systems, and when it reads 0: a running process always has some
     /// private pages resident, so 0 means the field was not filled in.
     pub private_working_set: Option<u64>,
     /// Private bytes (commit charge): private memory whether resident or paged out.

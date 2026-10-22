@@ -48,8 +48,8 @@ pub struct Signals {
     pub no_ui: bool,
     /// `DEVLANES_VERBOSE`: 1 or 2, like `-v` and `-vv`.
     pub env_verbose: u8,
-    /// The console cannot render escape sequences (a Windows console host older
-    /// than Windows 10 refused VT processing): a terminal gets plain output
+    /// The console cannot render escape sequences (Windows' legacy console
+    /// refused VT processing): a terminal gets plain output
     /// without color instead of human output. Set by the binary, which owns the
     /// console calls.
     pub no_escapes: bool,

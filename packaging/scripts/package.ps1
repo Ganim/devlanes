@@ -91,3 +91,6 @@ try {
 }
 Move-Item -LiteralPath $partial -Destination $out -Force
 $out
+# A failed `git log` above is a fallback, not a failure; callers such as GitHub's
+# PowerShell steps exit with the last native exit code.
+exit 0

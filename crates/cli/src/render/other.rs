@@ -1,6 +1,7 @@
 //! Logs, tasks, env, metrics, events, infra, doctor, config and daemon results.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 
 use devlanes_proto::{Event, LogLine, Method, RpcError, events};
 use serde_json::Value;
@@ -1026,8 +1027,9 @@ fn excluded_port_checks(excluded: &Value) -> Vec<Check> {
 }
 
 /// The embedded DNS server of the `resolver` hostname strategy (`dns`:
-/// `{tld, listen, running, error, resolver_file}`), and whether the OS sends
-/// the TLD's lookups to it. Nothing without that strategy.
+/// `{tld, listen, running, error, resolver_file}`, or `nrpt_rule` in place of
+/// `resolver_file` on Windows), and whether the OS sends the TLD's lookups to
+/// it. Nothing without that strategy.
 fn dns_checks(dns: &Value) -> Vec<Check> {
     if !dns.is_object() {
         return Vec::new();
@@ -1046,6 +1048,10 @@ fn dns_checks(dns: &Value) -> Vec<Check> {
             )
             .fix("free that address, then devlanes daemon restart"),
         ];
+    }
+    // A Windows daemon reports the NRPT rule that does the resolver file's job.
+    if dns["nrpt_rule"].is_object() {
+        return nrpt_checks(&dns["nrpt_rule"], &tld, &listen);
     }
     let file = &dns["resolver_file"];
     let path = text(file, "path");
@@ -1083,6 +1089,125 @@ fn dns_checks(dns: &Value) -> Vec<Check> {
         )
     };
     vec![check]
+}
+
+/// [`dns_checks`] for the Windows NRPT rule (`nrpt_rule`: `{namespace, server,
+/// installed, matches, foreign, group_policy, more_specific, effective_servers}`
+/// or `{namespace?, error}`), with the same verdicts as a resolver file plus
+/// what can override a local rule: another program's rule for the namespace,
+/// Group Policy NRPT rules, the applied policy (a VPN's rules included) and
+/// rules for names under the namespace.
+fn nrpt_checks(rule: &Value, tld: &str, listen: &str) -> Vec<Check> {
+    const RESOLVER: &str = "devlanes certs trust --resolver";
+    if let Some(error) = rule.get("error").and_then(Value::as_str) {
+        return vec![
+            Check::new(
+                "dns",
+                Outcome::Skip,
+                format!("cannot read the NRPT rules for .{tld}: {}", clean(error)),
+            )
+            .fix("run Get-DnsClientNrptRule in PowerShell to see them"),
+        ];
+    }
+    let namespace = text(rule, "namespace");
+    let server = text(rule, "server");
+    let flag = |key: &str| rule.get(key).and_then(Value::as_bool) == Some(true);
+    // `null` when Windows could not say which rules it applies.
+    let effective: Option<Vec<String>> = rule
+        .get("effective_servers")
+        .and_then(Value::as_array)
+        .map(|servers| servers.iter().map(display_value).collect());
+    // Whether the applied policy sends the namespace to the devlanes server.
+    let wanted = server.parse::<IpAddr>().ok();
+    let applied = effective.as_ref().map(|servers| {
+        servers
+            .iter()
+            .any(|named| wanted.is_some() && named.trim().parse::<IpAddr>().ok() == wanted)
+    });
+    let check = if flag("foreign") {
+        Check::new(
+            "dns",
+            Outcome::Skip,
+            format!(
+                "an NRPT rule for {namespace} was not added by devlanes; it sends .{tld} lookups elsewhere"
+            ),
+        )
+        .fix("remove it yourself (Get-DnsClientNrptRule lists it) or choose another hostnames.tld")
+    } else if !flag("installed") {
+        Check::new(
+            "dns",
+            Outcome::Skip,
+            format!(
+                ".{tld} lookups do not reach the devlanes DNS server: no NRPT rule for {namespace}"
+            ),
+        )
+        .fix(RESOLVER)
+    } else if !flag("matches") {
+        Check::new(
+            "dns",
+            Outcome::Skip,
+            format!(
+                "the NRPT rule for {namespace} sends .{tld} lookups elsewhere, not to {listen}"
+            ),
+        )
+        .fix(RESOLVER)
+    } else if flag("group_policy") && applied != Some(true) {
+        Check::new(
+            "dns",
+            Outcome::Skip,
+            format!(
+                "the NRPT rule for {namespace} is in place, but Windows ignores it while Group Policy NRPT rules exist"
+            ),
+        )
+        .fix(format!(
+            "ask the administrator to add {namespace} -> {server} to the Group Policy NRPT rules"
+        ))
+    } else if let (Some(servers), Some(false)) = (&effective, applied) {
+        let sent = if servers.is_empty() {
+            "no rule Windows applies routes them".to_owned()
+        } else {
+            format!("Windows sends them to {}", servers.join(", "))
+        };
+        Check::new(
+            "dns",
+            Outcome::Skip,
+            format!(
+                "the NRPT rule for {namespace} is in place, but .{tld} lookups do not reach the devlanes DNS server: {sent}"
+            ),
+        )
+        .fix("check the rules Windows applies with Get-DnsClientNrptPolicy -Effective; a VPN can add its own")
+    } else {
+        Check::new(
+            "dns",
+            Outcome::Ok,
+            format!("DNS server for .{tld} on {listen}, NRPT rule {namespace}"),
+        )
+    };
+    let mut checks = vec![check];
+    let routes: Vec<String> = list(rule, "more_specific")
+        .iter()
+        .map(|route| {
+            let servers: Vec<String> = list(route, "name_servers")
+                .iter()
+                .map(display_value)
+                .collect();
+            match servers.as_slice() {
+                [] => text(route, "namespace"),
+                servers => format!("{} -> {}", text(route, "namespace"), servers.join(", ")),
+            }
+        })
+        .collect();
+    if !routes.is_empty() {
+        checks.push(Check::new(
+            "dns",
+            Outcome::Skip,
+            format!(
+                "other NRPT rules route names under {namespace}: {}; Windows follows the most specific rule, so those names do not reach devlanes",
+                routes.join("; ")
+            ),
+        ));
+    }
+    checks
 }
 
 /// Seconds a shutdown needs past a unit's stop timeout, to record exits and
@@ -1253,27 +1378,13 @@ fn home_checks(home: &Value) -> Vec<Check> {
     vec![check]
 }
 
-/// The shell running `doctor` (`terminal: {elevated, job, conpty}`, reported on
+/// The shell running `doctor` (`terminal: {elevated, job}`, reported on
 /// Windows): an elevated shell cannot start the daemon, and a job that kills its
 /// processes on close, with no way out, stops a daemon started from it. Both only
 /// matter when this shell would start the daemon, so a `running` one turns the
-/// first into a note and silences the second. `conpty` names the pseudo console
-/// units run in.
+/// first into a note and silences the second.
 fn terminal_checks(terminal: &Value, running: bool) -> Vec<Check> {
     let mut checks = Vec::new();
-    match terminal.get("conpty").and_then(Value::as_str) {
-        Some("bundled") => checks.push(Check::new(
-            "terminal",
-            Outcome::Ok,
-            "units run in the bundled ConPTY (conpty.dll next to devlanes)",
-        )),
-        Some(_) => checks.push(Check::new(
-            "terminal",
-            Outcome::Ok,
-            "units run in the system's ConPTY (no usable conpty.dll next to devlanes)",
-        )),
-        None => {}
-    }
     let allowed = terminal.get("elevation_allowed").and_then(Value::as_bool) == Some(true);
     if terminal.get("elevated").and_then(Value::as_bool) == Some(true) {
         // An elevated CLI can still talk to a daemon that runs unelevated.

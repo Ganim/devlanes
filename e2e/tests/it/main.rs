@@ -10,6 +10,7 @@ mod docker_full;
 mod docker_pg_redis;
 mod lanes;
 mod lifecycle;
+mod prompts;
 mod proxy;
 mod shutdown;
 mod tasks;

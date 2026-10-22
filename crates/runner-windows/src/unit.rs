@@ -1291,4 +1291,10 @@ impl Unit for WindowsUnit {
         }
         Ok(subjects)
     }
+
+    /// The console host behind a pseudo console sends its rendering of the
+    /// screen, not what the programs wrote.
+    fn renders_screen(&self) -> bool {
+        self.inner.pty
+    }
 }

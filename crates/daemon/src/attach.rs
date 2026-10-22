@@ -252,6 +252,9 @@ impl Inner {
 }
 
 /// Snapshot, then live bytes until exit or disconnect; redraws after lag.
+/// Output that renders the unit's terminal is never forwarded: its cursor
+/// moves only fit a grid of the unit's size, while the snapshot showed the
+/// screen at the viewer's, so every batch of it becomes a redraw instead.
 async fn pump(
     engine: &Inner,
     session: &Session,
@@ -260,9 +263,26 @@ async fn pump(
     snapshot: Bytes,
     mut live: broadcast::Receiver<Bytes>,
 ) {
+    use broadcast::error::{RecvError, TryRecvError};
     if session.bytes(stream_id, snapshot).await.is_err() {
         return;
     }
+    let rendered = host.renders_screen();
+    // The viewer's latest size, which a resize may have changed since the attach.
+    let size = || {
+        lock(&engine.attach)
+            .streams
+            .get(&(session.id(), stream_id))
+            .and_then(|stream| stream.size)
+    };
+    // Skips what is already queued; one redraw covers it. True when anything was.
+    let skip_queued = |live: &mut broadcast::Receiver<Bytes>| {
+        let mut skipped = false;
+        while let Ok(_) | Err(TryRecvError::Lagged(_)) = live.try_recv() {
+            skipped = true;
+        }
+        skipped
+    };
     let disconnected = session.disconnected();
     loop {
         let next = tokio::select! {
@@ -271,29 +291,36 @@ async fn pump(
             received = live.recv() => Some(received),
         };
         match next {
-            Some(Ok(bytes)) => {
+            Some(Ok(bytes)) if !rendered => {
                 if session.bytes(stream_id, bytes).await.is_err() {
                     return;
                 }
             }
-            Some(Err(broadcast::error::RecvError::Lagged(_))) => {
-                // The viewer's latest size, which a resize may have changed since the attach.
-                let size = lock(&engine.attach)
-                    .streams
-                    .get(&(session.id(), stream_id))
-                    .and_then(|stream| stream.size);
+            Some(Ok(_) | Err(RecvError::Lagged(_))) => {
+                skip_queued(&mut live);
                 if session
-                    .bytes(stream_id, host.redraw(size).await)
+                    .bytes(stream_id, host.redraw(size()).await)
                     .await
                     .is_err()
                 {
                     return;
                 }
             }
-            Some(Err(broadcast::error::RecvError::Closed)) | None => {
-                while let Ok(bytes) = live.try_recv() {
-                    if session.bytes(stream_id, bytes).await.is_err() {
+            Some(Err(RecvError::Closed)) | None => {
+                if rendered {
+                    if skip_queued(&mut live)
+                        && session
+                            .bytes(stream_id, host.redraw(size()).await)
+                            .await
+                            .is_err()
+                    {
                         return;
+                    }
+                } else {
+                    while let Ok(bytes) = live.try_recv() {
+                        if session.bytes(stream_id, bytes).await.is_err() {
+                            return;
+                        }
                     }
                 }
                 let _ = session.bytes(stream_id, Bytes::new()).await;

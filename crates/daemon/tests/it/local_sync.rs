@@ -26,7 +26,7 @@ async fn service_sync_mirrors_while_the_unit_runs() {
     tokio::time::timeout(LIMIT, async {
         let tmp = temp();
         // `~` is the request's HOME, which `cx` keeps inside this test's directory.
-        let dest = tmp.path.join("user-home/mirror");
+        let dest = tmp.path.join("user-home").join("mirror");
         let config = "project: mirror\nservices:\n  ext:\n    run: sleep\n    ready: started\n    sync:\n      - from: out\n        to: ~/mirror\n        ignore: [\"*.map\"]\n";
         let main = repo(&tmp.path, "r", config);
         let out = main.join("out");

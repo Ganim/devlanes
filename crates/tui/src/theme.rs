@@ -24,8 +24,8 @@ pub enum Tier {
 pub enum Glyphs {
     #[default]
     Unicode,
-    /// For terminals and fonts without the Unicode shapes (`ui.glyphs: ascii`
-    /// or a locale that is not UTF-8).
+    /// For terminals and fonts without the Unicode shapes (`ui.glyphs: ascii`,
+    /// a locale that is not UTF-8, or a classic Windows console window).
     Ascii,
 }
 
@@ -79,11 +79,13 @@ const ASCII_SPINNER: [&str; 4] = ["-", "\\", "|", "/"];
 impl Theme {
     /// Picks the tier and glyphs from the environment and the user config.
     /// `theme` is `tui.theme` (`auto`, `dark`, `light` or `ansi`), `glyphs` is
-    /// `tui.glyphs` (`auto`, `unicode` or `ascii`).
+    /// `tui.glyphs` (`auto`, `unicode` or `ascii`). `classic_console` is
+    /// [`classic_console`]'s answer; auto glyphs are ASCII there.
     pub fn detect(
         theme: Option<&str>,
         glyphs: Option<&str>,
         env: impl Fn(&str) -> Option<String>,
+        classic_console: bool,
     ) -> Self {
         let set = |key: &str| env(key).filter(|value| !value.is_empty());
         let tier = if set("NO_COLOR").is_some() {
@@ -113,6 +115,8 @@ impl Theme {
         let glyphs = match glyphs.map(str::trim) {
             Some("ascii") => Glyphs::Ascii,
             Some("unicode") => Glyphs::Unicode,
+            // Whatever the locale says, conhost's fonts lack the shapes.
+            _ if classic_console => Glyphs::Ascii,
             _ => {
                 let locale = ["LC_ALL", "LC_CTYPE", "LANG"].into_iter().find_map(set);
                 match locale {
@@ -284,6 +288,23 @@ impl Theme {
     }
 }
 
+/// Whether this process draws in a classic Windows console window (conhost),
+/// whose default fonts (Consolas, Lucida Console) have neither the braille of
+/// the monitor's graphs nor the quadrant blocks of the banner's logo. Windows
+/// Terminal and other terminals host the console through a pseudoconsole and
+/// answer false, also when Windows Terminal took over a console started
+/// elsewhere, where it sets no `WT_SESSION`.
+#[cfg(windows)]
+pub fn classic_console() -> bool {
+    devlanes_sys::windows::console::classic_window()
+}
+
+/// Always false: only Windows has classic console windows.
+#[cfg(unix)]
+pub fn classic_console() -> bool {
+    false
+}
+
 /// Whether a `COLORFGBG` value (`15;0`, `0;default;15`) names a dark
 /// background; `None` when it says nothing usable.
 fn background(value: &str) -> Option<bool> {
@@ -320,12 +341,22 @@ mod tests {
     use super::*;
 
     fn detect(theme: Option<&str>, glyphs: Option<&str>, pairs: &[(&str, &str)]) -> Theme {
-        Theme::detect(theme, glyphs, |key| {
+        detect_in(theme, glyphs, pairs, false)
+    }
+
+    fn detect_in(
+        theme: Option<&str>,
+        glyphs: Option<&str>,
+        pairs: &[(&str, &str)],
+        classic_console: bool,
+    ) -> Theme {
+        let env = |key: &str| {
             pairs
                 .iter()
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| (*v).to_owned())
-        })
+        };
+        Theme::detect(theme, glyphs, env, classic_console)
     }
 
     #[test]
@@ -379,6 +410,37 @@ mod tests {
         };
         assert_eq!(ascii.glyph(Glyph::Ready), "*");
         assert_eq!(ascii.spinner(5), "\\");
+    }
+
+    #[test]
+    fn a_classic_console_window_gets_ascii_unless_the_config_says_unicode() {
+        // No locale is the usual Windows environment.
+        assert_eq!(detect_in(None, None, &[], true).glyphs, Glyphs::Ascii);
+        let git_bash = [("LANG", "en_US.UTF-8"), ("TERM", "xterm-256color")];
+        assert_eq!(detect_in(None, None, &git_bash, true).glyphs, Glyphs::Ascii);
+        assert_eq!(
+            detect_in(None, Some("auto"), &git_bash, true).glyphs,
+            Glyphs::Ascii
+        );
+        assert_eq!(
+            detect_in(None, Some("unicode"), &[], true).glyphs,
+            Glyphs::Unicode
+        );
+        // Other terminals keep the upstream rule.
+        let terminal = [("WT_SESSION", "abc")];
+        assert_eq!(
+            detect_in(None, None, &terminal, false).glyphs,
+            Glyphs::Unicode
+        );
+        // Colors do not depend on the window.
+        let dark = [("COLORTERM", "truecolor"), ("COLORFGBG", "15;0")];
+        assert_eq!(detect_in(None, None, &dark, true).tier, Tier::Dark);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_terminals_are_never_classic_consoles() {
+        assert!(!classic_console());
     }
 
     #[test]

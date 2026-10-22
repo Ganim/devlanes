@@ -48,6 +48,8 @@ pub async fn tui_options(paths: &Paths) -> devlanes_tui::Options {
         theme: Some(tui.theme.as_str().to_owned()),
         glyphs: Some(tui.glyphs.as_str().to_owned()),
         on_quit: Some(tui.on_quit.as_str().to_owned()),
+        // `None` on Windows: the logon entry gives the daemon no stop window to
+        // compare stop timeouts with (see `service_report`).
         service: Some(crate::daemon::service_report().await).filter(|report| !report.is_null()),
         // The process's environment, zone and directory.
         env: None,
@@ -1111,6 +1113,10 @@ impl Unit for OsManaged {
     /// Delegates.
     async fn subjects(&self) -> Result<Vec<ProcessIdentity>, devlanes_core::Error> {
         self.0.subjects().await
+    }
+    /// Delegates.
+    fn renders_screen(&self) -> bool {
+        self.0.renders_screen()
     }
 }
 

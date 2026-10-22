@@ -1,8 +1,0 @@
-# Template for manifests/d/devlanes-run/devlanes/VERSION/ in microsoft/winget-pkgs.
-# packaging/winget/render.sh replaces the @...@ placeholders.
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.10.0.schema.json
-PackageIdentifier: devlanes-run.devlanes
-PackageVersion: @VERSION@
-DefaultLocale: en-US
-ManifestType: version
-ManifestVersion: 1.10.0

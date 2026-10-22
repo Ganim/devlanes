@@ -25,12 +25,32 @@ pub fn remove_user_value(path: &Path, key: &str) -> Result<(), ConfigError> {
 /// [`set_user_value`] (`Some`) or [`remove_user_value`] (`None`) on the text of
 /// a user config, returning the new text. Rejects edits that would add a
 /// problem to the file, such as a value of the wrong type, an unknown key or a
-/// failed cross-field check.
+/// failed cross-field check. A file whose line breaks are all CRLF keeps CRLF,
+/// added lines included.
 pub fn edit_user_source(
     source: &str,
     key: &str,
     value: Option<&Value>,
 ) -> Result<String, ConfigError> {
+    // yaml-edit writes the lines it adds with LF, which would leave a file saved
+    // by a Windows editor with mixed line endings. Every LF of the edited text
+    // then stands for a CRLF, so converting back restores the untouched lines.
+    if uses_crlf(source) {
+        let edited = edit_lf_source(&source.replace("\r\n", "\n"), key, value)?;
+        return Ok(edited.replace('\n', "\r\n"));
+    }
+    edit_lf_source(source, key, value)
+}
+
+/// Whether every line break of `source` is CRLF. A file mixing both is edited
+/// as it is, so its other lines keep their bytes; new lines get LF there.
+fn uses_crlf(source: &str) -> bool {
+    let crlf = source.matches("\r\n").count();
+    crlf > 0 && crlf == source.matches('\n').count()
+}
+
+/// [`edit_user_source`] on text that is not converted from CRLF.
+fn edit_lf_source(source: &str, key: &str, value: Option<&Value>) -> Result<String, ConfigError> {
     let segments: Vec<&str> = key.split('.').collect();
     if segments.iter().any(|segment| !is_plain_key(segment)) {
         return Err(ConfigError::plain(format!("{key}: not a setting name")));
@@ -62,7 +82,9 @@ pub fn edit_user_source(
 }
 
 /// Reads `path` (absent is empty), applies `edit` and writes the result
-/// through a temporary file, so a crash never leaves half a config.
+/// through a temporary file, so a crash never leaves half a config. On Windows
+/// the rename waits out the short sharing violations of a virus scan or an
+/// indexer reading the new file.
 fn rewrite(
     path: &Path,
     edit: impl FnOnce(&str) -> Result<String, ConfigError>,
@@ -81,7 +103,7 @@ fn rewrite(
     }
     let temporary = path.with_extension("yaml.tmp");
     std::fs::write(&temporary, edited).map_err(|error| ConfigError::io(&temporary, error))?;
-    std::fs::rename(&temporary, path).map_err(|error| ConfigError::io(path, error))
+    devlanes_sys::rename_retrying(&temporary, path).map_err(|error| ConfigError::io(path, error))
 }
 
 /// Setting names are plain words; anything else could address YAML the
@@ -445,6 +467,140 @@ history:
         assert_eq!(
             std::fs::read_to_string(&path).expect("read"),
             "# top\ntui:\n  glyphs: ascii\n"
+        );
+    }
+
+    /// A file saved with CRLF (Notepad, most Windows editors) keeps CRLF on
+    /// every line, the added ones included, and its comments.
+    #[test]
+    fn crlf_files_stay_crlf() {
+        let crlf = COMMENTED.replace('\n', "\r\n");
+        let mut text = set(&crlf, "proxy.https_port", json!(8443));
+        text = set(&text, "tui.theme", json!("dark"));
+        assert_eq!(
+            text,
+            crlf.replace("https_port: 443", "https_port: 8443")
+                .replace("theme: auto", "theme: dark")
+        );
+        // A key added to a section, a new section and a removal.
+        let lf = set(COMMENTED, "tui.open_on_start", json!(false));
+        let text = set(&crlf, "tui.open_on_start", json!(false));
+        assert_eq!(text, lf.replace('\n', "\r\n"));
+        let lf = set(COMMENTED, "startup.max", json!(6));
+        let text = set(&crlf, "startup.max", json!(6));
+        assert_eq!(text, lf.replace('\n', "\r\n"));
+        let lf = edit_user_source(COMMENTED, "history.retention", None).expect("edit");
+        let text = edit_user_source(&crlf, "history.retention", None).expect("edit");
+        assert_eq!(text, lf.replace('\n', "\r\n"));
+        // Unchanged values give back the same bytes.
+        assert_eq!(set(&crlf, "tui.glyphs", json!("auto")), crlf);
+        assert_eq!(
+            edit_user_source(&crlf, "startup.max", None).expect("edit"),
+            crlf
+        );
+        // Removing the last setting leaves the comments.
+        let text = edit_user_source("# mine\r\ntui:\r\n  theme: dark\r\n", "tui.theme", None);
+        assert_eq!(text.expect("edit"), "# mine\r\n");
+    }
+
+    /// Comment-only files get the new section after the comments, without the
+    /// document marker yaml-edit puts on a new document; a file that starts
+    /// with a marker keeps it. Both line endings.
+    #[test]
+    fn document_markers_in_lf_and_crlf_files() {
+        for newline in ["\n", "\r\n"] {
+            let lines = |text: &str| text.replace('\n', newline);
+            assert_eq!(
+                set(&lines("# mine\n"), "updates.check", json!(false)),
+                lines("# mine\nupdates:\n  check: false\n")
+            );
+            assert_eq!(
+                set(
+                    &lines("---\n# mine\ntui:\n  theme: auto\n"),
+                    "tui.glyphs",
+                    json!("ascii")
+                ),
+                lines("---\n# mine\ntui:\n  theme: auto\n  glyphs: ascii\n")
+            );
+            assert_eq!(
+                set(
+                    &lines("---\ntui:\n  theme: auto\n"),
+                    "tui.theme",
+                    json!("dark")
+                ),
+                lines("---\ntui:\n  theme: dark\n")
+            );
+        }
+    }
+
+    /// A file mixing CRLF and LF is edited as it is: the lines around the edit
+    /// keep their bytes.
+    #[test]
+    fn mixed_line_endings_keep_their_bytes() {
+        let text = set(
+            "# mine\r\ntui:\n  theme: auto\r\n",
+            "tui.theme",
+            json!("dark"),
+        );
+        assert_eq!(text, "# mine\r\ntui:\n  theme: dark\r\n");
+    }
+
+    /// A CRLF file on disk stays CRLF through edits and removals.
+    #[test]
+    fn crlf_files_on_disk_stay_crlf() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "# top\r\ntui:\r\n  theme: dark\r\n").expect("write");
+        set_user_value(&path, "tui.glyphs", &json!("ascii")).expect("edited");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "# top\r\ntui:\r\n  theme: dark\r\n  glyphs: ascii\r\n"
+        );
+        remove_user_value(&path, "tui.theme").expect("removed");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "# top\r\ntui:\r\n  glyphs: ascii\r\n"
+        );
+    }
+
+    /// A virus scan holding the freshly written temporary file without delete
+    /// sharing makes a plain rename fail; the edit waits for it to let go.
+    #[cfg(windows)]
+    #[test]
+    fn edits_wait_for_a_scan_of_the_temporary_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_SHARE_READ | FILE_SHARE_WRITE: the edit can still write the
+        // file, but not rename it.
+        const SHARE_READ_WRITE: u32 = 3;
+        // ERROR_SHARING_VIOLATION.
+        const SHARING_VIOLATION: i32 = 32;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "tui:\n  theme: auto\n").expect("write");
+        let temporary = path.with_extension("yaml.tmp");
+        std::fs::write(&temporary, "").expect("write");
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_READ_WRITE)
+            .open(&temporary)
+            .expect("open without delete sharing");
+        let other = dir.path().join("other.yaml");
+        assert_eq!(
+            std::fs::rename(&temporary, &other)
+                .expect_err("plain rename fails")
+                .raw_os_error(),
+            Some(SHARING_VIOLATION),
+        );
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held);
+        });
+        set_user_value(&path, "tui.theme", &json!("dark")).expect("written once released");
+        release.join().expect("release thread");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "tui:\n  theme: dark\n"
         );
     }
 }

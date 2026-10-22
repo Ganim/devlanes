@@ -80,6 +80,15 @@ fn retry_ephemeral(kind: io::ErrorKind) -> bool {
     )
 }
 
+/// A port in the IANA dynamic range (49152-65535), different per attempt.
+fn random_dynamic_port(seed: &std::hash::RandomState, attempt: usize) -> u16 {
+    use std::hash::BuildHasher as _;
+    const FIRST: u16 = 49152;
+    let span = u64::from(u16::MAX - FIRST) + 1;
+    let offset = u16::try_from(seed.hash_one(attempt) % span).unwrap_or(0);
+    FIRST + offset
+}
+
 /// Nothing to add to a bind error outside Windows.
 #[cfg(not(windows))]
 pub(crate) fn bind_hint(_addr: &SocketAddr, _source: &io::Error) -> &'static str {
@@ -122,14 +131,25 @@ impl DnsServer {
             return Ok(Self::new(udp, tcp, zone));
         }
         let mut last = io::Error::new(io::ErrorKind::AddrInUse, "no shared free port");
-        for _ in 0..EPHEMERAL_ATTEMPTS {
-            let udp = UdpSocket::bind(listen)
-                .await
-                .map_err(|e| bind_error(listen, e))?;
+        let seed = std::hash::RandomState::new();
+        for attempt in 0..EPHEMERAL_ATTEMPTS {
+            // Windows hands out UDP ports in sequence, so after one lands in a
+            // reserved TCP block the next ones would too: retry at random ports.
+            let mut candidate = listen;
+            if attempt > 0 {
+                candidate.set_port(random_dynamic_port(&seed, attempt));
+            }
+            let udp = match UdpSocket::bind(candidate).await {
+                Ok(udp) => udp,
+                Err(error) if attempt > 0 && retry_ephemeral(error.kind()) => {
+                    last = error;
+                    continue;
+                }
+                Err(error) => return Err(bind_error(candidate, error)),
+            };
             let addr = udp.local_addr().map_err(|e| bind_error(listen, e))?;
             match TcpListener::bind(addr).await {
                 Ok(tcp) => return Ok(Self::new(udp, tcp, zone)),
-                // Another ephemeral port will do.
                 Err(error) if retry_ephemeral(error.kind()) => last = error,
                 Err(error) => return Err(bind_error(addr, error)),
             }
@@ -254,6 +274,18 @@ mod tests {
         assert!(retry_ephemeral(io::ErrorKind::PermissionDenied));
         #[cfg(not(windows))]
         assert!(!retry_ephemeral(io::ErrorKind::PermissionDenied));
+    }
+
+    /// Retries spread over the dynamic range instead of following the OS's
+    /// sequential pick into the same reserved block.
+    #[test]
+    fn retry_ports_are_dynamic_and_spread() {
+        let seed = std::hash::RandomState::new();
+        let ports: std::collections::BTreeSet<u16> = (1..EPHEMERAL_ATTEMPTS)
+            .map(|attempt| random_dynamic_port(&seed, attempt))
+            .collect();
+        assert!(ports.iter().all(|port| *port >= 49152));
+        assert!(ports.len() > EPHEMERAL_ATTEMPTS / 2, "{ports:?}");
     }
 
     /// A held port 53 on Windows says where to look; other failures, ports and

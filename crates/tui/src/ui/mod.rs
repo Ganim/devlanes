@@ -1134,3 +1134,66 @@ pub(crate) fn target_error<'a>(
     };
     app.target_error(&target)
 }
+
+/// `path` with the user's `home` written as `~`: `~/.devlanes/state.db`, or
+/// `~\.devlanes\state.db` on Windows, where the prefix matches without case
+/// and with either separator. Paths outside the home are left as they are.
+pub fn home_short(home: Option<&std::path::Path>, path: &str) -> String {
+    let rest = home
+        .filter(|home| !home.as_os_str().is_empty())
+        .and_then(|home| devlanes_core::paths::strip_path_prefix(std::path::Path::new(path), home));
+    match rest {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => std::path::Path::new("~").join(rest).display().to_string(),
+        None => path.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::home_short;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_home_is_shortened_by_whole_components() {
+        let home = Some(Path::new("/Users/acme"));
+        assert_eq!(
+            home_short(home, "/Users/acme/.devlanes/run/daemon.sock"),
+            "~/.devlanes/run/daemon.sock"
+        );
+        assert_eq!(home_short(home, "/Users/acme"), "~");
+        assert_eq!(home_short(home, "/Users/acme2/x"), "/Users/acme2/x");
+        assert_eq!(home_short(home, "/Users/Acme/x"), "/Users/Acme/x");
+        assert_eq!(home_short(None, "/Users/acme/x"), "/Users/acme/x");
+        assert_eq!(home_short(Some(Path::new("")), "/x"), "/x");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_home_is_shortened_ignoring_case_and_separators() {
+        let home = Some(Path::new(r"C:\Users\acme"));
+        assert_eq!(
+            home_short(home, r"c:\users\ACME\.devlanes\state.db"),
+            r"~\.devlanes\state.db"
+        );
+        assert_eq!(
+            home_short(
+                Some(Path::new("C:/Users/acme/")),
+                r"C:\Users\acme\.devlanes"
+            ),
+            r"~\.devlanes"
+        );
+        assert_eq!(home_short(home, r"C:\Users\acme"), "~");
+        assert_eq!(home_short(home, r"C:\Users\acme2\x"), r"C:\Users\acme2\x");
+        // The daemon's named pipe is never under the home.
+        let pipe = r"\\.\pipe\devlanes-0123";
+        assert_eq!(home_short(home, pipe), pipe);
+        // Git Bash's HOME never matches a native path.
+        assert_eq!(
+            home_short(Some(Path::new("/c/Users/acme")), r"C:\Users\acme\x"),
+            r"C:\Users\acme\x"
+        );
+    }
+}

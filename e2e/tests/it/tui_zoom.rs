@@ -1,7 +1,8 @@
 //! The TUI's unit pane at every size: the real TUI runs in a pseudo-terminal
 //! against the real daemon, and its screen is read back through vt100. Lines
 //! printed before a zoom, an unzoom or a window resize must show re-wrapped at
-//! the pane's new width and fill its rows.
+//! the pane's new width and fill its rows. `devlanes attach` is driven the
+//! same way.
 
 use std::{
     io::{Read, Write},
@@ -62,15 +63,21 @@ struct Tui {
 impl Tui {
     /// Runs `devlanes ui` in the lab's repository at `COLUMNS`x`ROWS`.
     fn open(lab: &Lab) -> Result<Self> {
+        Self::run(lab, &["ui"], (COLUMNS, ROWS))
+    }
+
+    /// Runs `devlanes <args>` in the lab's repository in a pseudo-terminal of
+    /// `columns`x`rows`.
+    fn run(lab: &Lab, args: &[&str], (columns, rows): (u16, u16)) -> Result<Self> {
         let pair = native_pty_system()
             .openpty(PtySize {
-                rows: ROWS,
-                cols: COLUMNS,
+                rows,
+                cols: columns,
                 pixel_width: 0,
                 pixel_height: 0,
             })
             .map_err(setup)?;
-        let template = lab.command(lab.repo(), &["ui"])?;
+        let template = lab.command(lab.repo(), args)?;
         let mut command = CommandBuilder::new(template.get_program());
         command.args(template.get_args());
         command.cwd(lab.repo());
@@ -87,8 +94,8 @@ impl Tui {
             lab.track(pid.cast_signed());
         }
         let screen = Arc::new(Mutex::new(vt100::Parser::new(
-            cells(ROWS),
-            cells(COLUMNS),
+            cells(rows),
+            cells(columns),
             0,
         )));
         let mut reader = pair.master.try_clone_reader().map_err(setup)?;
@@ -189,6 +196,29 @@ impl Tui {
             .map(|row| row.trim_end().to_owned())
             .collect();
         Some((usize::from(width), text))
+    }
+
+    /// Waits until the whole screen, `width` columns wide, holds the service's
+    /// lines as [`filled_problem`] wants them. Otherwise says what is wrong,
+    /// with the screen.
+    fn screen_unfilled(&self, prefix: char, width: usize) -> Option<String> {
+        let start = Instant::now();
+        loop {
+            let rows: Vec<String> = {
+                let parser = self.screen.lock().unwrap_or_else(|e| e.into_inner());
+                let columns = parser.screen().size().1.get();
+                parser
+                    .screen()
+                    .rows(0, columns)
+                    .map(|row| row.trim_end().to_owned())
+                    .collect()
+            };
+            let problem = filled_problem(width, &rows, prefix)?;
+            if start.elapsed() > SETTLE {
+                return Some(format!("{problem}\n{}", self.dump()));
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Waits for `text` anywhere on the screen.
@@ -349,4 +379,32 @@ fn tui_pane_fills_at_every_size_for_a_pty_unit() -> Result<()> {
 #[test]
 fn tui_pane_fills_at_every_size_for_a_pipe_unit() -> Result<()> {
     pane_fills_at_every_size(false)
+}
+
+/// `devlanes attach` shows a PTY unit's earlier output re-wrapped at the
+/// terminal's size, and lines typed into it reach the unit. The terminal is
+/// larger than the unit's default 120x40, so the earlier lines must fill rows
+/// the unit never drew.
+#[test]
+fn attach_draws_at_the_terminal_size_and_takes_input() -> Result<()> {
+    const SIZE: (u16, u16) = (200, 45);
+    let yaml = format!(
+        "project: fixture-zoom\nservices:\n{}  echo:\n    run: 'while read line; do \
+         printf \"got %s\\n\" \"$line\"; done'\n    pty: true\n",
+        service("ttyloop", 'P', true)
+    );
+    let lab = Lab::with_config(&yaml, BUDGET)?;
+    let started = lab.json(lab.repo(), &["start"])?;
+    assert_eq!(started["ready"], true, "{started}");
+    {
+        let attached = Tui::run(&lab, &["attach", "ttyloop"], SIZE)?;
+        attached.wait_for_text(&format!("P{BURST:05}"))?;
+        if let Some(problem) = attached.screen_unfilled('P', usize::from(SIZE.0)) {
+            return Err(Error::Unexpected(format!("attached: {problem}")));
+        }
+    }
+    let mut attached = Tui::run(&lab, &["attach", "echo"], SIZE)?;
+    // Keys typed before the stream opens wait in the terminal for the client.
+    attached.keys(b"acme\r")?;
+    attached.wait_for_text("got acme")
 }

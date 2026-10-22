@@ -31,10 +31,6 @@ pub enum InstallMethod {
     Pnpm,
     Bun,
     Yarn,
-    /// Scoop on Windows (`scoop\apps\devlanes`).
-    Scoop,
-    /// A winget portable package on Windows (`WinGet\Packages`).
-    Winget,
     CargoBinstall,
     CargoInstall,
     /// A `target/` directory of a checkout.
@@ -53,16 +49,6 @@ impl InstallMethod {
         let has = |needle: &str| text.contains(&os::normalise(needle));
         if has("/Cellar/devlanes/") {
             return Self::Homebrew;
-        }
-        // Scoop's root moves with $SCOOP but keeps this layout; `current` is a
-        // junction that canonicalisation resolves to the version directory.
-        if has("/scoop/apps/devlanes/") {
-            return Self::Scoop;
-        }
-        // winget runs portables through a symlink in WinGet\Links, which
-        // canonicalisation resolves into WinGet\Packages\<id>_<source>.
-        if has("/WinGet/Packages/devlanes-run.devlanes_") || has("/WinGet/Links/") {
-            return Self::Winget;
         }
         if has("/node_modules/@devlanes/") || has("/node_modules/devlanes/") {
             return if has("/.bun/install/global/") {
@@ -115,8 +101,6 @@ impl InstallMethod {
             Self::Pnpm => "pnpm",
             Self::Bun => "Bun",
             Self::Yarn => "Yarn",
-            Self::Scoop => "Scoop",
-            Self::Winget => "winget",
             Self::CargoBinstall => "cargo binstall",
             Self::CargoInstall => "cargo install",
             Self::Source => "a source checkout",
@@ -153,8 +137,6 @@ impl InstallMethod {
             Self::Pnpm => "pnpm add -g devlanes@latest".into(),
             Self::Bun => "bun add -g devlanes@latest".into(),
             Self::Yarn => "yarn global add devlanes@latest".into(),
-            Self::Scoop => "scoop update devlanes".into(),
-            Self::Winget => "winget upgrade --id devlanes-run.devlanes --exact".into(),
             Self::CargoBinstall => os::cargo_binstall(),
             Self::CargoInstall => format!(
                 "cargo install --locked --git {REPOSITORY} --tag v{version} {}",
@@ -334,8 +316,8 @@ mod os {
     }
 
     /// Windows refuses to overwrite or delete a running executable. Only
-    /// `install.ps1` renames it out of the way; Scoop, winget, npm, cargo and
-    /// a rebuild fail while the daemon runs from the installed file.
+    /// `install.ps1` renames it out of the way; npm, cargo and a rebuild fail
+    /// while the daemon runs from the installed file.
     pub(super) fn replaces_running_executable(method: &InstallMethod) -> bool {
         matches!(method, InstallMethod::Script(_))
     }
@@ -516,24 +498,6 @@ mod tests {
         let cargo = Path::new(r"C:\Users\a\.cargo");
         let detect = |path: &str| InstallMethod::detect(Path::new(path), Some(cargo), false);
         assert_eq!(
-            detect(r"C:\Users\a\scoop\apps\devlanes\0.3.0\devlanes.exe"),
-            InstallMethod::Scoop
-        );
-        assert_eq!(
-            detect(r"D:\Tools\Scoop\apps\devlanes\current\devlanes.exe"),
-            InstallMethod::Scoop
-        );
-        assert_eq!(
-            detect(
-                r"C:\Users\a\AppData\Local\Microsoft\WinGet\Packages\devlanes-run.devlanes_Microsoft.Winget.Source_8wekyb3d8bbwe\devlanes-0.3.0-x86_64-pc-windows-msvc\devlanes.exe"
-            ),
-            InstallMethod::Winget
-        );
-        assert_eq!(
-            detect(r"C:\Users\a\AppData\Local\Microsoft\WinGet\Links\devlanes.exe"),
-            InstallMethod::Winget
-        );
-        assert_eq!(
             detect(
                 r"C:\Users\a\AppData\Roaming\npm\node_modules\devlanes\node_modules\@devlanes\win32-x64\bin\devlanes.exe"
             ),
@@ -603,14 +567,6 @@ mod tests {
             InstallMethod::Pnpm.upgrade_command("0.3.0"),
             "pnpm add -g devlanes@latest"
         );
-        assert_eq!(
-            InstallMethod::Scoop.upgrade_command("0.3.0"),
-            "scoop update devlanes"
-        );
-        assert_eq!(
-            InstallMethod::Winget.upgrade_command("0.3.0"),
-            "winget upgrade --id devlanes-run.devlanes --exact"
-        );
     }
 
     #[cfg(windows)]
@@ -624,10 +580,6 @@ mod tests {
         assert_eq!(
             script.upgrade_advice("0.3.0"),
             "$env:DEVLANES_INSTALL_DIR='C:\\Users\\o''neil\\Tools'; irm https://github.com/devlanes-run/devlanes/releases/latest/download/install.ps1 | iex"
-        );
-        assert_eq!(
-            InstallMethod::Scoop.upgrade_advice("0.3.0"),
-            "devlanes daemon stop (it stops services), then scoop update devlanes"
         );
         assert_eq!(
             InstallMethod::Npm.upgrade_advice("0.3.0"),

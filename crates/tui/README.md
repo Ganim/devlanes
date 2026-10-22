@@ -53,6 +53,8 @@ Moving through the list watches a unit without resizing its PTY. Enter, a double
 
 While lanes start, the terminal tab's progress bar shows ready services over the services starting, across every starting lane. A failed start shows red for three seconds. Quitting, a panic or `terminal.progress: never` clears it; see `devlanes-term` for where it is drawn.
 
+On Windows, copies go to the Windows clipboard directly, since classic console windows (conhost) ignore OSC 52; over SSH they still use OSC 52, which reaches the client's clipboard. In a classic console window `tui.glyphs: auto` picks ASCII, because its default fonts have no braille or quadrant blocks. Paths under `%USERPROFILE%` show as `~\...`.
+
 ## Screens for design review
 
 `cargo run -p devlanes-tui --example screens` draws every page and dialog against a fake 45-unit monorepo at 200x60, 120x40 and 80x24, and writes a PNG, the plain text and an ANSI dump of each to `target/tui-screens/`, with `index.md` listing them. The PNGs use Menlo or DejaVu Sans Mono; `DEVLANES_SCREENS_FONT` names another font file.

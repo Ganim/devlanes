@@ -179,13 +179,15 @@ mod windows {
         }
 
         /// Not a test of its own: sleeps when [`SLEEP`] is set, with Windows'
-        /// default console handling, which ends the process on Ctrl-Break. With
-        /// [`SPAWN_IGNORER`] also set, it first starts [`ignorer`] on its console.
+        /// default console handling, which ends the process on Ctrl-Break. It
+        /// prints [`SLEEPER_READY`] first. With [`SPAWN_IGNORER`] also set, it
+        /// then starts [`ignorer`] on its console.
         #[test]
         fn sleeper() -> std::io::Result<()> {
             if std::env::var_os(SLEEP).is_none() {
                 return Ok(());
             }
+            println!("{SLEEPER_READY}");
             if std::env::var_os(SPAWN_IGNORER).is_some() {
                 // Shares this console and standard output, where it reports
                 // when its handler is in place.
@@ -222,6 +224,9 @@ mod windows {
         const IGNORE: &str = "DEVLANES_TEST_ORPHAN_IGNORE";
         /// The line an [`ignorer`] prints once Ctrl-Break no longer ends it.
         const IGNORER_READY: &str = "ignorer-ready";
+        /// The line a [`sleeper`] prints once it runs. Its console is set up by
+        /// then: Windows creates it while the process starts, before `main`.
+        const SLEEPER_READY: &str = "sleeper-ready";
         /// Longest a test waits for a process it started to change state.
         const WAIT: Duration = Duration::from_secs(20);
 
@@ -304,23 +309,48 @@ mod windows {
         }
 
         /// Starts a [`sleeper`] with a console of its own and no window, as pipe
-        /// units have.
-        fn start_sleeper(spawn_ignorer: bool) -> std::io::Result<Started> {
+        /// units have, and waits until standard output, shared with an
+        /// [`ignorer`] it starts, shows `ready`.
+        ///
+        /// Asking right after the start can find no console yet (the helper
+        /// exits with `NoConsole`), and orphans are asked without waiting for
+        /// one, so the tests wait until the process runs.
+        async fn start_sleeper(
+            spawn_ignorer: bool,
+            ready: &'static str,
+        ) -> std::io::Result<Started> {
+            use std::io::BufRead;
             let mut command = this_test("orphans::windows::tests::sleeper")?;
             command
                 .env(SLEEP, "1")
                 .stdin(Stdio::null())
-                .stdout(if spawn_ignorer {
-                    Stdio::piped()
-                } else {
-                    Stdio::null()
-                })
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .creation_flags(devlanes_sys::windows::process::CREATE_NO_WINDOW);
             if spawn_ignorer {
                 command.env(SPAWN_IGNORER, "1");
             }
-            command.spawn().map(Started)
+            let mut child = Started(command.spawn()?);
+            let stdout = child
+                .0
+                .stdout
+                .take()
+                .ok_or_else(|| std::io::Error::other("no pipe"))?;
+            // The read ends at the latest when the guards end the processes.
+            let seen = tokio::task::spawn_blocking(move || {
+                std::io::BufReader::new(stdout)
+                    .lines()
+                    // libtest may put the test's name before it on the line.
+                    .any(|line| line.is_ok_and(|line| line.trim_end().ends_with(ready)))
+            });
+            let seen = tokio::time::timeout(WAIT, seen)
+                .await
+                .map_err(|_| std::io::Error::other(format!("no {ready} in time")))?
+                .map_err(std::io::Error::other)?;
+            if !seen {
+                return Err(std::io::Error::other(format!("exited before {ready}")));
+            }
+            Ok(child)
         }
 
         /// An orphan with a console of its own, as pipe units have, ends on the
@@ -328,7 +358,7 @@ mod windows {
         /// process that no longer verifies is not asked.
         #[tokio::test]
         async fn orphans_are_asked_before_they_are_terminated() -> std::io::Result<()> {
-            let mut child = start_sleeper(false)?;
+            let mut child = start_sleeper(false, SLEEPER_READY).await?;
             let identity = identity_of(child.0.id()).await?;
             let table = AskFirst { helper: helper()? };
             let begun = Instant::now();
@@ -354,26 +384,8 @@ mod windows {
         /// fresh look from the gone root would no longer find it.
         #[tokio::test]
         async fn descendants_that_ignore_the_request_are_terminated() -> std::io::Result<()> {
-            use std::io::BufRead;
-            let mut child = start_sleeper(true)?;
+            let mut child = start_sleeper(true, IGNORER_READY).await?;
             let root = identity_of(child.0.id()).await?;
-            let stdout = child
-                .0
-                .stdout
-                .take()
-                .ok_or_else(|| std::io::Error::other("no pipe"))?;
-            // The read ends at the latest when the guards end both processes.
-            let ready = tokio::task::spawn_blocking(move || {
-                std::io::BufReader::new(stdout)
-                    .lines()
-                    // libtest may put the test's name before it on the line.
-                    .any(|line| line.is_ok_and(|line| line.trim_end().ends_with(IGNORER_READY)))
-            });
-            let ready = tokio::time::timeout(WAIT, ready)
-                .await
-                .map_err(|_| std::io::Error::other("the ignorer never got ready"))?
-                .map_err(std::io::Error::other)?;
-            assert!(ready, "the ignorer exited before it got ready");
             let exe = std::env::current_exe()?;
             let exe_name = exe
                 .file_name()

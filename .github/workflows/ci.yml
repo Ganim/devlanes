@@ -79,7 +79,7 @@ jobs:
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12 "$RUNNER_TEMP"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - run: actionlint
-      - run: shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh packaging/scoop/render.sh packaging/winget/render.sh e2e/ssh/run.sh
+      - run: shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh e2e/ssh/run.sh
       # Runs package.ps1 under the runner's pwsh for the Windows archives.
       - run: sh packaging/scripts/check.sh
   # install.ps1 and package.ps1 on Windows: lint, then an install from a local release
@@ -105,6 +105,7 @@ jobs:
         run: rustup toolchain install
       # The same debug build of devlanes as the Windows e2e job, so it only reads that store.
       - uses: ./.github/actions/kache
+        id: kache
         with:
           store: e2e
           save: "false"
@@ -124,8 +125,9 @@ jobs:
           # GitHub's Windows runners only run as administrator, which the daemon
           # refuses outside tests.
           DEVLANES_ALLOW_ELEVATED: "1"
+      # The dry runs above come before kache is installed; a failure there skips it.
       - name: kache stats
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.kache.outcome == 'success' }}
         run: |
           kache stats
           # Lets the daemon finish its queued uploads before the runner goes away.

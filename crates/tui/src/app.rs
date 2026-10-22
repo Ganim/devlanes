@@ -788,6 +788,9 @@ pub struct App {
     pub service_report: Option<serde_json::Value>,
     /// The user's home, so paths under it show as `~/…`; `None` shows them whole.
     pub user_home: Option<PathBuf>,
+    /// Copies go to the system clipboard (Windows, outside SSH) instead of
+    /// OSC 52, so the copy notices need not hedge about the terminal.
+    pub system_clipboard: bool,
     /// [`Effect::QuitWith`] runs; q again quits at once.
     quitting: bool,
 }
@@ -851,6 +854,7 @@ impl App {
             time_zone: jiff::tz::TimeZone::UTC,
             service_report: None,
             user_home: None,
+            system_clipboard: false,
             quitting: false,
         }
     }
@@ -3090,7 +3094,12 @@ impl App {
                 }
                 effects.push(Effect::Copy(text.join("\n")));
                 self.daemon.copy = None;
-                self.set_notice("copied (OSC 52; some terminals block it)".into());
+                let notice = if self.system_clipboard {
+                    "copied"
+                } else {
+                    "copied (OSC 52; some terminals block it)"
+                };
+                self.set_notice(notice.into());
                 return;
             }
             KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('q') => {
@@ -4094,10 +4103,12 @@ impl App {
                 if !text.is_empty() {
                     effects.push(Effect::Copy(text));
                     // OSC 52 has no reply: the terminal may ignore it silently.
-                    self.set_notice(
+                    let notice = if self.system_clipboard {
+                        "copied"
+                    } else {
                         "copied with OSC 52; it reaches the clipboard if the terminal allows that"
-                            .into(),
-                    );
+                    };
+                    self.set_notice(notice.into());
                 }
             }
             _ => {}

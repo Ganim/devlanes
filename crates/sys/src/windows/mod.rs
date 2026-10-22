@@ -6,6 +6,7 @@
 //! grouped by Job Objects instead.
 
 pub mod cert;
+pub mod clipboard;
 pub mod conpty;
 pub mod console;
 pub mod ctrl;

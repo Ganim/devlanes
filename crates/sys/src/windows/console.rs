@@ -1,5 +1,7 @@
 //! Console modes and console text I/O for the CLI: raw key input for `attach`,
-//! escape-sequence output, and prompts that hide what the user types.
+//! escape-sequence output, and prompts that hide what the user types, with
+//! whether the user's keys reach the console at all; and for the TUI, whether
+//! a classic console window shows the console.
 //!
 //! Mode changes apply to the console buffer behind a handle, not to the handle,
 //! so they are visible to every process sharing the console until restored;
@@ -7,17 +9,18 @@
 //! ends the process without running destructors.
 
 use std::fs::File;
-use std::io;
-use std::os::windows::io::{AsHandle, AsRawHandle};
+use std::io::{self, IsTerminal};
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle};
 use std::ptr;
 use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 
 use windows_sys::Win32::Foundation::{ERROR_OPERATION_ABORTED, GetLastError, HANDLE, SetLastError};
 use windows_sys::Win32::System::Console::{
     self as win, CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT,
-    CTRL_SHUTDOWN_EVENT, GetConsoleMode, ReadConsoleW, SetConsoleCtrlHandler, SetConsoleMode,
-    WriteConsoleW,
+    CTRL_SHUTDOWN_EVENT, GetConsoleMode, GetConsoleWindow, ReadConsoleW, SetConsoleCtrlHandler,
+    SetConsoleMode, WriteConsoleW,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, IsWindowVisible};
 use windows_sys::core::BOOL;
 
 /// Input mode: typed characters are echoed (needs [`LINE_INPUT`]).
@@ -58,8 +61,8 @@ pub fn mode(handle: impl AsHandle) -> io::Result<u32> {
 }
 
 /// Sets the console mode of `handle`. Fails for handles that are not a console
-/// buffer, and for output flags the console host does not know (VT processing on
-/// consoles older than Windows 10 1511).
+/// buffer, and for output flags the console host does not know (VT processing in
+/// the legacy console).
 pub fn set_mode(handle: impl AsHandle, mode: u32) -> io::Result<()> {
     // SAFETY: the handle is borrowed for the call; the mode is passed by value.
     if unsafe { SetConsoleMode(handle.as_handle().as_raw_handle(), mode) } == 0 {
@@ -134,6 +137,77 @@ pub fn write_output(handle: impl AsHandle, text: &str) -> io::Result<()> {
         rest = rest.get(written as usize..).unwrap_or_default();
     }
     Ok(())
+}
+
+/// Whether this process's console shows in a classic console window (conhost)
+/// rather than in a terminal behind a pseudoconsole (Windows Terminal, also
+/// when it took over a console launched elsewhere, VS Code, WezTerm, Alacritty,
+/// an SSH session) or a hidden console another program draws (ConEmu,
+/// winpty). False without a console.
+pub fn classic_window() -> bool {
+    // SAFETY: no arguments; returns null without a console.
+    let window = unsafe { GetConsoleWindow() };
+    if window.is_null() {
+        return false;
+    }
+    let mut class = [0u16; 64];
+    // SAFETY: `window` is a window handle and `class` holds the number of
+    // writable units passed; a stale handle makes the call fail, not crash.
+    let len = unsafe { GetClassNameW(window, class.as_mut_ptr(), class.len() as i32) };
+    // SAFETY: as above, a plain query on the handle.
+    let visible = unsafe { IsWindowVisible(window) } != 0;
+    let class = class
+        .get(..usize::try_from(len).unwrap_or(0))
+        .unwrap_or_default();
+    is_classic(class, visible)
+}
+
+/// Whether a console window of `class` is conhost's own window on screen.
+/// Pseudoconsoles use `PseudoConsoleWindow`, which is never shown.
+fn is_classic(class: &[u16], visible: bool) -> bool {
+    visible
+        && class
+            .iter()
+            .copied()
+            .eq("ConsoleWindowClass".encode_utf16())
+}
+
+/// Whether what the user types reaches this process's console, so a prompt
+/// read from `CONIN$` can be answered. See [`keyboard`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keyboard {
+    /// The console has a window or a pseudoconsole (conhost, Windows Terminal,
+    /// VS Code, an SSH session, winpty) that passes keys on.
+    Console,
+    /// No console, or one without a window, as `CREATE_NO_WINDOW` gives the
+    /// commands agents and editors run: a read would wait forever.
+    Unreachable,
+    /// A standard stream is a Cygwin or MSYS2 pseudo terminal: mintty, Git
+    /// Bash's own window, keeps the keys, and Windows programs started from it
+    /// get a hidden console nobody can type into.
+    Mintty,
+}
+
+/// Where the user's keys go, checked before prompting on the console.
+pub fn keyboard() -> Keyboard {
+    if mintty_stream(io::stdin().as_handle())
+        || mintty_stream(io::stdout().as_handle())
+        || mintty_stream(io::stderr().as_handle())
+    {
+        return Keyboard::Mintty;
+    }
+    // SAFETY: no arguments; returns null without a console or for a console
+    // created without a window.
+    if unsafe { GetConsoleWindow() }.is_null() {
+        return Keyboard::Unreachable;
+    }
+    Keyboard::Console
+}
+
+/// Whether `handle` is a Cygwin or MSYS2 pseudo terminal: std's terminal check
+/// accepts those pipes by name, and only they are terminals without a console mode.
+fn mintty_stream(handle: BorrowedHandle<'_>) -> bool {
+    handle.is_terminal() && mode(handle).is_err()
 }
 
 /// A console mode change that is undone on drop, also on error paths, so the
@@ -322,6 +396,56 @@ mod tests {
         assert_ne!(next, outer);
         registry.remove(outer);
         assert_eq!(replay(&registry), [(3, 1)]);
+    }
+
+    #[test]
+    fn only_a_visible_conhost_window_is_classic() {
+        let class = |name: &str| name.encode_utf16().collect::<Vec<_>>();
+        assert!(is_classic(&class("ConsoleWindowClass"), true));
+        // ConEmu and winpty keep the real console hidden.
+        assert!(!is_classic(&class("ConsoleWindowClass"), false));
+        assert!(!is_classic(&class("PseudoConsoleWindow"), true));
+        assert!(!is_classic(&class("PseudoConsoleWindow"), false));
+        assert!(!is_classic(&[], true));
+        // Whatever console nextest runs under, the query must not fail.
+        let _ = classic_window();
+    }
+
+    /// Only pipes named like a Cygwin or MSYS2 pseudo terminal count as mintty.
+    #[test]
+    fn mintty_streams_are_recognised_by_their_pipe_name() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("runtime");
+        let _context = runtime.enter();
+        let unique = format!("{:016x}", std::process::id());
+        let is_mintty = |name: String| {
+            let _server = tokio::net::windows::named_pipe::ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&name)
+                .expect("pipe server");
+            let client = File::options()
+                .read(true)
+                .write(true)
+                .open(&name)
+                .expect("pipe client");
+            mintty_stream(client.as_handle())
+        };
+        assert!(is_mintty(format!(
+            r"\\.\pipe\msys-{unique}-pty0-from-master"
+        )));
+        assert!(is_mintty(format!(
+            r"\\.\pipe\cygwin-{unique}-pty1-to-master"
+        )));
+        assert!(!is_mintty(format!(
+            r"\\.\pipe\acme-{unique}-pty0-from-master"
+        )));
+        assert!(!is_mintty(format!(r"\\.\pipe\msys-{unique}-pipe")));
+        let file = tempfile::tempfile().expect("temp file");
+        assert!(!mintty_stream(file.as_handle()));
+        // Whatever runs the tests, the check must not fail.
+        let _ = keyboard();
     }
 
     #[test]

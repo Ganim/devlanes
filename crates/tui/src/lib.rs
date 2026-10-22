@@ -64,8 +64,10 @@ pub struct Options {
     /// page's stop-window check; `None` leaves that check out.
     pub service: Option<serde_json::Value>,
     /// The environment the TUI reads (`NO_COLOR`, `COLORTERM`, the locale,
-    /// `TMUX`, `HOME`); `None` reads the process's. Tests pass their own so
-    /// the machine they run on does not show in what they draw.
+    /// `TMUX`, `HOME` or on Windows `USERPROFILE`); `None` reads the
+    /// process's, and on Windows also asks whether a classic console window
+    /// shows the TUI ([`theme::classic_console`]). Tests pass their own so the
+    /// machine they run on does not show in what they draw.
     pub env: Option<std::collections::BTreeMap<String, String>>,
     /// Where daemon.log times are shown; `None` is the system's zone.
     pub time_zone: Option<jiff::tz::TimeZone>,
@@ -77,9 +79,12 @@ impl Options {
     /// The colors and glyphs for this terminal, from the environment and
     /// the user config.
     pub fn theme(&self) -> theme::Theme {
-        theme::Theme::detect(self.theme.as_deref(), self.glyphs.as_deref(), |key| {
-            self.var(key)
-        })
+        theme::Theme::detect(
+            self.theme.as_deref(),
+            self.glyphs.as_deref(),
+            |key| self.var(key),
+            self.env.is_none() && theme::classic_console(),
+        )
     }
 
     /// An environment variable from [`Options::env`], else the process's.
@@ -110,14 +115,9 @@ pub async fn run_with(paths: Paths, options: Options) -> Result<(), Error> {
     let mut terminal = ratatui::Terminal::new(backend)?;
     terminal.clear()?;
     let events = crossterm::event::EventStream::new();
-    let result = drive(
-        &mut terminal,
-        api,
-        &options,
-        events,
-        Box::new(std::io::stdout()),
-    )
-    .await;
+    let result = runtime::drive_terminal(&mut terminal, api, &options, events, None)
+        .await
+        .map(drop);
     drop(guard);
     result
 }
@@ -138,15 +138,7 @@ pub async fn run_start(
     let mut terminal = ratatui::Terminal::new(backend)?;
     terminal.clear()?;
     let events = crossterm::event::EventStream::new();
-    let result = drive_start(
-        &mut terminal,
-        api,
-        &options,
-        events,
-        Box::new(std::io::stdout()),
-        start,
-    )
-    .await;
+    let result = runtime::drive_terminal(&mut terminal, api, &options, events, Some(start)).await;
     drop(guard);
     result
 }

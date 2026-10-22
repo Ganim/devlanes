@@ -1,7 +1,7 @@
 #!/bin/sh
 # Dry run of the release scripts against fake binaries: package.sh and package.ps1
-# for every target, manifest.sh, the Homebrew formula, the Scoop and winget
-# manifests, the npm packages and install.sh from a local release directory. Needs
+# for every target, manifest.sh, the Homebrew formula, the npm packages and
+# install.sh from a local release directory. Needs
 # tar, gzip, unzip, jq, npm, curl and pwsh; CI runs it on every push.
 # check.ps1 covers install.ps1 on Windows.
 set -eu
@@ -43,14 +43,6 @@ jq -e '.artifacts | length == 4' "$work/dist/release-manifest.json" >/dev/null
 
 sh "$root/packaging/homebrew/render.sh" "$version" "$work/dist/SHA256SUMS" >"$work/devlanes.rb"
 if command -v ruby >/dev/null 2>&1; then ruby -c "$work/devlanes.rb" >/dev/null; fi
-
-sh "$root/packaging/scoop/render.sh" "$version" "$work/dist/SHA256SUMS" >"$work/devlanes.json"
-jq -e --arg v "$version" '.version == $v and (.architecture | [.["64bit"].hash, .arm64.hash] | all(test("^[0-9a-f]{64}$")))' \
-	"$work/devlanes.json" >/dev/null
-sh "$root/packaging/winget/render.sh" "$version" "$work/dist/SHA256SUMS" "$work/winget" >/dev/null
-set -- "$work"/winget/*.yaml
-[ $# -eq 3 ]
-grep -q "InstallerSha256: [0-9a-f]\{64\}$" "$work/winget/devlanes-run.devlanes.installer.yaml"
 
 sh "$root/packaging/npm/build.sh" "$version" "$work/dist" "$work/npm" >/dev/null
 for bin in devlanes.exe devlanesw.exe devlanes-hosts-service.exe; do

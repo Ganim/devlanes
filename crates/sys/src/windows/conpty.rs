@@ -1,131 +1,27 @@
 //! Pseudo consoles (ConPTY): a terminal for units started with `pty: true`.
 //!
-//! A redistributed `conpty.dll` next to the executable, with its `OpenConsole.exe`,
-//! is used when present: it fixes rendering and resize bugs of older inbox
-//! versions. Otherwise the functions in `kernel32.dll` are used.
-//!
 //! A pseudo console lives as long as its handle. Its children receive
 //! `CTRL_CLOSE_EVENT` when it closes and are ended about five seconds later, so
 //! units in a pseudo console do not outlive the daemon (pipe units do).
+//!
+//! Its output is the console host's rendering of the screen, not what the
+//! programs wrote: long lines are split with absolute cursor moves for the
+//! console's size, and a resize repaints the whole window (still so on Windows
+//! 11 build 26300).
 
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
-use std::path::Path;
-use std::sync::OnceLock;
 
-use windows_sys::Win32::Foundation::HANDLE;
-use windows_sys::Win32::System::Console::{COORD, HPCON};
-use windows_sys::Win32::System::LibraryLoader::{
-    GetProcAddress, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+use windows_sys::Win32::System::Console::{
+    COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
 use windows_sys::core::HRESULT;
-
-use super::security::wide;
-
-/// `CreatePseudoConsole`.
-type CreateFn = unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> HRESULT;
-/// `ResizePseudoConsole`.
-type ResizeFn = unsafe extern "system" fn(HPCON, COORD) -> HRESULT;
-/// `ClosePseudoConsole`.
-type CloseFn = unsafe extern "system" fn(HPCON);
-
-/// The three entry points, from the redistributed DLL or from kernel32.
-#[derive(Clone, Copy)]
-struct Api {
-    create: CreateFn,
-    resize: ResizeFn,
-    close: CloseFn,
-    bundled: bool,
-}
-
-/// Loaded once per process; the DLL stays loaded for the process's lifetime.
-static API: OnceLock<Api> = OnceLock::new();
-
-/// The API in use, loading the redistributed DLL on first use when present.
-fn api() -> Api {
-    *API.get_or_init(|| {
-        bundled().unwrap_or(Api {
-            create: windows_sys::Win32::System::Console::CreatePseudoConsole,
-            resize: windows_sys::Win32::System::Console::ResizePseudoConsole,
-            close: windows_sys::Win32::System::Console::ClosePseudoConsole,
-            bundled: false,
-        })
-    })
-}
-
-/// The redistributed `conpty.dll` beside the executable. It starts
-/// `OpenConsole.exe` from its own directory or from the per-architecture folder
-/// the NuGet package uses (`x64\`, `arm64\`), so one of those must be there too;
-/// without it the DLL would quietly fall back to the inbox console host.
-fn bundled() -> Option<Api> {
-    let directory = std::env::current_exe().ok()?.parent()?.to_owned();
-    let dll = directory.join("conpty.dll");
-    let host = [
-        directory.join("OpenConsole.exe"),
-        directory.join(ARCH).join("OpenConsole.exe"),
-    ];
-    if !dll.is_file() || !host.iter().any(|path| path.is_file()) {
-        return None;
-    }
-    load(&dll)
-}
-
-/// The NuGet package's folder name for this architecture.
-#[cfg(target_arch = "x86_64")]
-const ARCH: &str = "x64";
-/// The NuGet package's folder name for this architecture.
-#[cfg(target_arch = "aarch64")]
-const ARCH: &str = "arm64";
-
-/// Loads `dll` by full path and resolves the three functions.
-fn load(dll: &Path) -> Option<Api> {
-    let path = wide(dll.as_os_str());
-    // SAFETY: `path` is NUL-terminated; the flags restrict the DLL's own
-    // dependencies to its directory and System32, so nothing is found on PATH.
-    let module = unsafe {
-        LoadLibraryExW(
-            path.as_ptr(),
-            std::ptr::null_mut(),
-            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
-        )
-    };
-    // A DLL that does not load leaves the system's ConPTY in use, which
-    // `bundled_in_use` lets `doctor` report.
-    if module.is_null() {
-        return None;
-    }
-    let symbol = |name: &[u8]| -> Option<unsafe extern "system" fn() -> isize> {
-        // SAFETY: `module` is loaded and `name` is NUL-terminated.
-        unsafe { GetProcAddress(module, name.as_ptr()) }
-    };
-    let (create, resize, close) = (
-        symbol(b"CreatePseudoConsole\0")?,
-        symbol(b"ResizePseudoConsole\0")?,
-        symbol(b"ClosePseudoConsole\0")?,
-    );
-    // SAFETY: the redistributed DLL exports these with the documented
-    // kernel32 signatures; only the pointer type changes.
-    unsafe {
-        Some(Api {
-            create: std::mem::transmute::<unsafe extern "system" fn() -> isize, CreateFn>(create),
-            resize: std::mem::transmute::<unsafe extern "system" fn() -> isize, ResizeFn>(resize),
-            close: std::mem::transmute::<unsafe extern "system" fn() -> isize, CloseFn>(close),
-            bundled: true,
-        })
-    }
-}
-
-/// Whether the redistributed `conpty.dll` is in use, for `doctor`.
-pub fn bundled_in_use() -> bool {
-    api().bundled
-}
 
 /// A pseudo console. Closing it ends the processes attached to it.
 #[derive(Debug)]
 pub struct PseudoConsole {
     handle: HPCON,
-    close: CloseFn,
 }
 
 // SAFETY: an HPCON is a plain handle value; the API may be called from any thread.
@@ -144,11 +40,10 @@ impl PseudoConsole {
         input: BorrowedHandle<'_>,
         output: BorrowedHandle<'_>,
     ) -> io::Result<Self> {
-        let api = api();
         let mut handle: HPCON = 0;
         // SAFETY: both handles are open for the call; `handle` is writable.
         let result = unsafe {
-            (api.create)(
+            CreatePseudoConsole(
                 size(columns, rows)?,
                 input.as_raw_handle(),
                 output.as_raw_handle(),
@@ -157,16 +52,13 @@ impl PseudoConsole {
             )
         };
         hresult(result)?;
-        Ok(Self {
-            handle,
-            close: api.close,
-        })
+        Ok(Self { handle })
     }
 
     /// Changes the console's size; the attached programs see a resize.
     pub fn resize(&self, columns: u16, rows: u16) -> io::Result<()> {
         // SAFETY: the handle stays valid until `self` is dropped.
-        hresult(unsafe { (api().resize)(self.handle, size(columns, rows)?) })
+        hresult(unsafe { ResizePseudoConsole(self.handle, size(columns, rows)?) })
     }
 
     /// The value `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` takes.
@@ -176,19 +68,19 @@ impl PseudoConsole {
 }
 
 impl Drop for PseudoConsole {
-    /// Closes the console on a separate thread. Older Windows versions block in
-    /// `ClosePseudoConsole` until its output pipe is drained, and the caller may
-    /// be the one that would drain it.
+    /// Closes the console on a separate thread. Before Windows 11 24H2 (build
+    /// 26100) `ClosePseudoConsole` blocks until its output pipe is drained, and
+    /// the caller may be the one that would drain it.
     fn drop(&mut self) {
-        let (handle, close) = (self.handle, self.close);
+        let handle = self.handle;
         let closing = std::thread::Builder::new()
             .name("devlanes-conpty-close".into())
             // SAFETY: the handle is closed exactly once, here.
-            .spawn(move || unsafe { close(handle) });
+            .spawn(move || unsafe { ClosePseudoConsole(handle) });
         if closing.is_err() {
             // No thread: close inline rather than leak the console and its children.
             // SAFETY: as above; the spawn failed, so the closure never ran.
-            unsafe { close(handle) };
+            unsafe { ClosePseudoConsole(handle) };
         }
     }
 }

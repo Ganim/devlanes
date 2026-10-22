@@ -98,17 +98,9 @@ fn inside(area: Rect) -> Rect {
 }
 
 /// `/Users/acme/.devlanes` as `~/.devlanes` when `/Users/acme` is the
-/// user's home (`App::user_home`).
+/// user's home (`App::user_home`); see [`super::home_short`].
 fn home_short(app: &App, path: &str) -> String {
-    let home = app
-        .user_home
-        .as_deref()
-        .and_then(std::path::Path::to_str)
-        .filter(|home| !home.is_empty());
-    match home {
-        Some(home) if path.starts_with(home) => format!("~{}", &path[home.len()..]),
-        _ => path.to_owned(),
-    }
+    super::home_short(app.user_home.as_deref(), path)
 }
 
 /// The facts: version and pid, uptime, socket, managed processes, clients,

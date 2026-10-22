@@ -138,4 +138,12 @@ pub trait Unit: Send + Sync {
     fn output(&self) -> broadcast::Receiver<OutputChunk>;
     /// Returns the leader and known descendants with PID-reuse-resistant identities.
     async fn subjects(&self) -> Result<Vec<ProcessIdentity>, Error>;
+    /// Whether the output is a rendering of the unit's terminal rather than
+    /// what its programs wrote: text placed with absolute cursor moves for the
+    /// terminal's current size, as a console host that redraws its own screen
+    /// sends. Such output only reads right in a grid of that size, so viewers
+    /// get redraws of the screen model instead of the raw bytes.
+    fn renders_screen(&self) -> bool {
+        false
+    }
 }

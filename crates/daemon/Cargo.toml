@@ -55,3 +55,6 @@ devlanes-start-gate = { path = "../start-gate" }
 devlanes-tunnel = { path = "../tunnel" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+devlanes-runner-windows = { path = "../runner-windows" }

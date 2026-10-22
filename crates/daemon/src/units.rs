@@ -191,6 +191,7 @@ impl UnitHost {
         let (log_tx, log_rx) = std::sync::mpsc::sync_channel(LOG_QUEUE);
         let log_signals = Arc::new(LogSignals::default());
         let log_done = watch::channel(false).0;
+        let rendered = unit.renders_screen();
         spawn_log_thread(
             log.clone(),
             log_rx,
@@ -205,7 +206,7 @@ impl UnitHost {
                 identity,
                 state: watch::channel(UnitState::Starting).0,
                 exit: watch::channel(None).0,
-                screen: StdMutex::new(Screen::new(TerminalSize::default())),
+                screen: StdMutex::new(Screen::new(TerminalSize::default(), rendered)),
                 live: broadcast::channel(1024).0,
                 log,
                 log_tx,
@@ -445,7 +446,14 @@ impl UnitHost {
         snapshot.unwrap_or_else(|_| (Bytes::new(), self.inner.live.subscribe()))
     }
 
-    /// Fresh redraw at `size` for a viewer that lagged behind the live channel.
+    /// Whether the output renders the unit's terminal (see
+    /// [`devlanes_core::Unit::renders_screen`]); viewers then get redraws.
+    pub fn renders_screen(&self) -> bool {
+        self.inner.unit.renders_screen()
+    }
+
+    /// Fresh redraw at `size` for a viewer that lagged behind the live channel,
+    /// or that watches a unit whose output renders its terminal.
     pub async fn redraw(&self, size: Option<TerminalSize>) -> Bytes {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {

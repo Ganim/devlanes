@@ -19,7 +19,15 @@ fn run_with_stdin(mut command: Command, payload: &str) -> (Option<i32>, String, 
         .stderr(Stdio::piped());
     let mut child = command.spawn().expect("start the hook");
     let mut stdin = child.stdin.take().expect("stdin");
-    stdin.write_all(payload.as_bytes()).expect("write payload");
+    // With no devlanes or an old one nothing reads stdin, and a shell that
+    // exits before the write leaves a broken pipe. Whether the hook read its
+    // input does not matter to the agent; the exit status and output do.
+    match stdin.write_all(payload.as_bytes()) {
+        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => {
+            panic!("write payload: {error}")
+        }
+        _ => {}
+    }
     drop(stdin);
     // Read on threads so a full pipe cannot stall the child.
     let mut stdout = child.stdout.take().expect("stdout");

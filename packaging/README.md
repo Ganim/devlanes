@@ -9,7 +9,7 @@ Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula an
 | `homebrew/devlanes.rb`, `homebrew/render.sh` | Formula template and the script that fills in version and checksums |
 | `npm/devlanes/`, `npm/build.sh` | Launcher package and the script that builds all npm packages |
 | `scripts/check.sh` | Dry run of all of the above and `install.sh` against fake binaries; CI runs it |
-| `scripts/package.ps1`, `scripts/check.ps1`, `scoop/`, `winget/` | Windows archives and manifests; see [Windows](#windows) |
+| `scripts/package.ps1`, `scripts/check.ps1` | Windows archives and their dry run; see [Windows](#windows) |
 
 ## Install channels
 
@@ -35,13 +35,11 @@ The workflow then runs these jobs:
 | `test` | Runs the workspace tests on Linux and macOS, in parallel with `build` |
 | `build` | Builds `devlanes` and `devlanes-hosts` for each target (the three `.exe` files on Windows), fails if the committed config schemas differ from the generated ones, and packs the archive (on Windows it uploads the executables instead) |
 | `windows` | Signs the Windows executables when signing is configured and packs the two zip archives |
-| `release` | Writes `SHA256SUMS`, `release-manifest.json`, the formula and the Scoop and winget manifests, copies `schema.json`, `user-schema.json`, `install.sh` and `install.ps1`, attests the archives' build provenance, and uploads everything to a draft release. A rerun refills the draft and refuses to touch a published release |
+| `release` | Writes `SHA256SUMS`, `release-manifest.json` and the formula, copies `schema.json`, `user-schema.json`, `install.sh` and `install.ps1`, attests the archives' build provenance, and uploads everything to a draft release. A rerun refills the draft and refuses to touch a published release |
 | `publish` | Publishes the draft |
 | `website` | Stable versions only. Triggers a rebuild of `devlanes-run/website`, which copies `install.sh`, `schema.json` and `user-schema.json` from the latest stable release to `https://devlanes.run/install.sh`, `https://devlanes.run/v1/schema.json` and `https://devlanes.run/v1/user-schema.json` |
 | `homebrew-verify` | Stable versions only. Installs the rendered formula on macOS from the published release, then runs `brew audit` and `brew test` |
 | `homebrew-publish` | Commits `Formula/devlanes.rb` to `devlanes-run/homebrew-tap`. It keeps the tap's formula when that one belongs to a newer version |
-| `scoop-publish` | Stable versions only, and only with `SCOOP_BUCKET_TOKEN`. Commits `bucket/devlanes.json` to `devlanes-run/scoop-bucket`, keeping a newer version there |
-| `winget` | Stable versions only, and only with `WINGET_TOKEN`. Opens the pull request for `devlanes-run.devlanes` in `microsoft/winget-pkgs` |
 | `npm` | Builds the npm packages from the archives and publishes the platform packages, then `devlanes`. Stable versions go to the `latest` dist-tag, prereleases to `next`. Versions already on the registry are skipped |
 
 The release stays a draft until every asset is attached because Homebrew, npm, cargo binstall and `install.sh` all download from the public release URLs, and `releases/latest` must never point at a release with missing archives. Publishing in a separate job keeps that order visible and lets a failed upload be rerun against the draft.
@@ -123,15 +121,15 @@ The `devlanes` package follows the esbuild and Biome layout. It contains a Node 
 
 ## Windows
 
-Native Windows support is not announced yet, so no user-facing page lists these channels.
+Windows releases install through `install.ps1`, npm and cargo binstall.
 
-Each Windows archive, `devlanes-VERSION-TARGET.zip`, holds one directory of the same name with `devlanes.exe`, `devlanesw.exe` (the logon launcher, package `devlanes-logon-launcher`), `devlanes-hosts-service.exe` and `LICENSE`. The three executables must stay side by side: `daemon install` and `certs trust --hosts` look for the other two next to `devlanes.exe`. They link the C runtime statically (`.cargo/config.toml`), so no Visual C++ Redistributable is needed. Units in a pseudo console use the system's ConPTY; `sys` would load a `conpty.dll` and `OpenConsole.exe` placed next to `devlanes.exe`, but the archives do not ship them.
+Each Windows archive, `devlanes-VERSION-TARGET.zip`, holds one directory of the same name with `devlanes.exe`, `devlanesw.exe` (the logon launcher, package `devlanes-logon-launcher`), `devlanes-hosts-service.exe` and `LICENSE`. The three executables must stay side by side: `daemon install` and `certs trust --hosts` look for the other two next to `devlanes.exe`. They link the C runtime statically (`.cargo/config.toml`), so no Visual C++ Redistributable is needed.
 
 `scripts/package.ps1 -Version V -Target T -OutDir DIR [-BinDir DIR]` writes the zip with fixed entry order, times (`SOURCE_DATE_EPOCH`, else the last commit's time) and attributes, so the same binaries give the same bytes under the same PowerShell version (Windows PowerShell 5.1 and PowerShell 7 compress differently). It uses .NET's `ZipArchive` rather than a shell script, because Git for Windows has no `zip` and `Compress-Archive` cannot fix times. `SHA256SUMS` lists the zips; `release-manifest.json` does not, because SSH bootstrap installs onto Linux and macOS boxes.
 
 ### Signing
 
-The `windows` job signs all six executables (both targets) with Azure Artifact Signing (formerly Trusted Signing) before packing, so the archives, Scoop, winget, binstall and the npm packages (copied from the archives) all carry signed files. `Get-AuthenticodeSignature` must then report every file `Valid`. It runs on `windows-latest` because the signing action does not support arm64 Windows runners. Without the settings below the job prints a warning and packs unsigned files.
+The `windows` job signs all six executables (both targets) with Azure Artifact Signing (formerly Trusted Signing) before packing, so the archives, binstall and the npm packages (copied from the archives) carry signed files. `Get-AuthenticodeSignature` must then report every file `Valid`. It runs on `windows-latest` because the signing action does not support arm64 Windows runners. Without the settings below the job prints a warning and packs unsigned files.
 
 | Name | Kind | Value |
 |---|---|---|
@@ -153,20 +151,17 @@ irm https://github.com/devlanes-run/devlanes/releases/latest/download/install.ps
 
 It picks the archive for the machine (an x64 PowerShell emulated on arm64 gets the arm64 build), reads `SHA256SUMS` from the latest release or from `DEVLANES_VERSION`, checks the archive's SHA-256 and its exact entries, and installs into `DEVLANES_INSTALL_DIR` (default `%LOCALAPPDATA%\Programs\devlanes`). It puts that directory first in the user `PATH` (kept as `REG_EXPAND_SZ`) unless `DEVLANES_NO_MODIFY_PATH=1` or `-NoModifyPath`. Windows refuses to overwrite a running executable but lets it be renamed, so an executable in use (usually the daemon's `devlanes.exe`) becomes `devlanes.exe.old-TIMESTAMP` and keeps running; the script prints that `devlanes daemon restart` switches over, and `devlanes doctor` deletes the old file once nothing runs it. It never stops the daemon. It runs in Windows PowerShell 5.1 (with TLS 1.2 forced on) and PowerShell 7. `DEVLANES_INSTALL_BASE_URL` accepts `http://` and `file://` for tests. The update notice names this URL until the website serves `install.ps1` the way it serves `install.sh`.
 
-`scripts/check.ps1` tests the script's helpers (`PATH` editing on fake values, architecture, `SHA256SUMS` parsing), packs twice and compares the hashes, and installs from a `file://` release with `DEVLANES_NO_MODIFY_PATH=1`, as a file and through `Invoke-Expression`. With `-BinDir` pointing at built binaries it also reinstalls while a daemon (with its own `DEVLANES_HOME`) runs from the installed `devlanes.exe`, and checks the rename, that the daemon survived, and that `doctor` deletes the old file after `daemon stop`. The `packaging-windows` CI job runs it after PSScriptAnalyzer (settings in `PSScriptAnalyzerSettings.psd1`).
+`scripts/check.ps1` tests the script's helpers (`PATH` editing on fake values, architecture, `SHA256SUMS` parsing), packs twice and compares the hashes, and installs from a `file://` release with `DEVLANES_NO_MODIFY_PATH=1`, as a file and through `Invoke-Expression`. With `-BinDir` pointing at built binaries it also reinstalls while a daemon (with its own `DEVLANES_HOME` and ports) runs from the installed `devlanes.exe`, and checks the rename, that the daemon survived, and that `doctor` deletes the old file after `daemon stop`. The `packaging-windows` CI job runs it after PSScriptAnalyzer (settings in `PSScriptAnalyzerSettings.psd1`).
 
-### Package managers
+### npm on Windows
 
-| Channel | Package | Release job | Needs |
-|---|---|---|---|
-| winget | `devlanes-run.devlanes` | `winget` runs `komac submit` on the manifests `winget/render.sh` writes | `WINGET_TOKEN`: a classic token with `public_repo`, whose account owns a fork of `microsoft/winget-pkgs`. The first version goes through the same pull request and Microsoft's review |
-| Scoop | `devlanes` in `devlanes-run/scoop-bucket` | `scoop-publish` commits the manifest `scoop/render.sh` writes | `SCOOP_BUCKET_TOKEN`: a fine-grained token with Contents read and write on `devlanes-run/scoop-bucket`, which must exist with a `main` branch |
-| npm | `@devlanes/win32-x64`, `@devlanes/win32-arm64` | `npm`, with the other platform packages | Both packages created (a `0.0.0` placeholder) with the same trusted publisher as the others, before the first release that lists them; otherwise the `npm` job fails before publishing `devlanes` |
-| cargo binstall | `devlanes`, `devlanes-logon-launcher`, `devlanes-hosts-service` | none | Nothing; each crate's metadata points at the zip, one `cargo binstall --git` run per crate. `devlanes-hosts-helper` refuses the Windows targets |
+The `npm` release job publishes `@devlanes/win32-x64` and `@devlanes/win32-arm64` with the other platform packages, with `devlanes.exe`, `devlanesw.exe` and `devlanes-hosts-service.exe` in `bin\`. Both packages must exist (a `0.0.0` placeholder) with the same trusted publisher as the others before the first release that lists them; otherwise the `npm` job fails before publishing `devlanes`.
 
-winget installs the zip as a portable package with a link in `WinGet\Links` for each of the three executables, because a linked `devlanes.exe` looks for the other two in the link's directory. `komac update` is not used: it rebuilds the installer entries from the archive and loses the three nested portables. Scoop puts a shim for `devlanes.exe` only; the other two run from the app directory.
+### cargo binstall on Windows
 
-None of these can replace `devlanes.exe` while the daemon runs from it (npm and cargo fail with a locked file, Scoop refuses to update a running app, winget fails to remove the old files), so on Windows the update notice and `doctor` say to run `devlanes daemon stop` before the upgrade command. Only `install.ps1` renames the running file instead.
+`devlanes`, `devlanes-logon-launcher` and `devlanes-hosts-service` each carry binstall metadata that points at the zip, one `cargo binstall --git` run per crate, so all three executables land side by side in `~\.cargo\bin`. `devlanes-hosts-helper` refuses the Windows targets, and the launcher and the service refuse the macOS and Linux targets.
+
+npm and cargo binstall cannot replace `devlanes.exe` while the daemon runs from it, and neither can `cargo install`, so on Windows the update notice and `doctor` say to run `devlanes daemon stop` before the upgrade command. Only `install.ps1` renames the running file instead.
 
 The npm launcher runs `bin\devlanes.exe`. Ctrl-C, Ctrl-Break and closing the console reach the binary directly because it shares the console, so the launcher only ignores `SIGINT`, `SIGBREAK` and `SIGHUP` and exits with the binary's exit code, including NTSTATUS codes such as `0xC000013A`.
 

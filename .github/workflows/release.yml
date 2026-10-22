@@ -274,26 +274,14 @@ jobs:
           subject-path: |
             dist/*.tar.gz
             dist/*.zip
-      - name: Homebrew formula, Scoop and winget manifests
+      - name: Homebrew formula
         run: |
-          mkdir -p formula scoop
+          mkdir -p formula
           sh packaging/homebrew/render.sh "$VERSION" dist/SHA256SUMS > formula/devlanes.rb
-          sh packaging/scoop/render.sh "$VERSION" dist/SHA256SUMS > scoop/devlanes.json
-          sh packaging/winget/render.sh "$VERSION" dist/SHA256SUMS winget
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: formula
           path: formula/
-          if-no-files-found: error
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: scoop
-          path: scoop/
-          if-no-files-found: error
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: winget
-          path: winget/
           if-no-files-found: error
       - name: Upload to a draft release
         run: |
@@ -415,105 +403,6 @@ jobs:
               ...(current ? { sha: current.sha } : {}),
             });
             core.notice(`Published devlanes ${version} to ${owner}/${repo}`);
-
-  # Like homebrew-publish, for bucket/devlanes.json in devlanes-run/scoop-bucket. Skipped
-  # until the SCOOP_BUCKET_TOKEN secret exists.
-  scoop-publish:
-    needs: [release, publish]
-    if: needs.release.outputs.prerelease == 'false'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    env:
-      HAS_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN != '' }}
-    steps:
-      - name: Skip without a token
-        if: env.HAS_TOKEN != 'true'
-        run: echo "::notice::SCOOP_BUCKET_TOKEN is not set; the Scoop manifest was not published"
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: env.HAS_TOKEN == 'true'
-        with:
-          name: scoop
-          path: scoop
-      - name: Push the manifest to devlanes-run/scoop-bucket
-        if: env.HAS_TOKEN == 'true'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        env:
-          VERSION: ${{ needs.release.outputs.version }}
-        with:
-          github-token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
-          script: |
-            const fs = require('fs');
-            const owner = 'devlanes-run';
-            const repo = 'scoop-bucket';
-            const path = 'bucket/devlanes.json';
-            const version = process.env.VERSION;
-            if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`not a stable version: ${version}`);
-            const content = fs.readFileSync('scoop/devlanes.json');
-
-            let current;
-            try {
-              current = (await github.rest.repos.getContent({ owner, repo, path, ref: 'main' })).data;
-            } catch (error) {
-              if (error.status !== 404) throw error;
-            }
-            if (current) {
-              const old = Buffer.from(current.content, 'base64');
-              if (old.equals(content)) return;
-              // A rerun of an older tag must not replace the manifest of a newer release.
-              const oldVersion = JSON.parse(old.toString('utf8')).version;
-              if (/^\d+\.\d+\.\d+$/.test(oldVersion ?? '')) {
-                const before = oldVersion.split('.').map(Number);
-                const after = version.split('.').map(Number);
-                const first = before.findIndex((part, index) => part !== after[index]);
-                if (first !== -1 && before[first] > after[first]) {
-                  core.notice(`Kept the newer bucket version ${oldVersion}`);
-                  return;
-                }
-              }
-            }
-
-            await github.rest.repos.createOrUpdateFileContents({
-              owner, repo, path, branch: 'main',
-              message: `devlanes ${version}`,
-              content: content.toString('base64'),
-              ...(current ? { sha: current.sha } : {}),
-            });
-            core.notice(`Published devlanes ${version} to ${owner}/${repo}`);
-
-  # Opens the pull request for devlanes-run.devlanes in microsoft/winget-pkgs from the
-  # rendered manifests (komac update would rebuild them from the archive and drop the
-  # three nested portables). Skipped until the WINGET_TOKEN secret exists.
-  winget:
-    needs: [release, publish]
-    if: needs.release.outputs.prerelease == 'false'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      HAS_TOKEN: ${{ secrets.WINGET_TOKEN != '' }}
-    steps:
-      - name: Skip without a token
-        if: env.HAS_TOKEN != 'true'
-        run: echo "::notice::WINGET_TOKEN is not set; no winget-pkgs pull request was opened"
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: env.HAS_TOKEN == 'true'
-        with:
-          name: winget
-          path: winget
-      - name: Submit with komac
-        if: env.HAS_TOKEN == 'true'
-        env:
-          # A classic token with public_repo; komac pushes to its owner's fork of winget-pkgs.
-          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
-          KOMAC_VERSION: 2.17.1
-          KOMAC_SHA256: e694e79cd451afabf47bead66ed34586fef4814f7b94e4b61a098f419978d5d7
-        run: |
-          set -euo pipefail
-          archive=$RUNNER_TEMP/komac.tar.gz
-          curl -fsSL --retry 3 -o "$archive" \
-            "https://github.com/russellbanks/Komac/releases/download/v$KOMAC_VERSION/komac-$KOMAC_VERSION-x86_64-unknown-linux-gnu.tar.gz"
-          echo "$KOMAC_SHA256  $archive" | sha256sum -c -
-          tar -xzf "$archive" -C "$RUNNER_TEMP" komac
-          "$RUNNER_TEMP/komac" submit winget --yes
 
   npm:
     needs: [release, publish]

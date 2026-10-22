@@ -127,7 +127,7 @@ async fn large_sync_reconnects_send_only_differences() {
         let mut context = cx(&main);
         if let Some(env) = context.env.as_mut() {
             env.insert(
-                "HOME".into(),
+                devlanes_core::paths::HOME_VAR.into(),
                 tmp.path.join("box-user").display().to_string(),
             );
         }

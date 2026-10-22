@@ -26,7 +26,8 @@ pub fn enable_escapes() -> bool {
 
 /// Turns on VT processing for stdout and stderr where they are a console, so
 /// colors render in the classic console host too; false when a console refuses
-/// it (hosts older than Windows 10). The mode stays on at exit, as shells leave it.
+/// it (the legacy console, "Use legacy console" in a console window's
+/// properties). The mode stays on at exit, as shells leave it.
 #[cfg(windows)]
 pub fn enable_escapes() -> bool {
     use devlanes_sys::windows::console;

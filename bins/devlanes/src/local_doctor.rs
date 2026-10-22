@@ -68,16 +68,13 @@ async fn annotate_excluded_ports(facts: &mut Value, user: &devlanes_config::User
 #[cfg(unix)]
 async fn annotate_excluded_ports(_facts: &mut Value, _user: &devlanes_config::UserConfig) {}
 
-/// Adds `terminal: {elevated, elevation_allowed, job, conpty}` about the shell
+/// Adds `terminal: {elevated, elevation_allowed, job}` about the shell
 /// running this command: an elevated shell cannot start the daemon unless
 /// `DEVLANES_ALLOW_ELEVATED=1` allows it, and a job that kills its processes
-/// when the terminal closes takes a daemon started inside it along. `conpty` is
-/// `bundled` or `system`: which ConPTY units get, judged from this executable,
-/// which is also the daemon's.
+/// when the terminal closes takes a daemon started inside it along.
 #[cfg(windows)]
 pub fn annotate_terminal(data: &mut Value) {
     use devlanes_sys::windows::{
-        conpty,
         process::job_of_self,
         token::{elevated, elevation_refused},
     };
@@ -85,11 +82,6 @@ pub fn annotate_terminal(data: &mut Value) {
         .ok()
         .flatten()
         .map(|job| json!({"kill_on_close": job.kill_on_close, "breakaway_ok": job.breakaway_ok}));
-    let conpty = if conpty::bundled_in_use() {
-        "bundled"
-    } else {
-        "system"
-    };
     let elevated = elevated().ok();
     // Elevated but not refused means the override is set.
     let allowed = elevated == Some(true) && elevation_refused().ok() == Some(false);
@@ -97,7 +89,6 @@ pub fn annotate_terminal(data: &mut Value) {
         "elevated": elevated,
         "elevation_allowed": allowed,
         "job": job,
-        "conpty": conpty,
     });
 }
 
