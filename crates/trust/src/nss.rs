@@ -288,7 +288,10 @@ impl TrustStore for NssStore {
                 TrustStatus::Installed => {}
                 // Missing is actionable (`devlanes certs trust` fixes it), so it wins over Unknown.
                 TrustStatus::Missing => return Ok(TrustStatus::Missing),
-                unknown @ TrustStatus::Unknown { .. } => combined = unknown,
+                // NSS databases report no distrust of their own; kept like Unknown.
+                other @ (TrustStatus::Unknown { .. } | TrustStatus::Distrusted { .. }) => {
+                    combined = other;
+                }
             }
         }
         Ok(combined)
