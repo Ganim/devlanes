@@ -14,12 +14,15 @@ use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle};
 use std::ptr;
 use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 
-use windows_sys::Win32::Foundation::{ERROR_OPERATION_ABORTED, GetLastError, HANDLE, SetLastError};
+use windows_sys::Win32::Foundation::{
+    ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, GetLastError, HANDLE, SetLastError,
+};
 use windows_sys::Win32::System::Console::{
     self as win, CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT,
     CTRL_SHUTDOWN_EVENT, GetConsoleMode, GetConsoleWindow, ReadConsoleW, SetConsoleCtrlHandler,
     SetConsoleMode, WriteConsoleW,
 };
+use windows_sys::Win32::System::IO::CancelIoEx;
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, IsWindowVisible};
 use windows_sys::core::BOOL;
 
@@ -109,6 +112,23 @@ pub fn read_input(handle: impl AsHandle, buf: &mut [u16]) -> io::Result<usize> {
     Ok(read as usize)
 }
 
+/// Cancels the reads and writes in progress on `handle` from any thread, so a
+/// [`read_input`] waiting on a console nobody types into returns with an error.
+/// Returns whether one was in progress; a read that starts after this call is
+/// not affected, so a caller racing the reader repeats it until the reader is done.
+pub fn cancel_io(handle: impl AsHandle) -> io::Result<bool> {
+    // SAFETY: the handle is borrowed for the call; a null OVERLAPPED cancels every
+    // request on it, synchronous ones of other threads included.
+    if unsafe { CancelIoEx(handle.as_handle().as_raw_handle(), ptr::null()) } == 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_NOT_FOUND.cast_signed()) {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    Ok(true)
+}
+
 /// Writes `text` to a console output handle as UTF-16, so it shows correctly
 /// whatever the console code page is.
 pub fn write_output(handle: impl AsHandle, text: &str) -> io::Result<()> {
@@ -177,7 +197,9 @@ fn is_classic(class: &[u16], visible: bool) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keyboard {
     /// The console has a window or a pseudoconsole (conhost, Windows Terminal,
-    /// VS Code, an SSH session, winpty) that passes keys on.
+    /// VS Code, an SSH session, winpty) that passes keys on. The window may be
+    /// hidden: pseudoconsoles, winpty and ConEmu pass keys to hidden windows, so a
+    /// hidden one can also be a console nobody types into, and prompts bound their reads.
     Console,
     /// No console, or one without a window, as `CREATE_NO_WINDOW` gives the
     /// commands agents and editors run: a read would wait forever.
@@ -446,6 +468,89 @@ mod tests {
         assert!(!mintty_stream(file.as_handle()));
         // Whatever runs the tests, the check must not fail.
         let _ = keyboard();
+    }
+
+    /// Set in the child of [`a_console_read_nobody_answers_can_be_cancelled`].
+    const CANCEL_CHILD: &str = "DEVLANES_TEST_CONSOLE_CANCEL_CHILD";
+
+    /// Not a test of its own: this binary in a pseudo console nobody types into,
+    /// when started with [`CANCEL_CHILD`]. Exits 0 when [`cancel_io`] on another
+    /// thread ended its console read, 1 when the read returned, 2 without a console.
+    #[test]
+    fn cancel_child_entry() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        if std::env::var_os(CANCEL_CHILD).is_none() {
+            return;
+        }
+        let Ok(input) = open_input() else {
+            std::process::exit(2);
+        };
+        let done = AtomicBool::new(false);
+        let read = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                while !done.load(Ordering::SeqCst) {
+                    let _ = cancel_io(&input);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            });
+            let mut buffer = [0_u16; 64];
+            let read = read_input(&input, &mut buffer);
+            done.store(true, Ordering::SeqCst);
+            read
+        });
+        std::process::exit(if read.is_err() { 0 } else { 1 });
+    }
+
+    /// A console read waits for a line that never comes in a console nobody types
+    /// into (here a pseudo console whose input is never written), until another
+    /// thread cancels it.
+    #[test]
+    fn a_console_read_nobody_answers_can_be_cancelled() -> io::Result<()> {
+        use std::collections::BTreeMap;
+        use std::time::{Duration, Instant};
+
+        use crate::windows::conpty::PseudoConsole;
+        use crate::windows::spawn::{Spawn, Stdio, spawn};
+
+        // The write end stays open and unwritten, so the console's input never ends.
+        let (input_read, _input_write) = io::pipe()?;
+        let (mut output_read, output_write) = io::pipe()?;
+        let console =
+            PseudoConsole::create(80, 25, input_read.as_handle(), output_write.as_handle())?;
+        drop((input_read, output_write));
+        // Ends once the console closes; an unread output pipe would stall the console.
+        let drain = std::thread::spawn(move || io::copy(&mut output_read, &mut io::sink()));
+        let exe = std::env::current_exe()?;
+        let command_line = format!(
+            "\"{}\" --exact windows::console::tests::cancel_child_entry --nocapture",
+            exe.display()
+        );
+        let mut environment: BTreeMap<String, String> = std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .collect();
+        environment.insert(CANCEL_CHILD.into(), "1".into());
+        let child = spawn(&Spawn {
+            program: &exe,
+            command_line: std::ffi::OsStr::new(&command_line),
+            environment: Some(&environment),
+            cwd: &std::env::temp_dir(),
+            stdout: Stdio::Null,
+            stderr: Stdio::Null,
+            job: None,
+            console: Some(&console),
+        })?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while child.exit_code()?.is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let code = child.exit_code()?;
+        // Closing the console also ends a child still waiting.
+        drop(console);
+        let _ = drain.join();
+        assert_eq!(code, Some(0), "the child's read was not cancelled");
+        Ok(())
     }
 
     #[test]

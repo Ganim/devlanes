@@ -171,6 +171,48 @@ mod tests {
         Ok(())
     }
 
+    /// The console host passes a clear of the screen and its scrollback (`cls`
+    /// here; `Clear-Host` and Git's `clear` too) on as `ESC[3J`, which the
+    /// daemon's screen model takes as the end of a rendered unit's history.
+    /// Its own `ESC[2J` at startup comes without one.
+    #[test]
+    fn a_clear_screen_reaches_the_terminal_as_a_scrollback_clear() -> io::Result<()> {
+        let (input_read, _input_write) = io::pipe()?;
+        let (mut output_read, output_write) = io::pipe()?;
+        let console =
+            PseudoConsole::create(100, 30, input_read.as_handle(), output_write.as_handle())?;
+        drop((input_read, output_write));
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        let cmd = Path::new(&root).join(r"System32\cmd.exe");
+        let child = spawn(&Spawn {
+            program: &cmd,
+            command_line: std::ffi::OsStr::new(r#"cmd.exe /d /q /c "echo one & cls & echo two""#),
+            environment: None,
+            cwd: &std::env::temp_dir(),
+            stdout: Stdio::Null,
+            stderr: Stdio::Null,
+            job: None,
+            console: Some(&console),
+        })?;
+        let reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let _ = output_read.read_to_end(&mut output);
+            String::from_utf8_lossy(&output).into_owned()
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while child.exit_code()?.is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(console);
+        let output = reader
+            .join()
+            .map_err(|_| io::Error::other("reader panicked"))?;
+        let clear = output.find("\x1b[3J");
+        let (one, two) = (output.find("one"), output.find("two"));
+        assert!(one < clear && clear < two && one.is_some(), "{output:?}");
+        Ok(())
+    }
+
     /// Sizes outside what a console can hold are refused before any call.
     #[test]
     fn sizes_are_checked() {

@@ -45,8 +45,6 @@ use crate::{
 
 /// `connect --background` returns once connected, failed, or after this long.
 const CONNECT_WAIT: Duration = Duration::from_secs(150);
-/// Unanswered ssh prompts are cancelled after this long.
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long a local spawn waits for box mirrors to release its ports.
 const RELEASE_WAIT: Duration = Duration::from_secs(3);
 
@@ -169,7 +167,8 @@ impl RemotePrompter for HostPrompter {
             tokio::select! {
                 reply = answer => reply.ok().flatten(),
                 () = disconnected.cancelled() => None,
-                () = tokio::time::sleep(PROMPT_TIMEOUT) => None,
+                // Unanswered ssh prompts are cancelled.
+                () = tokio::time::sleep(wire::PROMPT_TIMEOUT) => None,
             }
         } else {
             None

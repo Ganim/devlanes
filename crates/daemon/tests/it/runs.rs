@@ -106,9 +106,20 @@ fn real_runner() -> devlanes_runner_windows::WindowsRunner {
     devlanes_runner_windows::WindowsRunner::default()
 }
 
+/// How soon after the `run` answer the task's first line must be on screen.
+#[cfg(unix)]
+const FIRST_OUTPUT: Duration = Duration::from_secs(1);
+
+/// How soon after the `run` answer the task's first line must be on screen.
+/// Git's `sh.exe` is a launcher that starts the MSYS2 shell, two process starts
+/// that took up to 0.9 s on a loaded machine. Output that waited for the exit
+/// would still come only after the 5 s sleep.
+#[cfg(windows)]
+const FIRST_OUTPUT: Duration = Duration::from_secs(2);
+
 #[tokio::test(flavor = "multi_thread")]
 /// With the real runner, a pipe task's first line is on the attach screen within
-/// a second of the `run` answer.
+/// [`FIRST_OUTPUT`] of the `run` answer.
 async fn a_pipe_task_shows_its_output_right_away() {
     tokio::time::timeout(LIMIT, async {
         let tmp = temp();
@@ -136,6 +147,13 @@ async fn a_pipe_task_shows_its_output_right_away() {
             params,
             context: cx(&main),
         };
+        // The first request for a cwd discovers its project through several `git`
+        // processes, which take seconds on a loaded Windows machine. The bounds
+        // below are about the run, so that happens before the clock starts.
+        engine
+            .handle(request(0, Method::Status, json!({})), session.clone())
+            .await
+            .expect("status");
         let asked = std::time::Instant::now();
         engine
             .handle(
@@ -162,7 +180,7 @@ async fn a_pipe_task_shows_its_output_right_away() {
             .await
             .expect("attach");
         let mut screen = String::new();
-        let shown = tokio::time::timeout(Duration::from_secs(1), async {
+        let shown = tokio::time::timeout(FIRST_OUTPUT, async {
             while let Some(frame) = frames.recv().await {
                 if let Frame::Bytes { data, .. } = frame {
                     screen.push_str(&String::from_utf8_lossy(&data));
@@ -175,7 +193,7 @@ async fn a_pipe_task_shows_its_output_right_away() {
         .await;
         assert!(
             shown.is_ok(),
-            "no output within 1 s of the answer: {screen:?}"
+            "no output within {FIRST_OUTPUT:?} of the answer: {screen:?}"
         );
         assert!(
             answered < Duration::from_secs(2),

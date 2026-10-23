@@ -19,8 +19,9 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # Windows compiles kache from git on a cold cache (see the kache action).
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,7 +41,14 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: nextest
+      # Built once here and passed as DEVLANES_FAKE_TOOL, so no test process runs cargo.
+      - run: cargo build -p devlanes-testing --bin fake-tool --locked
       - run: cargo nextest run --workspace --all-features --locked
+        env:
+          # GitHub's Windows runners only run as administrator, which the daemon
+          # refuses outside tests. Ignored on other OSes.
+          DEVLANES_ALLOW_ELEVATED: "1"
+          DEVLANES_FAKE_TOOL: ${{ github.workspace }}/target/debug/fake-tool${{ runner.os == 'Windows' && '.exe' || '' }}
       - name: kache stats
         if: ${{ !cancelled() }}
         run: |

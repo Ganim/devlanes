@@ -55,6 +55,18 @@ pub fn accept_ctrl_c() -> io::Result<()> {
     Ok(())
 }
 
+/// Sets the inherited "ignore Ctrl-C" flag that [`accept_ctrl_c`] clears, so
+/// processes started afterwards begin as under Git Bash. For tests of programs
+/// that must clear it themselves.
+pub fn ignore_ctrl_c() -> io::Result<()> {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+    // SAFETY: a null handler with TRUE only sets the process's ignore flag.
+    if unsafe { SetConsoleCtrlHandler(None, 1) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Runs `spawn` while this process's standard handles are not inheritable, then
 /// restores them.
 ///

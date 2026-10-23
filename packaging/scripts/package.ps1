@@ -51,8 +51,14 @@ foreach ($file in $files) {
 
 $epoch = $env:SOURCE_DATE_EPOCH
 if (-not $epoch) {
-    $epoch = & git -C $root log -1 --format=%ct 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $epoch) { $epoch = '0' }
+    # Outside a Git checkout, or without git, the time falls back to the 1980 floor.
+    $epoch = '0'
+    if (Get-Command git -CommandType Application -ErrorAction SilentlyContinue) {
+        # Under Stop, Windows PowerShell turns git's stderr (not a repository) into a
+        # terminating error, so the call gets a scope of its own with Continue.
+        $commit = & { $ErrorActionPreference = 'Continue'; & git -C $root log -1 --format=%ct 2>$null }
+        if ("$commit" -match '^[0-9]+$') { $epoch = "$commit" }
+    }
 }
 # Zip stores local DOS times from 1980 to 2107 with two-second steps; .NET writes the
 # clock time of the offset it is given, so a UTC offset keeps the host's zone out.

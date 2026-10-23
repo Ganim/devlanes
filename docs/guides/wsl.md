@@ -60,7 +60,7 @@ tls:
 
 ## Opening URLs and terminals
 
-`devlanes url open` and the TUI's `o` open the Windows default browser: through `wslview` when wslu is installed, else Windows' `rundll32.exe url.dll,FileProtocolHandler`, so neither needs a Linux browser.
+`devlanes url open` and the TUI's `o` open the Windows default browser through Windows' `rundll32.exe url.dll,FileProtocolHandler`, so neither needs a Linux browser. Without interop, or when no mounted Windows drive holds `System32`, they run `xdg-open`.
 
 `terminal: windows-terminal` makes the TUI's `O` open a Windows Terminal tab that runs `wsl.exe -d <distro> -u <user> --cd <worktree> --exec devlanes attach <unit>` in the same distro, as the same user. When `terminal` is unset and the TUI runs in Windows Terminal, it picks Windows Terminal by itself, because Windows Terminal adds `WT_SESSION` to `WSLENV` and the variable reaches the distro. The same variable turns on the tab progress bar. A shell started another way (VS Code's terminal, `wsl.exe` from another console) has no `WT_SESSION`; set `terminal: windows-terminal` and `terminal.progress: always` in the user config there. Linux terminals installed in the distro also work through WSLg.
 

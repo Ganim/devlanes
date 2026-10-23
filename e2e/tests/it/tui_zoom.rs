@@ -253,6 +253,25 @@ impl Tui {
             thread::sleep(Duration::from_millis(100));
         }
     }
+
+    /// Says which line the pane shows more than once or out of order, with
+    /// the screen; the service numbers its lines one by one.
+    #[cfg(windows)]
+    fn repeated(&self, stage: &str, prefix: char) -> Option<String> {
+        let (_, rows) = self.pane()?;
+        let numbers: Vec<u32> = rows
+            .iter()
+            .filter(|row| starts_line(row, prefix))
+            .filter_map(|row| row.get(1..6)?.parse().ok())
+            .collect();
+        let pair = numbers.windows(2).find(|pair| pair[1] != pair[0] + 1)?;
+        Some(format!(
+            "{stage}: line {} follows line {}\n{}",
+            pair[1],
+            pair[0],
+            self.dump()
+        ))
+    }
 }
 
 impl Drop for Tui {
@@ -379,6 +398,43 @@ fn tui_pane_fills_at_every_size_for_a_pty_unit() -> Result<()> {
 #[test]
 fn tui_pane_fills_at_every_size_for_a_pipe_unit() -> Result<()> {
     pane_fills_at_every_size(false)
+}
+
+/// Zooming a PTY unit's pane in and out repeatedly changes the pseudo
+/// console's height each time; its repaints must never leave a blank gap or
+/// a line shown twice.
+#[cfg(windows)]
+#[test]
+fn tui_pane_survives_repeated_zooms_of_a_pty_unit() -> Result<()> {
+    let yaml = format!(
+        "project: fixture-zoom\nservices:\n{}",
+        service("ttyloop", 'P', true)
+    );
+    let lab = Lab::with_config(&yaml, BUDGET)?;
+    let started = lab.json(lab.repo(), &["start"])?;
+    assert_eq!(started["ready"], true, "{started}");
+    let mut tui = Tui::open(&lab)?;
+    tui.wait_for_text("ttyloop")?;
+    select(&mut tui, "ttyloop", 'P')?;
+    let (split, _) = tui
+        .pane()
+        .ok_or_else(|| Error::Unexpected(format!("no pane\n{}", tui.dump())))?;
+    let mut problems = Vec::new();
+    for round in 1..=3 {
+        tui.keys(b"z")?;
+        let stage = format!("zoom {round}");
+        problems.extend(tui.unfilled(&stage, 'P', |width| width == ZOOMED));
+        problems.extend(tui.repeated(&stage, 'P'));
+        tui.keys(b"z")?;
+        let stage = format!("unzoom {round}");
+        problems.extend(tui.unfilled(&stage, 'P', |width| width == split));
+        problems.extend(tui.repeated(&stage, 'P'));
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Unexpected(problems.join("\n\n")))
+    }
 }
 
 /// `devlanes attach` shows a PTY unit's earlier output re-wrapped at the

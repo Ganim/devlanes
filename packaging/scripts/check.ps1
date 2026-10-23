@@ -13,7 +13,8 @@ DEVLANES_HOME (and ports) under the temporary directory, so it never meets the
 user's daemon.
 
 install.ps1 runs in a child process of the same PowerShell (powershell.exe or pwsh)
-with DEVLANES_NO_MODIFY_PATH=1, and the check fails if the user PATH changed.
+with DEVLANES_NO_MODIFY_PATH=1, and the check fails if the user PATH changed. Every
+child process has a timeout, after which it is killed with its own children.
 
 .EXAMPLE
 pwsh packaging/scripts/check.ps1 -BinDir target/release
@@ -42,19 +43,68 @@ function Assert-True {
     if (-not $Condition) { throw "check.ps1: $What" }
 }
 
-function Invoke-Child {
-    <# Runs PowerShell code in a child process of this PowerShell; returns exit code and output. #>
-    param([string]$Command, [hashtable]$Environment)
+function ConvertTo-ProcessArgument {
+    <# Quotes one argument for a Windows command line (CommandLineToArgvW rules). #>
+    param([AllowEmptyString()][string]$Value)
+    if ($Value -and $Value -notmatch '[\s"]') { return $Value }
+    # Backslashes are doubled only before a quote, including the closing one.
+    $escaped = ($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
+function Invoke-Process {
+    <#
+    Runs a program and returns its exit code and output (stdout, then stderr). After
+    TimeoutSeconds its process tree is killed and the call throws.
+    #>
+    param([string]$FilePath, [string[]]$Arguments, [int]$TimeoutSeconds)
     # Windows PowerShell turns a native command's stderr into a terminating error under Stop.
     $ErrorActionPreference = 'Continue'
+    $start = New-Object Diagnostics.ProcessStartInfo $FilePath
+    $start.Arguments = @($Arguments | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' '
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $process.StandardInput.Close()
+        # Both pipes drain in the background, so a child that fills one never blocks.
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $exited = $process.WaitForExit($TimeoutSeconds * 1000)
+        if (-not $exited) {
+            # Windows PowerShell's Process.Kill has no tree option.
+            & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Null
+            $process.WaitForExit(10000) | Out-Null
+        }
+        # A grandchild that inherited the pipes (a daemon) can hold them open after exit.
+        [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr), 10000) | Out-Null
+        $output = (@($stdout, $stderr) | Where-Object { $_.IsCompleted } | ForEach-Object { $_.Result }) -join ''
+        if (-not $exited) {
+            throw "check.ps1: killed after $TimeoutSeconds s: $FilePath $($start.Arguments)`n$output"
+        }
+        return @{ Code = $process.ExitCode; Output = $output }
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Invoke-Child {
+    <# Runs PowerShell code in a child process of this PowerShell; returns exit code and output. #>
+    param([string]$Command, [hashtable]$Environment, [int]$TimeoutSeconds = 300)
     $saved = @{}
     foreach ($name in $Environment.Keys) {
         $saved[$name] = [Environment]::GetEnvironmentVariable($name)
         [Environment]::SetEnvironmentVariable($name, $Environment[$name])
     }
     try {
-        $output = & $shell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $Command 2>&1 | Out-String
-        return @{ Code = $LASTEXITCODE; Output = $output }
+        # Encoded, so the command needs no quoting for the command line. Text output,
+        # else an encoded command writes its host output and errors as CLIXML.
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Command))
+        $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-OutputFormat', 'Text', '-EncodedCommand', $encoded)
+        return Invoke-Process $shell $arguments $TimeoutSeconds
     } finally {
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
     }
@@ -62,10 +112,8 @@ function Invoke-Child {
 
 function Invoke-DevlanesExe {
     <# Runs the installed devlanes.exe; returns its exit code and output. #>
-    param([string]$Exe, [string[]]$Arguments)
-    $ErrorActionPreference = 'Continue'
-    $output = & $Exe @Arguments 2>&1 | Out-String
-    return @{ Code = $LASTEXITCODE; Output = $output }
+    param([string]$Exe, [string[]]$Arguments, [int]$TimeoutSeconds = 60)
+    return Invoke-Process $Exe $Arguments $TimeoutSeconds
 }
 
 function Get-UserPath {
@@ -79,13 +127,13 @@ function Get-UserPath {
 }
 
 # install.ps1 runs its installer when loaded, so only its function definitions are
-# taken from the parse tree.
+# taken from the parse tree (they sit inside the script block that holds its body).
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($installScript, [ref]$tokens, [ref]$errors)
 Assert-Equal $errors.Count 0 'install.ps1 parse errors'
 $isFunction = { param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }
-foreach ($definition in $ast.FindAll($isFunction, $false)) {
+foreach ($definition in $ast.FindAll($isFunction, $true)) {
     . ([ScriptBlock]::Create($definition.Extent.Text))
 }
 
@@ -115,9 +163,19 @@ foreach ($case in @(@('x86_64-pc-windows-msvc', '1.2.4'), @('aarch64-pc-windows-
 $pathBefore = Get-UserPath
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
+    # A devlanes.exe ahead of the install directory is reported; one behind it is not.
+    $shadowing = Join-Path $work 'shadowing'
+    $installDir = Join-Path $work 'install-dir'
+    New-Item -ItemType Directory -Path $shadowing, $installDir | Out-Null
+    Set-Content -LiteralPath (Join-Path $shadowing 'devlanes.cmd') -Value '@exit /b 0'
+    # The extension comes from PATHEXT, usually upper case.
+    $shadow = Find-DevlanesShadow "C:\acme<>;$shadowing\;$installDir" $installDir
+    Assert-True ($shadow -ieq "$shadowing\devlanes.cmd") "devlanes before the install directory: $shadow"
+    Assert-Equal (Find-DevlanesShadow "$installDir;$shadowing" $installDir) $null 'devlanes after the install directory'
+
     if ($BinDir) {
         $BinDir = (Resolve-Path -LiteralPath $BinDir).Path
-        $version = ((& (Join-Path $BinDir 'devlanes.exe') --version) -split ' ')[1]
+        $version = ((Invoke-DevlanesExe (Join-Path $BinDir 'devlanes.exe') @('--version')).Output.Trim() -split ' ')[1]
     } else {
         $version = '0.0.0-check'
         $BinDir = Join-Path $work 'bin'
@@ -132,8 +190,9 @@ try {
     # The same inputs must give the same bytes.
     $hashes = foreach ($run in 1, 2) {
         $out = Join-Path $work "dist$run"
-        & $shell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $packageScript -Version $version -Target $target -OutDir $out -BinDir $BinDir | Out-Null
-        Assert-Equal $LASTEXITCODE 0 'package.ps1 exit code'
+        $package = Invoke-Process $shell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $packageScript,
+            '-Version', $version, '-Target', $target, '-OutDir', $out, '-BinDir', $BinDir) 300
+        Assert-Equal $package.Code 0 "package.ps1 exit code: $($package.Output)"
         (Get-FileHash -LiteralPath (Join-Path $out "$name.zip") -Algorithm SHA256).Hash.ToLowerInvariant()
     }
     Assert-Equal $hashes[1] $hashes[0] 'archive hash of a second run'
@@ -162,9 +221,15 @@ try {
     Assert-Equal ($present -join ' ') (($shipped | Sort-Object) -join ' ') 'installed files'
     Assert-True ($run.Output -match [Regex]::Escape("Installed devlanes $version to $installed")) "install message: $($run.Output)"
 
-    # `irm | iex` runs the text in the caller's session; a pinned version this time.
+    # `irm | iex` runs the text in the caller's session, which must keep its own
+    # variables and gain no functions or variables; a pinned version this time.
     $environment.DEVLANES_VERSION = "v$version"
-    $run = Invoke-Child "Get-Content -Raw -LiteralPath '$installScript' | Invoke-Expression" $environment
+    $before = '$Version = $InstallDir = $NoModifyPath = ''mine''
+$names = @(Get-Variable | ForEach-Object Name) + @(Get-ChildItem Function: | ForEach-Object Name)'
+    $after = '$left = @(Get-Variable | ForEach-Object Name) + @(Get-ChildItem Function: | ForEach-Object Name) | Where-Object { $names -notcontains $_ -and $_ -ne ''names'' }
+if ($left) { throw "left in the session: $($left -join '', '')" }
+if (@($Version, $InstallDir, $NoModifyPath) -ne ''mine'') { throw ''the session lost its own $Version, $InstallDir or $NoModifyPath'' }'
+    $run = Invoke-Child "$before`nGet-Content -Raw -LiteralPath '$installScript' | Invoke-Expression`n$after" $environment
     Assert-Equal $run.Code 0 "install.ps1 through Invoke-Expression: $($run.Output)"
     Assert-True (@(Get-ChildItem -LiteralPath $installed -Filter '*.old-*').Count -eq 0) 'unlocked old files are deleted'
 

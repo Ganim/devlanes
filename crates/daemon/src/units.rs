@@ -427,6 +427,14 @@ impl UnitHost {
         let inner = self.inner.clone();
         // Replaying recent output is CPU work proportional to it; keep it off the executor.
         let snapshot = tokio::task::spawn_blocking(move || match inner.screen.lock() {
+            Ok(screen) if screen.rendered() => {
+                let frame = screen.frame(size);
+                let live = inner.live.subscribe();
+                // Rendered viewers only ever get redraws, so the replay may run
+                // after the lock is released.
+                drop(screen);
+                (frame.render(None).0, live)
+            }
             Ok(screen) => {
                 let snapshot = screen.snapshot(size);
                 tracing::debug!(
@@ -447,13 +455,35 @@ impl UnitHost {
     }
 
     /// Whether the output renders the unit's terminal (see
-    /// [`devlanes_core::Unit::renders_screen`]); viewers then get redraws.
+    /// [`devlanes_core::Unit::renders_screen`]); viewers then get redraws
+    /// from [`Self::render`].
     pub fn renders_screen(&self) -> bool {
         self.inner.unit.renders_screen()
     }
 
-    /// Fresh redraw at `size` for a viewer that lagged behind the live channel,
-    /// or that watches a unit whose output renders its terminal.
+    /// Redraw of a rendered unit for a viewer of `size` (the unit's own size
+    /// when `None`) that shows `shown`, the screen the last redraw left (a
+    /// whole screen when `None`), plus the screen this one leaves. Only the
+    /// copy of the model holds the screen lock, so the unit's output is not
+    /// held up by the replay.
+    pub async fn render(
+        &self,
+        size: Option<TerminalSize>,
+        shown: Option<vt100::Screen>,
+    ) -> (Bytes, Option<vt100::Screen>) {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let frame = inner.screen.lock().map(|screen| screen.frame(size));
+            match frame {
+                Ok(frame) => frame.render(shown.as_ref()),
+                Err(_) => (Bytes::new(), None),
+            }
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    /// Fresh redraw at `size` for a viewer that lagged behind the live channel.
     pub async fn redraw(&self, size: Option<TerminalSize>) -> Bytes {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
@@ -670,6 +700,9 @@ impl Inner {
         let Ok(mut screen) = self.screen.lock() else {
             return;
         };
+        // Viewers of rendered output get nothing but redraws anyway (see
+        // attach's pump), so they need no snapshot and the replay is spared.
+        let redraw = redraw && !screen.rendered();
         for bytes in batch {
             screen.process(bytes);
             if !redraw {

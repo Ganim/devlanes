@@ -835,6 +835,7 @@ pub struct UnitPeak {
 /// never daemon requests, environments or secrets.
 pub mod remote {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use serde::{Deserialize, Serialize};
 
@@ -842,6 +843,9 @@ pub mod remote {
     /// `{host, prompt, kind: secret|confirm|notify, stream_id}`. The CLI answers with
     /// one binary frame on `stream_id`; an empty frame cancels.
     pub const PROMPT_EVENT: &str = "remote.prompt";
+    /// How long the daemon waits for the answer to a [`PROMPT_EVENT`] before it
+    /// cancels the prompt; the CLI stops reading the console after as long.
+    pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
     /// `{host, state, ...}` whenever a connection changes state.
     pub const STATE_EVENT: &str = "remote.state";
     /// `{host, code, ...}` for mirroring problems such as a skipped lane or a busy port.

@@ -252,9 +252,6 @@ impl Inner {
 }
 
 /// Snapshot, then live bytes until exit or disconnect; redraws after lag.
-/// Output that renders the unit's terminal is never forwarded: its cursor
-/// moves only fit a grid of the unit's size, while the snapshot showed the
-/// screen at the viewer's, so every batch of it becomes a redraw instead.
 async fn pump(
     engine: &Inner,
     session: &Session,
@@ -263,26 +260,12 @@ async fn pump(
     snapshot: Bytes,
     mut live: broadcast::Receiver<Bytes>,
 ) {
-    use broadcast::error::{RecvError, TryRecvError};
     if session.bytes(stream_id, snapshot).await.is_err() {
         return;
     }
-    let rendered = host.renders_screen();
-    // The viewer's latest size, which a resize may have changed since the attach.
-    let size = || {
-        lock(&engine.attach)
-            .streams
-            .get(&(session.id(), stream_id))
-            .and_then(|stream| stream.size)
-    };
-    // Skips what is already queued; one redraw covers it. True when anything was.
-    let skip_queued = |live: &mut broadcast::Receiver<Bytes>| {
-        let mut skipped = false;
-        while let Ok(_) | Err(TryRecvError::Lagged(_)) = live.try_recv() {
-            skipped = true;
-        }
-        skipped
-    };
+    if host.renders_screen() {
+        return pump_rendered(engine, session, stream_id, host, live).await;
+    }
     let disconnected = session.disconnected();
     loop {
         let next = tokio::select! {
@@ -291,41 +274,105 @@ async fn pump(
             received = live.recv() => Some(received),
         };
         match next {
-            Some(Ok(bytes)) if !rendered => {
+            Some(Ok(bytes)) => {
                 if session.bytes(stream_id, bytes).await.is_err() {
                     return;
                 }
             }
-            Some(Ok(_) | Err(RecvError::Lagged(_))) => {
-                skip_queued(&mut live);
+            Some(Err(broadcast::error::RecvError::Lagged(_))) => {
+                // The viewer's latest size, which a resize may have changed since the attach.
+                let size = lock(&engine.attach)
+                    .streams
+                    .get(&(session.id(), stream_id))
+                    .and_then(|stream| stream.size);
                 if session
-                    .bytes(stream_id, host.redraw(size()).await)
+                    .bytes(stream_id, host.redraw(size).await)
                     .await
                     .is_err()
                 {
                     return;
                 }
             }
-            Some(Err(RecvError::Closed)) | None => {
-                if rendered {
-                    if skip_queued(&mut live)
-                        && session
-                            .bytes(stream_id, host.redraw(size()).await)
-                            .await
-                            .is_err()
-                    {
+            Some(Err(broadcast::error::RecvError::Closed)) | None => {
+                while let Ok(bytes) = live.try_recv() {
+                    if session.bytes(stream_id, bytes).await.is_err() {
                         return;
-                    }
-                } else {
-                    while let Ok(bytes) = live.try_recv() {
-                        if session.bytes(stream_id, bytes).await.is_err() {
-                            return;
-                        }
                     }
                 }
                 let _ = session.bytes(stream_id, Bytes::new()).await;
                 return;
             }
         }
+    }
+}
+
+/// Shortest time between two redraws for one viewer of a rendered unit.
+const REDRAW_GAP: std::time::Duration = std::time::Duration::from_millis(30);
+
+/// Redraws until exit or disconnect, for a unit whose output renders its
+/// terminal. That output is never forwarded: its cursor moves only fit a grid
+/// of the unit's size, while the viewer shows the screen at its own. Output
+/// instead brings a redraw, at most one per [`REDRAW_GAP`]; output arriving in
+/// between stays queued and brings the next one, so the last state always
+/// reaches the viewer. Each redraw changes only the rows that differ from the
+/// one before.
+async fn pump_rendered(
+    engine: &Inner,
+    session: &Session,
+    stream_id: u64,
+    host: &UnitHost,
+    mut live: broadcast::Receiver<Bytes>,
+) {
+    use broadcast::error::{RecvError, TryRecvError};
+    // Skips what is already queued; one redraw covers it. True when anything was.
+    let skip_queued = |live: &mut broadcast::Receiver<Bytes>| {
+        let mut skipped = false;
+        while let Ok(_) | Err(TryRecvError::Lagged(_)) = live.try_recv() {
+            skipped = true;
+        }
+        skipped
+    };
+    // What the viewer shows since the last redraw; the attach snapshot is not
+    // kept, so the first redraw is a whole screen.
+    let mut shown = None;
+    let redraw = async |shown: &mut Option<vt100::Screen>| {
+        // The viewer's latest size, which a resize may have changed since the attach.
+        let size = lock(&engine.attach)
+            .streams
+            .get(&(session.id(), stream_id))
+            .and_then(|stream| stream.size);
+        let (bytes, screen) = host.render(size, shown.take()).await;
+        *shown = screen;
+        // An unreadable screen gives nothing to send; an empty frame would tell
+        // the viewer that the unit exited.
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        session.bytes(stream_id, bytes).await
+    };
+    let disconnected = session.disconnected();
+    let mut next_redraw = tokio::time::Instant::now();
+    loop {
+        let open = tokio::select! {
+            () = disconnected.cancelled() => return,
+            _ = host.wait_exit() => false,
+            received = live.recv() => !matches!(received, Err(RecvError::Closed)),
+        };
+        if !open {
+            if skip_queued(&mut live) && redraw(&mut shown).await.is_err() {
+                return;
+            }
+            let _ = session.bytes(stream_id, Bytes::new()).await;
+            return;
+        }
+        tokio::select! {
+            () = disconnected.cancelled() => return,
+            () = tokio::time::sleep_until(next_redraw) => {}
+        }
+        skip_queued(&mut live);
+        if redraw(&mut shown).await.is_err() {
+            return;
+        }
+        next_redraw = tokio::time::Instant::now() + REDRAW_GAP;
     }
 }

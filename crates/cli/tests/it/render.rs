@@ -1816,6 +1816,19 @@ fn doctor_checks_the_nrpt_rule() {
         text.contains("fix: devlanes certs trust --resolver"),
         "{text}"
     );
+    // A server on another port is out of an NRPT rule's reach.
+    let text = render_text(
+        Method::Doctor,
+        &json!({"dns": {"tld": "test", "listen": "127.53.0.1:5353", "running": true,
+            "error": null, "nrpt_rule": rule(json!({"matches": false}))}}),
+    );
+    assert!(
+        text.contains(
+            "warn dns: .test lookups do not reach the devlanes DNS server: it listens on \
+             127.53.0.1:5353, and an NRPT rule can only reach port 53"
+        ),
+        "{text}"
+    );
     // A daemon without the rule's facts still reports its server.
     let text = render_text(
         Method::Doctor,

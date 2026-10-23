@@ -19,25 +19,17 @@ name = "devlanes-hosts-service"
 path = "src/main.rs"
 
 # `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-hosts-service`
-# takes the service from the same Windows release archive as devlanes.exe. The macOS
-# and Linux release targets have no service, so binstall refuses them (overrides add
-# to the disabled strategies, they never remove any).
+# takes the service from the same Windows release archive as devlanes.exe. Other
+# systems have no service, so binstall refuses them (overrides add to the disabled
+# strategies, they never remove any). `cfg(...)` keys need cargo-binstall 1.17 or
+# later; older versions skip them and compile the service's stub there.
 [package.metadata.binstall]
 pkg-url = "https://github.com/devlanes-run/devlanes/releases/download/v{ version }/devlanes-{ version }-{ target }.zip"
 bin-dir = "devlanes-{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "zip"
 disabled-strategies = ["quick-install"]
 
-[package.metadata.binstall.overrides.aarch64-apple-darwin]
-disabled-strategies = ["crate-meta-data", "compile"]
-
-[package.metadata.binstall.overrides.x86_64-apple-darwin]
-disabled-strategies = ["crate-meta-data", "compile"]
-
-[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
-disabled-strategies = ["crate-meta-data", "compile"]
-
-[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+[package.metadata.binstall.overrides.'cfg(not(windows))']
 disabled-strategies = ["crate-meta-data", "compile"]
 
 [dependencies]

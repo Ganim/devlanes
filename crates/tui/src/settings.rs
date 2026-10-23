@@ -972,14 +972,8 @@ fn humanize(value: &Value) -> String {
     text.clone()
 }
 
-/// Runs a request off the event loop and sends the file back. `home` is the
-/// devlanes home; `user_home` shortens the path shown (`~/.devlanes/config.yaml`).
-pub fn perform(
-    request: Request,
-    home: Option<PathBuf>,
-    user_home: Option<PathBuf>,
-    sender: mpsc::Sender<Msg>,
-) {
+/// Runs a request off the event loop and sends the file back.
+pub fn perform(request: Request, home: Option<PathBuf>, sender: mpsc::Sender<Msg>) {
     tokio::task::spawn_blocking(move || {
         let Some(home) = home else {
             let reply = Reply::Loaded {
@@ -1011,7 +1005,21 @@ pub fn perform(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
             Err(error) => Err(format!("Cannot read {}: {error}.", path.display())),
         };
-        let shown = crate::ui::home_short(user_home.as_deref(), &path.display().to_string());
+        #[cfg(unix)]
+        let shown = match std::env::var_os("HOME").map(PathBuf::from) {
+            Some(user) if path.starts_with(&user) => {
+                format!("~/{}", path.strip_prefix(&user).unwrap_or(&path).display())
+            }
+            _ => path.display().to_string(),
+        };
+        // `USERPROFILE`: Git Bash's `HOME` (`/c/Users/acme`) never matches.
+        #[cfg(windows)]
+        let shown = crate::ui::home_short(
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .as_deref(),
+            &path.display().to_string(),
+        );
         let reply = Reply::Loaded {
             path: shown,
             source,

@@ -80,13 +80,58 @@ fn retry_ephemeral(kind: io::ErrorKind) -> bool {
     )
 }
 
-/// A port in the IANA dynamic range (49152-65535), different per attempt.
-fn random_dynamic_port(seed: &std::hash::RandomState, attempt: usize) -> u16 {
+/// The UDP socket of ephemeral attempt `attempt`, on the port the OS picks.
+#[cfg(not(windows))]
+async fn ephemeral_udp(
+    listen: SocketAddr,
+    _attempt: usize,
+    _last: &mut io::Error,
+) -> Result<Option<UdpSocket>, DnsError> {
+    UdpSocket::bind(listen)
+        .await
+        .map(Some)
+        .map_err(|source| DnsError::Bind {
+            addr: listen,
+            source,
+        })
+}
+
+/// The UDP socket of ephemeral attempt `attempt`, or `None` when its port is
+/// taken (the error goes to `last`). Windows hands out UDP ports in sequence,
+/// so after one lands in a reserved TCP block the next ones would too: retries
+/// pick random ports instead.
+#[cfg(windows)]
+async fn ephemeral_udp(
+    listen: SocketAddr,
+    attempt: usize,
+    last: &mut io::Error,
+) -> Result<Option<UdpSocket>, DnsError> {
+    let mut candidate = listen;
+    if attempt > 0 {
+        candidate.set_port(random_dynamic_port());
+    }
+    match UdpSocket::bind(candidate).await {
+        Ok(udp) => Ok(Some(udp)),
+        Err(error) if attempt > 0 && retry_ephemeral(error.kind()) => {
+            *last = error;
+            Ok(None)
+        }
+        Err(source) => Err(DnsError::Bind {
+            addr: candidate,
+            source,
+        }),
+    }
+}
+
+/// A random port in the IANA dynamic range (49152-65535).
+#[cfg(windows)]
+fn random_dynamic_port() -> u16 {
     use std::hash::BuildHasher as _;
     const FIRST: u16 = 49152;
     let span = u64::from(u16::MAX - FIRST) + 1;
-    let offset = u16::try_from(seed.hash_one(attempt) % span).unwrap_or(0);
-    FIRST + offset
+    // Every `RandomState` has keys of its own, so the hash of a constant is random.
+    let offset = std::hash::RandomState::new().hash_one(0_u8) % span;
+    FIRST + u16::try_from(offset).unwrap_or(0)
 }
 
 /// Nothing to add to a bind error outside Windows.
@@ -131,25 +176,14 @@ impl DnsServer {
             return Ok(Self::new(udp, tcp, zone));
         }
         let mut last = io::Error::new(io::ErrorKind::AddrInUse, "no shared free port");
-        let seed = std::hash::RandomState::new();
         for attempt in 0..EPHEMERAL_ATTEMPTS {
-            // Windows hands out UDP ports in sequence, so after one lands in a
-            // reserved TCP block the next ones would too: retry at random ports.
-            let mut candidate = listen;
-            if attempt > 0 {
-                candidate.set_port(random_dynamic_port(&seed, attempt));
-            }
-            let udp = match UdpSocket::bind(candidate).await {
-                Ok(udp) => udp,
-                Err(error) if attempt > 0 && retry_ephemeral(error.kind()) => {
-                    last = error;
-                    continue;
-                }
-                Err(error) => return Err(bind_error(candidate, error)),
+            let Some(udp) = ephemeral_udp(listen, attempt, &mut last).await? else {
+                continue;
             };
             let addr = udp.local_addr().map_err(|e| bind_error(listen, e))?;
             match TcpListener::bind(addr).await {
                 Ok(tcp) => return Ok(Self::new(udp, tcp, zone)),
+                // The UDP port's TCP twin is taken; another ephemeral port will do.
                 Err(error) if retry_ephemeral(error.kind()) => last = error,
                 Err(error) => return Err(bind_error(addr, error)),
             }
@@ -278,11 +312,11 @@ mod tests {
 
     /// Retries spread over the dynamic range instead of following the OS's
     /// sequential pick into the same reserved block.
+    #[cfg(windows)]
     #[test]
     fn retry_ports_are_dynamic_and_spread() {
-        let seed = std::hash::RandomState::new();
         let ports: std::collections::BTreeSet<u16> = (1..EPHEMERAL_ATTEMPTS)
-            .map(|attempt| random_dynamic_port(&seed, attempt))
+            .map(|_| random_dynamic_port())
             .collect();
         assert!(ports.iter().all(|port| *port >= 49152));
         assert!(ports.len() > EPHEMERAL_ATTEMPTS / 2, "{ports:?}");

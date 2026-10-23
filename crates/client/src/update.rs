@@ -299,10 +299,11 @@ mod os {
         home.join(r"AppData\Local\Programs\devlanes")
     }
 
-    /// `install.ps1` into `dir`, as one PowerShell line.
+    /// `install.ps1` into `dir`, as one PowerShell line. Named as PowerShell,
+    /// since cmd.exe and Git Bash would fail on it.
     pub(super) fn script_upgrade(dir: &Path) -> String {
         format!(
-            "$env:DEVLANES_INSTALL_DIR='{}'; irm {INSTALL_SCRIPT} | iex",
+            "in PowerShell: $env:DEVLANES_INSTALL_DIR='{}'; irm {INSTALL_SCRIPT} | iex",
             dir.to_string_lossy().replace('\'', "''")
         )
     }
@@ -579,7 +580,7 @@ mod tests {
         let script = InstallMethod::Script(PathBuf::from(r"C:\Users\o'neil\Tools"));
         assert_eq!(
             script.upgrade_advice("0.3.0"),
-            "$env:DEVLANES_INSTALL_DIR='C:\\Users\\o''neil\\Tools'; irm https://github.com/devlanes-run/devlanes/releases/latest/download/install.ps1 | iex"
+            "in PowerShell: $env:DEVLANES_INSTALL_DIR='C:\\Users\\o''neil\\Tools'; irm https://github.com/devlanes-run/devlanes/releases/latest/download/install.ps1 | iex"
         );
         assert_eq!(
             InstallMethod::Npm.upgrade_advice("0.3.0"),

@@ -9,6 +9,13 @@ use devlanes_pki::{
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// The variable naming the account that creates a root.
+#[cfg(unix)]
+const USER_VAR: &str = "USER";
+/// Windows always sets `USERNAME`; `USER` there may come from Git Bash.
+#[cfg(windows)]
+const USER_VAR: &str = "USERNAME";
+
 /// Persistent roots survive restarts without changing their trust identity.
 #[test]
 fn persists_ca_and_protects_key() -> Result {
@@ -68,9 +75,7 @@ fn ca_subject_and_url() -> Result {
     let ou = ou.ok_or("missing OU")?;
     let (user, host) = ou.split_once('@').ok_or("OU is not user@host")?;
     assert!(!user.is_empty() && !host.is_empty(), "{ou}");
-    // Windows always sets USERNAME; USER there may come from Git Bash.
-    let user_var = if cfg!(windows) { "USERNAME" } else { "USER" };
-    if let Ok(expected) = std::env::var(user_var)
+    if let Ok(expected) = std::env::var(USER_VAR)
         && !expected.is_empty()
     {
         assert_eq!(user, expected);

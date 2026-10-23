@@ -925,10 +925,15 @@ fn read_tty(prompt: &str, kind: &str) -> Option<String> {
 /// which works when stdin and stdout are redirected, without echo for secrets.
 /// Returns the line with its newline, so an empty answer stays distinct from
 /// cancel; `None` when no one can type into the console (see
-/// `devlanes_sys::windows::console::keyboard`), or for a Ctrl-Z line (end of
-/// input, like Ctrl-D on Unix).
+/// `devlanes_sys::windows::console::keyboard`), for a Ctrl-Z line (end of
+/// input, like Ctrl-D on Unix), or without an answer within the daemon's
+/// prompt timeout.
 #[cfg(windows)]
 fn read_tty(prompt: &str, kind: &str) -> Option<String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::Duration;
+
     use devlanes_sys::windows::console::{self, Keyboard, ModeGuard};
     match console::keyboard() {
         Keyboard::Console => {}
@@ -955,6 +960,11 @@ fn read_tty(prompt: &str, kind: &str) -> Option<String> {
         return Some("\n".into());
     }
     console::write_output(&output, &format!("{prompt} ")).ok()?;
+    // Ctrl-C must cancel the prompt even when a parent started the CLI with the
+    // inherited "ignore Ctrl-C" flag set; Git Bash itself delivers Ctrl-C to its
+    // foreground program anyway. Cleared only here, so a background command
+    // keeps the flag and with it Git Bash's protection.
+    let _ = devlanes_sys::windows::process::accept_ctrl_c();
     let secret = kind == "secret";
     let (set, clear) = if secret {
         (0, console::ECHO_INPUT)
@@ -971,24 +981,54 @@ fn read_tty(prompt: &str, kind: &str) -> Option<String> {
     .ok()?;
     let mut units = Vec::new();
     let mut buffer = [0_u16; 512];
-    let read = loop {
-        match console::read_input(&input, &mut buffer) {
-            Ok(0) => break None,
-            Ok(read) => {
-                units.extend_from_slice(&buffer[..read]);
-                if units.contains(&u16::from(b'\n')) {
-                    break Some(String::from_utf16_lossy(&units));
-                }
+    // A console with a hidden window (a program started hidden, a closed winpty)
+    // can have nobody typing into it, so the read is cancelled once the daemon
+    // has given up on the answer.
+    let timed_out = AtomicBool::new(false);
+    let (reading, finished) = mpsc::channel::<()>();
+    let read = std::thread::scope(|scope| {
+        let (input, timed_out) = (&input, &timed_out);
+        scope.spawn(move || {
+            if finished.recv_timeout(devlanes_proto::remote::PROMPT_TIMEOUT)
+                != Err(RecvTimeoutError::Timeout)
+            {
+                return;
             }
-            // Ctrl-C ends the read but, as on Unix, is not an answer: the caller's
-            // Ctrl-C handling (detach) ends the command, and the console's control
-            // handler has already put the mode back.
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break None,
-        }
-    };
+            timed_out.store(true, Ordering::SeqCst);
+            // Repeated: a cancel landing between two reads cancels nothing.
+            while finished.recv_timeout(Duration::from_millis(100))
+                == Err(RecvTimeoutError::Timeout)
+            {
+                let _ = console::cancel_io(input);
+            }
+        });
+        let read = loop {
+            if timed_out.load(Ordering::SeqCst) {
+                break None;
+            }
+            match console::read_input(input, &mut buffer) {
+                Ok(0) => break None,
+                Ok(read) => {
+                    units.extend_from_slice(&buffer[..read]);
+                    if units.contains(&u16::from(b'\n')) {
+                        break Some(String::from_utf16_lossy(&units));
+                    }
+                }
+                // Ctrl-C ends the read but, as on Unix, is not an answer: the caller's
+                // Ctrl-C handling (detach) ends the command, and the console's control
+                // handler has already put the mode back. A cancelled read can end
+                // the same way; the check above ends the loop then.
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break None,
+            }
+        };
+        drop(reading);
+        read
+    });
     drop(mode);
-    if secret {
+    if read.is_none() && timed_out.load(Ordering::SeqCst) {
+        let _ = console::write_output(&output, "\r\nno answer in time; cancelled\r\n");
+    } else if secret {
         let _ = console::write_output(&output, "\r\n");
     }
     read.filter(|line| !line.starts_with('\u{1a}'))
@@ -1154,27 +1194,39 @@ fn confirm(runtime: &Runtime, question: &str) -> Result<bool, RpcError> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
-/// The browser is launched by the client, never the daemon (it may be remote or
-/// headless); [`devlanes_term::open_url`] picks the opener, the Windows browser
-/// under WSL included. The opener shares the terminal, so a text browser or the
-/// opener's own messages show, and its exit status is checked.
+/// The browser is launched by the client, never the daemon (it may be remote or headless).
 async fn open_url(url: &str) -> Result<(), RpcError> {
     if url.is_empty() {
         return Err(RpcError::new("no_url", Value::Null, 3));
     }
+    // On Windows and inside WSL the browser to open is the Windows one.
     let owned = url.to_owned();
-    tokio::task::spawn_blocking(move || {
-        devlanes_term::open_url(&owned, devlanes_term::Output::Terminal)
-    })
-    .await
-    .map_err(|error| RpcError::new("open_failed", json!({"message": error.to_string()}), 1))?
-    .map_err(|error| {
-        RpcError::new(
-            "open_failed",
-            json!({"message": error.to_string(), "url": url}),
-            1,
-        )
-    })
+    let windows =
+        tokio::task::spawn_blocking(move || devlanes_term::open_in_windows_browser(&owned))
+            .await
+            .map_err(|error| {
+                RpcError::new("open_failed", json!({"message": error.to_string()}), 1)
+            })?;
+    if let Some(opened) = windows {
+        return opened.map_err(|error| {
+            RpcError::new(
+                "open_failed",
+                json!({"message": error.to_string(), "url": url}),
+                1,
+            )
+        });
+    }
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    tokio::process::Command::new(opener)
+        .arg(url)
+        .status()
+        .await
+        .map_err(|error| RpcError::new("open_failed", json!({"message": error.to_string()}), 1))?;
+    Ok(())
 }
 
 /// Reads the daemon's own log file directly; works even when the daemon is wedged.

@@ -22,7 +22,7 @@ fn draw(tty: bool, tracker: &StartTracker) -> std::io::Result<()> {
 - `ProgressBar` writes it and clears it on drop, including while a panic unwinds.
 - `StartTracker` turns lane events into progress: ready services over the units the start's `services:started` event plans, newest `start_id` per lane. `command()` reads the events a start request streams; `viewer()` reads `subscribe` and `status` for the TUI.
 - `phase_detail` words a phase's `progress` event (`waiting for postgres (1 of 2 healthy)`, `migrate (2 of 3)`); the CLI's phase lines and the TUI header both use it.
-- `open_url` opens a URL in the default browser for `devlanes url open` and the TUI: `open` on macOS, the shell on Windows, `xdg-open` on Linux, and inside WSL the Windows browser through `wslview`, then Windows' `rundll32.exe url.dll,FileProtocolHandler`. No opener goes through a shell, so `&` in a URL is safe. `Output::Terminal` lets the opener use the terminal (the CLI), `Output::Hidden` keeps it off the screen and puts its last stderr line into the error (the TUI). Blocking.
+- `open_in_windows_browser` opens a URL in the Windows default browser for `devlanes url open` and the TUI: through the shell on Windows, and inside WSL with interop through Windows' `rundll32.exe url.dll,FileProtocolHandler`. No shell parses the URL, so `&` in it is safe. It returns `None` elsewhere, where the callers run `open` or `xdg-open` themselves. Blocking.
 
 ## Progress bar
 

@@ -1124,6 +1124,10 @@ fn nrpt_checks(rule: &Value, tld: &str, listen: &str) -> Vec<Check> {
             .iter()
             .any(|named| wanted.is_some() && named.trim().parse::<IpAddr>().ok() == wanted)
     });
+    // An NRPT rule names a server's address, never its port.
+    let off_port_53 = listen
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|listen| listen.port() != 53);
     let check = if flag("foreign") {
         Check::new(
             "dns",
@@ -1133,6 +1137,14 @@ fn nrpt_checks(rule: &Value, tld: &str, listen: &str) -> Vec<Check> {
             ),
         )
         .fix("remove it yourself (Get-DnsClientNrptRule lists it) or choose another hostnames.tld")
+    } else if off_port_53 {
+        Check::new(
+            "dns",
+            Outcome::Skip,
+            format!(
+                ".{tld} lookups do not reach the devlanes DNS server: it listens on {listen}, and an NRPT rule can only reach port 53"
+            ),
+        )
     } else if !flag("installed") {
         Check::new(
             "dns",

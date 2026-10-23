@@ -90,11 +90,6 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // Git Bash starts native programs in a new process group, which sets the
-    // inherited "ignore Ctrl-C" flag: without clearing it, Ctrl-C at a prompt or
-    // in an attached command would never reach the CLI. Failing is harmless.
-    #[cfg(windows)]
-    let _ = devlanes_sys::windows::process::accept_ctrl_c();
     let signals = Signals {
         no_escapes: !output::enable_escapes(),
         ..Signals::detect()

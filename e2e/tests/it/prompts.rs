@@ -22,6 +22,10 @@ use crate::BUDGET;
 const FIRST_STREAM: u64 = 1 << 40;
 /// How long a prompt may take to show, and the CLI to exit after the last answer.
 const WAIT: Duration = Duration::from_secs(30);
+/// `devlanes_proto::remote::PROMPT_TIMEOUT`, after which the CLI stops reading
+/// an unanswered prompt.
+#[cfg(windows)]
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A secret, a confirmation and a notice, the kinds ssh asks through askpass.
 const PROMPTS: [(&str, &str); 3] = [
@@ -63,21 +67,48 @@ fn connect_prompts_show_in_the_terminal_and_hide_secrets() -> Result<()> {
 }
 
 /// Ctrl-C at a passphrase prompt detaches like Ctrl-C anywhere in `connect`,
-/// instead of leaving the CLI waiting for a line.
+/// instead of leaving the CLI waiting for a line. On Windows the CLI starts
+/// with the inherited "ignore Ctrl-C" flag set, as under Git Bash, and has to
+/// clear it itself.
 #[test]
 fn ctrl_c_at_a_prompt_detaches() -> Result<()> {
     let lab = Lab::without_config(BUDGET)?;
     let _daemon = PromptDaemon::serve(&lab, &PROMPTS[..1])?;
-    // A Git Bash or nextest parent may have set the inherited "ignore Ctrl-C"
-    // flag, which would keep Ctrl-C from the CLI, as it would from any program
-    // started under it.
+    #[cfg(windows)]
+    devlanes_sys::windows::process::ignore_ctrl_c()?;
+    let terminal = Terminal::run(&lab, &["remote", "connect", "acme"]);
+    // Only the CLI starts with the flag.
     #[cfg(windows)]
     devlanes_sys::windows::process::accept_ctrl_c()?;
-    let mut terminal = Terminal::run(&lab, &["remote", "connect", "acme"])?;
+    let mut terminal = terminal?;
     terminal.wait_for("Enter passphrase")?;
     terminal.keys(b"\x03")?;
     let code = terminal.exit_code()?;
     assert_eq!(code, 130, "{}", terminal.text());
+    Ok(())
+}
+
+/// A console nobody types into (a hidden window, here a pseudo console the test
+/// never writes to) does not hold the CLI forever: the prompt is cancelled once
+/// the daemon's prompt timeout has passed.
+#[cfg(windows)]
+#[test]
+#[ignore = "waits out the two-minute prompt timeout"]
+fn unanswered_prompts_are_cancelled_after_the_prompt_timeout() -> Result<()> {
+    let lab = Lab::without_config(BUDGET)?;
+    let daemon = PromptDaemon::serve(&lab, &PROMPTS[..1])?;
+    let mut terminal = Terminal::run(&lab, &["remote", "connect", "acme", "--background"])?;
+    terminal.wait_for("Enter passphrase")?;
+    let shown = Instant::now();
+    terminal.wait_for_within("no answer in time; cancelled", PROMPT_TIMEOUT + WAIT)?;
+    let waited = shown.elapsed();
+    let code = terminal.exit_code()?;
+    assert_eq!(code, 0, "{}", terminal.text());
+    assert_eq!(daemon.answers(), [""], "{}", terminal.text());
+    assert!(
+        waited + Duration::from_secs(5) >= PROMPT_TIMEOUT,
+        "cancelled after {waited:?}"
+    );
     Ok(())
 }
 
@@ -446,9 +477,14 @@ impl Terminal {
 
     /// Waits for `text` on the screen.
     fn wait_for(&self, text: &str) -> Result<()> {
+        self.wait_for_within(text, WAIT)
+    }
+
+    /// Waits up to `limit` for `text` on the screen.
+    fn wait_for_within(&self, text: &str, limit: Duration) -> Result<()> {
         let start = Instant::now();
         while !self.text().contains(text) {
-            if start.elapsed() > WAIT {
+            if start.elapsed() > limit {
                 return Err(Error::Unexpected(format!(
                     "{text} never showed\n{}",
                     self.text()

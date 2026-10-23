@@ -62,14 +62,9 @@ pub struct Temp {
     pub path: PathBuf,
 }
 
-/// Creates a canonical temporary directory with a short path (`/tmp` on Unix,
-/// where the system one can be too long for a socket; `%TEMP%` on Windows).
+/// Creates a canonical temporary directory with a short path in [`temp_parent`].
 pub fn temp() -> Temp {
-    let parent = if cfg!(unix) {
-        PathBuf::from("/tmp")
-    } else {
-        std::env::temp_dir()
-    };
+    let parent = temp_parent();
     #[cfg(windows)]
     sweep_stale(&parent);
     let dir = tempfile::Builder::new()
@@ -78,6 +73,22 @@ pub fn temp() -> Temp {
         .expect("tempdir");
     let path = dunce::canonicalize(dir.path()).expect("canonical");
     Temp { _dir: dir, path }
+}
+
+/// The parent of every [`temp`] directory: `/tmp` on Unix, where the system one
+/// can be too long for a socket; on Windows `devlanes-daemon-it` in the
+/// canonical `%TEMP%` (CI's is an 8.3 short path), a directory of these tests'
+/// own so [`sweep_stale`] never deletes another program's files.
+fn temp_parent() -> PathBuf {
+    if cfg!(unix) {
+        return PathBuf::from("/tmp");
+    }
+    let temp = std::env::temp_dir();
+    let parent = dunce::canonicalize(&temp)
+        .unwrap_or(temp)
+        .join("devlanes-daemon-it");
+    std::fs::create_dir_all(&parent).expect("test parent dir");
+    parent
 }
 
 /// Removes `dle-*` directories in `parent` older than any test runs. Windows
@@ -108,8 +119,9 @@ fn sweep_stale(parent: &Path) {
 /// `run/d.sock` in it on Unix, a pipe named after the directory on Windows.
 pub fn endpoint(home: &Path) -> PathBuf {
     if cfg!(windows) {
+        // Homes are canonical, so the parent they are stripped of must be too.
         let name = home
-            .strip_prefix(std::env::temp_dir())
+            .strip_prefix(temp_parent())
             .unwrap_or(home)
             .display()
             .to_string()

@@ -98,7 +98,23 @@ fn inside(area: Rect) -> Rect {
 }
 
 /// `/Users/acme/.devlanes` as `~/.devlanes` when `/Users/acme` is the
+/// user's home (`App::user_home`).
+#[cfg(unix)]
+fn home_short(app: &App, path: &str) -> String {
+    let home = app
+        .user_home
+        .as_deref()
+        .and_then(std::path::Path::to_str)
+        .filter(|home| !home.is_empty());
+    match home {
+        Some(home) if path.starts_with(home) => format!("~{}", &path[home.len()..]),
+        _ => path.to_owned(),
+    }
+}
+
+/// `C:\Users\acme\.devlanes` as `~\.devlanes` when `C:\Users\acme` is the
 /// user's home (`App::user_home`); see [`super::home_short`].
+#[cfg(windows)]
 fn home_short(app: &App, path: &str) -> String {
     super::home_short(app.user_home.as_deref(), path)
 }

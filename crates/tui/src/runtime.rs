@@ -256,7 +256,6 @@ where
     // matches the native paths the daemon reports.
     app.user_home = options
         .var(devlanes_core::paths::HOME_VAR)
-        .filter(|home| !home.is_empty())
         .map(std::path::PathBuf::from);
     app.system_clipboard = system_clipboard;
     if let Some(cwd) = options.cwd.clone().or_else(|| std::env::current_dir().ok()) {
@@ -265,7 +264,6 @@ where
     let (sender, mut receiver) = mpsc::channel(MESSAGE_QUEUE);
     let mut executor = Executor::new(api, sender, options, clipboard);
     executor.system_clipboard = system_clipboard;
-    executor.user_home = app.user_home.clone();
     for effect in app.start() {
         executor.execute(effect);
     }
@@ -438,8 +436,6 @@ struct Executor {
     in_tmux: bool,
     /// Copies go to the system clipboard instead of OSC 52.
     system_clipboard: bool,
-    /// The user's home, for showing config.yaml's path on the options page.
-    user_home: Option<std::path::PathBuf>,
     subscription: Option<JoinHandle<()>>,
     attach: Option<(JoinHandle<()>, mpsc::Sender<AttachInput>)>,
     metrics: Option<JoinHandle<()>>,
@@ -468,7 +464,6 @@ impl Executor {
             out: ProgressBar::new(clipboard, options.progress),
             in_tmux: options.var("TMUX").is_some(),
             system_clipboard: false,
-            user_home: None,
             subscription: None,
             attach: None,
             metrics: None,
@@ -704,9 +699,7 @@ impl Executor {
             }
             Effect::OpenUrl(url) => {
                 tokio::task::spawn_blocking(move || {
-                    // A child writing to the terminal would corrupt the TUI.
-                    if let Err(error) = devlanes_term::open_url(&url, devlanes_term::Output::Hidden)
-                    {
+                    if let Err(error) = open_url(&url) {
                         let msg = Msg::Failed {
                             what: format!("open {url}"),
                             message: error.to_string(),
@@ -716,14 +709,7 @@ impl Executor {
                 });
             }
             Effect::Copy(text) => {
-                if text.len() > MAX_COPY_BYTES {
-                    self.fail(
-                        "copy",
-                        "the selection is over 100 KiB; terminals drop clipboard writes that large"
-                            .into(),
-                    );
-                    return true;
-                }
+                // The system clipboard has no size limit of its own.
                 if self.system_clipboard {
                     // Opening the clipboard waits while another program holds it.
                     tokio::task::spawn_blocking(move || {
@@ -735,6 +721,14 @@ impl Executor {
                             deliver_blocking(&sender, msg);
                         }
                     });
+                    return true;
+                }
+                if text.len() > MAX_COPY_BYTES {
+                    self.fail(
+                        "copy",
+                        "the selection is over 100 KiB; terminals drop clipboard writes that large"
+                            .into(),
+                    );
                     return true;
                 }
                 let sequence = input::osc52(&text, self.in_tmux);
@@ -783,10 +777,7 @@ impl Executor {
                     });
                 }
             }
-            Effect::Settings(request) => {
-                let user_home = self.user_home.clone();
-                crate::settings::perform(request, api.home(), user_home, sender);
-            }
+            Effect::Settings(request) => crate::settings::perform(request, api.home(), sender),
             Effect::ReadDaemonLog { from } => {
                 if self.log.as_ref().is_some_and(|task| !task.is_finished()) {
                     return true;
@@ -924,6 +915,29 @@ async fn pump_attach(
         }
     }
     deliver(&sender, Msg::AttachClosed { generation }).await;
+}
+
+/// Hands a URL to the desktop's opener.
+fn open_url(url: &str) -> io::Result<()> {
+    // On Windows and inside WSL the browser to open is the Windows one.
+    if let Some(opened) = devlanes_term::open_in_windows_browser(url) {
+        return opened.map_err(io::Error::other);
+    }
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(not(target_os = "macos"))]
+    let program = "xdg-open";
+    let status = std::process::Command::new(program)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("{program} exited with {status}")))
+    }
 }
 
 #[cfg(test)]

@@ -42,7 +42,8 @@ pub fn set_text(text: &str) -> io::Result<()> {
 }
 
 /// `text` as `CF_UNICODETEXT` wants it: UTF-16, every line end CRLF (Windows
-/// programs show a bare LF as nothing or a box), and a terminating NUL.
+/// programs show a bare LF as nothing or a box), and a terminating NUL. A NUL
+/// inside the text would end it there, so it becomes U+FFFD.
 fn encode(text: &str) -> Vec<u16> {
     let mut units = Vec::with_capacity(text.len() + 1);
     let mut previous = '\0';
@@ -50,6 +51,11 @@ fn encode(text: &str) -> Vec<u16> {
         if c == '\n' && previous != '\r' {
             units.push(u16::from(b'\r'));
         }
+        let c = if c == '\0' {
+            char::REPLACEMENT_CHARACTER
+        } else {
+            c
+        };
         let mut buffer = [0; 2];
         units.extend_from_slice(c.encode_utf16(&mut buffer));
         previous = c;
@@ -157,6 +163,8 @@ mod tests {
         assert_eq!(encode(""), [0]);
         // A lone CR stays as it is.
         assert_eq!(text(&encode("a\rb")[..3]), "a\rb");
+        // An embedded NUL would cut the text short.
+        assert_eq!(encode("a\0b"), [0x61, 0xfffd, 0x62, 0]);
     }
 
     #[test]
