@@ -1047,7 +1047,7 @@
   "$id": "https://devlanes.run/v1/user-schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "devlanes v0.2.0 user config: per-user settings in ~/.devlanes/config.yaml. Run a dev environment per git worktree, side by side. https://devlanes.run",
+  "description": "devlanes v0.3.0 user config: per-user settings in ~/.devlanes/config.yaml. Run a dev environment per git worktree, side by side. https://devlanes.run",
   "examples": [
     {
       "hostnames": {
@@ -1061,7 +1061,7 @@
       }
     }
   ],
-  "markdownDescription": "devlanes v0.2.0 user config: per-user settings in ~/.devlanes/config.yaml. Run a dev environment per git worktree, side by side. https://devlanes.run",
+  "markdownDescription": "devlanes v0.3.0 user config: per-user settings in ~/.devlanes/config.yaml. Run a dev environment per git worktree, side by side. https://devlanes.run",
   "properties": {
     "history": {
       "$ref": "#/$defs/HistoryConfig",

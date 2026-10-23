@@ -1,7 +1,7 @@
 {
   "name": "devlanes",
   "displayName": "devlanes",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Teaches Claude to run dev services through the devlanes CLI and blocks backgrounded dev servers",
   "author": {
     "name": "devlanes",
