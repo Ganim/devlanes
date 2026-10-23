@@ -134,6 +134,27 @@ fn terminal_takes_progress_and_ignores_an_old_app() {
     assert_eq!(error.location.line, 3);
 }
 
+#[test]
+fn terminal_features_default_to_auto_and_parse_each_choice() {
+    let config = parse_user(
+        "terminal:\n  title: never\n  links: always\n  notifications: auto\n  marks: never\n",
+    )
+    .expect("features");
+    let settings = config.terminal.expect("terminal").settings();
+    assert_eq!(settings.title, TerminalFeature::Never);
+    assert_eq!(settings.links, TerminalFeature::Always);
+    assert_eq!(settings.notifications, TerminalFeature::Auto);
+    assert_eq!(settings.marks, TerminalFeature::Never);
+    assert_eq!(settings.progress, TerminalProgress::Auto);
+    // An old app name keeps every feature on auto.
+    let legacy = parse_user("terminal: kitty\n").expect("old app name");
+    let settings = legacy.terminal.expect("terminal").settings();
+    assert_eq!(settings.title, TerminalFeature::Auto);
+    assert!(settings.app.is_none());
+    let error = parse_user("terminal:\n  title: sometimes\n").expect_err("bad value");
+    assert_eq!(error.location.line, 2, "{}", error.message);
+}
+
 /// Values with several YAML forms report the chosen form's own unknown keys.
 #[test]
 fn alternative_forms_keep_struct_errors() {

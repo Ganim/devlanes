@@ -23,6 +23,7 @@ mod orphans;
 mod progress;
 mod release;
 mod start;
+mod terminal;
 mod units;
 
 use std::{sync::Arc, time::Duration};

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use devlanes_cli::{
-    Action, Cli, Hint, InterruptPolicy, Rendered, Report, ReporterStream, Runtime,
+    Action, Cli, CommandTitle, Hint, InterruptPolicy, Rendered, Report, ReporterStream, Runtime,
     export_environment, run_with, stop_with_logs, write_completions,
 };
 use devlanes_client::{Client, Paths};
@@ -152,14 +152,14 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
         // The daemon's codes (not_found, terminal_required, ...) keep their wording
         // and exit status; only local terminal failures become attach_failed.
         Action::Attach(request) => {
-            attach::run(&paths()?, request).await.map_err(|error| {
-                match error.downcast::<devlanes_client::Error>() {
+            attach::run(runtime, &paths()?, request)
+                .await
+                .map_err(|error| match error.downcast::<devlanes_client::Error>() {
                     Ok(error) => rpc_error(error),
                     Err(error) => {
                         RpcError::new("attach_failed", json!({"message": error.to_string()}), 1)
                     }
-                }
-            })
+                })
         }
         Action::Open(request) => {
             let data = call(request).await?;
@@ -339,10 +339,13 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
             let signals = Signals::install()
                 .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
             let client = connect(&paths).await?;
-            let progress = crate::progress::wrap(&paths, runtime);
+            let progress = crate::progress::wrap(runtime);
+            // The title stays for the whole run, the test command included.
+            let title = crate::terminal::Title::start(runtime, Some(CommandTitle::with(&plan)));
             let mut driver = ClientDriver::new(client, plan.start.context.clone(), paths)
                 .with_signals(signals)
-                .with_progress(progress);
+                .with_progress(progress)
+                .with_title(title);
             let outcome =
                 run_with(&plan, runtime, &mut driver, &mut |rendered| emit(&rendered)).await;
             Ok(outcome.exit_code)
@@ -480,11 +483,14 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
     });
     let open_ended = matches!(method, Method::Logs | Method::Subscribe | Method::Status);
     // The tab's progress bar while a start is followed; a no-op otherwise.
-    let progress = crate::progress::Follower::start(&paths, runtime, &request);
+    let progress = crate::progress::Follower::start(runtime, &request);
     let id = client
         .begin_request(method, request.params.clone(), request.context.clone())
         .await
         .map_err(rpc_error)?;
+    // Set right before Ctrl-C is caught below, so every way out drops it and
+    // puts the previous title back.
+    let mut title = crate::terminal::Title::start(runtime, devlanes_cli::command_title(&request));
     let reporter = runtime.reporter();
     // `… infra` lines that turn into `✓ infra` when the phase ends.
     let mut phases = devlanes_cli::PhaseLines::new(runtime);
@@ -510,6 +516,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                     events += 1;
                     tracing::trace!(event = %event.event, seq = event.seq, "event received");
                     progress.event(&event);
+                    crate::terminal::title_event(&mut title, &event);
                     let rendered = match log_stream.as_mut() {
                         Some(stream) => stream.event(&event),
                         None => reporter.event(method, &event),
@@ -605,6 +612,9 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
         }
     };
     progress.finish(matches!(result, Ok(0))).await;
+    if let Some(title) = &title {
+        title.finish(runtime, matches!(result, Ok(0)));
+    }
     if result.is_ok() {
         crate::notices::after_command(&mut client, runtime, &paths, method).await;
     }

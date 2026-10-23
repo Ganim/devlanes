@@ -8,6 +8,7 @@ mod output;
 mod progress;
 mod render;
 mod runtime;
+mod terminal;
 mod with;
 
 pub use args::*;
@@ -20,6 +21,7 @@ pub use output::*;
 pub use progress::*;
 pub use render::{DoctorCheck, DoctorState, doctor_checks_of};
 pub use runtime::*;
+pub use terminal::*;
 pub use with::*;
 
 /// Whether the CLI words daemon code `code` itself (tests keep every code the

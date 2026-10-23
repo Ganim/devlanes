@@ -124,7 +124,7 @@ pub(super) fn logs(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
                 if !lines.is_empty() {
                     lines.push(String::new());
                 }
-                lines.push(format!("== {unit} ({count}{note}) =="));
+                lines.push(cx.section(&format!("== {unit} ({count}{note}) ==")));
             }
             lines.extend(page_lines(items, cx));
             if truncated {

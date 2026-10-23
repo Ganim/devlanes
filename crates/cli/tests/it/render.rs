@@ -26,7 +26,7 @@ fn runtime(mode: OutputMode) -> Runtime {
 /// A unit summary in the shape a real daemon sends (captured from `start --json`
 /// of the `two-services` fixture): the loopback URL first, then the proxied one
 /// with the HTTPS listener's port; units without hosts have only the first.
-fn unit(name: &str, state: &str) -> Value {
+pub(crate) fn unit(name: &str, state: &str) -> Value {
     let port = 20100 + name.len() as u16;
     let mut urls = vec![json!(format!("http://127.0.0.1:{port}"))];
     if name != "worker" {
@@ -53,7 +53,7 @@ fn unit(name: &str, state: &str) -> Value {
 }
 
 /// A start result: two ready services with URLs, two without, one failure, one skipped task.
-fn start_result() -> Value {
+pub(crate) fn start_result() -> Value {
     json!({
         "lane": "acme@2", "branch": "feat/billing",
         "started": ["acme@2:api", "acme@2:web", "acme@2:admin", "acme@2:worker", "acme@2:mailer"],
@@ -69,7 +69,7 @@ fn start_result() -> Value {
 }
 
 /// A lane summary.
-fn lane(index: Option<u32>, branch: &str, state: &str, units: Vec<Value>) -> Value {
+pub(crate) fn lane(index: Option<u32>, branch: &str, state: &str, units: Vec<Value>) -> Value {
     json!({
         "reference": index.map_or("acme@spike".into(), |i| format!("acme@{i}")),
         "project": "acme", "index": index, "branch": branch,

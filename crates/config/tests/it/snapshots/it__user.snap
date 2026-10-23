@@ -51,7 +51,11 @@ expression: user
     "reserve_memory": "2147483648B"
   },
   "terminal": {
-    "progress": "auto"
+    "progress": "auto",
+    "title": "auto",
+    "links": "auto",
+    "notifications": "auto",
+    "marks": "auto"
   },
   "updates": {
     "check": true

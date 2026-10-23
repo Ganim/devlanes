@@ -443,7 +443,12 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
             let styled = (styled.len() == tail.len()).then(|| styled[*index].as_str());
             detail.push_str(&format!("   {}", super::styled_line(line, styled, 120, cx)));
         }
-        rows.push(vec![cx.mark(Outcome::Fail), clean(name), detail]);
+        // Each failure is a place to jump to in a long start's output.
+        rows.push(vec![
+            cx.section(&cx.mark(Outcome::Fail)),
+            clean(name),
+            detail,
+        ]);
     }
     for unit in &view.pending {
         rows.push(vec![
@@ -458,7 +463,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
         rows.push(vec![
             cx.mark(Outcome::Ok),
             unit_label(unit, cx),
-            display_url(&unit.urls).map_or_else(String::new, |url| clean(url)),
+            display_url(&unit.urls).map_or_else(String::new, |url| url_cell(url, cx)),
         ]);
     }
     lines.extend(table(&rows, "  "));
@@ -687,6 +692,12 @@ fn loopback(url: &str) -> bool {
 }
 
 /// The URL to show for a unit: its first proxied (hostname) URL, else its first.
+/// A URL as shown in a table, clickable where the terminal shows links.
+fn url_cell(url: &str, cx: &Ctx<'_>) -> String {
+    let url = clean(url);
+    cx.link(&url, &url)
+}
+
 pub(crate) fn display_url(urls: &[String]) -> Option<&String> {
     urls.iter().find(|url| !loopback(url)).or(urls.first())
 }
@@ -836,12 +847,18 @@ pub(super) fn status(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             memory.map_or("–".into(), bytes),
             if lane.index.is_some() {
                 // The lane's own units first: their URLs carry the port it is served on.
-                lane_url(
+                let url = lane_url(
                     lane,
                     proxy_origin(std::slice::from_ref(lane))
                         .as_ref()
                         .or(origin.as_ref()),
-                )
+                );
+                // Only a full URL is worth a click; a bare domain or `–` is not.
+                if url.contains("://") {
+                    cx.link(&url, &url)
+                } else {
+                    url
+                }
             } else {
                 "–".into()
             },
@@ -935,7 +952,7 @@ fn unit_table(lane: &LaneSummary, cx: &Ctx<'_>) -> Vec<String> {
             },
             unit.cpu_percent.map_or("–".into(), percent),
             unit.memory_bytes.map_or("–".into(), bytes),
-            display_url(&unit.urls).map_or_else(String::new, |url| clean(url)),
+            display_url(&unit.urls).map_or_else(String::new, |url| url_cell(url, cx)),
         ]);
         if let Some(reason) = &unit.reason {
             extra.push(format!(
@@ -1250,6 +1267,29 @@ pub(super) fn why(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
     lines
 }
 
+/// The scheme and `:port` (none for the default port) a browser reaches the
+/// proxy on, from the `hosts` listener facts: HTTPS when bound, else HTTP.
+fn listener_origin(data: &Value) -> Option<(&'static str, String)> {
+    let proxy = data.get("proxy")?;
+    [("https", 443), ("http", 80)]
+        .into_iter()
+        .find_map(|(scheme, default)| {
+            let entry = proxy.get(scheme)?;
+            if entry.get("bound").and_then(Value::as_bool) != Some(true) {
+                return None;
+            }
+            let port = entry.get("port").and_then(Value::as_u64)?;
+            Some((
+                scheme,
+                if port == default {
+                    String::new()
+                } else {
+                    format!(":{port}")
+                },
+            ))
+        })
+}
+
 /// `hosts`: every route as `host -> lane:unit port state`, then listener facts.
 pub(super) fn hosts(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
     let items = list(data, "items");
@@ -1277,8 +1317,13 @@ pub(super) fn hosts(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
                 .map(str::to_owned)
                 .to_vec(),
         ];
+        let origin = listener_origin(data);
         for item in items {
-            let mut host = text(item, "host");
+            let name = text(item, "host");
+            let mut host = match &origin {
+                Some((scheme, port)) => cx.link(&name, &format!("{scheme}://{name}{port}")),
+                None => name,
+            };
             if item.get("fallback").and_then(Value::as_bool) == Some(true) {
                 host.push_str(" (fallback)");
             }

@@ -3,6 +3,7 @@
 use std::io::{Read, Write};
 
 use bytes::Bytes;
+use devlanes_cli::Runtime;
 use devlanes_client::{Client, Paths};
 use devlanes_ipc::Frame;
 use devlanes_proto::{AttachParams, AttachResult, Control, Method, Outcome, Request, ResizeParams};
@@ -34,7 +35,8 @@ impl Drop for RawGuard {
 }
 
 /// Attaches stdin/stdout to a unit's terminal until detach or unit exit.
-pub async fn run(paths: &Paths, request: Request) -> anyhow::Result<u8> {
+pub async fn run(runtime: &Runtime, paths: &Paths, request: Request) -> anyhow::Result<u8> {
+    let title = devlanes_cli::command_title(&request);
     let mut client = Client::connect_or_spawn(paths).await?;
     let unit = request
         .params
@@ -56,6 +58,9 @@ pub async fn run(paths: &Paths, request: Request) -> anyhow::Result<u8> {
             .await?,
     )?;
     let _raw = RawGuard::enable(interactive)?;
+    // The unit may set titles of its own while attached; detaching puts back
+    // the one from before the attach.
+    let _title = crate::terminal::Title::start(runtime, title);
     let mut stdout = std::io::stdout();
     if interactive {
         let _ = write!(

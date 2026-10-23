@@ -1638,6 +1638,7 @@ dependencies = [
 name = "devlanes-term"
 version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "devlanes-proto",
  "serde",
  "serde_json",

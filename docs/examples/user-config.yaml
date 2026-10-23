@@ -57,11 +57,19 @@ history:
 # Old metrics and history are pruned first; live registry and completion records are preserved.
 state:
   max_size: 512MiB
-# progress shows start progress in the terminal tab's progress bar: auto
-# (terminals known to draw it), always or never. DEVLANES_TERM_PROGRESS=0 or 1
-# overrides it.
+# progress shows start progress in the terminal tab's progress bar, title says what
+# devlanes is doing in the tab's title, links makes service URLs and file locations
+# clickable, notifications reports long starts and crashes while the terminal is not
+# focused, and marks lets the terminal jump between sections of long output. Each is
+# auto (terminals known to support it), always or never; DEVLANES_TERM_PROGRESS,
+# DEVLANES_TERM_TITLE, DEVLANES_TERM_LINKS, DEVLANES_TERM_NOTIFICATIONS and
+# DEVLANES_TERM_MARKS set to 0 or 1 override them.
 terminal:
   progress: auto
+  title: auto
+  links: auto
+  notifications: auto
+  marks: auto
 # Once a day the daemon reads the version of the latest devlanes release, and commands
 # print the upgrade command when it is newer. false (or DEVLANES_NO_UPDATE_CHECK=1) turns it off.
 updates:

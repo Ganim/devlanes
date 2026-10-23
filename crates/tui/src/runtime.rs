@@ -16,14 +16,17 @@ use std::{
 use bytes::Bytes;
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event as TermEvent, KeyEventKind,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event as TermEvent, KeyEventKind,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+        enable_raw_mode,
+    },
 };
 use devlanes_proto::{AttachParams, Method, Selection};
-use devlanes_term::{Progress, ProgressBar, Wrap};
+use devlanes_term::{Notifications, Notifier, Progress, ProgressBar, TitleGuard, Wrap};
 use futures_util::{Stream, StreamExt};
 use ratatui::{Terminal, backend::Backend};
 use tokio::{
@@ -43,6 +46,12 @@ use crate::{
 
 /// One frame at ~60 Hz; bursts of output within a frame are drawn once.
 const FRAME: Duration = Duration::from_millis(16);
+/// The frame while the terminal is not focused: nobody watches it closely.
+const UNFOCUSED_FRAME: Duration = Duration::from_millis(250);
+/// Synchronized output (DEC mode 2026): the terminal holds what follows
+/// until the end, so a frame never shows half drawn.
+const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+const SYNC_END: &[u8] = b"\x1b[?2026l";
 const MESSAGE_QUEUE: usize = 1024;
 /// One spinner frame.
 const SPIN: Duration = Duration::from_millis(150);
@@ -73,7 +82,8 @@ fn wrap_code(wrap: Wrap) -> u8 {
 pub struct TerminalGuard;
 
 impl TerminalGuard {
-    /// Enables raw mode, the alternate screen, mouse capture and bracketed paste.
+    /// Enables raw mode, the alternate screen, mouse capture, bracketed paste
+    /// and focus reports (`CSI ? 1004 h`).
     pub fn enter() -> io::Result<Self> {
         install_panic_hook();
         enable_raw_mode()?;
@@ -84,7 +94,8 @@ impl TerminalGuard {
             io::stdout(),
             EnterAlternateScreen,
             EnableMouseCapture,
-            EnableBracketedPaste
+            EnableBracketedPaste,
+            EnableFocusChange
         )?;
         Ok(guard)
     }
@@ -115,8 +126,13 @@ fn restore() {
     }
     // This can run while unwinding, so failures are printed rather than raised;
     // by now the alternate screen is gone and stderr is readable.
+    // A panic can strike between a frame's synchronized-output start and its
+    // end; ending it again is harmless and keeps the terminal from holding
+    // everything that follows.
     let screen = execute!(
         io::stdout(),
+        EndSynchronizedUpdate,
+        DisableFocusChange,
         DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen,
@@ -248,15 +264,21 @@ where
     spin.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut dirty = true;
     let mut last_draw = Instant::now() - FRAME;
+    executor.show_title(&app.tab_title());
     loop {
-        if dirty && last_draw.elapsed() >= FRAME {
-            terminal
+        // Unfocused, the screen is drawn a few times a second, not sixty.
+        let frame_time = if app.focused { FRAME } else { UNFOCUSED_FRAME };
+        if dirty && last_draw.elapsed() >= frame_time {
+            executor.sync(SYNC_BEGIN);
+            let drawn = terminal
                 .draw(|frame| ui::render(&app, frame))
-                .map_err(backend_error)?;
+                .map(|frame| executor.relink(frame.buffer, &app));
+            executor.sync(SYNC_END);
+            drawn.map_err(backend_error)?;
             dirty = false;
             last_draw = Instant::now();
         }
-        let next_frame = last_draw + FRAME;
+        let next_frame = last_draw + frame_time;
         let msg = tokio::select! {
             event = events.next() => match event {
                 Some(Ok(event)) => terminal_msg(event),
@@ -267,7 +289,7 @@ where
             frame = next_start(&mut start_stream) => Some(Msg::Start(frame)),
             _ = tick.tick() => Some(Msg::Tick),
             // Spinners advance between ticks only while one is on screen.
-            _ = spin.tick(), if app.spinning() => Some(Msg::Spin),
+            _ = spin.tick(), if app.spinning() && app.focused => Some(Msg::Spin),
             _ = sleep_until(next_frame), if dirty => None,
             // The panic hook already restored the terminal; a UI drawing over
             // the shell afterwards would only make things worse.
@@ -298,6 +320,7 @@ where
             }
         }
         executor.show_progress(app.start_progress(), resend);
+        executor.show_title(&app.tab_title());
     }
 }
 
@@ -313,6 +336,8 @@ fn terminal_msg(event: TermEvent) -> Option<Msg> {
         TermEvent::Mouse(mouse) => Some(Msg::Mouse(mouse)),
         TermEvent::Paste(text) => Some(Msg::Paste(text)),
         TermEvent::Resize(width, height) => Some(Msg::Resize(width, height)),
+        TermEvent::FocusGained => Some(Msg::Focus(true)),
+        TermEvent::FocusLost => Some(Msg::Focus(false)),
         _ => None,
     }
 }
@@ -331,9 +356,15 @@ fn deliver_blocking(sender: &mpsc::Sender<Msg>, msg: Msg) -> bool {
 struct Executor {
     api: Arc<dyn DaemonApi>,
     sender: mpsc::Sender<Msg>,
-    /// The terminal output for OSC sequences: clipboard copies and the tab's
-    /// progress bar, which clears when the executor drops.
-    out: ProgressBar<Box<dyn Write + Send>>,
+    /// The terminal output for OSC sequences: clipboard copies, the tab's
+    /// progress bar and its title. When the executor drops the bar clears
+    /// first, then the title the TUI found is put back.
+    out: ProgressBar<TitleGuard<Box<dyn Write + Send>>>,
+    notifications: Option<Notifications>,
+    notifier: Notifier,
+    links: Option<devlanes_term::Links>,
+    /// Frames are wrapped in synchronized output.
+    sync_output: bool,
     /// Set inside tmux, whose OSC 52 needs passthrough wrapping.
     in_tmux: bool,
     subscription: Option<JoinHandle<()>>,
@@ -361,7 +392,11 @@ impl Executor {
         Self {
             api,
             sender,
-            out: ProgressBar::new(clipboard, options.progress),
+            out: ProgressBar::new(TitleGuard::new(clipboard, options.title), options.progress),
+            notifications: options.notifications,
+            notifier: Notifier::default(),
+            links: options.links,
+            sync_output: options.sync_output,
             in_tmux: options.var("TMUX").is_some(),
             subscription: None,
             attach: None,
@@ -380,6 +415,49 @@ impl Executor {
             // The bar is decoration; a failed write is not worth a notice.
             let _ = self.out.set(progress);
         }
+    }
+
+    /// Sets the tab title; written only when the text changed.
+    fn show_title(&mut self, title: &str) {
+        // The title is decoration; a failed write is not worth a notice.
+        let _ = self.out.get_mut().set(title);
+    }
+
+    /// Makes the service URLs of the frame just drawn clickable, where the
+    /// terminal shows links.
+    fn relink(&mut self, buffer: &ratatui::buffer::Buffer, app: &App) {
+        let Some(links) = self.links else {
+            return;
+        };
+        let bytes = crate::hyperlink::relink(buffer, &app.link_targets(), &links);
+        if !bytes.is_empty() {
+            let out = self.out.get_mut();
+            let _ = out.write_all(bytes.as_bytes()).and_then(|()| out.flush());
+        }
+    }
+
+    /// Writes a synchronized-output mark around a frame, when enabled.
+    fn sync(&mut self, mark: &[u8]) {
+        if self.sync_output {
+            let out = self.out.get_mut();
+            let _ = out.write_all(mark).and_then(|()| out.flush());
+        }
+    }
+
+    /// Shows a desktop notification where they are on and the last one is
+    /// not too recent.
+    fn notify(&mut self, title: &str, body: &str) {
+        let Some(notifications) = self.notifications else {
+            return;
+        };
+        if !self.notifier.allow(std::time::Instant::now()) {
+            return;
+        }
+        let out = self.out.get_mut();
+        let sequence = notifications.sequence(title, body);
+        let _ = out
+            .write_all(sequence.as_bytes())
+            .and_then(|()| out.flush());
     }
 
     /// Updates the app, runs its effects and any local failures they caused;
@@ -425,6 +503,7 @@ impl Executor {
                 self.detach();
                 return false;
             }
+            Effect::Notify { title, body } => self.notify(&title, &body),
             Effect::QuitWith { stop, remember } => {
                 let home = api.home();
                 tokio::spawn(async move {
