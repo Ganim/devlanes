@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use devlanes_proto::{AttachResult, RpcError, UnitSummary, events};
 use devlanes_tui::{
     ApiError, DaemonApi,
-    app::{App, Msg, Target, View, areas},
+    app::{App, Msg, Target, View},
     ui,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
@@ -135,14 +135,18 @@ fn check_layout(app: &mut App) -> Result<Buffer, Box<dyn std::error::Error>> {
             "row {y} changed with the notice"
         );
     }
-    assert!(row(&with_notice, 0).contains("✕ start acme@1:portal failed"));
+    assert!(
+        row(&with_notice, 0).contains("✕ start acme@1:portal"),
+        "{}",
+        row(&with_notice, 0)
+    );
     assert!(
         row(&with_notice, 0).contains('…'),
         "notice is clipped: {}",
         row(&with_notice, 0)
     );
     assert!(row(&with_notice, 0).ends_with("M monitor   D daemon "));
-    let layout = areas(width, height, false).ok_or("too small")?;
+    let layout = app.areas_sized(width, height).ok_or("too small")?;
     assert_boxes(&with_notice, width, height, "notice");
     let pane_text: Vec<String> = (layout.pane_inner.y..layout.pane_inner.bottom())
         .map(|y| {
@@ -544,7 +548,7 @@ async fn drive_shows_a_failed_start_in_the_header_and_on_the_row() -> TestResult
     let backend = crate::daemon::run_keys(
         Arc::clone(&api),
         steps,
-        &["✕ start acme@1:portal failed"],
+        &["✕ start acme@1:portal fai"],
         |_| true,
     )
     .await?;
@@ -557,7 +561,7 @@ async fn drive_shows_a_failed_start_in_the_header_and_on_the_row() -> TestResult
     );
     let buffer = backend.buffer().clone();
     assert!(
-        row(&buffer, 0).contains("✕ start acme@1:portal failed"),
+        row(&buffer, 0).contains("✕ start acme@1:portal fai"),
         "{}",
         row(&buffer, 0)
     );

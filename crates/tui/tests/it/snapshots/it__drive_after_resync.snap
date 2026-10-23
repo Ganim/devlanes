@@ -2,9 +2,9 @@
 source: crates/tui/tests/it/main.rs
 expression: screen
 ---
-" devlanes  1 acme ●   2 shop ●                          ✕ 1 failed  M monitor   D daemon · 2 issues "
-" lanes    main @0 ●     feat/login @1 ·     fix/cache @2 ·                  0-9 or [ ] switch lanes "
-"┌ main @0 ─────────────────────────────┐┌ api  ready ────────────────────── watching · enter types ┐"
+" devlanes  1 acme   2 shop                              ✕ 1 failed  M monitor   D daemon · 2 issues "
+" lanes  1 main  2 feat/login  3 fix/cache                                   1-9 or [ ] switch lanes "
+"┌ @0 · 1/3 up ─────────────────────────┐┌ api  ready ────────────────────── watching · enter types ┐"
 "│ ▾ services                         3 ││                                                          │"
 "│   ● api                              ││                                                          │"
 "│   ⠋ web                     starting ││                                                          │"

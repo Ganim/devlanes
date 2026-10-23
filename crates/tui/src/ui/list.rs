@@ -37,16 +37,27 @@ pub fn render(app: &App, frame: &mut Frame, boxed: Rect, area: Rect) {
         );
         return;
     };
-    // Title: `main @0` as the mockups draw it (the lane's state glyph is on
-    // its chip), and the filter while one is set. The lane has no row:
+    // Title: `main @0`, or with several lanes, whose chips already name them,
+    // `@1 · 38/40 up`; then the filter while one is set. The lane has no row:
     // selecting it (k from the top, a click on the title) highlights the
     // title and shows its status in the pane.
-    let mut name = vec![
-        Span::raw(" "),
-        Span::styled(lane_name(lane), Style::new().add_modifier(Modifier::BOLD)),
-    ];
-    if let Some(index) = lane.index {
-        name.push(Span::raw(format!(" @{index}")));
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+    let mut name = vec![Span::raw(" ")];
+    match lane.index {
+        Some(index) if app.project_lanes().len() > 1 => {
+            let counts = tree::counts(lane);
+            name.push(Span::styled(format!("@{index}"), bold));
+            name.push(Span::styled(
+                format!(" · {}/{} up", counts.up, counts.total),
+                theme.quiet(),
+            ));
+        }
+        index => {
+            name.push(Span::styled(lane_name(lane), bold));
+            if let Some(index) = index {
+                name.push(Span::raw(format!(" @{index}")));
+            }
+        }
     }
     // A lane on its way somewhere says so; settled states need no word.
     let word = if app.is_cleaning(&lane.reference) {

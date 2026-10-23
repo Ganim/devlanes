@@ -125,7 +125,10 @@ async fn services_are_one_list_in_config_order_with_stopped_ones_inline() -> Tes
     assert!(line("docs").contains("· docs"), "{text}");
     // The list's title is the lane's name alone, as in the mockups; its
     // state glyph is on the chip in the lane bar.
-    assert!(text.contains("┌ main @0 ─"), "{text}");
+    // The chips name the lanes; the list's title gives the number and how
+    // much is up, and one row shows project and lanes together.
+    assert!(text.contains("┌ @0 · 6/8 up ─"), "{text}");
+    assert!(text.contains(" acme  1 main  2 feat  3 old "), "{text}");
     Ok(())
 }
 
@@ -224,7 +227,7 @@ async fn the_filter_narrows_opens_and_clears() -> TestResult {
     // Letters went to the filter, not to `w`/`e`/`b` shortcuts.
     assert_eq!(app.filter.as_ref().map(|f| f.text.as_str()), Some("web"));
     let text = draw(&app)?.backend().to_string();
-    assert!(text.contains("main @0 · filter: web"), "{text}");
+    assert!(text.contains("@0 · 6/8 up · filter: web"), "{text}");
     app.update(key(KeyCode::Enter));
     assert!(
         app.filter.as_ref().is_some_and(|f| !f.editing),

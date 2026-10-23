@@ -1,6 +1,6 @@
- devlanes  1 acme ✕   2 billing !   3 shop ●           ┌ keys ──────────────────────────────────────────────────────────────────────────────────┐ting feat/checkout: 4 of 8 ready  M monitor   D daemon
- lanes    main @0 ✕     feat/checkout @1 ⠋ 4/8     fix/│ glyphs                                                                                 │                               0-9 or [ ] switch lanes
-┌ main @0 ─────────────────────────────────────┐┌ wrk-e│   ● ready (check passed)      ◉ running (no ready check)  · stopped, not run           │──────────────────────────────────────────────────────┐
+ devlanes  1 acme   2 billing   3 shop                 ┌ keys ──────────────────────────────────────────────────────────────────────────────────┐ting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ lanes  1 main  2 feat/checkout 4/8  3 fix/cache  4 spi│ glyphs                                                                                 │                               1-9 or [ ] switch lanes
+┌ @0 · 34/38 up ───────────────────────────────┐┌ wrk-e│   ● ready (check passed)      ◉ running (no ready check)  · stopped, not run           │──────────────────────────────────────────────────────┐
 │ ▾ services                                34 ││ faile│   ⠸ starting, stopping        … queued                    ✕ failed                     │                                                      │
 │   ● Gateway API                              ││ next │   ◆ orphaned                  ✓ task done                 ▍ the unit's color           │                                                      │
 │   ● api-auth                                 ││      │                                                                                        │                                                      │
@@ -9,7 +9,7 @@
 │   ● api-orders                               ││ 2026-│   g G               the lane, the last row                                             │                                                      │
 │   ● api-search                               ││ 2026-│   h l               fold, unfold; h moves to the section                               │                                                      │
 │   ● api-catalog                              ││ 2026-│   enter  space      fold a section, or type into a running unit                        │                                                      │
-│   ● api-inventory                            ││ 2026-│   [ ]  0-9          previous, next lane; 2 is lane @2                                  │                                                      │
+│   ● api-inventory                            ││ 2026-│   [ ]  1-9          previous, next lane; lane by its place in the bar                  │                                                      │
 │   ● api-notify                               ││ 2026-│   n N               next, previous problem                                             │                                                      │
 │   ● api-reports                              ││ 2026-│   t  i              jump to the tasks, the infra                                       │                                                      │
 │   ● web-app                                  ││ 2026-│   s  x  r           start, stop, restart the selection; s runs a task                  │                                                      │
@@ -60,9 +60,9 @@
  r restart   n next problem   pgup scroll back   c select text   / filter                                                                                                         ? all keys   q quit
 
 --- styles (row: columns style) ---
-0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 55-144 bold, 179 bold, 180-187 dim, 191 bold, 192-198 dim
-1: 0-5 dim, 9-19 bold reversed, 37-40 dim, 55 bold, 57-62 dim, 144 bold, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
-2: 0 darkgray, 2-5 bold, 10-48 darkgray, 50-55 bold, 59-60 green, 87-88 green, 115-116 dim, 144 bold, 145-199 darkgray
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 55-144 bold, 179 bold, 180-187 dim, 191 bold, 192-198 dim
+1: 0-6 dim, 7-14 bold reversed, 16-17 dim, 18-34 yellow, 37-47 dim, 50-51 dim, 52-54 yellow, 55 bold, 57-62 dim, 144 bold, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
+2: 0 darkgray, 2-3 bold, 4-14 dim, 16-48 darkgray, 50-55 bold, 59-60 green, 87-88 green, 115-116 dim, 144 bold, 145-199 darkgray
 3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 50-54 dim, 55 bold, 87-88 dim, 115-116 red, 144 bold, 199 darkgray
 4: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-54 dim, 55 bold, 59-60 yellow, 87-88 green, 144 bold, 199 darkgray
 5: 0 darkgray, 4-5 green, 6-13 blue, 47-48 darkgray, 50-54 dim, 55 bold, 144 bold, 199 darkgray

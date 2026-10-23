@@ -1,4 +1,4 @@
- devlanes  1 acme ✕   2 billing !   3 shop ●   starti…  M   D daemon · 2 issues
+ devlanes  1 acme   2 billing   3 shop   starting fea…  M   D daemon · 2 issues
 ┌ daemon ───────────────────────────────────────────── 1 fail · 1 warn · i all ┐
 │daemon    1.0.0 · pid 4242 · up 7h 38m · 41 managed                           │
 │socket    /Users/acme/.devlanes/run/daemon.sock                               │
@@ -24,7 +24,7 @@
  j k scroll   F pause   w level   / filter   T targets    ? all keys   q quit
 
 --- styles (row: columns style) ---
-0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 18-19 red, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 56 bold, 60 bold, 61-67 bold underlined, 68-78 red
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 13-16 red, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 56 bold, 60 bold, 61-67 bold underlined, 68-78 red
 1: 0 darkgray, 1-8 bold, 9-53 darkgray, 55-60 red, 61-63 dim, 64-69 yellow, 70-78 dim, 79 darkgray
 2: 0 darkgray, 1-10 dim, 79 darkgray
 3: 0 darkgray, 1-10 dim, 79 darkgray

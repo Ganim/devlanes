@@ -1,6 +1,6 @@
- devlanes  1 acme ✕   2 billing !   3 shop ●                                                                                                        starting acme@1: task migrate  M monitor   D daemon
- lanes    main @0 ✕     feat/checkout @1 ⠋ 4/8     fix/cache @2 ·     spike/old-search @3 !                                                                                     0-9 or [ ] switch lanes
-┌ feat/checkout @1 · starting ─────────────────┐┌ feat/checkout @1 · starting · 4 of 8 ready ──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+ devlanes  1 acme   2 billing   3 shop                                                                                                              starting acme@1: task migrate  M monitor   D daemon
+ lanes  1 main  2 feat/checkout 4/8  3 fix/cache  4 spike/old-search                                                                                                            1-9 or [ ] switch lanes
+┌ @1 · 4/8 up · starting ──────────────────────┐┌ feat/checkout @1 · starting · 4 of 8 ready ──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ ▾ services                                 6 ││   ⠋ tasks      running                                                                                                                               │
 │   ● api-gateway                              ││                                                                                                                                                      │
 │   ⠋ api-orders                      starting ││ starting  api-orders, api-users                                                                                                                      │
@@ -26,7 +26,7 @@
 │   ▸ setup                             1 done ││   fix/cache @2             not running · config changed                                                                                              │
 │                                              ││   spike/old-search @3      worktree missing                                                                                                          │
 │                                              ││                                                                                                                                                      │
-│                                              ││ 0-9 (the lane's number), [ and ] or a click on a chip switch lanes. devlanes lane new <branch> adds one.                                             │
+│                                              ││ 1-9 (the lane's place in the bar), [ and ] or a click on a chip switch lanes. devlanes lane new <branch> adds one.                                   │
 │                                              ││                                                                                                                                                      │
 │                                              ││                                                                                                                                                      │
 │                                              ││                                                                                                                                                      │
@@ -60,9 +60,9 @@
  x stop lane   r restart lane   p start with profiles   C clean lane   [ ] switch lane   / filter                                                                                 ? all keys   q quit
 
 --- styles (row: columns style) ---
-0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 179 bold, 180-187 dim, 191 bold, 192-198 dim
-1: 0-5 dim, 14-17 dim, 18 red, 23-46 bold reversed, 60-64 dim, 86-89 dim, 90 yellow, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
-2: 0 darkgray, 1-29 bold reversed, 30-48 darkgray, 50-62 bold, 66-68 dim, 77-91 dim, 93-199 darkgray
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 179 bold, 180-187 dim, 191 bold, 192-198 dim
+1: 0-6 dim, 8-9 dim, 10-13 red, 15-35 bold reversed, 37-47 dim, 50-51 dim, 52-67 yellow, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
+2: 0 darkgray, 1-24 bold reversed, 25-48 darkgray, 50-62 bold, 66-68 dim, 77-91 dim, 93-199 darkgray
 3: 0 darkgray, 2-3 dim, 45 dim, 47-48 darkgray, 65-71 dim, 199 darkgray
 4: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 199 darkgray
 5: 0 darkgray, 6-15 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
@@ -88,7 +88,7 @@
 25: 0 darkgray, 4-5 dim, 40-45 dim, 47-48 darkgray, 50-51 bold, 77-104 dim, 199 darkgray
 26: 0 darkgray, 47-48 darkgray, 50-51 bold, 77-92 yellow, 199 darkgray
 27: 0 darkgray, 47-48 darkgray, 199 darkgray
-28: 0 darkgray, 47-48 darkgray, 50-153 dim, 199 darkgray
+28: 0 darkgray, 47-48 darkgray, 50-163 dim, 199 darkgray
 29: 0 darkgray, 47-48 darkgray, 199 darkgray
 30: 0 darkgray, 47-48 darkgray, 199 darkgray
 31: 0 darkgray, 47-48 darkgray, 199 darkgray

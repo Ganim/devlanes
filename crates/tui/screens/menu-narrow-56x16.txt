@@ -1,4 +1,4 @@
- d┌──────────────────────────────────────────────────┐n
+ d┌──────────────────────────────────────────────────┐on
  l│ ╎       ╎       ╎       ║       ╎       ╎       ╎│s
 ┌ │ ╎   ▀▀▀▀▀   ░█▀▄░█▀▀░█░█░█░░░█▀█░█▀█░█▀▀░█▀▀    ╎│─┐
 │ │ ╎    ▀▀▀▀▀  ░█░█░█▀▀░▀▄▀░█░░░█▀█░█░█░█▀▀░▀▀█    ╎│ │
@@ -16,7 +16,7 @@
  r restart   n next problem       ? all keys   q quit
 
 --- styles (row: columns style) ---
-0: 1 bold color220, 2-53 bold, 54 dim
+0: 1 bold color220, 2-53 bold, 54-55 dim
 1: 0-1 dim, 2 bold, 4 darkgray, 12 darkgray, 20 darkgray, 28 dim yellow, 36 darkgray, 44 darkgray, 52 darkgray, 53 bold, 54-55 dim
 2: 0 darkgray, 2 bold, 4 darkgray, 8-12 yellow, 16 darkgray, 17-19 lightyellow, 20 darkgray, 21-23 lightyellow, 24 darkgray, 25 lightyellow, 26 darkgray, 27 lightyellow, 28 darkgray, 29 lightyellow, 30-32 darkgray, 33-35 lightyellow, 36 darkgray, 37-39 lightyellow, 40 darkgray, 41-43 lightyellow, 44 darkgray, 45-47 lightyellow, 52 darkgray, 53 bold, 54-55 darkgray
 3: 0 darkgray, 2 bold, 4 darkgray, 9-13 gray, 16 darkgray, 17 lightyellow, 18 darkgray, 19 lightyellow, 20 darkgray, 21-23 lightyellow, 24 darkgray, 25-27 lightyellow, 28 darkgray, 29 lightyellow, 30-32 darkgray, 33-35 lightyellow, 36 darkgray, 37 lightyellow, 38 darkgray, 39 lightyellow, 40 darkgray, 41-43 lightyellow, 44 darkgray, 45-47 lightyellow, 52 darkgray, 53 bold, 55 darkgray

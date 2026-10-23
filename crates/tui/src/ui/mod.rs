@@ -25,7 +25,7 @@ use crate::app::{
     App, AttachState, Click, Connection, Focus, MIN_HEIGHT, MIN_WIDTH, PaneMode, Target, View,
 };
 use crate::text::{self, clean, clip};
-use crate::theme::{Glyph, Theme, Tone};
+use crate::theme::{Glyph, Theme, Tier, Tone};
 use crate::tree::{self, Role, RowId};
 
 pub use list::lane_summary;
@@ -472,6 +472,8 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     );
     let mut used = 9;
     let projects = app.projects();
+    // One project needs no tabs: its name, then its lanes on this same row.
+    let single = projects.len() <= 1;
     let current = app.project().map(str::to_owned);
     let tabs: Vec<(String, Vec<Span<'static>>)> = projects
         .iter()
@@ -483,25 +485,34 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             let (glyph, tone) =
                 worst.map_or(("", Tone::Quiet), |lane| lane_glyph(theme, lane, app.spin));
             let active = app.view == View::Project && current.as_deref() == Some(name.as_str());
-            let number = if index < 9 {
+            let number = if index < 9 && !single {
                 format!("{} ", index + 1)
             } else {
                 String::new()
             };
-            // The active tab is one yellow block: number, name and glyph.
-            let spans = if active {
-                let tab = theme.tab();
-                vec![
-                    Span::styled(format!(" {number}{} ", clean(name)), tab),
-                    Span::styled(format!("{glyph} "), tab),
-                ]
+            let glyph = if needs_glyph(theme) && !glyph.is_empty() {
+                format!("{glyph} ")
+            } else {
+                String::new()
+            };
+            // The active tab is one yellow block; the others' names take the
+            // color of their worst lane.
+            let spans = if single {
+                vec![Span::styled(
+                    format!(" {}{glyph} ", clean(name)),
+                    Style::new().add_modifier(Modifier::BOLD),
+                )]
+            } else if active {
+                vec![Span::styled(
+                    format!(" {number}{} {glyph}", clean(name)),
+                    theme.tab(),
+                )]
             } else {
                 vec![
                     Span::raw(" "),
                     Span::styled(number, theme.quiet()),
-                    Span::raw(clean(name)),
-                    Span::raw(" "),
-                    Span::styled(format!("{glyph} "), theme.tone(tone)),
+                    Span::styled(clean(name), state_style(theme, tone)),
+                    Span::raw(format!(" {glyph}")),
                 ]
             };
             (name.clone(), spans)
@@ -540,6 +551,17 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         );
         left.extend(spans);
         used += w;
+    }
+    if single && app.view == View::Project && app.project_lanes().len() > 1 {
+        // A message (a start's progress, an error) keeps up to 32 columns;
+        // lanes past that fold into `+N more`.
+        let message_room = message
+            .as_ref()
+            .map_or(0, |(spans, _)| spans_width(spans).min(32) + 4);
+        let budget = width.saturating_sub(buttons_width + 2 + message_room);
+        let (chips, after) = lane_chips(app, area, used, budget);
+        left.extend(chips);
+        used = after;
     }
     // The message, right-aligned before the buttons.
     let free = width.saturating_sub(used + buttons_width + 4);
@@ -703,63 +725,90 @@ fn header_message(app: &App) -> Option<(Vec<Span<'static>>, Option<Click>)> {
     (!spans.is_empty()).then_some((spans, Some(Click::FirstProblem)))
 }
 
-/// ` lanes   main @0 ●   [feat/checkout @1 ⠹ 5/9]` and the switch hint.
+/// ` lanes  1 main  2 feat/checkout 5/9` and the switch hint, under the
+/// project tabs when there are several projects.
 fn render_lane_bar(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
     let width = usize::from(area.width);
+    let hint = vec![
+        Span::styled("1-9", theme.key()),
+        Span::styled(" or ", theme.quiet()),
+        Span::styled("[ ]", theme.key()),
+        Span::styled(" switch lanes ", theme.quiet()),
+    ];
+    let budget = width.saturating_sub(spans_width(&hint) + 2);
+    let mut spans = vec![Span::styled(" lanes ", theme.quiet())];
+    spans.extend(lane_chips(app, area, 7, budget).0);
+    frame.render_widget(Paragraph::new(spread(spans, hint, width)), area);
+}
+
+/// The project's lane chips from column `used` of `area`, up to column
+/// `budget`: `1 main  2 feat/checkout`, the shown lane highlighted, `+N more`
+/// for those that do not fit. Like the project tabs, they scroll (`‹`) to
+/// keep the shown lane in view. Registers each chip's click; returns the
+/// spans and the column after them.
+fn lane_chips(
+    app: &App,
+    area: Rect,
+    mut used: usize,
+    budget: usize,
+) -> (Vec<Span<'static>>, usize) {
+    let theme = &app.theme;
     let lanes = app.project_lanes();
-    let current = app.selected.as_ref().map(|s| s.lane.clone());
-    let hint = if lanes.len() > 1 {
-        vec![
-            Span::styled("0-9", theme.key()),
-            Span::styled(" or ", theme.quiet()),
-            Span::styled("[ ]", theme.key()),
-            Span::styled(" switch lanes ", theme.quiet()),
-        ]
-    } else {
-        vec![Span::styled(
-            "one lane · devlanes lane new <branch> adds another ",
-            theme.quiet(),
-        )]
-    };
-    let hint_width = spans_width(&hint);
-    let mut spans = vec![Span::styled(" lanes", theme.quiet())];
-    let mut used = 6;
-    let budget = width.saturating_sub(hint_width + 2);
-    for (index, lane) in lanes.iter().enumerate() {
-        // `trunk @0 ●`: the digit of its number jumps to a lane.
-        let chip = lane_chip(app, lane);
-        let w = spans_width(&chip) + 2;
+    let current = app.selected.as_ref().map(|s| s.lane.as_str());
+    let chips: Vec<Vec<Span<'static>>> = lanes
+        .iter()
+        .enumerate()
+        .map(|(index, lane)| lane_chip(app, lane, &lanes, index))
+        .collect();
+    // Each chip pads itself with a space on both sides, so the highlight is
+    // a block; that padding is also the gap between chips.
+    let widths: Vec<usize> = chips.iter().map(|chip| spans_width(chip) + 2).collect();
+    let active = lanes
+        .iter()
+        .position(|lane| current == Some(lane.reference.as_str()))
+        .unwrap_or(0);
+    let mut first = 0;
+    let room = budget.saturating_sub(used + 2);
+    while first < active && widths[first..=active].iter().sum::<usize>() > room {
+        first += 1;
+    }
+    let mut spans = Vec::new();
+    if first > 0 {
+        spans.push(Span::styled(" ‹", theme.quiet()));
+        used += 2;
+    }
+    for (index, (lane, chip)) in lanes.iter().zip(chips).enumerate().skip(first) {
+        let w = widths[index];
         let more = lanes.len() - index;
-        // A chip with lanes after it leaves room for `   +N more`.
-        let reserve = if more > 1 {
-            format!("   +{} more", more - 1).len()
+        // A chip with lanes after it leaves room for ` +N more`; those up to
+        // the shown lane fit already, the scroll above saw to that.
+        let reserve = if more > 1 && index > active {
+            format!(" +{} more", more - 1).len()
         } else {
             0
         };
-        if used + 3 + w + reserve > budget && more > 0 {
-            let text = format!("   +{more} more");
-            let x = area.x + used as u16 + 3;
+        // The shown lane always draws; a message beside the chips gives way.
+        if used + w + reserve > budget && index != active {
+            let text = format!(" +{more} more");
             hit(
                 app,
-                Rect::new(x, area.y, (text.len() - 3) as u16, 1),
+                Rect::new(area.x + used as u16 + 1, area.y, (text.len() - 1) as u16, 1),
                 Click::Key(KeyCode::Char(']'), KeyModifiers::NONE),
             );
+            used += text.len();
             spans.push(Span::styled(text, theme.quiet()));
             break;
         }
-        spans.push(Span::raw("   "));
-        used += 3;
         hit(
             app,
             Rect::new(area.x + used as u16, area.y, w as u16, 1),
             Click::Lane(lane.reference.clone()),
         );
-        let active = current.as_deref() == Some(lane.reference.as_str());
         let mut chip_spans = vec![Span::raw(" ")];
         chip_spans.extend(chip);
         chip_spans.push(Span::raw(" "));
-        if active {
+        if current == Some(lane.reference.as_str()) {
             chip_spans = chip_spans
                 .into_iter()
                 .map(|span| {
@@ -771,28 +820,75 @@ fn render_lane_bar(app: &App, frame: &mut Frame, area: Rect) {
         spans.extend(chip_spans);
         used += w;
     }
-    frame.render_widget(Paragraph::new(spread(spans, hint, width)), area);
+    (spans, used)
 }
 
-/// One chip: branch, index and state glyph, the ready count while starting.
-fn lane_chip(app: &App, lane: &LaneSummary) -> Vec<Span<'static>> {
+/// What a lane is called in the chips: an extra lane's name, else its
+/// branch; `@N` only when another lane of the project has the same name.
+pub(crate) fn lane_label(lane: &LaneSummary, lanes: &[&LaneSummary]) -> (String, Option<String>) {
+    let label = |lane: &LaneSummary| {
+        lane.name
+            .clone()
+            .or_else(|| lane.branch.clone())
+            .map_or_else(|| "detached".to_owned(), |name| clean(&name))
+    };
+    let own = label(lane);
+    let shared = lanes
+        .iter()
+        .any(|other| other.reference != lane.reference && label(other) == own);
+    let number = lane
+        .index
+        .filter(|_| shared)
+        .map(|index| format!("@{index}"));
+    (own, number)
+}
+
+/// The color of a lane or project name for its state: green when running,
+/// yellow while it starts or needs a look, red when it failed, dim when idle.
+fn state_style(theme: &Theme, tone: Tone) -> Style {
+    match tone {
+        // Busy is default text elsewhere (a spinner shows motion); a name has
+        // no spinner, so it takes the attention color.
+        Tone::Busy => theme.tone(Tone::Attention),
+        tone => theme.tone(tone),
+    }
+}
+
+/// Without colors the state needs its glyph, since the name cannot carry it.
+fn needs_glyph(theme: &Theme) -> bool {
+    theme.tier == Tier::Plain
+}
+
+/// One chip: its key (1-9, then 0), the name colored by state, `@N` when the
+/// name is shared, the ready count while starting.
+fn lane_chip(
+    app: &App,
+    lane: &LaneSummary,
+    lanes: &[&LaneSummary],
+    index: usize,
+) -> Vec<Span<'static>> {
     let theme = &app.theme;
-    let branch = lane
-        .branch
-        .as_deref()
-        .map_or_else(|| "detached".to_owned(), clean);
-    let index = lane.index.unwrap_or_default();
+    let (label, number) = lane_label(lane, lanes);
     let (glyph, tone) = lane_glyph(theme, lane, app.spin);
-    let mut spans = vec![
-        Span::raw(branch),
-        Span::styled(format!(" @{index} "), theme.quiet()),
-        Span::styled(glyph, theme.tone(tone)),
-    ];
+    let mut spans = Vec::new();
+    if index < 10 {
+        spans.push(Span::styled(
+            format!("{} ", (index + 1) % 10),
+            theme.quiet(),
+        ));
+    }
+    spans.push(Span::styled(label, state_style(theme, tone)));
+    if let Some(number) = number {
+        spans.push(Span::styled(number, theme.quiet()));
+    }
+    if needs_glyph(theme) {
+        spans.push(Span::raw(format!(" {glyph}")));
+    }
     if lane.state == "starting" {
         let counts = tree::counts(lane);
         spans.push(Span::styled(
             format!(" {}/{}", counts.up, counts.total),
-            theme.tone(Tone::Busy),
+            state_style(theme, Tone::Busy),
         ));
     }
     spans
@@ -1142,4 +1238,39 @@ pub(crate) fn target_error<'a>(
         None => Target::Lane(lane.into()),
     };
     app.target_error(&target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lane(index: u32, branch: &str, name: Option<&str>) -> LaneSummary {
+        LaneSummary {
+            reference: format!("acme@{index}"),
+            project: "acme".into(),
+            index: Some(index),
+            branch: Some(branch.into()),
+            name: name.map(str::to_owned),
+            ..LaneSummary::default()
+        }
+    }
+
+    #[test]
+    fn lanes_go_by_branch_and_show_their_number_only_when_it_is_shared() {
+        let main = lane(0, "main", None);
+        let feat = lane(1, "feat/x", None);
+        let again = lane(2, "main", None);
+        // An extra lane of main's folder: same branch, its own name.
+        let review = lane(3, "main", Some("review"));
+        let all = [&main, &feat, &again, &review];
+        assert_eq!(lane_label(&feat, &all), ("feat/x".into(), None));
+        assert_eq!(lane_label(&main, &all), ("main".into(), Some("@0".into())));
+        assert_eq!(lane_label(&again, &all), ("main".into(), Some("@2".into())));
+        assert_eq!(lane_label(&review, &all), ("review".into(), None));
+        // Alone, main needs no number.
+        assert_eq!(
+            lane_label(&main, &[&main, &feat, &review]),
+            ("main".into(), None)
+        );
+    }
 }

@@ -1,6 +1,6 @@
- devlanes  1 acme ✕   2 billing !   3 shop ●   starting …  M monitor   D daemon
- lanes    main @0 ✕    +3 more                          0-9 or [ ] switch lanes
-┌ fix/cache @2 ────────────────┐┌ fix/cache @2 · not running ──────────────────┐
+ devlanes  1 acme   2 billing   3 shop   starting feat/c…  M monitor   D daemon
+ lanes  1 main  2 feat/checkout 4/8  3 fix/cache  +1 m… 1-9 or [ ] switch lanes
+┌ @2 · 0/2 up ─────────────────┐┌ fix/cache @2 · not running ──────────────────┐
 │ ▾ services                 2 ││ Not running. s starts the lane with its      │
 │   · api-gateway              ││ default profile, p picks profiles.           │
 │   · web-app                  ││                                              │
@@ -24,9 +24,9 @@
  s start lane   S start all   p start with profiles       ? all keys   q quit
 
 --- styles (row: columns style) ---
-0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 59 bold, 60-67 dim, 71 bold, 72-78 dim
-1: 0-5 dim, 14-17 dim, 18 red, 20-29 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
-2: 0 darkgray, 1-14 bold reversed, 15-32 darkgray, 34-42 bold, 46-59 dim, 61-79 darkgray
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 59 bold, 60-67 dim, 71 bold, 72-78 dim
+1: 0-6 dim, 8-9 dim, 10-13 red, 16-17 dim, 18-34 yellow, 36-48 bold reversed, 49-54 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
+2: 0 darkgray, 1-13 bold reversed, 14-32 darkgray, 34-42 bold, 46-59 dim, 61-79 darkgray
 3: 0 darkgray, 2-3 dim, 29 dim, 31-32 darkgray, 79 darkgray
 4: 0 darkgray, 4-5 dim, 6-16 dim blue, 31-32 darkgray, 79 darkgray
 5: 0 darkgray, 4-5 dim, 6-12 dim green, 31-32 darkgray, 79 darkgray

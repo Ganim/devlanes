@@ -2,7 +2,7 @@
 source: crates/tui/tests/it/main.rs
 expression: draw(&app)?.backend()
 ---
-" devlanes  1 acme ●   2 shop ●                 ✕ 1 failed  M monitor   D daemon "
+" devlanes  1 acme   2 shop                     ✕ 1 failed  M monitor   D daemon "
 " cpu                          0%  mem 0K                                        "
 "┌ units 1 of 1 · by lane ─────────────────────────────────────────── <- cpu -> ┐"
 "│  name         kind state    cpu ▼      mem         peak uptime cpu -13s      │"

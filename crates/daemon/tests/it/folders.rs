@@ -62,6 +62,8 @@ async fn a_folder_can_hold_several_lanes() {
         assert_eq!(created["name"], "review");
         assert_eq!(created["lane"]["reference"], "demo@1", "{created}");
         assert_eq!(created["lane"]["domain"], "demo-1.localhost");
+        // Clients label it by its name: its branch is the folder's first lane's.
+        assert_eq!(created["lane"]["name"], "review");
 
         let first = start(&h, cx(&main), json!({"units": ["web"]})).await;
         assert_eq!(
@@ -85,6 +87,12 @@ async fn a_folder_can_hold_several_lanes() {
         assert_eq!(lanes.len(), 2);
         assert_ne!(ports[0], ports[1], "each lane has its own ports");
         assert!(lanes.iter().all(|lane| lane.path == main));
+        let names: Vec<Option<&str>> = lanes.iter().map(|lane| lane.name.as_deref()).collect();
+        assert_eq!(
+            names,
+            [None, Some("review")],
+            "the worktree's own lane has none"
+        );
 
         let taken = h
             .call(Method::LaneNew, json!({"name": "review"}), cx(&main))

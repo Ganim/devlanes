@@ -589,6 +589,10 @@ pub struct LaneSummary {
     pub project: String,
     pub index: Option<u32>,
     pub branch: Option<String>,
+    /// Name of an extra lane on another lane's folder (`lane new` without a
+    /// branch); `None` for a worktree's own lane, which goes by its branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub path: PathBuf,
     pub state: String,
     pub config_changed: bool,

@@ -2,9 +2,9 @@
 source: crates/tui/tests/it/daemon.rs
 expression: text
 ---
-" dev┌ clean acme@0 ──────────────────────────┐mon "
+" dev┌ clean acme@0 ──────────────────────────┐aem…"
 " lan│ Clean main (acme@0)?                   │nes "
-"┌ ma│                                        │ ──┐"
+"┌ @0│                                        │ ──┐"
 "│   │ It stops every unit in the lane, then: │   │"
 "│   │   runs its lane.clean tasks and infra  │   │"
 "│   │ …                                      │   │"

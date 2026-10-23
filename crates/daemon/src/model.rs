@@ -1021,6 +1021,7 @@ pub(crate) fn lane_summary(project: &str, lane: &LaneSt) -> LaneSummary {
         project: project.to_owned(),
         index: lane.index(),
         branch: lane.branch.clone(),
+        name: lane.alias().map(|(_, name)| name.to_owned()),
         path: lane.path.clone(),
         state: lane.state_word().into(),
         config_changed: lane.config_changed,

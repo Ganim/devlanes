@@ -2,9 +2,8 @@
 source: crates/tui/tests/it/orphans.rs
 expression: text
 ---
-" devlanes  1 acme ●                          ◆ 1 orphaned  M monitor   D daemon "
-" lanes    main @0 ●     feat @1 ·                       0-9 or [ ] switch lanes "
-"┌ main @0 ─────────────────────┐┌ api  orphaned · pid 4242 ────────────────────┐"
+" devlanes  acme  1 main  2 feat              ◆ 1 orphaned  M monitor   D daemon "
+"┌ @0 · 1/2 up ─────────────────┐┌ api  orphaned · pid 4242 ────────────────────┐"
 "│ ▾ services                 2 ││ ◆ An earlier daemon started this process and │"
 "│   ◆ api  orphaned · pid 4242 ││   left it running.                           │"
 "│   ● web                      ││   It has no terminal or live output here.    │"
@@ -14,6 +13,7 @@ expression: text
 "│                              ││ pid       4242                               │"
 "│                              ││ running   since 22:13 UTC, orphaned since    │"
 "│                              ││           22:23 UTC                          │"
+"│                              ││                                              │"
 "│                              ││                                              │"
 "│                              ││                                              │"
 "│                              ││                                              │"

@@ -2,7 +2,7 @@
 source: crates/tui/tests/it/daemon.rs
 expression: text
 ---
-" devlanes  1 acme ●   2 shop ●              ✕ 1 failed  M   D daemon · 2 issues "
+" devlanes  1 acme   2 shop                  ✕ 1 failed  M   D daemon · 2 issues "
 "┌ daemon ───────────────────────────────────────────── 1 fail · 1 warn · i all ┐"
 "│daemon    X.Y.Z · pid 4242 · up 2h 5m · 3 managed                             │"
 "│socket    /home/acme/.devlanes/run/daemon.sock                                │"

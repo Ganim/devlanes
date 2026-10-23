@@ -1,4 +1,4 @@
- devlanes  1 acme ✕   2 billing !   3 shop ●                                                                                                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ devlanes  1 acme   2 billing   3 shop                                                                                                       starting feat/checkout: 4 of 8 ready  M monitor   D daemon
 ┌ api-search · acme@0 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │service · ready · pid 51005 · up 2h 14m                                                                                                                                                               │
 │                                                                                                                                                                                                      │
@@ -60,7 +60,7 @@
  j k move   enter open unit   < > sort   i reverse   / filter   e flat   m memory graph   s x r start stop restart   esc back                                                     ? all keys   q quit
 
 --- styles (row: columns style) ---
-0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 18-19 red, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 179 bold, 180-187 bold underlined, 191 bold, 192-198 dim
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 13-16 red, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 179 bold, 180-187 bold underlined, 191 bold, 192-198 dim
 1: 0 darkgray, 1-11 bold, 12-21 dim, 22-199 darkgray
 2: 0 darkgray, 199 darkgray
 3: 0 darkgray, 199 darkgray

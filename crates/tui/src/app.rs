@@ -2510,14 +2510,15 @@ impl App {
     }
 
     /// [`App::areas`] for a frame of `width` x `height`: the lane bar only
-    /// when the project has several lanes.
+    /// when the project has several lanes and the top bar has project tabs;
+    /// with one project, the lanes share the top bar.
     pub fn areas_sized(&self, width: u16, height: u16) -> Option<Areas> {
         areas_with(
             width,
             height,
             self.zoom,
             self.first_run_strip(),
-            self.project_lanes().len() > 1,
+            self.project_lanes().len() > 1 && self.projects().len() > 1,
         )
     }
 
@@ -2836,21 +2837,14 @@ impl App {
                     self.select_project(&name, effects);
                 }
             }
-            // 0-9 picks the project's lane with that number, so `2` is `@2`:
-            // one project with many lanes is the common case.
+            // 1-9, then 0, pick the project's lanes by their place in the bar,
+            // so the first lane is always 1 whatever its number: one project
+            // with many lanes is the common case.
             KeyCode::Char(digit @ '0'..='9') if plain => {
-                let number = u32::from(digit as u8 - b'0');
-                let lane = self
-                    .project_lanes()
-                    .iter()
-                    .find(|lane| lane.index == Some(number))
-                    .map(|lane| lane.reference.clone());
-                match lane {
-                    Some(lane) => {
-                        self.view = View::Project;
-                        self.select_lane(&lane, effects);
-                    }
-                    None => self.set_notice(format!("no lane @{number} in this project")),
+                let place = (usize::from(digit as u8 - b'0') + 9) % 10;
+                if let Some(lane) = self.project_lanes().get(place).map(|l| l.reference.clone()) {
+                    self.view = View::Project;
+                    self.select_lane(&lane, effects);
                 }
             }
             KeyCode::Char('M') => self.set_view(View::Monitor, effects),

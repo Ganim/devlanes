@@ -1,4 +1,4 @@
- devlanes  1 acme ✕   2 billing !   3 shop ●   starting …  M monitor   D daemon
+ devlanes  1 acme   2 billing   3 shop   starting feat/c…  M monitor   D daemon
  cpu ▃▄▄▄▃▄▄▃▃▄▃▃▄▄▃▃▄▃▃▃▃▃▃▄ 44% sys 72%  mem 10.3G 32% · avail 9.6G · normal
 ┌ units /acme 40 of 42 · flat ────────────────────────────────────── <- mem -> ┐
 │  name       lane          state    cpu        mem ▼      uptime cpu -12s     │
@@ -24,7 +24,7 @@
  j k move   enter open unit   < > sort   i reverse        ? all keys   q quit
 
 --- styles (row: columns style) ---
-0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 18-19 red, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 59 bold, 60-67 bold underlined, 71 bold, 72-78 dim
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 13-16 red, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 59 bold, 60-67 bold underlined, 71 bold, 72-78 dim
 1: 0-4 dim, 5-28 green, 33-46 dim, 56-77 dim
 2: 0 darkgray, 13-29 dim, 30-67 darkgray, 68-71 dim, 72-74 bold, 75-78 dim, 79 darkgray
 3: 0 darkgray, 1-78 dim, 79 darkgray

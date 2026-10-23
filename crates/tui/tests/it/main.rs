@@ -420,7 +420,7 @@ async fn a_cleaned_lane_leaves_the_selection_in_its_project() -> TestResult {
     app.update(key(KeyCode::Char('@')));
     assert_eq!(app.project(), Some("shop"));
     app.update(key(KeyCode::Char('!')));
-    app.update(key(KeyCode::Char('2')));
+    app.update(key(KeyCode::Char('3')));
     assert_eq!(
         app.selected.as_ref().map(|s| s.lane.as_str()),
         Some("acme@2")
@@ -472,7 +472,7 @@ async fn a_project_whose_last_lane_went_away_still_opens() -> TestResult {
     let (mut app, _) = loaded(&api, 100, 24).await;
     // acme was last shown on acme@2; then shop is on screen when acme@2
     // goes away (cleaned from the CLI, say).
-    app.update(key(KeyCode::Char('2')));
+    app.update(key(KeyCode::Char('3')));
     app.update(key(KeyCode::Char('@')));
     let remaining: Vec<_> = mixed_lanes()
         .into_iter()
@@ -529,29 +529,34 @@ async fn o_opens_the_public_url_first() -> TestResult {
 async fn digits_pick_lanes_of_the_project_and_shifted_digits_projects() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 100, 24).await;
-    // A digit is the lane's number: 1 is @1, 0 is @0.
-    app.update(key(KeyCode::Char('1')));
+    // A digit is the lane's place in the bar: 1 is the first lane (@0).
+    app.update(key(KeyCode::Char('2')));
     let lane = |app: &App| app.selected.as_ref().map(|s| s.lane.clone());
     assert_eq!(lane(&app).as_deref(), Some("acme@1"));
-    app.update(key(KeyCode::Char('2')));
+    app.update(key(KeyCode::Char('3')));
     assert_eq!(lane(&app).as_deref(), Some("acme@2"));
-    app.update(key(KeyCode::Char('0')));
+    app.update(key(KeyCode::Char('1')));
     assert_eq!(lane(&app).as_deref(), Some("acme@0"));
-    // A number no lane has only says so.
+    // A place past the last lane does nothing.
     app.update(key(KeyCode::Char('9')));
     assert_eq!(lane(&app).as_deref(), Some("acme@0"));
-    assert_eq!(
-        app.notice.as_ref().map(|n| n.text.as_str()),
-        Some("no lane @9 in this project")
-    );
     // `(` is Shift+9 and there is no ninth project either.
     app.update(key(KeyCode::Char('(')));
     assert_eq!(app.project(), Some("acme"));
     app.update(key(KeyCode::Char('@')));
     assert_eq!(app.project(), Some("shop"));
-    // The lane numbers follow the project.
-    app.update(key(KeyCode::Char('0')));
+    // The places follow the project.
+    app.update(key(KeyCode::Char('1')));
     assert_eq!(lane(&app).as_deref(), Some("shop@0"));
+    // A gap in the numbers leaves none in the places: with @1 gone, 2 is @2.
+    app.update(key(KeyCode::Char('!')));
+    let remaining: Vec<_> = mixed_lanes()
+        .into_iter()
+        .filter(|lane| lane.reference != "acme@1")
+        .collect();
+    app.update(Msg::Status(Ok(remaining)));
+    app.update(key(KeyCode::Char('2')));
+    assert_eq!(lane(&app).as_deref(), Some("acme@2"));
     Ok(())
 }
 
@@ -1019,7 +1024,7 @@ async fn drive_stops_the_lanes_and_remembers_before_closing() -> TestResult {
         let backend = backend.clone();
         async move {
             let press = |code| Ok(TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)));
-            backend.wait_for("main @0").await;
+            backend.wait_for("┌ @0 · ").await;
             keys_tx.send(press(KeyCode::Char('q'))).await.ok();
             backend.wait_for("remember this choice").await;
             for code in [KeyCode::Char('j'), KeyCode::Char(' '), KeyCode::Enter] {
@@ -1434,7 +1439,7 @@ async fn drive_loop_resyncs_and_quits_without_stopping() -> TestResult {
                     KeyModifiers::NONE,
                 )))
             };
-            backend.wait_for("main @0").await;
+            backend.wait_for("┌ @0 · ").await;
             // The lane opens on its failed worker; api is two rows up.
             keys_tx.send(press('k')).await.ok();
             keys_tx.send(press('k')).await.ok();

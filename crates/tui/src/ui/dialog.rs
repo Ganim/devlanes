@@ -26,7 +26,10 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
                 "enter  space",
                 "fold a section, or type into a running unit",
             ),
-            ("[ ]  0-9", "previous, next lane; 2 is lane @2"),
+            (
+                "[ ]  1-9",
+                "previous, next lane; lane by its place in the bar",
+            ),
             ("n N", "next, previous problem"),
             ("t  i", "jump to the tasks, the infra"),
             (

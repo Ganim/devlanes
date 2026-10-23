@@ -9,7 +9,7 @@
 ││   g G               the lane, the last row                                 ││
 ││   h l               fold, unfold; h moves to the section                   ││
 ││   enter  space      fold a section, or type into a running unit            ││
-││   [ ]  0-9          previous, next lane; 2 is lane @2                      ││
+││   [ ]  1-9          previous, next lane; lane by its place in the bar      ││
 ││   n N               next, previous problem                                 ││
 ││   t  i              jump to the tasks, the infra                           ││
 ││   s  x  r           start, stop, restart the selection; s runs a task      ││

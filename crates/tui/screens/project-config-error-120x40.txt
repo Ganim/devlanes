@@ -1,4 +1,4 @@
- devlanes  1 acme ✕   2 billing !   3 shop ●                                                       M monitor   D daemon
+ devlanes  1 acme   2 billing   3 shop                                                             M monitor   D daemon
 ┌ main @0 ─────────────────────────────────────┐┌ main @0 · config has an error ───────────────────────────────────────┐
 │                                              ││ devlanes.yaml in /work/billing doesn't load                          │
 │                                              ││                                                                      │
@@ -40,7 +40,7 @@
  s start lane   S start all   p start with profiles   C clean lane   [ ] switch lane   / filter … ? all keys   q quit
 
 --- styles (row: columns style) ---
-0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 18-19 red, 21-33 bold black on yellow, 36-37 dim, 43-44 green, 99 bold, 100-107 dim, 111 bold, 112-118 dim
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 13-16 red, 19-29 bold black on yellow, 32-33 dim, 34-37 green, 99 bold, 100-107 dim, 111 bold, 112-118 dim
 1: 0 darkgray, 1-9 bold reversed, 10-48 darkgray, 50-53 bold, 57-59 dim, 60-78 yellow, 80-119 darkgray
 2: 0 darkgray, 47-48 darkgray, 119 darkgray
 3: 0 darkgray, 47-48 darkgray, 119 darkgray

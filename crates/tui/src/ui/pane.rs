@@ -1311,7 +1311,7 @@ fn lanes_table(app: &App, current: &LaneSummary, width: usize) -> Vec<Line<'stat
     }
     lines.push(Line::from(""));
     lines.extend(sentence(
-        "0-9 (the lane's number), [ and ] or a click on a chip switch lanes. devlanes lane new <branch> adds one.",
+        "1-9 (the lane's place in the bar), [ and ] or a click on a chip switch lanes. devlanes lane new <branch> adds one.",
         width,
         Vec::new(),
         theme.quiet(),

@@ -1,6 +1,6 @@
- devlanes  1 acme ✕   2 billing !   3 shop ●   starting …  M monitor   D daemon
- lanes    main @0 ✕    +3 more                          0-9 or [ ] switch lanes
-┌ main @0 ─────────────────────┐┌ lint  not run ───────────────────────────────┐
+ devlanes  1 acme   2 billing   3 shop   starting feat/c…  M monitor   D daemon
+ lanes  1 main  2 feat/checkout 4/8  +2 more            1-9 or [ ] switch lanes
+┌ @0 · 34/38 up ───────────────┐┌ lint  not run ───────────────────────────────┐
 │   ◉ wrk-cron                 ││ Never ran in this lane. s runs it.           │
 │   ◉ wrk-webhooks             ││                                              │
 │   ◉ wrk-ledger               ││                                              │
@@ -24,9 +24,9 @@
  s run   / filter                                         ? all keys   q quit
 
 --- styles (row: columns style) ---
-0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 59 bold, 60-67 dim, 71 bold, 72-78 dim
-1: 0-5 dim, 9-19 bold reversed, 20-29 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
-2: 0 darkgray, 2-5 bold, 10-32 darkgray, 34-37 bold, 38-46 dim, 48-79 darkgray
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 59 bold, 60-67 dim, 71 bold, 72-78 dim
+1: 0-6 dim, 7-14 bold reversed, 16-17 dim, 18-34 yellow, 36-43 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
+2: 0 darkgray, 2-3 bold, 4-14 dim, 16-32 darkgray, 34-37 bold, 38-46 dim, 48-79 darkgray
 3: 0 darkgray, 4-5 green, 6-13 magenta, 31-32 darkgray, 79 darkgray
 4: 0 darkgray, 4-5 green, 6-17 magenta, 31-32 darkgray, 79 darkgray
 5: 0 darkgray, 4-5 green, 6-15 magenta, 31-32 darkgray, 79 darkgray

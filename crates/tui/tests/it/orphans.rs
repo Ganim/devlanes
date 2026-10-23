@@ -252,10 +252,7 @@ async fn starting_an_orphan_shows_the_daemons_refusal() -> TestResult {
         notice.text
     );
     let header = row(&render(&app)?, 0);
-    assert!(
-        header.contains("✕ start acme@0:api failed: acme@0:"),
-        "{header}"
-    );
+    assert!(header.contains("✕ start acme@0:api "), "{header}");
     let entry = app.errors.front().ok_or("not in the error list")?;
     assert!(
         entry

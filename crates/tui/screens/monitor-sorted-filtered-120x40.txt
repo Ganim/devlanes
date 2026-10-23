@@ -1,4 +1,4 @@
- devlanes  1 acme ✕   2 billing !   3 shop ●                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ devlanes  1 acme   2 billing   3 shop                       starting feat/checkout: 4 of 8 ready  M monitor   D daemon
 ┌ cpu ──────────────────────────────────────────────────────────── of 10 cores ┐┌ mem ─────────────────────── of 32.0G ┐
 │100%┤                                            acme@0        ■■■■■■■■■  37% ││  devlanes      10.3G ■■■■■■■■■  32%  │
 │    │                                            acme@1        ■■■■■■■■■   6% ││  used          22.4G ■■■■■■■■■  70%  │
@@ -40,7 +40,7 @@
  j k move   enter open unit   < > sort   i reverse   / filter   e flat   m memory graph           ? all keys   q quit
 
 --- styles (row: columns style) ---
-0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 18-19 red, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 99 bold, 100-107 bold underlined, 111 bold, 112-118 dim
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 13-16 red, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 99 bold, 100-107 bold underlined, 111 bold, 112-118 dim
 1: 0 darkgray, 6-65 darkgray, 66-78 dim, 79-80 darkgray, 86-108 darkgray, 109-118 dim, 119 darkgray
 2: 0 darkgray, 1-4 dim, 5 darkgray, 64-66 green, 67-72 darkgray, 79-80 darkgray, 103-105 green, 106-111 darkgray, 119 darkgray
 3: 0 darkgray, 1-4 dim, 5 darkgray, 64 green, 65-72 darkgray, 79-80 darkgray, 103-106 green, 107-108 yellow, 109-111 darkgray, 112-116 yellow, 119 darkgray

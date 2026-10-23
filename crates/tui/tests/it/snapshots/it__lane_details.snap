@@ -2,9 +2,9 @@
 source: crates/tui/tests/it/main.rs
 expression: draw(&app)?.backend()
 ---
-" devlanes  1 acme ●   2 shop ●                                     ✕ 1 failed  M monitor   D daemon "
-" lanes    main @0 ●     feat/login @1 ·     fix/cache @2 ·                  0-9 or [ ] switch lanes "
-"┌ fix/cache @2 ────────────────────────┐┌ fix/cache @2 · not running · config changed ─────────────┐"
+" devlanes  1 acme   2 shop                                         ✕ 1 failed  M monitor   D daemon "
+" lanes  1 main  2 feat/login  3 fix/cache                                   1-9 or [ ] switch lanes "
+"┌ @2 · 0/0 up ─────────────────────────┐┌ fix/cache @2 · not running · config changed ─────────────┐"
 "│                                      ││ Not running. s starts the lane with its default profile, │"
 "│                                      ││ p picks profiles.                                        │"
 "│                                      ││                                                          │"

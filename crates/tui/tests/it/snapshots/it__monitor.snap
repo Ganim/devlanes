@@ -2,7 +2,7 @@
 source: crates/tui/tests/it/main.rs
 expression: terminal.backend()
 ---
-" devlanes  1 acme ●   2 shop ●                                     ✕ 1 failed  M monitor   D daemon "
+" devlanes  1 acme   2 shop                                         ✕ 1 failed  M monitor   D daemon "
 " cpu ▅▆▆▇▁▁▂▂▃▄▅▆▆▇▁▁▂▂▃▄▅▆▆▇ 45%  mem 3.9G                                                         "
 "┌ units 2 of 2 · by lane ─────────────────────────────────────────────────────────────── <- cpu -> ┐"
 "│  name         kind state    cpu ▼          mem             peak uptime cpu -25s                  │"
