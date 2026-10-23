@@ -89,33 +89,30 @@ pub fn decide(payload: &str, cwd: &Path, home: Option<&Path>) -> Verdict {
         return Verdict::Allow;
     };
     let background = input["run_in_background"].as_bool() == Some(true);
-    let powershell_tool = payload["tool_name"].as_str() == Some("PowerShell");
-    let windows = powershell_tool || BASH_MAY_RUN_WINDOWS_COMMANDS;
-    let dialect = if powershell_tool || (windows && looks_like_powershell(command)) {
-        Dialect::PowerShell
-    } else {
-        Dialect::Posix
-    };
+    let powershell = payload["tool_name"].as_str() == Some("PowerShell");
     let mut dir = match payload["cwd"].as_str() {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => cwd.to_path_buf(),
     };
     let check = Check {
-        dialect,
-        windows,
+        powershell,
+        windows: powershell || BASH_MAY_RUN_WINDOWS_COMMANDS,
         home,
-        depth: 0,
     };
-    if check.judge(command, background, &mut dir) {
+    let blocked = check
+        .split(command)
+        .into_iter()
+        .any(|(tagged, segment)| check.blocks(&segment, tagged || background, &mut dir));
+    if blocked {
         Verdict::Block
     } else {
         Verdict::Allow
     }
 }
 
-/// Codex on Windows sends its PowerShell commands as the `Bash` tool, and Git
-/// Bash ships a `start` that runs cmd's, so Windows `Bash` calls also get the
-/// Windows launchers and path rules.
+/// Git Bash ships a `start` that runs cmd's, and Codex sends PowerShell as the
+/// `Bash` tool, so Windows `Bash` calls also get the Windows launchers and path
+/// rules.
 #[cfg(windows)]
 const BASH_MAY_RUN_WINDOWS_COMMANDS: bool = true;
 
@@ -123,124 +120,31 @@ const BASH_MAY_RUN_WINDOWS_COMMANDS: bool = true;
 #[cfg(not(windows))]
 const BASH_MAY_RUN_WINDOWS_COMMANDS: bool = false;
 
-/// How deep `pwsh -c`, `iex`, `Start-Job { }` and `& { }` may nest before the
-/// hook stops looking; real commands nest one or two levels.
-const MAX_DEPTH: u8 = 6;
-
-/// Whether a Windows `Bash` call is PowerShell text, which is how Codex sends
-/// PowerShell: a cmdlet name such as `Set-Location` or `Start-Process`
-/// (capitalised as PowerShell prints them, so `npm run start-server` does not
-/// count), `$env:`, a statement that assigns `$name =` (a syntax error in
-/// POSIX shells) or a here-string (`@'` ending a line). Assignments and cmdlet
-/// names count only outside quotes, so an awk or perl program
-/// (`'{ n++; $x = 1 }'`) or a commit message that names `Get-Started` keeps a
-/// POSIX call POSIX. `$env:` counts anywhere, as `"$env:PATH"` is PowerShell's
-/// way to expand it.
-fn looks_like_powershell(command: &str) -> bool {
-    const VERBS: &[&str] = &[
-        "Add", "Clear", "Copy", "Export", "ForEach", "Get", "Import", "Invoke", "Join", "Measure",
-        "Move", "New", "Out", "Pop", "Push", "Receive", "Remove", "Rename", "Resolve", "Select",
-        "Set", "Sort", "Split", "Start", "Stop", "Test", "Wait", "Where", "Write",
-    ];
-    if command.contains("$env:")
-        || ["@'\n", "@\"\n", "@'\r\n", "@\"\r\n"]
-            .iter()
-            .any(|marker| command.contains(marker))
-    {
-        return true;
-    }
-    let command = unquoted(command);
-    let assigns = |statement: &str| {
-        statement
-            .trim_start()
-            .strip_prefix('$')
-            .and_then(|rest| rest.split_once('='))
-            .is_some_and(|(name, _)| {
-                let name = name.trim_end();
-                !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
-            })
-    };
-    command.split(['\n', ';']).any(assigns)
-        || command
-            .split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | '{' | '|' | '&'))
-            .any(|word| {
-                word.split_once('-').is_some_and(|(verb, noun)| {
-                    VERBS.contains(&verb)
-                        && noun.starts_with(|c: char| c.is_ascii_uppercase())
-                        && noun.chars().all(|c| c.is_ascii_alphanumeric())
-                })
-            })
-}
-
-/// Quoting rules of the tool's shell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Dialect {
-    /// `sh`, bash and Git Bash: `\` escapes.
-    Posix,
-    /// PowerShell: `` ` `` escapes, `{ }` groups script blocks, `#` and
-    /// `<# #>` comment, `@' '@` quotes lines, and a leading `&` calls a command.
-    PowerShell,
-}
-
 /// Settings for judging the simple commands of one call.
 #[derive(Debug, Clone, Copy)]
 struct Check<'a> {
-    dialect: Dialect,
-    /// Windows commands and paths apply: PowerShell, cmd's `start`, `\`
+    /// PowerShell quoting: `` ` `` escapes, `#` comments and `@' '@` quotes
+    /// lines; otherwise `\` escapes.
+    powershell: bool,
+    /// Windows commands and paths apply: PowerShell and cmd launchers, `\`
     /// separators, `.exe`/`.cmd` names, case-insensitive commands, `$x =`
     /// assignments and the `&` call operator.
     windows: bool,
     home: Option<&'a Path>,
-    /// How many shells or script blocks this text is nested in.
-    depth: u8,
 }
 
 impl Check<'_> {
-    /// Whether any simple command of `text` starts a dev server in the
-    /// background inside a project. `detached` marks them all as detached, for
-    /// `run_in_background` and script blocks that run as jobs.
-    fn judge(&self, text: &str, detached: bool, dir: &mut PathBuf) -> bool {
-        self.split(text)
-            .into_iter()
-            .any(|(tagged, segment)| self.blocks(&segment, tagged || detached, dir))
-    }
-
-    /// The same check for text that runs in PowerShell one level deeper:
-    /// `pwsh -c TEXT`, `iex TEXT`, `Start-Job { TEXT }`, `& { TEXT }`.
-    fn nested(&self) -> Option<Self> {
-        (self.depth < MAX_DEPTH).then_some(Self {
-            dialect: Dialect::PowerShell,
-            windows: true,
-            depth: self.depth + 1,
-            ..*self
-        })
-    }
-
     /// Splits `command` into simple commands. Commands joined by `&&`, `||` or
     /// `|` share the flag of the operator that ends their list: `true` for a
-    /// lone `&`. Operators inside quotes, PowerShell script blocks and
-    /// redirections (`2>&1`, `&>`) don't split, and PowerShell comments are
-    /// dropped.
-    ///
-    /// A Windows `Bash` call may be PowerShell or cmd text that reached the
-    /// POSIX rules, where `"C:\acme\"` would escape its closing quote and
-    /// swallow the rest of the line. So there, inside double quotes that start
-    /// with a path (`C:`, `\\`, `.\`, `..\`), `\` is a plain character, as it is
-    /// in PowerShell and cmd. PowerShell's own `` ` `` escape stays on in paths.
+    /// lone `&`. Operators inside quotes and redirections (`2>&1`, `&>`) don't
+    /// split, and PowerShell comments are dropped.
     fn split(&self, command: &str) -> Vec<(bool, String)> {
-        let powershell = self.dialect == Dialect::PowerShell;
-        let escape = if powershell { '`' } else { '\\' };
+        let escape = if self.powershell { '`' } else { '\\' };
         let chars: Vec<char> = command.chars().collect();
         let mut segments = Vec::new();
         let mut list = Vec::new();
         let mut segment = String::new();
         let mut quote = None;
-        // The text of the open double-quoted word, for the Windows path rule.
-        let mut quoted = String::new();
-        let mut braces = 0usize;
         let mut i = 0;
         while i < chars.len() {
             let c = chars[i];
@@ -252,32 +156,24 @@ impl Check<'_> {
                 }
                 continue;
             }
-            let in_double = quote == Some('"');
-            let plain_backslash = !powershell && in_double && self.windows && windows_path(&quoted);
-            if c == escape && !plain_backslash {
+            if c == escape {
                 segment.push(c);
-                if in_double {
-                    quoted.push(c);
-                }
                 if let Some(&escaped) = chars.get(i) {
                     segment.push(escaped);
-                    if in_double {
-                        quoted.push(escaped);
-                    }
                     i += 1;
                 }
                 continue;
             }
-            if in_double {
+            if quote == Some('"') {
                 segment.push(if c == '\n' { ' ' } else { c });
                 if c == '"' {
                     quote = None;
-                } else {
-                    quoted.push(c);
                 }
                 continue;
             }
-            if powershell {
+            if self.powershell {
+                // A here-string is one word, so a `'` or `&` in a commit
+                // message written with one neither quotes nor splits.
                 if c == '@'
                     && let Some(end) = here_string_end(&chars, i)
                 {
@@ -289,41 +185,22 @@ impl Check<'_> {
                     i = end;
                     continue;
                 }
-                if c == '<' && chars.get(i) == Some(&'#') {
-                    i = find(&chars, i + 1, &['#', '>']).map_or(chars.len(), |end| end + 2);
-                    segment.push(' ');
-                    continue;
-                }
                 // `#` starts a comment where a token may start: after blanks
-                // and after `{`, `(`, `|` and `;`, which stay in the segment
-                // inside script blocks.
+                // and after `{` and `(`, which stay in the segment.
                 if c == '#'
                     && segment
                         .chars()
                         .next_back()
-                        .is_none_or(|c| c.is_whitespace() || matches!(c, '{' | '(' | '|' | ';'))
+                        .is_none_or(|c| c.is_whitespace() || matches!(c, '{' | '('))
                 {
-                    i = find(&chars, i, &['\n']).unwrap_or(chars.len());
-                    continue;
-                }
-                match c {
-                    '{' => braces += 1,
-                    '}' => braces = braces.saturating_sub(1),
-                    _ => {}
-                }
-                // Line breaks stay: they separate the block's own statements.
-                if braces > 0 || c == '}' {
-                    if c == '\'' || c == '"' {
-                        quote = Some(c);
-                        quoted.clear();
+                    while chars.get(i).is_some_and(|&c| c != '\n') {
+                        i += 1;
                     }
-                    segment.push(c);
                     continue;
                 }
             }
             if c == '\'' || c == '"' {
                 quote = Some(c);
-                quoted.clear();
                 segment.push(c);
                 continue;
             }
@@ -335,9 +212,18 @@ impl Check<'_> {
                     i += 1;
                 }
                 '&' if next == Some('>') || matches!(previous, Some('>' | '<')) => segment.push(c),
-                // PowerShell's call operator, as in `& 'C:\tools\vite.cmd' dev`;
-                // in a POSIX shell a leading `&` is a syntax error.
-                '&' if self.windows && segment.trim().is_empty() => segment.push(c),
+                // PowerShell's call operator, as in `& 'C:\tools\vite.cmd' dev`
+                // or `Start-Job { & pnpm dev }`; in a POSIX shell a leading `&`
+                // is a syntax error.
+                '&' if self.windows
+                    && segment
+                        .trim_end()
+                        .chars()
+                        .next_back()
+                        .is_none_or(|c| matches!(c, '{' | '(')) =>
+                {
+                    segment.push(c)
+                }
                 '&' => flush(true, &mut segment, &mut list, &mut segments),
                 '|' => {
                     if matches!(next, Some('|' | '&')) {
@@ -359,27 +245,16 @@ impl Check<'_> {
         let mut words = self.words(segment);
         loop {
             match words.as_slice() {
-                [first, ..] if is_assignment(first) => {
-                    words.remove(0);
-                }
-                [first, ..] if matches!(*first, "nohup" | "exec" | "command" | "time" | "env") => {
-                    words.remove(0);
-                }
-                [first, ..] if self.windows && *first == "&" => {
+                [first, ..]
+                    if is_assignment(first)
+                        || matches!(*first, "nohup" | "exec" | "command" | "time" | "env")
+                        || (self.windows && *first == "&") =>
+                {
                     words.remove(0);
                 }
                 // `$job = Start-Job { ... }`
                 [first, "=", ..] if self.windows && first.starts_with('$') => {
                     words.drain(..2);
-                }
-                // `$job=Start-Job { ... }`, `$job= Start-Job`
-                [first, ..] if self.windows && first.starts_with('$') && first.contains('=') => {
-                    match first.split_once('=').map(|(_, value)| value) {
-                        Some(value) if !value.is_empty() => words[0] = value,
-                        _ => {
-                            words.remove(0);
-                        }
-                    }
                 }
                 _ => break,
             }
@@ -387,33 +262,12 @@ impl Check<'_> {
         let Some(&first) = words.first() else {
             return false;
         };
-        // `& { ... }` runs a script block here, so its `Set-Location` moves `dir`.
-        if self.dialect == Dialect::PowerShell && first.starts_with('{') {
-            return self.nested().is_some_and(|nested| {
-                nested.judge(brace_body(tail(segment, first)), detached, dir)
-            });
-        }
         if self.is_cd(first) {
             self.change_dir(&words[1..], dir);
             return false;
         }
-        let launch = match self.launch(segment, &words, detached, dir) {
-            Some(Launched::Command(launch)) => launch,
-            Some(Launched::Script {
-                text,
-                detached,
-                mut dir,
-            }) => {
-                return self
-                    .nested()
-                    .is_some_and(|nested| nested.judge(&text, detached, &mut dir));
-            }
-            Some(Launched::Inline { text, detached }) => {
-                return self
-                    .nested()
-                    .is_some_and(|nested| nested.judge(&text, detached, dir));
-            }
-            None => return false,
+        let Some(launch) = self.launch(&words, detached, dir) else {
+            return false;
         };
         let Some(program) = launch.words.first() else {
             return false;
@@ -423,7 +277,6 @@ impl Check<'_> {
         launch.detached
             && program != "devlanes"
             && !EDITORS.contains(&program.as_str())
-            && !HOST_EDITORS.contains(&program.as_str())
             && self.long_running(&launch.words)
             && in_project(&launch.dir)
     }
@@ -431,22 +284,25 @@ impl Check<'_> {
     /// Splits a simple command into words on whitespace, like the unquoted
     /// `set -- $segment` of the script this replaces: quote characters stay on
     /// the words. PowerShell also splits argument arrays (`'run','dev'`) and
-    /// drops the array and grouping brackets around them (`@('run','dev')`).
-    /// Every word is a slice of `segment`, which [`tail`] relies on.
+    /// drops the brackets around them (`@('run','dev')`), and on Windows the
+    /// braces of script blocks go, so `Start-Job { pnpm dev }` reads as
+    /// `Start-Job pnpm dev`.
     fn words<'s>(&self, segment: &'s str) -> Vec<&'s str> {
-        let separators: &[char] = match (self.dialect, self.windows) {
-            (Dialect::PowerShell, _) => &[' ', '\t', '\n', '\r', ','],
-            (Dialect::Posix, true) => &[' ', '\t', '\n', '\r'],
-            (Dialect::Posix, false) => &[' ', '\t', '\n'],
+        let separators: &[char] = match (self.powershell, self.windows) {
+            (true, _) => &[' ', '\t', '\n', '\r', ','],
+            (false, true) => &[' ', '\t', '\n', '\r'],
+            (false, false) => &[' ', '\t', '\n'],
         };
         segment
             .split(separators)
-            .map(|word| match self.dialect {
-                Dialect::PowerShell => word
+            .map(|word| match (self.powershell, self.windows) {
+                (true, _) => word
+                    .trim_matches(['{', '}'])
                     .trim_start_matches("@(")
                     .trim_start_matches('(')
                     .trim_end_matches(')'),
-                Dialect::Posix => word,
+                (false, true) => word.trim_matches(['{', '}']),
+                (false, false) => word,
             })
             .filter(|word| !word.is_empty())
             .collect()
@@ -495,15 +351,10 @@ impl Check<'_> {
         *dir = lexical(&moved);
     }
 
-    /// Unwraps the launcher at the start of `words`, if any, and says whether
-    /// the command it starts is detached. `words` are slices of `segment`.
-    fn launch<'w>(
-        &self,
-        segment: &'w str,
-        mut words: &[&'w str],
-        detached: bool,
-        dir: &Path,
-    ) -> Option<Launched<'w>> {
+    /// Unwraps the launchers at the start of `words`, if any, and says whether
+    /// the command they start is detached. `None` when nothing runs that this
+    /// hook can read, such as a URL or `pwsh -EncodedCommand`.
+    fn launch<'w>(&self, mut words: &[&'w str], detached: bool, dir: &Path) -> Option<Launch<'w>> {
         let mut launch = Launch {
             detached,
             words: Vec::new(),
@@ -545,143 +396,74 @@ impl Check<'_> {
                         launch.detached = true;
                     }
                 }
-                _ if self.windows => {
-                    let name = strip_quotes(first).to_ascii_lowercase();
-                    match name.as_str() {
-                        "start-process" | "saps" | "start" => {
-                            return self
-                                .start_process(&words[1..], launch)
-                                .map(Launched::Command);
-                        }
-                        "start-job" | "sajb" | "start-threadjob" => {
-                            launch.detached = true;
-                            let rest = words.get(1).map_or("", |word| tail(segment, word));
-                            if rest.contains('{') {
-                                return Some(Launched::Script {
-                                    text: brace_body(rest).to_owned(),
-                                    detached: true,
-                                    dir: launch.dir,
-                                });
-                            }
-                            launch.words = script_block(&words[1..]);
-                            return Some(Launched::Command(launch));
-                        }
-                        "invoke-expression" | "iex" => {
-                            let mut args = &words[1..];
-                            if args.first().is_some_and(|arg| {
-                                arg.eq_ignore_ascii_case("-command")
-                                    || arg.eq_ignore_ascii_case("-c")
-                            }) {
-                                args = &args[1..];
-                            }
-                            let text = strip_one_pair(tail(segment, args.first()?));
-                            return Some(Launched::Inline {
-                                text: text.to_owned(),
-                                detached: launch.detached,
-                            });
-                        }
-                        // `cmd /c start ...`: judge the inner command.
-                        "cmd" | "cmd.exe" => {
-                            let rest = words[1..]
-                                .iter()
-                                .position(|word| {
-                                    matches!(
-                                        strip_quotes(word).to_ascii_lowercase().as_str(),
-                                        "/c" | "//c" | "/k" | "//k"
-                                    )
-                                })
-                                .map(|index| index + 2)?;
-                            words = &words[rest..];
-                            continue;
-                        }
-                        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => {
-                            return powershell_command(segment, &words[1..], launch);
-                        }
-                        _ => {}
+                _ if self.windows => match strip_quotes(first).to_ascii_lowercase().as_str() {
+                    "start-process" | "saps" | "start" => {
+                        return self.start(false, &words[1..], launch);
                     }
-                }
+                    "start-job" | "sajb" | "start-threadjob" => {
+                        return self.start(true, &words[1..], launch);
+                    }
+                    // `cmd /c start ...`, `pwsh -c "Start-Process ..."`: judge
+                    // the command that follows.
+                    "cmd" | "cmd.exe" | "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => {
+                        let command = words.iter().position(|word| {
+                            matches!(
+                                strip_quotes(word).to_ascii_lowercase().as_str(),
+                                "/c" | "//c" | "/k" | "//k" | "-c" | "-command"
+                            )
+                        })?;
+                        words = &words[command + 1..];
+                        continue;
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
             launch.words = words.to_vec();
-            return Some(Launched::Command(launch));
+            return Some(launch);
         }
     }
 
-    /// `Start-Process` (or cmd's `start`): detached unless `-Wait` (and not
-    /// `-Wait:$false`) or `/wait`. Opening a URL starts a browser, not a
-    /// server, so that passes. `-WorkingDirectory` and `/d` move the command.
-    fn start_process<'w>(&self, args: &[&'w str], mut launch: Launch<'w>) -> Option<Launch<'w>> {
+    /// `Start-Process`, cmd's `start` (`job` false) and `Start-Job` (`job`
+    /// true): detached unless `-Wait` or `/wait`, and a job always is.
+    /// `-WorkingDirectory` and `/d` move the command. Opening a URL starts a
+    /// browser, not a server, so that passes.
+    fn start<'w>(&self, job: bool, args: &[&'w str], mut launch: Launch<'w>) -> Option<Launch<'w>> {
         let mut wait = false;
-        let mut command = Vec::new();
         let mut args = args.iter();
-        let move_to = |launch: &mut Launch<'_>, value: &str| {
-            launch.dir = lexical(&launch.dir.join(native_path(strip_quotes(value))));
-        };
         while let Some(&arg) = args.next() {
             let lower = arg.to_ascii_lowercase();
-            if lower.starts_with('-') && lower.len() > 1 {
-                let (name, inline) = match lower.split_once(':') {
-                    Some((name, value)) => (name, Some(value)),
-                    None => (lower.as_str(), None),
-                };
-                match name {
-                    "-wait" => wait = !matches!(inline, Some("$false" | "false" | "0")),
-                    "-filepath" | "-path" | "-pspath" | "-argumentlist" | "-args" => {
-                        if inline.is_some() {
-                            command.push(&arg[name.len() + 1..]);
-                        }
+            match lower.as_str() {
+                "/wait" => wait = true,
+                // `-Wait:$true` too.
+                _ if lower.starts_with("-wait") => wait = true,
+                "-workingdirectory" | "/d" => {
+                    if let Some(value) = args.next() {
+                        launch.dir = lexical(&launch.dir.join(native_path(strip_quotes(value))));
                     }
-                    "-workingdirectory" => {
-                        let value = if inline.is_some() {
-                            Some(&arg[name.len() + 1..])
-                        } else {
-                            args.next().copied()
-                        };
-                        if let Some(value) = value {
-                            move_to(&mut launch, value);
-                        }
-                    }
-                    _ if START_PROCESS_VALUES.contains(&name) && inline.is_none() => {
-                        args.next();
-                    }
-                    _ => {}
                 }
-                continue;
-            }
-            // cmd's `start` switches; `/d DIR` takes a value.
-            if lower.len() > 1
-                && lower.starts_with('/')
-                && lower[1..].chars().all(|c| c.is_ascii_alphabetic())
-                && lower.len() <= 12
-            {
-                match lower.as_str() {
-                    "/wait" => wait = true,
-                    "/d" => {
-                        if let Some(value) = args.next() {
-                            move_to(&mut launch, value);
-                        }
-                    }
-                    "/node" | "/affinity" => {
-                        args.next();
-                    }
-                    _ => {}
+                // Options whose value is not part of the started command.
+                "-name" | "-windowstyle" | "-verb" | "-credential" => {
+                    args.next();
                 }
-                continue;
+                _ if lower.starts_with("-redirectstandard") => {
+                    args.next();
+                }
+                // Other options and cmd's switches; `-FilePath npm` keeps `npm`.
+                _ if lower.len() > 1
+                    && (lower.starts_with('-')
+                        || (lower.starts_with('/')
+                            && lower[1..].chars().all(|c| c.is_ascii_alphabetic()))) => {}
+                // cmd's `start "" program` (an empty window title) and the call
+                // operator of `Start-Job { & pnpm dev }`.
+                _ if strip_quotes(arg).is_empty() || arg == "&" => {}
+                _ => launch.words.push(arg),
             }
-            command.push(arg);
         }
-        // cmd's `start "" program`: the first quoted argument is a window title.
-        if command
-            .first()
-            .is_some_and(|first| strip_quotes(first).is_empty())
-        {
-            command.remove(0);
-        }
-        if command.first()?.contains("://") {
+        if launch.words.first()?.contains("://") {
             return None;
         }
-        launch.detached |= !wait;
-        launch.words = command;
+        launch.detached |= job || !wait;
         Some(launch)
     }
 
@@ -746,96 +528,12 @@ impl Check<'_> {
     }
 }
 
-/// What a launcher starts: a command to judge, or PowerShell text.
-enum Launched<'w> {
-    Command(Launch<'w>),
-    /// Text that runs in another process (`pwsh -c`, a job's script block).
-    Script {
-        text: String,
-        detached: bool,
-        /// Where the text starts; its `Set-Location` stays inside it.
-        dir: PathBuf,
-    },
-    /// Text that runs in the caller's runspace (`iex`), so its `Set-Location`
-    /// moves the commands after it too.
-    Inline {
-        text: String,
-        detached: bool,
-    },
-}
-
 /// A command a launcher starts, and whether it outlives the call.
 struct Launch<'w> {
     detached: bool,
     words: Vec<&'w str>,
     /// Where it runs: `Start-Process -WorkingDirectory` can move it.
     dir: PathBuf,
-}
-
-/// `powershell`/`pwsh` arguments: the text after `-Command` (or the first
-/// argument that is no option) runs as PowerShell; `-WorkingDirectory` moves it,
-/// and the values of the other options are skipped. `-EncodedCommand` cannot be
-/// read, and `-Command -` reads stdin, so both pass.
-fn powershell_command<'w>(
-    segment: &'w str,
-    args: &[&'w str],
-    mut launch: Launch<'w>,
-) -> Option<Launched<'w>> {
-    let mut index = 0;
-    while let Some(&arg) = args.get(index) {
-        index += 1;
-        let lower = strip_quotes(arg).to_ascii_lowercase();
-        let Some(name) = lower.strip_prefix('-').filter(|name| !name.is_empty()) else {
-            index -= 1;
-            break;
-        };
-        // `-ExecutionPolicy:Bypass` carries its value.
-        let (name, inline) = match name.split_once(':') {
-            Some((name, value)) => (name, Some(value)),
-            None => (name, None),
-        };
-        let is = |full: &str, shortest: usize| name.len() >= shortest && full.starts_with(name);
-        if name == "c" || is("command", 3) {
-            break;
-        }
-        if name == "e" || name == "ec" || is("encodedcommand", 2) {
-            return None;
-        }
-        if name == "wd" || is("workingdirectory", 2) {
-            let value = match inline {
-                Some(_) => arg.split_once(':').map_or("", |(_, value)| value),
-                None => {
-                    index += 1;
-                    args.get(index - 1)?
-                }
-            };
-            launch.dir = lexical(&launch.dir.join(native_path(strip_quotes(value))));
-            continue;
-        }
-        let takes_value = matches!(name, "ep" | "ex" | "w" | "o" | "of" | "if" | "config")
-            || is("executionpolicy", 3)
-            || is("windowstyle", 3)
-            || is("outputformat", 3)
-            || is("inputformat", 2)
-            || is("configurationname", 7)
-            || is("configurationfile", 14)
-            || is("settingsfile", 2)
-            || is("custompipename", 2)
-            || is("psconsolefile", 2);
-        if takes_value && inline.is_none() {
-            index += 1;
-        }
-    }
-    let first = args.get(index)?;
-    let text = strip_one_pair(tail(segment, first));
-    if text == "-" {
-        return None;
-    }
-    Some(Launched::Script {
-        text: text.to_owned(),
-        detached: launch.detached,
-        dir: launch.dir,
-    })
 }
 
 /// Programs that serve until stopped unless given a one-shot subcommand.
@@ -856,7 +554,10 @@ const SERVER_TOOLS: &[&str] = &[
 ];
 
 /// Editors, IDEs and file openers: started in the background they open a file
-/// such as `server.js` in a window, they don't serve it.
+/// such as `server.js` in a window, they don't serve it. Some names count only
+/// on the OS where they are editors: elsewhere `devenv` is Nix's (`devenv up`
+/// starts services), and Linux `open` may be Debian's `openvt`, which runs the
+/// command it is given.
 const EDITORS: &[&str] = &[
     "code",
     "code-insiders",
@@ -870,75 +571,17 @@ const EDITORS: &[&str] = &[
     "webstorm",
     "webstorm64",
     "xdg-open",
+    #[cfg(windows)]
+    "notepad",
+    #[cfg(windows)]
+    "notepad++",
+    #[cfg(windows)]
+    "explorer",
+    #[cfg(windows)]
+    "devenv",
+    #[cfg(target_os = "macos")]
+    "open",
 ];
-
-/// Editors and openers whose names mean something else on other systems, so
-/// they count only on the OS where they are editors. On Windows: Notepad,
-/// Explorer and Visual Studio's `devenv`, which elsewhere is Nix's `devenv`
-/// (`devenv up` starts services), also from PowerShell on Linux.
-#[cfg(windows)]
-const HOST_EDITORS: &[&str] = &["notepad", "notepad++", "explorer", "devenv"];
-
-/// macOS `open` hands a file or URL to the app registered for it.
-#[cfg(target_os = "macos")]
-const HOST_EDITORS: &[&str] = &["open"];
-
-/// On Linux `open` may be Debian's `openvt`, which runs the command it is
-/// given on a new virtual terminal, so it is no editor.
-#[cfg(not(any(windows, target_os = "macos")))]
-const HOST_EDITORS: &[&str] = &[];
-
-/// `Start-Process` parameters (with their aliases and the common parameters)
-/// whose value is not part of the started command.
-const START_PROCESS_VALUES: &[&str] = &[
-    "-credential",
-    "-redirectstandarderror",
-    "-rse",
-    "-redirectstandardinput",
-    "-rsi",
-    "-redirectstandardoutput",
-    "-rso",
-    "-windowstyle",
-    "-verb",
-    "-environment",
-    "-erroraction",
-    "-ea",
-    "-warningaction",
-    "-wa",
-    "-informationaction",
-    "-infa",
-    "-errorvariable",
-    "-ev",
-    "-outvariable",
-    "-ov",
-    "-outbuffer",
-    "-ob",
-    "-pipelinevariable",
-    "-pv",
-];
-
-/// The command words of a `Start-Job` without a script block, such as
-/// `Start-Job -FilePath ./build.ps1`.
-fn script_block<'w>(args: &[&'w str]) -> Vec<&'w str> {
-    let mut words = Vec::new();
-    let mut args = args.iter();
-    while let Some(&arg) = args.next() {
-        if arg.starts_with('-') {
-            if matches!(
-                arg.to_ascii_lowercase().as_str(),
-                "-name" | "-initializationscript" | "-runas32" | "-psversion" | "-credential"
-            ) {
-                args.next();
-            }
-            continue;
-        }
-        let arg = arg.trim_matches(['{', '}']);
-        if !arg.is_empty() {
-            words.push(arg);
-        }
-    }
-    words
-}
 
 /// Ends the current simple command, without grouping punctuation around it.
 fn add(segment: &mut String, list: &mut Vec<String>) {
@@ -960,54 +603,6 @@ fn flush(
 ) {
     add(segment, list);
     segments.extend(list.drain(..).map(|command| (detached, command)));
-}
-
-/// Whether the text of an open double-quoted word starts like a Windows path:
-/// a drive (`C:`), a UNC or rooted path (`\\`), or `.\` and `..\`.
-fn windows_path(quoted: &str) -> bool {
-    let bytes = quoted.as_bytes();
-    matches!(bytes, [drive, b':', ..] if drive.is_ascii_alphabetic())
-        || quoted.starts_with(r"\\")
-        || matches!(quoted, "." | "..")
-        || quoted.starts_with(r".\")
-        || quoted.starts_with(r"..\")
-}
-
-/// `command` with every quoted string replaced by a space, for
-/// [`looks_like_powershell`], which does not know the dialect yet. Inside
-/// double quotes both PowerShell's `` ` `` and POSIX `\` escape the next
-/// character, except that `\` is plain in a Windows path ([`windows_path`]).
-fn unquoted(command: &str) -> String {
-    let mut out = String::with_capacity(command.len());
-    let mut chars = command.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            // PowerShell's `''` inside single quotes closes and reopens, which
-            // removes the same text.
-            '\'' => {
-                chars.by_ref().find(|&c| c == '\'');
-                out.push(' ');
-            }
-            '"' => {
-                let mut quoted = String::new();
-                while let Some(c) = chars.next() {
-                    match c {
-                        '"' => break,
-                        '`' => {
-                            chars.next();
-                        }
-                        '\\' if !windows_path(&quoted) => {
-                            chars.next();
-                        }
-                        _ => quoted.push(c),
-                    }
-                }
-                out.push(' ');
-            }
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 /// The end (exclusive) of a PowerShell here-string whose `@` is just before
@@ -1032,61 +627,6 @@ fn here_string_end(chars: &[char], start: usize) -> Option<usize> {
         i += 1;
     }
     Some(chars.len())
-}
-
-/// The index in `chars` of the first `pattern` at or after `from`.
-fn find(chars: &[char], from: usize, pattern: &[char]) -> Option<usize> {
-    chars
-        .get(from..)?
-        .windows(pattern.len())
-        .position(|window| window == pattern)
-        .map(|index| index + from)
-}
-
-/// The rest of `text` from `word` on, where `word` is a slice of `text` (as
-/// every word from [`Check::words`] is); empty for any other `word`.
-fn tail<'t>(text: &'t str, word: &str) -> &'t str {
-    word.as_ptr()
-        .addr()
-        .checked_sub(text.as_ptr().addr())
-        .and_then(|start| text.get(start..))
-        .unwrap_or("")
-}
-
-/// The inside of the first `{ ... }` in `text`, quotes respected; to the end of
-/// the text when the closing brace is missing, as when [`add`] trimmed it.
-fn brace_body(text: &str) -> &str {
-    let Some(open) = text.find('{') else {
-        return "";
-    };
-    let body = &text[open + 1..];
-    let mut depth = 0usize;
-    let mut quote = None;
-    for (index, c) in body.char_indices() {
-        match (quote, c) {
-            (Some(q), _) if c == q => quote = None,
-            (Some(_), _) => {}
-            (None, '\'' | '"') => quote = Some(c),
-            (None, '{') => depth += 1,
-            (None, '}') if depth == 0 => return &body[..index],
-            (None, '}') => depth -= 1,
-            _ => {}
-        }
-    }
-    body
-}
-
-/// `text` without one pair of surrounding quotes, as the shell that ran
-/// `pwsh -c "..."` would have removed them; a missing closing quote is fine.
-fn strip_one_pair(text: &str) -> &str {
-    let text = text.trim();
-    match text.chars().next() {
-        Some(quote @ ('"' | '\'')) => {
-            let inner = &text[1..];
-            inner.strip_suffix(quote).unwrap_or(inner)
-        }
-        _ => text,
-    }
 }
 
 /// `NAME=value`, a variable assignment before a command.

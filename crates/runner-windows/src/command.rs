@@ -438,7 +438,7 @@ fn quote_batch(arg: &str) -> String {
 }
 
 /// `path` without a verbatim `\\?\` prefix, which cmd.exe cannot read.
-fn user_path(path: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn user_path(path: &str) -> std::borrow::Cow<'_, str> {
     if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{unc}").into()
     } else if let Some(local) = path.strip_prefix(r"\\?\")

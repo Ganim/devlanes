@@ -895,7 +895,10 @@ mod os {
         time::Duration,
     };
 
-    use devlanes_sys::{ProcessInfo, windows::proc::terminate_verified};
+    use devlanes_sys::{
+        ProcessInfo,
+        windows::{net::parse_excluded_ranges, proc::terminate_verified},
+    };
 
     /// What commands keep of the outer environment besides `PATH`: what Windows
     /// programs need to start (Winsock fails without `SystemRoot`), to find
@@ -979,7 +982,7 @@ mod os {
                     .stdin(Stdio::null());
                 match crate::run_bounded(command, Duration::from_secs(10)) {
                     Ok(output) if output.success() => {
-                        ranges.extend(parse_excluded(&output.stdout));
+                        ranges.extend(parse_excluded_ranges(&output.stdout));
                     }
                     _ => return ranges,
                 }
@@ -1003,10 +1006,11 @@ mod os {
         if age >= RANGES_FRESH {
             return None;
         }
-        Some(parse_excluded(&std::fs::read_to_string(path).ok()?))
+        Some(parse_excluded_ranges(&std::fs::read_to_string(path).ok()?))
     }
 
-    /// Saves `ranges` at `path` in `netsh`'s row format, through a file of
+    /// Saves `ranges` at `path` in `netsh`'s row format, which
+    /// [`parse_excluded_ranges`] reads back, through a file of
     /// this process renamed into place, so a concurrent reader never sees half
     /// a list. Failures only cost the next process another `netsh` run.
     fn save(path: &std::path::Path, ranges: &[(u16, u16)]) {
@@ -1020,12 +1024,6 @@ mod os {
         {
             let _ = std::fs::remove_file(&partial);
         }
-    }
-
-    /// Rows of `netsh ... show excludedportrange`, also the format of the saved
-    /// copy (see [`devlanes_sys::windows::net::parse_excluded_ranges`]).
-    fn parse_excluded(text: &str) -> Vec<(u16, u16)> {
-        devlanes_sys::windows::net::parse_excluded_ranges(text)
     }
 
     /// The process, when it is visible to this user.
@@ -1055,29 +1053,14 @@ mod os {
 
     /// Terminates `pid` and every descendant. Windows has no process groups, and
     /// the unit's job cannot be reopened once its daemon is gone, so descendants
-    /// come from parent PIDs; a child must have started after its parent, which
-    /// rules out a recycled parent PID.
+    /// come from parent PIDs ([`devlanes_sys::DescendantTracker`]).
     pub fn kill_tree(pid: i32) {
         let Some(root) = info(pid) else {
             return;
         };
-        let table = devlanes_sys::processes().unwrap_or_default();
-        let mut victims = vec![root];
-        let mut next = 0;
-        while let Some(parent) = victims.get(next).cloned() {
-            next += 1;
-            let children: Vec<ProcessInfo> = table
-                .iter()
-                .filter(|p| {
-                    p.ppid == parent.pid
-                        && p.start_time >= parent.start_time
-                        && !victims.iter().any(|v| v.pid == p.pid)
-                })
-                .cloned()
-                .collect();
-            victims.extend(children);
-        }
-        for victim in victims {
+        let mut tree = devlanes_sys::DescendantTracker::new(root.identity());
+        tree.update(&devlanes_sys::processes().unwrap_or_default());
+        for victim in tree.processes() {
             let _ = terminate_verified(&victim.identity(), KILLED);
         }
     }
@@ -1099,31 +1082,6 @@ mod os {
         pids.sort_unstable();
         pids.dedup();
         pids
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        /// Data rows are read whatever the header language; `*` marks are ignored.
-        #[test]
-        fn parses_excluded_ranges() {
-            let text = "
-Protocol tcp Port Exclusion Ranges
-
-Start Port    End Port
-----------    --------
-      5357        5357
-     27339       27339
-     50000       50059     *
-
-* - Administered port exclusions.
-";
-            assert_eq!(
-                parse_excluded(text),
-                [(5357, 5357), (27339, 27339), (50000, 50059)]
-            );
-        }
     }
 }
 

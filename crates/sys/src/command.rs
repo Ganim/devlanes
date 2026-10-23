@@ -44,23 +44,32 @@ mod os {
     use super::NoWindow;
     use crate::windows::process::{CREATE_NO_WINDOW, has_console};
 
+    /// The creation flags [`NoWindow`] sets: `CREATE_NO_WINDOW` unless this
+    /// process has a console to share, else none.
+    pub(crate) fn window_flags() -> u32 {
+        if has_console() { 0 } else { CREATE_NO_WINDOW }
+    }
+
     impl NoWindow for std::process::Command {
         /// `CREATE_NO_WINDOW` unless this process has a console to share.
         fn no_window(&mut self) -> &mut Self {
-            if !has_console() {
-                self.creation_flags(CREATE_NO_WINDOW);
+            match window_flags() {
+                0 => self,
+                flags => self.creation_flags(flags),
             }
-            self
         }
     }
 
     impl NoWindow for tokio::process::Command {
         /// `CREATE_NO_WINDOW` unless this process has a console to share.
         fn no_window(&mut self) -> &mut Self {
-            if !has_console() {
-                self.creation_flags(CREATE_NO_WINDOW);
+            match window_flags() {
+                0 => self,
+                flags => self.creation_flags(flags),
             }
-            self
         }
     }
 }
+
+#[cfg(windows)]
+pub(crate) use os::window_flags;

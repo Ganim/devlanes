@@ -1241,7 +1241,6 @@ name = "devlanes-logon-launcher"
 version = "0.2.0"
 dependencies = [
  "devlanes-client",
- "devlanes-sys",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
@@ -1799,7 +1798,6 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "devlanes-pki",
- "devlanes-sys",
  "hex",
  "rcgen",
  "rustls-pki-types",

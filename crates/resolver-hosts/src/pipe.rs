@@ -1,8 +1,8 @@
 //! Windows: the daemon's side of the `devlanes-hosts` service's pipe.
 //!
 //! Before anything is sent, the pipe must be owned by the expected account
-//! (SYSTEM for the real service), and when the server process can be inspected,
-//! run as it: a pipe name taken by another program is refused, never fed names.
+//! (SYSTEM for the real service): a pipe name taken by another program is
+//! refused, never fed names.
 //! Responses carry the helper's exit codes and map to the same [`HostsError`]s
 //! as the sudo client, plus `service_missing`, `service_denied` and
 //! `service_untrusted`.
@@ -13,11 +13,10 @@ use std::time::Duration;
 
 use devlanes_hosts_helper::exit;
 use devlanes_hosts_helper::protocol::{
-    self, DENIED, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PIPE_NAME, PIPE_PROTOCOL, Request,
-    Response,
+    self, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PIPE_NAME, PIPE_PROTOCOL, Request, Response,
 };
 use devlanes_sys::windows::pipe::{self as sys_pipe, ERROR_PIPE_BUSY};
-use devlanes_sys::windows::token::{self, Sid};
+use devlanes_sys::windows::token::Sid;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::windows::named_pipe::NamedPipeClient;
 
@@ -39,9 +38,8 @@ impl PipeHostsClient {
         Self::new(PIPE_NAME, Sid::local_system())
     }
 
-    /// A client of `pipe_name` that only talks to a pipe owned by (and, when that
-    /// can be read, served by a process of) `server_owner`. Tests pass their own
-    /// pipe and account.
+    /// A client of `pipe_name` that only talks to a pipe owned by
+    /// `server_owner`. Tests pass their own pipe and account.
     pub fn new(pipe_name: impl Into<OsString>, server_owner: Sid) -> Self {
         Self {
             pipe_name: pipe_name.into(),
@@ -111,12 +109,9 @@ impl PipeHostsClient {
         }
     }
 
-    /// Refuses a pipe that is not owned by the expected account, or whose server
-    /// process runs as another one. Only the account itself (or an
-    /// administrator) can create an object it owns, so the owner check alone
-    /// stops a squatting user process. The process check is a second look; an
-    /// unelevated daemon usually may not read a SYSTEM process's token, and that
-    /// is fine.
+    /// Refuses a pipe that is not owned by the expected account. Only the
+    /// account itself (or an administrator) can create an object it owns, so
+    /// this stops a squatting user process.
     fn check_server(&self, client: &NamedPipeClient) -> Result<(), HostsError> {
         let expected = self
             .server_owner
@@ -127,13 +122,6 @@ impl PipeHostsClient {
         if owner.as_deref() != Some(expected.as_str()) {
             return Err(HostsError::ServiceUntrusted {
                 owner: owner.unwrap_or_else(|| "nobody".into()),
-            });
-        }
-        if let Ok(user) = sys_pipe::server_process_id(client).and_then(token::process_user)
-            && user != self.server_owner
-        {
-            return Err(HostsError::ServiceUntrusted {
-                owner: user.to_sddl().unwrap_or_else(|_| "another account".into()),
             });
         }
         Ok(())
@@ -194,7 +182,6 @@ fn success(response: Response) -> Result<String, HostsError> {
     let message = response.message;
     match response.code {
         exit::OK => Ok(message),
-        DENIED => Err(HostsError::ServiceDenied { message }),
         exit::INVALID_NAMES => Err(HostsError::InvalidNames { message }),
         exit::REFUSED_FILE => Err(HostsError::HostsFileRefused { message }),
         code => Err(HostsError::HelperFailed {
@@ -212,7 +199,6 @@ mod tests {
     fn response_codes_map_like_the_helper_exits() {
         assert_eq!(success(Response::ok("x")), Ok("x".into()));
         for (code, expected) in [
-            (DENIED, "service_denied"),
             (exit::INVALID_NAMES, "hosts_invalid_names"),
             (exit::REFUSED_FILE, "hosts_file_refused"),
             (exit::IO, "helper_failed"),

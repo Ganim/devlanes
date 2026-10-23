@@ -7,33 +7,23 @@
 
 use std::io;
 use std::os::windows::io::OwnedHandle;
+use std::ptr;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_BAD_LENGTH, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER,
-    FILETIME,
-};
+use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
 use windows_sys::Win32::System::Memory::{
     CreateMemoryResourceNotification, LowMemoryResourceNotification,
     QueryMemoryResourceNotification,
 };
 use windows_sys::Win32::System::ProcessStatus::{
-    GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
-    PROCESS_MEMORY_COUNTERS_EX2,
+    GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
 };
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-use windows_sys::Win32::System::Threading::{
-    GetProcessTimes, GetSystemTimes, PROCESS_QUERY_LIMITED_INFORMATION,
-};
+use windows_sys::Win32::System::Threading::GetSystemTimes;
 
-use super::proc::{exited, open};
+use super::proc::{open_verified, times};
 use super::token::{owned, raw};
 use crate::ProcessIdentity;
-
-/// Set once `PROCESS_MEMORY_COUNTERS_EX2` was refused for its size, so systems
-/// without it make one memory call per process instead of two.
-static EX2_UNSUPPORTED: AtomicBool = AtomicBool::new(false);
 
 /// The low-memory notification object, created on first use and kept for the
 /// process's life: the object is shared system state, so one handle is enough.
@@ -47,13 +37,8 @@ pub struct ProcessUsage {
     /// Working set: resident pages, shared ones (DLLs, shared memory) included.
     pub working_set: u64,
     /// Private working set: resident pages no other process shares, what Task
-    /// Manager's Memory column shows. `PROCESS_MEMORY_COUNTERS_EX2` reports it from
-    /// Windows 11 22H2 with the September 2023 update. `None` on 21H2 and
-    /// unpatched systems, and when it reads 0: a running process always has some
-    /// private pages resident, so 0 means the field was not filled in.
-    pub private_working_set: Option<u64>,
-    /// Private bytes (commit charge): private memory whether resident or paged out.
-    pub private_bytes: u64,
+    /// Manager's Memory column shows.
+    pub private_working_set: u64,
 }
 
 /// Machine-wide CPU times since boot, in 100 ns units summed over all CPUs.
@@ -68,8 +53,6 @@ pub struct SystemTimes {
 /// Physical memory use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryStatus {
-    /// Share of physical memory in use, 0 to 100, as Windows grades it.
-    pub load_percent: u32,
     pub total_physical: u64,
     /// Physical memory available without paging anything out: free, zeroed and
     /// standby (cache) pages.
@@ -80,7 +63,7 @@ pub struct MemoryStatus {
 /// refuses access (protected or another user's) or its PID now names a process
 /// started at another time.
 pub fn process_usage(identity: &ProcessIdentity) -> io::Result<Option<ProcessUsage>> {
-    let handle = match open(identity.pid, PROCESS_QUERY_LIMITED_INFORMATION) {
+    let handle = match open_verified(identity, 0) {
         Ok(Some(handle)) => handle,
         Ok(None) => return Ok(None),
         Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
@@ -88,10 +71,7 @@ pub fn process_usage(identity: &ProcessIdentity) -> io::Result<Option<ProcessUsa
         }
         Err(error) => return Err(error),
     };
-    let times = process_times(&handle)?;
-    if times.created != identity.start_time || exited(&handle) {
-        return Ok(None);
-    }
+    let times = times(&handle)?;
     let memory = memory_counters(&handle)?;
     Ok(Some(ProcessUsage {
         cpu_time: times.kernel.saturating_add(times.user),
@@ -101,17 +81,15 @@ pub fn process_usage(identity: &ProcessIdentity) -> io::Result<Option<ProcessUsa
 
 /// Idle, kernel and user time of all CPUs since boot (`GetSystemTimes`).
 pub fn system_times() -> io::Result<SystemTimes> {
-    let mut times = [ZERO_FILETIME; 3];
-    let [idle, kernel, user] = &mut times;
-    // SAFETY: the three FILETIMEs are writable for the call.
-    if unsafe { GetSystemTimes(idle, kernel, user) } == 0 {
+    let mut times = [0_u64; 3];
+    let [idle, kernel, user] = times.each_mut().map(ptr::from_mut);
+    // SAFETY: a FILETIME is two u32 halves, low half first, so on little-endian
+    // Windows each writable u64 has its layout, with stricter alignment.
+    if unsafe { GetSystemTimes(idle.cast(), kernel.cast(), user.cast()) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(SystemTimes {
-        idle: ticks(idle),
-        kernel: ticks(kernel),
-        user: ticks(user),
-    })
+    let [idle, kernel, user] = times;
+    Ok(SystemTimes { idle, kernel, user })
 }
 
 /// Physical memory load and availability (`GlobalMemoryStatusEx`).
@@ -126,7 +104,6 @@ pub fn memory_status() -> io::Result<MemoryStatus> {
         return Err(io::Error::last_os_error());
     }
     Ok(MemoryStatus {
-        load_percent: status.dwMemoryLoad,
         total_physical: status.ullTotalPhys,
         available_physical: status.ullAvailPhys,
     })
@@ -161,78 +138,17 @@ pub fn low_memory() -> io::Result<bool> {
     Ok(state != 0)
 }
 
-const ZERO_FILETIME: FILETIME = FILETIME {
-    dwLowDateTime: 0,
-    dwHighDateTime: 0,
-};
-
-/// A `FILETIME` as one 64-bit count.
-fn ticks(time: &FILETIME) -> u64 {
-    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
-}
-
-/// `GetProcessTimes` as 64-bit counts.
-struct ProcessTimes {
-    created: u64,
-    kernel: u64,
-    user: u64,
-}
-
-/// Reads the creation time and CPU times of an open process.
-fn process_times(handle: &OwnedHandle) -> io::Result<ProcessTimes> {
-    let mut times = [ZERO_FILETIME; 4];
-    let [created, exit, kernel, user] = &mut times;
-    // SAFETY: `handle` is open with query rights; the four FILETIMEs are writable.
-    if unsafe { GetProcessTimes(raw(handle), created, exit, kernel, user) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(ProcessTimes {
-        created: ticks(created),
-        kernel: ticks(kernel),
-        user: ticks(user),
-    })
-}
-
-/// Memory counters of an open process, CPU time left at 0. Asks for the `EX2`
-/// layout first and falls back to `EX` (no private working set) when that call
-/// fails; only a size refusal marks `EX2` unsupported for later calls.
+/// Memory counters of an open process (`PROCESS_MEMORY_COUNTERS_EX2`, which
+/// Windows 11 24H2 fills in), CPU time left at 0.
 fn memory_counters(handle: &OwnedHandle) -> io::Result<ProcessUsage> {
-    if !EX2_UNSUPPORTED.load(Ordering::Relaxed) {
-        let mut counters = PROCESS_MEMORY_COUNTERS_EX2 {
-            cb: size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32,
-            // SAFETY: an all-zero value is valid for the rest of this plain C struct.
-            ..unsafe { std::mem::zeroed() }
-        };
-        // SAFETY: `handle` is open with query rights; `counters` is writable and
-        // `cb` is the size passed. EX2 starts with the base layout, so the cast
-        // is the documented way to pass it.
-        let ok = unsafe {
-            GetProcessMemoryInfo(
-                raw(handle),
-                (&raw mut counters).cast::<PROCESS_MEMORY_COUNTERS>(),
-                counters.cb,
-            )
-        };
-        if ok != 0 {
-            return Ok(ProcessUsage {
-                cpu_time: 0,
-                working_set: counters.WorkingSetSize as u64,
-                private_working_set: Some(counters.PrivateWorkingSetSize as u64)
-                    .filter(|&private| private != 0),
-                private_bytes: counters.PrivateUsage as u64,
-            });
-        }
-        let error = io::Error::last_os_error();
-        if is_size_refusal(&error) {
-            EX2_UNSUPPORTED.store(true, Ordering::Relaxed);
-        }
-    }
-    let mut counters = PROCESS_MEMORY_COUNTERS_EX {
-        cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX2 {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32,
         // SAFETY: an all-zero value is valid for the rest of this plain C struct.
         ..unsafe { std::mem::zeroed() }
     };
-    // SAFETY: as above, with the EX layout.
+    // SAFETY: `handle` is open with query rights; `counters` is writable and
+    // `cb` is the size passed. EX2 starts with the base layout, so the cast is
+    // the documented way to pass it.
     let ok = unsafe {
         GetProcessMemoryInfo(
             raw(handle),
@@ -246,23 +162,7 @@ fn memory_counters(handle: &OwnedHandle) -> io::Result<ProcessUsage> {
     Ok(ProcessUsage {
         cpu_time: 0,
         working_set: counters.WorkingSetSize as u64,
-        private_working_set: None,
-        private_bytes: counters.PrivateUsage as u64,
-    })
-}
-
-/// The errors `GetProcessMemoryInfo` gives for a structure size it does not
-/// know; any other failure (a process ending mid-call, say) says nothing about
-/// `EX2` support.
-fn is_size_refusal(error: &io::Error) -> bool {
-    error.raw_os_error().is_some_and(|code| {
-        [
-            ERROR_BAD_LENGTH,
-            ERROR_INSUFFICIENT_BUFFER,
-            ERROR_INVALID_PARAMETER,
-        ]
-        .iter()
-        .any(|&refusal| code == refusal as i32)
+        private_working_set: counters.PrivateWorkingSetSize as u64,
     })
 }
 
@@ -309,10 +209,8 @@ mod tests {
         let identity = identity_of(&child)?;
         let first = process_usage(&identity)?.ok_or(Error::Unsupported("child unread"))?;
         assert!(first.working_set > 0, "{first:?}");
-        assert!(first.private_bytes > 0, "{first:?}");
-        if let Some(private) = first.private_working_set {
-            assert!(private > 0 && private <= first.working_set, "{first:?}");
-        }
+        let private = first.private_working_set;
+        assert!(private > 0 && private <= first.working_set, "{first:?}");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             std::thread::sleep(Duration::from_millis(100));
@@ -361,11 +259,10 @@ mod tests {
         Ok(())
     }
 
-    /// Memory load is a percentage and availability fits in the total.
+    /// Availability fits in the total.
     #[test]
     fn memory_status_is_consistent() -> io::Result<()> {
         let status = memory_status()?;
-        assert!(status.load_percent <= 100, "{status:?}");
         assert!(status.total_physical > 0, "{status:?}");
         assert!(
             status.available_physical <= status.total_physical,
@@ -381,21 +278,5 @@ mod tests {
         low_memory()?;
         assert!(LOW_MEMORY.get().is_some());
         Ok(())
-    }
-
-    /// Only size errors mark `EX2` unsupported.
-    #[test]
-    fn size_refusals() {
-        for code in [
-            ERROR_BAD_LENGTH,
-            ERROR_INSUFFICIENT_BUFFER,
-            ERROR_INVALID_PARAMETER,
-        ] {
-            assert!(is_size_refusal(&io::Error::from_raw_os_error(code as i32)));
-        }
-        assert!(!is_size_refusal(&io::Error::from_raw_os_error(
-            ERROR_ACCESS_DENIED as i32
-        )));
-        assert!(!is_size_refusal(&io::Error::other("no code")));
     }
 }

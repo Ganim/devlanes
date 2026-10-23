@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use devlanes_core::ProcessIdentity;
 use devlanes_metrics::{Error, MetricsSource, Sample, SampleRequest, Subject, UnitTarget, unix_ms};
-use devlanes_sys::windows::usage::{ProcessUsage, process_usage};
+use devlanes_sys::windows::usage::process_usage;
 
 /// 100 ns ticks between 1601-01-01 (the `FILETIME` epoch) and 1970-01-01.
 const FILETIME_UNIX_OFFSET: u64 = 116_444_736_000_000_000;
@@ -26,13 +26,12 @@ struct CpuReading {
 /// Samples the processes the daemon tracks for each unit.
 ///
 /// A unit's processes are the runner's tracked processes as of its last
-/// snapshot (at most half a second old): the job's members plus their
-/// descendants by parent PID, including those outside the job. The collector
-/// measures exactly the identities it is given and ignores session ids, which
-/// Windows does not have. Identities
-/// whose PID now names a process started at another time, exited processes and
-/// processes that refuse to be opened are skipped. A process listed by several
-/// targets counts for the first one.
+/// snapshot (at most half a second old): the job's members and descendants by
+/// parent PID. The collector measures exactly the identities it is given and
+/// ignores session ids, which Windows does not have. Identities whose PID now
+/// names a process started at another time, exited processes and processes
+/// that refuse to be opened are skipped. A process listed by several targets
+/// counts for the first one.
 #[derive(Debug, Clone, Default)]
 pub struct WindowsSource {
     previous: Arc<Mutex<HashMap<(u32, u64), CpuReading>>>,
@@ -132,7 +131,7 @@ fn collect(previous: &mut HashMap<(u32, u64), CpuReading>, units: &[UnitTarget])
                     start_time: identity.start_time,
                 },
                 cpu_percent,
-                footprint_bytes: footprint(&usage),
+                footprint_bytes: usage.private_working_set,
                 rss_bytes: usage.working_set,
                 ts_ms,
             });
@@ -142,13 +141,6 @@ fn collect(previous: &mut HashMap<(u32, u64), CpuReading>, units: &[UnitTarget])
     *previous = readings;
     samples.sort_by(|a, b| a.subject.cmp(&b.subject));
     samples
-}
-
-/// The memory number: the private working set, or private bytes on Windows
-/// versions that do not report it. Private bytes also count paged-out memory, so
-/// they read higher for idle processes.
-fn footprint(usage: &ProcessUsage) -> u64 {
-    usage.private_working_set.unwrap_or(usage.private_bytes)
 }
 
 /// CPU of a process seen for the first time: its lifetime average, so a busy
@@ -204,22 +196,6 @@ mod tests {
         // One second of CPU over four seconds of life.
         assert!((first_sight_percent(10_000_000, 40_000_000) - 25.0).abs() < 1e-9);
         assert!((first_sight_percent(5_000_000, MIN_FIRST_SIGHT_AGE) - 50.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn footprint_prefers_the_private_working_set() {
-        let usage = ProcessUsage {
-            cpu_time: 0,
-            working_set: 10,
-            private_working_set: Some(4),
-            private_bytes: 7,
-        };
-        assert_eq!(footprint(&usage), 4);
-        let older = ProcessUsage {
-            private_working_set: None,
-            ..usage
-        };
-        assert_eq!(footprint(&older), 7);
     }
 
     /// The clock conversion agrees with this process's creation time: it started

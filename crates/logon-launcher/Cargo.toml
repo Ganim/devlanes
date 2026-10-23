@@ -32,7 +32,6 @@ workspace = true
 
 [target.'cfg(windows)'.dependencies]
 devlanes-client = { path = "../client" }
-devlanes-sys = { path = "../sys" }
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }

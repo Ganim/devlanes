@@ -90,12 +90,11 @@ Windows has no sudo helper; the `devlanes-hosts` service writes the hosts file
 instead. `HostsClient::service(PipeHostsClient::system(), tld)` talks to it over
 `\\.\pipe\devlanes-hosts` with the same `apply`, `clear`, `status` and `version`,
 one connection per call. Before sending anything the client requires the pipe to
-be owned by SYSTEM (and, when it may read the serving process's token, served by
-a SYSTEM process). The Windows-only error codes:
+be owned by SYSTEM. The Windows-only error codes:
 
 - `service_missing`: the pipe does not exist (not installed, or stopped); replaces `helper_missing`.
-- `service_denied`: the service refused this account (installed by another user, or a sandboxed caller); replaces `sudo_denied`, with the same backoff.
-- `service_untrusted`: something other than SYSTEM serves the pipe; nothing was sent.
+- `service_denied`: the pipe refused this account (installed by another user, or a sandboxed caller); replaces `sudo_denied`, with the same backoff.
+- `service_untrusted`: the pipe is not owned by SYSTEM; nothing was sent.
 - `helper_outdated`: the service speaks another pipe protocol, as with the helper.
 
 A sudo `HostsClient` on Windows still fails with `hosts_unsupported`, because

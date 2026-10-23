@@ -87,19 +87,20 @@ pub enum HostsError {
         /// The pipe looked for.
         pipe: String,
     },
-    /// Windows: the hosts service refused this account, which is not the user
-    /// who installed it (or is a sandboxed or low-integrity process of that user).
+    /// Windows: the hosts service's pipe refused this account, which is not the
+    /// user who installed it (or is a sandboxed or low-integrity process of that
+    /// user).
     #[error(
         "the devlanes hosts service refused this account ({message}); it serves the user who ran `devlanes certs trust --hosts`"
     )]
     ServiceDenied {
-        /// The service's or the system's message.
+        /// The system's message.
         message: String,
     },
-    /// Windows: the pipe is served by something other than a SYSTEM process, so
-    /// it is not the hosts service; nothing was sent to it.
+    /// Windows: the pipe is not owned by SYSTEM, so it is not the hosts service;
+    /// nothing was sent to it.
     #[error(
-        "the process serving the hosts service's pipe runs as {owner}, not SYSTEM; refusing to use it (another program took the name; restart the devlanes-hosts service or reboot)"
+        "the hosts service's pipe is owned by {owner}, not SYSTEM; refusing to use it (another program took the name; restart the devlanes-hosts service or reboot)"
     )]
     ServiceUntrusted {
         /// The account that owns the pipe.

@@ -13,10 +13,6 @@ wsl
   ✓ WSL 2 (Ubuntu), Windows interop on
   ! systemd is not running in this distro, so devlanes daemon install cannot start the daemon with it
     fix: set systemd=true under [boot] in /etc/wsl.conf, then run wsl.exe --shutdown from Windows and reopen the distro
-  ✓ NAT networking: Windows reaches the proxy through WSL's localhost forwarding
-  ! ports below 1024 need root in this distro, so the proxy cannot bind 80 and 443 and uses its fallback ports (8080 for HTTP, 8443 for HTTPS)
-    fix: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80, and keep it with echo net.ipv4.ip_unprivileged_port_start=80 | sudo tee /etc/sysctl.d/50-devlanes.conf; then devlanes daemon restart
-  ✓ WSL rewrites /etc/hosts when the distro starts (generateHosts); the daemon writes its names again when it starts, and Windows programs never read this file
   ! browsers on Windows do not trust the CA: tls.trust leaves out windows
     fix: add windows to tls.trust in ~/.devlanes/config.yaml, then devlanes certs trust
   ! acme@2 is on the Windows drive C:\ (/mnt/c/src/acme-2): file access is slow and file watching misses edits made from Windows
@@ -44,10 +40,6 @@ wsl
   ok WSL 2 (Ubuntu), Windows interop on
   warn systemd is not running in this distro, so devlanes daemon install cannot start the daemon with it
     fix: set systemd=true under [boot] in /etc/wsl.conf, then run wsl.exe --shutdown from Windows and reopen the distro
-  ok NAT networking: Windows reaches the proxy through WSL's localhost forwarding
-  warn ports below 1024 need root in this distro, so the proxy cannot bind 80 and 443 and uses its fallback ports (8080 for HTTP, 8443 for HTTPS)
-    fix: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80, and keep it with echo net.ipv4.ip_unprivileged_port_start=80 | sudo tee /etc/sysctl.d/50-devlanes.conf; then devlanes daemon restart
-  ok WSL rewrites /etc/hosts when the distro starts (generateHosts); the daemon writes its names again when it starts, and Windows programs never read this file
   warn browsers on Windows do not trust the CA: tls.trust leaves out windows
     fix: add windows to tls.trust in ~/.devlanes/config.yaml, then devlanes certs trust
   warn acme@2 is on the Windows drive C:\ (/mnt/c/src/acme-2): file access is slow and file watching misses edits made from Windows
@@ -67,8 +59,6 @@ output
 --- agent (exit 0)
 warn wsl: systemd is not running in this distro, so devlanes daemon install cannot start the daemon with it
   fix: set systemd=true under [boot] in /etc/wsl.conf, then run wsl.exe --shutdown from Windows and reopen the distro
-warn wsl: ports below 1024 need root in this distro, so the proxy cannot bind 80 and 443 and uses its fallback ports (8080 for HTTP, 8443 for HTTPS)
-  fix: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80, and keep it with echo net.ipv4.ip_unprivileged_port_start=80 | sudo tee /etc/sysctl.d/50-devlanes.conf; then devlanes daemon restart
 warn wsl: browsers on Windows do not trust the CA: tls.trust leaves out windows
   fix: add windows to tls.trust in ~/.devlanes/config.yaml, then devlanes certs trust
 warn wsl: acme@2 is on the Windows drive C:\ (/mnt/c/src/acme-2): file access is slow and file watching misses edits made from Windows
@@ -81,8 +71,6 @@ ok daemon: devlanes 0.3.0, pid 42, socket /home/acme/.devlanes/run/daemon.sock
 ok daemon: state schema 1 at /home/acme/.devlanes/state.db
 ok sandbox: not sandboxed
 ok wsl: WSL 2 (Ubuntu), Windows interop on
-ok wsl: NAT networking: Windows reaches the proxy through WSL's localhost forwarding
-ok wsl: WSL rewrites /etc/hosts when the distro starts (generateHosts); the daemon writes its names again when it starts, and Windows programs never read this file
 ok tls: CA at /home/acme/.devlanes/ca/ca.pem
 ok tls: CA trusted by system
 ok hosts: /etc/hosts fallback auto, not probed, 2 names written

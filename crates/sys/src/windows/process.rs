@@ -6,9 +6,7 @@ use std::os::windows::io::IntoRawHandle;
 use std::ptr;
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE, SetStdHandle};
 use windows_sys::Win32::System::JobObjects::{
     IsProcessInJob, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -16,7 +14,7 @@ use windows_sys::Win32::System::JobObjects::{
     JobObjectExtendedLimitInformation, QueryInformationJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    GetCurrentProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 
 use super::token;
@@ -111,15 +109,8 @@ pub fn without_inherited_std_handles<T>(spawn: impl FnOnce() -> T) -> T {
 /// Only for waiting: a recycled PID could make this wait on an unrelated process,
 /// which costs time but never acts on it.
 pub fn wait_exit(pid: u32, timeout: Duration) -> io::Result<bool> {
-    // SAFETY: plain call; a null result is checked.
-    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
-    let process = match token::owned(process) {
-        Ok(process) => process,
-        // No such process.
-        Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => {
-            return Ok(true);
-        }
-        Err(error) => return Err(error),
+    let Some(process) = super::proc::open(pid, PROCESS_SYNCHRONIZE)? else {
+        return Ok(true);
     };
     let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
     // SAFETY: `process` is an open handle with SYNCHRONIZE rights.

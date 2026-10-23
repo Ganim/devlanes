@@ -504,33 +504,32 @@ fn spawn_daemon(command: &mut Command) -> std::io::Result<tokio::process::Child>
     command.spawn()
 }
 
-/// Starts the daemon without a console, so the terminal's Ctrl-C and close events
-/// never reach it, and outside the terminal's job object, which some terminals kill
-/// when they close. A job that forbids breaking away refuses the second flag with
-/// access denied; the daemon then starts inside it, and `doctor` reports whether
-/// that job kills on close.
-///
-/// The daemon also must not inherit this process's standard handles: a shell
-/// reading devlanes' output (`$(devlanes status)`) would wait for the daemon to
-/// exit.
+/// Starts the daemon detached ([`spawn_detached`]) without inheriting this
+/// process's standard handles: a shell reading devlanes' output
+/// (`$(devlanes status)`) would wait for the daemon to exit.
 #[cfg(windows)]
 fn spawn_daemon(command: &mut Command) -> std::io::Result<tokio::process::Child> {
-    use devlanes_sys::windows::process::{
-        CREATE_BREAKAWAY_FROM_JOB, DETACHED_PROCESS, without_inherited_std_handles,
-    };
-    without_inherited_std_handles(|| {
-        command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
-        match command.spawn() {
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                tracing::debug!(
-                    "the terminal's job refuses breakaway; the daemon starts inside it"
-                );
-                command.creation_flags(DETACHED_PROCESS);
-                command.spawn()
-            }
-            result => result,
-        }
+    devlanes_sys::windows::process::without_inherited_std_handles(|| {
+        spawn_detached(|flags| command.creation_flags(flags).spawn())
     })
+}
+
+/// Runs `spawn` with the creation flags that start the daemon without a console,
+/// so the terminal's Ctrl-C and close events never reach it, and outside the
+/// terminal's job object, which some terminals kill when they close. A job that
+/// forbids breaking away refuses that flag with access denied; `spawn` then runs
+/// again without it and the daemon starts inside the job (`doctor` reports
+/// whether that job kills on close). Shared with the Windows logon launcher.
+#[cfg(windows)]
+pub fn spawn_detached<T>(mut spawn: impl FnMut(u32) -> std::io::Result<T>) -> std::io::Result<T> {
+    use devlanes_sys::windows::process::{CREATE_BREAKAWAY_FROM_JOB, DETACHED_PROCESS};
+    match spawn(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            tracing::debug!("the terminal's job refuses breakaway; the daemon starts inside it");
+            spawn(DETACHED_PROCESS)
+        }
+        result => result,
+    }
 }
 
 /// Detects explicit sandbox markers before any auto-spawn filesystem or process operations.
@@ -616,13 +615,13 @@ const DAEMON_ENV_DENIED: &[&str] = devlanes_proto::remote::ASKPASS_ENV;
 
 /// Nothing extra on Unix.
 #[cfg(unix)]
-const PLATFORM_ENV: &[&str] = &[];
+pub const PLATFORM_ENV: &[&str] = &[];
 
 /// What Windows programs expect: Winsock fails to start without `SystemRoot`
 /// (WSA error 10106), and helpers such as git and docker read the profile and
-/// program directories.
+/// program directories. The daemon passes the same list to Compose.
 #[cfg(windows)]
-const PLATFORM_ENV: &[&str] = &[
+pub const PLATFORM_ENV: &[&str] = &[
     "SystemRoot",
     "SystemDrive",
     "windir",
@@ -653,22 +652,24 @@ const PLATFORM_ENV: &[&str] = &[
     "PSModulePath",
 ];
 
-/// Names compare exactly on Unix.
+/// Whether environment variable `name` is `listed`: exactly on Unix.
 #[cfg(unix)]
-fn same_name(name: &str, listed: &str) -> bool {
+pub fn env_name_eq(name: &str, listed: &str) -> bool {
     name == listed
 }
 
-/// Windows names compare without case: the environment usually spells `Path`.
+/// Whether environment variable `name` is `listed`: Windows names compare
+/// without case, and the environment usually spells `Path`.
 #[cfg(windows)]
-fn same_name(name: &str, listed: &str) -> bool {
+pub fn env_name_eq(name: &str, listed: &str) -> bool {
     name.eq_ignore_ascii_case(listed)
 }
 
-/// Prefix match with the platform's name comparison.
-fn has_prefix(name: &str, prefix: &str) -> bool {
+/// Whether environment variable `name` starts with `prefix`, compared as
+/// [`env_name_eq`] does.
+pub fn env_name_has_prefix(name: &str, prefix: &str) -> bool {
     name.get(..prefix.len())
-        .is_some_and(|start| same_name(start, prefix))
+        .is_some_and(|start| env_name_eq(start, prefix))
 }
 
 /// The part of this process's environment a daemon started from it keeps, as
@@ -693,14 +694,14 @@ fn daemon_env(
         !remove
             .iter()
             .chain(DAEMON_ENV_DENIED)
-            .any(|removed| same_name(name, removed))
+            .any(|removed| env_name_eq(name, removed))
             && (DAEMON_ENV
                 .iter()
                 .chain(PLATFORM_ENV)
-                .any(|listed| same_name(name, listed))
+                .any(|listed| env_name_eq(name, listed))
                 || DAEMON_ENV_PREFIXES
                     .iter()
-                    .any(|prefix| has_prefix(name, prefix)))
+                    .any(|prefix| env_name_has_prefix(name, prefix)))
     })
     .collect()
 }

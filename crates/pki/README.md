@@ -40,7 +40,7 @@ With `mkcert`, the daemon loads mkcert's root from `mkcert -CAROOT` through `Cer
 
 ## Behaviour
 
-New CA directories use mode `0700`; key files use `0600`. On Windows a new CA directory gets an access list for the user, SYSTEM and Administrators that its files inherit; an existing one, or a mkcert CAROOT, must already be limited that way, and so must the key itself (no explicit grants, a single hard link). A symlink or junction for the directory or the key is refused. `Error::InsecurePath` names the path, what is wrong with it, and, when one is known, the `chmod` or `icacls` command that fixes it. Loading rejects mismatched pairs and a certificate without its key. The key is written before the certificate, so a key without a certificate is treated as an interrupted creation and replaced by a new CA. This crate does not modify system trust stores.
+New CA directories use mode `0700`; key files use `0600`. On Windows a new CA directory gets an access list for the user, SYSTEM and Administrators that its files inherit; an existing one, or a mkcert CAROOT, must already be limited that way, and so must the key itself (no explicit grants, a single hard link). A symlink or junction for the directory or the key is refused. On Windows `Error::InsecurePath` also names the path, what is wrong with it and, when one is known, the `icacls` command that fixes it. Loading rejects mismatched pairs and a certificate without its key. The key is written before the certificate, so a key without a certificate is treated as an interrupted creation and replaced by a new CA. This crate does not modify system trust stores.
 
 ## Name constraints
 

@@ -42,11 +42,6 @@ pub const MAX_REQUEST_BYTES: usize = MAX_HEADER_BYTES + 1 + MAX_INPUT_BYTES;
 /// names is about 2.2 MB; the rest leaves room for hand-edited blocks.
 pub const MAX_RESPONSE_BYTES: usize = 8 << 20;
 
-/// Response code for a caller the service refuses: not the installing user, or
-/// a sandboxed or lower-integrity process of that user. The helper never exits
-/// with 1, so this is the pipe counterpart of sudo's refusal.
-pub const DENIED: u8 = 1;
-
 /// A malformed or oversized message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -156,7 +151,7 @@ impl Request {
 /// The service's answer: the helper's exit code and its output or error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
-    /// [`exit`] codes, or [`DENIED`].
+    /// [`exit`] codes.
     pub code: u8,
     /// stdout of the helper on success, its error message otherwise.
     pub message: String,
@@ -369,7 +364,7 @@ mod tests {
             Response::ok("changed names=2\n"),
             Response::ok(""),
             Response::failure(exit::INVALID_NAMES, "line 1: invalid name \"x\""),
-            Response::failure(DENIED, "refused"),
+            Response::failure(exit::IO, "refused"),
             Response::failure(255, "multi\nline"),
         ] {
             assert_eq!(Response::decode(&response.encode()), Ok(response.clone()));

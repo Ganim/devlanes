@@ -646,11 +646,10 @@ fn doctor_without_a_daemon() {
     );
 }
 
-/// Trust entries with a location (Windows) name the store, the dialog `certs
-/// trust` shows (once for a shared store), and a hint the CLI cannot fix (Firefox
-/// ignoring the store). A CA in the deny list fails without a `certs trust` fix.
+/// Trust entries with a location (Windows) name the store and the dialog `certs
+/// trust` shows, once. A CA in the deny list fails without a `certs trust` fix.
 #[test]
-fn doctor_names_the_store_its_dialog_and_hints() {
+fn doctor_names_the_store_and_its_dialog() {
     let approval = "choose Yes in the Windows security warning";
     let data = json!({
         "running": false, "version": "0.3.0", "home": r"C:\Users\u\.devlanes",
@@ -660,18 +659,15 @@ fn doctor_names_the_store_its_dialog_and_hints() {
                "trust": [
                    {"store": "system", "state": "untrusted", "location": "Windows user root store",
                     "approval": approval},
-                   {"store": "firefox", "state": "untrusted",
-                    "location": "Windows user root store, read by Firefox at startup",
-                    "approval": approval,
-                    "hint": "Firefox profile a.default sets security.enterprise_roots.enabled to false"},
+                   {"store": "windows", "state": "untrusted",
+                    "location": r"Cert:\CurrentUser\devlanes-test", "approval": approval},
                ]},
     });
     let text = render_text(Method::Doctor, &data);
     for expected in [
         "fail tls: CA not trusted by system (Windows user root store)",
         "devlanes certs trust, then choose Yes in the Windows security warning",
-        "fail tls: CA not trusted by firefox (Windows user root store, read by Firefox at startup)",
-        "tls: Firefox profile a.default sets security.enterprise_roots.enabled to false",
+        r"fail tls: CA not trusted by windows (Cert:\CurrentUser\devlanes-test)",
     ] {
         assert!(text.contains(expected), "{expected}:\n{text}");
     }
@@ -831,10 +827,9 @@ fn doctor_terminal_and_acl_checks() {
 }
 
 /// WSL facts (`wsl`, from the CLI inside a distro, and the daemon's
-/// `windows_drive_worktrees`): interop and the networking mode are passing
-/// checks; interop off, no systemd, proxy ports below the unprivileged start,
-/// a CA Windows browsers do not trust and worktrees on Windows drives are
-/// warnings with fixes; none fails doctor. Outside WSL nothing is added.
+/// `windows_drive_worktrees`): interop on is a passing check; interop off, no
+/// systemd, a CA Windows browsers do not trust and worktrees on Windows drives
+/// are warnings with fixes; none fails doctor. Outside WSL nothing is added.
 #[test]
 fn doctor_wsl_checks() {
     let base = json!({
@@ -852,13 +847,8 @@ fn doctor_wsl_checks() {
             {"lane": "acme@2", "path": "/mnt/c/src/acme-2", "drive": r"C:\"},
         ],
     });
-    let wsl = json!({
-        "distro": "Ubuntu", "version": 2, "interop": true, "systemd": false,
-        "networking_mode": "nat", "networking_source": "wslinfo", "generate_hosts": true,
-        "unprivileged_port_start": 1024, "privileged_proxy_ports": [80, 443],
-    });
     let mut data = base.clone();
-    data["wsl"] = wsl.clone();
+    data["wsl"] = json!({"distro": "Ubuntu", "version": 2, "interop": true, "systemd": false});
     let text = render_text(Method::Doctor, &data);
     insta::assert_snapshot!("render_doctor_wsl", text);
     assert!(text.contains("--- agent (exit 0)"), "{text}");
@@ -868,15 +858,11 @@ fn doctor_wsl_checks() {
     assert!(!outside.contains("wsl:"), "{outside}");
     assert!(!outside.contains("Windows drive"), "{outside}");
 
-    // Interop off and mirrored; the windows store is configured and the proxy
-    // got its ports, so neither the CA nor the sysctl hint appears.
+    // Interop off; the windows store is configured, so the CA hint is absent.
     let mut quiet = data.clone();
     quiet["wsl"]["interop"] = json!(false);
     quiet["wsl"]["distro"] = Value::Null;
     quiet["wsl"]["systemd"] = json!(true);
-    quiet["wsl"]["networking_mode"] = json!("mirrored");
-    quiet["proxy"] = json!({"http": {"bound": true, "port": 80, "fallback_reason": null},
-                            "https": {"bound": true, "port": 443, "fallback_reason": null}});
     quiet["ca"]["trust"] =
         json!([{"store": "system", "state": "trusted"}, {"store": "windows", "state": "trusted"}]);
     quiet["windows_drive_worktrees"] = json!([]);
@@ -886,39 +872,9 @@ fn doctor_wsl_checks() {
             .contains("warn wsl: WSL 2, Windows interop off: devlanes cannot open URLs in Windows"),
         "{quiet}"
     );
-    assert!(
-        quiet.contains("ok wsl: mirrored networking: Windows and the distro share localhost"),
-        "{quiet}"
-    );
-    for absent in [
-        "systemd",
-        "sysctl",
-        "tls.trust leaves out windows",
-        "Windows drive",
-    ] {
+    for absent in ["systemd", "tls.trust leaves out windows", "Windows drive"] {
         assert!(!quiet.contains(absent), "{absent}\n{quiet}");
     }
-
-    // Without a daemon the configured ports alone call for the sysctl hint.
-    let mut stopped = json!({
-        "running": false, "version": "0.3.0", "home": "/home/acme/.devlanes",
-        "socket": "/home/acme/.devlanes/run/daemon.sock",
-        "db_path": "/home/acme/.devlanes/state.db",
-        "sandbox": {"codex_sandbox": false, "app_sandbox": false},
-    });
-    stopped["wsl"] = wsl;
-    stopped["wsl"]["privileged_proxy_ports"] = json!([443]);
-    let stopped = render_text(Method::Doctor, &stopped);
-    assert!(
-        stopped.contains(
-            "warn wsl: ports below 1024 need root in this distro, so the proxy cannot bind 443 and uses its fallback ports"
-        ),
-        "{stopped}"
-    );
-    assert!(
-        stopped.contains("fix: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=443"),
-        "{stopped}"
-    );
 }
 
 /// Port ranges Windows reserves (`excluded_ports`): a pool clear of them is a
@@ -1738,8 +1694,7 @@ fn doctor_checks_the_dns_server_and_the_resolver_file() {
 
 /// On Windows the daemon reports the NRPT rule (`nrpt_rule`) where Unix has
 /// the resolver file: the same verdicts and fix, plus what overrides a local
-/// rule (another program's rule, Group Policy, the applied policy, rules for
-/// names under the namespace).
+/// rule (another program's rule, Group Policy).
 #[test]
 fn doctor_checks_the_nrpt_rule() {
     let lines = |rule: Value| {
@@ -1757,8 +1712,7 @@ fn doctor_checks_the_nrpt_rule() {
     };
     let rule = |changes: Value| {
         let mut rule = json!({"namespace": ".test", "server": "127.53.0.1", "installed": true,
-            "matches": true, "foreign": false, "group_policy": false, "more_specific": [],
-            "effective_servers": ["127.53.0.1"]});
+            "matches": true, "foreign": false, "group_policy": false});
         for (key, value) in changes.as_object().expect("object") {
             rule[key] = value.clone();
         }
@@ -1766,20 +1720,10 @@ fn doctor_checks_the_nrpt_rule() {
     };
     let output = [
         rule(json!({})),
-        rule(json!({"installed": false, "matches": false, "effective_servers": []})),
-        rule(json!({"matches": false, "effective_servers": ["10.0.0.53"]})),
+        rule(json!({"installed": false, "matches": false})),
+        rule(json!({"matches": false})),
         rule(json!({"foreign": true})),
-        rule(json!({"group_policy": true, "effective_servers": []})),
-        // The administrator added the namespace to the policy.
         rule(json!({"group_policy": true})),
-        rule(json!({"effective_servers": ["10.8.0.1"]})),
-        rule(json!({"effective_servers": []})),
-        // Unreadable applied policy: the local rule's word stands.
-        rule(json!({"effective_servers": null})),
-        rule(json!({"more_specific": [
-            {"namespace": ".api.test", "name_servers": ["10.8.0.1"]},
-            {"namespace": "host.test", "name_servers": []},
-        ]})),
         json!({"namespace": ".test", "error": "Get-DnsClientNrptRule did not answer within 20 s"}),
     ]
     .into_iter()
@@ -1792,12 +1736,6 @@ fn doctor_checks_the_nrpt_rule() {
     Warn the NRPT rule for .test sends .test lookups elsewhere, not to 127.53.0.1:53 (fix: devlanes certs trust --resolver)
     Warn an NRPT rule for .test was not added by devlanes; it sends .test lookups elsewhere (fix: remove it yourself (Get-DnsClientNrptRule lists it) or choose another hostnames.tld)
     Warn the NRPT rule for .test is in place, but Windows ignores it while Group Policy NRPT rules exist (fix: ask the administrator to add .test -> 127.53.0.1 to the Group Policy NRPT rules)
-    Ok DNS server for .test on 127.53.0.1:53, NRPT rule .test
-    Warn the NRPT rule for .test is in place, but .test lookups do not reach the devlanes DNS server: Windows sends them to 10.8.0.1 (fix: check the rules Windows applies with Get-DnsClientNrptPolicy -Effective; a VPN can add its own)
-    Warn the NRPT rule for .test is in place, but .test lookups do not reach the devlanes DNS server: no rule Windows applies routes them (fix: check the rules Windows applies with Get-DnsClientNrptPolicy -Effective; a VPN can add its own)
-    Ok DNS server for .test on 127.53.0.1:53, NRPT rule .test
-    Ok DNS server for .test on 127.53.0.1:53, NRPT rule .test
-    Warn other NRPT rules route names under .test: .api.test -> 10.8.0.1; host.test; Windows follows the most specific rule, so those names do not reach devlanes
     Warn cannot read the NRPT rules for .test: Get-DnsClientNrptRule did not answer within 20 s (fix: run Get-DnsClientNrptRule in PowerShell to see them)
     ");
     // The CLI prints the same words, with the fix on its own line.

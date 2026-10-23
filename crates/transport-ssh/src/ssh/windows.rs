@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use devlanes_sys::NoWindow as _;
-use devlanes_sys::windows::job::{HelperError, Job};
+use devlanes_sys::windows::job::Job;
 use devlanes_transport::{BoxDuplex, Transport, TransportError};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
@@ -63,8 +63,6 @@ pub struct SshTransport {
     /// Set after the first tunnel opened: from then on a failing DNS lookup is a
     /// network blip (sleep, Wi-Fi change), not a misspelt host.
     connected: AtomicBool,
-    /// Why the last ssh run started outside a job, if it did.
-    outside_job: Mutex<Option<String>>,
 }
 
 /// What one session run found.
@@ -84,7 +82,6 @@ impl SshTransport {
             probe: Mutex::new(None),
             sessions: Mutex::new(CancellationToken::new()),
             connected: AtomicBool::new(false),
-            outside_job: Mutex::new(None),
         }
     }
 
@@ -366,39 +363,17 @@ impl SshTransport {
     }
 
     /// Starts `command` inside a new job that ends the whole tree when the job
-    /// is dropped or this process dies. When no job can be made or the job
-    /// refuses ssh, ssh starts the usual way without that cover, and
-    /// [`Transport::warnings`] says so until a later run gets a job. A program
-    /// that does not start fails here, as it would without the job.
+    /// is dropped or this process dies.
     fn spawn_in_job(
         &self,
         command: &mut Command,
         program: &Path,
-    ) -> Result<(Child, Option<Job>), SshError> {
-        let refused = match Job::create_kill_on_close() {
-            Ok(job) => match job.spawn_helper(command) {
-                Ok(child) => {
-                    *self
-                        .outside_job
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner) = None;
-                    return Ok((child, Some(job)));
-                }
-                Err(HelperError::Spawn(error)) => return Err(spawn_error(program, error)),
-                Err(HelperError::Job(error)) => error,
-            },
-            Err(error) => error,
-        };
-        let warning = outside_job_warning(&refused);
-        tracing::warn!(destination = %self.destination, "{warning}");
-        let child = command
-            .spawn()
+    ) -> Result<(Child, Job), SshError> {
+        let job = Job::create_kill_on_close()?;
+        let child = job
+            .spawn_helper(command)
             .map_err(|error| spawn_error(program, error))?;
-        *self
-            .outside_job
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(warning);
-        Ok((child, None))
+        Ok((child, job))
     }
 
     /// Whether no tunnel has opened yet.
@@ -435,29 +410,12 @@ impl Transport for SshTransport {
     async fn connect(&self) -> Result<BoxDuplex, TransportError> {
         Ok(Box::new(self.open().await?))
     }
-
-    /// Whether the last ssh run started outside its job.
-    fn warnings(&self) -> Vec<String> {
-        self.outside_job
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .cloned()
-            .collect()
-    }
 }
 
 /// The remote command for `script`. ssh joins its arguments into one command
 /// line for the login shell, so the script travels as one quoted word.
 fn remote_shell(script: &str) -> String {
     format!("sh -c {}", sh_quote(script))
-}
-
-/// The warning shown while ssh runs outside a job, after `error`.
-fn outside_job_warning(error: &dyn std::fmt::Display) -> String {
-    format!(
-        "ssh runs outside a job object ({error}), so a ProxyCommand it starts may outlive the connection"
-    )
 }
 
 /// Resolves a bare `ssh` to the system OpenSSH client (`System32\OpenSSH`,
@@ -724,11 +682,6 @@ mod tests {
                 panic!("fake ssh unexpectedly connected");
             };
             assert!(!error.is_permanent(), "{error}");
-            assert!(
-                transport.warnings().is_empty(),
-                "{:?}",
-                transport.warnings()
-            );
             Ok(())
         })
         .await?
@@ -769,11 +722,6 @@ mod tests {
         };
         assert!(error.is_permanent());
         assert!(error.to_string().contains("OpenSSH Client"), "{error}");
-        assert!(
-            transport.warnings().is_empty(),
-            "a missing program is not a job failure: {:?}",
-            transport.warnings()
-        );
         Ok(())
     }
 

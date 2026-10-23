@@ -102,13 +102,13 @@ impl LocalStream {
     /// the daemon. A Windows daemon defers its check to
     /// [`LocalStream::confirm_peer_after_read`] and reports `true` here.
     pub fn peer_is_current_user(&self) -> io::Result<bool> {
-        self.0.peer_is_current_user()
+        imp::peer_is_current_user(&self.0)
     }
 
     /// The daemon's check after reading the client's first frame. On Unix the accept
     /// check already covered it and this reports `true`.
     pub fn confirm_peer_after_read(&self) -> io::Result<bool> {
-        self.0.confirm_peer_after_read()
+        imp::confirm_peer_after_read(&self.0)
     }
 }
 
@@ -220,15 +220,12 @@ mod tests {
 mod imp {
     use std::io;
     use std::path::Path;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
 
-    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tokio::net::{UnixListener, UnixStream};
 
     use super::{BindError, ProbeError};
 
-    pub(super) struct Stream(UnixStream);
+    pub(super) type Stream = UnixStream;
 
     pub(super) struct Listener(UnixListener);
 
@@ -247,7 +244,7 @@ mod imp {
     impl Listener {
         pub(super) async fn accept(&mut self) -> io::Result<Stream> {
             let (stream, _) = self.0.accept().await?;
-            Ok(Stream(stream))
+            Ok(stream)
         }
 
         pub(super) fn close(self) {
@@ -256,7 +253,7 @@ mod imp {
     }
 
     pub(super) async fn connect(path: &Path) -> io::Result<Stream> {
-        UnixStream::connect(path).await.map(Stream)
+        UnixStream::connect(path).await
     }
 
     /// The socket's directory.
@@ -292,42 +289,12 @@ mod imp {
         Ok(())
     }
 
-    impl Stream {
-        pub(super) fn peer_is_current_user(&self) -> io::Result<bool> {
-            Ok(self.0.peer_cred()?.uid() == rustix::process::geteuid().as_raw())
-        }
-
-        pub(super) fn confirm_peer_after_read(&self) -> io::Result<bool> {
-            Ok(true)
-        }
+    pub(super) fn peer_is_current_user(stream: &Stream) -> io::Result<bool> {
+        Ok(stream.peer_cred()?.uid() == rustix::process::geteuid().as_raw())
     }
 
-    impl AsyncRead for Stream {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &mut ReadBuf<'_>,
-        ) -> Poll<io::Result<()>> {
-            Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
-        }
-    }
-
-    impl AsyncWrite for Stream {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Pin::new(&mut self.get_mut().0).poll_flush(cx)
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
-        }
+    pub(super) fn confirm_peer_after_read(_stream: &Stream) -> io::Result<bool> {
+        Ok(true)
     }
 }
 

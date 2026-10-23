@@ -2,11 +2,10 @@
 //! whose whole tree has to end with it ([`Job::spawn_helper`]).
 //!
 //! A unit's leader starts inside its own job, and every process it starts joins
-//! the job too: the runner's jobs refuse breakaway (see `Job::create`). The job
-//! is only for grouping and
-//! killing: no memory, CPU or process-count limits are set, and closing the last
-//! handle does not kill the members, so units outlive a daemon crash. Helper
-//! jobs from [`Job::create_kill_on_close`] do the opposite.
+//! the job too: jobs refuse breakaway (see [`Job::create`]). The job is only for
+//! grouping and killing: no memory, CPU or process-count limits are set, and
+//! closing the last handle does not kill the members, so units outlive a daemon
+//! crash. Helper jobs from [`Job::create_kill_on_close`] do the opposite.
 
 use std::io;
 use std::os::windows::io::OwnedHandle;
@@ -17,12 +16,10 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
-    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
-    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-    TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+    SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
@@ -37,43 +34,20 @@ compile_error!("devlanes supports 64-bit Windows (x64 and arm64) only");
 #[derive(Debug)]
 pub struct Job(OwnedHandle);
 
-/// Why [`Job::spawn_helper`] did not start a helper.
-#[derive(Debug, thiserror::Error)]
-pub enum HelperError {
-    /// The program did not start (missing, not executable, ...); it would fail
-    /// the same way outside a job.
-    #[error("{0}")]
-    Spawn(io::Error),
-    /// The program started but could not join the job or be resumed, and was
-    /// killed. Without the job it may start; a job this process runs in that
-    /// refuses nested jobs is one cause.
-    #[error("the job did not take the process: {0}")]
-    Job(io::Error),
-}
-
-impl From<HelperError> for io::Error {
-    /// The underlying error, for callers that handle both cases alike.
-    fn from(error: HelperError) -> Self {
-        match error {
-            HelperError::Spawn(error) | HelperError::Job(error) => error,
-        }
-    }
-}
-
 impl Job {
-    /// Creates an unnamed job. With `breakaway`, processes inside may leave it by
-    /// asking for `CREATE_BREAKAWAY_FROM_JOB`. Note that Git for Windows' MSYS2
-    /// runtime then asks for every child it starts, so such a job loses track of
-    /// anything a Git `sh` runs.
+    /// Creates an unnamed job that processes inside may not leave.
+    ///
+    /// Breakaway is refused because Git for Windows' MSYS2 runtime, which runs
+    /// every `run:` string and ready probe, asks for `CREATE_BREAKAWAY_FROM_JOB`
+    /// for every child it starts whenever the job allows it. A child whose
+    /// short-lived parent (a fork before exec) no snapshot saw would then escape
+    /// tracking by parent too. A tool that insists on breaking away gets access
+    /// denied instead.
     ///
     /// `DIE_ON_UNHANDLED_EXCEPTION` keeps a crashed member from waiting on an
     /// invisible Windows Error Reporting dialog.
-    pub fn create(breakaway: bool) -> io::Result<Self> {
-        Self::with_limits(if breakaway {
-            JOB_OBJECT_LIMIT_BREAKAWAY_OK
-        } else {
-            0
-        })
+    pub fn create() -> io::Result<Self> {
+        Self::with_limits(0)
     }
 
     /// Creates an unnamed job, without breakaway, that ends every member when
@@ -148,26 +122,6 @@ impl Job {
         }
     }
 
-    /// How many processes in the job are still running.
-    pub fn active_count(&self) -> io::Result<u32> {
-        // SAFETY: an all-zero value is valid for this plain C struct.
-        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
-        // SAFETY: `info` matches the information class and size.
-        let ok = unsafe {
-            QueryInformationJobObject(
-                self.raw(),
-                JobObjectBasicAccountingInformation,
-                (&raw mut info).cast(),
-                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
-                ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(info.ActiveProcesses)
-    }
-
     /// Ends every process still in the job with `exit_code`.
     pub fn terminate(&self, exit_code: u32) -> io::Result<()> {
         // SAFETY: `self` is an open job handle with full access.
@@ -178,31 +132,21 @@ impl Job {
     }
 
     /// Starts a helper program (see [`crate::NoWindow`]) inside this job from
-    /// its first instruction, so everything it starts is a member too unless it
-    /// breaks away. For short-lived helpers whose whole tree has to end with
-    /// them, such as a ready probe behind Git's `sh.exe` launcher.
+    /// its first instruction, so everything it starts is a member too. For
+    /// short-lived helpers whose whole tree has to end with them, such as a
+    /// ready probe behind Git's `sh.exe` launcher.
     ///
-    /// The child is created suspended, added to the job, then resumed. Creation
-    /// flags set on `command` before are replaced; it gets `CREATE_NO_WINDOW`
-    /// when this process has no console, as `no_window` sets. When the job
-    /// refuses the child ([`HelperError::Job`]), the child is killed and
-    /// `command` is left with the flags it would have without the job, so the
-    /// caller can start it the usual way. [`HelperError::Spawn`] would fail the
-    /// same way without the job.
+    /// The child is created suspended, added to the job, then resumed; a new
+    /// job without UI limits always takes it. Creation flags set on `command`
+    /// before are replaced by `CREATE_NO_WINDOW` when this process has no
+    /// console, as `no_window` sets. A child that cannot be resumed is killed.
     pub fn spawn_helper(
         &self,
         command: &mut tokio::process::Command,
-    ) -> Result<tokio::process::Child, HelperError> {
+    ) -> io::Result<tokio::process::Child> {
         use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
-        let window = if super::process::has_console() {
-            0
-        } else {
-            super::process::CREATE_NO_WINDOW
-        };
-        command.creation_flags(CREATE_SUSPENDED | window);
-        let spawned = command.spawn();
-        command.creation_flags(window);
-        let mut child = spawned.map_err(HelperError::Spawn)?;
+        command.creation_flags(CREATE_SUSPENDED | crate::command::window_flags());
+        let mut child = command.spawn()?;
         let adopted = match child.raw_handle() {
             // SAFETY: the job handle is open, and `handle` is the child's,
             // valid while `child` has not been waited for.
@@ -220,7 +164,7 @@ impl Job {
         if let Err(error) = adopted {
             // Still suspended (or never resumed): it has run no code yet.
             let _ = child.start_kill();
-            return Err(HelperError::Job(error));
+            return Err(error);
         }
         Ok(child)
     }
@@ -278,7 +222,7 @@ mod tests {
     /// the job is terminated; without breakaway, leaving the job is refused.
     #[test]
     fn members_follow_the_tree_and_terminate_together() -> io::Result<()> {
-        let job = Job::create(false)?;
+        let job = Job::create()?;
         let cmd = std::path::PathBuf::from(
             std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into()),
         );
@@ -300,10 +244,9 @@ mod tests {
         let members = job.members()?;
         assert!(members.contains(&child.pid()), "{members:?}");
         assert!(members.len() >= 2, "{members:?}");
-        assert!(job.active_count()? >= 2);
         job.terminate(7)?;
         assert_eq!(child.wait()?, 7);
-        assert_eq!(job.active_count()?, 0);
+        assert!(job.members()?.is_empty());
         Ok(())
     }
 
@@ -320,7 +263,7 @@ mod tests {
     /// grandchild it starts joins the job, so terminating the job ends both.
     #[tokio::test]
     async fn helpers_start_inside_the_job() -> io::Result<()> {
-        let job = Ending(Job::create(false)?);
+        let job = Ending(Job::create()?);
         let mut command = tokio::process::Command::new("cmd.exe");
         command
             .args(["/d", "/c", "ping -n 30 127.0.0.1 >NUL"])
@@ -345,12 +288,12 @@ mod tests {
             .await
             .map_err(|_| io::Error::other("the helper outlived its job"))??;
         assert_eq!(status.code(), Some(7));
-        assert_eq!(job.0.active_count()?, 0);
+        assert!(job.0.members()?.is_empty());
         Ok(())
     }
 
-    /// A program that cannot start is a spawn failure, not a job failure, and
-    /// the job is left empty.
+    /// A program that cannot start fails as it would outside a job, and the
+    /// job is left empty.
     #[tokio::test]
     async fn missing_helpers_are_spawn_failures() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
@@ -358,13 +301,10 @@ mod tests {
         let mut command = tokio::process::Command::new(dir.path().join("missing.exe"));
         command.kill_on_drop(true);
         match job.0.spawn_helper(&mut command) {
-            Err(HelperError::Spawn(error)) => {
-                assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
-            }
-            Err(other) => panic!("not a spawn failure: {other}"),
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}"),
             Ok(_) => panic!("a missing program started"),
         }
-        assert_eq!(job.0.active_count()?, 0);
+        assert!(job.0.members()?.is_empty());
         Ok(())
     }
 

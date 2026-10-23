@@ -42,7 +42,6 @@ impl Server {
             target: Target {
                 hosts: hosts.clone(),
                 flush: false,
-                check_directory: false,
             },
         };
         let task = tokio::spawn(async move {
@@ -166,22 +165,6 @@ async fn a_pipe_not_owned_by_system_is_refused() {
     assert_eq!(server.content(), "127.0.0.1 localhost\r\n");
 }
 
-/// A service installed for another account answers this one with
-/// `service_denied`.
-#[tokio::test]
-async fn another_users_service_denies() {
-    let user = token::current_user().expect("user");
-    let server = Server::start("denied", Sid::local_system()).await;
-    let client =
-        HostsClient::service(PipeHostsClient::new(&server.name, user), None).expect("client");
-    let error = tokio::time::timeout(LIMIT, client.apply(&names(&["a.localhost"])))
-        .await
-        .expect("in time")
-        .expect_err("denied");
-    assert_eq!(error.code(), "service_denied", "{error:?}");
-    assert_eq!(server.content(), "127.0.0.1 localhost\r\n");
-}
-
 /// The real thing: installs the service from `DEVLANES_HOSTS_SERVICE`, writes a
 /// name, resolves it through the system resolver, clears and uninstalls. Run
 /// from an elevated terminal:
@@ -200,7 +183,7 @@ async fn installs_applies_and_uninstalls_the_service() {
     let user = token::current_user().expect("user");
     let run = async {
         let installed = tokio::task::spawn_blocking(move || {
-            devlanes_hosts_service::install::install(&source, &user, &|| Ok(()))
+            devlanes_hosts_service::install::install(&source, &user)
         })
         .await
         .expect("join")
@@ -225,11 +208,12 @@ async fn installs_applies_and_uninstalls_the_service() {
             "{addrs:?}"
         );
         client.clear().await.expect("clear");
-        let warnings = tokio::task::spawn_blocking(devlanes_hosts_service::install::uninstall)
+        tokio::task::spawn_blocking(devlanes_hosts_service::install::uninstall)
             .await
             .expect("join")
             .expect("uninstall");
-        assert!(warnings.is_empty(), "{warnings:?}");
+        let directory = devlanes_hosts_service::config::install_dir().expect("install dir");
+        assert!(!directory.exists(), "{} left", directory.display());
         assert_eq!(
             client.version().await.expect_err("gone").code(),
             "service_missing"

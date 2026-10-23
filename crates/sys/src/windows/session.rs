@@ -25,13 +25,13 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, ENDSESSION_CLOSEAPP, ENDSESSION_LOGOFF,
-    EnumWindows, GetClassNameW, GetMessageW, GetWindowThreadProcessId, MSG, PostMessageW,
-    PostQuitMessage, RegisterClassW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, TranslateMessage,
-    WM_CLOSE, WM_DESTROY, WM_ENDSESSION, WM_QUERYENDSESSION, WNDCLASSW, WS_OVERLAPPED,
+    GetClassNameW, GetMessageW, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
+    SMTO_ABORTIFHUNG, SendMessageTimeoutW, TranslateMessage, WM_CLOSE, WM_DESTROY, WM_ENDSESSION,
+    WM_QUERYENDSESSION, WNDCLASSW, WS_OVERLAPPED,
 };
-use windows_sys::core::BOOL;
 
 use super::security::wide;
+use super::window::for_each_window;
 
 /// Why the session ends, from the `WM_ENDSESSION` flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,52 +133,28 @@ impl SessionWatch {
 /// so end-to-end tests can log a running daemon off. `NotFound` when `pid` has
 /// no such window.
 pub fn simulate_for(pid: u32, end: SessionEnd, timeout: std::time::Duration) -> io::Result<()> {
-    let mut search = Search {
-        pid,
-        class: wide(OsStr::new(CLASS)),
-        found: None,
-    };
-    // SAFETY: the callback only runs during this call, so the pointer to
-    // `search` stays valid; a FALSE return only means enumeration stopped.
-    unsafe { EnumWindows(Some(visit), (&raw mut search) as LPARAM) };
-    match search.found {
-        Some(window) => send_end(window as HWND, end, timeout),
+    let class: Vec<u16> = CLASS.encode_utf16().collect();
+    let mut found = None;
+    for_each_window(|window, owner| {
+        if owner != pid {
+            return true;
+        }
+        let mut name = [0_u16; 64];
+        // SAFETY: `name` holds the 64 characters the call may write.
+        let length = unsafe { GetClassNameW(window, name.as_mut_ptr(), name.len() as i32) };
+        if name[..usize::try_from(length).unwrap_or(0)] == class[..] {
+            found = Some(window);
+            return false;
+        }
+        true
+    });
+    match found {
+        Some(window) => send_end(window, end, timeout),
         None => Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!("process {pid} has no session-end window"),
         )),
     }
-}
-
-/// What [`simulate_for`]'s enumeration looks for and finds.
-struct Search {
-    pid: u32,
-    /// [`CLASS`] as a NUL-terminated wide string.
-    class: Vec<u16>,
-    found: Option<isize>,
-}
-
-/// Stops at the first window of `search.pid` with the watcher class.
-extern "system" fn visit(window: HWND, state: LPARAM) -> BOOL {
-    // SAFETY: `state` is the `Search` that `simulate_for` passed, alive and not
-    // used elsewhere while the enumeration runs.
-    let search = unsafe { &mut *(state as *mut Search) };
-    let mut pid = 0;
-    // SAFETY: `window` comes from the enumeration; `pid` is writable.
-    unsafe { GetWindowThreadProcessId(window, &raw mut pid) };
-    if pid != search.pid {
-        return 1;
-    }
-    let mut name = [0_u16; 64];
-    // SAFETY: `name` holds the 64 characters the call may write.
-    let length = unsafe { GetClassNameW(window, name.as_mut_ptr(), name.len() as i32) };
-    let length = usize::try_from(length).unwrap_or(0);
-    // `class` ends with its NUL, which the copied name does not include.
-    if name[..length] == search.class[..search.class.len() - 1] {
-        search.found = Some(window as isize);
-        return 0;
-    }
-    1
 }
 
 /// Sends `window` the `WM_QUERYENDSESSION` and `WM_ENDSESSION` pair for `end`,

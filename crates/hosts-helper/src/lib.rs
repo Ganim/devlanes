@@ -49,8 +49,7 @@ pub const BUILD: &str = if cfg!(debug_assertions) {
 };
 
 /// Exit codes. 1 is never used, so under `sudo -n` it always means sudo itself refused.
-/// The Windows service answers with the same codes ([`protocol::Response::code`]),
-/// using 1 ([`protocol::DENIED`]) for a caller it refuses.
+/// The Windows service answers with the same codes ([`protocol::Response::code`]).
 pub mod exit {
     /// Success.
     pub const OK: u8 = 0;

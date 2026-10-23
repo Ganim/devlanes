@@ -213,25 +213,22 @@ pub fn remove_script() -> String {
     .join("; ")
 }
 
-/// The unelevated script that prints the local rules, whether Group Policy
-/// rules override them, and the effective policy as one JSON object for
-/// [`NrptRules::parse`]: `{"rules": [...], "group_policy": false, "effective":
-/// [...]}`. Reading needs no admin.
+/// The unelevated script that prints the local rules and whether Group Policy
+/// rules override them as one JSON object for [`NrptRules::parse`]:
+/// `{"rules": [...], "group_policy": false}`. Reading needs no admin.
 ///
 /// Output is UTF-8, since redirected output otherwise uses the OEM code page;
 /// Constrained Language mode refuses that .NET call, and the script then goes
 /// on with the code page. Group Policy counts only with rules under its key, as
 /// Chromium decides (`net/dns/public/win_dns_system_settings.cc`): an empty key
-/// left after a policy was removed does not override local rules. The effective
-/// policy also holds rules from VPN profiles and is `null` when unreadable.
+/// left after a policy was removed does not override local rules.
 pub fn status_script() -> String {
     format!(
         "$ErrorActionPreference = 'Stop'; \
          try {{ [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) }} catch {{ }}; \
          $rules = @(Get-DnsClientNrptRule | Select-Object Name, Namespace, NameServers, Comment); \
          $policy = @(Get-ChildItem -LiteralPath {} -ErrorAction SilentlyContinue).Count -gt 0; \
-         try {{ $effective = @(Get-DnsClientNrptPolicy -Effective | Select-Object Namespace, NameServers) }} catch {{ $effective = $null }}; \
-         ConvertTo-Json -Compress -Depth 4 -InputObject @{{ rules = $rules; group_policy = $policy; effective = $effective }}",
+         ConvertTo-Json -Compress -Depth 4 -InputObject @{{ rules = $rules; group_policy = $policy }}",
         powershell_literal(GROUP_POLICY_KEY)
     )
 }
@@ -254,19 +251,7 @@ fn normalized(namespace: &str) -> &str {
         .unwrap_or(namespace)
 }
 
-/// Whether `routed` names something strictly under `namespace` (`.a.test` or
-/// `host.test` under `.test`), without case.
-fn is_under(routed: &str, namespace: &str) -> bool {
-    let routed = normalized(routed);
-    routed.len() > namespace.len()
-        && routed
-            .get(routed.len() - namespace.len()..)
-            .is_some_and(|tail| tail.eq_ignore_ascii_case(namespace))
-}
-
-/// One NRPT rule as `Get-DnsClientNrptRule` reports it, or one entry of the
-/// effective policy (`Get-DnsClientNrptPolicy -Effective`), which has no name
-/// or comment.
+/// One NRPT rule as `Get-DnsClientNrptRule` reports it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NrptRule {
     /// Identifier (a GUID in braces), which removal takes.
@@ -317,15 +302,6 @@ impl NrptRule {
     }
 }
 
-/// A namespace some other NRPT rule routes, and the servers it names.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Route {
-    /// The namespace, such as `.api.test` or `host.test`.
-    pub namespace: String,
-    /// Its DNS servers; empty for rules that set other options only.
-    pub name_servers: Vec<String>,
-}
-
 /// How the local rules route one namespace.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuleStatus {
@@ -345,9 +321,6 @@ pub struct NrptRules {
     /// Group Policy NRPT rules exist (subkeys of [`GROUP_POLICY_KEY`]), so
     /// Windows ignores the local rules.
     pub group_policy: bool,
-    /// The policy the DNS Client applies (local, Group Policy and VPN rules),
-    /// without names or comments; `None` when it could not be read.
-    pub effective: Option<Vec<NrptRule>>,
 }
 
 impl NrptRules {
@@ -371,54 +344,12 @@ impl NrptRules {
                     .get("group_policy")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                effective: match object.get("effective") {
-                    None | Some(Value::Null) => None,
-                    effective => Some(rules(effective)?),
-                },
             }),
             _ => Ok(Self {
                 rules: rules(Some(&value))?,
                 ..Self::default()
             }),
         }
-    }
-
-    /// Namespaces strictly under `zone`'s that another rule routes, local or
-    /// effective (a VPN's included), once each. The DNS Client follows the most
-    /// specific rule, so names under them never reach devlanes. devlanes rules
-    /// route the zone's namespace only, so none of these is one.
-    pub fn more_specific(&self, zone: &Zone) -> Vec<Route> {
-        let namespace = namespace(zone);
-        let local = self.rules.iter().filter(|rule| !rule.is_managed());
-        let effective = self.effective.iter().flatten();
-        let mut routes: Vec<Route> = Vec::new();
-        for rule in local.chain(effective) {
-            for routed in &rule.namespaces {
-                let seen = routes
-                    .iter()
-                    .any(|route| route.namespace.eq_ignore_ascii_case(routed));
-                if is_under(routed, &namespace) && !seen {
-                    routes.push(Route {
-                        namespace: routed.clone(),
-                        name_servers: rule.name_servers.clone(),
-                    });
-                }
-            }
-        }
-        routes
-    }
-
-    /// The servers the effective policy sends `zone`'s namespace to: empty when
-    /// no applied rule routes it, `None` when the policy could not be read.
-    pub fn effective_servers(&self, zone: &Zone) -> Option<Vec<String>> {
-        let namespace = namespace(zone);
-        self.effective.as_ref().map(|effective| {
-            effective
-                .iter()
-                .filter(|rule| rule.routes(&namespace))
-                .flat_map(|rule| rule.name_servers.iter().cloned())
-                .collect()
-        })
     }
 
     /// How the rules route `zone`'s namespace, `server` being the address
@@ -618,9 +549,6 @@ mod tests {
         assert!(script.contains(
             "try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }"
         ));
-        assert!(script.contains(
-            "try { $effective = @(Get-DnsClientNrptPolicy -Effective | Select-Object Namespace, NameServers) } catch { $effective = $null }"
-        ));
         assert!(script.contains("ConvertTo-Json -Compress"));
     }
 
@@ -744,70 +672,5 @@ mod tests {
         // The DNS Client reads `.test.` as `.test`.
         assert!(status(vec![rule(".test.", &["127.0.0.1"], "Acme dev DNS")]).foreign);
         assert!(status(vec![rule(".test.", &["127.53.0.1"], ours)]).matches);
-    }
-
-    #[test]
-    fn status_output_carries_group_policy_and_the_effective_policy() {
-        // Captured on Windows 11 (26300) without rules or policy.
-        let none =
-            NrptRules::parse(r#"{"effective":[],"group_policy":false,"rules":[]}"#).expect("none");
-        assert!(!none.group_policy);
-        assert_eq!(none.effective, Some(Vec::new()));
-        assert_eq!(none.effective_servers(&zone("test")), Some(Vec::new()));
-        // Shaped like the capture, with the policy and VPN entries a managed
-        // machine has; effective entries carry a string namespace and no name.
-        let managed = NrptRules::parse(
-            r##"{"effective":[{"Namespace":".test.","NameServers":["10.0.0.53"]},{"Namespace":".api.test","NameServers":"10.8.0.1"},{"Namespace":".corp","NameServers":null}],"group_policy":true,"rules":[{"Name":"{A}","Namespace":[".test"],"NameServers":["127.53.0.1"],"Comment":"# Managed by devlanes: x"},{"Name":"{B}","Namespace":["HOST.test."],"NameServers":["10.0.0.1"],"Comment":"Acme"}]}"##,
-        )
-        .expect("managed");
-        assert!(managed.group_policy);
-        assert_eq!(managed.rules[1].namespaces, ["HOST.test"]);
-        let test = zone("test");
-        assert_eq!(
-            managed.effective_servers(&test),
-            Some(vec!["10.0.0.53".to_owned()])
-        );
-        assert_eq!(
-            managed.more_specific(&test),
-            [
-                Route {
-                    namespace: "HOST.test".into(),
-                    name_servers: vec!["10.0.0.1".into()],
-                },
-                Route {
-                    namespace: ".api.test".into(),
-                    name_servers: vec!["10.8.0.1".into()],
-                },
-            ]
-        );
-        // Older output without the field, and a failed effective read.
-        for output in [
-            r#"{"group_policy":false,"rules":[]}"#,
-            r#"{"effective":null,"group_policy":false,"rules":[]}"#,
-        ] {
-            let parsed = NrptRules::parse(output).expect(output);
-            assert_eq!(parsed.effective, None);
-            assert_eq!(parsed.effective_servers(&test), None);
-        }
-    }
-
-    #[test]
-    fn more_specific_rules_are_strictly_under_the_zone() {
-        assert!(is_under(".api.test", ".test"));
-        assert!(is_under("host.TEST.", ".test"));
-        assert!(!is_under(".test", ".test"));
-        assert!(!is_under(".test.", ".test"));
-        assert!(!is_under("contest", ".test"));
-        assert!(!is_under(".internal", ".test"));
-        // devlanes rules never count, wherever they point.
-        let rules = NrptRules {
-            rules: vec![NrptRule {
-                namespaces: vec![".api.test".into()],
-                comment: "# Managed by devlanes: x".into(),
-                ..NrptRule::default()
-            }],
-            ..NrptRules::default()
-        };
-        assert!(rules.more_specific(&zone("test")).is_empty());
     }
 }

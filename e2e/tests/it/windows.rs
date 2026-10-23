@@ -9,7 +9,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use devlanes_e2e::{Error, Lab, Result};
-use devlanes_sys::windows::handles::held_processes;
 use devlanes_sys::windows::window::visible_windows;
 use devlanes_sys::{DescendantTracker, ProcessInfo};
 
@@ -35,9 +34,9 @@ services:
 /// inside it.
 const POLL: Duration = Duration::from_millis(5);
 
-/// How often the process table is read, to follow the tree and find new
-/// `OpenConsole` hosts. A window's owner is looked up on its own, so this only
-/// needs to keep up with the processes that start others.
+/// How often the process table is read, to follow the tree. A window's owner
+/// is looked up on its own, so this only needs to keep up with the processes
+/// that start others.
 const SCAN: Duration = Duration::from_millis(50);
 
 /// Most parents a window's owner is followed through to reach the tree.
@@ -66,31 +65,20 @@ fn in_tree(pid: u32, members: &HashSet<(u32, u64)>) -> Option<ProcessInfo> {
     None
 }
 
-/// `start` makes no visible window appear for the processes it starts, and
-/// no console tab in Windows Terminal: when it is the default terminal, a
-/// console a helper gets opens there as a new tab (an `OpenConsole`) instead
-/// of a window of its own.
+/// `start` makes no visible window appear for the processes it starts.
 ///
 /// Only this test's own process tree counts: the CLI it runs, the daemon the
 /// CLI spawns and everything the daemon starts. The tree is rooted at the test
 /// process because the daemon only exists once `start` has spawned it. Windows
 /// count when their owner (a console window's owner is its client) or one of
-/// its ancestors is in the tree; an `OpenConsole` counts when it holds a
-/// handle to a process of the tree, which a console host does for each client
-/// it serves. Other programs' windows and tabs, opened during the test or
-/// before, do not count.
+/// its ancestors is in the tree. Other programs' windows, opened during the
+/// test or before, do not count.
 #[test]
 fn start_opens_no_console_windows() -> Result<()> {
     let lab = Lab::with_config(CONFIG, BUDGET)?;
     let root = devlanes_sys::identity(std::process::id())
         .map_err(|error| Error::Unexpected(error.to_string()))?
         .ok_or_else(|| Error::Unexpected("no identity for the test process".into()))?;
-    let hosts_before: HashSet<(u32, u64)> = devlanes_sys::processes()
-        .map_err(|error| Error::Unexpected(error.to_string()))?
-        .iter()
-        .filter(|p| p.name.eq_ignore_ascii_case("OpenConsole.exe"))
-        .map(key)
-        .collect();
     let windows_before: HashSet<isize> = visible_windows().iter().map(|w| w.handle).collect();
     let done = Arc::new(AtomicBool::new(false));
     let watcher = {
@@ -99,32 +87,14 @@ fn start_opens_no_console_windows() -> Result<()> {
             let mut seen: Vec<String> = Vec::new();
             let mut tree = DescendantTracker::new(root);
             // Every process the tree ever had, exited ones included: a window
-            // or a host may outlive the helper it belonged to.
+            // may outlive the helper it belonged to.
             let mut members: HashSet<(u32, u64)> = HashSet::from([(root.pid, root.start_time)]);
             let mut scanned: Option<Instant> = None;
             while !done.load(Ordering::Relaxed) {
                 if scanned.is_none_or(|at| at.elapsed() >= SCAN) {
                     scanned = Some(Instant::now());
-                    let table = devlanes_sys::processes().unwrap_or_default();
-                    tree.update(&table);
+                    tree.update(&devlanes_sys::processes().unwrap_or_default());
                     members.extend(tree.processes().map(key));
-                    for host in table.iter().filter(|p| {
-                        p.name.eq_ignore_ascii_case("OpenConsole.exe")
-                            && !hosts_before.contains(&key(p))
-                    }) {
-                        let serves_tree = held_processes(host.pid)
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default()
-                            .iter()
-                            .any(|held| members.contains(&(held.pid, held.start_time)));
-                        if serves_tree {
-                            seen.push(format!(
-                                "Windows Terminal tab (OpenConsole pid {})",
-                                host.pid
-                            ));
-                        }
-                    }
                 }
                 for window in visible_windows() {
                     if windows_before.contains(&window.handle) {

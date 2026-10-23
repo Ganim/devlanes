@@ -79,13 +79,13 @@ fn cmd(text: &str) -> LaunchSpec {
     }
 }
 
-/// This test binary running [`breakaway_leader`] (roles `stay` and `exit`) or
+/// This test binary running [`breakaway_leader`] (role `stay`) or
 /// [`graceful_leader`] (the others) in `role`.
 fn leader(role: &str) -> Result<LaunchSpec, std::io::Error> {
     let mut env = env();
     env.insert(ROLE.into(), role.into());
     let test = match role {
-        "stay" | "exit" => "breakaway_leader",
+        "stay" => "breakaway_leader",
         _ => "graceful_leader",
     };
     Ok(LaunchSpec {
@@ -103,14 +103,13 @@ fn leader(role: &str) -> Result<LaunchSpec, std::io::Error> {
 /// Not a test of its own: as a unit, starts `ping` asking to leave the unit's
 /// job (`CREATE_BREAKAWAY_FROM_JOB`) and, when refused, without asking, as tools
 /// that handle the refusal do. Prints `breakaway <pid>` or `fallback <pid>`,
-/// then waits (role `stay`) or exits (role `exit`). Without the role it does
-/// nothing.
+/// then waits. Without the role it does nothing.
 #[test]
 fn breakaway_leader() -> std::io::Result<()> {
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    let Ok(role) = std::env::var(ROLE) else {
+    if std::env::var(ROLE).is_err() {
         return Ok(());
-    };
+    }
     let ping = || {
         let mut command = std::process::Command::new("ping");
         command
@@ -126,12 +125,7 @@ fn breakaway_leader() -> std::io::Result<()> {
         Err(error) => return Err(error),
     }
     std::io::stdout().flush()?;
-    // Long enough for a snapshot to see the child under this process.
-    std::thread::sleep(Duration::from_millis(if role == "exit" {
-        1500
-    } else {
-        30_000
-    }));
+    std::thread::sleep(Duration::from_secs(30));
     Ok(())
 }
 
@@ -145,20 +139,18 @@ fn console_ctrl_helper() {
 }
 
 /// The runner with this binary as its console-control helper.
-fn runner_with_helper() -> Result<WindowsRunner, std::io::Error> {
-    Ok(
-        WindowsRunner::default().with_console_helper(devlanes_runner_windows::ConsoleHelper {
-            program: std::env::current_exe()?,
-            args: [
-                "--exact",
-                "console_ctrl_helper",
-                "--nocapture",
-                "--test-threads=1",
-            ]
-            .map(Into::into)
-            .into(),
-        }),
-    )
+fn runner() -> Result<WindowsRunner, std::io::Error> {
+    Ok(WindowsRunner::new(devlanes_runner_windows::ConsoleHelper {
+        program: std::env::current_exe()?,
+        args: [
+            "--exact",
+            "console_ctrl_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ]
+        .map(Into::into)
+        .into(),
+    }))
 }
 
 /// Not a test of its own: as a unit (role `graceful`), waits for Ctrl-C or
@@ -208,6 +200,14 @@ fn graceful_leader() -> std::io::Result<()> {
     }
 }
 
+/// A stop that terminates at once, for tests of termination itself.
+fn kill() -> StopPolicy {
+    StopPolicy {
+        signal: devlanes_core::StopSignal::Kill,
+        timeout: Duration::from_secs(10),
+    }
+}
+
 /// The `shared` and `own` pings a `q9` leader reports, as processes.
 async fn q9_pings(
     unit: &Guard,
@@ -245,7 +245,7 @@ async fn wait_for(
 #[tokio::test]
 async fn pipe_units_stop_gracefully_on_ctrl_break() -> TestResult {
     timeout(Duration::from_secs(60), async {
-        let unit = spawn(runner_with_helper()?, leader("graceful")?).await?;
+        let unit = spawn(runner()?, leader("graceful")?).await?;
         let mut output = unit.output();
         let mut seen = String::new();
         wait_for(&mut output, &mut seen, "handlers ready")
@@ -269,7 +269,7 @@ async fn pty_units_stop_gracefully_on_ctrl_c() -> TestResult {
     timeout(Duration::from_secs(60), async {
         let mut spec = leader("graceful")?;
         spec.pty = true;
-        let unit = spawn(WindowsRunner::default(), spec).await?;
+        let unit = spawn(runner()?, spec).await?;
         let mut output = unit.output();
         let mut seen = String::new();
         wait_for(&mut output, &mut seen, "handlers ready")
@@ -305,7 +305,7 @@ async fn batch_shims_do_not_hold_a_stop() -> TestResult {
         spec.program = shim.to_string_lossy().into_owned();
         spec.args.clear();
         spec.pty = true;
-        let unit = spawn(WindowsRunner::default(), spec).await?;
+        let unit = spawn(runner()?, spec).await?;
         let mut output = unit.output();
         let mut seen = String::new();
         wait_for(&mut output, &mut seen, "handlers ready")
@@ -333,7 +333,7 @@ async fn batch_shims_do_not_hold_a_stop() -> TestResult {
 #[tokio::test]
 async fn tasks_keep_processes_with_their_own_console() -> TestResult {
     timeout(Duration::from_secs(60), async {
-        let runner = runner_with_helper()?
+        let runner = runner()?
             .with_track_interval(Duration::from_millis(100))
             .with_exit_sweep(ExitSweep::KeepDaemonized);
         let unit = spawn(runner, leader("q9")?).await?;
@@ -376,13 +376,13 @@ fn git_sh() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     Ok(sh)
 }
 
-/// A `run:` string's background command (`sleep &` in Git's `sh`, which breaks
-/// its children out of the job) still on the task's console is a leftover and
+/// A `run:` string's background command (`sleep &` in Git's `sh`, a grandchild
+/// through the MSYS2 runtime) still on the task's console is a leftover and
 /// ends with the task.
 #[tokio::test]
 async fn sh_leftovers_on_the_console_end_with_the_task() -> TestResult {
     timeout(Duration::from_secs(60), async {
-        let runner = runner_with_helper()?.with_exit_sweep(ExitSweep::KeepDaemonized);
+        let runner = runner()?.with_exit_sweep(ExitSweep::KeepDaemonized);
         let spec = LaunchSpec {
             program: git_sh()?.to_string_lossy().into_owned(),
             args: vec!["-c".into(), "sleep 37 & echo \"sleep $!\"; sleep 1".into()],
@@ -401,37 +401,6 @@ async fn sh_leftovers_on_the_console_end_with_the_task() -> TestResult {
         };
         assert!(sleeps(&report.swept), "{report:?}");
         assert!(!sleeps(&report.left_running), "{report:?}");
-        Ok(())
-    })
-    .await?
-}
-
-/// When the task's console cannot be listed (the helper cannot attach), nothing
-/// is ended on a guess: every process the task left running is kept and
-/// reported (decision Q9).
-#[tokio::test]
-async fn tasks_keep_everything_when_the_console_cannot_be_listed() -> TestResult {
-    timeout(Duration::from_secs(60), async {
-        let failing = devlanes_runner_windows::ConsoleHelper {
-            program: std::env::var_os("ComSpec")
-                .unwrap_or_else(|| "cmd.exe".into())
-                .into(),
-            args: ["/d", "/c", "exit 7"].map(Into::into).into(),
-        };
-        let runner = WindowsRunner::default()
-            .with_console_helper(failing)
-            .with_exit_sweep(ExitSweep::KeepDaemonized);
-        let unit = spawn(runner, leader("q9")?).await?;
-        let pings = q9_pings(&unit).await?;
-        let _ends = pings.each_ref().map(|ping| Ends(ping.identity()));
-        let report = unit.wait_report().await?;
-        for kept in &pings {
-            assert!(
-                report.left_running.iter().any(|p| p.pid == kept.pid),
-                "{report:?}"
-            );
-        }
-        assert!(report.swept.is_empty(), "{report:?}");
         Ok(())
     })
     .await?
@@ -481,11 +450,7 @@ async fn collect(
 #[tokio::test]
 async fn output_and_exit_code() -> TestResult {
     timeout(Duration::from_secs(30), async {
-        let unit = spawn(
-            WindowsRunner::default(),
-            cmd("echo out& echo err 1>&2& exit 7"),
-        )
-        .await?;
+        let unit = spawn(runner()?, cmd("echo out& echo err 1>&2& exit 7")).await?;
         let output = tokio::spawn(collect(unit.output()));
         let report = unit.wait_report().await?;
         assert_eq!(report.outcome.code, Some(7));
@@ -502,7 +467,7 @@ async fn output_and_exit_code() -> TestResult {
 #[tokio::test]
 async fn late_first_subscriber_sees_everything() -> TestResult {
     timeout(Duration::from_secs(30), async {
-        let unit = spawn(WindowsRunner::default(), cmd("echo early")).await?;
+        let unit = spawn(runner()?, cmd("echo early")).await?;
         unit.wait_report().await?;
         let seen = collect(unit.output()).await;
         assert_eq!(seen.get("stdout").map(|s| s.trim()), Some("early"));
@@ -516,7 +481,7 @@ async fn late_first_subscriber_sees_everything() -> TestResult {
 async fn merged_stderr() -> TestResult {
     timeout(Duration::from_secs(30), async {
         let unit = spawn(
-            WindowsRunner::default().with_stderr(StderrMode::Merged),
+            runner()?.with_stderr(StderrMode::Merged),
             cmd("echo one& echo two 1>&2"),
         )
         .await?;
@@ -535,7 +500,7 @@ async fn merged_stderr() -> TestResult {
 #[tokio::test]
 async fn stop_ends_the_whole_tree() -> TestResult {
     timeout(Duration::from_secs(30), async {
-        let unit = spawn(WindowsRunner::default(), cmd("ping -n 60 127.0.0.1 >NUL")).await?;
+        let unit = spawn(runner()?, cmd("ping -n 60 127.0.0.1 >NUL")).await?;
         // Wait until the ping grandchild is tracked.
         let mut members = Vec::new();
         for _ in 0..100 {
@@ -546,7 +511,7 @@ async fn stop_ends_the_whole_tree() -> TestResult {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(members.len() >= 2, "{members:?}");
-        let report = unit.stop_with_report(StopPolicy::default()).await?;
+        let report = unit.stop_with_report(kill()).await?;
         assert!(report.stop.is_some());
         assert_eq!(report.outcome.code, Some(1));
         assert!(report.escaped.is_empty(), "{report:?}");
@@ -566,7 +531,7 @@ async fn stop_ends_the_whole_tree() -> TestResult {
 #[tokio::test]
 async fn breakaway_is_refused_and_a_stop_ends_the_fallback() -> TestResult {
     timeout(Duration::from_secs(60), async {
-        let runner = WindowsRunner::default().with_track_interval(Duration::from_millis(50));
+        let runner = runner()?.with_track_interval(Duration::from_millis(50));
         let unit = spawn(runner, leader("stay")?).await?;
         let (word, pid) = breakaway_pid(unit.output())
             .await
@@ -574,36 +539,10 @@ async fn breakaway_is_refused_and_a_stop_ends_the_fallback() -> TestResult {
         let info = devlanes_sys::process(pid)?.ok_or("ping missing")?;
         let _ends = Ends(info.identity());
         assert_eq!(word, "fallback", "breakaway was allowed");
-        unit.stop_with_report(StopPolicy::default()).await?;
+        unit.stop_with_report(kill()).await?;
         assert!(
             !devlanes_sys::matches(&info.identity())?,
             "ping {pid} survived"
-        );
-        Ok(())
-    })
-    .await?
-}
-
-/// Without a helper to list the task's console, job membership decides what a
-/// task keeps: its job's members end with it.
-#[tokio::test]
-async fn task_without_a_helper_ends_its_job_members() -> TestResult {
-    timeout(Duration::from_secs(60), async {
-        let runner = WindowsRunner::default()
-            .with_track_interval(Duration::from_millis(50))
-            .with_exit_sweep(ExitSweep::KeepDaemonized);
-        let unit = spawn(runner, leader("exit")?).await?;
-        let (_, pid) = breakaway_pid(unit.output())
-            .await
-            .ok_or("no breakaway or fallback line")?;
-        let info = devlanes_sys::process(pid)?.ok_or("ping missing")?;
-        let _ends = Ends(info.identity());
-        let report = unit.wait_report().await?;
-        assert_eq!(report.outcome.code, Some(0));
-        assert!(report.swept.iter().any(|p| p.pid == pid), "{report:?}");
-        assert!(
-            !devlanes_sys::matches(&info.identity())?,
-            "job member survived"
         );
         Ok(())
     })
@@ -620,7 +559,7 @@ async fn pty_units_read_input_and_resize() -> TestResult {
         let mut spec = cmd("set /p NAME=name? & echo hello !NAME!");
         spec.args.insert(2, "/v:on".into());
         spec.pty = true;
-        let unit = spawn(WindowsRunner::default(), spec).await?;
+        let unit = spawn(runner()?, spec).await?;
         let output = tokio::spawn(collect(unit.output()));
         unit.resize(TerminalSize {
             columns: 100,
@@ -647,12 +586,12 @@ async fn pty_units_read_input_and_resize() -> TestResult {
 #[tokio::test]
 async fn pipe_units_have_no_terminal() -> TestResult {
     timeout(Duration::from_secs(30), async {
-        let unit = spawn(WindowsRunner::default(), cmd("ping -n 30 127.0.0.1 >NUL")).await?;
+        let unit = spawn(runner()?, cmd("ping -n 30 127.0.0.1 >NUL")).await?;
         assert!(matches!(
             unit.input(bytes::Bytes::from_static(b"x")).await,
             Err(devlanes_core::Error::Unsupported(_))
         ));
-        unit.stop_with_report(StopPolicy::default()).await?;
+        unit.stop_with_report(kill()).await?;
         Ok(())
     })
     .await?
@@ -664,10 +603,10 @@ async fn pty_units_stop() -> TestResult {
     timeout(Duration::from_secs(30), async {
         let mut spec = cmd("ping -n 60 127.0.0.1");
         spec.pty = true;
-        let unit = spawn(WindowsRunner::default(), spec).await?;
+        let unit = spawn(runner()?, spec).await?;
         let output = tokio::spawn(collect(unit.output()));
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let report = unit.stop_with_report(StopPolicy::default()).await?;
+        let report = unit.stop_with_report(kill()).await?;
         assert!(report.stop.is_some());
         assert!(report.escaped.is_empty(), "{report:?}");
         // Output ends rather than hanging on the closed console.
@@ -680,11 +619,11 @@ async fn pty_units_stop() -> TestResult {
 /// A missing program fails the spawn with `NotFound`, which the daemon's spawn
 /// diagnostics turn into "not found on PATH".
 #[tokio::test]
-async fn missing_program_is_not_found() {
+async fn missing_program_is_not_found() -> TestResult {
     let mut spec = cmd("");
     spec.program = "devlanes-no-such-program".into();
     spec.args.clear();
-    match WindowsRunner::default().spawn_unit(spec).await {
+    match runner()?.spawn_unit(spec).await {
         Err(devlanes_core::Error::Io(error)) => {
             assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
         }
@@ -694,16 +633,17 @@ async fn missing_program_is_not_found() {
             panic!("spawned {unit:?}");
         }
     }
+    Ok(())
 }
 
-/// After a task exits on its own, leftovers still inside its job are ended, even
-/// in the mode that keeps daemons started outside the job.
+/// After a task exits on its own, leftovers still on its console are ended,
+/// even in the mode that keeps daemons.
 #[tokio::test]
 async fn task_leftovers_in_the_job_are_swept() -> TestResult {
     timeout(Duration::from_secs(30), async {
-        // `start /b` keeps the ping in the job; it is a leftover to sweep.
+        // `start /b` keeps the ping on the task's console; it is a leftover.
         let unit = spawn(
-            WindowsRunner::default().with_exit_sweep(ExitSweep::KeepDaemonized),
+            runner()?.with_exit_sweep(ExitSweep::KeepDaemonized),
             cmd("start /b ping -n 60 127.0.0.1 >NUL& ping -n 2 127.0.0.1 >NUL"),
         )
         .await?;

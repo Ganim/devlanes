@@ -79,27 +79,9 @@ pub const ELEVATED_WAIT: std::time::Duration = std::time::Duration::from_secs(10
 /// [`io::ErrorKind::TimedOut`] and is left running: it is elevated, so this
 /// process may not end it.
 pub fn run_elevated(program: &std::path::Path, parameters: &str) -> io::Result<u32> {
-    run_elevated_child(program, parameters).map(|exit| exit.code)
-}
-
-/// How an elevated program ended, and which process it was.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ElevatedExit {
-    /// The elevated process's ID, for matching it with a pipe client
-    /// (`pipe::client_process_id`). It was alive, and its handle held, from the
-    /// start until the exit, so no other process had this ID meanwhile.
-    pub pid: u32,
-    /// Its exit code.
-    pub code: u32,
-}
-
-/// [`run_elevated`], also returning the elevated process's ID.
-pub fn run_elevated_child(program: &std::path::Path, parameters: &str) -> io::Result<ElevatedExit> {
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, GetProcessId, WaitForSingleObject,
-    };
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
     use windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
@@ -131,11 +113,6 @@ pub fn run_elevated_child(program: &std::path::Path, parameters: &str) -> io::Re
     }
     // SAFETY: the handle was just returned to us and is closed once, on drop.
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
-    // SAFETY: `process` is a valid process handle with query access.
-    let pid = unsafe { GetProcessId(info.hProcess) };
-    if pid == 0 {
-        return Err(io::Error::last_os_error());
-    }
     let wait_ms = u32::try_from(ELEVATED_WAIT.as_millis()).unwrap_or(u32::MAX - 1);
     // SAFETY: `process` is a valid process handle with SYNCHRONIZE access.
     match unsafe { WaitForSingleObject(info.hProcess, wait_ms) } {
@@ -161,7 +138,7 @@ pub fn run_elevated_child(program: &std::path::Path, parameters: &str) -> io::Re
         return Err(io::Error::last_os_error());
     }
     drop(process);
-    Ok(ElevatedExit { pid, code })
+    Ok(code)
 }
 
 /// Accepts only `http` and `https` URLs made of printable ASCII other than space

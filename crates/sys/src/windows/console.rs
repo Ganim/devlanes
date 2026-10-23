@@ -18,8 +18,7 @@ use windows_sys::Win32::Foundation::{
     ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, GetLastError, HANDLE, SetLastError,
 };
 use windows_sys::Win32::System::Console::{
-    self as win, CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT,
-    CTRL_SHUTDOWN_EVENT, GetConsoleMode, GetConsoleWindow, ReadConsoleW, SetConsoleCtrlHandler,
+    self as win, GetConsoleMode, GetConsoleWindow, ReadConsoleW, SetConsoleCtrlHandler,
     SetConsoleMode, WriteConsoleW,
 };
 use windows_sys::Win32::System::IO::CancelIoEx;
@@ -297,31 +296,18 @@ fn install_handler() {
     });
 }
 
-/// Puts back every registered mode when `event` is about to end the process,
-/// then returns FALSE so the next handler, or the default one that exits, runs.
-/// When another handler keeps the process alive, the guards restore again on drop.
-extern "system" fn restore_on_exit(event: u32) -> BOOL {
-    if ends_process(event) {
-        active().restore(|handle, previous| {
-            // SAFETY: entries are removed under the lock held here before their
-            // guard releases the handle, so `handle` is still open; the mode is
-            // passed by value.
-            let _ = unsafe { SetConsoleMode(handle as HANDLE, previous) };
-        });
-    }
+/// Puts back every registered mode when a control event is about to end the
+/// process (the default handling of every event ends it), then returns FALSE
+/// so the next handler, or the default one that exits, runs. When another
+/// handler keeps the process alive, the guards restore again on drop.
+extern "system" fn restore_on_exit(_event: u32) -> BOOL {
+    active().restore(|handle, previous| {
+        // SAFETY: entries are removed under the lock held here before their
+        // guard releases the handle, so `handle` is still open; the mode is
+        // passed by value.
+        let _ = unsafe { SetConsoleMode(handle as HANDLE, previous) };
+    });
     0
-}
-
-/// Whether the default handling of console control `event` ends the process.
-fn ends_process(event: u32) -> bool {
-    matches!(
-        event,
-        CTRL_C_EVENT
-            | CTRL_BREAK_EVENT
-            | CTRL_CLOSE_EVENT
-            | CTRL_LOGOFF_EVENT
-            | CTRL_SHUTDOWN_EVENT
-    )
 }
 
 /// The previous modes of live guards, in the order they were taken.
@@ -551,19 +537,5 @@ mod tests {
         let _ = drain.join();
         assert_eq!(code, Some(0), "the child's read was not cancelled");
         Ok(())
-    }
-
-    #[test]
-    fn only_events_that_end_the_process_restore() {
-        for event in [
-            CTRL_C_EVENT,
-            CTRL_BREAK_EVENT,
-            CTRL_CLOSE_EVENT,
-            CTRL_LOGOFF_EVENT,
-            CTRL_SHUTDOWN_EVENT,
-        ] {
-            assert!(ends_process(event), "{event}");
-        }
-        assert!(!ends_process(7));
     }
 }

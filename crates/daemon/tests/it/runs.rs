@@ -100,10 +100,16 @@ fn real_runner() -> devlanes_runner_pty::PtyRunner {
     devlanes_runner_pty::PtyRunner::default()
 }
 
-/// The runner the daemon uses on this OS.
+/// The runner the daemon uses on this OS, with a console helper that always
+/// fails, so a stop terminates at once: these tests stop nothing gracefully.
 #[cfg(windows)]
 fn real_runner() -> devlanes_runner_windows::WindowsRunner {
-    devlanes_runner_windows::WindowsRunner::default()
+    devlanes_runner_windows::WindowsRunner::new(devlanes_runner_windows::ConsoleHelper {
+        program: std::env::var_os("ComSpec")
+            .unwrap_or_else(|| "cmd.exe".into())
+            .into(),
+        args: ["/d", "/c", "exit 1"].map(Into::into).into(),
+    })
 }
 
 /// How soon after the `run` answer the task's first line must be on screen.

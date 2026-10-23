@@ -16,15 +16,14 @@
 //! Empty on other platforms.
 #![cfg(windows)]
 
-mod firefox;
-
 use std::io;
 
 use async_trait::async_trait;
 use devlanes_sys::windows::cert::{Access, CertError, CertStore, Thumbprint, View};
+use devlanes_trust::windows_root::{APPROVAL, RootChange};
 use devlanes_trust::{CaCertificate, TrustError, TrustStatus, TrustStore, TrustTarget};
 
-pub use firefox::{ENTERPRISE_ROOTS_PREF, FirefoxDirs, FirefoxStore, enterprise_roots_disabled};
+pub use devlanes_trust::windows_root::LOCATION;
 
 /// The CurrentUser system store browsers trust as roots.
 pub const ROOT: &str = "Root";
@@ -34,46 +33,33 @@ pub const ROOT: &str = "Root";
 /// root store holds it.
 pub const DISALLOWED: &str = "Disallowed";
 
-/// Store id shared by `system`, `chrome` and `windows`, which all mean the
-/// user's root store; also what the `firefox` target changes.
+/// Store id shared by `system`, `chrome`, `firefox` and `windows`, which all
+/// mean the user's root store.
 pub const STORE_ID: &str = "windows-current-user-root";
-
-/// Store id of the `firefox` target, which reports on the same store on a line of
-/// its own.
-pub const FIREFOX_ID: &str = "windows-firefox";
 
 /// Common name `devlanes-pki` gives its CA; older devlanes CAs are found by it.
 pub const DEVLANES_CA_SUBJECT: &str = "devlanes local development CA";
-
-/// What [`UserRootStore::location`] calls the real `Root` store.
-pub const LOCATION: &str = "Windows user root store";
-
-/// The confirmation every `Root` change needs, short enough for `doctor`'s fix line.
-const APPROVAL: &str = "choose Yes in the Windows security warning";
 
 /// Builds the Windows store for each [`TrustTarget`].
 pub struct WindowsTrust {
     store: String,
     disallowed: String,
     subject: Option<String>,
-    firefox: FirefoxDirs,
 }
 
 impl WindowsTrust {
-    /// Uses the CurrentUser store `store` (tests pass a scratch store) and looks
-    /// for Firefox profiles in `firefox`.
-    pub fn new(store: impl Into<String>, firefox: FirefoxDirs) -> Self {
+    /// Uses the CurrentUser store `store`; tests pass a scratch store.
+    pub fn new(store: impl Into<String>) -> Self {
         Self {
             store: store.into(),
             disallowed: DISALLOWED.to_owned(),
             subject: None,
-            firefox,
         }
     }
 
-    /// The real [`ROOT`] store and the Firefox profiles of this user.
+    /// The real [`ROOT`] store.
     pub fn from_env() -> Self {
-        Self::new(ROOT, FirefoxDirs::from_env())
+        Self::new(ROOT)
     }
 
     /// Stores also remove certificates whose subject contains `subject` on
@@ -97,21 +83,18 @@ impl WindowsTrust {
     /// `windows`, which names this store from WSL, is the user root store here
     /// too, so a config shared with a WSL distro works on Windows unchanged.
     pub fn store(&self, target: TrustTarget) -> Result<Box<dyn TrustStore>, TrustError> {
-        let system = |target| {
-            let store = UserRootStore::new(&self.store, target).with_disallowed(&self.disallowed);
-            match &self.subject {
-                Some(subject) => store.with_subject(subject),
-                None => store,
-            }
-        };
         match target {
-            TrustTarget::System | TrustTarget::Chrome | TrustTarget::Windows => {
-                Ok(Box::new(system(target)))
+            TrustTarget::System
+            | TrustTarget::Chrome
+            | TrustTarget::Firefox
+            | TrustTarget::Windows => {
+                let store =
+                    UserRootStore::new(&self.store, target).with_disallowed(&self.disallowed);
+                Ok(Box::new(match &self.subject {
+                    Some(subject) => store.with_subject(subject),
+                    None => store,
+                }))
             }
-            TrustTarget::Firefox => Ok(Box::new(FirefoxStore::new(
-                system(TrustTarget::Firefox),
-                self.firefox.clone(),
-            ))),
             TrustTarget::IosSimulator | TrustTarget::AndroidEmulator => {
                 Err(TrustError::Unsupported { target })
             }
@@ -130,31 +113,6 @@ pub fn thumbprint(ca: &CaCertificate) -> Result<Thumbprint, TrustError> {
             .ok_or_else(|| TrustError::InvalidCertificate(format!("bad SHA-1 `{hex}`")))?;
     }
     Ok(thumbprint)
-}
-
-/// A change that may show the confirmation dialog.
-#[derive(Debug, Clone, Copy)]
-enum Change {
-    Add,
-    Delete,
-}
-
-impl Change {
-    /// The devlanes command that makes this change, for the user to rerun.
-    fn command(self) -> &'static str {
-        match self {
-            Self::Add => "devlanes certs trust",
-            Self::Delete => "devlanes certs untrust",
-        }
-    }
-
-    /// The title of the dialog crypt32 shows for it.
-    fn dialog(self) -> &'static str {
-        match self {
-            Self::Add => "\"Security Warning\"",
-            Self::Delete => "\"Root Certificate Store\"",
-        }
-    }
 }
 
 /// Where a CA stands in the logical stores.
@@ -232,48 +190,32 @@ impl UserRootStore {
     }
 
     /// Fails before a change the dialog could not be shown for.
-    fn ensure_desktop(&self, change: Change) -> Result<(), TrustError> {
+    fn ensure_desktop(&self, change: RootChange) -> Result<(), TrustError> {
         if self.lacks_desktop() {
             return Err(self.no_desktop(change));
         }
         Ok(())
     }
 
-    /// What `change` does, for messages.
-    fn action(&self, change: Change) -> String {
-        match change {
-            Change::Add => format!("adding the CA to {}", self.path()),
-            Change::Delete => format!("removing a CA from {}", self.path()),
-        }
-    }
-
     /// [`TrustError::InteractionRequired`] for `change`.
-    fn no_desktop(&self, change: Change) -> TrustError {
+    fn no_desktop(&self, change: RootChange) -> TrustError {
         TrustError::InteractionRequired {
             command: change.command().to_owned(),
             detail: format!(
                 "{} shows a Windows {} dialog on the desktop; run it from a logged-in \
                  desktop session, not over SSH or from a service",
-                self.action(change),
+                change.action(&self.path()),
                 change.dialog()
             ),
         }
     }
 
     /// Maps a failed change to the error the CLI shows.
-    fn change_error(&self, change: Change, error: CertError) -> TrustError {
-        let action = self.action(change);
+    fn change_error(&self, change: RootChange, error: CertError) -> TrustError {
         match error {
-            CertError::Cancelled => TrustError::Cancelled {
-                detail: format!(
-                    "{action} was declined in the Windows {} dialog; run `{}` again and \
-                     choose Yes",
-                    change.dialog(),
-                    change.command()
-                ),
-            },
+            CertError::Cancelled => change.declined(&self.path()),
             CertError::NoDesktop => self.no_desktop(change),
-            CertError::Io(error) => TrustError::io(action, error),
+            CertError::Io(error) => TrustError::io(change.action(&self.path()), error),
         }
     }
 
@@ -338,7 +280,7 @@ impl UserRootStore {
         if doomed.is_empty() {
             return Ok(());
         }
-        self.ensure_desktop(Change::Delete)?;
+        self.ensure_desktop(RootChange::Delete)?;
         let name = self.name.clone();
         blocking(
             "changing the certificate store",
@@ -352,18 +294,18 @@ impl UserRootStore {
             },
         )
         .await?
-        .map_err(|error| self.change_error(Change::Delete, error))
+        .map_err(|error| self.change_error(RootChange::Delete, error))
     }
 }
 
 #[async_trait]
 impl TrustStore for UserRootStore {
-    /// `system`, `chrome` or `windows`, as requested.
+    /// The target it was built for.
     fn target(&self) -> TrustTarget {
         self.target
     }
 
-    /// [`STORE_ID`] for both targets.
+    /// [`STORE_ID`] for every target.
     fn id(&self) -> &'static str {
         STORE_ID
     }
@@ -407,24 +349,14 @@ impl TrustStore for UserRootStore {
             if let Ok(Ok(Lookup::Trusted | Lookup::Denied)) = self.lookup(thumbprint).await {
                 return None;
             }
-            return Some(format!(
-                "Windows asks you to confirm adding the CA to your user root store in a \
-                 {} dialog; choose Yes",
-                Change::Add.dialog()
-            ));
+            return Some(RootChange::Add.pending(1));
         }
-        let what = match self.doomed(thumbprint).await {
+        let count = match self.doomed(thumbprint).await {
             Ok(doomed) if doomed.is_empty() => return None,
-            Ok(doomed) if doomed.len() > 1 => {
-                format!("each of the {} CAs devlanes removes", doomed.len())
-            }
-            Ok(_) | Err(_) => "removing the CA".to_owned(),
+            Ok(doomed) => doomed.len(),
+            Err(_) => 1,
         };
-        Some(format!(
-            "Windows asks you to confirm {what} from your user root store in a {} dialog; \
-             choose Yes",
-            Change::Delete.dialog()
-        ))
+        Some(RootChange::Delete.pending(count))
     }
 
     /// Adds the CA to the user's own store unless a root store this user trusts
@@ -435,7 +367,7 @@ impl TrustStore for UserRootStore {
         if let Ok(Lookup::Trusted | Lookup::Denied) = self.lookup(thumbprint).await? {
             return Ok(());
         }
-        self.ensure_desktop(Change::Add)?;
+        self.ensure_desktop(RootChange::Add)?;
         let name = self.name.clone();
         let der = ca.der().to_vec();
         blocking(
@@ -447,7 +379,7 @@ impl TrustStore for UserRootStore {
             },
         )
         .await?
-        .map_err(|error| self.change_error(Change::Add, error))
+        .map_err(|error| self.change_error(RootChange::Add, error))
     }
 
     /// Deletes the CA and, with a subject, every devlanes CA from the user's own
@@ -482,7 +414,7 @@ impl TrustStore for UserRootStore {
     }
 }
 
-/// Runs crypt32 or file work on a blocking thread.
+/// Runs crypt32 work on a blocking thread.
 async fn blocking<T: Send + 'static>(
     what: &'static str,
     work: impl FnOnce() -> T + Send + 'static,
@@ -496,44 +428,17 @@ async fn blocking<T: Send + 'static>(
 mod tests {
     use super::*;
 
-    /// A No names the dialog of that change and the command to rerun.
-    #[test]
-    fn declined_dialogs_name_their_dialog_and_command() {
-        let root = UserRootStore::new(ROOT, TrustTarget::System);
-        let detail = |change| match root.change_error(change, CertError::Cancelled) {
-            TrustError::Cancelled { detail } => detail,
-            other => panic!("{other:?}"),
-        };
-        let add = detail(Change::Add);
-        assert!(add.contains("\"Security Warning\""), "{add}");
-        assert!(add.contains("`devlanes certs trust`"), "{add}");
-        let delete = detail(Change::Delete);
-        assert!(delete.contains("\"Root Certificate Store\""), "{delete}");
-        assert!(delete.contains("`devlanes certs untrust`"), "{delete}");
-    }
-
     /// Without a desktop the error carries the devlanes command to rerun.
     #[test]
     fn no_desktop_names_the_devlanes_command() {
         let root = UserRootStore::new(ROOT, TrustTarget::System);
-        for (change, command, dialog) in [
-            (Change::Add, "devlanes certs trust", "\"Security Warning\""),
-            (
-                Change::Delete,
-                "devlanes certs untrust",
-                "\"Root Certificate Store\"",
-            ),
-        ] {
+        for change in [RootChange::Add, RootChange::Delete] {
             let error = root.change_error(change, CertError::NoDesktop);
-            let TrustError::InteractionRequired {
-                command: got,
-                detail,
-            } = &error
-            else {
+            let TrustError::InteractionRequired { command, detail } = &error else {
                 panic!("{error:?}");
             };
-            assert_eq!(got, command);
-            assert!(detail.contains(dialog), "{detail}");
+            assert_eq!(command, change.command());
+            assert!(detail.contains(change.dialog()), "{detail}");
             assert!(error.to_string().starts_with(&format!("`{command}`")));
         }
     }

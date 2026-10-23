@@ -5,7 +5,7 @@
 
 use std::{
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
@@ -166,26 +166,14 @@ fn path_with(first: &Path) -> std::ffi::OsString {
         .expect("PATH")
 }
 
-/// The first executable `name` (`name.exe` on Windows) on this process's
-/// `PATH`. Windows' app execution aliases (`WindowsApps\pwsh.exe`) are reparse
-/// points that only `symlink_metadata` reads.
-fn on_path(name: &str) -> Option<PathBuf> {
-    let file = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_owned()
-    };
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|dir| dir.join(&file))
-        .find(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| !meta.is_dir()))
-}
-
 /// Git Bash, found the way Claude Code looks for it: next to the `git.exe` on
 /// `PATH`, as `<Git>\bin\bash.exe`. `bash.exe` in `System32` is WSL's and is
 /// never used.
 #[cfg(windows)]
-fn git_bash() -> Option<PathBuf> {
-    let git = on_path("git")?;
+fn git_bash() -> Option<std::path::PathBuf> {
+    let git = std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("git.exe"))
+        .find(|path| path.is_file())?;
     git.ancestors().skip(1).find_map(|dir| {
         let bash = dir.join("bin").join("bash.exe");
         (bash.is_file() && dir.join("usr").join("bin").is_dir()).then_some(bash)
@@ -193,50 +181,31 @@ fn git_bash() -> Option<PathBuf> {
 }
 
 /// The shells the agents run a shell-form hook with on this OS, each running
-/// `line`: `sh -c` (Claude Code), and on Windows `cmd.exe /C "<line>"` (Codex,
-/// with its quoting) and Windows PowerShell 5.1 (Claude Code without Git Bash
-/// or `pwsh`). Also, when installed: Git Bash and PowerShell 7 on Windows
-/// (Claude Code), and `bash`, `zsh` and `fish` with `-lc` on Unix (Codex's
-/// `$SHELL -lc`), whose login profiles read `home`. Absolute paths, because
+/// `line`: `sh -c` (Claude Code) on Unix; on Windows `cmd.exe /C "<line>"`
+/// (Codex, with its quoting), Windows PowerShell 5.1 (Claude Code without Git
+/// Bash) and, when installed, Git Bash (Claude Code). Absolute paths, because
 /// the tests change `PATH`.
-fn shells(line: &str, home: &Path) -> Vec<(String, Command)> {
+fn shells(line: &str) -> Vec<(String, Command)> {
     let mut shells = Vec::new();
     #[cfg(unix)]
     {
         let mut sh = Command::new("/bin/sh");
         sh.args(["-c", line]);
         shells.push(("sh -c".to_owned(), sh));
-        for name in ["bash", "zsh", "fish"] {
-            let Some(shell) = on_path(name) else { continue };
-            let mut login = Command::new(shell);
-            login
-                .args(["-lc", line])
-                .env("HOME", home)
-                .env_remove("ZDOTDIR")
-                .env_remove("XDG_CONFIG_HOME")
-                .env_remove("BASH_ENV")
-                .env_remove("ENV");
-            shells.push((format!("{name} -lc"), login));
-        }
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let _ = home;
-        let system =
-            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
-                .join("System32");
+        let system = std::path::PathBuf::from(
+            std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()),
+        )
+        .join("System32");
         let mut cmd = Command::new(system.join("cmd.exe"));
         cmd.arg("/C").raw_arg(format!("\"{line}\""));
         shells.push(("cmd.exe /C".to_owned(), cmd));
         let mut powershell = Command::new(system.join("WindowsPowerShell/v1.0/powershell.exe"));
         powershell.args(["-NoProfile", "-NonInteractive", "-Command", line]);
         shells.push(("powershell -Command".to_owned(), powershell));
-        if let Some(pwsh) = on_path("pwsh") {
-            let mut pwsh = Command::new(pwsh);
-            pwsh.args(["-NoProfile", "-NonInteractive", "-Command", line]);
-            shells.push(("pwsh -Command".to_owned(), pwsh));
-        }
         // Git Bash runs `devlanes.exe` but not the old `devlanes.cmd`, so the
         // old case behaves like the missing one there.
         if let Some(bash) = git_bash() {
@@ -248,31 +217,6 @@ fn shells(line: &str, home: &Path) -> Vec<(String, Command)> {
     shells
 }
 
-/// A home whose login profiles set `PATH` from `DEVLANES_HOOK_TEST_PATH`, the
-/// way an install's profile line puts `devlanes` on it: Debian's
-/// `/etc/profile` replaces `PATH` for `bash -l`.
-#[cfg(unix)]
-fn login_home() -> tempfile::TempDir {
-    let home = tempfile::tempdir().expect("home");
-    let posix = "PATH=\"$DEVLANES_HOOK_TEST_PATH\"; export PATH\n";
-    std::fs::write(home.path().join(".bash_profile"), posix).expect(".bash_profile");
-    std::fs::write(home.path().join(".zprofile"), posix).expect(".zprofile");
-    let fish = home.path().join(".config/fish");
-    std::fs::create_dir_all(&fish).expect("fish config dir");
-    std::fs::write(
-        fish.join("config.fish"),
-        "set -gx PATH (string split : -- $DEVLANES_HOOK_TEST_PATH)\n",
-    )
-    .expect("config.fish");
-    home
-}
-
-/// No login profiles are read on Windows.
-#[cfg(windows)]
-fn login_home() -> tempfile::TempDir {
-    tempfile::tempdir().expect("home")
-}
-
 /// The plugin's command exits 0 in every shell [`shells`] finds, blocks
 /// through the current binary, and lets everything through when an older
 /// devlanes or none is on `PATH` (that devlanes would otherwise block every
@@ -280,10 +224,9 @@ fn login_home() -> tempfile::TempDir {
 #[test]
 fn plugin_command_masks_old_and_missing_devlanes_in_every_shell() {
     let line = plugin_command();
-    let login = login_home();
     println!(
         "shells: {}",
-        shells(&line, login.path())
+        shells(&line)
             .into_iter()
             .map(|(name, _)| name)
             .collect::<Vec<_>>()
@@ -298,25 +241,21 @@ fn plugin_command_masks_old_and_missing_devlanes_in_every_shell() {
         "tool_input": {"command": "pnpm dev &"},
     })
     .to_string();
-    let current = Path::new(env!("CARGO_BIN_EXE_devlanes"))
-        .parent()
-        .expect("binary directory")
-        .to_path_buf();
+    let current = Path::new(env!("CARGO_BIN_EXE_devlanes")).parent();
     let old = old_devlanes();
     let none = tempfile::tempdir().expect("temp dir");
     // The old and missing cases get no other `PATH` entry: on Windows cargo
     // puts the build directory, with the current `devlanes.exe`, on `PATH`,
     // where Git Bash would find it past the old `devlanes.cmd`.
     for (devlanes, path) in [
-        ("current", path_with(&current)),
+        ("current", path_with(current.expect("binary directory"))),
         ("old", old.path().as_os_str().to_owned()),
         ("missing", none.path().as_os_str().to_owned()),
     ] {
-        for (shell, mut command) in shells(&line, login.path()) {
+        for (shell, mut command) in shells(&line) {
             command
                 .current_dir(project.path())
                 .env("PATH", &path)
-                .env("DEVLANES_HOOK_TEST_PATH", &path)
                 .env("DEVLANES_HOME", &home)
                 .env_remove("DEVLANES_BLOCK_BACKGROUND");
             let context = format!("{devlanes} devlanes, {shell}");

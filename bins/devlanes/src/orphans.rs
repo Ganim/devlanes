@@ -1,7 +1,7 @@
 //! How the daemon stops processes a previous daemon left running (orphans).
 //!
 //! Unix sends SIGTERM, then SIGKILL after the grace period
-//! ([`SysProcesses`]). Windows has no signals, so an orphan is first asked the
+//! (`SysProcesses`). Windows has no signals, so an orphan is first asked the
 //! way a graceful stop asks a unit: Ctrl-Break to its console, through the
 //! console-control helper, and `WM_CLOSE` to its visible windows. What still
 //! runs after the grace period is terminated. The helper lives in
@@ -10,25 +10,22 @@
 
 use std::sync::Arc;
 
-use devlanes_daemon::integrations::{ProcessTable, SysProcesses};
+use devlanes_daemon::integrations::ProcessTable;
+#[cfg(unix)]
+use devlanes_daemon::integrations::SysProcesses;
 
 /// The process table the daemon reconciles and stops orphans with.
 #[cfg(unix)]
-pub fn process_table() -> Arc<dyn ProcessTable> {
-    Arc::new(SysProcesses)
+pub fn process_table() -> std::io::Result<Arc<dyn ProcessTable>> {
+    Ok(Arc::new(SysProcesses))
 }
 
-/// The process table the daemon reconciles and stops orphans with: asks first
-/// when this binary can be the console-control helper, else terminates at once.
+/// The process table the daemon reconciles and stops orphans with, asking
+/// through this binary as the console-control helper first.
 #[cfg(windows)]
-pub fn process_table() -> Arc<dyn ProcessTable> {
-    match devlanes_runner_windows::ConsoleHelper::current_exe() {
-        Ok(helper) => Arc::new(windows::AskFirst { helper }),
-        Err(error) => {
-            tracing::warn!(%error, "no console helper; orphans are terminated without a graceful stop");
-            Arc::new(SysProcesses)
-        }
-    }
+pub fn process_table() -> std::io::Result<Arc<dyn ProcessTable>> {
+    let helper = devlanes_runner_windows::ConsoleHelper::current_exe()?;
+    Ok(Arc::new(windows::AskFirst { helper }))
 }
 
 #[cfg(windows)]
@@ -39,6 +36,7 @@ mod windows {
     use devlanes_core::ProcessIdentity;
     use devlanes_daemon::integrations::{ProcessTable, SysProcesses};
     use devlanes_runner_windows::ConsoleHelper;
+    use devlanes_runner_windows::ctrl::Request;
 
     /// How often a waiting stop checks whether the orphan is gone.
     const POLL: Duration = Duration::from_millis(100);
@@ -135,7 +133,7 @@ mod windows {
         tree.hold_root(true);
         tree.update(&snapshot);
         let pids: Vec<u32> = tree.live().map(|process| process.pid).collect();
-        let signalled = helper.ask_to_stop(identity.pid);
+        let signalled = helper.send_held(identity, Request::CtrlBreak, Duration::ZERO);
         drop(held);
         tree.hold_root(false);
         let closed = devlanes_sys::windows::window::close_windows(&pids);

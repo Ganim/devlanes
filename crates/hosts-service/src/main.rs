@@ -1,6 +1,6 @@
-//! `devlanes-hosts-service` binary: started by the Windows service manager. It
-//! takes no paths and no configuration on its command line; `--version` is the
-//! only argument, for the installer's check of a staged copy.
+//! `devlanes-hosts-service` binary: started by the Windows service manager with
+//! `--user-sid <SID>`. It takes no paths; `--version` is for the installer's
+//! check of a staged copy.
 
 /// Runs the service, or prints the version line for `--version`.
 #[cfg(windows)]

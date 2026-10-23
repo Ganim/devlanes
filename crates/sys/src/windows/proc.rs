@@ -14,9 +14,11 @@ use std::ptr;
 use windows_sys::Wdk::System::SystemInformation::{
     NtQuerySystemInformation, SystemTimeOfDayInformation,
 };
-use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
+use windows_sys::Wdk::System::Threading::{
+    NtQueryInformationProcess, PROCESSINFOCLASS, ProcessBasicInformation,
+};
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, FILETIME, NO_ERROR,
+    ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, NO_ERROR,
     WAIT_OBJECT_0,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -210,18 +212,108 @@ impl Held {
     /// Opens `identity`; `None` when it is gone, exited, or its PID now names
     /// another process.
     pub fn open(identity: &ProcessIdentity) -> Result<Option<Self>, Error> {
+        let handle = open_verified(identity, PROCESS_SYNCHRONIZE)?;
+        Ok(handle.map(|handle| Self { _handle: handle }))
+    }
+}
+
+/// The console a process is attached to, known by its console host
+/// (`conhost.exe`, or `OpenConsole.exe` for a pseudo console). The host is held
+/// open, so its PID cannot name another process while this lives, even after
+/// the host exited with its last client.
+///
+/// Built on an undocumented query (see [`console_host`]); the tests below pin
+/// how it behaves.
+#[derive(Debug)]
+pub struct Console {
+    host: u32,
+    _handle: OwnedHandle,
+}
+
+impl Console {
+    /// The console `process` is attached to now; `None` while it has none, as
+    /// before its console is set up (it is created while the process starts).
+    pub(crate) fn of(process: &OwnedHandle) -> io::Result<Option<Self>> {
+        let Some(host) = console_host(process)? else {
+            return Ok(None);
+        };
         let Some(handle) = open(
-            identity.pid,
+            host,
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
         )?
         else {
             return Ok(None);
         };
-        if creation_time(&handle)? != identity.start_time || exited(&handle) {
+        // Opened by bare PID: it is the host only if `process` is still running
+        // on it, which keeps the host alive and its PID from being reused.
+        if exited(process) || console_host(process)? != Some(host) {
             return Ok(None);
         }
-        Ok(Some(Self { _handle: handle }))
+        Ok(Some(Self {
+            host,
+            _handle: handle,
+        }))
     }
+
+    /// Whether `identity` is attached to this console now; `false` once it is
+    /// gone, exited or its PID names another process.
+    pub fn attached(&self, identity: &ProcessIdentity) -> io::Result<bool> {
+        let Some(handle) = open_verified(identity, 0)? else {
+            return Ok(false);
+        };
+        Ok(console_host(&handle)? == Some(self.host))
+    }
+}
+
+/// The PID of the console host of the console an open process is attached to;
+/// `None` when it is attached to none (`DETACHED_PROCESS`, `FreeConsole`) or
+/// has not set its console up yet.
+///
+/// Undocumented: `NtQueryInformationProcess` class 49, `ProcessConsoleHostProcess`
+/// in System Informer's phnt headers (windows-sys names it
+/// `ProcessOwnerInformation`), needs only `PROCESS_QUERY_LIMITED_INFORMATION`
+/// and gives a `ULONG_PTR` with two flag bits. Bit 0 set: the rest is the host's
+/// PID, 0 without a console; the value follows `AttachConsole` and
+/// `FreeConsole`. Bit 1 set: the rest is another process (the creator of a
+/// process whose console is not set up yet, or the client a console host
+/// serves). It keeps its last value after the process exited.
+fn console_host(process: &OwnedHandle) -> io::Result<Option<u32>> {
+    const PROCESS_CONSOLE_HOST_PROCESS: PROCESSINFOCLASS = 49;
+    let mut value = 0_usize;
+    // SAFETY: `process` is open with query rights; `value` is the writable
+    // ULONG_PTR the class fills.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            raw(process),
+            PROCESS_CONSOLE_HOST_PROCESS,
+            (&raw mut value).cast::<c_void>(),
+            size_of::<usize>() as u32,
+            ptr::null_mut(),
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::other(format!(
+            "NtQueryInformationProcess(ProcessConsoleHostProcess) failed: {status:#x}"
+        )));
+    }
+    let pid = u32::try_from(value & !3).unwrap_or(0);
+    Ok((value & 3 == 1 && pid != 0).then_some(pid))
+}
+
+/// Opens `identity` with `access` plus `PROCESS_QUERY_LIMITED_INFORMATION`;
+/// `None` when it is gone, exited, or its PID now names a process started at
+/// another time.
+pub(crate) fn open_verified(
+    identity: &ProcessIdentity,
+    access: PROCESS_ACCESS_RIGHTS,
+) -> io::Result<Option<OwnedHandle>> {
+    let Some(handle) = open(identity.pid, access | PROCESS_QUERY_LIMITED_INFORMATION)? else {
+        return Ok(None);
+    };
+    if creation_time(&handle)? != identity.start_time || exited(&handle) {
+        return Ok(None);
+    }
+    Ok(Some(handle))
 }
 
 /// Opens `pid` with `access`; `None` when no process has that PID.
@@ -257,16 +349,44 @@ fn open_query(pid: u32) -> Option<OwnedHandle> {
 
 /// The creation time of an open process as one 64-bit value.
 pub(crate) fn creation_time(handle: &OwnedHandle) -> io::Result<u64> {
-    let mut times = [FILETIME {
-        dwLowDateTime: 0,
-        dwHighDateTime: 0,
-    }; 4];
-    let [created, exited, kernel, user] = &mut times;
-    // SAFETY: `handle` is open with query rights; the four FILETIMEs are writable.
-    if unsafe { GetProcessTimes(raw(handle), created, exited, kernel, user) } == 0 {
+    Ok(times(handle)?.created)
+}
+
+/// `GetProcessTimes` of an open process, in 100 ns ticks.
+pub(crate) struct Times {
+    /// The creation time, since 1601 UTC.
+    pub(crate) created: u64,
+    /// CPU time in kernel mode.
+    pub(crate) kernel: u64,
+    /// CPU time in user mode.
+    pub(crate) user: u64,
+}
+
+/// Reads the creation and CPU times of an open process.
+pub(crate) fn times(handle: &OwnedHandle) -> io::Result<Times> {
+    let mut times = [0_u64; 4];
+    let [created, exited, kernel, user] = times.each_mut().map(ptr::from_mut);
+    // SAFETY: `handle` is open with query rights. A FILETIME is two u32 halves,
+    // low half first, so on little-endian Windows each writable u64 has its
+    // layout, with stricter alignment.
+    let ok = unsafe {
+        GetProcessTimes(
+            raw(handle),
+            created.cast(),
+            exited.cast(),
+            kernel.cast(),
+            user.cast(),
+        )
+    };
+    if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    let [created, _, kernel, user] = times;
+    Ok(Times {
+        created,
+        kernel,
+        user,
+    })
 }
 
 /// Whether an open process has exited. Waiting is preferred over the exit code,
@@ -414,6 +534,91 @@ mod tests {
         assert!(Held::open(&other)?.is_none());
         let gone = ProcessIdentity { pid: 0, ..me };
         assert!(Held::open(&gone)?.is_none());
+        Ok(())
+    }
+
+    /// A job whose members are ended when the test is done, pass or fail.
+    struct Ending(crate::windows::job::Job);
+
+    impl Drop for Ending {
+        fn drop(&mut self) {
+            let _ = self.0.terminate(1);
+        }
+    }
+
+    /// A child started without a window has a console of its own. A grandchild
+    /// that inherited it is attached to it, still after the child exited, while
+    /// processes with a console of their own or none are not.
+    #[test]
+    fn consoles_tell_who_shares_them() -> Result<(), Error> {
+        use std::os::windows::process::CommandExt;
+        use std::time::{Duration, Instant};
+
+        use crate::windows::process::{CREATE_NO_WINDOW, DETACHED_PROCESS};
+        use crate::windows::spawn::{Spawn, spawn};
+
+        let job = Ending(crate::windows::job::Job::create()?);
+        let cmd = std::path::PathBuf::from(
+            std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into()),
+        );
+        let child = spawn(&Spawn {
+            program: &cmd,
+            command_line: std::ffi::OsStr::new(
+                r#"cmd.exe /d /c "start /b ping -n 30 127.0.0.1 >NUL& ping -n 3 127.0.0.1 >NUL""#,
+            ),
+            environment: None,
+            cwd: &std::env::temp_dir(),
+            stdout: crate::windows::spawn::Stdio::Null,
+            stderr: crate::windows::spawn::Stdio::Null,
+            job: Some(&job.0),
+            console: None,
+        })?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (console, pings) = loop {
+            let console = child.console()?;
+            let pings: Vec<ProcessInfo> = processes()?
+                .into_iter()
+                .filter(|p| p.ppid == child.pid() && p.name.eq_ignore_ascii_case("PING.EXE"))
+                .collect();
+            if let Some(console) = console
+                && pings.len() == 2
+            {
+                break (console, pings);
+            }
+            assert!(Instant::now() < deadline, "no console or pings: {pings:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let leader = ProcessIdentity {
+            pid: child.pid(),
+            sid: child.pid(),
+            start_time: child.start_time(),
+        };
+        assert!(console.attached(&leader)?);
+        child.wait()?;
+        // The background ping outlives the child on the same console.
+        let attached: Vec<bool> = pings
+            .iter()
+            .map(|ping| console.attached(&ping.identity()))
+            .collect::<io::Result<_>>()?;
+        assert!(attached.contains(&true), "{pings:?} {attached:?}");
+        assert!(
+            !console.attached(&leader)?,
+            "an exited process is on no console"
+        );
+        for flags in [CREATE_NO_WINDOW, DETACHED_PROCESS] {
+            let mut other = Command::new("ping")
+                .args(["-n", "30", "127.0.0.1"])
+                .stdout(Stdio::null())
+                .creation_flags(flags)
+                .spawn()?;
+            // Time to set up its own console, which takes milliseconds.
+            std::thread::sleep(Duration::from_millis(200));
+            let identity = crate::identity(other.id())?;
+            let result = identity.map(|identity| console.attached(&identity));
+            let _ = other.kill();
+            let _ = other.wait();
+            assert_eq!(result.transpose()?, Some(false), "flags {flags:#x}");
+        }
         Ok(())
     }
 

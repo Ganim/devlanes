@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
@@ -43,11 +43,16 @@ pub enum Error {
     Tls(#[from] rustls::Error),
     #[error("CA directory contains an incomplete certificate/key pair")]
     IncompleteCa,
+    #[cfg(unix)]
+    #[error("CA key or directory must be a regular non-symlink path with private permissions")]
+    InsecurePath,
     /// A CA directory or key file that others could read or swap; `fix` is a
-    /// command that makes it private, when one is known.
+    /// command that makes it private, when one is known. Access lists are hard
+    /// to read by hand, so Windows names the path, the problem and the fix.
+    #[cfg(windows)]
     #[error("CA path {} is not private: {problem}{}", .path.display(), fix_suffix(.fix))]
     InsecurePath {
-        path: PathBuf,
+        path: std::path::PathBuf,
         problem: PathProblem,
         fix: Option<String>,
     },
@@ -58,6 +63,7 @@ pub enum Error {
 }
 
 /// `; fix: <command>` for [`Error::InsecurePath`]'s message, or nothing.
+#[cfg(windows)]
 fn fix_suffix(fix: &Option<String>) -> String {
     fix.as_ref()
         .map(|fix| format!("; fix: {fix}"))
@@ -65,6 +71,7 @@ fn fix_suffix(fix: &Option<String>) -> String {
 }
 
 /// Why a CA path is not private.
+#[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathProblem {
     /// A symlink, junction or other reparse point, which could point anywhere.
@@ -77,13 +84,12 @@ pub enum PathProblem {
     HardLinks(u32),
     /// Another account owns it.
     Owner,
-    /// Group or others have access (Unix permission bits).
-    Mode(u32),
-    /// Other accounts can open it (Windows), as `Name (SID)` or a bare SID; empty
-    /// when its access list cannot be judged.
+    /// Other accounts can open it, as `Name (SID)` or a bare SID; empty when
+    /// its access list cannot be judged.
     Accounts(Vec<String>),
 }
 
+#[cfg(windows)]
 impl std::fmt::Display for PathProblem {
     /// A clause for [`Error::InsecurePath`]'s message.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,7 +99,6 @@ impl std::fmt::Display for PathProblem {
             Self::NotAFile => f.write_str("it is not a regular file"),
             Self::HardLinks(links) => write!(f, "it has {links} hard links"),
             Self::Owner => f.write_str("another account owns it"),
-            Self::Mode(mode) => write!(f, "group or others have access (mode {mode:o})"),
             Self::Accounts(accounts) if accounts.is_empty() => {
                 f.write_str("its access list grants access that cannot be judged")
             }
@@ -524,27 +529,14 @@ fn create_private_directory(path: &Path) -> Result<(), Error> {
 fn check_private(path: &Path, directory: bool) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt;
     let metadata = fs::symlink_metadata(path)?;
-    let mode = metadata.permissions().mode() & 0o7777;
-    let problem = if metadata.file_type().is_symlink() {
-        PathProblem::Link
-    } else if directory && !metadata.is_dir() {
-        PathProblem::NotADirectory
-    } else if !directory && !metadata.is_file() {
-        PathProblem::NotAFile
-    } else if mode & 0o077 != 0 {
-        PathProblem::Mode(mode)
-    } else {
-        return Ok(());
-    };
-    let fix = matches!(problem, PathProblem::Mode(_)).then(|| {
-        let private = if directory { "700" } else { "600" };
-        format!("chmod {private} {}", path.display())
-    });
-    Err(Error::InsecurePath {
-        path: path.to_owned(),
-        problem,
-        fix,
-    })
+    if metadata.file_type().is_symlink()
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(Error::InsecurePath);
+    }
+    Ok(())
 }
 
 /// Rejects a directory that is a reparse point (symlinks and junctions, which

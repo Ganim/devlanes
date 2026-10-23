@@ -235,54 +235,6 @@ pub fn check_private_file(path: &Path) -> io::Result<Result<(), FileProblem>> {
     Ok(unsafe { inspect(&file, None) }?.map_err(FileProblem::from))
 }
 
-/// Why [`open_plain_file`] refused a path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlainFileProblem {
-    /// A symlink or other reparse point, which could point anywhere.
-    ReparsePoint,
-    /// A directory or device is in the way.
-    NotAFile,
-    /// The file has this many names; another one may sit in a directory other
-    /// accounts can write.
-    HardLinks(u32),
-}
-
-impl From<PlainFileProblem> for FileProblem {
-    /// The same finding about a private file.
-    fn from(problem: PlainFileProblem) -> Self {
-        match problem {
-            PlainFileProblem::ReparsePoint => Self::ReparsePoint,
-            PlainFileProblem::NotAFile => Self::NotAFile,
-            PlainFileProblem::HardLinks(links) => Self::HardLinks(links),
-        }
-    }
-}
-
-/// Opens `path` for reading if it is a regular file with a single name. The
-/// entry itself is opened, never a link's target, and the checks run on the
-/// opened handle, so the path cannot be swapped in between. Other processes may
-/// keep reading, writing, renaming and deleting it meanwhile, as with a plain
-/// open. A missing file is an error of kind `NotFound`.
-pub fn open_plain_file(path: &Path) -> io::Result<Result<File, PlainFileProblem>> {
-    let file = File::options()
-        .read(true)
-        // Backup semantics lets a directory open too, so it is reported, not denied.
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    if metadata.file_attributes() & REPARSE_POINT != 0 {
-        return Ok(Err(PlainFileProblem::ReparsePoint));
-    }
-    if !metadata.is_file() {
-        return Ok(Err(PlainFileProblem::NotAFile));
-    }
-    let links = link_count(&file)?;
-    if links > 1 {
-        return Ok(Err(PlainFileProblem::HardLinks(links)));
-    }
-    Ok(Ok(file))
-}
-
 /// How many names (hard links) the open file has.
 fn link_count(file: &File) -> io::Result<u32> {
     let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
@@ -1026,46 +978,6 @@ mod tests {
         assert_eq!(
             judge_admin_only(&unjudged),
             Err(AdminOnlyProblem::Writers(Vec::new()))
-        );
-        Ok(())
-    }
-
-    /// Plain files open; a directory, a second name or a junction is reported,
-    /// and a missing file is `NotFound`.
-    #[test]
-    fn plain_files_open_and_others_are_reported() -> io::Result<()> {
-        let temp = tempfile::tempdir()?;
-        let file = temp.path().join("hosts");
-        std::fs::write(&file, "x")?;
-        assert!(open_plain_file(&file)?.is_ok());
-        assert_eq!(
-            open_plain_file(temp.path())?.err(),
-            Some(PlainFileProblem::NotAFile)
-        );
-        assert_eq!(
-            open_plain_file(&temp.path().join("missing"))
-                .err()
-                .map(|error| error.kind()),
-            Some(io::ErrorKind::NotFound)
-        );
-        std::fs::hard_link(&file, temp.path().join("second"))?;
-        assert_eq!(
-            open_plain_file(&file)?.err(),
-            Some(PlainFileProblem::HardLinks(2))
-        );
-        let target = temp.path().join("target");
-        std::fs::create_dir(&target)?;
-        let link = temp.path().join("link");
-        let status = std::process::Command::new("cmd")
-            .args(["/d", "/c", "mklink", "/J"])
-            .arg(&link)
-            .arg(&target)
-            .stdout(std::process::Stdio::null())
-            .status()?;
-        assert!(status.success(), "mklink /J failed");
-        assert_eq!(
-            open_plain_file(&link)?.err(),
-            Some(PlainFileProblem::ReparsePoint)
         );
         Ok(())
     }

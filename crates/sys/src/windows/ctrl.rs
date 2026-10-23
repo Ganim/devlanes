@@ -15,7 +15,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::System::Console::{
     AttachConsole, CTRL_BREAK_EVENT, CTRL_C_EVENT, FreeConsole, GenerateConsoleCtrlEvent,
-    GetConsoleProcessList, SetConsoleCtrlHandler,
+    SetConsoleCtrlHandler,
 };
 use windows_sys::core::BOOL;
 
@@ -57,21 +57,10 @@ impl CtrlError {
             Self::Io(_) => 1,
         }
     }
-
-    /// The error a helper exit code stands for, the inverse of [`Self::exit_code`].
-    pub fn from_exit_code(code: i32) -> Option<Self> {
-        match code {
-            3 => Some(Self::AttachDenied),
-            4 => Some(Self::NoConsole),
-            5 => Some(Self::NoProcess),
-            _ => None,
-        }
-    }
 }
 
 /// This process attached to another's console, with control events ignored,
-/// until dropped. Staying attached keeps the console, and so its process list,
-/// alive after the process it was reached through exits.
+/// until dropped.
 #[derive(Debug)]
 pub struct Attached(());
 
@@ -82,10 +71,7 @@ impl Attached {
     pub fn to(pid: u32) -> Result<Self, CtrlError> {
         // The ignore flag survives the attach, so Ctrl-C is covered from the
         // first moment; other events only once the handler below is in place.
-        // SAFETY: a null handler with TRUE only sets the process's ignore flag.
-        if unsafe { SetConsoleCtrlHandler(None, 1) } == 0 {
-            return Err(io::Error::last_os_error().into());
-        }
+        super::process::ignore_ctrl_c()?;
         // SAFETY: harmless without a console.
         unsafe { FreeConsole() };
         // SAFETY: plain call; failures are mapped below.
@@ -101,8 +87,8 @@ impl Attached {
         // After the attach, not before: on Windows 11 build 26300 a handler
         // registered before AttachConsole no longer ran after it, and the next
         // event (even one this process sent) ended it with
-        // STATUS_CONTROL_C_EXIT. `anchor_lists_and_signals_a_console` in
-        // devlanes-runner-windows pins this.
+        // STATUS_CONTROL_C_EXIT. `helpers_signal_a_console` in
+        // devlanes-runner-windows covers this.
         // SAFETY: `ignore` is a valid handler for the life of the process.
         if unsafe { SetConsoleCtrlHandler(Some(ignore), 1) } == 0 {
             let error = io::Error::last_os_error();
@@ -124,26 +110,6 @@ impl Attached {
             return Err(io::Error::last_os_error().into());
         }
         Ok(())
-    }
-
-    /// PIDs of every process attached to the console now, this one excluded.
-    pub fn processes(&self) -> Result<Vec<u32>, CtrlError> {
-        let mut pids = vec![0_u32; 64];
-        loop {
-            // SAFETY: `pids` holds `len` writable u32s.
-            let count = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
-            if count == 0 {
-                return Err(io::Error::last_os_error().into());
-            }
-            let count = count as usize;
-            if count <= pids.len() {
-                pids.truncate(count);
-                let me = std::process::id();
-                pids.retain(|&listed| listed != me);
-                return Ok(pids);
-            }
-            pids.resize(count, 0);
-        }
     }
 }
 

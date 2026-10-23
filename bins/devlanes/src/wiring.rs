@@ -103,7 +103,7 @@ pub async fn engine(
     let ca_permitted = ca.as_ref().and_then(|ca| ca.permitted_dns_names());
     let routes = Arc::new(proxy(&user, ca, shutdown.clone()).await);
     let infra = Arc::new(ContainerInfra::new().await);
-    let mut integ = Integrations::with_runner(unit_runner());
+    let mut integ = Integrations::with_runner(unit_runner()?);
     integ.contributors = contributors();
     integ.script_runners = script_runners();
     integ.secrets = Some(Arc::new(devlanes_secrets_fnox::FnoxProvider::default()));
@@ -111,7 +111,7 @@ pub async fn engine(
     integ.infra = infra;
     integ.routes = routes;
     integ.ports = Arc::new(SysPorts);
-    integ.processes = crate::orphans::process_table();
+    integ.processes = crate::orphans::process_table()?;
     integ.shell = devlanes_daemon::integrations::detect_shell().await;
     integ.ca_env = ca_env;
     integ.ca_status = ca_status;
@@ -456,8 +456,7 @@ impl devlanes_daemon::integrations::ResolverFiles for OsResolverFiles {
 impl devlanes_daemon::integrations::ResolverFiles for OsResolverFiles {
     /// The NRPT rule's facts from `resolver_nrpt::status`: `foreign` when
     /// another program's rule routes the namespace, `group_policy` when Group
-    /// Policy rules make Windows ignore local ones, `more_specific` and
-    /// `effective_servers` for rules (a VPN's included) that win over it.
+    /// Policy rules make Windows ignore local ones.
     fn status(&self, tld: &str, server: std::net::SocketAddr) -> Value {
         crate::resolver_nrpt::status(tld, server)
     }
@@ -1034,23 +1033,17 @@ impl devlanes_transport_ssh::PromptRelay for PromptBridge {
 
 /// The unit runner the daemon spawns services and tasks with.
 #[cfg(unix)]
-fn unit_runner() -> Arc<dyn UnitRunner> {
-    Arc::new(OsUnits(OsRunner::default()))
+fn unit_runner() -> anyhow::Result<Arc<dyn UnitRunner>> {
+    Ok(Arc::new(OsUnits(OsRunner::default())))
 }
 
 /// The unit runner the daemon spawns services and tasks with. Graceful stops
 /// send console control events through this binary as a helper
-/// (`devlanes __console-ctrl`); without it units are terminated at once.
+/// (`devlanes __console-ctrl`).
 #[cfg(windows)]
-fn unit_runner() -> Arc<dyn UnitRunner> {
-    let runner = match devlanes_runner_windows::ConsoleHelper::current_exe() {
-        Ok(helper) => OsRunner::default().with_console_helper(helper),
-        Err(error) => {
-            tracing::warn!(%error, "no console helper; units are terminated without a graceful stop");
-            OsRunner::default()
-        }
-    };
-    Arc::new(OsUnits(runner))
+fn unit_runner() -> anyhow::Result<Arc<dyn UnitRunner>> {
+    let helper = devlanes_runner_windows::ConsoleHelper::current_exe()?;
+    Ok(Arc::new(OsUnits(OsRunner::new(helper))))
 }
 
 /// The PTY runner: sessions, PTYs and signals.
@@ -1071,7 +1064,7 @@ impl UnitRunner for OsUnits {
         Ok(Arc::new(OsManaged(self.0.spawn_unit(spec).await?)))
     }
 
-    /// Tasks keep daemons they started outside their session (Unix) or job
+    /// Tasks keep daemons they started outside their session (Unix) or console
     /// (Windows) running after they exit.
     async fn spawn_task(
         &self,
@@ -1253,52 +1246,10 @@ struct ContainerInfra {
 /// The daemon variables the `docker` CLI needs: where to find binaries and its
 /// config, which engine to talk to, locale and proxies. A daemon started by hand
 /// may carry a full shell environment; none of the rest reaches Compose. Windows
-/// also keeps the variables Windows programs need to start (a missing
-/// `SystemRoot` breaks Winsock) and matches names ignoring case (`Path`).
+/// also keeps the variables Windows programs need to start (the daemon's own
+/// [`devlanes_client::PLATFORM_ENV`]) and matches names ignoring case (`Path`).
 fn compose_base_env(vars: impl Iterator<Item = (String, String)>) -> BTreeMap<String, String> {
-    #[cfg(unix)]
-    mod os {
-        /// No extra variables on Unix.
-        pub const NAMES: &[&str] = &[];
-
-        /// Unix names are case-sensitive.
-        pub fn same(name: &str, wanted: &str) -> bool {
-            name == wanted
-        }
-    }
-    #[cfg(windows)]
-    mod os {
-        /// What Windows processes and the docker CLI read on top of `PATH`.
-        pub const NAMES: &[&str] = &[
-            "SystemRoot",
-            "SystemDrive",
-            "windir",
-            "ComSpec",
-            "PATHEXT",
-            "USERPROFILE",
-            "USERNAME",
-            "USERDOMAIN",
-            "HOMEDRIVE",
-            "HOMEPATH",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "ProgramData",
-            "ProgramFiles",
-            "ProgramFiles(x86)",
-            "ProgramW6432",
-            "CommonProgramFiles",
-            "TEMP",
-            "TMP",
-            "PROCESSOR_ARCHITECTURE",
-            "NUMBER_OF_PROCESSORS",
-            "OS",
-        ];
-
-        /// Windows names ignore case.
-        pub fn same(name: &str, wanted: &str) -> bool {
-            name.eq_ignore_ascii_case(wanted)
-        }
-    }
+    use devlanes_client::{PLATFORM_ENV, env_name_eq, env_name_has_prefix};
     const NAMES: &[&str] = &[
         "PATH",
         "HOME",
@@ -1319,12 +1270,11 @@ fn compose_base_env(vars: impl Iterator<Item = (String, String)>) -> BTreeMap<St
     vars.filter(|(name, _)| {
         NAMES
             .iter()
-            .chain(os::NAMES)
-            .any(|wanted| os::same(name, wanted))
-            || PREFIXES.iter().any(|prefix| {
-                name.get(..prefix.len())
-                    .is_some_and(|start| os::same(start, prefix))
-            })
+            .chain(PLATFORM_ENV)
+            .any(|wanted| env_name_eq(name, wanted))
+            || PREFIXES
+                .iter()
+                .any(|prefix| env_name_has_prefix(name, prefix))
     })
     .collect()
 }

@@ -69,14 +69,10 @@ pub(crate) async fn read_rules() -> Result<NrptRules, String> {
 }
 
 /// `doctor`'s view of the rule for `tld`: `{namespace, server, installed,
-/// matches, foreign, group_policy, more_specific, effective_servers}`, or
-/// `{namespace?, error}`. `matches` also needs the server on port 53, the only
-/// port an NRPT rule reaches. `more_specific` lists other rules for names under
-/// the namespace (`[{namespace, name_servers}]`), which win for those names;
-/// `effective_servers` are the servers Windows actually sends the namespace to
-/// (a VPN or Group Policy can differ from the local rule), `null` when that
-/// could not be read. Runs PowerShell on the current runtime, so call it from a
-/// blocking thread inside one.
+/// matches, foreign, group_policy}`, or `{namespace?, error}`. `matches` also
+/// needs the server on port 53, the only port an NRPT rule reaches. Runs
+/// PowerShell on the current runtime, so call it from a blocking thread inside
+/// one.
 pub(crate) fn status(tld: &str, server: SocketAddr) -> Value {
     let zone = match Zone::new(tld) {
         Ok(zone) => zone,
@@ -97,29 +93,10 @@ pub(crate) fn status(tld: &str, server: SocketAddr) -> Value {
                 "matches": found.matches && server.port() == 53,
                 "foreign": found.foreign,
                 "group_policy": rules.group_policy,
-                "more_specific": rules
-                    .more_specific(&zone)
-                    .into_iter()
-                    .map(|route| json!({"namespace": route.namespace, "name_servers": route.name_servers}))
-                    .collect::<Vec<_>>(),
-                "effective_servers": rules.effective_servers(&zone),
             })
         }
         Err(error) => json!({"namespace": namespace, "error": error}),
     }
-}
-
-/// Where `certs trust --resolver` records the namespace it routed, so `untrust`
-/// can explain a foreign rule after `hostnames.tld` changes.
-fn record_path(paths: &Paths) -> PathBuf {
-    paths.home.join("resolver-rule")
-}
-
-/// The zone of a recorded namespace (`.test`); `None` for anything a devlanes
-/// install would not have written, since the record is user-writable.
-fn parse_record(text: &str) -> Option<Zone> {
-    let name = text.trim().strip_prefix('.')?;
-    Zone::new(name).ok().filter(|zone| zone.name() == name)
 }
 
 /// The error for another program's rule on `namespace`.
@@ -200,27 +177,6 @@ fn group_policy_warning(rules: &NrptRules, namespace: &str, server: SocketAddr) 
     )
 }
 
-/// Which names under `zone` other rules (local, VPN or Group Policy) send
-/// elsewhere. Install goes on: only a rule for the namespace itself conflicts.
-fn more_specific_warning(rules: &NrptRules, zone: &Zone) -> String {
-    let routes = rules.more_specific(zone);
-    if routes.is_empty() {
-        return String::new();
-    }
-    let list = routes
-        .iter()
-        .map(|route| match route.name_servers.as_slice() {
-            [] => route.namespace.clone(),
-            servers => format!("{} -> {}", route.namespace, servers.join(", ")),
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
-    format!(
-        "warning: other NRPT rules route names under {}: {list}; Windows follows the most specific rule, so those names do not reach devlanes\n",
-        nrpt::namespace(zone)
-    )
-}
-
 /// The result line for a rule for `zone` that is in place (`added` when this
 /// run added it). With Group Policy NRPT rules Windows ignores it, so the line
 /// does not claim that names resolve through devlanes.
@@ -266,11 +222,6 @@ pub async fn apply(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
     };
     // The daemon listens on the default address; there is no setting for it.
     let server = devlanes_resolver_dns::default_listen();
-    let record = record_path(&paths);
-    let recorded = tokio::fs::read_to_string(&record)
-        .await
-        .ok()
-        .and_then(|text| parse_record(&text));
     let rules = read_rules().await.map_err(|message| {
         RpcError::new("resolver_status_failed", json!({"message": message}), 1)
     })?;
@@ -284,7 +235,6 @@ pub async fn apply(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
             return Err(foreign(&namespace));
         }
         stderr.push_str(&group_policy_warning(&rules, &namespace, server));
-        stderr.push_str(&more_specific_warning(&rules, &zone));
         if found.installed && found.matches && rules.managed().count() == 1 {
             stdout.push_str(&routed_line(&zone, server, false, rules.group_policy));
         } else {
@@ -309,18 +259,13 @@ pub async fn apply(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
             }
             stdout.push_str(&routed_line(&zone, server, true, after.group_policy));
         }
-        if let Err(error) = tokio::fs::write(&record, format!("{namespace}\n")).await {
-            stderr.push_str(&format!(
-                "warning: could not record the installed NRPT rule: {error}\n"
-            ));
-        }
     } else {
         let namespaces: Vec<String> = rules
             .managed()
             .flat_map(|rule| rule.namespaces.iter().cloned())
             .collect();
         if namespaces.is_empty() {
-            let zone = recorded.or(zone).ok_or_else(crate::local::not_configured)?;
+            let zone = zone.ok_or_else(crate::local::not_configured)?;
             let namespace = nrpt::namespace(&zone);
             // Names under it still resolve elsewhere; say whose rule does that.
             if rules.status(&zone, server.ip()).foreign {
@@ -347,12 +292,6 @@ pub async fn apply(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
             }
             stdout.push_str(&format!("removed the devlanes NRPT rule for {list}\n"));
         }
-        match tokio::fs::remove_file(&record).await {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => stderr.push_str(
-                &format!("warning: could not remove the NRPT rule record: {error}\n"),
-            ),
-            _ => {}
-        }
     }
     if runtime.quiet {
         stdout.clear();
@@ -369,21 +308,6 @@ pub async fn apply(runtime: &Runtime, install: bool) -> Result<u8, RpcError> {
 mod tests {
     use super::*;
     use devlanes_cli::clap::Parser as _;
-
-    #[test]
-    fn records_hold_a_devlanes_namespace() {
-        assert_eq!(
-            parse_record(".test\n").map(|zone| zone.name().to_owned()),
-            Some("test".into())
-        );
-        assert_eq!(
-            parse_record(".dev.internal").map(|zone| zone.name().to_owned()),
-            Some("dev.internal".into())
-        );
-        for refused in ["test", ".com", ".TEST", "", ".", r"..\x", ".test extra"] {
-            assert!(parse_record(refused).is_none(), "{refused:?}");
-        }
-    }
 
     /// Agents, CI and anything without a terminal get `terminal_required`
     /// before any prompt.
@@ -407,8 +331,6 @@ mod tests {
         for rule in &rules.rules {
             assert!(!rule.name.is_empty(), "{rule:?}");
         }
-        // The effective policy reads without admin too.
-        assert!(rules.effective.is_some(), "{rules:?}");
     }
 
     /// `doctor` reports the namespace and state, or a TLD error.
@@ -422,8 +344,6 @@ mod tests {
         assert!(report["installed"].is_boolean(), "{report}");
         assert!(report["foreign"].is_boolean(), "{report}");
         assert!(report["group_policy"].is_boolean(), "{report}");
-        assert!(report["more_specific"].is_array(), "{report}");
-        assert!(report["effective_servers"].is_array(), "{report}");
         let other = tokio::task::spawn_blocking(move || status("example", server))
             .await
             .expect("status");
@@ -554,30 +474,6 @@ mod tests {
         let output = run_command_line(&script, None).await;
         assert!(output.status.success(), "{output:?}");
         NrptRules::parse(&stdout(&output)).expect("status");
-    }
-
-    /// The generated scripts parse in Windows PowerShell 5.1 (parsed only,
-    /// never run).
-    #[tokio::test]
-    async fn scripts_parse_in_windows_powershell() {
-        let zone = Zone::new("dev.internal").expect("zone");
-        for script in [
-            nrpt::install_script(&zone, devlanes_resolver_dns::default_listen().ip()),
-            nrpt::remove_script(),
-            nrpt::status_script(),
-        ] {
-            let check = format!(
-                "$errors = $null; [void][System.Management.Automation.Language.Parser]::ParseInput({}, [ref]$null, [ref]$errors); $errors.Count",
-                nrpt::powershell_literal(&script)
-            );
-            let output = run_command_line(&check, None).await;
-            assert_eq!(
-                stdout(&output).trim(),
-                "0",
-                "{script}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
     }
 
     /// Cmdlet calls in the scripts and the stand-ins the logic tests call, so
@@ -746,21 +642,6 @@ mod tests {
             assert!(!line.contains("resolves through"), "{line}");
             assert!(line.contains("Windows ignores"), "{line}");
         }
-    }
-
-    /// Rules for names under the namespace are named, with their servers.
-    #[test]
-    fn more_specific_rules_are_warned_about() {
-        let zone = Zone::new("test").expect("zone");
-        let rules = NrptRules::parse(
-            r#"{"rules":[{"Name":"{B}","Namespace":".api.test","NameServers":"10.8.0.1","Comment":"Acme VPN"}],"group_policy":false,"effective":[{"Namespace":"host.test","NameServers":null}]}"#,
-        )
-        .expect("rules");
-        assert_eq!(
-            more_specific_warning(&rules, &zone),
-            "warning: other NRPT rules route names under .test: .api.test -> 10.8.0.1; host.test; Windows follows the most specific rule, so those names do not reach devlanes\n"
-        );
-        assert_eq!(more_specific_warning(&NrptRules::default(), &zone), "");
     }
 
     /// Adds the rule for `test`, resolves `web.acme-2.test` through the system

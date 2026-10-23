@@ -61,27 +61,20 @@ impl PseudoConsole {
         hresult(unsafe { ResizePseudoConsole(self.handle, size(columns, rows)?) })
     }
 
-    /// The value `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` takes.
-    pub(crate) fn raw(&self) -> HPCON {
-        self.handle
+    /// The value `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` takes: the handle value
+    /// itself, not a pointer to it.
+    pub(crate) fn attribute_value(&self) -> *const c_void {
+        self.handle as *const c_void
     }
 }
 
 impl Drop for PseudoConsole {
-    /// Closes the console on a separate thread. Before Windows 11 24H2 (build
-    /// 26100) `ClosePseudoConsole` blocks until its output pipe is drained, and
-    /// the caller may be the one that would drain it.
+    /// Closes the console. From Windows 11 24H2 (build 26100), the oldest
+    /// devlanes supports, this returns at once even while the output pipe is
+    /// not drained.
     fn drop(&mut self) {
-        let handle = self.handle;
-        let closing = std::thread::Builder::new()
-            .name("devlanes-conpty-close".into())
-            // SAFETY: the handle is closed exactly once, here.
-            .spawn(move || unsafe { ClosePseudoConsole(handle) });
-        if closing.is_err() {
-            // No thread: close inline rather than leak the console and its children.
-            // SAFETY: as above; the spawn failed, so the closure never ran.
-            unsafe { ClosePseudoConsole(handle) };
-        }
+        // SAFETY: the handle is closed exactly once, here.
+        unsafe { ClosePseudoConsole(self.handle) };
     }
 }
 
@@ -108,11 +101,6 @@ fn hresult(result: HRESULT) -> io::Result<()> {
         return Err(io::Error::from_raw_os_error(code));
     }
     Ok(())
-}
-
-/// The pseudo-console attribute takes the handle value itself, not a pointer to it.
-pub(crate) fn attribute_value(console: &PseudoConsole) -> *const c_void {
-    console.raw() as *const c_void
 }
 
 #[cfg(test)]
@@ -210,6 +198,47 @@ mod tests {
         let clear = output.find("\x1b[3J");
         let (one, two) = (output.find("one"), output.find("two"));
         assert!(one < clear && clear < two && one.is_some(), "{output:?}");
+        Ok(())
+    }
+
+    /// Closing returns at once while the output pipe is full and nobody reads
+    /// it, which before 24H2 blocked until the pipe was drained.
+    #[test]
+    fn closing_does_not_wait_for_undrained_output() -> io::Result<()> {
+        let (input_read, _input_write) = io::pipe()?;
+        let (output_read, output_write) = io::pipe()?;
+        let console =
+            PseudoConsole::create(100, 30, input_read.as_handle(), output_write.as_handle())?;
+        drop((input_read, output_write));
+        let job = crate::windows::job::Job::create()?;
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        let cmd = Path::new(&root).join(r"System32\cmd.exe");
+        let _child = spawn(&Spawn {
+            program: &cmd,
+            command_line: std::ffi::OsStr::new(
+                r#"cmd.exe /d /q /c "for /l %i in (1,1,1000000) do @echo line %i""#,
+            ),
+            environment: None,
+            cwd: &std::env::temp_dir(),
+            stdout: Stdio::Null,
+            stderr: Stdio::Null,
+            job: Some(&job),
+            console: Some(&console),
+        })?;
+        // Long enough to fill the pipe, which nothing reads.
+        std::thread::sleep(Duration::from_millis(500));
+        let (closed, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(console);
+            let _ = closed.send(());
+        });
+        let returned = done.recv_timeout(Duration::from_secs(5)).is_ok();
+        let _ = job.terminate(1);
+        drop(output_read);
+        assert!(
+            returned,
+            "ClosePseudoConsole waited for the output to drain"
+        );
         Ok(())
     }
 

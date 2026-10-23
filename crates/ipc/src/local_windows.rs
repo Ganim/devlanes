@@ -6,13 +6,11 @@
 use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use devlanes_sys::windows::pipe::{self, PipeFactory};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer};
+use tokio_util::either::Either;
 
 use super::{BindError, ProbeError};
 
@@ -24,11 +22,8 @@ const PIPE_BUSY: i32 = 231;
 /// before the server noticed.
 const NO_DATA: i32 = 232;
 
-/// One end of a pipe connection.
-pub(super) enum Stream {
-    Client(NamedPipeClient),
-    Server(NamedPipeServer),
-}
+/// One end of a pipe connection: the client's (left) or the daemon's (right).
+pub(super) type Stream = Either<NamedPipeClient, NamedPipeServer>;
 
 /// The daemon's side of the pipe name.
 pub(super) struct Listener {
@@ -64,7 +59,7 @@ impl Listener {
             let fresh = self.pipes.create(false)?;
             let current = std::mem::replace(&mut self.next, fresh);
             match connected {
-                Ok(()) => return Ok(Stream::Server(current)),
+                Ok(()) => return Ok(Either::Right(current)),
                 Err(error) if error.raw_os_error() == Some(NO_DATA) => {}
                 Err(error) => return Err(error),
             }
@@ -81,7 +76,7 @@ impl Listener {
 pub(super) async fn connect(path: &Path) -> io::Result<Stream> {
     loop {
         match ClientOptions::new().open(path.as_os_str()) {
-            Ok(client) => return Ok(Stream::Client(client)),
+            Ok(client) => return Ok(Either::Left(client)),
             // The server is between accepting one client and offering the next
             // instance; the caller's connect timeout bounds this loop.
             Err(error) if error.raw_os_error() == Some(PIPE_BUSY) => {
@@ -115,61 +110,19 @@ pub(super) fn probe(_path: &Path) -> Result<(), ProbeError> {
         .map_err(ProbeError::Endpoint)
 }
 
-impl Stream {
-    /// The client checks the serving process now; the server can only check its
-    /// client after reading, in [`Self::confirm_peer_after_read`].
-    pub(super) fn peer_is_current_user(&self) -> io::Result<bool> {
-        match self {
-            Self::Client(client) => pipe::server_is_current_user(client),
-            Self::Server(_) => Ok(true),
-        }
-    }
-
-    /// The server checks its client by impersonation, possible once it has read.
-    pub(super) fn confirm_peer_after_read(&self) -> io::Result<bool> {
-        match self {
-            Self::Client(_) => Ok(true),
-            Self::Server(server) => pipe::client_is_current_user(server),
-        }
+/// The client checks the serving process now; the server can only check its
+/// client after reading, in [`confirm_peer_after_read`].
+pub(super) fn peer_is_current_user(stream: &Stream) -> io::Result<bool> {
+    match stream {
+        Either::Left(client) => pipe::server_is_current_user(client),
+        Either::Right(_) => Ok(true),
     }
 }
 
-impl AsyncRead for Stream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Client(client) => Pin::new(client).poll_read(cx, buf),
-            Self::Server(server) => Pin::new(server).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for Stream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Client(client) => Pin::new(client).poll_write(cx, buf),
-            Self::Server(server) => Pin::new(server).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Client(client) => Pin::new(client).poll_flush(cx),
-            Self::Server(server) => Pin::new(server).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Client(client) => Pin::new(client).poll_shutdown(cx),
-            Self::Server(server) => Pin::new(server).poll_shutdown(cx),
-        }
+/// The server checks its client by impersonation, possible once it has read.
+pub(super) fn confirm_peer_after_read(stream: &Stream) -> io::Result<bool> {
+    match stream {
+        Either::Left(_) => Ok(true),
+        Either::Right(server) => pipe::client_is_current_user(server),
     }
 }

@@ -1,57 +1,47 @@
-//! The console-control helper: a process without a console of its own that
-//! attaches to a unit's console to send it Ctrl-C or Ctrl-Break, or that stays
-//! attached (an anchor) to list the processes on that console when asked.
+//! The console-control helper: a short-lived process without a console of its
+//! own that attaches to a unit's console and sends it Ctrl-C or Ctrl-Break.
 //!
 //! The daemon has no console and a process can attach to only one at a time,
-//! so the runner starts helpers without a console (`DETACHED_PROCESS`). A send is
-//! one short-lived helper. A pipe task gets one anchor for its whole run: it
-//! attaches while the task's leader is alive and keeps the console, and so its
-//! process list, alive after the leader exits, which is when the runner needs
-//! it (decision Q9). The helper is any program that calls [`console_ctrl_main`]
-//! when the request variable is set: `devlanes __console-ctrl` in the shipped
-//! binary, the test binary in tests.
+//! so the runner starts a helper without a console (`DETACHED_PROCESS`) per
+//! event. The helper is any program that calls [`console_ctrl_main`] when the
+//! request variable is set: `devlanes __console-ctrl` in the shipped binary, the
+//! test binary in tests.
 
 use std::{
     ffi::OsString,
-    io::{BufRead, BufReader, Write},
     path::PathBuf,
-    process::{Child, ChildStdin, Stdio},
-    sync::mpsc,
+    process::Stdio,
     time::{Duration, Instant},
 };
 
+use devlanes_core::ProcessIdentity;
+use devlanes_sys::windows::proc::Held;
+
 /// The environment variable carrying the request,
-/// `<pid> <c|break|anchor> [<milliseconds>]`: the target, what to do, and how
-/// long the target may still be setting up its console (none: no wait). An
-/// environment variable rather than arguments, so any program can be the helper
-/// whatever its own argument parsing.
+/// `<pid> <c|break> [<milliseconds>]`: the target, the event, and how long the
+/// target may still be setting up its console (none: no wait). An environment
+/// variable rather than arguments, so any program can be the helper whatever
+/// its own argument parsing.
 pub const REQUEST_VAR: &str = "DEVLANES_CONSOLE_CTRL";
 
 /// The hidden argument `devlanes` dispatches to [`console_ctrl_main`] on.
 pub const HELPER_ARG: &str = "__console-ctrl";
 
-/// Prefix of an anchor's answers. Lines without it (a test harness's own
-/// output) are ignored.
-const ANSWER_PREFIX: &str = "console-anchor:";
-
-/// What a helper is asked to do.
+/// The console control event a helper is asked to send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
     /// Send `CTRL_C_EVENT`.
     CtrlC,
     /// Send `CTRL_BREAK_EVENT`.
     CtrlBreak,
-    /// Stay attached and answer commands on standard input until it closes.
-    Anchor,
 }
 
 impl Request {
-    /// The request's word in [`REQUEST_VAR`], also an anchor command for sends.
+    /// The request's word in [`REQUEST_VAR`].
     fn word(self) -> &'static str {
         match self {
             Self::CtrlC => "c",
             Self::CtrlBreak => "break",
-            Self::Anchor => "anchor",
         }
     }
 
@@ -62,7 +52,6 @@ impl Request {
         let request = match words.next()? {
             "c" => Self::CtrlC,
             "break" => Self::CtrlBreak,
-            "anchor" => Self::Anchor,
             _ => return None,
         };
         let wait = match words.next() {
@@ -81,22 +70,8 @@ impl Request {
 /// was started may not have one yet.
 pub(crate) const CONSOLE_SETUP: Duration = Duration::from_secs(2);
 
-/// What follows [`ANSWER_PREFIX`] on an answer line, trimmed.
-fn answer(line: &str) -> Option<&str> {
-    line.split_once(ANSWER_PREFIX).map(|(_, rest)| rest.trim())
-}
-
-/// PIDs from a `pids 1 2 3` answer.
-fn parse_pids(answer: &str) -> Option<Vec<u32>> {
-    answer
-        .strip_prefix("pids")?
-        .split_whitespace()
-        .map(|pid| pid.parse().ok())
-        .collect()
-}
-
-/// The helper's body: performs the request in [`REQUEST_VAR`] and returns the
-/// exit code the runner reads (0, or 3/4/5 for the attach failures in
+/// The helper's body: sends the event in [`REQUEST_VAR`] and returns the exit
+/// code the runner reads (0, or 3/4/5 for the attach failures in
 /// `devlanes_sys::windows::ctrl::CtrlError`, 2 for a malformed request).
 pub fn console_ctrl_main() -> u8 {
     use devlanes_sys::windows::ctrl::CtrlEvent;
@@ -106,15 +81,11 @@ pub fn console_ctrl_main() -> u8 {
     else {
         return 2;
     };
-    let result = attach_patiently(pid, wait).and_then(|attached| match request {
-        Request::CtrlC => attached.send(CtrlEvent::CtrlC),
-        Request::CtrlBreak => attached.send(CtrlEvent::CtrlBreak),
-        Request::Anchor => {
-            serve_anchor(&attached);
-            Ok(())
-        }
-    });
-    match result {
+    let event = match request {
+        Request::CtrlC => CtrlEvent::CtrlC,
+        Request::CtrlBreak => CtrlEvent::CtrlBreak,
+    };
+    match attach_patiently(pid, wait).and_then(|attached| attached.send(event)) {
         Ok(()) => 0,
         Err(error) => error.exit_code(),
     }
@@ -145,45 +116,6 @@ fn attach_patiently(
     }
 }
 
-/// Answers `list`, `c` and `break` lines on standard input until it closes.
-fn serve_anchor(attached: &devlanes_sys::windows::ctrl::Attached) {
-    use devlanes_sys::windows::ctrl::CtrlEvent;
-    let mut out = std::io::stdout();
-    if writeln!(out, "{ANSWER_PREFIX} attached").is_err() {
-        return;
-    }
-    for line in std::io::stdin().lock().lines() {
-        let Ok(line) = line else { return };
-        let reply = match line.trim() {
-            "list" => match attached.processes() {
-                Ok(pids) => {
-                    let pids: Vec<String> = pids.iter().map(u32::to_string).collect();
-                    format!("pids {}", pids.join(" "))
-                }
-                Err(error) => format!("error {error}"),
-            },
-            word @ ("c" | "break") => {
-                let event = if word == "c" {
-                    CtrlEvent::CtrlC
-                } else {
-                    CtrlEvent::CtrlBreak
-                };
-                match attached.send(event) {
-                    Ok(()) => "sent".to_owned(),
-                    Err(error) => format!("error {error}"),
-                }
-            }
-            other => format!("error unknown command {other}"),
-        };
-        if writeln!(out, "{ANSWER_PREFIX} {reply}")
-            .and_then(|()| out.flush())
-            .is_err()
-        {
-            return;
-        }
-    }
-}
-
 /// How the runner starts the helper: `program` with `args` before anything else.
 #[derive(Debug, Clone)]
 pub struct ConsoleHelper {
@@ -191,9 +123,9 @@ pub struct ConsoleHelper {
     pub args: Vec<OsString>,
 }
 
-/// How long a helper (or one anchor answer) may take before it is given up on.
-/// Generous because the first start of a new executable can take seconds while
-/// an antivirus scans it; a helper that works answers in milliseconds.
+/// How long a helper may take before it is given up on. Generous because the
+/// first start of a new executable can take seconds while an antivirus scans
+/// it; a helper that works answers in milliseconds.
 pub(crate) const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl ConsoleHelper {
@@ -205,44 +137,43 @@ impl ConsoleHelper {
         })
     }
 
-    /// Sends Ctrl-Break to every process attached to `pid`'s console, the
-    /// graceful stop for `SIGTERM`; `true` when the event went out. For processes
-    /// no runner supervises any more (a previous daemon's orphans); hold the
-    /// process open meanwhile so its PID cannot name a stranger. Blocking.
-    pub fn ask_to_stop(&self, pid: u32) -> bool {
-        self.send(pid, Request::CtrlBreak, Duration::ZERO).is_ok()
+    /// Sends `request` to the console `target` is attached to, waiting up to
+    /// `wait` for a console still being set up; `true` when the event went out.
+    /// `target` is held open meanwhile, so the helper's attach by bare PID
+    /// cannot reach a stranger that got the PID in between. Blocking.
+    pub fn send_held(&self, target: &ProcessIdentity, request: Request, wait: Duration) -> bool {
+        let held = match Held::open(target) {
+            Ok(Some(held)) => held,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::debug!(%error, pid = target.pid, "console control event not sent");
+                return false;
+            }
+        };
+        let sent = self.send(target.pid, request, wait);
+        drop(held);
+        sent.map_err(|error| {
+            tracing::debug!(%error, pid = target.pid, "console control event not sent");
+        })
+        .is_ok()
     }
 
-    /// A helper process for `request` on `pid`, without a console of its own so
-    /// it can attach to the unit's. `wait` is how long `pid` may still be
-    /// setting up its console.
-    fn command(&self, pid: u32, request: Request, wait: Duration) -> std::process::Command {
+    /// Sends Ctrl-C or Ctrl-Break to `pid`'s console through a helper, waiting
+    /// up to `wait` for a console still being set up. Blocking.
+    fn send(&self, pid: u32, request: Request, wait: Duration) -> Result<(), HelperError> {
         use devlanes_sys::windows::process::DETACHED_PROCESS;
         use std::os::windows::process::CommandExt;
-        let mut command = std::process::Command::new(&self.program);
-        command
+        let mut child = std::process::Command::new(&self.program)
             .args(&self.args)
             .env(
                 REQUEST_VAR,
                 format!("{pid} {} {}", request.word(), wait.as_millis()),
             )
+            // No console of its own, so it can attach to the unit's.
             .creation_flags(DETACHED_PROCESS)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        command
-    }
-
-    /// Sends Ctrl-C or Ctrl-Break to `pid`'s console through a short-lived
-    /// helper, waiting up to `wait` for a console still being set up. Blocking.
-    pub(crate) fn send(
-        &self,
-        pid: u32,
-        request: Request,
-        wait: Duration,
-    ) -> Result<(), HelperError> {
-        let mut child = self
-            .command(pid, request, wait)
+            .stderr(Stdio::null())
             .spawn()
             .map_err(HelperError::Spawn)?;
         let deadline = Instant::now() + HELPER_TIMEOUT;
@@ -265,154 +196,22 @@ impl ConsoleHelper {
             // helper's exit and end it. Being ended by an event this soon after
             // sending one means it went out, so this is success.
             Some(0 | ENDED_BY_EVENT) => Ok(()),
-            Some(code) => Err(exit_error(code)),
+            Some(code) => Err(HelperError::Exit(code)),
             None => Err(HelperError::Exit(-1)),
         }
-    }
-
-    /// Starts an anchor on `pid`'s console and waits until it is attached,
-    /// giving `pid` up to `wait` to set its console up. Blocking. The caller
-    /// keeps `pid` from being reused meanwhile (it holds the unit leader's
-    /// handle).
-    pub(crate) fn anchor(&self, pid: u32, wait: Duration) -> Result<Anchor, HelperError> {
-        let mut child = self
-            .command(pid, Request::Anchor, wait)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(HelperError::Spawn)?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(HelperError::Output);
-        };
-        // A thread reads answers, so a stuck helper costs a timeout, not a hang.
-        let (sender, answers) = mpsc::channel();
-        let reader = std::thread::Builder::new()
-            .name("devlanes-console-anchor".into())
-            .spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { return };
-                    if let Some(answer) = answer(&line)
-                        && sender.send(answer.to_owned()).is_err()
-                    {
-                        return;
-                    }
-                }
-            });
-        if let Err(error) = reader {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(HelperError::Spawn(error));
-        }
-        let mut anchor = Anchor {
-            child,
-            stdin: Some(stdin),
-            answers,
-        };
-        match anchor.next_answer() {
-            Ok(answer) if answer == "attached" => Ok(anchor),
-            Ok(_) => Err(HelperError::Output),
-            // Most likely it exited, failing to attach.
-            Err(error) => Err(error),
-        }
-    }
-}
-
-/// The error a helper's exit code stands for.
-fn exit_error(code: i32) -> HelperError {
-    match devlanes_sys::windows::ctrl::CtrlError::from_exit_code(code) {
-        Some(error) => HelperError::Ctrl(error),
-        None => HelperError::Exit(code),
-    }
-}
-
-/// A helper attached to a unit's console for as long as this lives. Dropping it
-/// ends the helper; the console then lives on only while others are attached.
-#[derive(Debug)]
-pub(crate) struct Anchor {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    answers: mpsc::Receiver<String>,
-}
-
-impl Anchor {
-    /// PIDs attached to the console now, the anchor excluded. Blocking.
-    pub(crate) fn list(&mut self) -> Result<Vec<u32>, HelperError> {
-        let answer = self.ask("list")?;
-        parse_pids(&answer).ok_or(HelperError::Output)
-    }
-
-    /// Sends Ctrl-C or Ctrl-Break to the console. Blocking.
-    pub(crate) fn send(&mut self, request: Request) -> Result<(), HelperError> {
-        match self.ask(request.word())?.as_str() {
-            "sent" => Ok(()),
-            _ => Err(HelperError::Output),
-        }
-    }
-
-    /// Writes `command` and waits for its answer.
-    fn ask(&mut self, command: &str) -> Result<String, HelperError> {
-        let stdin = self.stdin.as_mut().ok_or(HelperError::Output)?;
-        writeln!(stdin, "{command}")
-            .and_then(|()| stdin.flush())
-            .map_err(HelperError::Spawn)?;
-        self.next_answer()
-    }
-
-    /// The next answer line, within [`HELPER_TIMEOUT`]. When the helper's output
-    /// ends first, the error is what its exit code stands for.
-    fn next_answer(&mut self) -> Result<String, HelperError> {
-        match self.answers.recv_timeout(HELPER_TIMEOUT) {
-            Ok(answer) => Ok(answer),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(HelperError::Timeout),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(self.wait_exit().map_or(HelperError::Timeout, exit_error))
-            }
-        }
-    }
-
-    /// The helper's exit code once it exited, ending it if it does not within
-    /// [`HELPER_TIMEOUT`].
-    fn wait_exit(&mut self) -> Option<i32> {
-        self.stdin.take();
-        let deadline = Instant::now() + HELPER_TIMEOUT;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => return status.code(),
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                _ => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    return None;
-                }
-            }
-        }
-    }
-}
-
-impl Drop for Anchor {
-    /// Closing its input ends the helper; one that does not exit is ended.
-    fn drop(&mut self) {
-        self.wait_exit();
     }
 }
 
 /// Why a helper request failed.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum HelperError {
-    #[error("starting or talking to the console helper failed: {0}")]
+enum HelperError {
+    #[error("starting the console helper failed: {0}")]
     Spawn(std::io::Error),
-    #[error("the console helper did not answer in time")]
+    #[error("the console helper did not finish in time")]
     Timeout,
-    #[error("the console helper could not attach: {0}")]
-    Ctrl(devlanes_sys::windows::ctrl::CtrlError),
+    /// 3, 4 and 5 are the attach failures of `CtrlError::exit_code`.
     #[error("the console helper exited with {0}")]
     Exit(i32),
-    #[error("the console helper answered something unexpected")]
-    Output,
 }
 
 #[cfg(test)]
@@ -422,7 +221,7 @@ mod tests {
     /// Requests round-trip through their words; anything else is refused.
     #[test]
     fn requests_parse() {
-        for request in [Request::CtrlC, Request::CtrlBreak, Request::Anchor] {
+        for request in [Request::CtrlC, Request::CtrlBreak] {
             assert_eq!(
                 Request::parse(&format!("42 {}", request.word())),
                 Some((42, request, Duration::ZERO))
@@ -448,20 +247,20 @@ mod tests {
         }
     }
 
-    /// An anchor attaches to a process's console, lists it and sends to it, and
-    /// outlives the events on that console, its own and others'. Its errors are
-    /// shown whole, since they differ between machines (CI runners).
+    /// A helper reaches a process's console right after it started, and the
+    /// event it sends there (which reaches the helper too, attached to the same
+    /// console) counts as sent. Errors are shown whole, since they differ
+    /// between machines (CI runners).
     #[test]
-    fn anchor_lists_and_signals_a_console() -> Result<(), Box<dyn std::error::Error>> {
+    fn helpers_signal_a_console() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         // Ping inherits the "ignore Ctrl-C" flag from a Git Bash parent; the
         // daemon clears it the same way.
         devlanes_sys::windows::process::accept_ctrl_c()?;
         let mut ping = std::process::Command::new("ping")
             .args(["-n", "30", "127.0.0.1"])
             .stdout(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
+            .creation_flags(devlanes_sys::windows::process::CREATE_NO_WINDOW)
             .spawn()?;
         let helper = ConsoleHelper {
             program: std::env::current_exe()?,
@@ -471,41 +270,15 @@ mod tests {
         };
         let result = (|| -> Result<(), HelperError> {
             // Started just now: its console may still be on its way.
-            let mut anchor = helper.anchor(ping.id(), CONSOLE_SETUP)?;
-            let pids = anchor.list()?;
-            assert!(pids.contains(&ping.id()), "{pids:?} lacks {}", ping.id());
-            // Ctrl-C from another helper ends ping; once it has, the event has
-            // reached the console and the anchor must still answer.
-            helper.send(anchor.child.id(), Request::CtrlC, Duration::ZERO)?;
+            helper.send(ping.id(), Request::CtrlC, CONSOLE_SETUP)?;
             let ended = devlanes_sys::windows::process::wait_exit(ping.id(), HELPER_TIMEOUT)
                 .map_err(HelperError::Spawn)?;
             assert!(ended, "Ctrl-C did not end ping");
-            anchor.list()?;
-            // Its own event reaches the anchor too, on a thread of its own. Ping
-            // would print statistics on Ctrl-Break and go on, so it was not used
-            // above.
-            anchor.send(Request::CtrlBreak)?;
-            std::thread::sleep(Duration::from_millis(200));
-            anchor.list()?;
             Ok(())
         })();
         let _ = ping.kill();
         let _ = ping.wait();
         result.map_err(|error| format!("{error:?}: {error}"))?;
         Ok(())
-    }
-
-    /// Answers are found inside other output, and PID lists parse strictly.
-    #[test]
-    fn answers_parse_from_noisy_output() {
-        assert_eq!(
-            answer("test x ... console-anchor: attached"),
-            Some("attached")
-        );
-        assert_eq!(answer("running 1 test"), None);
-        assert_eq!(parse_pids("pids 3 4 5"), Some(vec![3, 4, 5]));
-        assert_eq!(parse_pids("pids"), Some(vec![]));
-        assert_eq!(parse_pids("pids 1 x"), None);
-        assert_eq!(parse_pids("sent"), None);
     }
 }

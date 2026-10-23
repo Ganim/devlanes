@@ -47,7 +47,6 @@ mod launcher {
     use std::process::{Command, Stdio};
 
     use devlanes_client::Paths;
-    use devlanes_sys::windows::process::{CREATE_BREAKAWAY_FROM_JOB, DETACHED_PROCESS};
 
     /// Why the daemon was not started.
     #[derive(Debug, thiserror::Error)]
@@ -83,12 +82,9 @@ mod launcher {
     /// The daemon gets the environment the CLI's own spawn gives it (an
     /// allowlist, `DEVLANES_HOME` set) and the home as its working directory,
     /// or this executable's directory while the home does not exist yet: a
-    /// daemon running in a worktree would keep Windows from deleting it.
-    ///
-    /// `DETACHED_PROCESS` gives the daemon no console, so no window appears.
-    /// Breaking away from a job matters when this runs from a terminal that kills
-    /// its job on close; a job that forbids it refuses with access denied, and
-    /// the daemon then starts inside it, as the CLI's own spawn does.
+    /// daemon running in a worktree would keep Windows from deleting it. The
+    /// flags are the CLI's ([`devlanes_client::spawn_detached`]), so the daemon
+    /// has no console and no window appears.
     fn spawn(paths: &Paths) -> Result<(), LaunchError> {
         let exe = std::env::current_exe().map_err(|source| LaunchError::Spawn {
             program: PathBuf::from("devlanes.exe"),
@@ -110,19 +106,13 @@ mod launcher {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
-        let spawned = match command.spawn() {
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                command.creation_flags(DETACHED_PROCESS);
-                command.spawn()
-            }
-            result => result,
-        };
         // The daemon outlives this launcher; nothing waits for it.
-        spawned.map(drop).map_err(|source| LaunchError::Spawn {
-            program: devlanes,
-            source,
-        })
+        devlanes_client::spawn_detached(|flags| command.creation_flags(flags).spawn())
+            .map(drop)
+            .map_err(|source| LaunchError::Spawn {
+                program: devlanes,
+                source,
+            })
     }
 
     /// Appends `error` to `logs\daemon.log` in the daemon's own line format.

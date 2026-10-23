@@ -28,9 +28,9 @@ The runner itself is Windows-only:
 
 ```rust
 use devlanes_core::{ExitSweep, LaunchSpec, StopPolicy};
-use devlanes_runner_windows::WindowsRunner;
+use devlanes_runner_windows::{ConsoleHelper, WindowsRunner};
 
-let unit = WindowsRunner::default()
+let unit = WindowsRunner::new(ConsoleHelper::current_exe()?)
     .with_exit_sweep(ExitSweep::KeepDaemonized)
     .spawn_unit(spec)
     .await?;
@@ -40,7 +40,7 @@ let report = unit.stop_with_report(StopPolicy::default()).await?;
 
 ## API
 
-- `WindowsRunner`: spawns units; `with_stderr`, `with_exit_sweep`, `with_track_interval`, `with_output_capacity`.
+- `WindowsRunner`: spawns units; `new` with the console helper, `with_stderr`, `with_exit_sweep`, `with_track_interval`, `with_output_capacity`.
 - `WindowsUnit`: `identity`, `processes`, `listening_ports`, `stop_with_report`, `wait_report`, `exit_report`, plus `devlanes_core::Unit`.
 - `ExitReport`: the exit code plus processes swept, escaped, or left running.
 - `ConsoleHelper`, `console_ctrl_main`: the console-control helper and its entry point for the binary that hosts it.
@@ -50,15 +50,15 @@ let report = unit.stop_with_report(StopPolicy::default()).await?;
 
 ## Units
 
-A unit's leader starts inside a new job object (no limits, no kill on close, so units outlive a daemon crash). Breaking away from it is refused: Git for Windows' MSYS2 runtime, which runs every `run:` string, takes every child out of a job that allows it, and a child whose short-lived parent was never seen would then escape tracking. A tool that insists on `CREATE_BREAKAWAY_FROM_JOB` gets access denied. Descendants are tracked from the job's members and from process snapshots by parent. Terminating ends the job and then every tracked process outside it, each checked by PID and start time first. After a natural exit, leftovers are ended too.
+A unit's leader starts inside a new job object that refuses breakaway (see `Job::create` in `devlanes-sys`) and does not kill on close, so units outlive a daemon crash. Descendants are tracked from the job's members and from snapshots by parent; terminating ends the job, then every tracked process by PID and start time.
 
-`pty: true` units run in a pseudo console (ConPTY): their output is one terminal stream, and input and resizes go to the console. Closing it ends the processes still attached, so the console is closed only after the final sweep. A pseudo console dies with the process that owns it, so these units stop about five seconds after the daemon does; pipe units (`pty: false`) outlive it.
+`pty: true` units run in a pseudo console (ConPTY), which is closed after the final sweep and ends what is still attached. It dies with the daemon, so these units stop about five seconds after it; pipe units outlive it.
 
 ## Stopping
 
-A stop first asks: `SIGINT` sends Ctrl-C (as a key to a pseudo console, else as an event), every other signal Ctrl-Break, and the members' visible windows get `WM_CLOSE`. Console control events go through a helper process started without a console, which attaches to the unit's console (a process can only be on one): `devlanes __console-ctrl` in the shipped binary, set with `WindowsRunner::with_console_helper`. Processes still running at the stop timeout are terminated (`escalated`). `SIGKILL`, or a pipe unit without a helper, terminates at once. In a pseudo console, `cmd.exe` processes left alone for half a second after the program they ran exited (an `npm.cmd` shim asking "Terminate batch job (Y/N)?") are ended without counting as escalation; pipe units read no answer from `NUL`, so `cmd` there goes on with the batch and is left to the timeout.
+A stop asks first: `SIGINT` sends Ctrl-C (a key in a pseudo console), other signals Ctrl-Break, through a helper without a console (`devlanes __console-ctrl`) that attaches to the unit's console; visible windows get `WM_CLOSE`. What runs at the timeout is terminated; `SIGKILL` terminates at once. `cmd.exe` shims left at "Terminate batch job (Y/N)?" in a pseudo console are ended without escalation.
 
-After a task (`ExitSweep::KeepDaemonized`) exits on its own, job members still attached to its console are leftovers and end, while those with a console of their own, none, or outside the job are daemons it started and keep running (`left_running`). A pipe task gets one helper for its whole run that attaches to its console while the leader is alive (an anchor) and keeps it listable after the leader exits; the sweep lists it once. When the anchor cannot attach (the leader exited first) or the listing fails, everything is kept and reported rather than ended on a guess. Without a helper, job membership decides. `pty: true` tasks keep nothing, since closing their pseudo console ends everything attached.
+After a task (`ExitSweep::KeepDaemonized`) exits on its own, processes still on its console end and the rest are daemons it started (`left_running`). The console is told by its console host, through an undocumented `NtQueryInformationProcess` class that `devlanes-sys` tests pin. If the leader exited before its console was seen, everything is kept.
 
 ## Program resolution
 

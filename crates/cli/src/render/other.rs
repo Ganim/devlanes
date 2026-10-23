@@ -1,7 +1,6 @@
 //! Logs, tasks, env, metrics, events, infra, doctor, config and daemon results.
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
 
 use devlanes_proto::{Event, LogLine, Method, RpcError, events};
 use serde_json::Value;
@@ -865,7 +864,7 @@ fn fact_checks(data: &Value) -> Vec<Check> {
         .fix("devlanes daemon install, so the daemon starts outside the sandbox")
     });
     checks.extend(terminal_checks(&data["terminal"], running));
-    checks.extend(wsl_checks(data, running));
+    checks.extend(wsl_checks(data));
     // Docker is the daemon's to ask; without one there is nothing to say.
     if data.get("infra").is_some() {
         checks.extend(docker_checks(data));
@@ -1092,11 +1091,9 @@ fn dns_checks(dns: &Value) -> Vec<Check> {
 }
 
 /// [`dns_checks`] for the Windows NRPT rule (`nrpt_rule`: `{namespace, server,
-/// installed, matches, foreign, group_policy, more_specific, effective_servers}`
-/// or `{namespace?, error}`), with the same verdicts as a resolver file plus
-/// what can override a local rule: another program's rule for the namespace,
-/// Group Policy NRPT rules, the applied policy (a VPN's rules included) and
-/// rules for names under the namespace.
+/// installed, matches, foreign, group_policy}` or `{namespace?, error}`), with
+/// the same verdicts as a resolver file plus what can override a local rule:
+/// another program's rule for the namespace and Group Policy NRPT rules.
 fn nrpt_checks(rule: &Value, tld: &str, listen: &str) -> Vec<Check> {
     const RESOLVER: &str = "devlanes certs trust --resolver";
     if let Some(error) = rule.get("error").and_then(Value::as_str) {
@@ -1112,18 +1109,6 @@ fn nrpt_checks(rule: &Value, tld: &str, listen: &str) -> Vec<Check> {
     let namespace = text(rule, "namespace");
     let server = text(rule, "server");
     let flag = |key: &str| rule.get(key).and_then(Value::as_bool) == Some(true);
-    // `null` when Windows could not say which rules it applies.
-    let effective: Option<Vec<String>> = rule
-        .get("effective_servers")
-        .and_then(Value::as_array)
-        .map(|servers| servers.iter().map(display_value).collect());
-    // Whether the applied policy sends the namespace to the devlanes server.
-    let wanted = server.parse::<IpAddr>().ok();
-    let applied = effective.as_ref().map(|servers| {
-        servers
-            .iter()
-            .any(|named| wanted.is_some() && named.trim().parse::<IpAddr>().ok() == wanted)
-    });
     // An NRPT rule names a server's address, never its port.
     let off_port_53 = listen
         .parse::<std::net::SocketAddr>()
@@ -1163,7 +1148,7 @@ fn nrpt_checks(rule: &Value, tld: &str, listen: &str) -> Vec<Check> {
             ),
         )
         .fix(RESOLVER)
-    } else if flag("group_policy") && applied != Some(true) {
+    } else if flag("group_policy") {
         Check::new(
             "dns",
             Outcome::Skip,
@@ -1174,20 +1159,6 @@ fn nrpt_checks(rule: &Value, tld: &str, listen: &str) -> Vec<Check> {
         .fix(format!(
             "ask the administrator to add {namespace} -> {server} to the Group Policy NRPT rules"
         ))
-    } else if let (Some(servers), Some(false)) = (&effective, applied) {
-        let sent = if servers.is_empty() {
-            "no rule Windows applies routes them".to_owned()
-        } else {
-            format!("Windows sends them to {}", servers.join(", "))
-        };
-        Check::new(
-            "dns",
-            Outcome::Skip,
-            format!(
-                "the NRPT rule for {namespace} is in place, but .{tld} lookups do not reach the devlanes DNS server: {sent}"
-            ),
-        )
-        .fix("check the rules Windows applies with Get-DnsClientNrptPolicy -Effective; a VPN can add its own")
     } else {
         Check::new(
             "dns",
@@ -1195,31 +1166,7 @@ fn nrpt_checks(rule: &Value, tld: &str, listen: &str) -> Vec<Check> {
             format!("DNS server for .{tld} on {listen}, NRPT rule {namespace}"),
         )
     };
-    let mut checks = vec![check];
-    let routes: Vec<String> = list(rule, "more_specific")
-        .iter()
-        .map(|route| {
-            let servers: Vec<String> = list(route, "name_servers")
-                .iter()
-                .map(display_value)
-                .collect();
-            match servers.as_slice() {
-                [] => text(route, "namespace"),
-                servers => format!("{} -> {}", text(route, "namespace"), servers.join(", ")),
-            }
-        })
-        .collect();
-    if !routes.is_empty() {
-        checks.push(Check::new(
-            "dns",
-            Outcome::Skip,
-            format!(
-                "other NRPT rules route names under {namespace}: {}; Windows follows the most specific rule, so those names do not reach devlanes",
-                routes.join("; ")
-            ),
-        ));
-    }
-    checks
+    vec![check]
 }
 
 /// Seconds a shutdown needs past a unit's stop timeout, to record exits and
@@ -1442,12 +1389,10 @@ fn terminal_checks(terminal: &Value, running: bool) -> Vec<Check> {
 const WSL_RESTART: &str = "then run wsl.exe --shutdown from Windows and reopen the distro";
 
 /// The WSL distro this CLI runs in (`wsl`, added by the CLI inside WSL only:
-/// `{distro, version, interop, systemd, networking_mode, generate_hosts,
-/// unprivileged_port_start, privileged_proxy_ports}`) and what it changes: interop
-/// off, no systemd for `daemon install`, proxy ports that need root, WSL
-/// rewriting `/etc/hosts`, a CA Windows browsers do not trust, and worktrees on
-/// Windows drives (`windows_drive_worktrees`, from the daemon).
-fn wsl_checks(data: &Value, running: bool) -> Vec<Check> {
+/// `{distro, version, interop, systemd}`) and what it changes: interop off, no
+/// systemd for `daemon install`, a CA Windows browsers do not trust, and
+/// worktrees on Windows drives (`windows_drive_worktrees`, from the daemon).
+fn wsl_checks(data: &Value) -> Vec<Check> {
     let wsl = &data["wsl"];
     if !wsl.is_object() {
         return Vec::new();
@@ -1477,58 +1422,6 @@ fn wsl_checks(data: &Value, running: bool) -> Vec<Check> {
             )
             .fix(format!("set systemd=true under [boot] in /etc/wsl.conf, {WSL_RESTART}")),
         );
-    }
-    if let Some(mode) = wsl.get("networking_mode").and_then(Value::as_str) {
-        let how = match mode {
-            "mirrored" => "Windows and the distro share localhost",
-            "nat" => "Windows reaches the proxy through WSL's localhost forwarding",
-            _ => "Windows may not reach the proxy on localhost",
-        };
-        let label = if mode == "nat" {
-            "NAT".to_owned()
-        } else {
-            clean(mode)
-        };
-        checks.push(Check::new(
-            "wsl",
-            Outcome::Ok,
-            format!("{label} networking: {how}"),
-        ));
-    }
-    let ports: Vec<u64> = list(wsl, "privileged_proxy_ports")
-        .iter()
-        .filter_map(Value::as_u64)
-        .collect();
-    // A running proxy that got its ports anyway (a capability, an older sysctl
-    // value) needs no fix.
-    let fell_back = ["http", "https"].iter().any(|name| {
-        data["proxy"][name]
-            .get("fallback_reason")
-            .is_some_and(|reason| !reason.is_null())
-    });
-    if let Some(lowest) = ports.iter().min().filter(|_| !running || fell_back) {
-        let listed: Vec<String> = ports.iter().map(u64::to_string).collect();
-        checks.push(
-            Check::new(
-                "wsl",
-                Outcome::Skip,
-                format!(
-                    "ports below {} need root in this distro, so the proxy cannot bind {} and uses its fallback ports (8080 for HTTP, 8443 for HTTPS)",
-                    display_value(&wsl["unprivileged_port_start"]),
-                    listed.join(" and ")
-                ),
-            )
-            .fix(format!(
-                "sudo sysctl -w net.ipv4.ip_unprivileged_port_start={lowest}, and keep it with echo net.ipv4.ip_unprivileged_port_start={lowest} | sudo tee /etc/sysctl.d/50-devlanes.conf; then devlanes daemon restart"
-            )),
-        );
-    }
-    if flag("generate_hosts") == Some(true) && text(&data["hosts"], "state") == "applied" {
-        checks.push(Check::new(
-            "wsl",
-            Outcome::Ok,
-            "WSL rewrites /etc/hosts when the distro starts (generateHosts); the daemon writes its names again when it starts, and Windows programs never read this file",
-        ));
     }
     let ca = &data["ca"];
     let windows_listed = list(ca, "trust")
@@ -1678,11 +1571,6 @@ fn tls_and_hosts_checks(data: &Value, running: bool) -> Vec<Check> {
                     },
                 ),
             });
-            // A browser setting that keeps the store from working (Firefox ignoring
-            // the Windows store); `certs trust` cannot change it.
-            if let Some(hint) = note("hint") {
-                checks.push(Check::new("tls", Outcome::Skip, hint));
-            }
         }
         // A CA from before name constraints stays until the user recreates it.
         if let Some(hint) = ca.get("hint").and_then(Value::as_str) {

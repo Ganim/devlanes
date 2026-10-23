@@ -26,7 +26,7 @@ instanceIdleTimeout=-1
 
 ## Ports 80 and 443
 
-A normal user cannot bind ports below 1024 in the distro, so the proxy falls back to 8080 for HTTP and 8443 for HTTPS, and URLs carry the port (`https://web.acme-2.localhost:8443`). `doctor` shows the fix:
+A normal user cannot bind ports below 1024 in the distro, so the proxy falls back to 8080 for HTTP and 8443 for HTTPS, and URLs carry the port (`https://web.acme-2.localhost:8443`). To get 80 and 443:
 
 ```sh
 sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80
@@ -36,7 +36,7 @@ devlanes daemon restart
 
 ## Reaching the proxy from Windows
 
-Chrome, Edge and Firefox on Windows answer `*.localhost` with loopback themselves, and WSL forwards loopback connections from Windows into the distro. In the default NAT networking mode this works for both `127.0.0.1` and `::1`, because the proxy listens on each of them (checked with WSL 2.7). Mirrored networking (`networkingMode=mirrored` under `[wsl2]` in `.wslconfig`, Windows 11 22H2 or later) shares localhost both ways and is the mode in which `proxy.lan: true` lets other machines in. `doctor` reports the active mode from `wslinfo --networking-mode`, or from `.wslconfig` on WSL versions without it.
+Chrome, Edge and Firefox on Windows answer `*.localhost` with loopback themselves, and WSL forwards loopback connections from Windows into the distro. In the default NAT networking mode this works for both `127.0.0.1` and `::1`, because the proxy listens on each of them (checked with WSL 2.7). Mirrored networking (`networkingMode=mirrored` under `[wsl2]` in `.wslconfig`, Windows 11 22H2 or later) shares localhost both ways and is the mode in which `proxy.lan: true` lets other machines in. `wslinfo --networking-mode` prints the active mode.
 
 Windows programs that resolve names through Windows, such as Node or Python installed on Windows, do not know `*.localhost` subdomains, and Windows never reads the distro's `/etc/hosts`. Call those services from inside the distro, or by `127.0.0.1:<port>`.
 
@@ -62,7 +62,7 @@ tls:
 
 `devlanes url open` and the TUI's `o` open the Windows default browser through Windows' `rundll32.exe url.dll,FileProtocolHandler`, so neither needs a Linux browser. Without interop, or when no mounted Windows drive holds `System32`, they run `xdg-open`.
 
-`terminal: windows-terminal` makes the TUI's `O` open a Windows Terminal tab that runs `wsl.exe -d <distro> -u <user> --cd <worktree> --exec devlanes attach <unit>` in the same distro, as the same user. When `terminal` is unset and the TUI runs in Windows Terminal, it picks Windows Terminal by itself, because Windows Terminal adds `WT_SESSION` to `WSLENV` and the variable reaches the distro. The same variable turns on the tab progress bar. A shell started another way (VS Code's terminal, `wsl.exe` from another console) has no `WT_SESSION`; set `terminal: windows-terminal` and `terminal.progress: always` in the user config there. Linux terminals installed in the distro also work through WSLg.
+In Windows Terminal the tab progress bar works by itself, because Windows Terminal adds `WT_SESSION` to `WSLENV` and the variable reaches the distro. A shell started another way (VS Code's terminal, `wsl.exe` from another console) has no `WT_SESSION`; set `terminal.progress: always` in the user config there.
 
 ## Worktrees belong on the Linux filesystem
 
@@ -80,4 +80,4 @@ The `/etc/hosts` fallback writes the distro's file, which WSL rewrites when the 
 
 - `certs trust` and `untrust` for `windows` need someone at the Windows desktop to answer the dialog. After 5 minutes without an answer the command stops and says a dialog may be waiting; `doctor` gives up on a Windows store lookup after 20 seconds and reports the store as unknown.
 - Older wslu releases fail on WSL versions that name the interop entry `WSLInterop-late`; devlanes then falls back to `rundll32.exe`.
-- With interop off (`[interop] enabled=false` in `/etc/wsl.conf`), the `windows` target, Windows Terminal tabs and opening URLs in Windows are unavailable; `doctor` says so.
+- With interop off (`[interop] enabled=false` in `/etc/wsl.conf`), the `windows` target and opening URLs in Windows are unavailable; `doctor` says so.

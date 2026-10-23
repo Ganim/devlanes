@@ -50,7 +50,7 @@ relocated sockets. The lock remains at `run/daemon.lock` under the home.
 
 ## Windows
 
-The home defaults to `%USERPROFILE%\.devlanes` (`user_home()` ignores `HOME`, which Git Bash sets to a POSIX path). The socket is a named pipe, `\\.\pipe\devlanes-<home hash>`, hashed from the canonical home so every spelling of it reaches the same daemon; `run/daemon.socket` always names it. New directories get a DACL for the user, SYSTEM and Administrators.
+The home defaults to `%USERPROFILE%\.devlanes` (`user_home()` ignores `HOME`, which Git Bash sets to a POSIX path). The socket is a named pipe, `\\.\pipe\devlanes-<home hash>`, hashed from the canonical home so every spelling of it reaches the same daemon; no `run/daemon.socket` is written. New directories get a DACL for the user, SYSTEM and Administrators.
 
 The daemon is spawned without a console (`DETACHED_PROCESS`) and, when the terminal's job allows it, outside that job, so closing the terminal does not stop it. It inherits none of the CLI's standard handles, so `$(devlanes status)` returns at once. Its environment adds the Windows variables programs need (`SystemRoot`, `PATHEXT`, the profile and program directories), with names compared without case.
 

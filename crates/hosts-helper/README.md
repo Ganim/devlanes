@@ -382,8 +382,8 @@ and exits 2, and the integration tests don't build.
 Windows uses `devlanes-hosts-service`, a LocalSystem service that answers the
 installing user's daemon over `\\.\pipe\devlanes-hosts`. It shares `names`,
 `block` and the `protocol` module from this crate: the same commands, the same
-4096-name and 1,044,480-byte limits, and the exit codes above as response codes,
-plus 1 for a caller it refuses. Its README
+4096-name and 1,044,480-byte limits, and the exit codes above as response codes.
+Its README
 ([`crates/hosts-service/README.md`](../hosts-service/README.md)) has the Windows
 security model.
 

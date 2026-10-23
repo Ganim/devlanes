@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use devlanes_trust::windows_root::{APPROVAL, LOCATION, RootChange as Change};
 use devlanes_trust::{
     CaCertificate, CommandExecutor, CommandLine, CommandOutput, TempPem, TrustError, TrustStatus,
     TrustStore, TrustTarget, find_system_program, path_arg, run,
@@ -17,12 +18,6 @@ pub const WINDOWS_ID: &str = "wsl-windows-user-root";
 
 /// The CurrentUser store Windows browsers trust as roots.
 pub const WINDOWS_ROOT: &str = "Root";
-
-/// What [`WindowsInteropStore::location`] calls the real `Root` store.
-const LOCATION: &str = "Windows user root store";
-
-/// The confirmation every `Root` change needs, short enough for `doctor`'s fix line.
-const APPROVAL: &str = "choose Yes in the Windows security warning";
 
 /// Shown when `certutil.exe` cannot be started from the distro.
 const INTEROP_HINT: &str = "Windows interop must be on in this WSL distro \
@@ -86,31 +81,6 @@ impl WindowsInterop {
     pub fn with_store(mut self, store: impl Into<String>) -> Self {
         self.store = store.into();
         self
-    }
-}
-
-/// A change that may show the confirmation dialog.
-#[derive(Debug, Clone, Copy)]
-enum Change {
-    Add,
-    Delete,
-}
-
-impl Change {
-    /// The devlanes command that makes this change, for the user to rerun.
-    fn command(self) -> &'static str {
-        match self {
-            Self::Add => "devlanes certs trust",
-            Self::Delete => "devlanes certs untrust",
-        }
-    }
-
-    /// The title of the dialog Windows shows for it.
-    fn dialog(self) -> &'static str {
-        match self {
-            Self::Add => "\"Security Warning\"",
-            Self::Delete => "\"Root Certificate Store\"",
-        }
     }
 }
 
@@ -251,18 +221,7 @@ impl WindowsInteropStore {
             return Ok(());
         }
         if cancelled(&output) {
-            let action = match change {
-                Change::Add => format!("adding the CA to {}", self.path()),
-                Change::Delete => format!("removing the CA from {}", self.path()),
-            };
-            return Err(TrustError::Cancelled {
-                detail: format!(
-                    "{action} was declined in the Windows {} dialog; run `{}` again and \
-                     choose Yes",
-                    change.dialog(),
-                    change.command()
-                ),
-            });
+            return Err(change.declined(&self.path()));
         }
         // certutil writes its errors to stdout.
         Err(TrustError::CommandFailed {
@@ -335,20 +294,12 @@ impl TrustStore for WindowsInteropStore {
             {
                 return None;
             }
-            return Some(format!(
-                "Windows asks you to confirm adding the CA to your user root store in a {} \
-                 dialog; choose Yes",
-                Change::Add.dialog()
-            ));
+            return Some(Change::Add.pending(1));
         }
         if no_change(&self.in_user_store(ca).await, false) {
             return None;
         }
-        Some(format!(
-            "Windows asks you to confirm removing the CA from your user root store in a {} \
-             dialog; choose Yes",
-            Change::Delete.dialog()
-        ))
+        Some(Change::Delete.pending(1))
     }
 
     /// Adds the CA to the user's store unless a root store already trusts it.

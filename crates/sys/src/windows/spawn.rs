@@ -24,9 +24,9 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::System::Console::HPCON;
 use windows_sys::Win32::System::Threading::PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE;
 
-use super::conpty::{PseudoConsole, attribute_value};
+use super::conpty::PseudoConsole;
 use super::job::Job;
-use super::proc::{creation_time, exited};
+use super::proc::{Console, creation_time, exited};
 use super::security::wide;
 use super::token::{owned, raw};
 
@@ -93,6 +93,13 @@ impl Child {
             .ok_or_else(|| io::Error::other("process still running after its wait"))
     }
 
+    /// The console the process is attached to now, held so its host's PID
+    /// stays its own; `None` while it has none, as before its console is set
+    /// up.
+    pub fn console(&self) -> io::Result<Option<Console>> {
+        Console::of(&self.handle)
+    }
+
     /// The exit code once the process has exited, `None` while it runs.
     pub fn exit_code(&self) -> io::Result<Option<u32>> {
         if !exited(&self.handle) {
@@ -152,7 +159,7 @@ pub fn spawn(spec: &Spawn<'_>) -> io::Result<Child> {
     if let Some(console) = spec.console {
         attributes.update(
             PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-            attribute_value(console),
+            console.attribute_value(),
             size_of::<HPCON>(),
         )?;
     } else if let Some(handles) = &raw_inherited {

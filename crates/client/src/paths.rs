@@ -1,14 +1,16 @@
 //! Path discovery is read-only so shell completion never creates daemon state.
 
-#[cfg(unix)]
-use std::os::unix::{
-    ffi::OsStrExt,
-    fs::{DirBuilderExt, MetadataExt},
-};
 use std::{
     env, fs,
-    io::Write,
     path::{Path, PathBuf},
+};
+#[cfg(unix)]
+use std::{
+    io::Write,
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{DirBuilderExt, MetadataExt},
+    },
 };
 
 use crate::{Error, Result};
@@ -176,49 +178,19 @@ fn pipe_key(home: &Path) -> PathBuf {
 fn publish_socket(paths: &Paths) -> Result<()> {
     if paths.socket.parent() != Some(paths.run.as_path()) {
         private_directory(paths.socket.parent().ok_or(Error::InvalidSocketPath)?)?;
-        write_pointer(&paths.run, paths.socket.as_os_str().as_bytes())?;
+        let mut pointer = tempfile::NamedTempFile::new_in(&paths.run)?;
+        pointer.write_all(paths.socket.as_os_str().as_bytes())?;
+        pointer.write_all(b"\n")?;
+        pointer
+            .persist(paths.run.join("daemon.socket"))
+            .map_err(|error| error.error)?;
     }
     Ok(())
 }
 
-/// Publishes the pipe name in `run/daemon.socket`; a pipe never lives under `run`.
+/// A pipe name follows from the home alone, so there is nothing to publish.
 #[cfg(windows)]
-fn publish_socket(paths: &Paths) -> Result<()> {
-    write_pointer(&paths.run, paths.socket.to_string_lossy().as_bytes())
-}
-
-/// Replaces `run/daemon.socket` atomically with `target` and a newline.
-///
-/// Every client and daemon of a home writes the same text, and several do at
-/// once when commands race to spawn the daemon. On Windows a replace fails with
-/// access denied while another process's replace of the same file is under way,
-/// so a pointer that already holds the text is left alone, and a refused
-/// replace is retried briefly and counts once the pointer holds the text.
-fn write_pointer(run: &Path, target: &[u8]) -> Result<()> {
-    const ATTEMPTS: usize = 10;
-    let path = run.join("daemon.socket");
-    let mut wanted = target.to_vec();
-    wanted.push(b'\n');
-    let current = || fs::read(&path).is_ok_and(|text| text == wanted);
-    if current() {
-        return Ok(());
-    }
-    let mut pointer = tempfile::NamedTempFile::new_in(run)?;
-    pointer.write_all(&wanted)?;
-    for attempt in 1.. {
-        match pointer.persist(&path) {
-            Ok(_) => break,
-            Err(_) if current() => break,
-            Err(error)
-                if error.error.kind() == std::io::ErrorKind::PermissionDenied
-                    && attempt < ATTEMPTS =>
-            {
-                pointer = error.file;
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Err(error) => return Err(error.error.into()),
-        }
-    }
+fn publish_socket(_paths: &Paths) -> Result<()> {
     Ok(())
 }
 
@@ -362,21 +334,6 @@ mod windows_tests {
         Ok(())
     }
 
-    /// Preparing creates the private directories and publishes the pipe name.
-    #[test]
-    fn prepare_writes_the_pointer() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let paths =
-            Paths::with_environment(&directory.path().join("home"), None, directory.path())?;
-        paths.prepare()?;
-        assert!(paths.logs.is_dir());
-        assert_eq!(
-            fs::read_to_string(paths.run.join("daemon.socket"))?,
-            format!("{}\n", paths.socket.display())
-        );
-        Ok(())
-    }
-
     /// Commands racing to spawn the daemon prepare a new home at the same time,
     /// as `start` in the background and `status` right after it do; none fails.
     #[test]
@@ -402,10 +359,8 @@ mod windows_tests {
                     .into_iter()
                     .try_for_each(|racer| racer.join().expect("racer panicked"))
             })?;
-            assert_eq!(
-                fs::read_to_string(paths.run.join("daemon.socket"))?,
-                format!("{}\n", paths.socket.display())
-            );
+            assert!(paths.logs.is_dir());
+            assert!(!paths.run.join("daemon.socket").exists());
         }
         Ok(())
     }

@@ -31,7 +31,7 @@ use windows_sys::Win32::Foundation::{
     CRYPT_E_NOT_FOUND, ERROR_CANCELLED, ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION, GetLastError,
 };
 use windows_sys::Win32::Security::Cryptography::{
-    CERT_CONTEXT, CERT_FIND_ANY, CERT_FIND_FLAGS, CERT_FIND_SHA1_HASH, CERT_FIND_SUBJECT_STR_W,
+    CERT_CONTEXT, CERT_FIND_FLAGS, CERT_FIND_SHA1_HASH, CERT_FIND_SUBJECT_STR_W,
     CERT_OPEN_STORE_FLAGS, CERT_SHA1_HASH_PROP_ID, CERT_STORE_ADD_REPLACE_EXISTING,
     CERT_STORE_DELETE_FLAG, CERT_STORE_MAXIMUM_ALLOWED_FLAG, CERT_STORE_OPEN_EXISTING_FLAG,
     CERT_STORE_PROV_SYSTEM_REGISTRY_W, CERT_STORE_PROV_SYSTEM_W, CERT_STORE_READONLY_FLAG,
@@ -194,11 +194,6 @@ impl CertStore {
         self.thumbprints(CERT_FIND_SUBJECT_STR_W, needle.as_ptr().cast())
     }
 
-    /// Thumbprints of every certificate in the store.
-    pub fn all_thumbprints(&self) -> io::Result<Vec<Thumbprint>> {
-        self.thumbprints(CERT_FIND_ANY, ptr::null())
-    }
-
     /// Thumbprints of every certificate matching a `CertFindCertificateInStore` query.
     fn thumbprints(
         &self,
@@ -307,9 +302,9 @@ const fn hresult_from_win32(code: u32) -> i32 {
 
 /// Classifies the last error of a failed add or delete.
 ///
-/// crypt32 reports both a No in the dialog and a dialog it could not show as
-/// `ERROR_CANCELLED` (`0x800704C7`; the latter is seen in Windows containers,
-/// microsoft/Windows-Containers#506), so the window station tells them apart.
+/// crypt32 also reports a dialog it could not show as `ERROR_CANCELLED`
+/// (Windows containers, microsoft/Windows-Containers#506); callers check
+/// [`interactive_desktop`] before a change, so here it means a No.
 fn change_error() -> CertError {
     let error = io::Error::last_os_error();
     let cancelled = [ERROR_CANCELLED as i32, hresult_from_win32(ERROR_CANCELLED)];
@@ -319,12 +314,7 @@ fn change_error() -> CertError {
     ];
     match error.raw_os_error() {
         Some(code) if no_desktop.contains(&code) => CertError::NoDesktop,
-        // An unreadable window station is treated as interactive: a real No
-        // should not be reported as a missing desktop.
-        Some(code) if cancelled.contains(&code) => match interactive_desktop() {
-            Ok(false) => CertError::NoDesktop,
-            Ok(true) | Err(_) => CertError::Cancelled,
-        },
+        Some(code) if cancelled.contains(&code) => CertError::Cancelled,
         _ => CertError::Io(error),
     }
 }
@@ -467,7 +457,8 @@ mod tests {
             .thumbprints_with_subject("DEVLANES local development")
             .expect("by subject");
         assert_eq!(ours.len(), 1, "case-insensitive substring of the subject");
-        assert_eq!(logical.all_thumbprints().expect("all").len(), 2);
+        let theirs = logical.thumbprints_with_subject("someone").expect("other");
+        assert_eq!(theirs.len(), 1);
         assert!(logical.contains(&ours[0]).expect("contains"));
 
         assert!(store.delete(&ours[0]).expect("delete"));
@@ -475,7 +466,7 @@ mod tests {
         let reopened =
             CertStore::open(scratch.name(), View::Logical, Access::Read).expect("reopen");
         assert!(!reopened.contains(&ours[0]).expect("gone"));
-        assert_eq!(reopened.all_thumbprints().expect("all").len(), 1);
+        assert!(reopened.contains(&theirs[0]).expect("kept"));
     }
 
     /// The logical view never opens for writing, so nothing can reach a machine store.
@@ -534,16 +525,20 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
     }
 
-    /// The logical CurrentUser `Root` includes the machine's roots, the user's
-    /// registry store does not. Read-only: the real `Root` is never changed.
+    /// The logical CurrentUser `Root` includes the machine's roots (Microsoft's
+    /// own among them), the user's registry store does not. Read-only: the real
+    /// `Root` is never changed.
     #[test]
     fn user_root_aggregates_machine_roots() {
-        let logical = CertStore::open("Root", View::Logical, Access::Read)
-            .expect("logical Root")
-            .all_thumbprints()
-            .expect("list logical");
+        let microsoft = |store: CertStore| {
+            store
+                .thumbprints_with_subject("Microsoft")
+                .expect("list roots")
+        };
+        let logical =
+            microsoft(CertStore::open("Root", View::Logical, Access::Read).expect("logical Root"));
         let registry = match CertStore::open("Root", View::UserRegistry, Access::Read) {
-            Ok(store) => store.all_thumbprints().expect("list registry"),
+            Ok(store) => microsoft(store),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => panic!("user registry Root: {error}"),
         };
@@ -568,19 +563,5 @@ mod tests {
             let error = unregister_test_store(name).expect_err("refused");
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
-    }
-
-    #[test]
-    fn window_station_flags_are_readable() {
-        interactive_desktop().expect("window station flags");
-    }
-
-    #[test]
-    fn hresult_wraps_win32_codes() {
-        assert_eq!(
-            hresult_from_win32(ERROR_CANCELLED) as u32,
-            0x8007_04C7,
-            "the code certutil prints for a declined root"
-        );
     }
 }

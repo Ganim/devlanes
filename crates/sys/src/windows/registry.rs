@@ -2,9 +2,6 @@
 //! logon entry (`Software\Microsoft\Windows\CurrentVersion\Run`) and its Task
 //! Manager state (`...\Explorer\StartupApproved\Run`). Only the current user's
 //! hive is reachable through these, so nothing here needs elevation.
-//!
-//! [`machine`] reads `HKEY_LOCAL_MACHINE` for the hosts service (where the hosts
-//! file lives, which user it serves) and writes there for its elevated installer.
 
 use std::ffi::OsStr;
 use std::io;
@@ -13,15 +10,12 @@ use std::ptr;
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_BINARY,
-    REG_OPTION_NON_VOLATILE, REG_ROUTINE_FLAGS, REG_SZ, REG_VALUE_TYPE, RRF_RT_REG_BINARY,
-    RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW,
-    RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_BINARY, REG_OPTION_NON_VOLATILE, REG_ROUTINE_FLAGS,
+    REG_SZ, REG_VALUE_TYPE, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
+    RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetValueExW,
 };
 
-use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-
-use super::security::{SecurityAttributes, SecurityDescriptor, wide};
+use super::security::wide;
 
 /// Maps a registry status to a result.
 fn check(status: WIN32_ERROR) -> io::Result<()> {
@@ -47,20 +41,16 @@ pub fn read_binary(subkey: &str, name: &str) -> io::Result<Option<Vec<u8>>> {
 /// Writes `value` as the `REG_SZ` value `name` of `HKCU\<subkey>`, creating the
 /// key when it is missing.
 pub fn write_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
-    write_string_in(HKEY_CURRENT_USER, subkey, name, value, ptr::null_mut())
+    let data = wide(OsStr::new(value));
+    let bytes: Vec<u8> = data.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+    // `data` ends with the terminating NUL that REG_SZ needs.
+    write_raw(HKEY_CURRENT_USER, subkey, name, REG_SZ, &bytes)
 }
 
 /// Writes `value` as the `REG_BINARY` value `name` of `HKCU\<subkey>`, creating
 /// the key when it is missing.
 pub fn write_binary(subkey: &str, name: &str, value: &[u8]) -> io::Result<()> {
-    write_raw(
-        HKEY_CURRENT_USER,
-        subkey,
-        name,
-        REG_BINARY,
-        value,
-        ptr::null_mut(),
-    )
+    write_raw(HKEY_CURRENT_USER, subkey, name, REG_BINARY, value)
 }
 
 /// Deletes the value `name` of `HKCU\<subkey>`; `false` when there was none.
@@ -73,56 +63,6 @@ pub fn delete_value(subkey: &str, name: &str) -> io::Result<bool> {
 /// would empty the whole hive.
 pub fn delete_tree(subkey: &str) -> io::Result<()> {
     delete_tree_in(HKEY_CURRENT_USER, subkey)
-}
-
-/// Values under `HKEY_LOCAL_MACHINE`. Reading most keys needs no elevation;
-/// writing and deleting need an elevated process (or SYSTEM).
-pub mod machine {
-    use super::*;
-
-    /// The string value `name` of `HKLM\<subkey>`, or `None` when the key or the
-    /// value does not exist. A `REG_EXPAND_SZ` value comes back expanded with
-    /// this process's environment (`RegGetValueW` does that for `RRF_RT_REG_SZ`).
-    pub fn read_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
-        read_string_in(HKEY_LOCAL_MACHINE, subkey, name)
-    }
-
-    /// Writes `value` as the `REG_SZ` value `name` of `HKLM\<subkey>`, creating
-    /// the key when it is missing. A created key is owned by Administrators from
-    /// the start and inherits its parent's access list; the default owner would
-    /// be the elevated user under the "default owner: object creator" policy,
-    /// and the `CREATOR OWNER` entry on `Services` would then give that user full
-    /// control. An existing key keeps its owner.
-    pub fn write_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
-        // An owner and no access list: the access list is still inherited.
-        let mut attributes = SecurityAttributes::new(SecurityDescriptor::from_sddl("O:BA")?);
-        write_string_in(
-            HKEY_LOCAL_MACHINE,
-            subkey,
-            name,
-            value,
-            attributes.as_mut_ptr(),
-        )
-    }
-
-    /// Deletes the value `name` of `HKLM\<subkey>`; `false` when there was none.
-    pub fn delete_value(subkey: &str, name: &str) -> io::Result<bool> {
-        delete_value_in(HKEY_LOCAL_MACHINE, subkey, name)
-    }
-
-    /// Deletes `HKLM\<subkey>` with everything under it; a missing key is fine.
-    /// Keys with fewer than three levels (such as `SYSTEM\CurrentControlSet`)
-    /// are refused, so a caller bug cannot empty a hive or a top-level branch.
-    pub fn delete_tree(subkey: &str) -> io::Result<()> {
-        let levels = subkey.split('\\').filter(|level| !level.is_empty()).count();
-        if levels < 3 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("refusing to delete HKEY_LOCAL_MACHINE\\{subkey}"),
-            ));
-        }
-        delete_tree_in(HKEY_LOCAL_MACHINE, subkey)
-    }
 }
 
 /// The string value `name` of `<hive>\<subkey>`.
@@ -207,36 +147,20 @@ fn read_raw(
     Err(io::Error::other("registry value kept changing size"))
 }
 
-/// Writes `value` as a `REG_SZ` value; `security` as in [`write_raw`].
-fn write_string_in(
-    hive: HKEY,
-    subkey: &str,
-    name: &str,
-    value: &str,
-    security: *mut SECURITY_ATTRIBUTES,
-) -> io::Result<()> {
-    let data = wide(OsStr::new(value));
-    let bytes: Vec<u8> = data.iter().flat_map(|unit| unit.to_le_bytes()).collect();
-    // `data` ends with the terminating NUL that REG_SZ needs.
-    write_raw(hive, subkey, name, REG_SZ, &bytes, security)
-}
-
 /// Writes `data` as a value of type `kind`, creating the key when it is missing
-/// with `security` (null: the default owner and inherited access list), which
-/// must stay valid for the call.
+/// with the default owner and inherited access list.
 fn write_raw(
     hive: HKEY,
     subkey: &str,
     name: &str,
     kind: REG_VALUE_TYPE,
     data: &[u8],
-    security: *mut SECURITY_ATTRIBUTES,
 ) -> io::Result<()> {
     let key_name = wide(OsStr::new(subkey));
     let name = wide(OsStr::new(name));
     let mut key: HKEY = ptr::null_mut();
-    // SAFETY: the key name outlives the call, and the caller keeps `security`
-    // (null or valid) alive across it; `key` receives an open handle.
+    // SAFETY: the key name outlives the call; null security attributes are
+    // allowed; `key` receives an open handle.
     check(unsafe {
         RegCreateKeyExW(
             hive,
@@ -245,7 +169,7 @@ fn write_raw(
             ptr::null(),
             REG_OPTION_NON_VOLATILE,
             KEY_SET_VALUE,
-            security,
+            ptr::null(),
             &raw mut key,
             ptr::null_mut(),
         )
@@ -372,42 +296,6 @@ mod tests {
         delete_tree(&scratch.0)?;
         delete_tree(&scratch.0)?;
         assert!(delete_tree(r"\").is_err());
-        Ok(())
-    }
-
-    /// The hosts file directory comes from a `REG_EXPAND_SZ` value under HKLM,
-    /// readable without elevation and expanded on read. Read-only.
-    #[test]
-    fn machine_values_read_expanded() -> io::Result<()> {
-        let directory = machine::read_string(
-            r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
-            "DataBasePath",
-        )?
-        .expect("DataBasePath");
-        assert!(!directory.contains('%'), "{directory}");
-        assert!(
-            directory
-                .to_ascii_lowercase()
-                .ends_with(r"\system32\drivers\etc"),
-            "{directory}"
-        );
-        assert_eq!(
-            machine::read_string(
-                r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
-                "devlanes-missing"
-            )?,
-            None
-        );
-        // Refused before any call, so nothing is ever deleted here.
-        for shallow in ["", r"\", "SYSTEM", r"SYSTEM\CurrentControlSet"] {
-            assert_eq!(
-                machine::delete_tree(shallow)
-                    .err()
-                    .map(|error| error.kind()),
-                Some(io::ErrorKind::InvalidInput),
-                "{shallow:?}"
-            );
-        }
         Ok(())
     }
 }

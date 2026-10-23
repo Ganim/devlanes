@@ -35,7 +35,7 @@ mod runner {
     use crate::unit::{WindowsUnit, spawn_unit};
 
     /// Spawns units in job objects with piped output or a pseudo console. Cheap
-    /// to clone; holds only tuning values.
+    /// to clone; holds only tuning values and the helper's command.
     #[derive(Debug, Clone)]
     pub struct WindowsRunner {
         pub(crate) stderr: StderrMode,
@@ -44,13 +44,14 @@ mod runner {
         pub(crate) drain_timeout: Duration,
         pub(crate) sweep_timeout: Duration,
         pub(crate) exit_sweep: ExitSweep,
-        pub(crate) helper: Option<ConsoleHelper>,
+        pub(crate) helper: ConsoleHelper,
     }
 
-    impl Default for WindowsRunner {
-        /// Separate stderr, 500 ms descendant snapshots, 1024 buffered chunks per
-        /// subscriber, leftovers ended after a natural exit.
-        fn default() -> Self {
+    impl WindowsRunner {
+        /// A runner whose graceful stops send console control events through
+        /// `helper`. Separate stderr, 500 ms descendant snapshots, 1024 buffered
+        /// chunks per subscriber, leftovers ended after a natural exit.
+        pub fn new(helper: ConsoleHelper) -> Self {
             Self {
                 stderr: StderrMode::Separate,
                 track_interval: Duration::from_millis(500),
@@ -58,18 +59,8 @@ mod runner {
                 drain_timeout: Duration::from_millis(500),
                 sweep_timeout: Duration::from_secs(1),
                 exit_sweep: ExitSweep::KillAll,
-                helper: None,
+                helper,
             }
-        }
-    }
-
-    impl WindowsRunner {
-        /// Sets the console-control helper graceful stops go through. Without
-        /// one, only `pty: true` units can be asked to stop (Ctrl-C as a key);
-        /// other stops terminate at once.
-        pub fn with_console_helper(mut self, helper: ConsoleHelper) -> Self {
-            self.helper = Some(helper);
-            self
         }
 
         /// Selects the natural-exit sweep for units spawned by this runner.

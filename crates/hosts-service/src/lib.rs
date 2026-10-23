@@ -12,16 +12,14 @@
 //!
 //! - [`handler`] answers one request against a hosts file path; tests drive it
 //!   (and [`server`]) against temp files and temp pipe names.
-//! - [`server`] owns the pipe: its access list, the caller check, framing.
-//! - [`service`] is what the binary runs: install checks, configuration from the
-//!   registry (never from the caller), the service control handler.
+//! - [`server`] owns the pipe: its access list and framing.
+//! - [`service`] is what the binary runs: the service control handler and the
+//!   server.
 //! - [`install`] is the elevated install and removal that `devlanes.exe` runs.
 //!
 //! Everything is Windows only; elsewhere the crate is empty and the binary
 //! refuses to run.
 
-#[cfg(windows)]
-pub mod checks;
 #[cfg(windows)]
 pub mod config;
 #[cfg(windows)]

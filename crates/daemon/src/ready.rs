@@ -294,46 +294,24 @@ mod os {
     /// its own leaves background processes alone, as on Unix.
     pub(super) struct Probe {
         pub(super) child: tokio::process::Child,
-        /// `None` when no job could be made or joined; the shell alone is then
-        /// killed, as before.
-        job: Option<Job>,
+        job: Job,
     }
 
     impl Probe {
-        /// Starts `process` inside a new job when possible.
-        ///
-        /// Unlike a unit's job, this one forbids breaking away: the MSYS2
-        /// runtime behind Git's `sh.exe` adds `CREATE_BREAKAWAY_FROM_JOB` to
-        /// every program it starts when the job allows that and leaves it off
-        /// otherwise, so with breakaway allowed a probe's `sleep` or `curl`
-        /// would leave the job. A program that insists on breaking away fails
-        /// to start here, which only fails that attempt.
+        /// Starts `process` inside a new job, which refuses breakaway (see
+        /// `Job::create`): a program that insists on breaking away fails to
+        /// start here, which only fails that attempt.
         pub(super) fn spawn(process: &mut tokio::process::Command) -> std::io::Result<Self> {
-            let jobbed = Job::create(false).and_then(|job| {
-                let child = job.spawn_helper(process)?;
-                Ok(Self {
-                    child,
-                    job: Some(job),
-                })
-            });
-            match jobbed {
-                Ok(probe) => Ok(probe),
-                Err(error) => {
-                    tracing::debug!(%error, "ready probe runs outside a job; a timeout ends only its shell");
-                    Ok(Self {
-                        child: process.spawn()?,
-                        job: None,
-                    })
-                }
-            }
+            let job = Job::create()?;
+            let child = job.spawn_helper(process)?;
+            Ok(Self { child, job })
         }
     }
 
     impl Drop for Probe {
         fn drop(&mut self) {
-            if let Some(job) = &self.job
-                && matches!(self.child.try_wait(), Ok(None))
-                && let Err(error) = job.terminate(1)
+            if matches!(self.child.try_wait(), Ok(None))
+                && let Err(error) = self.job.terminate(1)
             {
                 tracing::debug!(%error, "ending a ready probe's job failed");
             }

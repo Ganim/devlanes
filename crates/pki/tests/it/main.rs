@@ -393,27 +393,16 @@ fn refuses_exposed_or_symlink_keys() -> Result {
     CertificateAuthority::load_or_create(&path)?;
     let key = path.join("ca-key.pem");
     fs::set_permissions(&key, fs::Permissions::from_mode(0o644))?;
-    match CertificateAuthority::load_or_create(&path) {
-        Err(devlanes_pki::Error::InsecurePath {
-            path: refused,
-            problem,
-            fix,
-        }) => {
-            assert_eq!(refused, key);
-            assert_eq!(problem, devlanes_pki::PathProblem::Mode(0o644));
-            assert_eq!(fix, Some(format!("chmod 600 {}", key.display())));
-        }
-        other => return Err(format!("{other:?}").into()),
-    }
+    assert!(matches!(
+        CertificateAuthority::load_or_create(&path),
+        Err(devlanes_pki::Error::InsecurePath)
+    ));
     fs::set_permissions(&key, fs::Permissions::from_mode(0o600))?;
     fs::rename(&key, path.join("real-key"))?;
     symlink(path.join("real-key"), &key)?;
     assert!(matches!(
         CertificateAuthority::load_or_create(&path),
-        Err(devlanes_pki::Error::InsecurePath {
-            problem: devlanes_pki::PathProblem::Link,
-            ..
-        })
+        Err(devlanes_pki::Error::InsecurePath)
     ));
     Ok(())
 }
