@@ -169,6 +169,31 @@ fn ready_word(spec: &ReadySpec) -> &'static str {
     }
 }
 
+/// `<logs>/<project>/<lane index>/<unit>`, where a unit's log segments live.
+pub(crate) fn unit_log_dir(
+    logs: &std::path::Path,
+    project: &str,
+    index: u32,
+    unit: &str,
+) -> std::path::PathBuf {
+    logs.join(devlanes_core::paths::name_on_disk(project).as_ref())
+        .join(index.to_string())
+        .join(unit_folder(unit))
+}
+
+/// The folder name of a unit's logs: `/` becomes `_`, as it always has on Unix.
+#[cfg(unix)]
+fn unit_folder(unit: &str) -> String {
+    unit.replace('/', "_")
+}
+
+/// The folder name of a unit's logs: the injective Windows encoding, so
+/// `db:migrate` or `aux` get a folder and `a/b` never meets `a_b`.
+#[cfg(windows)]
+fn unit_folder(unit: &str) -> String {
+    devlanes_core::paths::name_on_disk(unit).into_owned()
+}
+
 /// Writes contributor files atomically. Paths must stay inside one of `roots` (the lane
 /// worktree, which relative paths are joined to, then the lane data folder); the files
 /// must not contain secrets because they land on disk.
@@ -186,7 +211,9 @@ async fn write_files(
                 Some(worktree) if !file.path.is_absolute() => worktree.join(&file.path),
                 _ => file.path.clone(),
             };
-            if !roots.iter().any(|root| path.starts_with(root))
+            if !roots
+                .iter()
+                .any(|root| devlanes_core::paths::path_starts_with(&path, root))
                 || path
                     .components()
                     .any(|c| c == std::path::Component::ParentDir)
@@ -206,7 +233,7 @@ async fn write_files(
                 .unwrap_or_default();
             let temp = path.with_file_name(format!(".{name}.devlanes-tmp"));
             std::fs::write(&temp, &file.contents).map_err(|e| internal("io", e))?;
-            std::fs::rename(&temp, &path).map_err(|e| internal("io", e))?;
+            crate::files::rename(&temp, &path).map_err(|e| internal("io", e))?;
         }
         Ok(())
     })
@@ -232,8 +259,25 @@ pub(crate) fn readiness(spec: &ReadySpec, env: BTreeMap<String, String>) -> Read
             command: shell.clone(),
             cwd: cwd.clone(),
             env,
+            // Set with `Readiness::with_shell` from the daemon's integrations.
+            #[cfg(windows)]
+            shell: None,
         },
     }
+}
+
+/// Whether a spawned leader's identity can be recorded as a run: a PID and
+/// the session it leads.
+#[cfg(unix)]
+fn recordable(process: &devlanes_core::ProcessIdentity) -> bool {
+    process.pid > 0 && process.sid > 0
+}
+
+/// Whether a spawned leader's identity can be recorded as a run: a PID;
+/// Windows has no sessions.
+#[cfg(windows)]
+fn recordable(process: &devlanes_core::ProcessIdentity) -> bool {
+    process.pid > 0
 }
 
 /// True once the state no longer moves toward ready on its own.
@@ -1162,12 +1206,12 @@ impl Inner {
         } else {
             runner.spawn(request.spec).await
         };
-        let log_dir = self
-            .opts
-            .logs
-            .join(project.name())
-            .join(record.index.to_string())
-            .join(request.name.replace('/', "_"));
+        let log_dir = unit_log_dir(
+            &self.opts.logs,
+            &project.name(),
+            record.index,
+            &request.name,
+        );
         let managed = match spawned {
             Ok(managed) => managed,
             Err(error) => {
@@ -1196,7 +1240,7 @@ impl Inner {
             }
         };
         let run_id = match identity {
-            Some(process) if process.pid > 0 && process.sid > 0 => {
+            Some(process) if recordable(&process) => {
                 let boot_id = tokio::task::spawn_blocking(devlanes_sys::boot_id)
                     .await
                     .ok()
@@ -3078,7 +3122,20 @@ impl Inner {
                         .await
                         .unwrap_or_default()
                 };
-                crate::ready::container_ready(&container.name, ready, &ports, env, logs).await
+                #[cfg(unix)]
+                let check =
+                    crate::ready::container_ready(&container.name, ready, &ports, env, logs);
+                // Windows runs `cmd` checks through the shell found at daemon start.
+                #[cfg(windows)]
+                let check = crate::ready::container_ready(
+                    &container.name,
+                    ready,
+                    &ports,
+                    env,
+                    self.integ.shell.as_deref(),
+                    logs,
+                );
+                check.await
             })
         });
         join_all(checks).await.into_iter().collect()

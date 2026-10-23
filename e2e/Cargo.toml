@@ -12,12 +12,24 @@ workspace = true
 
 [dependencies]
 devlanes-testing = { path = "../crates/testing" }
-rustix = { version = "1", features = ["process"] }
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
+# Process table, verified termination, listeners and reserved port ranges; Unix uses
+# `ps`, `lsof` and signals.
+[target.'cfg(windows)'.dependencies]
+devlanes-sys = { path = "../crates/sys" }
+devlanes-sys-windows = { path = "../crates/sys-windows" }
 
 [dev-dependencies]
 # The TUI tests run `devlanes ui` in a pseudo-terminal and read its screen.
 portable-pty = "0.9"
 vt100 = "0.18"
+
+# The fake daemon's named pipe.
+[target.'cfg(windows)'.dev-dependencies]
+tokio.workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "devlanes-runner-windows"
+description = "Job-object runner for daemon-owned units on Windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The crate is empty on other platforms, which use devlanes-runner-pty.
+[target.'cfg(windows)'.dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+devlanes-core = { path = "../core" }
+devlanes-shell-windows = { path = "../shell-windows" }
+devlanes-sys = { path = "../sys" }
+devlanes-sys-windows = { path = "../sys-windows" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+tempfile.workspace = true

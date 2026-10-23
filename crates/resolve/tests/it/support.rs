@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use devlanes_config::ProjectConfig;
 use devlanes_core::{
-    Error,
+    Error, StopSignal,
     contrib::{
         ContribCx, Contributor, DETECT_MANIFEST, DETECT_SCRIPT_SOURCE, DetectCx, LaunchDraft,
         ScriptPlan, ScriptRequest, ScriptRunner, SecretEnv, SecretsError, SecretsProvider,
@@ -305,10 +305,24 @@ pub fn launch_view(launch: &Launch) -> Value {
             "source": s.source, "name": s.name, "runner": s.runner, "cwd": s.cwd,
         })),
         "contributors": launch.contributors,
-        "notes": launch.notes,
+        "notes": snapshot_notes(&launch.notes),
         "files": launch.files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>(),
         "env": env,
     })
+}
+
+/// The Linux signal number the snapshots show for a stop signal, the form the
+/// policy had before it became an enum.
+fn signal_number(signal: StopSignal) -> i32 {
+    match signal {
+        StopSignal::Hangup => 1,
+        StopSignal::Interrupt => 2,
+        StopSignal::Quit => 3,
+        StopSignal::Kill => 9,
+        StopSignal::User1 => 10,
+        StopSignal::User2 => 12,
+        StopSignal::Terminate => 15,
+    }
 }
 
 /// Snapshot view of a whole lane.
@@ -327,7 +341,7 @@ pub fn lane_view(lane: &ResolvedLane) -> Value {
                     "public_url": s.public_url,
                     "hosts": s.hosts,
                     "ready": format!("{:?} within {:?}", s.ready.check, s.ready.timeout),
-                    "stop": format!("signal {} after {:?}", s.stop.signal, s.stop.timeout),
+                    "stop": format!("signal {} after {:?}", signal_number(s.stop.signal), s.stop.timeout),
                     "pty": s.pty,
                     "autostart": s.autostart,
                     "hidden": s.hidden,
@@ -375,7 +389,7 @@ pub fn lane_view(lane: &ResolvedLane) -> Value {
             .collect::<serde_json::Map<_, _>>()
             .into()
     };
-    json!({
+    let view = json!({
         "lane": {"index": lane.facts.index, "name": lane.facts.name, "label": lane.facts.label},
         "domain": lane.domain,
         "port": lane.port,
@@ -395,5 +409,46 @@ pub fn lane_view(lane: &ResolvedLane) -> Value {
         "tasks": tasks,
         "setup": commands(&lane.setup),
         "teardown": commands(&lane.teardown),
-    })
+    });
+    host_neutral(view)
+}
+
+/// The view as is: the snapshots are Unix output.
+#[cfg(unix)]
+fn host_neutral(view: Value) -> Value {
+    view
+}
+
+/// The view with `/` for `\` in every string, so Windows compares against the
+/// Unix snapshots: paths joined below a `/`-spelled fixture root get `\`
+/// separators there (escaped as `\\` inside `Debug` text).
+#[cfg(windows)]
+fn host_neutral(view: Value) -> Value {
+    match view {
+        Value::String(text) => Value::String(text.replace("\\\\", "/").replace('\\', "/")),
+        Value::Array(items) => Value::Array(items.into_iter().map(host_neutral).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, host_neutral(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Launch notes the snapshots show: all of them on Unix.
+#[cfg(unix)]
+fn snapshot_notes(notes: &[String]) -> Vec<String> {
+    notes.to_vec()
+}
+
+/// Launch notes the snapshots show: Windows-only notes (`on Windows ...`) are
+/// left out so the Unix snapshots apply; tests assert them directly.
+#[cfg(windows)]
+fn snapshot_notes(notes: &[String]) -> Vec<String> {
+    notes
+        .iter()
+        .filter(|note| !note.starts_with("on Windows "))
+        .cloned()
+        .collect()
 }

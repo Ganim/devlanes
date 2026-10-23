@@ -371,16 +371,17 @@ impl Inner {
             Ok((host, managed)) => {
                 let started = matches!(ready.check, ReadySpec::Started);
                 let checked = host.clone();
+                let check = readiness(&ready.check, probe_env);
+                // Windows runs `cmd` probes through the shell found at daemon start.
+                #[cfg(windows)]
+                let check = check.with_shell(self.integ.shell.clone());
                 // In the unit's span, so a verbose start shows the probe attempts.
                 let span = tracing::debug_span!("readiness");
                 tokio::spawn(tracing::Instrument::instrument(
                     async move {
-                        run_check(
-                            &checked,
-                            readiness(&ready.check, probe_env),
-                            ready.timeout,
-                            || async move { managed.listening_ports().await },
-                        )
+                        run_check(&checked, check, ready.timeout, || async move {
+                            managed.listening_ports().await
+                        })
                         .await;
                     },
                     span,

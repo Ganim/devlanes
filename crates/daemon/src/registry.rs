@@ -14,6 +14,7 @@ use devlanes_config::{
 };
 use devlanes_core::{
     LaneId, WorktreeId,
+    paths::{name_on_disk, path_starts_with, same_path, strip_path_prefix},
     ports::{PortName, PortPool},
 };
 use devlanes_proto::{RpcError, events};
@@ -327,7 +328,7 @@ impl Inner {
         }
         for (project, lane) in self.all_lanes() {
             let st = lane.st();
-            if st.present && cwd.starts_with(&st.path) {
+            if st.present && path_starts_with(cwd, &st.path) {
                 return Ok(Some(project));
             }
         }
@@ -366,8 +367,7 @@ impl Inner {
             .map_err(|error| internal("git_failed", error))?;
         let (root, common_dir, primary_branch, relative, trees) = match &repository {
             Some(repo) => {
-                let relative = config_dir
-                    .strip_prefix(&repo.root)
+                let relative = strip_path_prefix(&config_dir, &repo.root)
                     .map(Path::to_path_buf)
                     .unwrap_or_default();
                 let trees = repo.worktrees.iter().map(tree).collect();
@@ -399,7 +399,7 @@ impl Inner {
         let identity = common_dir.clone().unwrap_or_else(|| root.clone());
         let existing = self.all_projects().into_iter().find(|project| {
             let st = project.st();
-            st.common_dir.as_ref().unwrap_or(&st.root) == &identity
+            same_path(st.common_dir.as_ref().unwrap_or(&st.root), &identity)
         });
         if let Some(project) = existing {
             self.sync_worktrees(&project, trees).await?;
@@ -554,7 +554,7 @@ impl Inner {
                     .lanes()
                     .into_iter()
                     .map(|lane| lane.st().path.clone())
-                    .find(|path| path.exists() && *path != root);
+                    .find(|path| path.exists() && !same_path(path, &root));
                 match alternative {
                     Some(path) => devlanes_git::list(&path, &common_dir)
                         .await
@@ -613,7 +613,7 @@ impl Inner {
             let (was_present, moved, rebranched) = {
                 let mut st = lane.st();
                 let was_present = st.present;
-                let moved = st.path != tree.path;
+                let moved = !same_path(&st.path, &tree.path);
                 let rebranched = st.branch != tree.branch;
                 st.path = tree.path.clone();
                 st.branch = tree.branch.clone();
@@ -659,7 +659,7 @@ impl Inner {
             let (was_present, moved) = {
                 let mut st = alias.st();
                 let was_present = st.present;
-                let moved = st.path != path || st.branch != branch;
+                let moved = !same_path(&st.path, &path) || st.branch != branch;
                 st.path = path.clone();
                 st.branch = branch.clone();
                 st.present = present;
@@ -1115,7 +1115,7 @@ impl Inner {
                 fixed_start,
                 names,
                 reserved: needs.reserved.clone(),
-                avoid: self.remote.advertised_ports(),
+                avoid: self.avoided_ports(pool).await,
             })
             .await
             .map_err(store_error)?;
@@ -1140,7 +1140,7 @@ impl Inner {
                     fixed_start: None,
                     names: shared,
                     reserved: BTreeSet::new(),
-                    avoid: self.remote.advertised_ports(),
+                    avoid: self.avoided_ports(pool).await,
                 })
                 .await
                 .map_err(store_error)?;
@@ -1151,6 +1151,24 @@ impl Inner {
             st.ports_pending = false;
         }
         Ok(allocation)
+    }
+
+    /// Ports a new pool block keeps clear of: a connected box's mirrored ports.
+    #[cfg(unix)]
+    async fn avoided_ports(&self, _pool: PortPool) -> BTreeSet<u16> {
+        self.remote.advertised_ports()
+    }
+
+    /// Ports a new pool block keeps clear of: a connected box's mirrored ports
+    /// and the Windows reserved port ranges inside `pool`, where no service
+    /// could bind. Ranges `netsh` could not list are not avoided; `doctor`
+    /// reports why.
+    #[cfg(windows)]
+    async fn avoided_ports(&self, pool: PortPool) -> BTreeSet<u16> {
+        let mut avoid = self.remote.advertised_ports();
+        let reserved = crate::reserved_ports::RESERVED.get().await;
+        avoid.extend(reserved.ports_within(pool.start, pool.end));
+        avoid
     }
 
     /// The machine-wide pool from the user config.
@@ -1185,12 +1203,14 @@ impl Inner {
     }
 
     /// `<data root>/<project>`, holding the data folders of the project's lanes.
+    /// The folder name is the project name (encoded on Windows, where `con`
+    /// or `nul.x` would name a device).
     pub(crate) fn project_data_path(&self, project: &str) -> PathBuf {
         self.opts
             .user
             .lanes
             .data_root(&self.opts.home)
-            .join(project)
+            .join(name_on_disk(project).as_ref())
     }
 
     /// `<data root>/<project>/<lane id>` (`lane.data_path`). Keyed by the lane's record
@@ -1237,7 +1257,7 @@ impl Inner {
         let path = self.lane_data_path(project, lane);
         let parent = self.project_data_path(project);
         let result = tokio::task::spawn_blocking(move || {
-            match std::fs::remove_dir_all(&path) {
+            match crate::files::remove_dir_all(&path) {
                 Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
                 _ => {}
             }
@@ -1248,6 +1268,15 @@ impl Inner {
         .await;
         match result {
             Ok(Ok(())) => {}
+            #[cfg(windows)]
+            Ok(Err(error)) if devlanes_sys_windows::file::is_held(&error) => {
+                tracing::warn!(
+                    project,
+                    lane = lane.0,
+                    %error,
+                    "cannot delete the lane data folder: a program still has a file in it open; close that program and delete the folder by hand"
+                );
+            }
             Ok(Err(error)) => {
                 tracing::warn!(project, lane = lane.0, %error, "cannot delete the lane data folder");
             }
@@ -1323,7 +1352,7 @@ impl Inner {
         }
         // Read before `primary_path`, which locks every lane, this one included.
         let path = lane.st().path.clone();
-        if path != self.primary_path(project) {
+        if !same_path(&path, &self.primary_path(project)) {
             return;
         }
         let input = {
@@ -1724,7 +1753,7 @@ impl Inner {
         let mut best: Option<(usize, bool, Arc<LaneRt>)> = None;
         for lane in project.lanes() {
             let st = lane.st();
-            if st.present && cwd.starts_with(&st.path) {
+            if st.present && path_starts_with(cwd, &st.path) {
                 let rank = (st.path.components().count(), st.alias().is_none());
                 if best
                     .as_ref()
@@ -1937,7 +1966,7 @@ pub(crate) fn lane_context(
         "name": facts.name,
         "label": facts.label,
         "path": facts.path.display().to_string(),
-        "data_path": facts.data_path.display().to_string(),
+        "data_path": devlanes_core::paths::forward_slashes(&facts.data_path),
         "domain": domain,
         "port": port,
     });

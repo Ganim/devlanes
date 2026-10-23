@@ -47,6 +47,9 @@ fn wait_for_exit(lab: &Lab, daemon: i32) -> Result<()> {
 /// SIGTERM to the daemon stops the service (process gone, port closed) and
 /// closes its run, so the next daemon finds the lane idle with no orphan; the
 /// stop task does not run.
+// Signals are Unix. On Windows, logoff and shutdown reach the daemon as
+// WM_ENDSESSION; devlanes-sys-windows tests that window.
+#[cfg(unix)]
 #[test]
 fn sigterm_stops_units_without_lane_stop_tasks() -> Result<()> {
     let lab = Lab::with_config(CONFIG, BUDGET)?;

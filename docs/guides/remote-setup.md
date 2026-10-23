@@ -60,6 +60,8 @@ Hidden units stay on the box: their ports are not mirrored and the box refuses s
 
 ## On the client
 
+The client runs macOS or Linux. On Windows, `devlanes remote connect` fails with `not_supported_yet`, because the SSH transport has no Windows version yet.
+
 - A `Host` entry in `~/.ssh/config`. devlanes runs the system `ssh`, so `ProxyJump`, certificates, `IdentityFile` and `User` apply. The name you give `remote connect` is that `Host`.
 - Your key in an agent. The ssh master is a child of the local daemon and uses the agent the daemon was started with; a daemon spawned from your shell inherits that shell's `SSH_AUTH_SOCK`. If the agent socket changes (new login, 1Password restart), `devlanes daemon restart` picks up the new one.
 - `devlanes certs trust`, once. The box's hostnames are served by your local proxy with your local CA.

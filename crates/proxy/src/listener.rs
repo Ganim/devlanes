@@ -53,7 +53,7 @@ fn bind_listeners_with(
                 )
             } else {
                 format!(
-                    "Could not bind port {port}: {error}; using {}. On Linux, configure CAP_NET_BIND_SERVICE or ip_unprivileged_port_start for low ports.",
+                    "Could not bind port {port}: {error}; using {}. {DENIED_HINT}",
                     listeners.port
                 )
             };
@@ -65,7 +65,20 @@ fn bind_listeners_with(
     }
 }
 
+/// What usually denies a port, for the fallback message.
+#[cfg(unix)]
+const DENIED_HINT: &str =
+    "On Linux, configure CAP_NET_BIND_SERVICE or ip_unprivileged_port_start for low ports.";
+
+/// Windows needs no privilege for low ports. Access denied means another
+/// program holds the port exclusively (port 80 is often http.sys, PID 4) or
+/// Windows reserved it for Hyper-V, WSL or Docker.
+#[cfg(windows)]
+const DENIED_HINT: &str = "On Windows, another program may hold it: port 80 is often held by http.sys (PID 4, System), listed by `netsh http show servicestate`. Reserved port ranges are listed by `netsh int ipv4 show excludedportrange protocol=tcp`.";
+
 /// Errors that mean this port is taken or privileged, as opposed to the host lacking a family.
+/// On Windows `PermissionDenied` (WSAEACCES) also covers reserved port ranges
+/// and ports another socket holds exclusively.
 fn port_unavailable(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -122,10 +135,25 @@ fn bind(address: SocketAddr) -> io::Result<TcpListener> {
     if address.is_ipv6() {
         socket.set_only_v6(true)?;
     }
+    #[cfg(windows)]
+    exclusive_if_wildcard(&socket, address)?;
     socket.set_nonblocking(true)?;
     socket.bind(&address.into())?;
     socket.listen(1024)?;
     TcpListener::from_std(socket.into())
+}
+
+/// Wildcard (`lan: true`) listeners only: without `SO_EXCLUSIVEADDRUSE` another
+/// program can bind a specific address on the same port and take those
+/// connections. A loopback listener already wins over later wildcard binds, and
+/// Microsoft documents that an exclusive port may not be bound again while
+/// connections it accepted linger, which would slow a daemon restart.
+#[cfg(windows)]
+fn exclusive_if_wildcard(socket: &Socket, address: SocketAddr) -> io::Result<()> {
+    if address.ip().is_unspecified() {
+        devlanes_sys_windows::net::set_exclusive_address_use(socket)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -164,6 +192,50 @@ mod tests {
         assert_ne!(bound.port, port);
         let reason = bound.fallback_reason.unwrap_or_default();
         assert!(reason.contains("in use"), "{reason}");
+        Ok(())
+    }
+
+    /// WSAEACCES (10013), what a reserved range or an exclusively held port
+    /// returns, falls back with the Windows hint.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn access_denied_port_falls_back_with_the_windows_hint() -> io::Result<()> {
+        let denied = |address: SocketAddr| {
+            if address.port() == 80 {
+                Err(io::Error::from_raw_os_error(10013))
+            } else {
+                bind(address)
+            }
+        };
+        let bound = bind_listeners_with(80, 0, false, denied)?;
+        assert_ne!(bound.port, 80);
+        let reason = bound.fallback_reason.unwrap_or_default();
+        assert!(
+            reason.contains("netsh http show servicestate") && reason.contains("excludedportrange"),
+            "{reason}"
+        );
+        Ok(())
+    }
+
+    /// Only wildcard addresses get `SO_EXCLUSIVEADDRUSE`. The sockets are
+    /// never bound, so no firewall prompt appears.
+    #[cfg(windows)]
+    #[test]
+    fn only_wildcard_listeners_are_exclusive() -> io::Result<()> {
+        let exclusive = |ip: std::net::IpAddr| -> io::Result<bool> {
+            let address = SocketAddr::new(ip, 0);
+            let socket = Socket::new(
+                Domain::for_address(address),
+                Type::STREAM,
+                Some(Protocol::TCP),
+            )?;
+            exclusive_if_wildcard(&socket, address)?;
+            devlanes_sys_windows::net::exclusive_address_use(&socket)
+        };
+        assert!(exclusive(Ipv4Addr::UNSPECIFIED.into())?);
+        assert!(exclusive(Ipv6Addr::UNSPECIFIED.into())?);
+        assert!(!exclusive(Ipv4Addr::LOCALHOST.into())?);
+        assert!(!exclusive(Ipv6Addr::LOCALHOST.into())?);
         Ok(())
     }
 

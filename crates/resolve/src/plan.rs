@@ -11,7 +11,7 @@ use devlanes_config::{
     Templated,
 };
 use devlanes_core::{
-    StopPolicy,
+    StopPolicy, StopSignal,
     color::unit_color,
     contrib::{
         ContribCx, ContribMemo, Contributor, DetectCx, DraftCommand, LaunchDraft, ScriptInfo,
@@ -27,7 +27,7 @@ use crate::{
     ResolvedLane, ResolvedService, ResolvedTask, ServiceLayout, SyncSpec,
     layout::{self, Namespaces, env_namespace, replica_value},
     select::{active_profiles, merge_options},
-    util::{shell_quote, signal_number},
+    util::shell_quote,
 };
 
 /// Plans every service replica, task and infra command of a lane.
@@ -119,7 +119,7 @@ async fn plan_lane<E: Extensions>(
         ("DEVLANES_LANE_NAME".to_owned(), input.facts.name.clone()),
         (
             crate::LANE_DATA_ENV.to_owned(),
-            input.facts.data_path.display().to_string(),
+            devlanes_core::paths::forward_slashes(&input.facts.data_path),
         ),
     ]);
     devlanes.extend(input.ca_env.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -380,6 +380,8 @@ impl<E: Extensions> Planner<'_, '_, E> {
             &path,
         )?;
         let stop = stop_policy(service.stop.as_ref(), &context, &path)?;
+        #[cfg(windows)]
+        let launch = with_windows_stop_note(launch, stop.signal);
         let sync = self.sync(service.sync.as_deref().unwrap_or_default(), &context, &path)?;
         Ok(ResolvedService {
             name: layout.name.clone(),
@@ -710,9 +712,11 @@ impl<E: Extensions> Planner<'_, '_, E> {
         let Some((program, rest)) = argv.split_first() else {
             return Err(ResolveError::invalid(run_path, "the command is empty"));
         };
-        let mut client = input.client_env.clone();
+        // Folded here as `assemble` folds every layer, so a removal spelled
+        // `PATH` also drops a client's `Path` on Windows.
+        let mut client = devlanes_core::env::fold_names(input.client_env.clone());
         for key in remove.iter().chain(&secrets.remove) {
-            client.remove(key);
+            client.remove(&devlanes_core::env::fold_name(key.clone()));
         }
         if !secrets.files.is_empty() {
             let keys: Vec<_> = secrets.files.keys().map(String::as_str).collect();
@@ -1083,6 +1087,19 @@ fn ready(
     })
 }
 
+/// Adds the `stop_signal_mapped` note when a Windows stop sends something other
+/// than the configured signal. Only a `run:` string runs through the shell, whose
+/// programs ignore Ctrl-C, so SIGINT is mapped for those alone.
+#[cfg(windows)]
+fn with_windows_stop_note(mut launch: Launch, signal: StopSignal) -> Launch {
+    let through_shell =
+        launch.program == "/bin/sh" && launch.args.first().is_some_and(|a| a == "-c");
+    launch
+        .notes
+        .extend(signal.windows_launch_note(through_shell));
+    launch
+}
+
 /// Converts `stop` into a policy; defaults are SIGTERM and ten seconds.
 fn stop_policy(
     stop: Option<&StopConfig>,
@@ -1094,7 +1111,7 @@ fn stop_policy(
         return Ok(policy);
     };
     if let Some(signal) = &stop.signal {
-        policy.signal = signal_number(signal).ok_or_else(|| {
+        policy.signal = StopSignal::from_config_name(signal).ok_or_else(|| {
             ResolveError::invalid(
                 format!("{path}.stop.signal"),
                 format!("unsupported signal `{signal}`"),

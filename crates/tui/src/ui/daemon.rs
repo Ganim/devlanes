@@ -99,6 +99,7 @@ fn inside(area: Rect) -> Rect {
 
 /// `/Users/acme/.devlanes` as `~/.devlanes` when `/Users/acme` is the
 /// user's home (`App::user_home`).
+#[cfg(unix)]
 fn home_short(app: &App, path: &str) -> String {
     let home = app
         .user_home
@@ -109,6 +110,16 @@ fn home_short(app: &App, path: &str) -> String {
         Some(home) if path.starts_with(home) => format!("~{}", &path[home.len()..]),
         _ => path.to_owned(),
     }
+}
+
+/// `C:\Users\acme\.devlanes` as `~\.devlanes` when `C:\Users\acme` is the
+/// user's profile directory (`App::user_home`), in any case or separator.
+#[cfg(windows)]
+fn home_short(app: &App, path: &str) -> String {
+    app.user_home
+        .as_deref()
+        .and_then(|home| crate::home::shorten(home, std::path::Path::new(path)))
+        .unwrap_or_else(|| path.to_owned())
 }
 
 /// The facts: version and pid, uptime, socket, managed processes, clients,

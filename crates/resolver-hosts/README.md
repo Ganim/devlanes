@@ -80,6 +80,7 @@ With both, the project's routed names are written on every route change, even wh
 - The helper only accepts names under `localhost`, plus a TLD under `localhost`, `test`, `internal` or `home.arpa`. `HostsClient::new` rejects any other TLD before running sudo.
 - `install` refuses debug builds of the helper, and refuses directories on the install path that are not root-owned or that others can write.
 - `install` works from a private copy of the helper and compares the root-owned staged helper and rule with what it checked before activating either; a failure during activation restores the previous helper and rule.
+- On Windows only `probe_localhost` and the policy are used: Windows answers `*.localhost` itself, the daemon never writes the hosts file, and the helper commands fail as unsupported.
 
 The helper's README covers what gets installed, the sudo rule and the security
 model: [`crates/hosts-helper/README.md`](../hosts-helper/README.md).

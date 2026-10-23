@@ -512,12 +512,12 @@ async fn drive_starts_with_the_profiles_checked_in_the_picker() -> TestResult {
     // The picker's keys wait for its list; the start's notice is waited for
     // before quitting.
     let steps = vec![
-        Step::Key(key(KeyCode::Char('p'))),
+        Step::Key(Box::new(key(KeyCode::Char('p')))),
         Step::Screen("frontend"),
-        Step::Key(key(KeyCode::Char('j'))),
-        Step::Key(key(KeyCode::Char('j'))),
-        Step::Key(key(KeyCode::Char(' '))),
-        Step::Key(key(KeyCode::Enter)),
+        Step::Key(Box::new(key(KeyCode::Char('j')))),
+        Step::Key(Box::new(key(KeyCode::Char('j')))),
+        Step::Key(Box::new(key(KeyCode::Char(' ')))),
+        Step::Key(Box::new(key(KeyCode::Enter))),
     ];
     let terminal = run_keys(Arc::clone(&api), steps, &["started acme@0 with"], |_| true).await?;
     let calls = api.calls();

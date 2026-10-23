@@ -3,6 +3,7 @@
 mod allocation;
 mod lifecycle;
 mod models;
+mod paths;
 mod queries;
 mod records;
 mod retention;
@@ -22,7 +23,6 @@ use diesel::{
 };
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use std::{
-    os::unix::ffi::OsStrExt,
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -246,21 +246,15 @@ fn roll_back_open_transactions(connection: &mut SqliteConnection) -> bool {
     }
 }
 
-/// Encodes Unix paths as SQLite file URIs to preserve non-UTF-8 names and prevent
-/// filename punctuation from becoming URI options. Runs on the database thread.
+/// Opens the database through a SQLite file URI built per OS (see
+/// [`paths::database_url`]) so filename punctuation never becomes URI options.
+/// Runs on the database thread.
 fn open_connection(path: &Path) -> Result<(SqliteConnection, PathBuf), Error> {
     let (path, url) = if path == Path::new(":memory:") {
         (path.to_path_buf(), ":memory:".to_owned())
     } else {
         let path = std::path::absolute(path).map_err(Error::Filesystem)?;
-        let bytes = path.as_os_str().as_bytes();
-        if bytes.contains(&0) {
-            return Err(Error::Invalid("database path contains NUL".into()));
-        }
-        let url = format!(
-            "file:{}",
-            percent_encoding::percent_encode(bytes, percent_encoding::NON_ALPHANUMERIC)
-        );
+        let url = paths::database_url(&path)?;
         (path, url)
     };
     let mut connection = SqliteConnection::establish(&url).map_err(Error::Connection)?;

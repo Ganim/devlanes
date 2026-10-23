@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -113,8 +113,93 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  build-windows:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          # Native arm64 runner, so the binary is executed like the x64 one.
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      # As in build: shipped binaries are always compiled from source.
+      KACHE_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      # .cargo/config.toml names kache as rustc wrapper, so it must exist even when disabled.
+      - uses: ./.github/actions/kache
+      # The build job checks the tag against the workspace and plugin versions; the
+      # smoke test below ties this binary to the tag.
+      - name: Version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      # devlanes-hosts is Unix-only; .cargo/config.toml links the C runtime statically.
+      - name: Build
+        env:
+          DEVLANES_BUILD_ID: ${{ github.ref_name }}
+        run: cargo build --release --locked --target "$TARGET" -p devlanes
+      # .gitattributes checks the schemas out with LF on Windows too, as build.rs writes them.
+      - name: Check the committed schemas
+        run: git diff --exit-code crates/config/schema.json crates/config/user-schema.json
+      - name: Smoke test
+        run: |
+          "target/$TARGET/release/devlanes.exe" --version | tr -d '\r' | grep -Fx "devlanes $VERSION"
+      # The Visual C++ Redistributable is not part of Windows, so the executable must
+      # not import its DLLs.
+      - name: Check the C runtime is linked statically
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $dumpbin = @(& $vswhere -latest -products * -find 'VC\Tools\MSVC\*\bin\Host*\*\dumpbin.exe')[0]
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          $imports = & $dumpbin /nologo /dependents "target/$env:TARGET/release/devlanes.exe" | Out-String
+          if ($LASTEXITCODE -ne 0 -or $imports -notmatch '(?im)^\s+kernel32\.dll\s*$') { throw "unexpected dumpbin output:`n$imports" }
+          if ($imports -match '(?im)^\s+(vcruntime|msvcp)\S*\.dll\s*$') { throw "devlanes.exe imports the Visual C++ runtime:`n$imports" }
+          Write-Output $imports
+      - name: Package
+        shell: pwsh
+        run: ./packaging/scripts/package.ps1 -Version $env:VERSION -Target $env:TARGET -OutDir dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  # The npm job publishes every package in the launcher's optionalDependencies. A
+  # package that does not exist yet can only be created by its owner (trusted
+  # publishing needs an existing package), so a missing one stops the release
+  # before a draft exists, instead of after the GitHub release is published.
+  npm-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Every npm package exists on the registry
+        run: |
+          missing=
+          for name in devlanes $(jq -r '.optionalDependencies | keys[]' packaging/npm/devlanes/package.json); do
+            if ! npm view "$name" name >/dev/null 2>&1; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::not on the npm registry:$missing; create each with trusted publishing first (packaging/README.md)"
+            exit 1
+          fi
+
   release:
-    needs: [test, build]
+    needs: [test, build, build-windows, npm-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -149,12 +234,13 @@ jobs:
             "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
           jq -e '.artifacts | length == 4' dist/release-manifest.json
           cp crates/config/schema.json crates/config/user-schema.json dist/
-          cp install.sh dist/
+          cp install.sh install.ps1 dist/
       # Verify with: gh attestation verify devlanes-VERSION-TARGET.tar.gz --repo devlanes-run/devlanes
+      # (or the .zip for Windows).
       - name: Attest build provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: dist/*.tar.gz
+          subject-checksums: dist/SHA256SUMS
       - name: Homebrew formula
         run: |
           mkdir -p formula
@@ -166,7 +252,7 @@ jobs:
           if-no-files-found: error
       - name: Upload to a draft release
         run: |
-          set -- dist/*.tar.gz dist/SHA256SUMS dist/release-manifest.json dist/schema.json dist/user-schema.json dist/install.sh
+          set -- dist/*.tar.gz dist/*.zip dist/SHA256SUMS dist/release-manifest.json dist/schema.json dist/user-schema.json dist/install.sh dist/install.ps1
           if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then
             # A rerun may refill a draft, but published assets are never replaced.
             if [ "$draft" != true ]; then

@@ -8,9 +8,12 @@
 //! # Ok::<(), devlanes_testing::Error>(())
 //! ```
 
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Output};
+
+pub mod fake_tool;
 
 /// Failures creating isolated test resources or invoking Git.
 #[derive(Debug, thiserror::Error)]
@@ -21,6 +24,12 @@ pub enum Error {
     /// Git rejected a command; stderr is retained for test diagnostics.
     #[error("git failed: {0}")]
     Git(String),
+    /// A fake tool's behaviour could not be written.
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    /// The prebuilt `fake-tool` binary is missing.
+    #[error("fake-tool: {0}")]
+    FakeTool(String),
 }
 
 /// A short, private home removed on drop. Stop owned processes before dropping it.
@@ -31,6 +40,7 @@ impl TestHome {
     /// Creates a home with a run directory short enough for macOS Unix sockets.
     ///
     /// This blocking filesystem helper should run outside async executor threads.
+    #[cfg(unix)]
     pub fn new() -> Result<Self, Error> {
         // macOS TMPDIR is often too long for a nested daemon socket path.
         let dir = tempfile::Builder::new()
@@ -44,6 +54,19 @@ impl TestHome {
         Ok(Self(dir))
     }
 
+    /// Creates a home with a run directory in the user's temp directory, whose
+    /// profile ACL already keeps other users out.
+    ///
+    /// This blocking filesystem helper should run outside async executor threads.
+    #[cfg(windows)]
+    pub fn new() -> Result<Self, Error> {
+        let dir = tempfile::Builder::new()
+            .prefix("dl-")
+            .tempdir_in(std::env::temp_dir())?;
+        std::fs::create_dir(dir.path().join("run"))?;
+        Ok(Self(dir))
+    }
+
     /// Returns the home path while this owner is alive.
     pub fn path(&self) -> &Path {
         self.0.path()
@@ -53,6 +76,9 @@ impl TestHome {
     pub fn configure(&self, command: &mut Command) {
         command.env("DEVLANES_HOME", self.path());
         command.env("HOME", self.path());
+        // `std::env::home_dir` and most Windows tools read the profile, not HOME.
+        #[cfg(windows)]
+        command.env("USERPROFILE", self.path());
         command.env("XDG_CONFIG_HOME", self.path().join("config"));
         command.env("XDG_DATA_HOME", self.path().join("data"));
         command.env("XDG_CACHE_HOME", self.path().join("cache"));
@@ -98,10 +124,16 @@ impl TestRepo {
                 command.env_remove(key);
             }
         }
+        #[cfg(unix)]
+        let global = "/dev/null";
+        #[cfg(windows)]
+        let empty = empty_git_config()?;
+        #[cfg(windows)]
+        let global = &*empty;
         let output = command
             .current_dir(self.path())
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", global)
             .args(["-c", "core.hooksPath=/dev/null", "-c", "init.templateDir="])
             .args(args)
             .output()?;
@@ -114,11 +146,22 @@ impl TestRepo {
     }
 }
 
+/// An empty file to point `GIT_CONFIG_GLOBAL` at, removed on drop. Git for
+/// Windows has no `/dev/null` file; an empty file reads the same.
+#[cfg(windows)]
+pub fn empty_git_config() -> Result<tempfile::TempPath, Error> {
+    Ok(tempfile::Builder::new()
+        .prefix("devlanes-gitconfig-")
+        .tempfile()?
+        .into_temp_path())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Home paths support Unix sockets and are removed with their owner.
+    #[cfg(unix)]
     #[test]
     fn home_lifetime_and_socket() -> Result<(), Error> {
         let home = TestHome::new()?;
@@ -132,6 +175,28 @@ mod tests {
                 .any(|(key, value)| key == "DEVLANES_HOME" && value == Some(path.as_os_str()))
         );
         drop(socket);
+        drop(home);
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    /// Homes stand in for HOME and USERPROFILE and are removed with their owner.
+    #[cfg(windows)]
+    #[test]
+    fn home_lifetime_and_profile() -> Result<(), Error> {
+        let home = TestHome::new()?;
+        let path = home.path().to_owned();
+        assert!(path.join("run").is_dir());
+        let mut command = Command::new("unused");
+        home.configure(&mut command);
+        for name in ["DEVLANES_HOME", "HOME", "USERPROFILE"] {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == name && value == Some(path.as_os_str())),
+                "{name}"
+            );
+        }
         drop(home);
         assert!(!path.exists());
         Ok(())

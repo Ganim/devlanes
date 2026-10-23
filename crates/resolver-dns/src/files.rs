@@ -130,7 +130,18 @@ fn restart_resolved() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::default_listen;
+
+    /// The Unix default address; Windows listens elsewhere but builds these
+    /// files in tests too.
+    fn default_listen() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 15353))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_default_address() {
+        assert_eq!(crate::default_listen(), default_listen());
+    }
 
     #[test]
     fn macos_file() {

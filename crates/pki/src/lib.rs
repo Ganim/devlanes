@@ -43,8 +43,18 @@ pub enum Error {
     Tls(#[from] rustls::Error),
     #[error("CA directory contains an incomplete certificate/key pair")]
     IncompleteCa,
+    #[cfg(unix)]
     #[error("CA key or directory must be a regular non-symlink path with private permissions")]
     InsecurePath,
+    /// Access lists are hard to read by hand, so Windows names the path, what
+    /// is wrong with it and, when one exists, the `icacls` command that fixes it.
+    #[cfg(windows)]
+    #[error("CA path {} is not private to this user: {problem}{}", .path.display(), fix_suffix(.fix))]
+    InsecurePath {
+        path: std::path::PathBuf,
+        problem: String,
+        fix: Option<String>,
+    },
     #[error("CA certificate is invalid, expired, or lacks signing authority")]
     InvalidCa,
     #[error("certificate SAN list must contain valid DNS names")]
@@ -417,6 +427,16 @@ fn subject(common_name: Option<&str>, unit: &str) -> DistinguishedName {
 }
 
 /// `user@host` of the creating account, so CAs from several machines can be told apart.
+#[cfg(windows)]
+fn machine_label() -> String {
+    let read = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
+    let user = read("USERNAME").unwrap_or_else(|| "user".to_owned());
+    let host = read("COMPUTERNAME").unwrap_or_else(|| "localhost".to_owned());
+    format!("{user}@{host}")
+}
+
+/// `user@host` of the creating account, so CAs from several machines can be told apart.
+#[cfg(unix)]
 fn machine_label() -> String {
     let user = ["USER", "LOGNAME"]
         .into_iter()
@@ -428,6 +448,7 @@ fn machine_label() -> String {
 }
 
 /// Existing directories are checked, never silently chmodded.
+#[cfg(unix)]
 fn create_private_directory(path: &Path) -> Result<(), Error> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -442,7 +463,109 @@ fn create_private_directory(path: &Path) -> Result<(), Error> {
     }
 }
 
+/// Creates `path` (its parent must exist) owned by this user with an access
+/// list for the user, SYSTEM and Administrators that the key and certificate
+/// inherit. An existing directory is checked, never changed.
+#[cfg(windows)]
+pub fn create_private_dir(path: &Path) -> Result<(), Error> {
+    create_private_directory(path)
+}
+
+/// See [`create_private_dir`].
+#[cfg(windows)]
+fn create_private_directory(path: &Path) -> Result<(), Error> {
+    match check_private(path, true) {
+        Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            match devlanes_sys_windows::security::ensure_private_dir(path)? {
+                Ok(_) => Ok(()),
+                Err(problem) => Err(insecure_path(path, problem, true)),
+            }
+        }
+        checked => checked,
+    }
+}
+
+/// Rejects links, other owners, extra hard links and access for other
+/// accounts before secret material is opened.
+#[cfg(windows)]
+fn check_private(path: &Path, directory: bool) -> Result<(), Error> {
+    use devlanes_sys_windows::security::{check_private_dir, check_private_file};
+    let verdict = if directory {
+        check_private_dir(path)?
+    } else {
+        check_private_file(path)?
+    };
+    verdict.map_err(|problem| insecure_path(path, problem, directory))
+}
+
+/// The `icacls` commands that make `path` private to this user: `/reset`
+/// drops the explicit grants (`/grant:r` only replaces this user's own), then
+/// the path keeps a grant to this user alone; a `directory` also resets
+/// everything inside so it inherits that, since one recursive grant would
+/// leave the entries' explicit grants in place. The steps are joined with
+/// `; `, which Windows PowerShell 5.1 (it rejects `&&`), PowerShell 7 and Git
+/// Bash all run in order. `None` when this user's SID cannot be read.
+#[cfg(windows)]
+pub fn icacls_fix(path: &Path, directory: bool) -> Option<String> {
+    let user = devlanes_sys_windows::token::current_user().ok()?;
+    let shown = path.display();
+    Some(if directory {
+        format!(
+            r#"icacls "{shown}" /reset; icacls "{shown}" /inheritance:r /grant:r "*{user}:(OI)(CI)F"; icacls "{shown}\*" /reset /T /C"#
+        )
+    } else {
+        format!(r#"icacls "{shown}" /reset; icacls "{shown}" /inheritance:r /grant:r "*{user}:F""#)
+    })
+}
+
+/// [`Error::InsecurePath`] for `problem`, with the [`icacls_fix`] when other
+/// accounts have access.
+#[cfg(windows)]
+fn insecure_path(
+    path: &Path,
+    problem: devlanes_sys_windows::security::Problem,
+    directory: bool,
+) -> Error {
+    use devlanes_sys_windows::security::Problem;
+    let list = |sids: &[devlanes_sys_windows::token::Sid]| {
+        sids.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (problem, fixable) = match problem {
+        Problem::NotADirectory => ("it is not a directory".to_owned(), false),
+        Problem::NotAFile => ("it is not a regular file".to_owned(), false),
+        Problem::ReparsePoint => ("it is a symlink or junction".to_owned(), false),
+        Problem::Owner(owner) => (format!("another account ({owner}) owns it"), false),
+        Problem::Acl(others) => (
+            format!("other accounts can access it ({})", list(&others)),
+            true,
+        ),
+        Problem::HardLinks(links) => (format!("it has {links} hard links"), false),
+        Problem::Unreadable => (
+            "its owner or access list cannot be read or judged".to_owned(),
+            false,
+        ),
+    };
+    let fix = fixable.then(|| icacls_fix(path, directory)).flatten();
+    Error::InsecurePath {
+        path: path.to_owned(),
+        problem,
+        fix,
+    }
+}
+
+/// `; fix: <command>` for [`Error::InsecurePath`], or nothing.
+#[cfg(windows)]
+fn fix_suffix(fix: &Option<String>) -> String {
+    fix.as_ref()
+        .map(|fix| format!("; fix: {fix}"))
+        .unwrap_or_default()
+}
+
 /// Rejects symlinks and group/world access before secret material is opened.
+#[cfg(unix)]
 fn check_private(path: &Path, directory: bool) -> Result<(), Error> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
@@ -488,11 +611,33 @@ fn write_private(path: &Path, bytes: &[u8], replace: bool) -> Result<(), Error> 
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
     if replace {
-        file.persist(path).map_err(|error| error.error)?;
+        persist(file, path)?;
     } else {
         file.persist_noclobber(path).map_err(|error| error.error)?;
     }
     Ok(())
+}
+
+/// Moves `file` over `path`.
+#[cfg(unix)]
+fn persist(file: tempfile::NamedTempFile, path: &Path) -> io::Result<()> {
+    file.persist(path).map(drop).map_err(|error| error.error)
+}
+
+/// Moves `file` over `path`, retried while another program (antivirus, a
+/// backup tool) briefly holds the old file, which Windows refuses to replace.
+#[cfg(windows)]
+fn persist(file: tempfile::NamedTempFile, path: &Path) -> io::Result<()> {
+    let mut pending = Some(file);
+    devlanes_sys_windows::file::retry_while_held(|| {
+        let Some(file) = pending.take() else {
+            return Ok(());
+        };
+        file.persist(path).map(drop).map_err(|error| {
+            pending = Some(error.file);
+            error.error
+        })
+    })
 }
 
 /// Makes completed renames durable so a power loss cannot reorder the key and certificate.

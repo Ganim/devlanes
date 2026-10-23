@@ -11,6 +11,7 @@ mod control;
 pub mod diagnostics;
 mod dns;
 mod engine;
+mod files;
 pub mod hosts;
 mod input;
 pub mod integrations;
@@ -28,6 +29,9 @@ pub mod ready;
 mod reconcile;
 mod registry;
 mod remote;
+mod rendered;
+#[cfg(windows)]
+pub mod reserved_ports;
 mod resolve;
 mod routes;
 mod sampler;
@@ -40,9 +44,10 @@ pub mod update;
 
 pub use engine::{Engine, EngineOptions};
 
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::{
     fs::{File, OpenOptions},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -50,14 +55,15 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use devlanes_ipc::{Connection, Frame};
+use devlanes_ipc::{
+    Connection, Frame,
+    local::{self, BindError, LocalListener, LocalStream},
+};
 use devlanes_proto::{Control, Event, Hello, Method, Outcome, Request, Response, RpcError};
+#[cfg(unix)]
 use fs2::FileExt;
 use serde_json::{Value, json};
-use tokio::{
-    net::{UnixListener, UnixStream},
-    sync::{mpsc, oneshot},
-};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -68,6 +74,11 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("a daemon already owns the lock")]
     AlreadyRunning,
+    /// Windows: another process created the daemon's pipe name first, while
+    /// this daemon held the lock, so it is no daemon of this home.
+    #[cfg(windows)]
+    #[error("another process holds the daemon's pipe {}", .0.display())]
+    EndpointTaken(PathBuf),
     #[error("unsafe daemon directory: {0}")]
     UnsafeDirectory(PathBuf),
     #[error("startup worker failed: {0}")]
@@ -343,7 +354,7 @@ fn shutdown_answer(
 
 /// Owns the singleton lock until all shutdown work and socket cleanup complete.
 pub struct Server {
-    listener: UnixListener,
+    listener: LocalListener,
     _lock: File,
     options: Options,
     started: Instant,
@@ -357,15 +368,13 @@ impl Server {
     pub async fn bind(options: Options) -> Result<Self, Error> {
         let prepared = options.clone();
         let lock = tokio::task::spawn_blocking(move || prepare(&prepared)).await??;
-        match UnixStream::connect(&options.socket).await {
-            Ok(_) => return Err(Error::AlreadyRunning),
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                tokio::fs::remove_file(&options.socket).await?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        let listener = UnixListener::bind(&options.socket)?;
+        let listener = match LocalListener::bind(&options.socket).await {
+            Ok(listener) => listener,
+            Err(BindError::AlreadyListening(_)) => return Err(Error::AlreadyRunning),
+            #[cfg(windows)]
+            Err(BindError::Taken(path)) => return Err(Error::EndpointTaken(path)),
+            Err(BindError::Io(error)) => return Err(error.into()),
+        };
         let (stops, answered) = Stops::new();
         Ok(Self {
             listener,
@@ -407,12 +416,12 @@ impl Server {
             {
                 tracing::warn!(code = %stopped.code, "shutdown after a failed reconcile");
             }
-            let _ = tokio::fs::remove_file(&self.options.socket).await;
+            let _ = local::remove(&self.options.socket).await;
             return Err(Error::Reconcile(startup_reason(&error)));
         }
         ready()?;
         let Self {
-            listener,
+            mut listener,
             options,
             started,
             shutdown,
@@ -439,7 +448,7 @@ impl Server {
                     // One client's failure must never end the daemon: a peer that closes
                     // before its credentials are read (macOS: ENOTCONN) used to exit here.
                     let stream = match accepted {
-                        Ok((stream, _)) => stream,
+                        Ok(stream) => stream,
                         Err(error) => {
                             tracing::warn!(%error, "accept failed");
                             // Out of descriptors: give closing units a moment instead of spinning.
@@ -447,9 +456,9 @@ impl Server {
                             continue;
                         }
                     };
-                    match stream.peer_cred() {
-                        Ok(cred) if cred.uid() == rustix::process::getuid().as_raw() => {}
-                        Ok(_) => continue,
+                    match stream.peer_is_current_user() {
+                        Ok(true) => {}
+                        Ok(false) => continue,
                         Err(error) => {
                             tracing::debug!(%error, "client left before its credentials were read");
                             continue;
@@ -487,7 +496,7 @@ impl Server {
         let _ = tokio::time::timeout(ANSWER_WAIT, answered.recv()).await;
         clients.abort_all();
         while clients.join_next().await.is_some() {}
-        let remove = tokio::fs::remove_file(&options.socket).await;
+        let remove = local::remove(&options.socket).await;
         stopped.map_err(|error| Error::Shutdown(error.code))?;
         remove?;
         Ok(())
@@ -520,6 +529,7 @@ fn startup_reason(error: &RpcError) -> String {
 }
 
 /// Uses no-follow opens inside owner-only directories to protect the singleton lock.
+#[cfg(unix)]
 fn prepare(options: &Options) -> Result<File, Error> {
     let parent = options
         .socket
@@ -530,10 +540,18 @@ fn prepare(options: &Options) -> Result<File, Error> {
     Ok(lock)
 }
 
+/// Takes the singleton lock; the pipe lives outside the filesystem, protected
+/// by its own descriptor.
+#[cfg(windows)]
+fn prepare(options: &Options) -> Result<File, Error> {
+    lock_singleton(&options.home)
+}
+
 /// Takes the daemon's singleton lock under `home` (blocking I/O). Offline
 /// maintenance such as the CLI's local `daemon reset-state` holds it, so no daemon
 /// starts meanwhile; [`Error::AlreadyRunning`] means one owns it. Dropping the
 /// file releases the lock.
+#[cfg(unix)]
 pub fn lock_singleton(home: &Path) -> Result<File, Error> {
     secure_directory(home)?;
     let run = home.join("run");
@@ -553,9 +571,44 @@ pub fn lock_singleton(home: &Path) -> Result<File, Error> {
     }
 }
 
+/// Takes the daemon's singleton lock under `home` (blocking I/O) with
+/// `LockFileEx`; [`Error::AlreadyRunning`] means another process holds it.
+/// Dropping the file releases the lock. A symlink or junction at the lock path
+/// is opened itself, never followed, and refused, as `O_NOFOLLOW` does on Unix.
+#[cfg(windows)]
+pub fn lock_singleton(home: &Path) -> Result<File, Error> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    // Win32 values: open a link itself; the attribute every link carries.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    secure_directory(home)?;
+    let run = home.join("run");
+    secure_directory(&run)?;
+    let path = run.join("daemon.lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path)?;
+    if lock.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is a symlink or junction", path.display()),
+        )));
+    }
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Error::AlreadyRunning),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 /// Creates `path` private, or tightens an existing directory of this user to
 /// 0700. A symlink, a non-directory or another user's directory is refused: it
 /// may not be ours to change.
+#[cfg(unix)]
 fn secure_directory(path: &Path) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::DirBuilder::new()
@@ -577,6 +630,27 @@ fn secure_directory(path: &Path) -> Result<(), Error> {
         tracing::warn!(path = %path.display(), mode = format!("{mode:o}"), "tightened a devlanes directory to 0700");
     }
     Ok(())
+}
+
+/// Creates `path` private (owned by this user, access for this user, SYSTEM
+/// and Administrators), or tightens an existing, empty directory of this user
+/// that others can reach. A symlink or junction, a non-directory, another
+/// account's directory or a non-empty one others can reach is refused: its
+/// entries would keep their grants, so fixing it is the user's call.
+#[cfg(windows)]
+fn secure_directory(path: &Path) -> Result<(), Error> {
+    use devlanes_sys_windows::security::{Outcome, ensure_private_dir};
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match ensure_private_dir(path)? {
+        Ok(Outcome::Tightened) => {
+            tracing::warn!(path = %path.display(), "tightened a devlanes directory to owner-only access");
+            Ok(())
+        }
+        Ok(Outcome::Created | Outcome::Present) => Ok(()),
+        Err(_) => Err(Error::UnsafeDirectory(path.into())),
+    }
 }
 
 /// A request's tap and the task forwarding its records to the client.
@@ -650,7 +724,7 @@ async fn finish_tap(
 
 /// One bounded outgoing queue prevents slow terminals from consuming unbounded memory.
 async fn serve_client(
-    stream: UnixStream,
+    stream: LocalStream,
     handler: Arc<dyn Handler>,
     shutdown: CancellationToken,
     stops: Arc<Stops>,
@@ -819,12 +893,30 @@ async fn serve_client(
 mod tests {
     use super::*;
 
+    /// The endpoint for `home`: a socket inside it, or on Windows a pipe named
+    /// after its test directory, unique to the test.
+    fn endpoint(home: &Path) -> PathBuf {
+        #[cfg(unix)]
+        let endpoint = home.join("run/d.sock");
+        #[cfg(windows)]
+        let endpoint = PathBuf::from(format!(
+            r"\\.\pipe\devlanes-daemon-test-{}-{}",
+            std::process::id(),
+            home.parent()
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default()
+        ));
+        endpoint
+    }
+
+    /// A second daemon on one home answers `already-running`.
     #[tokio::test]
     async fn lock_prevents_a_second_bind() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let home = temp.path().join("home");
         let options = Options {
-            socket: home.join("run/daemon.sock"),
+            socket: endpoint(&home),
             home,
         };
         let _first = Server::bind(options.clone()).await?;
@@ -835,6 +927,95 @@ mod tests {
         Ok(())
     }
 
+    /// A pipe someone else created first is refused, not shared.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_squatted_pipe_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let options = Options {
+            socket: endpoint(&home),
+            home,
+        };
+        let pipes = devlanes_sys_windows::pipe::PipeFactory::current_user(&options.socket)?;
+        let _squatter = pipes.create(true)?;
+        assert!(matches!(
+            Server::bind(options).await,
+            Err(Error::EndpointTaken(_))
+        ));
+        Ok(())
+    }
+
+    /// Grants Everyone read access to `path` and what it will hold.
+    #[cfg(windows)]
+    fn grant_everyone(path: &Path) -> std::io::Result<()> {
+        let icacls = devlanes_sys_windows::file::system_directory()?.join("icacls.exe");
+        let status = std::process::Command::new(icacls)
+            .arg(path)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)R"])
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        assert!(status.success(), "icacls");
+        Ok(())
+    }
+
+    /// An empty directory of this user that others can read is made private;
+    /// one with entries is refused, since they would keep their grants.
+    #[cfg(windows)]
+    #[test]
+    fn tightens_an_empty_open_home() -> Result<(), Box<dyn std::error::Error>> {
+        use devlanes_sys_windows::security::check_private_dir;
+        let dir = tempfile::tempdir()?;
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home)?;
+        grant_everyone(&home)?;
+        assert!(check_private_dir(&home)?.is_err());
+        secure_directory(&home)?;
+        assert_eq!(check_private_dir(&home)?, Ok(()));
+        let full = dir.path().join("full");
+        std::fs::create_dir(&full)?;
+        std::fs::write(full.join("state.db"), "x")?;
+        grant_everyone(&full)?;
+        assert!(matches!(
+            secure_directory(&full),
+            Err(Error::UnsafeDirectory(_))
+        ));
+        Ok(())
+    }
+
+    /// A junction is refused as a home and as the lock file.
+    #[cfg(windows)]
+    #[test]
+    fn refuses_junctions() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target)?;
+        let junction = |link: &Path| -> std::io::Result<()> {
+            let cmd = devlanes_sys_windows::file::system_directory()?.join("cmd.exe");
+            let status = std::process::Command::new(cmd)
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link)
+                .arg(&target)
+                .stdout(std::process::Stdio::null())
+                .status()?;
+            assert!(status.success(), "mklink");
+            Ok(())
+        };
+        let link = dir.path().join("alias");
+        junction(&link)?;
+        assert!(matches!(
+            secure_directory(&link),
+            Err(Error::UnsafeDirectory(_))
+        ));
+        let home = dir.path().join("home");
+        secure_directory(&home)?;
+        secure_directory(&home.join("run"))?;
+        junction(&home.join("run").join("daemon.lock"))?;
+        assert!(lock_singleton(&home).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
     #[test]
     /// An existing directory of this user that others can read is made private.
     fn tightens_an_open_home() -> Result<(), Box<dyn std::error::Error>> {
@@ -848,6 +1029,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn refuses_a_symlinked_home() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
@@ -905,20 +1087,27 @@ mod tests {
 
     /// Options under a short temporary directory (socket paths are bounded).
     fn short_options() -> (tempfile::TempDir, Options) {
-        let dir = tempfile::Builder::new()
-            .prefix("dls-")
-            .tempdir_in("/tmp")
-            .expect("tempdir");
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("dls-");
+        #[cfg(unix)]
+        let dir = builder.tempdir_in("/tmp").expect("tempdir");
+        #[cfg(windows)]
+        let dir = builder.tempdir().expect("tempdir");
         let home = dir.path().join("h");
         let options = Options {
-            socket: home.join("run/d.sock"),
+            socket: endpoint(&home),
             home,
         };
         (dir, options)
     }
 
+    /// A connection to the endpoint at `socket`.
+    async fn connect(socket: &Path) -> LocalStream {
+        local::connect(socket).await.expect("connect")
+    }
+
     /// Sends request `id` and waits for its outcome.
-    async fn ask(connection: &mut Connection<UnixStream>, id: u64, method: Method) -> Outcome {
+    async fn ask(connection: &mut Connection<LocalStream>, id: u64, method: Method) -> Outcome {
         connection
             .send(Frame::Control(Control::Request(Request {
                 id,
@@ -954,8 +1143,7 @@ mod tests {
                 idle_after: None,
             });
             let running = tokio::spawn(server.run(handler, || Ok(())));
-            let mut connection =
-                Connection::new(UnixStream::connect(&socket).await.expect("connect"));
+            let mut connection = Connection::new(connect(&socket).await);
             connection
                 .send(Frame::Control(Control::Hello(Hello::current(0))))
                 .await
@@ -1005,7 +1193,14 @@ mod tests {
             *model::lock(&handler.shut_down),
             Some(ShutdownReason::Signal)
         );
+        // A pipe is gone with its listener; looking at its path would connect.
+        #[cfg(unix)]
         assert!(!socket.exists());
+        #[cfg(windows)]
+        assert!(matches!(
+            local::connect(&socket).await,
+            Err(local::ConnectError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
     }
 
     /// A served handler answering `null`, with a handshaken connection to it.
@@ -1014,7 +1209,7 @@ mod tests {
         Arc<Fixed>,
         CancellationToken,
         tokio::task::JoinHandle<Result<(), Error>>,
-        Connection<UnixStream>,
+        Connection<LocalStream>,
     ) {
         let (dir, options) = short_options();
         let socket = options.socket.clone();
@@ -1027,7 +1222,7 @@ mod tests {
             idle_after: None,
         });
         let running = tokio::spawn(server.run(handler.clone(), || Ok(())));
-        let mut connection = Connection::new(UnixStream::connect(&socket).await.expect("connect"));
+        let mut connection = Connection::new(connect(&socket).await);
         connection
             .send(Frame::Control(Control::Hello(Hello::current(0))))
             .await
@@ -1074,8 +1269,7 @@ mod tests {
                 idle_after: Some(Duration::from_millis(20)),
             });
             let running = tokio::spawn(server.run(handler.clone(), || Ok(())));
-            let mut connection =
-                Connection::new(UnixStream::connect(&socket).await.expect("connect"));
+            let mut connection = Connection::new(connect(&socket).await);
             connection
                 .send(Frame::Control(Control::Hello(Hello::current(0))))
                 .await

@@ -3,7 +3,8 @@
 //! Trust changes run in the CLI process because they prompt (the macOS keychain
 //! dialog, a sudo password). The daemon never calls a [`TrustStore`].
 //!
-//! Platform crates (`devlanes-trust-macos`, `devlanes-trust-linux`) implement the
+//! Platform crates (`devlanes-trust-macos`, `devlanes-trust-linux`,
+//! `devlanes-trust-windows`) implement the
 //! stores. Every external command goes through a [`CommandExecutor`], so tests
 //! check argv without touching real stores. The NSS implementation used by
 //! Firefox and Chromium lives here because both platforms share it.
@@ -22,9 +23,11 @@ use async_trait::async_trait;
 
 pub use cert::CaCertificate;
 pub use error::TrustError;
+#[cfg(unix)]
+pub use exec::SYSTEM_PROGRAM_DIRS;
 pub use exec::{
-    CommandExecutor, CommandLine, CommandOutput, SYSTEM_PROGRAM_DIRS, SystemExecutor, TempPem,
-    find_system_program, path_arg, run, run_checked,
+    CommandExecutor, CommandLine, CommandOutput, SystemExecutor, TempPem, find_system_program,
+    path_arg, run, run_checked,
 };
 
 /// A store a user can ask `devlanes certs trust` to install the CA into.

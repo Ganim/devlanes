@@ -1,5 +1,7 @@
 //! Process-lifecycle tests with standard tools. Every test is time-bounded and kills
 //! what it spawned, including escaped descendants, through [`Cleanup`].
+// The runner is Unix only; the crate is empty on Windows.
+#![cfg(unix)]
 
 use std::{
     collections::BTreeMap,
@@ -10,7 +12,8 @@ use std::{
 
 use bytes::Bytes;
 use devlanes_core::{
-    Error, LaunchSpec, OutputChunk, OutputStream, ProcessIdentity, StopPolicy, TerminalSize, Unit,
+    Error, LaunchSpec, OutputChunk, OutputStream, ProcessIdentity, StopPolicy, StopSignal,
+    TerminalSize, Unit,
 };
 use devlanes_runner_pty::{ExitSweep, PtyRunner, PtyUnit, StderrMode};
 use devlanes_sys::Signal;
@@ -360,7 +363,7 @@ async fn sigterm_ignoring_unit_escalates_to_sigkill() -> Result<(), Error> {
         let started = Instant::now();
         let report = unit
             .stop_with_report(StopPolicy {
-                signal: 15,
+                signal: StopSignal::Terminate,
                 timeout: Duration::from_millis(300),
             })
             .await?;
@@ -440,7 +443,7 @@ async fn setsid_grandchild_killed_via_descendants() -> Result<(), Error> {
 
         let report = unit
             .stop_with_report(StopPolicy {
-                signal: 15,
+                signal: StopSignal::Terminate,
                 timeout: Duration::from_secs(5),
             })
             .await?;
@@ -601,7 +604,7 @@ async fn stopped_unit_acts_on_stop_signal() -> Result<(), Error> {
         .await;
         let report = unit
             .stop_with_report(StopPolicy {
-                signal: 15,
+                signal: StopSignal::Terminate,
                 timeout: Duration::from_secs(5),
             })
             .await?;
@@ -632,7 +635,7 @@ async fn stop_racing_natural_exit_reports_once() -> Result<(), Error> {
             tokio::time::sleep(Duration::from_millis((round % 10) * 10)).await;
             let stopped = unit
                 .stop_with_report(StopPolicy {
-                    signal: 15,
+                    signal: StopSignal::Terminate,
                     timeout: Duration::from_secs(2),
                 })
                 .await?;
@@ -764,14 +767,6 @@ async fn invalid_requests() -> Result<(), Error> {
         let mut cleanup = Cleanup::default();
         cleanup.unit(&unit);
         assert!(matches!(
-            unit.stop(StopPolicy {
-                signal: 999,
-                timeout: Duration::ZERO
-            })
-            .await,
-            Err(Error::InvalidInput(_))
-        ));
-        assert!(matches!(
             unit.resize(TerminalSize {
                 columns: 0,
                 rows: 1
@@ -781,7 +776,7 @@ async fn invalid_requests() -> Result<(), Error> {
         ));
         let report = unit
             .stop_with_report(StopPolicy {
-                signal: 15,
+                signal: StopSignal::Terminate,
                 timeout: Duration::ZERO,
             })
             .await?;

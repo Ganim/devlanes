@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use devlanes_core::UnitRunId;
+use devlanes_core::{ProcessIdentity, UnitRunId};
 use devlanes_metrics::{
     COARSE_CAPACITY, COARSE_INTERVAL_MS, ContainerTarget, History, RAW_CAPACITY, RunTracker,
     Sample, SampleRequest, Series, Subject, UnitKey, UnitTarget, Window, aggregate,
@@ -237,17 +237,10 @@ impl Inner {
                     unit: name.clone(),
                 };
                 let identity = host.identity();
-                let mut processes = host.subjects().await;
-                if let Some(identity) = identity
-                    && !processes.iter().any(|p| p.pid == identity.pid)
-                {
-                    processes.push(identity);
-                }
-                request.units.push(UnitTarget {
-                    unit: key.clone(),
-                    sessions: identity.map(|i| vec![i.sid]).unwrap_or_default(),
-                    processes,
-                });
+                let processes = host.subjects().await;
+                request
+                    .units
+                    .push(unit_target(key.clone(), identity, processes));
                 targets.push(Target {
                     lane: lane.clone(),
                     reference: reference.clone(),
@@ -606,6 +599,42 @@ impl Inner {
     }
 }
 
+/// What to measure for one unit: the leader's session, the leader and the
+/// runner's tracked processes.
+#[cfg(unix)]
+fn unit_target(
+    unit: UnitKey,
+    identity: Option<ProcessIdentity>,
+    mut processes: Vec<ProcessIdentity>,
+) -> UnitTarget {
+    if let Some(identity) = identity
+        && !processes.iter().any(|p| p.pid == identity.pid)
+    {
+        processes.push(identity);
+    }
+    UnitTarget {
+        unit,
+        sessions: identity.map(|i| vec![i.sid]).unwrap_or_default(),
+        processes,
+    }
+}
+
+/// What to measure for one unit: exactly the job members the runner reports.
+/// Windows has no sessions, and the leader is a member while it runs; once it
+/// has exited, its identity names nothing left to measure.
+#[cfg(windows)]
+fn unit_target(
+    unit: UnitKey,
+    _identity: Option<ProcessIdentity>,
+    processes: Vec<ProcessIdentity>,
+) -> UnitTarget {
+    UnitTarget {
+        unit,
+        sessions: Vec::new(),
+        processes,
+    }
+}
+
 /// Highest `(cpu, memory)` of a series since `started_ms`, from its raw points
 /// and, for what the raw ring no longer holds, its 10 s windows.
 fn peak_since(series: &Series, started_ms: u64) -> (Option<f64>, Option<u64>) {
@@ -852,5 +881,55 @@ mod tests {
         track(&mut state, "gone", 0);
         state.prune(now + 1_000, &live);
         assert_eq!(state.subjects.len(), 3);
+    }
+
+    /// The unit key every target test uses.
+    fn web() -> UnitKey {
+        UnitKey {
+            project: ProjectId(1),
+            lane: LaneId(1),
+            unit: "web".into(),
+        }
+    }
+
+    /// A process identity with a recognisable start time.
+    fn process(pid: u32, sid: u32) -> ProcessIdentity {
+        ProcessIdentity {
+            pid,
+            sid,
+            start_time: u64::from(pid) * 10,
+        }
+    }
+
+    /// Unix measures the leader's session and adds the leader when the runner
+    /// no longer lists it.
+    #[cfg(unix)]
+    #[test]
+    fn unit_target_adds_the_leader_and_its_session() {
+        let leader = process(10, 10);
+        let child = process(11, 10);
+        let target = unit_target(web(), Some(leader), vec![child]);
+        assert_eq!(target.sessions, [10]);
+        assert_eq!(target.processes, [child, leader]);
+        let target = unit_target(web(), Some(leader), vec![leader, child]);
+        assert_eq!(target.processes, [leader, child]);
+        let target = unit_target(web(), None, vec![child]);
+        assert!(target.sessions.is_empty());
+        assert_eq!(target.processes, [child]);
+    }
+
+    /// Windows measures the job members the runner reports and nothing else,
+    /// so an exited leader is not added back.
+    #[cfg(windows)]
+    #[test]
+    fn unit_target_is_the_job_members() {
+        let leader = process(8, 0);
+        let member = process(12, 0);
+        let target = unit_target(web(), Some(leader), vec![member]);
+        assert!(target.sessions.is_empty());
+        assert_eq!(target.processes, [member]);
+        let target = unit_target(web(), Some(leader), vec![leader, member]);
+        assert_eq!(target.processes, [leader, member]);
+        assert_eq!(target.unit, web());
     }
 }

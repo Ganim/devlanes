@@ -1,0 +1,15 @@
+[package]
+name = "devlanes-shell-windows"
+description = "Git for Windows' sh.exe lookup, environment and quoting, shared by the daemon's ready probes and runner-windows, which must not depend on each other"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The crate is empty on other platforms, so its dependencies are Windows-only too.
+[target.'cfg(windows)'.dependencies]
+tokio.workspace = true

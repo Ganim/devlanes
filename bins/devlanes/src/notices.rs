@@ -140,6 +140,30 @@ pub async fn annotate_doctor(client: Option<&mut Client>, data: &mut Value) {
             }),
         );
     }
+    #[cfg(windows)]
+    remove_old_copies(data).await;
+}
+
+/// Deletes the `devlanes.exe.old-*` copies `install.ps1` left next to this
+/// executable and adds what happened to doctor's `release` facts. A copy that
+/// still runs (the daemon before its restart) stays until a later doctor.
+#[cfg(windows)]
+async fn remove_old_copies(data: &mut Value) {
+    let copies = tokio::task::spawn_blocking(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(devlanes_client::update::remove_old_copies))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    if let Some(release) = data.get_mut("release").and_then(Value::as_object_mut) {
+        release.insert(
+            "old_copies".into(),
+            json!({"removed": copies.removed, "in_use": copies.in_use}),
+        );
+    }
 }
 
 #[cfg(test)]

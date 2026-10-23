@@ -1,17 +1,24 @@
 //! Live process-table checks against this test process and short-lived children.
 
+#[cfg(windows)]
+mod windows;
+
+#[cfg(unix)]
+use std::process::{Child, Command, Stdio};
 use std::{
     net::TcpListener,
-    process::{Child, Command, Stdio},
     thread::sleep,
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
 use devlanes_sys::{ProcessIdentity, Signal, SignalOutcome};
 
 /// Kills and reaps a test child even when an assertion fails first.
+#[cfg(unix)]
 struct Reaped(Child);
 
+#[cfg(unix)]
 impl Drop for Reaped {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -20,6 +27,7 @@ impl Drop for Reaped {
 }
 
 /// Spawns `sleep` with a bounded lifetime in case cleanup is skipped.
+#[cfg(unix)]
 fn sleeper() -> Reaped {
     Reaped(
         Command::new("sleep")
@@ -48,7 +56,8 @@ fn enumeration_includes_self() -> Result<(), devlanes_sys::Error> {
     let pid = std::process::id();
     let me = devlanes_sys::process(pid)?.expect("own process");
     assert!(!me.zombie);
-    assert!(me.sid.is_some());
+    // Windows has no sessions.
+    assert_eq!(me.sid.is_some(), cfg!(unix));
     let listed = devlanes_sys::processes()?;
     let entry = listed.iter().find(|p| p.pid == pid).expect("listed");
     assert_eq!(entry.start_time, me.start_time);
@@ -68,6 +77,7 @@ fn boot_id_is_stable() -> Result<(), devlanes_sys::Error> {
 }
 
 /// A wrong start time is a mismatch and must not deliver the signal.
+#[cfg(unix)]
 #[test]
 fn verified_signals_reject_recycled_identity() -> Result<(), devlanes_sys::Error> {
     let child = sleeper();
@@ -93,6 +103,7 @@ fn verified_signals_reject_recycled_identity() -> Result<(), devlanes_sys::Error
 }
 
 /// An exited, unreaped child still has a readable identity marked as a zombie.
+#[cfg(unix)]
 #[test]
 fn zombies_keep_identity_until_reaped() -> Result<(), devlanes_sys::Error> {
     let mut child = Reaped(Command::new("true").spawn().expect("spawn true"));
@@ -135,6 +146,7 @@ fn listening_ports_of_pid_set() -> Result<(), Box<dyn std::error::Error>> {
 
 /// A child holding a pipe's write end or a PTY slave is found by its open file;
 /// unrelated processes are not.
+#[cfg(unix)]
 #[test]
 fn holders_of_pipes_and_terminals() -> Result<(), Box<dyn std::error::Error>> {
     use std::os::fd::AsFd;
@@ -177,6 +189,7 @@ fn holders_of_pipes_and_terminals() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Raising records the original limit for children and never lowers the soft limit.
+#[cfg(unix)]
 #[test]
 fn nofile_raise_records_original() -> Result<(), devlanes_sys::Error> {
     let raised = devlanes_sys::raise_nofile_limit()?;

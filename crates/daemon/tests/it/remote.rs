@@ -119,7 +119,7 @@ impl BoxSide {
         let home = tmp.path.join(format!("{name}-srv"));
         let options = Options {
             home: home.clone(),
-            socket: home.join("run/d.sock"),
+            socket: crate::endpoint(&home, "run/d.sock"),
         };
         let paths = devlanes_client::Paths {
             run: home.join("run"),

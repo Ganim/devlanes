@@ -156,6 +156,9 @@ async fn lanes_of_one_folder_have_their_own_data_folders() {
         for path in &paths {
             assert!(path.starts_with(home.join("data/demo")), "{path:?}");
             assert!(path.is_dir(), "{path:?} exists");
+            // `/` only, so the path survives interpolation into `sh` strings.
+            #[cfg(windows)]
+            assert!(!path.to_string_lossy().contains('\\'), "{path:?}");
         }
 
         h.call(Method::Stop, json!({}), on_lane(&main, "review"))
@@ -176,6 +179,50 @@ async fn lanes_of_one_folder_have_their_own_data_folders() {
         h.call(Method::Stop, json!({}), cx(&main))
             .await
             .expect("stop main");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+/// A project named like a DOS device gets an encoded data folder, which Windows
+/// can create, and `lane clean` removes it.
+async fn windows_device_project_names_get_encoded_folders() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config = "project: aux\nservices:\n  worker:\n    run: \"echo ${{ lane.data_path }}; sleep\"\n    pty: false\n";
+        let main = repo(&tmp.path, "r", config);
+        let home = tmp.path.join("home");
+        let h = harness(&home, Setup::default()).await;
+        start(&h, cx(&main), json!({})).await;
+        let path: std::path::PathBuf = h
+            .runner
+            .journal
+            .entries()
+            .iter()
+            .filter_map(|script| script.strip_prefix("echo "))
+            .filter_map(|rest| rest.split(';').next())
+            .map(std::path::PathBuf::from)
+            .next()
+            .expect("the data path");
+        assert!(path.starts_with(home.join("data").join("%61ux")), "{path:?}");
+        assert!(path.is_dir(), "{path:?} exists");
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        h.call(
+            Method::LaneClean,
+            json!({}),
+            Context {
+                yes: true,
+                ..cx(&main)
+            },
+        )
+        .await
+        .expect("clean");
+        assert!(!home.join("data").join("%61ux").exists());
         h.close().await;
     })
     .await

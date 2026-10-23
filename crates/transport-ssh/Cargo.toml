@@ -13,12 +13,16 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 devlanes-transport = { path = "../transport" }
-openssh = { version = "0.11", default-features = false, features = ["process-mux"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+# openssh does not build on Windows, and the crate body is Unix only: there is
+# no Windows transport yet.
+[target.'cfg(unix)'.dependencies]
+openssh = { version = "0.11", default-features = false, features = ["process-mux"] }
 
 [dev-dependencies]
 sha2 = "0.10"

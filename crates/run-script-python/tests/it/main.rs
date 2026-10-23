@@ -27,6 +27,18 @@ fn write_files(root: &Path, files: &[(&str, &str)]) {
     }
 }
 
+/// `text` as is: the snapshots show Unix separators.
+#[cfg(unix)]
+fn slashes(text: String) -> String {
+    text
+}
+
+/// `text` with `/` for `\`, so the Unix snapshots hold on Windows.
+#[cfg(windows)]
+fn slashes(text: String) -> String {
+    text.replace('\\', "/")
+}
+
 fn request<'a>(
     worktree: &'a Path,
     source: &'a str,
@@ -88,9 +100,11 @@ fn runner_selection_table() {
             }
             Err(error) => format!(
                 "error: {}",
-                error
-                    .to_string()
-                    .replace(&temp.path().display().to_string(), "<lane>")
+                slashes(
+                    error
+                        .to_string()
+                        .replace(&temp.path().display().to_string(), "<lane>")
+                )
             ),
         };
         rendered.push_str(&format!("{label}: {line}\n"));
@@ -136,9 +150,11 @@ fn errors() {
         )],
     );
     let error = plan(&request(temp.path(), "pyproject.toml", "migrate", &[])).expect_err("missing");
-    let message = error
-        .to_string()
-        .replace(&temp.path().display().to_string(), "<lane>");
+    let message = slashes(
+        error
+            .to_string()
+            .replace(&temp.path().display().to_string(), "<lane>"),
+    );
     insta::assert_snapshot!(message, @"`<lane>/pyproject.toml` has no script `migrate` in [project.scripts] or [tool.poetry.scripts] (scripts: serve, worker)");
     assert!(matches!(
         plan(&request(temp.path(), "../pyproject.toml", "serve", &[])),

@@ -103,6 +103,46 @@ async fn renaming_the_project_renames_its_lanes() {
     .expect("timeout");
 }
 
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+/// A project in a folder with spaces and mixed case is one project with one
+/// lane per worktree, whatever case and separators the cwd is spelled with.
+async fn windows_cwd_spelling_finds_the_same_lanes() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "Acme Src", WEB);
+        let feature = tmp.path.join("Acme Src-Feature");
+        worktree(&main, &feature, "feature");
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        let respell = |path: &Path| {
+            std::path::PathBuf::from(path.display().to_string().to_uppercase().replace('\\', "/"))
+        };
+        let references = |lanes: Vec<LaneSummary>| {
+            let mut references: Vec<String> =
+                lanes.into_iter().map(|lane| lane.reference).collect();
+            references.sort();
+            references
+        };
+        // devlanes running in a worktree gives it a lane, here from a respelled cwd.
+        lanes(&h, &respell(&feature.join("sub"))).await;
+        let exact = references(lanes(&h, &main).await);
+        assert_eq!(exact, ["demo@0", "demo@1"]);
+        assert_eq!(references(lanes(&h, &respell(&main)).await), exact);
+        assert_eq!(
+            references(lanes(&h, &respell(&feature.join("sub"))).await),
+            exact
+        );
+        assert_eq!(lane_at(&h, &main, &feature).await.reference, "demo@1");
+        h.close().await;
+        let store = devlanes_state::Store::open(tmp.path.join("home/state.db"))
+            .await
+            .expect("store");
+        assert_eq!(store.projects().await.expect("projects").len(), 1);
+    })
+    .await
+    .expect("timeout");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 /// Writing a config into a worktree devlanes ran in without one, while another
 /// lane runs, assigns the new lane and marks no worktree missing, in memory or

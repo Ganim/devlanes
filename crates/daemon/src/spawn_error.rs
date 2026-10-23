@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use devlanes_core::paths::names_a_path;
 use devlanes_proto::RpcError;
 use serde_json::{Value, json};
 
@@ -38,6 +39,23 @@ pub(crate) fn classify(attempt: &Attempt, error: &devlanes_core::Error) -> RpcEr
     if let Some(errno) = io.raw_os_error() {
         data["errno"] = json!(errno_name(errno));
     }
+    // The runner's refusals name their case; a missing program is classified
+    // below like any other.
+    #[cfg(windows)]
+    let refusal = io
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<devlanes_core::SpawnRefusal>());
+    #[cfg(windows)]
+    if let Some(refusal) = refusal
+        && refusal.code != "not_found"
+    {
+        data["reason"] = json!(refusal.code);
+        data["message"] = json!(refusal.message);
+        if refusal.code == "cwd_too_long" {
+            data["cwd"] = json!(attempt.cwd);
+        }
+        return RpcError::new("spawn_failed", data, 1);
+    }
     // std reports a failed chdir in the child with the chdir's errno, which is
     // ENOENT for a missing directory, so the directory is checked first.
     if !attempt.cwd.is_dir() {
@@ -45,18 +63,21 @@ pub(crate) fn classify(attempt: &Attempt, error: &devlanes_core::Error) -> RpcEr
         data["cwd"] = json!(attempt.cwd);
         return RpcError::new("spawn_failed", data, 1);
     }
-    let explicit = attempt.program.contains('/');
+    let explicit = names_a_path(&attempt.program);
     let dirs: Vec<String> = if explicit {
         Vec::new()
     } else {
-        attempt
-            .path
-            .as_deref()
-            .unwrap_or_default()
-            .split(':')
-            .filter(|dir| !dir.is_empty())
-            .map(str::to_owned)
-            .collect()
+        path_dirs(attempt.path.as_deref().unwrap_or_default())
+    };
+    // The directories the runner searched, relative entries already resolved.
+    #[cfg(windows)]
+    let dirs = match refusal {
+        Some(refusal) if !explicit => refusal
+            .searched
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect(),
+        _ => dirs,
     };
     match io.kind() {
         std::io::ErrorKind::NotFound => {
@@ -132,7 +153,7 @@ fn describe(data: &Value) -> String {
     let text = |key: &str| data.get(key).and_then(Value::as_str).unwrap_or_default();
     let program = text("program");
     match text("reason") {
-        "not_found" if program.contains('/') => format!("{program}: no such file"),
+        "not_found" if names_a_path(program) => format!("{program}: no such file"),
         "not_found" => {
             let dirs: Vec<&str> = data
                 .get("path_searched")
@@ -148,7 +169,7 @@ fn describe(data: &Value) -> String {
                 if dirs.is_empty() {
                     "PATH is empty".to_owned()
                 } else {
-                    dirs.join(":")
+                    dirs.join(PATH_SEPARATOR)
                 }
             )
         }
@@ -161,7 +182,50 @@ fn describe(data: &Value) -> String {
     }
 }
 
+/// What separates `PATH` entries.
+#[cfg(unix)]
+const PATH_SEPARATOR: &str = ":";
+
+/// What separates `PATH` entries.
+#[cfg(windows)]
+const PATH_SEPARATOR: &str = ";";
+
+/// The non-empty entries of `path`.
+#[cfg(unix)]
+fn path_dirs(path: &str) -> Vec<String> {
+    path.split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The non-empty entries of `path`, split as Windows does (`;`, with double
+/// quotes protecting a `;` inside an entry).
+#[cfg(windows)]
+fn path_dirs(path: &str) -> Vec<String> {
+    std::env::split_paths(path)
+        .map(|dir| dir.display().to_string())
+        .filter(|dir| !dir.is_empty())
+        .collect()
+}
+
+/// Symbolic name of the Windows errors a spawn can report; the number
+/// otherwise.
+#[cfg(windows)]
+fn errno_name(errno: i32) -> String {
+    let name = match errno {
+        2 => "ERROR_FILE_NOT_FOUND",
+        3 => "ERROR_PATH_NOT_FOUND",
+        5 => "ERROR_ACCESS_DENIED",
+        193 => "ERROR_BAD_EXE_FORMAT",
+        267 => "ERROR_DIRECTORY",
+        _ => return format!("os error {errno}"),
+    };
+    name.to_owned()
+}
+
 /// Symbolic name of the exec errors a spawn can report; the number otherwise.
+#[cfg(unix)]
 fn errno_name(errno: i32) -> String {
     let errno = rustix::io::Errno::from_raw_os_error(errno);
     let name = [
@@ -186,7 +250,152 @@ fn errno_name(errno: i32) -> String {
     name.unwrap_or_else(|| format!("errno {}", errno.raw_os_error()))
 }
 
-#[cfg(test)]
+// Windows PATH syntax, error names and the runner's refusals.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::io;
+
+    use super::*;
+
+    /// An attempt in `cwd` with `PATH` set to `path`.
+    fn attempt(program: &str, cwd: &Path, path: &str) -> Attempt {
+        Attempt {
+            unit: "api".into(),
+            program: program.into(),
+            cwd: cwd.into(),
+            path: Some(path.into()),
+        }
+    }
+
+    /// The error the Windows runner returns for a refusal with `code`.
+    fn refused(kind: io::ErrorKind, code: &'static str, searched: &[&str]) -> devlanes_core::Error {
+        devlanes_core::Error::Io(io::Error::new(
+            kind,
+            devlanes_core::SpawnRefusal {
+                code,
+                message: format!("refused: {code}"),
+                searched: searched.iter().map(PathBuf::from).collect(),
+            },
+        ))
+    }
+
+    #[test]
+    /// A program missing from PATH lists the directories the runner searched,
+    /// joined with `;`.
+    fn missing_program_lists_the_runner_search() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attempt = attempt("fixture-server", dir.path(), r"C:\ignored");
+        let error = classify(
+            &attempt,
+            &refused(io::ErrorKind::NotFound, "not_found", &[r"C:\a", r"C:\b"]),
+        );
+        assert_eq!(error.code, "spawn_failed");
+        assert_eq!(error.data["reason"], "not_found");
+        assert_eq!(error.data["path_searched"], json!([r"C:\a", r"C:\b"]));
+        assert_eq!(
+            log_line(&error),
+            r"[devlanes] could not start: fixture-server: command not found on PATH (C:\a;C:\b)"
+        );
+    }
+
+    #[test]
+    /// Without the runner's list, `PATH` is split on `;` with quotes, and a
+    /// long one is cut with a count of the rest.
+    fn path_splits_on_semicolons() {
+        assert_eq!(
+            path_dirs(r#"C:\a;;"C:\semi;colon";C:\b"#),
+            [r"C:\a", r"C:\semi;colon", r"C:\b"]
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path: Vec<String> = (0..20).map(|n| format!(r"C:\nonexistent\{n}")).collect();
+        let attempt = attempt("missing-tool", dir.path(), &path.join(";"));
+        let error = classify(&attempt, &io::Error::from(io::ErrorKind::NotFound).into());
+        assert_eq!(
+            error.data["path_searched"].as_array().map(Vec::len),
+            Some(PATH_SHOWN)
+        );
+        assert_eq!(error.data["path_more"], 8);
+    }
+
+    #[test]
+    /// Backslashes and drive letters make a path explicit: the error names
+    /// the file instead of PATH.
+    fn explicit_paths_name_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for program in [r".\tool", "bin/tool", r"C:\tools\tool.exe"] {
+            let attempt = attempt(program, dir.path(), r"C:\bin");
+            let error = classify(
+                &attempt,
+                &refused(io::ErrorKind::NotFound, "not_found", &[r"C:\elsewhere"]),
+            );
+            assert_eq!(error.data["reason"], "not_found");
+            assert!(error.data.get("path_searched").is_none(), "{program}");
+            assert_eq!(error.data["resolved"], json!(dir.path().join(program)));
+            assert!(log_line(&error).ends_with(": no such file"), "{program}");
+        }
+    }
+
+    #[test]
+    /// The runner's refusals keep their code as the reason and their message.
+    fn refusals_keep_their_code() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for code in [
+            "shell_missing",
+            "cwd_too_long",
+            "unsafe_batch_argument",
+            "invalid_command",
+            "invalid_environment",
+        ] {
+            let attempt = attempt("/bin/sh", dir.path(), r"C:\bin");
+            let error = classify(&attempt, &refused(io::ErrorKind::InvalidInput, code, &[]));
+            assert_eq!(error.code, "spawn_failed");
+            assert_eq!(error.data["reason"], code);
+            assert_eq!(error.data["message"], format!("refused: {code}"));
+            assert_eq!(
+                log_line(&error),
+                format!("[devlanes] could not start: /bin/sh: refused: {code}")
+            );
+        }
+        // Refused before any directory was entered, so it is not blamed.
+        let gone = attempt("/bin/sh", &dir.path().join("gone"), "");
+        let error = classify(
+            &gone,
+            &refused(io::ErrorKind::InvalidInput, "shell_missing", &[]),
+        );
+        assert_eq!(error.data["reason"], "shell_missing");
+    }
+
+    #[test]
+    /// A missing working directory is named instead of blaming the program.
+    fn missing_cwd_is_named() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gone = dir.path().join("gone");
+        let attempt = attempt("tool", &gone, r"C:\bin");
+        let error = classify(&attempt, &io::Error::from_raw_os_error(267).into());
+        assert_eq!(error.data["reason"], "cwd_missing");
+        assert_eq!(error.data["cwd"], json!(gone));
+        assert_eq!(error.data["errno"], "ERROR_DIRECTORY");
+    }
+
+    #[test]
+    /// Common Windows error codes get their names, others their number.
+    fn error_names() {
+        assert_eq!(errno_name(2), "ERROR_FILE_NOT_FOUND");
+        assert_eq!(errno_name(3), "ERROR_PATH_NOT_FOUND");
+        assert_eq!(errno_name(5), "ERROR_ACCESS_DENIED");
+        assert_eq!(errno_name(193), "ERROR_BAD_EXE_FORMAT");
+        assert_eq!(errno_name(267), "ERROR_DIRECTORY");
+        assert_eq!(errno_name(1455), "os error 1455");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attempt = attempt("tool", dir.path(), r"C:\bin");
+        let error = classify(&attempt, &io::Error::from_raw_os_error(193).into());
+        assert!(error.data.get("reason").is_none());
+        assert!(log_line(&error).ends_with("(ERROR_BAD_EXE_FORMAT)"));
+    }
+}
+
+// Unix PATH syntax and errno names.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

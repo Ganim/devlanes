@@ -1,23 +1,29 @@
-//! Thin Unix-socket client shared by CLI, completion, and TUI frontends.
+//! Thin daemon client shared by CLI, completion, and TUI frontends, over the
+//! local endpoint of [`devlanes_ipc::local`].
 
 mod paths;
 pub mod restart;
 pub mod update;
 
-use std::{collections::VecDeque, path::PathBuf, process::Stdio, time::Duration};
+#[cfg(unix)]
+use std::process::Stdio;
+use std::{collections::VecDeque, path::PathBuf, time::Duration};
 
 use bytes::Bytes;
-use devlanes_ipc::Connection;
 pub use devlanes_ipc::Frame;
+use devlanes_ipc::{
+    Connection,
+    local::{self, ConnectError, LocalStream, ProbeError},
+};
 pub use devlanes_proto::{Context, Hello, Method, RpcError};
 use devlanes_proto::{Control, Outcome, PROTOCOL_VERSION, Request};
-pub use paths::Paths;
+pub use paths::{Paths, user_home};
 use serde_json::Value;
+use tokio::time::{Instant, sleep, timeout};
+#[cfg(unix)]
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    net::UnixStream,
     process::Command,
-    time::{Instant, sleep, timeout},
 };
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -68,7 +74,8 @@ pub enum Error {
     Rpc(RpcError),
     #[error("daemon v{version} (build {build_id}) runs {managed_processes} processes with protocol {protocol}; run devlanes daemon restart", version = .peer.version, build_id = .peer.build_id, managed_processes = .peer.managed_processes, protocol = .peer.protocol)]
     Incompatible { peer: Hello },
-    #[error("daemon peer uid does not match this user")]
+    #[cfg_attr(unix, error("daemon peer uid does not match this user"))]
+    #[cfg_attr(windows, error("the daemon's pipe belongs to another account"))]
     WrongPeer,
     #[error("expected {0} from daemon")]
     UnexpectedFrame(&'static str),
@@ -92,6 +99,16 @@ pub enum Error {
     RequestIdsExhausted,
     #[error("blocking startup task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
+}
+
+impl From<ConnectError> for Error {
+    /// I/O failures keep their kind, so [`Error::is_not_running`] still reads them.
+    fn from(error: ConnectError) -> Self {
+        match error {
+            ConnectError::Io(error) => Self::Io(error),
+            ConnectError::WrongPeer => Self::WrongPeer,
+        }
+    }
 }
 
 impl Error {
@@ -119,7 +136,7 @@ impl Error {
 
 /// One client serializes requests; use begin_request/next_frame for streaming consumers.
 pub struct Client {
-    connection: Connection<UnixStream>,
+    connection: Connection<LocalStream>,
     pub peer: Hello,
     /// True when this connection's `connect_or_spawn` started the daemon; `devlanes with`
     /// stops only a daemon it started itself.
@@ -180,10 +197,7 @@ impl Client {
     /// Connects to the socket and exchanges hellos within [`CONNECT_TIMEOUT`].
     async fn exchange(paths: &Paths, strict: bool) -> Result<Self> {
         timeout(CONNECT_TIMEOUT, async {
-            let stream = UnixStream::connect(&paths.socket).await?;
-            if stream.peer_cred()?.uid() != rustix::process::geteuid().as_raw() {
-                return Err(Error::WrongPeer);
-            }
+            let stream = local::connect(&paths.socket).await?;
             let mut connection = Connection::new(stream);
             connection
                 .send(Frame::Control(Control::Hello(Hello::current(0))))
@@ -252,45 +266,7 @@ impl Client {
                 error
             }
         })?;
-        let mut command = Command::new(std::env::current_exe()?);
-        // The daemon outlives this shell and serves every later one, so it keeps
-        // only what it needs itself; services get each request's client env.
-        command
-            .env_clear()
-            .envs(daemon_env(std::env::vars_os(), remove_env));
-        let mut child = command
-            .args(["daemon", "run"])
-            .env("DEVLANES_HOME", &paths.home)
-            .env("DEVLANES_READY_FD", "1")
-            .current_dir(&paths.home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(false)
-            .spawn()?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| Error::Startup("missing readiness pipe".into()))?;
-        tracing::debug!(
-            pid = child.id(),
-            elapsed_ms = begun.elapsed().as_millis() as u64,
-            "daemon process started; waiting for its readiness line"
-        );
-        // Tokio reaps the child after this handle is dropped; never kill a potentially live daemon.
-        drop(child);
-        let mut reader = BufReader::new(stdout);
-        let deadline = Instant::now() + START_TIMEOUT;
-        let mut message = Vec::new();
-        timeout(START_TIMEOUT, async {
-            use tokio::io::AsyncReadExt;
-            (&mut reader)
-                .take(READY_LINE_LIMIT)
-                .read_until(b'\n', &mut message)
-                .await
-        })
-        .await
-        .map_err(|_| Error::Timeout)??;
+        let (deadline, message) = start_daemon(paths, remove_env, begun).await?;
         if message != b"ready\n" && message != b"already-running\n" {
             let reason = String::from_utf8_lossy(&message).trim().to_owned();
             // A refused user config is a structured error, so the CLI and the TUI word it
@@ -555,6 +531,40 @@ const DAEMON_ENV: &[&str] = &[
 /// CLI's settings and devlanes' own.
 const DAEMON_ENV_PREFIXES: &[&str] = &["LC_", "XDG_", "DOCKER_", "DEVLANES_"];
 
+/// Nothing beyond the shared list on Unix.
+#[cfg(unix)]
+const PLATFORM_ENV: &[&str] = &[];
+
+/// What Windows programs the daemon runs expect: Winsock fails to start
+/// without `SystemRoot`, and tools such as git and docker read the profile and
+/// program directories.
+#[cfg(windows)]
+const PLATFORM_ENV: &[&str] = &[
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "PATHEXT",
+    "USERPROFILE",
+    "USERNAME",
+    "USERDOMAIN",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "CommonProgramFiles",
+    "TEMP",
+    "TMP",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "PSModulePath",
+];
+
 /// The allowlisted part of `vars` for an auto-spawned daemon, minus `remove`.
 /// Anything else a shell carries (tokens, project variables) stays out of a
 /// process that serves every later shell.
@@ -566,28 +576,200 @@ fn daemon_env(
         let Some(name) = name.to_str() else {
             return false;
         };
-        !remove.contains(&name)
-            && (DAEMON_ENV.contains(&name)
-                || DAEMON_ENV_PREFIXES
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix)))
+        !remove.iter().any(|removed| same_name(name, removed))
+            && (DAEMON_ENV
+                .iter()
+                .chain(PLATFORM_ENV)
+                .any(|listed| same_name(name, listed))
+                || DAEMON_ENV_PREFIXES.iter().any(|prefix| {
+                    name.get(..prefix.len())
+                        .is_some_and(|start| same_name(start, prefix))
+                }))
     })
     .collect()
 }
 
+/// Whether two environment variable names are the same variable: by exact
+/// name on Unix.
+#[cfg(unix)]
+fn same_name(name: &str, listed: &str) -> bool {
+    name == listed
+}
+
+/// Whether two environment variable names are the same variable: Windows
+/// ignores case, and its environment usually spells `Path`.
+#[cfg(windows)]
+fn same_name(name: &str, listed: &str) -> bool {
+    name.eq_ignore_ascii_case(listed)
+}
+
+/// Spawns `devlanes daemon run` and reads its readiness line; returns the
+/// deadline for connecting afterwards and the line.
+#[cfg(unix)]
+async fn start_daemon(
+    paths: &Paths,
+    remove_env: &[&str],
+    begun: Instant,
+) -> Result<(Instant, Vec<u8>)> {
+    let mut command = Command::new(std::env::current_exe()?);
+    // The daemon outlives this shell and serves every later one, so it keeps
+    // only what it needs itself; services get each request's client env.
+    command
+        .env_clear()
+        .envs(daemon_env(std::env::vars_os(), remove_env));
+    let mut child = command
+        .args(["daemon", "run"])
+        .env("DEVLANES_HOME", &paths.home)
+        .env("DEVLANES_READY_FD", "1")
+        .current_dir(&paths.home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(false)
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::Startup("missing readiness pipe".into()))?;
+    tracing::debug!(
+        pid = child.id(),
+        elapsed_ms = begun.elapsed().as_millis() as u64,
+        "daemon process started; waiting for its readiness line"
+    );
+    // Tokio reaps the child after this handle is dropped; never kill a potentially live daemon.
+    drop(child);
+    let mut reader = BufReader::new(stdout);
+    let deadline = Instant::now() + START_TIMEOUT;
+    let mut message = Vec::new();
+    timeout(START_TIMEOUT, async {
+        use tokio::io::AsyncReadExt;
+        (&mut reader)
+            .take(READY_LINE_LIMIT)
+            .read_until(b'\n', &mut message)
+            .await
+    })
+    .await
+    .map_err(|_| Error::Timeout)??;
+    Ok((deadline, message))
+}
+
+/// Spawns `devlanes daemon run` and reads its readiness line; returns the
+/// deadline for connecting afterwards and the line.
+///
+/// The daemon inherits only the readiness pipe (as stdout, so
+/// `DEVLANES_READY_FD=1` holds) and NUL: a shell reading this command's output,
+/// as Git Bash's `$(...)` does, would otherwise wait for the daemon to exit. It
+/// gets a hidden console of its own (`CREATE_NO_WINDOW`), which the programs it
+/// starts share without a window, and its own process group, so the
+/// terminal's Ctrl-C and closing never reach it. It also leaves the terminal's
+/// job, which some terminals end when they close; a job that refuses
+/// breakaway fails the spawn with access denied, and the daemon then starts
+/// inside it (`doctor` reports a job that kills on close).
+#[cfg(windows)]
+async fn start_daemon(
+    paths: &Paths,
+    remove_env: &[&str],
+    begun: Instant,
+) -> Result<(Instant, Vec<u8>)> {
+    use std::ffi::{OsStr, OsString};
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::windows::io::AsHandle;
+
+    use devlanes_sys_windows::spawn::{self, CreationFlags, Environment, Spawn, Stdio, Stream};
+
+    let exe = std::env::current_exe()?;
+    // The daemon's own variables replace inherited ones; Windows would refuse
+    // two spellings of one name.
+    let own = ["DEVLANES_HOME", "DEVLANES_READY_FD"];
+    let mut variables: Vec<(OsString, OsString)> = daemon_env(std::env::vars_os(), remove_env)
+        .into_iter()
+        .filter(|(name, _)| {
+            name.to_str()
+                .is_none_or(|name| !own.iter().any(|own| same_name(name, own)))
+        })
+        .collect();
+    variables.push(("DEVLANES_HOME".into(), paths.home.clone().into()));
+    variables.push(("DEVLANES_READY_FD".into(), "1".into()));
+    let environment = Environment::new(variables)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    // A path holds no `"`, so quoting is enough for the program's argv[0].
+    let mut command_line = OsString::from("\"");
+    command_line.push(&exe);
+    command_line.push("\" daemon run");
+    let (reader, writer) = spawn::pipe()?;
+    let spec = |breakaway_from_job: bool| Spawn {
+        program: &exe,
+        command_line: OsStr::new(&command_line),
+        environment: Some(&environment),
+        cwd: Some(&paths.home),
+        stdio: Stdio::Handles {
+            stdin: Stream::Null,
+            stdout: Stream::Handle(writer.as_handle()),
+            stderr: Stream::Null,
+        },
+        inherit: &[],
+        job: None,
+        flags: CreationFlags {
+            no_window: true,
+            new_process_group: true,
+            breakaway_from_job,
+            ..CreationFlags::default()
+        },
+    };
+    let child = match spawn::spawn(&spec(true)) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            tracing::debug!("the terminal's job refuses breakaway; the daemon starts inside it");
+            spawn::spawn(&spec(false))?
+        }
+        result => result?,
+    };
+    // Only the daemon may hold the writing end, or the reader never sees its end.
+    drop(writer);
+    tracing::debug!(
+        pid = child.pid(),
+        elapsed_ms = begun.elapsed().as_millis() as u64,
+        "daemon process started; waiting for its readiness line"
+    );
+    // Dropping the handle leaves the daemon running.
+    drop(child);
+    // Anonymous pipes have no async reads on Windows. A plain thread, unlike
+    // `spawn_blocking`, never holds up the runtime's shutdown when a daemon
+    // hangs without answering; it ends with the pipe or the process.
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("daemon-ready".into())
+        .spawn(move || {
+            let mut message = Vec::new();
+            let read = BufReader::new(reader)
+                .take(READY_LINE_LIMIT)
+                .read_until(b'\n', &mut message)
+                .map(|_| message);
+            let _ = sender.send(read);
+        })?;
+    let deadline = Instant::now() + START_TIMEOUT;
+    let message = timeout(START_TIMEOUT, receiver)
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::Startup("the readiness reader stopped".into()))??;
+    Ok((deadline, message))
+}
+
+/// What a failed endpoint probe says.
+#[cfg(unix)]
+const PROBE_FAILED: &str = "Unix socket bind probe failed";
+
+/// What a failed endpoint probe says.
+#[cfg(windows)]
+const PROBE_FAILED: &str = "named pipe probe failed";
+
 /// A bind probe catches socket restrictions even when the launcher omitted sandbox markers.
 fn probe_socket(paths: &Paths) -> Result<()> {
-    let parent = paths.socket.parent().ok_or(Error::InvalidSocketPath)?;
-    let path = tempfile::Builder::new()
-        .prefix("p")
-        .rand_bytes(3)
-        .tempfile_in(parent)?
-        .into_temp_path();
-    std::fs::remove_file(&path)?;
-    let listener = std::os::unix::net::UnixListener::bind(&path)
-        .map_err(|_| Error::Sandbox("Unix socket bind probe failed"))?;
-    drop(listener);
-    Ok(())
+    match local::probe(&paths.socket) {
+        Ok(()) => Ok(()),
+        Err(ProbeError::NoParent) => Err(Error::InvalidSocketPath),
+        Err(ProbeError::Setup(error)) => Err(error.into()),
+        Err(ProbeError::Endpoint(_)) => Err(Error::Sandbox(PROBE_FAILED)),
+    }
 }
 
 /// Accounts for control payloads too, so a short event count cannot conceal excessive memory.
@@ -660,6 +842,30 @@ mod tests {
                 "https_proxy",
                 "CI"
             ]
+        );
+    }
+
+    /// Windows keeps the system variables programs need and matches names
+    /// without case, as Windows does.
+    #[cfg(windows)]
+    #[test]
+    fn daemon_env_keeps_windows_variables() {
+        let vars = [
+            ("Path", r"C:\Windows"),
+            ("SystemRoot", r"C:\Windows"),
+            ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            ("devlanes_home", r"C:\dl"),
+            ("ssh_auth_sock", r"\\.\pipe\openssh-ssh-agent"),
+            ("GITHUB_TOKEN", "secret"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        let kept: Vec<String> = daemon_env(vars.into_iter(), &["SSH_AUTH_SOCK"])
+            .into_iter()
+            .filter_map(|(name, _)| name.into_string().ok())
+            .collect();
+        assert_eq!(
+            kept,
+            ["Path", "SystemRoot", "ProgramFiles(x86)", "devlanes_home"]
         );
     }
 }

@@ -17,6 +17,10 @@ use crate::{
     output::emit,
 };
 
+// Prompts read `CONIN$` on Windows, which has no `/dev/tty`.
+#[cfg(windows)]
+use crate::console::read_tty;
+
 /// Ctrl-C exit status when a client detaches; managed units keep running.
 const DETACHED: u8 = 130;
 
@@ -243,7 +247,7 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
                 lane.into_iter()
                     .map(|(key, value)| (key.into(), value.into())),
             );
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell());
             let status = tokio::process::Command::new(shell)
                 .env_clear()
                 .envs(env)
@@ -424,9 +428,44 @@ const DAEMON_EXIT_WAIT: Duration = Duration::from_secs(300);
 /// after stopping everything); without a pid, until its socket stops answering.
 async fn wait_for_daemon_exit(paths: &Paths, pid: Option<i32>) -> Result<(), RpcError> {
     let deadline = tokio::time::Instant::now() + DAEMON_EXIT_WAIT;
+    // The PID is pinned to the start time read now, while the old daemon still
+    // stops its units, so a process that reuses the PID later never counts as
+    // the daemon. Start times need only query access, which an elevated
+    // daemon grants too. The pipe is only the fallback when that fails: it
+    // closes when the shutdown begins, before the lock is released.
+    #[cfg(windows)]
+    let identity = match pid.and_then(|pid| u32::try_from(pid).ok()) {
+        Some(pid) => {
+            let started =
+                tokio::task::spawn_blocking(move || devlanes_sys_windows::proc::start_time(pid))
+                    .await;
+            match started {
+                Ok(Ok(Some(started))) => Some((pid, started)),
+                // No process has the PID any more.
+                Ok(Ok(None)) => return Ok(()),
+                Ok(Err(_)) | Err(_) => None,
+            }
+        }
+        None => None,
+    };
     loop {
+        #[cfg(unix)]
         let gone = match pid.and_then(rustix::process::Pid::from_raw) {
             Some(pid) => rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH),
+            None => Client::connect_any(paths)
+                .await
+                .is_err_and(|error| error.is_not_running()),
+        };
+        #[cfg(windows)]
+        let gone = match identity {
+            Some((pid, started)) => {
+                let alive = tokio::task::spawn_blocking(move || {
+                    devlanes_sys_windows::proc::matches(pid, started)
+                })
+                .await;
+                // A failed query keeps waiting; the deadline still bounds it.
+                matches!(alive, Ok(Ok(false)))
+            }
             None => Client::connect_any(paths)
                 .await
                 .is_err_and(|error| error.is_not_running()),
@@ -584,6 +623,11 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                                 // The service definition is in this user's home, read here.
                                 if data.is_object() {
                                     data["service"] = crate::daemon::service_report().await;
+                                }
+                                // Facts of this terminal, whatever daemon answered.
+                                #[cfg(windows)]
+                                if data.is_object() {
+                                    data["terminal"] = crate::local_doctor::terminal_facts();
                                 }
                             }
                             // The counterpart of the not-running answer's `false`.
@@ -882,6 +926,7 @@ fn printable(text: &str) -> String {
 
 /// Shows `prompt` on `/dev/tty` and reads one line, without echo for secrets.
 /// Returns the line with its newline, so an empty answer stays distinct from cancel.
+#[cfg(unix)]
 fn read_tty(prompt: &str, kind: &str) -> Option<String> {
     use std::io::{BufRead, Write};
     let tty = std::fs::OpenOptions::new()
@@ -1080,6 +1125,7 @@ fn confirm(runtime: &Runtime, question: &str) -> Result<bool, RpcError> {
 }
 
 /// The browser is launched by the client, never the daemon (it may be remote or headless).
+#[cfg(unix)]
 async fn open_url(url: &str) -> Result<(), RpcError> {
     if url.is_empty() {
         return Err(RpcError::new("no_url", Value::Null, 3));
@@ -1097,7 +1143,58 @@ async fn open_url(url: &str) -> Result<(), RpcError> {
     Ok(())
 }
 
+/// The browser is launched by the client, never the daemon. Windows hands
+/// the URL to the shell, which opens only plain `http` and `https` URLs.
+#[cfg(windows)]
+async fn open_url(url: &str) -> Result<(), RpcError> {
+    if url.is_empty() {
+        return Err(RpcError::new("no_url", Value::Null, 3));
+    }
+    let failed = |message: String| RpcError::new("open_failed", json!({"message": message}), 1);
+    let url = url.to_owned();
+    tokio::task::spawn_blocking(move || devlanes_sys_windows::shell_execute::open_url(&url))
+        .await
+        .map_err(|error| failed(error.to_string()))?
+        .map_err(|error| failed(error.to_string()))
+}
+
+/// The shell `env shell` starts when `$SHELL` is unset.
+#[cfg(unix)]
+fn default_shell() -> String {
+    "/bin/sh".into()
+}
+
+/// The shell `env shell` starts when `$SHELL` is unset: `%ComSpec%`, which
+/// Windows sets to its `cmd.exe`.
+#[cfg(windows)]
+fn default_shell() -> String {
+    std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into())
+}
+
+/// Reads the daemon's own log file directly; works even when the daemon is
+/// wedged. Windows has no `tail`, so a small follower does the same there.
+#[cfg(windows)]
+async fn daemon_logs(follow: bool, tail: usize) -> Result<u8, RpcError> {
+    let path = paths()?.logs.join("daemon.log");
+    let read = path.clone();
+    // Reads and waits block; `-f` runs until the user stops it.
+    tokio::task::spawn_blocking(move || {
+        crate::follow::tail(&read, tail, follow, &mut std::io::stdout())
+    })
+    .await
+    .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?
+    .map(|()| 0)
+    .map_err(|error| {
+        RpcError::new(
+            "io",
+            json!({"message": format!("{}: {error}", path.display())}),
+            1,
+        )
+    })
+}
+
 /// Reads the daemon's own log file directly; works even when the daemon is wedged.
+#[cfg(unix)]
 async fn daemon_logs(follow: bool, tail: usize) -> Result<u8, RpcError> {
     let paths = paths()?;
     let path = paths.logs.join("daemon.log");
@@ -1137,7 +1234,11 @@ mod tests {
     /// Without a daemon, `daemon status` says so in each mode and exits 1.
     #[test]
     fn daemon_not_running_in_every_mode() {
-        let paths = Paths::new("/home/u/.devlanes").expect("paths");
+        #[cfg(unix)]
+        const HOME: &str = "/home/u/.devlanes";
+        #[cfg(windows)]
+        const HOME: &str = r"C:\Users\u\.devlanes";
+        let paths = Paths::new(HOME).expect("paths");
         let socket = paths.socket.display().to_string();
         let mode = |name: &str| {
             let cli = Cli::parse_from(["devlanes", "--output", name]);
@@ -1148,7 +1249,7 @@ mod tests {
         let value: Value = serde_json::from_str(&json.stdout).expect("json");
         assert_eq!(value["running"], false);
         assert_eq!(value["socket"], socket);
-        assert_eq!(value["home"], "/home/u/.devlanes");
+        assert_eq!(value["home"], HOME);
         assert_eq!(
             daemon_not_running(&mode("plain"), &paths).stdout,
             format!(
@@ -1161,10 +1262,37 @@ mod tests {
         );
     }
 
+    /// `url open` on Windows hands the shell plain web URLs only; nothing
+    /// here reaches a browser.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn url_open_refuses_what_is_not_a_web_url() {
+        assert_eq!(open_url("").await.map_err(|e| e.code), Err("no_url".into()));
+        for url in [
+            "file:///C:/Windows/System32/calc.exe",
+            "https://example.invalid/\" --new-window \"x",
+            "https://example.invalid/a b",
+        ] {
+            let error = open_url(url).await.expect_err(url);
+            assert_eq!(error.code, "open_failed", "{url}");
+            assert_eq!(error.exit_code, 1, "{url}");
+        }
+    }
+
     /// The restart wait ends once the old daemon's pid is gone.
     #[tokio::test]
     async fn restart_waits_for_the_old_pid() {
+        #[cfg(unix)]
         let mut child = std::process::Command::new("true").spawn().expect("spawn");
+        #[cfg(windows)]
+        let mut child = std::process::Command::new(
+            devlanes_sys_windows::file::system_directory()
+                .expect("System32")
+                .join("cmd.exe"),
+        )
+        .args(["/d", "/c", "exit"])
+        .spawn()
+        .expect("spawn");
         let pid = i32::try_from(child.id()).expect("pid");
         child.wait().expect("reaped");
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1183,12 +1311,18 @@ mod tests {
     #[tokio::test]
     async fn restart_refuses_an_invalid_user_config_first() {
         let temp = tempfile::tempdir().expect("tempdir");
+        #[cfg_attr(windows, expect(unused_mut, reason = "the pipe name stays"))]
         let mut paths = Paths::new(temp.path().join("h")).expect("paths");
-        paths.socket = paths.run.join("daemon.sock");
+        #[cfg(unix)]
+        {
+            paths.socket = paths.run.join("daemon.sock");
+        }
         paths.prepare().expect("prepare");
         let config = paths.home.join("config.yaml");
         std::fs::write(&config, "tui:\n  theme: neon\n").expect("config");
-        let daemon = tokio::net::UnixListener::bind(&paths.socket).expect("socket");
+        let mut daemon = devlanes_ipc::local::LocalListener::bind(&paths.socket)
+            .await
+            .expect("socket");
         let context = devlanes_proto::Context {
             yes: true,
             ..devlanes_proto::Context::default()

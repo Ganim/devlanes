@@ -217,14 +217,15 @@ pub struct UserLanesConfig {
 pub const DEFAULT_DATA_DIR: &str = "data";
 
 impl UserLanesConfig {
-    /// The folder holding lane data folders: `data_dir` with `~/` expanded from `HOME`,
-    /// or `<home>/data`, where `home` is the devlanes home.
+    /// The folder holding lane data folders: `data_dir` with `~/` expanded from `HOME`
+    /// (on Windows also `~\`, from the profile directory), or `<home>/data`, where
+    /// `home` is the devlanes home.
     pub fn data_root(&self, home: &Path) -> std::path::PathBuf {
         let Some(dir) = self.data_dir.as_deref() else {
             return home.join(DEFAULT_DATA_DIR);
         };
-        match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
-            (Some(rest), Some(user_home)) => std::path::PathBuf::from(user_home).join(rest),
+        match (below_home(dir), devlanes_core::paths::user_home()) {
+            (Some(rest), Some(user_home)) => user_home.join(rest),
             _ => std::path::PathBuf::from(dir),
         }
     }
@@ -233,12 +234,24 @@ impl UserLanesConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         match self.data_dir.as_deref() {
             None => Ok(()),
-            Some(dir) if dir.starts_with("~/") || Path::new(dir).is_absolute() => Ok(()),
+            Some(dir) if below_home(dir).is_some() || Path::new(dir).is_absolute() => Ok(()),
             Some(_) => Err(ConfigError::plain(
                 "lanes.data_dir: must be an absolute path or start with `~/`",
             )),
         }
     }
+}
+
+/// The part of a `~/...` folder below the user's home.
+#[cfg(unix)]
+fn below_home(dir: &str) -> Option<&str> {
+    dir.strip_prefix("~/")
+}
+
+/// The part of a `~/...` or `~\...` folder below the user's home.
+#[cfg(windows)]
+fn below_home(dir: &str) -> Option<&str> {
+    dir.strip_prefix("~/").or_else(|| dir.strip_prefix("~\\"))
 }
 
 /// Release checks: the daemon reads the latest release's version once a day and
@@ -665,6 +678,12 @@ pub struct ProxyConfig {
     #[schemars(extend("examples" = [false,true]))]
     pub lan: bool,
 }
+
+/// The port the HTTPS proxy binds when [`ProxyConfig::https_port`] is taken or not allowed.
+pub const HTTPS_FALLBACK_PORT: u16 = 8443;
+
+/// The port the HTTP proxy binds when [`ProxyConfig::http_port`] is taken or not allowed.
+pub const HTTP_FALLBACK_PORT: u16 = 8080;
 
 impl Default for ProxyConfig {
     /// Prefer standard ports; runtime binding handles permission-related fallbacks.

@@ -32,9 +32,26 @@ HTTP paths return the request path, headers and PID as JSON. `/ws` echoes text/b
 - `--port <port>` overrides `PORT` (default 3000); zero selects an ephemeral port.
 - `--bind-other-port <port>` replaces the configured port; `--bind-ipv6-only` binds `[::1]` only.
 - `--log-line <text>` prints a startup line and is repeatable; `--print-env` prints the entire environment as an `ENV` JSON line.
-- `--ignore-sigterm` consumes SIGTERM; SIGINT still exits.
-- `--spawn-grandchild` creates a child and grandchild; `--setsid-grandchild` creates that tree with the grandchild in its own session.
+- `--ignore-sigterm` consumes SIGTERM; SIGINT still exits. On Windows, Ctrl-Break and Ctrl-C both exit, and this flag consumes both.
+- `--spawn-grandchild` creates a child and grandchild; `--setsid-grandchild` creates that tree with the grandchild in its own session (Unix only; Windows refuses it).
 - `--exit-after <duration>` accepts values such as `500ms` or `10s` and is inherited by descendants.
+
+## Fake tools
+
+`fake-tool` stands in for external programs (`mise`, `direnv`, `fnox`, `mkcert`) where `#!/bin/sh` scripts cannot run. `fake_tool::install(dir, "mise", &behaviour)` copies the binary to `dir/mise` (`mise.exe` on Windows) and writes the `Behaviour` (expected arguments, a file recording each call, a sleep, stdout, stderr, exit code) next to it as `mise.exe.json`. Tests never build it: build this crate first (`cargo build -p devlanes-testing`, or any workspace test build), and the helper finds the binary next to the test binaries.
+
+```rust
+use devlanes_testing::fake_tool::{Behaviour, install};
+
+let bin = tempfile::tempdir()?;
+let mise = install(
+    bin.path(),
+    "mise",
+    &Behaviour::new()
+        .args(["env", "--json"])
+        .stdout_json(serde_json::json!({ "FROM_DIR": "{cwd}", "PATH": "{env:PATH}" })),
+)?;
+```
 
 ## Behaviour
 

@@ -1,4 +1,7 @@
-//! Bounded framing shared by Unix sockets and tunneled daemon connections.
+//! Bounded framing shared by local daemon connections and tunneled ones, plus
+//! the local endpoint itself ([`local`]).
+
+pub mod local;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use devlanes_proto::{Control, MAX_FRAME_SIZE};

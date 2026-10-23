@@ -8,6 +8,7 @@
 //! Requires a tokio runtime with IO, time and signal drivers enabled.
 //!
 //! ```no_run
+//! # #[cfg(unix)] mod demo {
 //! use devlanes_core::{LaunchSpec, Runner, StopPolicy, TerminalSize};
 //! use devlanes_runner_pty::PtyRunner;
 //!
@@ -28,8 +29,11 @@
 //! # let _ = (output.try_recv(), exit);
 //! # Ok(())
 //! # }
+//! # }
 //! ```
 
+// Sessions, PTYs and signals are Unix; Windows units run through devlanes-runner-windows.
+#![cfg(unix)]
 // Unsafe code is limited to the pre-exec hook in `spawn` and master registration in
 // `unit`; each block documents its invariants.
 #![deny(unsafe_code)]
@@ -46,31 +50,11 @@ mod snapshot;
 mod spawn;
 mod unit;
 
+// Defined in core so the Windows runner shares them. Here, `KeepDaemonized`
+// leftovers are listed in `ExitReport::left_running`.
+pub use devlanes_core::{ExitSweep, StderrMode};
 pub use devlanes_sys::{ListeningSocket, ProcessInfo};
 pub use unit::{ExitReport, PtyUnit, StopOutcome};
-
-/// How pipe-mode units (`pty: false`) deliver stderr.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum StderrMode {
-    /// Separate pipes; chunks are tagged `Stdout` or `Stderr`.
-    #[default]
-    Separate,
-    /// One shared pipe preserving write order; every chunk is tagged `Stdout`.
-    Merged,
-}
-
-/// What happens to processes still running after a unit's leader exits on its own.
-/// An explicit stop always kills every tracked process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ExitSweep {
-    /// SIGKILL every tracked leftover; for services and ad-hoc commands.
-    #[default]
-    KillAll,
-    /// Kill leftovers inside the unit's session, but leave descendants that moved to
-    /// their own session running and list them in [`ExitReport::left_running`]. For
-    /// setup tasks that start daemons (`pg_ctl start`, `redis-server --daemonize yes`).
-    KeepDaemonized,
-}
 
 /// Spawns units in PTYs or pipes. Cheap to clone; holds only tuning values.
 #[derive(Debug, Clone)]

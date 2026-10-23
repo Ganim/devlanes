@@ -22,9 +22,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Windows compiles and links about twice as slowly, and the large sync test
+    # alone takes four minutes on NTFS.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 30 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain
@@ -74,13 +76,27 @@ jobs:
       - run: shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh agent-plugin/scripts/*.sh e2e/ssh/run.sh
       - run: sh packaging/scripts/check.sh
       - run: sh agent-plugin/scripts/test-block-background.sh
+  # install.ps1, package.ps1 and the npm launcher on Windows, against a fake
+  # devlanes.exe, so no Rust build is needed.
+  packaging-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install PSScriptAnalyzer
+        run: Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
+      - run: ./packaging/scripts/check.ps1
   e2e:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Windows builds take longer.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 30 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain
@@ -99,7 +115,8 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: nextest
-      # Built once here; each nextest test process would otherwise run cargo build itself.
+      # Built once here; each nextest test process would otherwise run cargo build
+      # itself (on Windows tests never build, so the binaries must exist first).
       - run: cargo build -p devlanes -p devlanes-testing --locked
       - run: cargo nextest run --profile e2e --locked --no-fail-fast --failure-output immediate-final
         env:

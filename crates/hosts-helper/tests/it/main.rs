@@ -2,7 +2,8 @@
 //!
 //! `--hosts-file` exists only in debug builds, so these tests are compiled out of
 //! release test runs.
-#![cfg(debug_assertions)]
+// The helper is Unix only; Windows needs no hosts file entries.
+#![cfg(all(debug_assertions, unix))]
 
 use std::fs;
 use std::io::Write as _;

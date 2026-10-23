@@ -45,7 +45,29 @@ pub enum Readiness {
         cwd: std::path::PathBuf,
         /// The unit's assembled environment; the daemon's own is never inherited.
         env: BTreeMap<String, String>,
+        /// Git for Windows' `sh.exe`, set with [`Readiness::with_shell`];
+        /// without one the check fails with `shell_missing` at once.
+        #[cfg(windows)]
+        shell: Option<std::path::PathBuf>,
     },
+}
+
+#[cfg(windows)]
+impl Readiness {
+    /// Runs a `cmd` check through `shell`; other checks stay as they are.
+    pub fn with_shell(self, shell: Option<std::path::PathBuf>) -> Self {
+        match self {
+            Self::Cmd {
+                command, cwd, env, ..
+            } => Self::Cmd {
+                command,
+                cwd,
+                env,
+                shell,
+            },
+            other => other,
+        }
+    }
 }
 
 impl std::fmt::Debug for Readiness {
@@ -95,6 +117,14 @@ where
             "config_error",
             json!({"path": "ready.log", "pattern": pattern, "message": error.to_string()}),
             1,
+        ))));
+        return;
+    }
+    // Without the shell no attempt can pass; failing now names the cause.
+    #[cfg(windows)]
+    if let Readiness::Cmd { shell: None, .. } = &check {
+        host.set_state(UnitState::Failed(Some(windows::shell_missing(
+            json!({"check": "cmd"}),
         ))));
         return;
     }
@@ -160,9 +190,24 @@ async fn probe_until_ready(
             })
             .await
         }
+        #[cfg(unix)]
         Readiness::Cmd { command, cwd, env } => {
             poll(deadline, || async move {
                 cmd_succeeds(command, cwd, env, deadline).await
+            })
+            .await
+        }
+        #[cfg(windows)]
+        Readiness::Cmd {
+            command,
+            cwd,
+            env,
+            shell,
+        } => {
+            // `run_check` fails a check without a shell before probing.
+            let Some(shell) = shell else { return Err(()) };
+            poll(deadline, || async move {
+                windows::cmd_succeeds(shell, command, cwd, env, deadline).await
             })
             .await
         }
@@ -208,6 +253,7 @@ async fn probe_until_ready(
 /// Runs one `cmd` attempt in the unit's environment. Each attempt is bounded by
 /// [`CMD_ATTEMPT`] and the overall deadline; a timed-out probe is killed, not left
 /// running alongside the next attempt.
+#[cfg(unix)]
 async fn cmd_succeeds(
     command: &str,
     cwd: &std::path::Path,
@@ -310,14 +356,16 @@ fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
 
 /// Waits for `infra.containers.<name>.ready` once the container is up. `ports`
 /// maps its port names to published host ports in declaration order; `env` runs
-/// a `cmd` probe; `logs` reads the container's last lines for a `log` probe.
-/// Fails with `config_error` for an unknown port name or pattern, and with
-/// `container_not_ready` when the check does not pass within its timeout.
+/// a `cmd` probe (on Windows through `shell`, Git's `sh.exe`); `logs` reads the
+/// container's last lines for a `log` probe. Fails with `config_error` for an
+/// unknown port name or pattern, and with `container_not_ready` when the check
+/// does not pass within its timeout.
 pub(crate) async fn container_ready<F, Fut>(
     name: &str,
     ready: &devlanes_resolve::ContainerReady,
     ports: &[(String, u16)],
     env: &BTreeMap<String, String>,
+    #[cfg(windows)] shell: Option<&std::path::Path>,
     logs: F,
 ) -> Result<(), RpcError>
 where
@@ -376,8 +424,22 @@ where
             let probe = || async move { logs().await.iter().any(|line| regex.is_match(line)) };
             ("log", poll(deadline, probe).await)
         }
+        #[cfg(unix)]
         ContainerCheck::Cmd { shell, cwd } => {
             let probe = || cmd_succeeds(shell, cwd, env, deadline);
+            ("cmd", poll(deadline, probe).await)
+        }
+        #[cfg(windows)]
+        ContainerCheck::Cmd {
+            shell: command,
+            cwd,
+        } => {
+            let Some(shell) = shell else {
+                return Err(windows::shell_missing(
+                    json!({"container": name, "check": "cmd"}),
+                ));
+            };
+            let probe = || windows::cmd_succeeds(shell, command, cwd, env, deadline);
             ("cmd", poll(deadline, probe).await)
         }
     };
@@ -504,6 +566,105 @@ async fn http_ok(port: u16, path: &str, expected: Option<u16>, last: &LastStatus
     }
 }
 
+/// `cmd` probes on Windows: Git's `sh.exe` in a job that ends the probe's
+/// whole tree when the attempt is over or abandoned, and when the daemon dies.
+#[cfg(windows)]
+mod windows {
+    use std::{collections::BTreeMap, io, path::Path, sync::Arc};
+
+    use devlanes_proto::RpcError;
+    use devlanes_sys_windows::{
+        job::{Job, JobOptions},
+        spawn::{self, Child, CreationFlags, Environment, Spawn, Stdio, Stream},
+    };
+    use serde_json::{Value, json};
+    use tokio::time::{Instant, timeout};
+
+    use super::CMD_ATTEMPT;
+
+    /// The failure of a `cmd` check without Git's `sh.exe`: `spawn_failed`
+    /// with reason `shell_missing`, plus the check's own `data`.
+    pub(super) fn shell_missing(mut data: Value) -> RpcError {
+        data["program"] = json!("/bin/sh");
+        data["reason"] = json!("shell_missing");
+        data["message"] = json!(
+            "`ready.cmd` needs Git for Windows' sh.exe, and no `git` on PATH has one; install Git for Windows and restart the daemon"
+        );
+        RpcError::new("spawn_failed", data, 1)
+    }
+
+    /// Runs one `cmd` attempt with `shell`, like the Unix probe: the unit's
+    /// environment only (plus the shell's variables and Git's tools at the
+    /// end of `PATH`), no input or output, bounded by [`CMD_ATTEMPT`] and the
+    /// deadline. Whatever is left of the attempt's process tree is ended when
+    /// it returns or is dropped.
+    pub(super) async fn cmd_succeeds(
+        shell: &Path,
+        command: &str,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        deadline: Instant,
+    ) -> bool {
+        let limit = deadline
+            .saturating_duration_since(Instant::now())
+            .min(CMD_ATTEMPT);
+        let mut env = env.clone();
+        devlanes_shell_windows::shell_env(&mut env, shell);
+        // The per-drive `=C:` entries cannot go into an environment block.
+        env.retain(|name, _| !name.starts_with('='));
+        let line = devlanes_shell_windows::shell_command_line(shell, command);
+        let (shell, cwd) = (shell.to_path_buf(), cwd.to_path_buf());
+        // Process creation touches the disk, so it stays off the executor.
+        let started = tokio::task::spawn_blocking(move || start(&shell, &line, &cwd, &env)).await;
+        let Ok(Ok((job, child))) = started else {
+            return false;
+        };
+        let child = Arc::new(child);
+        let waiter = tokio::task::spawn_blocking({
+            let child = child.clone();
+            move || child.wait()
+        });
+        let passed = matches!(timeout(limit, waiter).await, Ok(Ok(Ok(0))));
+        // Closing the job's only handle ends every process still in it. A
+        // dropped attempt drops `job` too, which also ends the blocking wait.
+        drop(job);
+        passed
+    }
+
+    /// Starts the shell in a new kill-on-close job, its standard streams on
+    /// `NUL`. Blocking.
+    fn start(
+        shell: &Path,
+        line: &std::ffi::OsStr,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+    ) -> io::Result<(Job, Child)> {
+        let environment = Environment::new(env)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let job = Job::create(JobOptions {
+            kill_on_close: true,
+            die_on_unhandled_exception: true,
+        })?;
+        // Default flags: the probe shares the daemon's hidden console, so no
+        // window opens and no console host is created per attempt.
+        let child = spawn::spawn(&Spawn {
+            program: shell,
+            command_line: line,
+            environment: Some(&environment),
+            cwd: Some(cwd),
+            stdio: Stdio::Handles {
+                stdin: Stream::Null,
+                stdout: Stream::Null,
+                stderr: Stream::Null,
+            },
+            inherit: &[],
+            job: Some(&job),
+            flags: CreationFlags::default(),
+        })?;
+        Ok((job, child))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,7 +761,10 @@ mod tests {
         };
         let ports = [("http".to_owned(), port)];
         let env = BTreeMap::new();
+        #[cfg(unix)]
         let check = container_ready("web", &ready, &ports, &env, || async { Vec::new() });
+        #[cfg(windows)]
+        let check = container_ready("web", &ready, &ports, &env, None, || async { Vec::new() });
         let Err(error) = timeout(Duration::from_secs(10), check).await? else {
             return Err("a 302 must not pass a check without `status`".into());
         };
@@ -631,6 +795,7 @@ mod tests {
 
     /// `cmd` probes see the unit's environment only, and a hanging attempt is cut
     /// at the deadline instead of blocking the check.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cmd_probe_uses_unit_env_and_is_bounded() {
         let cwd = std::env::temp_dir();
@@ -646,6 +811,135 @@ mod tests {
         let deadline = started + Duration::from_millis(300);
         assert!(!cmd_succeeds("sleep 30", &cwd, &env, deadline).await);
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// The environment Windows programs need, `PATH` holding only System32,
+    /// plus `extra`.
+    #[cfg(windows)]
+    fn windows_env(extra: &[(&str, &str)]) -> BTreeMap<String, String> {
+        let system = devlanes_sys_windows::file::system_directory().expect("System32");
+        let mut env: BTreeMap<String, String> = ["SYSTEMROOT", "WINDIR", "TEMP", "TMP"]
+            .iter()
+            .filter_map(|name| Some(((*name).to_owned(), std::env::var(name).ok()?)))
+            .collect();
+        env.insert("PATH".into(), system.to_string_lossy().into_owned());
+        env.extend(
+            extra
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+        );
+        env
+    }
+
+    /// `cmd` probes run through Git's `sh.exe` with the unit's environment
+    /// only, find Git's tools through the directory appended to `PATH`, and
+    /// pass only on exit 0.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cmd_probe_runs_through_git_sh() {
+        let shell = devlanes_shell_windows::windows_shell()
+            .await
+            .expect("Git for Windows' sh.exe");
+        let cwd = std::env::temp_dir();
+        let env = windows_env(&[("DL_READY", "yes")]);
+        let probe = |command: &'static str| {
+            let (shell, cwd, env) = (shell.clone(), cwd.clone(), env.clone());
+            async move {
+                let soon = Instant::now() + Duration::from_secs(30);
+                windows::cmd_succeeds(&shell, command, &cwd, &env, soon).await
+            }
+        };
+        assert!(probe("test \"$DL_READY\" = yes").await);
+        // The daemon's own variables are not inherited.
+        assert!(probe("test -z \"$USERPROFILE\"").await);
+        assert!(probe("sleep 0 && exit 0").await);
+        assert!(!probe("sleep 0 && exit 3").await);
+    }
+
+    /// An attempt cut at the deadline ends its whole process tree, including
+    /// a program the shell started in the background.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cmd_probe_timeout_ends_the_tree() {
+        let shell = devlanes_shell_windows::windows_shell()
+            .await
+            .expect("Git for Windows' sh.exe");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("pid");
+        let env = windows_env(&[("MARK", &marker.to_string_lossy().replace('\\', "/"))]);
+        // `/proc/<pid>/winpid` is the Windows PID behind an MSYS one.
+        let script =
+            "sleep 60 & cat /proc/$!/winpid > \"$MARK.tmp\" && mv \"$MARK.tmp\" \"$MARK\"; wait";
+        let watcher = {
+            let marker = marker.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Ok(text) = std::fs::read_to_string(&marker)
+                        && let Ok(pid) = text.trim().parse::<u32>()
+                        && let Ok(Some(identity)) = devlanes_sys::identity(pid)
+                    {
+                        return identity;
+                    }
+                    sleep(Duration::from_millis(50)).await;
+                }
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let passed = timeout(
+            Duration::from_secs(30),
+            windows::cmd_succeeds(&shell, script, dir.path(), &env, deadline),
+        )
+        .await
+        .expect("the attempt ends at its deadline");
+        assert!(!passed);
+        let background = timeout(Duration::from_secs(5), watcher)
+            .await
+            .expect("the background sleep started")
+            .expect("watcher");
+        // Ending a job's processes is asynchronous; allow it a moment.
+        let mut alive = true;
+        for _ in 0..100 {
+            alive = devlanes_sys::matches(&background).unwrap_or(false);
+            if !alive {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        if alive {
+            let _ = devlanes_sys::terminate_verified(&background, 1);
+        }
+        assert!(!alive, "the background sleep outlived its probe");
+    }
+
+    /// A `cmd` check without Git's `sh.exe` fails at once with
+    /// `shell_missing`, for units and containers alike.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cmd_probe_without_shell_fails_with_shell_missing() {
+        let ready = devlanes_resolve::ContainerReady {
+            check: devlanes_resolve::ContainerCheck::Cmd {
+                shell: "exit 0".into(),
+                cwd: std::env::temp_dir(),
+            },
+            timeout: Duration::from_secs(60),
+        };
+        let env = BTreeMap::new();
+        let check = container_ready("db", &ready, &[], &env, None, || async { Vec::new() });
+        let error = timeout(Duration::from_secs(5), check)
+            .await
+            .expect("fails at once")
+            .expect_err("no shell");
+        assert_eq!(error.code, "spawn_failed");
+        assert_eq!(error.data["reason"], "shell_missing");
+        assert_eq!(error.data["container"], "db");
+        let check = Readiness::Cmd {
+            command: "exit 0".into(),
+            cwd: std::env::temp_dir(),
+            env: BTreeMap::new(),
+            shell: Some("sh.exe".into()),
+        }
+        .with_shell(None);
+        assert!(matches!(check, Readiness::Cmd { shell: None, .. }));
     }
 
     #[tokio::test]

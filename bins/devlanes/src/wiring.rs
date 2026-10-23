@@ -13,12 +13,16 @@ use devlanes_core::{
     ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopPolicy, TerminalSize, Unit,
     contrib::{CA_BUNDLE_ENV, CA_CERT_ENV, Contributor, ScriptRunner},
 };
+use devlanes_daemon::integrations::ExitDetails;
+#[cfg(unix)]
+use devlanes_daemon::integrations::{
+    ConnectOptions, RemoteConnector, RemotePrompt, RemotePrompter,
+};
 use devlanes_daemon::{
     Engine, EngineOptions, Handler,
     integrations::{
-        ConnectOptions, ExitDetails, InfraContainer, InfraError, InfraEvent, InfraPortNeed,
-        InfraProvider, InfraSpec, InfraUp, Integrations, LaunchCheck, ManagedUnit, PlannedUnit,
-        PortInspector, PortScope, PresetEntry, RemoteConnector, RemotePrompt, RemotePrompter,
+        InfraContainer, InfraError, InfraEvent, InfraPortNeed, InfraProvider, InfraSpec, InfraUp,
+        Integrations, LaunchCheck, ManagedUnit, PlannedUnit, PortInspector, PortScope, PresetEntry,
         RouteEntry, RouteSink, RouteStatus, SysProcesses, UnitRunner, unavailable,
     },
 };
@@ -110,9 +114,20 @@ pub async fn engine(
     let ca_permitted = ca.as_ref().and_then(|ca| ca.permitted_dns_names());
     let routes = Arc::new(proxy(&user, ca, shutdown.clone()).await);
     let infra = Arc::new(ContainerInfra::new().await);
+    #[cfg(unix)]
     let mut integ = Integrations::with_runner(Arc::new(PtyUnits(
         devlanes_runner_pty::PtyRunner::default(),
     )));
+    #[cfg(windows)]
+    let shell = windows_shell().await;
+    #[cfg(windows)]
+    let mut integ = Integrations::with_runner(Arc::new(WindowsUnits(
+        devlanes_runner_windows::WindowsRunner::default().with_shell(shell.clone()),
+    )));
+    #[cfg(windows)]
+    {
+        integ.shell = shell;
+    }
     integ.contributors = contributors();
     integ.script_runners = script_runners();
     integ.secrets = Some(Arc::new(devlanes_secrets_fnox::FnoxProvider::default()));
@@ -120,19 +135,42 @@ pub async fn engine(
     integ.infra = infra;
     integ.routes = routes;
     integ.ports = Arc::new(SysPorts);
-    integ.processes = Arc::new(SysProcesses);
+    #[cfg(unix)]
+    {
+        integ.processes = Arc::new(SysProcesses);
+    }
+    #[cfg(windows)]
+    {
+        integ.processes = Arc::new(WindowsProcesses {
+            helper: devlanes_runner_windows::ConsoleHelper::current_exe().ok(),
+        });
+    }
     integ.ca_env = ca_env;
     integ.ca_status = ca_status;
     integ.ca_permitted = ca_permitted;
     integ.presets = presets();
     integ.launch_checks = vec![Arc::new(DistinctTauriIdentifiers)];
-    integ.remote = Arc::new(SshConnector {
-        home: paths.home.clone(),
-        exe: std::env::current_exe().ok(),
-    });
-    integ.hosts = hosts_file(hosts_policy, hosts_tld, hosts_probe)
-        .await
-        .map(Arc::new);
+    // Windows keeps the default `NoRemote`, which refuses `remote connect`
+    // with `not_supported_yet`: the SSH transport is Unix only.
+    #[cfg(unix)]
+    {
+        integ.remote = Arc::new(SshConnector {
+            home: paths.home.clone(),
+            exe: std::env::current_exe().ok(),
+        });
+    }
+    #[cfg(unix)]
+    {
+        integ.hosts = hosts_file(hosts_policy, hosts_tld, hosts_probe)
+            .await
+            .map(Arc::new);
+    }
+    // Names under the resolver TLD go through the NRPT rule instead.
+    #[cfg(windows)]
+    {
+        let _ = hosts_tld;
+        integ.native_hosts = Some(native_hosts(hosts_policy, hosts_probe).await);
+    }
     integ.pressure = pressure_source();
     integ.system_pressure = pressure_source();
     integ.start_gate = Some(start_gate(&user.startup, integ.pressure.clone()));
@@ -150,8 +188,29 @@ pub async fn engine(
 /// Bound on the startup `*.localhost` probe; past it the resolver counts as failing.
 const HOSTS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Windows answers every `*.localhost` name itself, so nothing writes the hosts
+/// file; `doctor` shows the startup probe that confirms it.
+#[cfg(windows)]
+async fn native_hosts(
+    policy: devlanes_resolver_hosts::HostsFilePolicy,
+    probe: Option<tokio::task::JoinHandle<devlanes_resolver_hosts::LocalhostResolution>>,
+) -> devlanes_daemon::hosts::NativeHosts {
+    let resolution = match probe {
+        // A panicked probe proves nothing about the resolver; treat it like a failure.
+        Some(probe) => Some(
+            probe
+                .await
+                .unwrap_or(devlanes_resolver_hosts::LocalhostResolution::Fails),
+        ),
+        None => None,
+    };
+    tracing::info!(mode = %policy.user_mode(), ?resolution, "hosts file not used on Windows");
+    devlanes_daemon::hosts::NativeHosts::new(policy, resolution)
+}
+
 /// The `/etc/hosts` fallback over `sudo -n` and the installed helper. Only names
 /// under `.localhost` are written when the configured TLD is one the helper refuses.
+#[cfg(unix)]
 async fn hosts_file(
     policy: devlanes_resolver_hosts::HostsFilePolicy,
     tld: Option<String>,
@@ -289,7 +348,10 @@ fn pressure_source() -> Option<Arc<dyn devlanes_core::gate::PressureSource>> {
     #[cfg(target_os = "linux")]
     let source: Option<Arc<dyn devlanes_core::gate::PressureSource>> =
         Some(Arc::new(devlanes_metrics_linux::LinuxPressure::new()));
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    let source: Option<Arc<dyn devlanes_core::gate::PressureSource>> =
+        Some(Arc::new(devlanes_metrics_windows::WindowsPressure::new()));
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     let source = None;
     source
 }
@@ -348,6 +410,8 @@ fn metrics_sources(
     }
     #[cfg(target_os = "linux")]
     sources.push(Arc::new(devlanes_metrics_linux::LinuxSource::new()));
+    #[cfg(windows)]
+    sources.push(Arc::new(devlanes_metrics_windows::WindowsSource::new()));
     match docker {
         Some(docker) => sources.push(Arc::new(devlanes_metrics_docker::DockerSource::new(
             docker.client().clone(),
@@ -371,12 +435,14 @@ async fn open_store(db: &Path) -> anyhow::Result<devlanes_state::Store> {
     }
 }
 
-/// Checks the file `devlanes certs trust --resolver` writes.
+/// Checks the file `devlanes certs trust --resolver` writes (the NRPT rule on
+/// Windows).
 struct OsResolverFiles;
 
 impl devlanes_daemon::integrations::ResolverFiles for OsResolverFiles {
     /// `{path, installed, matches}`; `matches` is false when the file routes the TLD
     /// elsewhere (another port, a stale install), `{error}` when the OS has no form.
+    #[cfg(unix)]
     fn status(&self, tld: &str, server: std::net::SocketAddr) -> Value {
         match crate::local::resolver_file(tld, server) {
             Ok(file) => {
@@ -389,6 +455,12 @@ impl devlanes_daemon::integrations::ResolverFiles for OsResolverFiles {
             }
             Err(error) => json!({"error": error}),
         }
+    }
+
+    /// The NRPT rule in the same shape; see [`crate::local::nrpt::doctor_status`].
+    #[cfg(windows)]
+    fn status(&self, tld: &str, server: std::net::SocketAddr) -> Value {
+        crate::local::nrpt::doctor_status(tld, server)
     }
 }
 
@@ -474,6 +546,7 @@ async fn certificate_authority_with(
                 directory.join("ca.pem"),
             ),
         };
+        #[cfg(unix)]
         if !directory.exists() {
             use std::os::unix::fs::DirBuilderExt;
             std::fs::DirBuilder::new()
@@ -481,6 +554,15 @@ async fn certificate_authority_with(
                 .mode(0o700)
                 .create(&directory)?;
         }
+        // With mkcert only the bundle lives here, so the CA never created it.
+        #[cfg(windows)]
+        if !directory.exists() {
+            if let Some(parent) = directory.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            devlanes_pki::create_private_dir(&directory)?;
+        }
+        #[cfg(unix)]
         let system = [
             "/etc/ssl/cert.pem",
             "/etc/ssl/certs/ca-certificates.crt",
@@ -489,10 +571,22 @@ async fn certificate_authority_with(
         .iter()
         .find_map(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default();
+        #[cfg(windows)]
+        let system = {
+            let roots = devlanes_trust_windows::bundle_roots(ca.certificate_der().as_ref());
+            for problem in &roots.problems {
+                tracing::warn!(%problem, "bundle.pem roots");
+            }
+            roots.pem
+        };
         let bundle = directory.join("bundle.pem");
         let temp = directory.join(".bundle.pem.tmp");
         std::fs::write(&temp, ca.combined_bundle(&system))?;
+        #[cfg(unix)]
         std::fs::rename(&temp, &bundle)?;
+        // A program reading the old bundle briefly blocks the replace on Windows.
+        #[cfg(windows)]
+        devlanes_sys_windows::file::rename_retrying(&temp, &bundle)?;
         Ok::<_, devlanes_pki::Error>((ca, cert, bundle))
     })
     .await;
@@ -534,7 +628,11 @@ async fn proxy(
     let lan = user.proxy.lan;
     let mut status = serde_json::Map::new();
     let https = match &ca {
-        Some(_) => match devlanes_proxy::bind_listeners(user.proxy.https_port, 8443, lan) {
+        Some(_) => match devlanes_proxy::bind_listeners(
+            user.proxy.https_port,
+            devlanes_config::HTTPS_FALLBACK_PORT,
+            lan,
+        ) {
             Ok(listeners) => Some(listeners),
             Err(error) => {
                 status.insert(
@@ -579,7 +677,11 @@ async fn proxy(
             }
         }
     }
-    match devlanes_proxy::bind_listeners(user.proxy.http_port, 8080, lan) {
+    match devlanes_proxy::bind_listeners(
+        user.proxy.http_port,
+        devlanes_config::HTTP_FALLBACK_PORT,
+        lan,
+    ) {
         Ok(listeners) => {
             status.insert(
                 "http".into(),
@@ -730,6 +832,7 @@ fn listener_status(bound: &Value, health: &[devlanes_proxy::ListenerHealth]) -> 
 }
 
 /// `connect` over system OpenSSH, with ssh's prompts relayed to the attached CLI.
+#[cfg(unix)]
 struct SshConnector {
     /// `$DEVLANES_HOME`; control sockets live in its `run/ssh`.
     home: PathBuf,
@@ -737,6 +840,7 @@ struct SshConnector {
     exe: Option<PathBuf>,
 }
 
+#[cfg(unix)]
 impl RemoteConnector for SshConnector {
     /// One SSH transport (and ControlMaster) per box.
     fn transport(
@@ -772,8 +876,10 @@ impl RemoteConnector for SshConnector {
 }
 
 /// Adapts the daemon's prompt relay to the SSH transport's.
+#[cfg(unix)]
 struct PromptBridge(Arc<dyn RemotePrompter>);
 
+#[cfg(unix)]
 #[async_trait]
 impl devlanes_transport_ssh::PromptRelay for PromptBridge {
     /// Forwards with the CLI's prompt kind words.
@@ -793,9 +899,172 @@ impl devlanes_transport_ssh::PromptRelay for PromptBridge {
     }
 }
 
+/// Git for Windows' `sh.exe` for `run:` strings and `ready.cmd`, looked up
+/// once at daemon start; units and checks that need it fail with
+/// `shell_missing` without one.
+#[cfg(windows)]
+async fn windows_shell() -> Option<PathBuf> {
+    let shell = devlanes_shell_windows::windows_shell().await;
+    match &shell {
+        Some(path) => {
+            tracing::info!(shell = %path.display(), "shell for run strings and ready.cmd")
+        }
+        None => {
+            tracing::warn!("no Git for Windows sh.exe found; run strings and ready.cmd cannot run")
+        }
+    }
+    shell
+}
+
+/// [`SysProcesses`] whose orphan stops ask first, as a running unit's stop
+/// does: `WM_CLOSE` and one Ctrl-Break per unit through `helper`, then
+/// termination of what is left after the grace period.
+#[cfg(windows)]
+struct WindowsProcesses {
+    helper: Option<devlanes_runner_windows::ConsoleHelper>,
+}
+
+#[cfg(windows)]
+#[async_trait]
+impl devlanes_daemon::integrations::ProcessTable for WindowsProcesses {
+    /// Delegates.
+    async fn alive(&self, identity: ProcessIdentity) -> bool {
+        devlanes_daemon::integrations::ProcessTable::alive(&SysProcesses, identity).await
+    }
+
+    /// Delegates: a verified terminate.
+    async fn terminate(&self, identity: ProcessIdentity, grace: Duration) {
+        devlanes_daemon::integrations::ProcessTable::terminate(&SysProcesses, identity, grace)
+            .await;
+    }
+
+    /// See [`devlanes_runner_windows::stop_orphan`].
+    async fn terminate_unit(
+        &self,
+        leader: ProcessIdentity,
+        members: &[ProcessIdentity],
+        grace: Duration,
+    ) {
+        let (helper, members) = (self.helper.clone(), members.to_vec());
+        let stopped = tokio::task::spawn_blocking(move || {
+            devlanes_runner_windows::stop_orphan(helper.as_ref(), leader, &members, grace)
+        })
+        .await;
+        match stopped {
+            Ok(stop) => tracing::info!(
+                pid = leader.pid,
+                asked_through = ?stop.asked_through,
+                windows = stop.windows,
+                running = stop.running,
+                terminated = stop.terminated,
+                "stopped an orphaned unit"
+            ),
+            Err(error) => {
+                tracing::warn!(%error, pid = leader.pid, "stopping an orphaned unit failed")
+            }
+        }
+    }
+}
+
+/// The job-object runner with identity and socket inspection. Tasks use
+/// [`UnitRunner::spawn_task`]'s default: on Windows they sweep like services.
+#[cfg(windows)]
+struct WindowsUnits(devlanes_runner_windows::WindowsRunner);
+
+#[cfg(windows)]
+#[async_trait]
+impl UnitRunner for WindowsUnits {
+    /// Spawns in a job, with piped output or, for `pty: true`, a pseudo console.
+    async fn spawn(&self, spec: LaunchSpec) -> Result<Arc<dyn ManagedUnit>, devlanes_core::Error> {
+        Ok(Arc::new(WindowsManaged(self.0.spawn_unit(spec).await?)))
+    }
+}
+
+/// [`devlanes_runner_windows::WindowsUnit`] as a daemon unit.
+#[cfg(windows)]
+struct WindowsManaged(Arc<devlanes_runner_windows::WindowsUnit>);
+
+#[cfg(windows)]
+#[async_trait]
+impl Unit for WindowsManaged {
+    /// Delegates.
+    async fn input(&self, bytes: bytes::Bytes) -> Result<(), devlanes_core::Error> {
+        self.0.input(bytes).await
+    }
+    /// Delegates.
+    async fn resize(&self, size: TerminalSize) -> Result<(), devlanes_core::Error> {
+        self.0.resize(size).await
+    }
+    /// Delegates.
+    async fn stop(&self, policy: StopPolicy) -> Result<(), devlanes_core::Error> {
+        self.0.stop(policy).await
+    }
+    /// Delegates.
+    async fn wait(&self) -> Result<ExitOutcome, devlanes_core::Error> {
+        self.0.wait().await
+    }
+    /// Delegates; the first subscriber sees everything since launch.
+    fn output(&self) -> broadcast::Receiver<OutputChunk> {
+        self.0.output()
+    }
+    /// Delegates.
+    async fn subjects(&self) -> Result<Vec<ProcessIdentity>, devlanes_core::Error> {
+        self.0.subjects().await
+    }
+    /// Delegates: true for `pty: true` units, which run in a pseudo console.
+    fn renders_screen(&self) -> bool {
+        self.0.renders_screen()
+    }
+}
+
+#[cfg(windows)]
+#[async_trait]
+impl ManagedUnit for WindowsManaged {
+    /// Leader identity recorded at spawn.
+    fn identity(&self) -> Option<ProcessIdentity> {
+        Some(self.0.identity())
+    }
+    /// Listening TCP ports of the unit's job.
+    async fn listening_ports(&self) -> Vec<u16> {
+        let mut ports: Vec<u16> = self
+            .0
+            .listening_ports()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|socket| socket.addr.port())
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+    /// The runner's exit report with leftover processes by pid and name.
+    fn exit_details(&self) -> Option<ExitDetails> {
+        let report = self.0.exit_report()?;
+        Some(ExitDetails {
+            outcome: report.outcome,
+            left_running: left_processes(report.left_running),
+            escaped: left_processes(report.escaped),
+        })
+    }
+}
+
+/// Leftover processes by pid and name, for exit details.
+#[cfg(windows)]
+fn left_processes(list: Vec<devlanes_sys::ProcessInfo>) -> Vec<devlanes_proto::LeftProcess> {
+    list.into_iter()
+        .map(|process| devlanes_proto::LeftProcess {
+            pid: process.pid,
+            command: process.name,
+        })
+        .collect()
+}
+
 /// The PTY runner with identity and socket inspection.
+#[cfg(unix)]
 struct PtyUnits(devlanes_runner_pty::PtyRunner);
 
+#[cfg(unix)]
 #[async_trait]
 impl UnitRunner for PtyUnits {
     /// Spawns in a PTY or pipes per the spec.
@@ -817,8 +1086,10 @@ impl UnitRunner for PtyUnits {
 }
 
 /// [`devlanes_runner_pty::PtyUnit`] as a daemon unit.
+#[cfg(unix)]
 struct PtyManaged(Arc<devlanes_runner_pty::PtyUnit>);
 
+#[cfg(unix)]
 #[async_trait]
 impl Unit for PtyManaged {
     /// Delegates.
@@ -847,6 +1118,7 @@ impl Unit for PtyManaged {
     }
 }
 
+#[cfg(unix)]
 #[async_trait]
 impl ManagedUnit for PtyManaged {
     /// Leader identity recorded at spawn.
@@ -949,7 +1221,28 @@ struct ContainerInfra {
 /// The daemon variables the `docker` CLI needs: where to find binaries and its
 /// config, which engine to talk to, locale and proxies. A daemon started by hand
 /// may carry a full shell environment; none of the rest reaches Compose.
+/// Windows names match in any case (the variable is `Path` there).
 fn compose_base_env(vars: impl Iterator<Item = (String, String)>) -> BTreeMap<String, String> {
+    /// The docker CLI finds Docker Desktop's plugins, Compose among them, under
+    /// `ProgramFiles`, and its config and contexts under `USERPROFILE`; Winsock
+    /// needs `SystemRoot`.
+    #[cfg(windows)]
+    const PLATFORM: &[&str] = &[
+        "PATHEXT",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "TEMP",
+        "TMP",
+        "USERNAME",
+    ];
+    #[cfg(not(windows))]
+    const PLATFORM: &[&str] = &[];
     const NAMES: &[&str] = &[
         "PATH",
         "HOME",
@@ -967,8 +1260,19 @@ fn compose_base_env(vars: impl Iterator<Item = (String, String)>) -> BTreeMap<St
         "no_proxy",
     ];
     const PREFIXES: &[&str] = &["LC_", "XDG_", "DOCKER_"];
+    let same = |a: &str, b: &str| {
+        if cfg!(windows) {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    };
     vars.filter(|(name, _)| {
-        NAMES.contains(&name.as_str()) || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+        NAMES.iter().chain(PLATFORM).any(|known| same(name, known))
+            || PREFIXES.iter().any(|prefix| {
+                name.get(..prefix.len())
+                    .is_some_and(|start| same(start, prefix))
+            })
     })
     .collect()
 }
@@ -1848,6 +2152,33 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    /// Windows spells the names in any case, and the docker CLI needs
+    /// `ProgramFiles` to find Docker Desktop's Compose plugin.
+    fn compose_base_env_keeps_windows_variables() {
+        let vars = [
+            ("Path", r"C:\Windows\system32"),
+            ("ProgramFiles", r"C:\Program Files"),
+            ("USERPROFILE", r"C:\Users\acme"),
+            ("SystemRoot", r"C:\Windows"),
+            ("Docker_Host", "npipe:////./pipe/docker_engine"),
+            ("GITHUB_TOKEN", "secret"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        let kept: Vec<String> = compose_base_env(vars.into_iter()).into_keys().collect();
+        assert_eq!(
+            kept,
+            [
+                "Docker_Host",
+                "Path",
+                "ProgramFiles",
+                "SystemRoot",
+                "USERPROFILE"
+            ]
+        );
+    }
+
     /// A route entry of `lane:unit` for `host`.
     fn entry(host: &str, lane: &str, unit: &str, port: u16) -> RouteEntry {
         RouteEntry {
@@ -1905,6 +2236,7 @@ mod tests {
     }
 
     /// A fake `mkcert` that prints `caroot` for `-CAROOT`.
+    #[cfg(unix)]
     fn fake_mkcert(dir: &Path, caroot: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let program = dir.join("mkcert");
@@ -1915,6 +2247,19 @@ mod tests {
         .expect("script");
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         program
+    }
+
+    /// A fake `mkcert` that prints `caroot` for `-CAROOT`: the prebuilt
+    /// `fake-tool`, since Windows cannot run scripts as programs.
+    #[cfg(windows)]
+    fn fake_mkcert(dir: &Path, caroot: &Path) -> PathBuf {
+        use devlanes_testing::fake_tool::{Behaviour, install};
+        install(
+            dir,
+            "mkcert",
+            &Behaviour::new().stdout(format!("{}\n", caroot.display())),
+        )
+        .expect("install fake-tool")
     }
 
     #[tokio::test]
@@ -1941,7 +2286,7 @@ mod tests {
             env[CA_CERT_ENV],
             caroot.join("rootCA.pem").display().to_string()
         );
-        let bundle = home.join("ca/bundle.pem");
+        let bundle = home.join("ca").join("bundle.pem");
         assert_eq!(env[CA_BUNDLE_ENV], bundle.display().to_string());
         let root = std::fs::read_to_string(caroot.join("rootCA.pem")).expect("root");
         let bundled = std::fs::read_to_string(bundle).expect("bundle");
@@ -1971,6 +2316,45 @@ mod tests {
         assert!(ca.is_some(), "{status}");
         assert_eq!(status["name_constrained"], true, "{status}");
         assert!(status["hint"].is_null() && status["fix"].is_null());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    /// On Windows bundle.pem holds Mozilla's roots and the Windows store's,
+    /// every block a certificate, and the devlanes CA exactly once, last; the
+    /// CA directory is private.
+    async fn windows_bundle_has_public_roots_and_the_devlanes_ca() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir(&home).expect("home");
+        let (env, status, ca) = certificate_authority_with(
+            &home,
+            devlanes_config::CaKind::Devlanes,
+            Path::new("mkcert"),
+            None,
+        )
+        .await;
+        let ca = ca.expect("devlanes CA");
+        assert_eq!(status["present"], true, "{status}");
+        let bundle = std::fs::read_to_string(&env[CA_BUNDLE_ENV]).expect("bundle");
+        let ders: Vec<Vec<u8>> = bundle
+            .split_inclusive("-----END CERTIFICATE-----\n")
+            .filter(|block| !block.trim().is_empty())
+            .map(|block| {
+                devlanes_trust::CaCertificate::from_pem(block, "root")
+                    .expect("PEM certificate")
+                    .der()
+                    .to_vec()
+            })
+            .collect();
+        assert!(ders.len() > 100, "only {} certificates", ders.len());
+        let own = ca.certificate_der().to_vec();
+        assert_eq!(ders.iter().filter(|der| **der == own).count(), 1);
+        assert_eq!(ders.last(), Some(&own));
+        assert_eq!(
+            devlanes_sys_windows::security::check_private_dir(&home.join("ca")).expect("check"),
+            Ok(())
+        );
     }
 
     #[tokio::test]
@@ -2157,6 +2541,7 @@ mod tests {
     async fn offline_reset_moves_a_legacy_database_aside() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().join("home");
+        #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
             // The daemon lock only accepts a private home, like $DEVLANES_HOME.
@@ -2165,6 +2550,8 @@ mod tests {
                 .create(&home)
                 .expect("home");
         }
+        #[cfg(windows)]
+        std::fs::create_dir(&home).expect("home");
         let db = home.join("state.db");
         let legacy = legacy_database(4);
         std::fs::write(&db, &legacy).expect("db");

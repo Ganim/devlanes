@@ -234,7 +234,11 @@ where
         .clone()
         .unwrap_or_else(jiff::tz::TimeZone::system);
     app.service_report = options.service.clone();
-    app.user_home = options.var("HOME").map(std::path::PathBuf::from);
+    #[cfg(unix)]
+    let user_home = options.var("HOME").map(std::path::PathBuf::from);
+    #[cfg(windows)]
+    let user_home = crate::home::user_home(options);
+    app.user_home = user_home;
     if let Some(cwd) = options.cwd.clone().or_else(|| std::env::current_dir().ok()) {
         app.prefer_path(cwd);
     }
@@ -332,7 +336,10 @@ fn backend_error<E: std::error::Error + Send + Sync + 'static>(error: E) -> Erro
 /// Maps crossterm events; key releases are dropped (kitty protocol reports them).
 fn terminal_msg(event: TermEvent) -> Option<Msg> {
     match event {
+        #[cfg(unix)]
         TermEvent::Key(key) if key.kind != KeyEventKind::Release => Some(Msg::Key(key)),
+        #[cfg(windows)]
+        TermEvent::Key(key) if key.kind != KeyEventKind::Release => Some(Msg::Key(altgr(key))),
         TermEvent::Mouse(mouse) => Some(Msg::Mouse(mouse)),
         TermEvent::Paste(text) => Some(Msg::Paste(text)),
         TermEvent::Resize(width, height) => Some(Msg::Resize(width, height)),
@@ -340,6 +347,28 @@ fn terminal_msg(event: TermEvent) -> Option<Msg> {
         TermEvent::FocusLost => Some(Msg::Focus(false)),
         _ => None,
     }
+}
+
+/// AltGr reaches Windows console programs as Ctrl+Alt with the character it
+/// typed (`@` is AltGr+Q on a German layout), which the app would take for a
+/// Ctrl chord: text fields would drop it and units would get a control byte.
+/// crossterm reports a real Ctrl+Alt chord with the key's unshifted
+/// character, and the chords programs bind are on letters and digits, so any
+/// other character is taken as typed text. Unix terminals resolve AltGr
+/// themselves.
+#[cfg(windows)]
+fn altgr(mut key: crossterm::event::KeyEvent) -> crossterm::event::KeyEvent {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let chord = KeyModifiers::CONTROL | KeyModifiers::ALT;
+    if let KeyCode::Char(c) = key.code
+        && key.modifiers.contains(chord)
+        && !c.is_ascii_alphanumeric()
+        && !c.is_control()
+        && c != ' '
+    {
+        key.modifiers.remove(chord);
+    }
+    key
 }
 
 /// Sends a result to the loop; false once the loop has quit.
@@ -882,6 +911,7 @@ async fn pump_attach(
 }
 
 /// Hands a URL to the desktop's opener.
+#[cfg(unix)]
 fn open_url(url: &str) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     let program = "open";
@@ -897,5 +927,55 @@ fn open_url(url: &str) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::other(format!("{program} exited with {status}")))
+    }
+}
+
+/// Hands a URL to the shell, which opens only plain `http` and `https` URLs
+/// with the default browser.
+#[cfg(windows)]
+fn open_url(url: &str) -> io::Result<()> {
+    devlanes_sys_windows::shell_execute::open_url(url)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+
+    fn key(c: char, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), modifiers)
+    }
+
+    #[test]
+    fn chords_on_letters_and_digits_stay_chords() {
+        let ctrl_alt = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        for event in [
+            key('c', KeyModifiers::CONTROL),
+            key('q', ctrl_alt),
+            key('Q', ctrl_alt | KeyModifiers::SHIFT),
+            key('1', ctrl_alt),
+            key(' ', ctrl_alt),
+            key('!', KeyModifiers::SHIFT),
+            key('@', KeyModifiers::CONTROL),
+            key('@', KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Left, ctrl_alt),
+        ] {
+            assert_eq!(altgr(event), event);
+        }
+    }
+
+    #[test]
+    fn altgr_characters_are_typed_text() {
+        let ctrl_alt = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert_eq!(altgr(key('@', ctrl_alt)), key('@', KeyModifiers::NONE));
+        assert_eq!(altgr(key('{', ctrl_alt)), key('{', KeyModifiers::NONE));
+        assert_eq!(
+            altgr(key('€', ctrl_alt | KeyModifiers::SHIFT)),
+            key('€', KeyModifiers::SHIFT)
+        );
+        // As text, the unit gets the character's UTF-8 bytes, not a control byte.
+        let typed = terminal_msg(TermEvent::Key(key('@', ctrl_alt)));
+        assert!(matches!(typed, Some(Msg::Key(k)) if k == key('@', KeyModifiers::NONE)));
     }
 }

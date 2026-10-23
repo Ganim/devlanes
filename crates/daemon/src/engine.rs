@@ -247,13 +247,14 @@ impl Handler for Engine {
     }
 }
 
-/// Resolves symlinks (macOS `/tmp`) so cwd matches the paths git reports.
+/// Resolves symlinks (macOS `/tmp`) so cwd matches the paths git reports. dunce
+/// keeps Windows paths in the `C:\...` form Git prints, not `\\?\C:\...`.
 async fn canonical(path: &Path) -> PathBuf {
     if path.as_os_str().is_empty() {
         return PathBuf::new();
     }
     let owned = path.to_path_buf();
-    tokio::task::spawn_blocking(move || std::fs::canonicalize(&owned).unwrap_or(owned))
+    tokio::task::spawn_blocking(move || dunce::canonicalize(&owned).unwrap_or(owned))
         .await
         .unwrap_or_else(|_| path.to_path_buf())
 }

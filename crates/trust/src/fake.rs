@@ -78,7 +78,9 @@ impl CommandExecutor for FakeExecutor {
 
     /// True only for absolute paths registered with [`FakeExecutor::with_programs`].
     fn is_executable(&self, path: &Path) -> bool {
-        path.to_str()
-            .is_some_and(|path| path.starts_with('/') && self.programs.contains(path))
+        path.is_absolute()
+            && path
+                .to_str()
+                .is_some_and(|path| self.programs.contains(path))
     }
 }

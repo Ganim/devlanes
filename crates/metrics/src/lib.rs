@@ -203,8 +203,9 @@ pub enum Error {
 
 /// A metrics collector. Implementations keep the previous reading per process or
 /// container so CPU percentages are deltas between successive calls. A process's
-/// first reading reports its lifetime average; a container's first reading uses
-/// the engine's `precpu_stats`, as the docker CLI does.
+/// first reading reports its lifetime average (0 on Windows, whose clocks are too
+/// coarse for a young process's average); a container's first reading uses the
+/// engine's `precpu_stats`, as the docker CLI does.
 ///
 /// Implementations must not block the async executor; blocking OS reads belong in
 /// `spawn_blocking`.

@@ -7,15 +7,16 @@ devlanes is a Cargo workspace: one binary (`bins/devlanes`) built from small cra
 - Rust comes from `rust-toolchain.toml`; rustup installs the pinned version on the first `cargo` call.
 - Install nextest: `cargo install cargo-nextest --locked`.
 - Install kache, the build cache every compile goes through (`.cargo/config.toml` sets it as rustc wrapper): `cargo install kache --locked`, then `kache init` once.
-- macOS (Apple Silicon and Intel) and Linux with glibc (x86_64 and arm64) are supported. Windows isn't.
+- macOS (Apple Silicon and Intel), Linux with glibc (x86_64 and arm64) and Windows 11 24H2 or later (x64 and arm64) are supported.
+- On Windows, also install the Visual Studio Build Tools (the "Desktop development with C++" workload) and [Git for Windows](https://gitforwindows.org). kache 1.2.2 can't wrap the C compiler there, so build kache from a commit with the fix, outside the checkout and without the wrapper: `cargo install --locked --git https://github.com/kunobi-ninja/kache --rev a37fb5ff3bcc86adfded7f3ecb4f7c5100f744c2 kache` with `RUSTC_WRAPPER` unset. Switch to `cargo install kache` once a release includes it.
 
-Optional tools, needed only by the ignored tests that mention them: Docker (OrbStack or Docker Desktop on macOS), `node` with npm/pnpm/yarn/bun, `just`, `deno`, `uv`, `poetry`, `mise`, `direnv`, `fnox` 1.39+, `certutil` (NSS), `dig`, `tmux`.
+Optional tools, needed only by the ignored tests that mention them: Docker (OrbStack or Docker Desktop on macOS, Docker Desktop on Windows), `node` with npm/pnpm/yarn/bun, `just`, `deno`, `uv`, `poetry`, `mise`, `direnv`, `fnox` 1.39+, `certutil` (NSS), `dig`, `tmux`.
 
 CI also shares kache's cache through a remote bucket when the repository has one configured, and falls back to the Actions cache when it hasn't. Contributors don't need the remote; kache's local cache is enough, and connecting to a remote is an optional setting in your own `~/.config/kache/config.toml`.
 
 ## Checks
 
-Run these before sending a change. CI runs the same ones on macOS and Linux.
+Run these before sending a change. CI runs the same ones on macOS, Linux and Windows.
 
 ```sh
 cargo fmt --all --check
@@ -34,6 +35,12 @@ shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packag
 actionlint
 sh packaging/scripts/check.sh                       # release scripts and install.sh against fake binaries
 sh agent-plugin/scripts/test-block-background.sh    # the Claude Code hook
+```
+
+`install.ps1`, `package.ps1` and the npm launcher have a Windows check against a fake `devlanes.exe`, which CI runs in its `packaging-windows` job. It needs PSScriptAnalyzer (CI pins 1.25.0), both `powershell.exe` and `pwsh`, and `node`. It changes your user `PATH` while it runs and writes the old value back at the end:
+
+```powershell
+pwsh packaging/scripts/check.ps1
 ```
 
 ## Running the CLI from a checkout
@@ -83,7 +90,7 @@ dl stop && dl daemon stop --yes
 
 ## HTTPS and hostnames
 
-The daemon's proxy listens on 443 and 80, and falls back to 8443 and 8080 when it can't bind them. macOS lets unprivileged processes bind both; on Linux, run `sudo setcap cap_net_bind_service=+ep target/debug/devlanes` or use the fallback ports.
+The daemon's proxy listens on 443 and 80, and falls back to 8443 and 8080 when it can't bind them. macOS and Windows let unprivileged processes bind both; on Linux, run `sudo setcap cap_net_bind_service=+ep target/debug/devlanes` or use the fallback ports.
 
 ```sh
 dl url ls                                   # routed hostnames with their lane, unit and port
@@ -101,7 +108,7 @@ dl certs untrust --hosts             # removes both
 dl certs untrust --hosts --keep-ca   # removes only the helper
 ```
 
-`crates/hosts-helper/README.md` explains what that installs and why.
+`crates/hosts-helper/README.md` explains what that installs and why. On Windows there is no helper: `*.localhost` resolves natively, `certs trust` shows a Windows security warning instead of a password prompt, `curl.exe` needs `--ssl-revoke-best-effort`, and `certs trust --resolver` writes an NRPT rule after a UAC prompt ([Windows](docs/guides/windows.md)).
 
 ## Docker and compose
 
@@ -139,7 +146,7 @@ dl remote disconnect mybox
 
 ## End-to-end tests
 
-`e2e/` runs the real `devlanes` binary against the projects in `fixtures/`. The default nextest profile skips it (`.config/nextest.toml`); the `e2e` profile runs only it. Without `DEVLANES_E2E_BIN_DIR`, each test process builds `devlanes` and `fixture-server` with cargo first; set it to skip that:
+`e2e/` runs the real `devlanes` binary against the projects in `fixtures/`. The default nextest profile skips it (`.config/nextest.toml`); the `e2e` profile runs only it. Without `DEVLANES_E2E_BIN_DIR`, each test process on macOS and Linux builds `devlanes` and `fixture-server` with cargo first; set it to skip that. On Windows tests never run cargo and take the binaries next to the test binary, so the build below is required there:
 
 ```sh
 cargo build -p devlanes -p devlanes-testing
@@ -161,6 +168,8 @@ Run a crate's ignored tests with `cargo nextest run -p <crate> --run-ignored onl
 | `devlanes-env-mise`, `devlanes-env-direnv`, `devlanes-secrets-fnox` | mise, direnv, fnox 1.39+ |
 | `devlanes-trust-macos` | someone to click the keychain password prompt |
 | `devlanes-trust-linux` | sudo and certutil |
+| `devlanes-trust-windows` | a desktop session, to answer the two Windows security warnings for the real user root store |
+| `devlanes-resolver-nrpt` | a desktop session to approve two UAC prompts, and nothing (no devlanes daemon) on `127.53.0.1:53`; it writes a rule under `HKEY_LOCAL_MACHINE` and removes it |
 | `devlanes-resolver-dns` | dig |
 | `devlanes-daemon` | `DEVLANES_FIXTURE_SERVER=$PWD/target/debug/fixture-server` |
 

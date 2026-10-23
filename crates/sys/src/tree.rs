@@ -182,8 +182,10 @@ mod tests {
         ProcessInfo {
             pid,
             ppid,
+            #[cfg(unix)]
             pgid: pid,
             sid: Some(sid),
+            #[cfg(unix)]
             uid: 501,
             start_time,
             zombie: false,

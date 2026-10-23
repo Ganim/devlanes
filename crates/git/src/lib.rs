@@ -1,5 +1,6 @@
 //! Git worktree discovery preserves administration identities across directory moves.
 
+use devlanes_core::paths::{forward_slashes, path_starts_with, same_path, strip_path_prefix};
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -101,8 +102,8 @@ pub async fn discover(cwd: &Path, primary: Option<&str>) -> Result<Option<Reposi
         }
         return Err(Error::Git(stderr.trim().into()));
     }
-    let root = PathBuf::from(text(&probe.stdout)?.trim_end_matches('\n'));
-    let common_dir = PathBuf::from(
+    let root = native(text(&probe.stdout)?.trim_end_matches('\n'));
+    let common_dir = native(
         text(
             &git(
                 &root,
@@ -122,10 +123,11 @@ pub async fn discover(cwd: &Path, primary: Option<&str>) -> Result<Option<Reposi
     let canonical = tokio::fs::canonicalize(cwd)
         .await
         .unwrap_or_else(|_| cwd.to_owned());
-    if let Some(broken) = worktrees
-        .iter()
-        .find(|tree| !tree.present && tree.path != root && canonical.starts_with(&tree.path))
-    {
+    // The comparisons ignore case and `\\?\` on Windows, where canonical paths
+    // are verbatim and Git's are not.
+    if let Some(broken) = worktrees.iter().find(|tree| {
+        !tree.present && !same_path(&tree.path, &root) && path_starts_with(&canonical, &tree.path)
+    }) {
         return Err(Error::MissingGitEntry(broken.path.clone()));
     }
     Ok(Some(Repository {
@@ -148,16 +150,14 @@ pub async fn list(root: &Path, common_dir: &Path) -> Result<Vec<Worktree>, Error
                 worktree.present = false;
                 continue;
             };
-            worktree.identity = if admin == common_dir {
+            worktree.identity = if same_path(&admin, common_dir) {
                 "main".into()
             } else {
-                admin
-                    .strip_prefix(common_dir)
-                    .map_err(|_| {
-                        Error::Porcelain("worktree admin directory outside common directory".into())
-                    })?
-                    .to_string_lossy()
-                    .into_owned()
+                // `/`-separated on Windows too, matching the `worktrees/<name>`
+                // spelling below: identities are state keys.
+                forward_slashes(strip_path_prefix(&admin, common_dir).ok_or_else(|| {
+                    Error::Porcelain("worktree admin directory outside common directory".into())
+                })?)
             };
         }
     }
@@ -167,10 +167,10 @@ pub async fn list(root: &Path, common_dir: &Path) -> Result<Vec<Worktree>, Error
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path().join("gitdir");
             if let Ok(content) = tokio::fs::read_to_string(path).await {
-                let gitfile = PathBuf::from(content.trim_end_matches('\n'));
+                let gitfile = native(content.trim_end_matches('\n'));
                 if let Some(worktree) = worktrees
                     .iter_mut()
-                    .find(|tree| tree.path == gitfile.parent().unwrap_or(Path::new("")))
+                    .find(|tree| same_path(&tree.path, gitfile.parent().unwrap_or(Path::new(""))))
                 {
                     worktree.identity =
                         format!("worktrees/{}", entry.file_name().to_string_lossy());
@@ -192,8 +192,9 @@ async fn admin_dir(path: &Path) -> Result<Option<PathBuf>, Error> {
         .stdin(Stdio::null());
     // Worktrees live inside the main checkout (`.worktrees/`), so without a
     // ceiling Git would climb to the main `.git` and the worktree would take the
-    // identity `main`. `join_paths` refuses a parent containing `:`, which the
-    // variable cannot carry; then no ceiling is set.
+    // identity `main`. `join_paths` refuses a parent containing the list
+    // separator (`:`, or `;` on Windows), which the variable cannot carry; then
+    // no ceiling is set.
     if let Some(parent) = path.parent().filter(|parent| parent.is_absolute())
         && let Ok(ceiling) = std::env::join_paths([parent])
     {
@@ -201,9 +202,7 @@ async fn admin_dir(path: &Path) -> Result<Option<PathBuf>, Error> {
     }
     let output = command.output().await?;
     if output.status.success() {
-        return Ok(Some(PathBuf::from(
-            text(&output.stdout)?.trim_end_matches('\n'),
-        )));
+        return Ok(Some(native(text(&output.stdout)?.trim_end_matches('\n'))));
     }
     // Checking the entry instead of matching stderr keeps this locale-independent.
     if !tokio::fs::try_exists(path.join(".git")).await? {
@@ -231,7 +230,7 @@ pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>, Error> {
         } else if let Some(path) = field.strip_prefix("worktree ") {
             current = Some(Worktree {
                 identity: String::new(),
-                path: path.into(),
+                path: native(path),
                 branch: None,
                 head: String::new(),
                 present: false,
@@ -391,6 +390,20 @@ fn text(bytes: &[u8]) -> Result<&str, Error> {
     std::str::from_utf8(bytes).map_err(|_| Error::Encoding)
 }
 
+/// A path printed by Git, as is on Unix.
+#[cfg(unix)]
+fn native(path: &str) -> PathBuf {
+    PathBuf::from(path)
+}
+
+/// A path printed by Git, with native separators. Git for Windows prints
+/// `C:/x/y`; worktree paths are stored as state keys and shown to users, so
+/// they take the spelling Windows tools and canonical cwds use.
+#[cfg(windows)]
+fn native(path: &str) -> PathBuf {
+    PathBuf::from(path.replace('/', "\\"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,7 +491,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::timeout(Duration::from_secs(15), async {
             let dir = tempfile::tempdir()?;
-            let temp = TempPath(dir.path().canonicalize()?);
+            let temp = TempPath(dunce::canonicalize(dir.path())?);
             let lane = repository_with_nested_lane(temp.path()).await?;
             let common = temp.path().join(".git");
             let admin = admin_dir(&lane).await?.ok_or("the worktree has its link")?;
@@ -486,7 +499,7 @@ mod tests {
             std::fs::remove_file(lane.join(".git"))?;
             // Without the ceiling, Git answers for the main checkout.
             let outer = git(&lane, &["rev-parse", "--path-format=absolute", "--git-dir"]).await?;
-            assert_eq!(PathBuf::from(text(&outer)?.trim_end_matches('\n')), common);
+            assert_eq!(native(text(&outer)?.trim_end_matches('\n')), common);
             assert_eq!(admin_dir(&lane).await?, None);
             Ok::<_, Box<dyn std::error::Error>>(())
         })
@@ -501,7 +514,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::timeout(Duration::from_secs(15), async {
             let dir = tempfile::tempdir()?;
-            let temp = TempPath(dir.path().canonicalize()?);
+            let temp = TempPath(dunce::canonicalize(dir.path())?);
             let lane = repository_with_nested_lane(temp.path()).await?;
             let nested = lane.join("apps");
             std::fs::create_dir(&nested)?;
@@ -528,12 +541,22 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
+    #[test]
+    /// Git for Windows prints `/`; stored paths use `\`.
+    fn windows_porcelain_paths_use_backslashes() -> Result<(), Error> {
+        let trees = parse_porcelain(b"worktree C:/src/acme lanes/web\0HEAD abc\0\0")?;
+        assert_eq!(trees[0].path.as_os_str(), r"C:\src\acme lanes\web");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn moved_worktree_keeps_its_identity() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::timeout(Duration::from_secs(15), async {
             let dir = tempfile::tempdir()?;
-            // Git reports canonical paths, while macOS temp paths include a /var symlink.
-            let temp = TempPath(dir.path().canonicalize()?);
+            // Git reports canonical paths, while macOS temp paths include a /var
+            // symlink; dunce avoids the `\\?\` form Git rejects on Windows.
+            let temp = TempPath(dunce::canonicalize(dir.path())?);
             git(temp.path(), &["init", "-b", "main"]).await?;
             git(
                 temp.path(),
@@ -580,6 +603,11 @@ mod tests {
                 .find(|tree| tree.path == moved)
                 .ok_or("missing moved lane")?;
             assert_eq!(linked.identity, moved.identity);
+            assert!(
+                moved.identity.starts_with("worktrees/"),
+                "{}",
+                moved.identity
+            );
             Ok::<_, Box<dyn std::error::Error>>(())
         })
         .await??;

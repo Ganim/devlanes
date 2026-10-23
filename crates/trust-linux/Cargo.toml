@@ -8,8 +8,9 @@ license.workspace = true
 publish.workspace = true
 
 # Commands are only built here and run through an injected executor, so the crate
-# and its argv tests compile on every platform; only the composition root picks it on Linux.
-[dependencies]
+# and its argv tests compile on every Unix platform; only the composition root picks
+# it on Linux. The crate is empty on Windows.
+[target.'cfg(unix)'.dependencies]
 async-trait.workspace = true
 devlanes-trust = { path = "../trust" }
 rustix = { version = "1", features = ["process"] }

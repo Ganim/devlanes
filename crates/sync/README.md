@@ -64,6 +64,8 @@ Changes are debounced and detected by size and mtime, then confirmed by content 
 
 When a box syncs to a destination whose file system ignores case (macOS volumes by default), two box names that differ only by case, such as `README.md` and `Readme.md` or a file `build` and a folder `Build`, map to one path. The daemon keeps the spelling the destination already holds, reports the other as skipped, and never deletes the held file because the other spelling went away on the box. The probe decides this per destination, not per OS.
 
+Windows has only the read-only attribute. A mode without write bits makes the destination file read-only, exec bits are ignored, and Windows sources report `0o444` or `0o644`.
+
 A source that does not exist yet is polled until it appears. If the source folder is deleted and recreated, the sync mirrors the new folder and watches it.
 
 ## License

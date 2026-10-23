@@ -57,7 +57,10 @@ pub enum Error {
     MissingPortAssignment { service: String, target: u16 },
     #[error("host port {port} is assigned twice in the lane block")]
     DuplicatePort { port: u16 },
-    #[error("compose path {0:?} contains the COMPOSE_FILE separator `:`")]
+    #[error(
+        "compose path {0:?} contains the COMPOSE_FILE separator `{separator}`",
+        separator = crate::env::COMPOSE_FILE_SEPARATOR
+    )]
     PathSeparator(PathBuf),
     #[error("{}", conflict_message(.0))]
     ContainerNameConflict(Vec<NameConflict>),

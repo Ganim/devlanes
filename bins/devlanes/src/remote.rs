@@ -1,9 +1,11 @@
 //! Remote entry points that run in a terminal or over SSH: `devlanes tunnel --stdio`
 //! (started on the box by the client's SSH transport) and `devlanes askpass` (run by ssh).
 
+#[cfg(unix)]
 use std::io::Write;
 
 use devlanes_cli::Action;
+#[cfg(unix)]
 use devlanes_client::Paths;
 use devlanes_proto::RpcError;
 use serde_json::json;
@@ -26,6 +28,7 @@ pub async fn run(action: Action) -> Result<u8, RpcError> {
 /// stdout carries only mux frames; failures go straight to stderr (whatever the
 /// output mode, since a JSON error on stdout would corrupt the pipe), and the
 /// client's SSH transport returns that text as the connection error.
+#[cfg(unix)]
 async fn tunnel() -> Result<u8, RpcError> {
     let result = match Paths::discover() {
         Ok(paths) => devlanes_tunnel::run_stdio(paths)
@@ -45,6 +48,7 @@ async fn tunnel() -> Result<u8, RpcError> {
 /// Asks the daemon that launched ssh, which relays to the CLI running `connect`.
 ///
 /// ssh reads the answer from stdout; exit status 1 tells it the prompt was cancelled.
+#[cfg(unix)]
 async fn askpass(prompt: &str) -> u8 {
     match devlanes_transport_ssh::run_askpass(prompt).await {
         Ok(answer) => {
@@ -63,4 +67,19 @@ async fn askpass(prompt: &str) -> u8 {
             1
         }
     }
+}
+
+/// Refuses on stderr with exit 2: a Windows box cannot serve remote clients
+/// yet, since the SSH transport is Unix only.
+#[cfg(windows)]
+async fn tunnel() -> Result<u8, RpcError> {
+    eprintln!("devlanes tunnel: not supported on Windows yet");
+    Ok(2)
+}
+
+/// Cancels the prompt (exit 1), since the SSH transport is Unix only.
+#[cfg(windows)]
+async fn askpass(_prompt: &str) -> u8 {
+    eprintln!("devlanes askpass: not supported on Windows yet");
+    1
 }

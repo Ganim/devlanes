@@ -1,6 +1,6 @@
 # devlanes-client
 
-The Unix-socket client shared by the devlanes CLI, shell completions, and TUI.
+The local daemon client shared by the devlanes CLI, shell completions, and TUI.
 It uses `devlanes-ipc` and `devlanes-proto` to connect to the daemon and exchange requests and streaming frames.
 
 ## Usage
@@ -47,6 +47,13 @@ macOS ignores XDG. On either platform, an overlong home socket path falls back t
 `$TMPDIR/devlanes-<uid>/daemon-<home hash>.sock`, or `/tmp` if that path is still too long.
 `Paths::prepare()` creates private directories and writes `run/daemon.socket` for
 relocated sockets. The lock remains at `run/daemon.lock` under the home.
+
+On Windows the home is `%USERPROFILE%\.devlanes` unless `DEVLANES_HOME` is set, and
+the daemon listens on the named pipe `\\.\pipe\devlanes-<hash of the user's SID and
+the home>`; no `daemon.socket` pointer is written. Directories are created with an
+access list for the user, SYSTEM and Administrators, and junctions are refused. The
+daemon is spawned with only its readiness pipe inherited, a hidden console of its own,
+and outside the terminal's job when that job allows it.
 
 ## License
 

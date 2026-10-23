@@ -48,6 +48,11 @@ pub struct Signals {
     pub no_ui: bool,
     /// `DEVLANES_VERBOSE`: 1 or 2, like `-v` and `-vv`.
     pub env_verbose: u8,
+    /// The console cannot render escape sequences (a Windows console refused
+    /// VT processing): a terminal gets plain output without color instead of
+    /// human output. Set by the binary, which owns the console calls; always
+    /// false on Unix.
+    pub no_escapes: bool,
 }
 
 impl Signals {
@@ -78,6 +83,7 @@ impl Signals {
                 .ok()
                 .and_then(|v| v.trim().parse::<u8>().ok())
                 .unwrap_or(0),
+            no_escapes: false,
         }
         .with_ci_env(|key| std::env::var(key).ok())
     }
@@ -139,6 +145,11 @@ impl Runtime {
             (OutputMode::Agent, "agent detection")
         } else if signals.ci.is_some() {
             (OutputMode::Plain, "CI detection")
+        } else if signals.stdout_tty && signals.no_escapes {
+            (
+                OutputMode::Plain,
+                "the console cannot render escape sequences",
+            )
         } else if signals.stdout_tty {
             (OutputMode::Human, "stdout is a terminal")
         } else {
@@ -151,6 +162,7 @@ impl Runtime {
             stdout_tty: signals.stdout_tty,
             stdin_tty: signals.stdin_tty,
             color: !signals.no_color
+                && !signals.no_escapes
                 && (mode == OutputMode::Human && signals.stdout_tty && signals.ci.is_none()
                     || matches!(mode, OutputMode::Human | OutputMode::Plain)
                         && (signals.force_color || signals.ci.is_some_and(CiKind::supports_ansi))),

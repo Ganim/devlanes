@@ -1,10 +1,10 @@
 # Repository conventions
 
-Rust 2024, pinned stable toolchain, macOS and Linux. Packages live in `crates/<name>` as `devlanes-<name>`; the composition root is `bins/devlanes`. Add crates when needed. Shared dependencies and lints belong in the root manifest.
+Rust 2024, pinned stable toolchain, macOS, Linux and Windows 11 24H2 or later. Packages live in `crates/<name>` as `devlanes-<name>`; the composition root is `bins/devlanes`. Add crates when needed. Shared dependencies and lints belong in the root manifest.
 
 `core` owns domain types and traits; integrations implement them; only the binary registers concrete integrations. `testing` provides isolated homes, Git repositories and `fixture-server`, initially without a core dependency. Core unit tests must not depend on testing. Keep integration tests in one binary per crate at `tests/it/main.rs`.
 
-Use typed library errors and propagate expected failures. Add concise rustdoc to functions and methods. Inline comments explain why, when or where. Unsafe code is denied except in explicitly approved OS-boundary crates, where each block needs a safety explanation. Keep blocking filesystem/process work off async executor threads.
+Use typed library errors and propagate expected failures. Add concise rustdoc to functions and methods. Inline comments explain why, when or where. Unsafe code is denied except in the approved OS-boundary crates (`sys`, `runner-pty`, `sys-windows`), where each block needs a safety explanation. A `-windows` crate exists only when it is a backend next to sibling OS crates behind a shared trait (trust, metrics, runner), the Windows FFI boundary (`sys-windows`, the Windows counterpart of rustix and libc; `sys` is the portable process facade over both), or code several crates need that cannot depend on each other (`shell-windows`); name a crate after its mechanism when that is the point (`resolver-nrpt`). Otherwise Windows code goes in a `cfg(windows)` module next to the Unix code for the same concern. Windows changes leave macOS and Linux behaviour unchanged. Keep blocking filesystem/process work off async executor threads.
 
 Accepted exception: the daemon depends on `git`, `resolver-dns`, `resolver-hosts` and `sync` directly instead of through core traits. They are daemon-internal mechanisms with one implementation each, so a trait would add indirection without a second implementer; reviews should not flag it.
 

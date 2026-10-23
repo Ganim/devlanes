@@ -630,7 +630,9 @@ async fn help_lists_clean_and_the_daemon_page() -> TestResult {
 
 /// One step of a [`run_keys`] script.
 pub enum Step {
-    Key(Msg),
+    /// Boxed: `Msg` is far larger than the other variant (over clippy's
+    /// limit on Windows, where paths are wider).
+    Key(Box<Msg>),
     /// Wait until the drawn screen contains this text, as after a key whose
     /// effect needs a daemon answer (the profile picker's list).
     Screen(&'static str),
@@ -638,7 +640,9 @@ pub enum Step {
 
 /// Plain key presses as steps.
 pub fn presses(keys: Vec<Msg>) -> Vec<Step> {
-    keys.into_iter().map(Step::Key).collect()
+    keys.into_iter()
+        .map(|key| Step::Key(Box::new(key)))
+        .collect()
 }
 
 /// Runs `drive` against `api` through `steps`, then quits once every text of
@@ -665,10 +669,11 @@ pub async fn run_keys(
             crate::wait_for_calls(&api, |calls| calls.iter().any(|c| c == "status")).await;
             for step in steps {
                 match step {
-                    Step::Key(Msg::Key(event)) => {
-                        keys_tx.send(Ok(TermEvent::Key(event))).await.ok();
+                    Step::Key(msg) => {
+                        if let Msg::Key(event) = *msg {
+                            keys_tx.send(Ok(TermEvent::Key(event))).await.ok();
+                        }
                     }
-                    Step::Key(_) => {}
                     Step::Screen(text) => backend.wait_for(text).await,
                 }
                 tokio::time::sleep(Duration::from_millis(15)).await;

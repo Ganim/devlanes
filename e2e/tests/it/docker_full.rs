@@ -15,7 +15,7 @@ const CHECK: &str = r#"set -e
 url="$DEVLANES_PUBLIC_URL_API"
 host="${url#https://}"
 host="${host%%:*}"
-curl -fsS --max-time 10 --cacert "$DEVLANES_CA_CERT" \
+curl -fsS --max-time 10 --cacert "$DEVLANES_CA_CERT" $E2E_CURL_FLAGS \
   --resolve "$host:$E2E_HTTPS_PORT:127.0.0.1" "$url/healthz"
 devlanes status --json > "$E2E_STATUS"
 docker compose -p devlanes-fixture-full exec -T postgres \
@@ -43,6 +43,7 @@ fn with(lab: &Lab, name: &str, tail: &str) -> Result<(Output, Value, String)> {
     )?;
     command
         .env("E2E_HTTPS_PORT", lab.https_port().to_string())
+        .env("E2E_CURL_FLAGS", devlanes_e2e::CURL_FLAGS)
         .env("E2E_STATUS", &status)
         .env("E2E_ROWS", &rows);
     let output = lab.run(command, Duration::from_secs(420))?;

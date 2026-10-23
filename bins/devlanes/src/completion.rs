@@ -42,7 +42,10 @@ fn item_names(data: &Value, key: &str) -> Vec<String> {
 fn worktree_lane<'a>(lanes: &'a [LaneSummary], cwd: &Path) -> Option<&'a str> {
     lanes
         .iter()
-        .filter(|lane| !lane.path.as_os_str().is_empty() && cwd.starts_with(&lane.path))
+        .filter(|lane| {
+            !lane.path.as_os_str().is_empty()
+                && devlanes_core::paths::path_starts_with(cwd, &lane.path)
+        })
         .max_by_key(|lane| lane.path.as_os_str().len())
         .map(|lane| lane.reference.as_str())
 }

@@ -215,7 +215,7 @@ async fn daemon_status_through_the_server_reports_the_release() {
         status_until(&engine, |s| s.get("update").is_some()).await;
         let options = devlanes_daemon::Options {
             home: tmp.path.join("srv"),
-            socket: tmp.path.join("srv/run/d.sock"),
+            socket: crate::endpoint(&tmp.path, "srv/run/d.sock"),
         };
         let socket = options.socket.clone();
         let server = devlanes_daemon::Server::bind(options).await.expect("bind");

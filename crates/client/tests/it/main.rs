@@ -1,19 +1,31 @@
-use std::{os::unix::fs::PermissionsExt, time::Duration};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
 
 use bytes::Bytes;
 use devlanes_client::{Client, Context, Error, Frame, Hello, Method, Paths};
-use devlanes_ipc::Connection;
+use devlanes_ipc::{Connection, local::LocalListener};
 use devlanes_proto::{Control, Event, Outcome, Response, RpcError};
 use serde_json::json;
-use tokio::{net::UnixListener, time::timeout};
+use tokio::time::timeout;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-/// Keeps mock sockets inside test cleanup even when the host exports XDG_RUNTIME_DIR.
+/// Keeps mock sockets inside test cleanup even when the host exports
+/// XDG_RUNTIME_DIR. A Windows pipe is named after the home, so it is unique.
 fn mock_paths(home: &std::path::Path) -> devlanes_client::Result<Paths> {
+    #[cfg_attr(windows, expect(unused_mut, reason = "the pipe name stays"))]
     let mut paths = Paths::new(home)?;
-    paths.socket = paths.run.join("daemon.sock");
+    #[cfg(unix)]
+    {
+        paths.socket = paths.run.join("daemon.sock");
+    }
     Ok(paths)
+}
+
+/// A fake daemon's endpoint at `paths.socket`.
+async fn listen(paths: &Paths) -> Result<LocalListener, devlanes_ipc::local::BindError> {
+    LocalListener::bind(&paths.socket).await
 }
 
 /// A real socket exercises peer credentials, framing, request context, and queued output together.
@@ -23,9 +35,9 @@ async fn request_preserves_events_bytes_and_rpc_errors() -> TestResult {
         let temp = tempfile::tempdir()?;
         let paths = mock_paths(&temp.path().join("home"))?;
         paths.prepare()?;
-        let listener = UnixListener::bind(&paths.socket)?;
+        let mut listener = listen(&paths).await?;
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             let mut connection = Connection::new(stream);
             assert!(matches!(
                 connection.recv().await?,
@@ -111,9 +123,9 @@ async fn incompatible_daemon_is_never_sent_shutdown() -> TestResult {
         let temp = tempfile::tempdir()?;
         let paths = mock_paths(&temp.path().join("home"))?;
         paths.prepare()?;
-        let listener = UnixListener::bind(&paths.socket)?;
+        let mut listener = listen(&paths).await?;
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             let mut connection = Connection::new(stream);
             connection.recv().await?;
             let mut hello = Hello::current(42);
@@ -149,9 +161,9 @@ async fn connect_any_keeps_an_incompatible_daemon_for_shutdown() -> TestResult {
         let temp = tempfile::tempdir()?;
         let paths = mock_paths(&temp.path().join("home"))?;
         paths.prepare()?;
-        let listener = UnixListener::bind(&paths.socket)?;
+        let mut listener = listen(&paths).await?;
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             let mut connection = Connection::new(stream);
             connection.recv().await?;
             let mut hello = Hello::current(5);
@@ -231,7 +243,9 @@ fn long_paths_remain_isolated_and_read_only() -> TestResult {
 }
 
 /// A symlinked home cannot silently become trusted daemon state; an own home
-/// others can read passes, for the daemon to tighten.
+/// others can read passes, for the daemon to tighten. The Windows version
+/// (junctions and access lists) is a unit test of `paths`.
+#[cfg(unix)]
 #[test]
 fn prepare_rejects_symlinked_homes() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -248,6 +262,43 @@ fn prepare_rejects_symlinked_homes() -> TestResult {
     Ok(())
 }
 
+/// Two homes get two endpoints, each reaching only its own daemon.
+#[tokio::test]
+async fn two_homes_reach_two_daemons() -> TestResult {
+    timeout(Duration::from_secs(10), async {
+        let temp = tempfile::tempdir()?;
+        let homes = [temp.path().join("one"), temp.path().join("two")];
+        let mut servers = Vec::new();
+        let mut all = Vec::new();
+        for (managed, home) in homes.iter().enumerate() {
+            let paths = mock_paths(home)?;
+            paths.prepare()?;
+            let mut listener = listen(&paths).await?;
+            servers.push(tokio::spawn(async move {
+                let mut connection = Connection::new(listener.accept().await?);
+                connection.recv().await?;
+                connection
+                    .send(Frame::Control(Control::Hello(Hello::current(managed))))
+                    .await?;
+                Ok::<_, devlanes_ipc::Error>(())
+            }));
+            all.push(paths);
+        }
+        assert_ne!(all[0].socket, all[1].socket);
+        for (managed, paths) in all.iter().enumerate() {
+            assert_eq!(
+                Client::connect(paths).await?.peer.managed_processes,
+                managed
+            );
+        }
+        for server in servers {
+            server.await??;
+        }
+        Ok(())
+    })
+    .await?
+}
+
 /// Streaming consumers receive terminal response ids and can send arbitrary terminal bytes.
 #[tokio::test]
 async fn streaming_attach_is_bidirectional() -> TestResult {
@@ -255,9 +306,9 @@ async fn streaming_attach_is_bidirectional() -> TestResult {
         let temp = tempfile::tempdir()?;
         let paths = mock_paths(&temp.path().join("home"))?;
         paths.prepare()?;
-        let listener = UnixListener::bind(&paths.socket)?;
+        let mut listener = listen(&paths).await?;
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             let mut connection = Connection::new(stream);
             connection.recv().await?;
             connection.send(Frame::Control(Control::Hello(Hello::current(1)))).await?;
@@ -284,6 +335,8 @@ async fn streaming_attach_is_bidirectional() -> TestResult {
 }
 
 /// The pointer is atomically published inside the home and fallback directories stay private.
+/// Windows pipe names follow from the home, so nothing is published there.
+#[cfg(unix)]
 #[test]
 fn prepare_writes_fallback_pointer() -> TestResult {
     let temp = tempfile::tempdir()?;

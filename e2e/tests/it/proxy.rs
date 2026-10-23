@@ -1,6 +1,6 @@
 //! HTTPS through the daemon's proxy to each lane's hostnames.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use devlanes_e2e::{Lab, Result, lane, pid, unit};
 use serde_json::Value;
@@ -11,7 +11,7 @@ use crate::{BUDGET, need};
 /// answer comes from that lane's process.
 #[test]
 fn https_reaches_each_lane_by_hostname() -> Result<()> {
-    if Command::new("curl")
+    if devlanes_e2e::curl()
         .arg("--version")
         .stdout(Stdio::null())
         .status()
@@ -42,7 +42,7 @@ fn https_reaches_each_lane_by_hostname() -> Result<()> {
     let ca = lab.home().join("ca/ca.pem");
     for route in &items {
         let host = need(route["host"].as_str(), "route host")?;
-        let mut curl = Command::new("curl");
+        let mut curl = devlanes_e2e::curl();
         curl.args(["-sS", "--max-time", "10", "--cacert"])
             .arg(&ca)
             .arg("--resolve")

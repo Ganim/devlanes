@@ -557,8 +557,11 @@ impl ClientApi {
         Ok(Arc::new(Self {
             paths,
             cwd: std::env::current_dir().unwrap_or_default(),
-            // Captured once: start/run from the TUI use this shell's env as the lane base env.
-            env: std::env::vars().collect(),
+            // Captured once: start/run from the TUI use this shell's env as the lane
+            // base env. Names folded as the CLI folds them (`Path` is `PATH` on Windows).
+            env: std::env::vars()
+                .map(|(name, value)| (devlanes_core::env::fold_name(name), value))
+                .collect(),
             shared: Mutex::new(Some(client)),
         }))
     }

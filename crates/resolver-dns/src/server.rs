@@ -12,7 +12,13 @@ use tokio_util::sync::CancellationToken;
 use crate::{DnsError, Zone, answer};
 
 /// Default port: unprivileged, so the daemon never needs root to serve DNS.
+#[cfg(unix)]
 pub const DEFAULT_PORT: u16 = 15353;
+
+/// Default port: 53, because an NRPT rule names only a server address and
+/// Windows always queries it on port 53. Any user may bind it on Windows.
+#[cfg(windows)]
+pub const DEFAULT_PORT: u16 = 53;
 
 /// Large enough for any query a stub resolver sends, EDNS options included.
 const UDP_BUFFER: usize = 4096;
@@ -30,8 +36,45 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const EPHEMERAL_ATTEMPTS: usize = 16;
 
 /// `127.0.0.1:15353`.
+#[cfg(unix)]
 pub fn default_listen() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT)
+}
+
+/// `127.53.0.1:53`: port 53 on `127.0.0.1` may belong to another local DNS
+/// server, and the rest of `127/8` is loopback too.
+#[cfg(windows)]
+pub fn default_listen() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 53, 0, 1)), DEFAULT_PORT)
+}
+
+/// A bind failure on `addr`.
+#[cfg(unix)]
+fn bind_error(addr: SocketAddr, source: io::Error) -> DnsError {
+    DnsError::Bind { addr, source }
+}
+
+/// A bind failure on `addr`. When another program holds the address, the
+/// message says how to find it, since Windows names no owner in the error.
+#[cfg(windows)]
+fn bind_error(addr: SocketAddr, source: io::Error) -> DnsError {
+    // WSAEACCES (10013): another socket holds the address exclusively.
+    let held = source.kind() == io::ErrorKind::AddrInUse || source.raw_os_error() == Some(10013);
+    let source = if held && addr.port() != 0 {
+        io::Error::new(
+            source.kind(),
+            format!(
+                "{source}; another program holds port {port} on {ip}; find it with \
+                 `netstat -ano -p udp | findstr {addr}` (the last column is its process id) \
+                 or `Get-NetUDPEndpoint -LocalAddress {ip} -LocalPort {port}` in PowerShell",
+                port = addr.port(),
+                ip = addr.ip(),
+            ),
+        )
+    } else {
+        source
+    };
+    DnsError::Bind { addr, source }
 }
 
 /// A bound DNS server over UDP and TCP on the same port.
@@ -42,12 +85,29 @@ pub struct DnsServer {
     zone: Arc<Zone>,
 }
 
+/// Whether binding the TCP twin of an ephemeral UDP port failed in a way
+/// another port fixes.
+#[cfg(unix)]
+fn retry_twin(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::AddrInUse
+}
+
+/// Whether binding the TCP twin of an ephemeral UDP port failed in a way
+/// another port fixes. Windows hands out UDP ports without regard to the TCP
+/// ranges Hyper-V and WSL reserve, where TCP binds fail with access denied.
+#[cfg(windows)]
+fn retry_twin(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+    )
+}
+
 impl DnsServer {
     /// Binds UDP and TCP on `listen`.
     ///
     /// Port 0 picks one ephemeral port free for both protocols, which tests use.
     pub async fn bind(listen: SocketAddr, zone: Zone) -> Result<Self, DnsError> {
-        let bind_error = |addr, source| DnsError::Bind { addr, source };
         if listen.port() != 0 {
             let udp = UdpSocket::bind(listen)
                 .await
@@ -65,8 +125,9 @@ impl DnsServer {
             let addr = udp.local_addr().map_err(|e| bind_error(listen, e))?;
             match TcpListener::bind(addr).await {
                 Ok(tcp) => return Ok(Self::new(udp, tcp, zone)),
-                // The UDP port's TCP twin is taken; another ephemeral port will do.
-                Err(error) if error.kind() == io::ErrorKind::AddrInUse => last = error,
+                // The UDP port's TCP twin is taken, or on Windows inside a
+                // reserved TCP range (WSAEACCES); another ephemeral port will do.
+                Err(error) if retry_twin(&error) => last = error,
                 Err(error) => return Err(bind_error(addr, error)),
             }
         }

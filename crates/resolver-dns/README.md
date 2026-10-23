@@ -22,7 +22,7 @@ async fn serve_test_tld(shutdown: CancellationToken) -> Result<(), DnsError> {
 ## API
 
 - `Zone`: a validated TLD. It must be `test`, `internal` or `home.arpa`, a domain under one of them, or a domain under `localhost`.
-- `DnsServer`: UDP and TCP on one port, `127.0.0.1:15353` by default. Port 0 picks a free port for tests.
+- `DnsServer`: UDP and TCP on one port, `127.0.0.1:15353` by default (`127.53.0.1:53` on Windows, where an NRPT rule from `devlanes-resolver-nrpt` points at it). Port 0 picks a free port for tests.
 - `answer`: builds the response to one DNS message, without sockets.
 - `macos_resolver`: `/etc/resolver/<tld>`. macOS picks it up without a reload.
 - `systemd_resolver`: a `dns-delegate.d` file on systemd 258 and later, `DnsError::SystemdTooOld` before that.

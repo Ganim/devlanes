@@ -149,7 +149,9 @@ pub fn required_ports() -> &'static [&'static str] {
 
 /// Returns the overlay path for `service` replica `replica`: `tauri/` in the lane data
 /// folder, which no other lane shares, even one running from the same worktree.
+/// The service name is encoded on Windows, where it may hold `:` or name a device.
 pub fn overlay_path(lane_data: &Path, service: &str, replica: u32) -> PathBuf {
+    let service = devlanes_core::paths::name_on_disk(service);
     lane_data
         .join("tauri")
         .join(format!("{service}.{replica}.conf.json"))
@@ -415,7 +417,11 @@ mod tests {
             let draft = apply_replica(&memo, Some(options), replica)
                 .await
                 .expect("apply");
-            let expected = format!("/data/acme/5/tauri/desktop.{replica}.conf.json");
+            let expected = Path::new("/data/acme/5")
+                .join("tauri")
+                .join(format!("desktop.{replica}.conf.json"))
+                .display()
+                .to_string();
             assert_eq!(draft.args, ["--config", expected.as_str()]);
             assert_eq!(draft.env.get(CONFIG_ENV), Some(&expected));
             let [file] = draft.files.as_slice() else {
@@ -516,11 +522,25 @@ mod tests {
             overlay_path: &path,
         })
         .expect("valid options");
-        insta::assert_snapshot!(launch.contribution.args.join(" "), @"--config /data/acme/5/tauri/desktop.1.conf.json");
+        // Snapshots use `/`; Windows joins below the lane data folder with `\`.
+        let args = launch.contribution.args.join(" ").replace('\\', "/");
+        insta::assert_snapshot!(args, @"--config /data/acme/5/tauri/desktop.1.conf.json");
         assert_eq!(
             launch.contribution.env.get(CONFIG_ENV).map(String::as_str),
-            Some("/data/acme/5/tauri/desktop.1.conf.json")
+            Some(path.display().to_string().as_str())
         );
+    }
+
+    /// Service names are file names as they are on Unix; Windows encodes the
+    /// characters and device names it refuses.
+    #[test]
+    fn overlay_names_follow_the_host() {
+        let path = overlay_path(Path::new("data"), "aux", 1);
+        let name = path.file_name().and_then(|name| name.to_str());
+        #[cfg(unix)]
+        assert_eq!(name, Some("aux.1.conf.json"));
+        #[cfg(windows)]
+        assert_eq!(name, Some("%61ux.1.conf.json"));
     }
 
     /// Identifier problems are reported before anything starts.

@@ -219,7 +219,7 @@ pub fn resolve_volume(
         spec: spec.to_owned(),
         reason,
     };
-    let parts: Vec<&str> = spec.split(':').collect();
+    let parts = split_volume(spec);
     let (source, target, mode) = match parts.as_slice() {
         [target] => (None, *target, None),
         [source, target] => (Some(*source), *target, None),
@@ -245,14 +245,14 @@ pub fn resolve_volume(
             "`~` is not expanded; use an absolute or relative path",
         ));
     }
-    if source.starts_with('/') {
+    if let Some(source) = absolute_source(source) {
         return Ok(Mount::Bind {
-            source: normalize(Path::new(source)),
+            source,
             target,
             mode,
         });
     }
-    if source.starts_with('.') || source.contains('/') {
+    if source.starts_with('.') || is_path_source(source) {
         return Ok(Mount::Bind {
             source: normalize(&base_dir.join(source)),
             target,
@@ -266,6 +266,62 @@ pub fn resolve_volume(
         target,
         mode,
     })
+}
+
+/// `source[:target[:mode]]` split on `:`.
+#[cfg(unix)]
+fn split_volume(spec: &str) -> Vec<&str> {
+    spec.split(':').collect()
+}
+
+/// `source[:target[:mode]]` split on `:`, keeping a leading drive letter
+/// (`C:\data:/data`, `C:/data:/data`) with the source as Docker does.
+#[cfg(windows)]
+fn split_volume(spec: &str) -> Vec<&str> {
+    let drive = matches!(
+        spec.as_bytes(),
+        [letter, b':', b'\\' | b'/', ..] if letter.is_ascii_alphabetic()
+    );
+    if !drive {
+        return spec.split(':').collect();
+    }
+    let mut parts: Vec<&str> = spec[2..].split(':').collect();
+    parts[0] = &spec[..2 + parts[0].len()];
+    parts
+}
+
+/// The bind source of an absolute host path, normalized; `None` for other sources.
+#[cfg(unix)]
+fn absolute_source(source: &str) -> Option<PathBuf> {
+    source
+        .starts_with('/')
+        .then(|| normalize(Path::new(source)))
+}
+
+/// The bind source of an absolute path; `None` for other sources. Drive and
+/// UNC paths are normalized. A `/...` source is kept as written: Docker
+/// Desktop reads it as a path in its Linux VM (`/var/run/docker.sock`).
+#[cfg(windows)]
+fn absolute_source(source: &str) -> Option<PathBuf> {
+    if source.starts_with('/') {
+        Some(PathBuf::from(source))
+    } else {
+        Path::new(source)
+            .is_absolute()
+            .then(|| normalize(Path::new(source)))
+    }
+}
+
+/// Whether a volume source names a path rather than a volume.
+#[cfg(unix)]
+fn is_path_source(source: &str) -> bool {
+    source.contains('/')
+}
+
+/// Whether a volume source names a path rather than a volume, with either separator.
+#[cfg(windows)]
+fn is_path_source(source: &str) -> bool {
+    source.contains(['/', '\\'])
 }
 
 /// Removes `.` and resolves `..` without touching the filesystem, since bind sources may
@@ -444,6 +500,43 @@ mod tests {
         assert!(!shared.contains_key(labels::LANE));
         assert_eq!(Scope::from_labels(&shared), Some(Scope::Shared));
         assert_eq!(Scope::from_labels(&BTreeMap::new()), None);
+    }
+
+    /// Drive-letter sources keep their colon on Windows, with either separator.
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_sources() {
+        for (spec, source, target, mode) in [
+            (r"C:\data:/data", r"C:\data", "/data", None),
+            ("C:/data:/data", r"C:\data", "/data", None),
+            (r"d:\a\..\b:/b:ro", r"d:\b", "/b", Some("ro")),
+            (r"\\server\share\x:/x", r"\\server\share\x", "/x", None),
+            (r"infra\x:/x", r"\work\acme\infra\x", "/x", None),
+        ] {
+            let mount = resolve(spec, Scope::Shared).expect(spec);
+            assert_eq!(
+                mount,
+                Mount::Bind {
+                    source: source.into(),
+                    target: target.into(),
+                    mode: mode.map(str::to_owned),
+                },
+                "{spec}"
+            );
+        }
+        assert_eq!(
+            resolve(r"C:\data:/data", Scope::Shared)
+                .ok()
+                .and_then(|mount| mount.bind()),
+            Some(r"C:\data:/data".to_owned())
+        );
+        assert_eq!(
+            resolve("/var/run/docker.sock:/var/run/docker.sock", Scope::Shared)
+                .ok()
+                .and_then(|mount| mount.bind()),
+            Some("/var/run/docker.sock:/var/run/docker.sock".to_owned())
+        );
+        assert!(resolve(r"C:\data", Scope::Shared).is_err());
     }
 
     #[test]

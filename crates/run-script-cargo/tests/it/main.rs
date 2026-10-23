@@ -13,6 +13,18 @@ fn write_files(root: &Path, files: &[(&str, &str)]) {
     }
 }
 
+/// `text` as is: the snapshots show Unix separators.
+#[cfg(unix)]
+fn slashes(text: String) -> String {
+    text
+}
+
+/// `text` with `/` for `\`, so the Unix snapshots hold on Windows.
+#[cfg(windows)]
+fn slashes(text: String) -> String {
+    text.replace('\\', "/")
+}
+
 fn request<'a>(
     worktree: &'a Path,
     source: &'a str,
@@ -98,12 +110,13 @@ fn renders_cargo_run() {
         ("virtual/Cargo.toml", "svc", &[][..]),
     ] {
         let plan = plan(&request(temp.path(), source, name, args)).expect("plan");
-        let cwd = plan
-            .cwd
-            .strip_prefix(temp.path())
-            .expect("inside worktree")
-            .display()
-            .to_string();
+        let cwd = slashes(
+            plan.cwd
+                .strip_prefix(temp.path())
+                .expect("inside worktree")
+                .display()
+                .to_string(),
+        );
         rendered.push_str(&format!(
             "{source}#{name}: cwd={cwd:?} package={} argv={}\n",
             plan.package,
@@ -125,10 +138,12 @@ fn errors() {
     let temp = tempfile::tempdir().expect("tempdir");
     fixture(temp.path());
     let message = |source: &str, name: &str| {
-        plan(&request(temp.path(), source, name, &[]))
-            .expect_err("error")
-            .to_string()
-            .replace(&temp.path().display().to_string(), "<lane>")
+        slashes(
+            plan(&request(temp.path(), source, name, &[]))
+                .expect_err("error")
+                .to_string()
+                .replace(&temp.path().display().to_string(), "<lane>"),
+        )
     };
     insta::assert_snapshot!(
         [

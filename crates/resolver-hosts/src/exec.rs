@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 use std::process::Stdio;
@@ -209,7 +210,19 @@ pub trait FsProbe: Send + Sync {
 pub struct SystemFs;
 
 impl FsProbe for SystemFs {
+    /// Refuses, since owner and mode checks of the helper's paths are Unix concepts.
+    /// Windows answers `*.localhost` itself and devlanes writes no hosts file
+    /// there, so nothing calls this on Windows.
+    #[cfg(windows)]
+    fn lstat(&self, _path: &Path) -> io::Result<Option<FileInfo>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the hosts helper is not supported on Windows",
+        ))
+    }
+
     /// `std::fs::symlink_metadata`, mapping `NotFound` to `None`.
+    #[cfg(unix)]
     fn lstat(&self, path: &Path) -> io::Result<Option<FileInfo>> {
         match std::fs::symlink_metadata(path) {
             Ok(meta) => {
@@ -251,6 +264,8 @@ mod tests {
         assert_eq!(command.to_string(), "sudo -n 'a b' ''");
     }
 
+    // Runs `sh`; the executor only runs the Unix helper and sudo.
+    #[cfg(unix)]
     #[tokio::test]
     async fn system_executor_pipes_stdin() {
         let command = CommandSpec::new("sh")
@@ -273,6 +288,8 @@ mod tests {
         );
     }
 
+    // Runs `sh`; the executor only runs the Unix helper and sudo.
+    #[cfg(unix)]
     #[tokio::test]
     async fn early_exit_is_not_an_epipe_error() {
         let command = CommandSpec::new("sh")
@@ -288,6 +305,8 @@ mod tests {
         assert_eq!(output.code, Some(1));
     }
 
+    // `SystemFs` is a Unix probe; Windows has no hosts helper.
+    #[cfg(unix)]
     #[test]
     fn system_fs_reports_kinds() {
         let dir = tempfile::tempdir().expect("tempdir");

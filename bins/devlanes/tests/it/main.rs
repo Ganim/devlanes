@@ -84,3 +84,17 @@ fn config_and_state_retention_defaults_match() {
         policy.logs
     );
 }
+
+/// The Windows binary carries its manifest, whose `detached` console policy
+/// keeps the logon start windowless. Windows stores an embedded manifest as
+/// plain text in the binary's resources.
+#[cfg(windows)]
+#[test]
+fn windows_binary_embeds_the_console_policy() {
+    let binary = std::fs::read(env!("CARGO_BIN_EXE_devlanes")).expect("devlanes.exe");
+    let policy = br#"<consoleAllocationPolicy xmlns="http://schemas.microsoft.com/SMI/2024/WindowsSettings">detached</consoleAllocationPolicy>"#;
+    assert!(
+        binary.windows(policy.len()).any(|window| window == policy),
+        "no consoleAllocationPolicy in the embedded manifest"
+    );
+}

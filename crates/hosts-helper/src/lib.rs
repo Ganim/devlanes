@@ -12,9 +12,13 @@
 //! the same validation and constants.
 
 pub mod block;
+// The helper edits `/etc/hosts` through sudo; Windows needs no hosts file entries.
+#[cfg(unix)]
 pub mod cli;
+#[cfg(unix)]
 pub mod flush;
 pub mod names;
+#[cfg(unix)]
 pub mod write;
 
 /// The file the helper edits.

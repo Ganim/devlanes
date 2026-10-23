@@ -66,8 +66,15 @@ pub fn server_label() -> String {
     }
 }
 
+/// False: Windows has no systemd to stop the user's processes at logout.
+#[cfg(windows)]
+fn linger_off() -> bool {
+    false
+}
+
 /// True on Linux when systemd stops the user's processes at logout, which would
 /// stop a daemon the tunnel started once the SSH session ends.
+#[cfg(unix)]
 fn linger_off() -> bool {
     if !cfg!(target_os = "linux") {
         return false;

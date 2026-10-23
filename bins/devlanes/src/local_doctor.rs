@@ -29,7 +29,8 @@ pub async fn facts(paths: &Paths) -> Value {
             .await
             .unwrap_or_default()
     };
-    json!({
+    #[cfg_attr(unix, expect(unused_mut, reason = "Windows adds facts"))]
+    let mut facts = json!({
         "running": false,
         "version": env!("CARGO_PKG_VERSION"),
         "home": paths.home,
@@ -44,11 +45,46 @@ pub async fn facts(paths: &Paths) -> Value {
         "user_config": user_config,
         "port_holders": port_holders,
         "hosts": hosts_helper().await,
+    });
+    #[cfg(windows)]
+    {
+        facts["terminal"] = terminal_facts();
+        facts["reserved_ports"] = reserved_ports(&home.join("config.yaml")).await;
+    }
+    facts
+}
+
+/// The Windows reserved port ranges checked against `ports.range` and the
+/// proxy ports from the user config, as the daemon's doctor reports them.
+/// Without a daemon nothing is mirrored.
+#[cfg(windows)]
+async fn reserved_ports(config: &Path) -> Value {
+    let path = config.to_owned();
+    let configured = tokio::task::spawn_blocking(move || {
+        let config = if path.exists() {
+            devlanes_config::load_user_lenient(&path).0
+        } else {
+            devlanes_config::UserConfig::default()
+        };
+        (
+            config.ports.bounds().ok(),
+            [
+                ("http", config.proxy.http_port),
+                ("https", config.proxy.https_port),
+            ],
+        )
     })
+    .await;
+    let Ok((pool, proxy)) = configured else {
+        return Value::Null;
+    };
+    let reading = devlanes_daemon::reserved_ports::RESERVED.get().await;
+    devlanes_daemon::reserved_ports::report(&reading, pool, &[], proxy, &Default::default())
 }
 
 /// `{path, private, mode?}` for the devlanes home: the client refuses another
 /// user's or a symlinked home, and the daemon tightens an open one to 0700.
+#[cfg(unix)]
 fn home_check(home: &Path) -> Value {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     match std::fs::symlink_metadata(home) {
@@ -74,6 +110,44 @@ fn home_check(home: &Path) -> Value {
             json!({"path": home, "exists": true, "mode": format!("{mode:o}"), "problem": problem})
         }
     }
+}
+
+/// `{path, exists, problem, owner?, acl?, fix?}` for the devlanes home, with
+/// the problems of `driver::unsafe_directory`. An empty home others can reach
+/// has no `fix`: the daemon tightens it when it starts.
+#[cfg(windows)]
+fn home_check(home: &Path) -> Value {
+    match crate::driver::privacy_problem(home) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            json!({"path": home, "exists": false})
+        }
+        Err(error) => {
+            json!({"path": home, "exists": true, "problem": "unreadable", "message": error.to_string()})
+        }
+        Ok(None) => json!({"path": home, "exists": true, "problem": null}),
+        Ok(Some(mut facts)) => {
+            let empty = std::fs::read_dir(home).is_ok_and(|mut entries| entries.next().is_none());
+            if empty && facts["problem"] == "acl" {
+                facts["fix"] = Value::Null;
+            }
+            facts["path"] = json!(home);
+            facts["exists"] = json!(true);
+            facts
+        }
+    }
+}
+
+/// `{elevated, job_kills_on_close}` for this terminal on Windows: a daemon
+/// started from an elevated terminal runs every unit elevated, and one started
+/// inside a job that kills on close and refuses breakaway stops with the
+/// terminal. `null` facts could not be read. Blocking.
+#[cfg(windows)]
+pub fn terminal_facts() -> Value {
+    let job = devlanes_sys_windows::job::job_of_self().ok();
+    json!({
+        "elevated": devlanes_sys_windows::token::elevated().ok(),
+        "job_kills_on_close": job.map(|job| job.kill_on_close && !job.breakaway_ok),
+    })
 }
 
 /// The user config as the daemon's doctor reports it: `{path, valid, error,
@@ -146,7 +220,7 @@ fn port_holders(ports: &[(&'static str, u16)]) -> Vec<Value> {
 async fn ca(paths: &Paths) -> Value {
     let config = crate::user_config::lenient(paths).await;
     let mkcert = crate::local::mkcert_selected(&config);
-    let path = paths.home.join("ca/ca.pem");
+    let path = paths.home.join("ca").join("ca.pem");
     let mut ca = match crate::local::certificate(paths, &config, false).await {
         Ok(Some(certificate)) => {
             let recreate = !mkcert && !certificate.is_name_constrained();
@@ -201,10 +275,75 @@ async fn hosts_helper() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// The reserved ranges are checked against the configured pool and proxy
+    /// ports; a missing config means the defaults.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn reserved_ports_use_the_user_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("config.yaml");
+        let report = reserved_ports(&config).await;
+        assert_eq!(
+            report["pool"],
+            json!({"start": 20000, "end": 32767}),
+            "{report}"
+        );
+        std::fs::write(&config, "ports:\n  range: 40000-40100\n").expect("config");
+        let report = reserved_ports(&config).await;
+        assert_eq!(
+            report["pool"],
+            json!({"start": 40000, "end": 40100}),
+            "{report}"
+        );
+        assert!(report["ranges"].is_array(), "{report}");
+    }
+
+    /// A home other accounts can reach is a finding, with the `icacls` fix once
+    /// it holds entries the daemon would not tighten; a missing one is not (the
+    /// first command creates it), and neither is a private one.
+    #[cfg(windows)]
+    #[test]
+    fn home_permissions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("h");
+        assert_eq!(home_check(&home)["exists"], false);
+        std::fs::create_dir(&home).expect("home");
+        let icacls = devlanes_sys_windows::file::system_directory()
+            .expect("System32")
+            .join("icacls.exe");
+        let status = std::process::Command::new(icacls)
+            .arg(&home)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)R"])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("icacls");
+        assert!(status.success());
+        let open = home_check(&home);
+        assert_eq!(open["problem"], "acl", "{open}");
+        assert!(open["fix"].is_null(), "{open}");
+        std::fs::write(home.join("config.yaml"), "").expect("config");
+        let full = home_check(&home);
+        assert!(
+            full["fix"]
+                .as_str()
+                .is_some_and(|fix| fix.starts_with("icacls ") && !fix.contains("&&")),
+            "{full}"
+        );
+        let private = temp.path().join("p");
+        assert!(
+            devlanes_sys_windows::security::ensure_private_dir(&private)
+                .expect("create")
+                .is_ok()
+        );
+        assert_eq!(home_check(&private)["problem"], Value::Null);
+    }
 
     /// A home others can read is a finding; a missing one is not (the first
     /// command creates it).
+    #[cfg(unix)]
     #[test]
     fn home_permissions() {
         let temp = tempfile::tempdir().expect("tempdir");

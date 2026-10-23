@@ -5,12 +5,17 @@ pub mod color;
 pub mod contrib;
 pub mod env;
 pub mod gate;
+pub mod paths;
 pub mod ports;
 pub mod refs;
 pub mod runtime;
+mod stop;
 
 pub use runtime::*;
 use serde::{Deserialize, Serialize};
+pub use stop::StopSignal;
+#[cfg(windows)]
+pub use stop::WindowsStop;
 
 macro_rules! id {
     ($name:ident) => {

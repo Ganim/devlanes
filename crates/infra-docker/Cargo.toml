@@ -16,6 +16,10 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+# The profile directory, which the Docker CLI keeps `.docker` in on Windows.
+[target.'cfg(windows)'.dependencies]
+devlanes-core = { path = "../core" }
+
 [dev-dependencies]
 tempfile.workspace = true
 

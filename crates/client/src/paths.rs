@@ -4,17 +4,24 @@ use std::{
     env,
     ffi::OsString,
     fs,
+    path::{Path, PathBuf},
+};
+#[cfg(unix)]
+use std::{
     io::Write,
     os::unix::{
         ffi::OsStrExt,
         fs::{DirBuilderExt, MetadataExt},
     },
-    path::{Path, PathBuf},
 };
+
+pub use devlanes_core::paths::user_home;
 
 use crate::{Error, Result};
 
 /// Persistent state belongs to one home; sockets may use a private runtime directory.
+/// On Windows `socket` holds the daemon's named pipe (`\\.\pipe\...`), which is
+/// not a filesystem path.
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub home: PathBuf,
@@ -29,7 +36,7 @@ impl Paths {
     pub fn discover() -> Result<Self> {
         Self::new(home_directory(
             env::var_os("DEVLANES_HOME"),
-            env::var_os("HOME"),
+            user_home().map(PathBuf::into_os_string),
         )?)
     }
 
@@ -47,18 +54,29 @@ impl Paths {
         if home.as_os_str().is_empty() {
             return Err(Error::MissingHome);
         }
+        #[cfg(unix)]
         let home = if home.is_absolute() {
             home.to_owned()
         } else {
             env::current_dir()?.join(home)
         };
+        // Resolves `C:foo` and `\foo` the way Windows opens them; joining those
+        // onto the current directory would leave them relative.
+        #[cfg(windows)]
+        let home = std::path::absolute(home)?;
         let run = home.join("run");
         #[cfg(target_os = "linux")]
         let mut socket = _runtime
             .and_then(|runtime| runtime_socket(runtime, &home))
             .unwrap_or_else(|| run.join("daemon.sock"));
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(unix, not(target_os = "linux")))]
         let mut socket = run.join("daemon.sock");
+        #[cfg(windows)]
+        let socket = {
+            let _ = temporary;
+            pipe_name(&home)?
+        };
+        #[cfg(unix)]
         if socket.as_os_str().as_bytes().len() >= 104 {
             // A stable home-specific name prevents isolated homes sharing a fallback daemon.
             let name = format!("devlanes-{}", rustix::process::geteuid().as_raw());
@@ -82,6 +100,7 @@ impl Paths {
         for directory in [&self.home, &self.run, &self.logs] {
             private_directory(directory)?;
         }
+        #[cfg(unix)]
         if self.socket.parent() != Some(self.run.as_path()) {
             private_directory(self.socket.parent().ok_or(Error::InvalidSocketPath)?)?;
             let mut pointer = tempfile::NamedTempFile::new_in(&self.run)?;
@@ -95,7 +114,7 @@ impl Paths {
     }
 }
 
-/// Picks `DEVLANES_HOME`, else `$HOME/.devlanes`; empty values count as unset.
+/// Picks `DEVLANES_HOME`, else `<user home>/.devlanes`; empty values count as unset.
 fn home_directory(devlanes_home: Option<OsString>, home: Option<OsString>) -> Result<PathBuf> {
     match (devlanes_home, home) {
         (Some(devlanes_home), _) if !devlanes_home.is_empty() => Ok(PathBuf::from(devlanes_home)),
@@ -105,7 +124,34 @@ fn home_directory(devlanes_home: Option<OsString>, home: Option<OsString>) -> Re
     }
 }
 
+/// The daemon's pipe for `home`. Pipe names are machine-wide, so the name
+/// hashes (FNV-1a) the user's SID with the home, which keeps isolated homes
+/// and other users' daemons apart. The home is hashed as UTF-16 with ASCII
+/// folded to lowercase and no trailing separator: Windows opens `C:\Acme\` and
+/// `c:\acme` as one directory, and two spellings must not get two daemons.
+#[cfg(windows)]
+fn pipe_name(home: &Path) -> Result<PathBuf> {
+    use std::os::windows::ffi::OsStrExt;
+    let user = devlanes_sys_windows::token::current_user()?.to_string();
+    let home: PathBuf = home.components().collect();
+    let units = home
+        .as_os_str()
+        .encode_wide()
+        .map(|unit| match u8::try_from(unit) {
+            Ok(byte) => u16::from(byte.to_ascii_lowercase()),
+            Err(_) => unit,
+        });
+    let hash = user
+        .bytes()
+        .chain(units.flat_map(u16::to_le_bytes))
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    Ok(PathBuf::from(format!(r"\\.\pipe\devlanes-{hash:016x}")))
+}
+
 /// Keeps isolated homes distinct in shared per-user runtime directories.
+#[cfg(unix)]
 fn socket_name(home: &Path) -> String {
     let hash = home
         .as_os_str()
@@ -118,7 +164,7 @@ fn socket_name(home: &Path) -> String {
 }
 
 /// Invalid XDG directories are ignored without creating or repairing their contents.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(all(unix, any(target_os = "linux", test)))]
 fn runtime_socket(runtime: &Path, home: &Path) -> Option<PathBuf> {
     if !runtime.is_absolute() {
         return None;
@@ -138,6 +184,7 @@ fn runtime_socket(runtime: &Path, home: &Path) -> Option<PathBuf> {
 /// Creates a missing state directory private and refuses a symlinked one, a
 /// non-directory or another user's directory. An own directory that others can
 /// read passes: the daemon tightens it to 0700 when it starts and logs that once.
+#[cfg(unix)]
 fn private_directory(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => {}
@@ -156,7 +203,119 @@ fn private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+/// Creates a missing state directory private (owned by this user, access for
+/// this user, SYSTEM and Administrators) and refuses a symlink or junction, a
+/// non-directory or another account's directory. An own directory that others
+/// can read is tightened here while it is still empty, because `prepare`
+/// creates entries in the home next and Windows does not carry a changed access
+/// list over to existing entries; a non-empty one passes and the daemon
+/// reports it.
+#[cfg(windows)]
+fn private_directory(path: &Path) -> Result<()> {
+    use devlanes_sys_windows::security::{Problem, ensure_private_dir};
+    let checked = match fs::symlink_metadata(path) {
+        Ok(_) => ensure_private_dir(path)?.map(drop),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            ensure_private_dir(path)?.map(drop)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    match checked {
+        Ok(()) | Err(Problem::Acl(_)) => Ok(()),
+        Err(_) => Err(Error::UnsafeDirectory(path.to_owned())),
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// Each home gets its own pipe; spellings of one home share it.
+    #[test]
+    fn pipe_names_follow_the_home() -> Result<()> {
+        let temporary = env::temp_dir();
+        let first = Paths::with_environment(Path::new(r"C:\Users\acme\one"), None, &temporary)?;
+        let second = Paths::with_environment(Path::new(r"C:\Users\acme\two"), None, &temporary)?;
+        let socket = first.socket.to_string_lossy().into_owned();
+        assert!(socket.starts_with(r"\\.\pipe\devlanes-"), "{socket}");
+        assert_eq!(socket.len(), r"\\.\pipe\devlanes-".len() + 16, "{socket}");
+        assert_ne!(first.socket, second.socket);
+        assert_eq!(first.run, Path::new(r"C:\Users\acme\one\run"));
+        assert_eq!(first.db, Path::new(r"C:\Users\acme\one\state.db"));
+        for spelling in [
+            r"C:\USERS\ACME\ONE",
+            r"C:/Users/acme/one",
+            r"C:\Users\acme\one\",
+        ] {
+            let other = Paths::with_environment(Path::new(spelling), None, &temporary)?;
+            assert_eq!(other.socket, first.socket, "{spelling}");
+        }
+        Ok(())
+    }
+
+    /// A relative home resolves against the current directory, and discovery
+    /// creates nothing.
+    #[test]
+    fn relative_homes_become_absolute() -> Result<()> {
+        let paths = Paths::with_environment(Path::new("rel-home"), None, &env::temp_dir())?;
+        assert!(paths.home.is_absolute(), "{}", paths.home.display());
+        assert_eq!(paths.home, env::current_dir()?.join("rel-home"));
+        assert!(!paths.home.exists());
+        Ok(())
+    }
+
+    /// Prepared directories are private, an own empty directory others can
+    /// read is tightened before anything is created in it, and a junction is
+    /// refused.
+    #[test]
+    fn prepare_creates_private_directories() -> Result<()> {
+        use devlanes_sys_windows::security::check_private_dir;
+        let temp = tempfile::tempdir()?;
+        let paths = Paths::new(temp.path().join("deep").join("home"))?;
+        paths.prepare()?;
+        for directory in [&paths.home, &paths.run, &paths.logs] {
+            assert_eq!(
+                check_private_dir(directory)?,
+                Ok(()),
+                "{}",
+                directory.display()
+            );
+        }
+        assert!(!paths.run.join("daemon.socket").exists());
+        let open = temp.path().join("open");
+        fs::create_dir(&open)?;
+        let everyone = std::process::Command::new(
+            devlanes_sys_windows::file::system_directory()?.join("icacls.exe"),
+        )
+        .arg(&open)
+        .args(["/grant", "*S-1-1-0:(OI)(CI)R"])
+        .stdout(std::process::Stdio::null())
+        .status()?;
+        assert!(everyone.success());
+        Paths::new(&open)?.prepare()?;
+        assert_eq!(check_private_dir(&open)?, Ok(()));
+        let link = temp.path().join("link");
+        let junction = std::process::Command::new(
+            devlanes_sys_windows::file::system_directory()?.join("cmd.exe"),
+        )
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&link)
+        .arg(&paths.home)
+        .stdout(std::process::Stdio::null())
+        .status()?;
+        assert!(junction.success());
+        assert!(matches!(
+            Paths::new(&link)?.prepare(),
+            Err(Error::UnsafeDirectory(_))
+        ));
+        Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

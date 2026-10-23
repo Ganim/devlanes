@@ -1,6 +1,6 @@
 # devlanes
 
-devlanes runs a project's dev environment once per Git worktree on macOS and Linux. Each worktree is a lane with its own ports, hostnames and data; a per-user daemon owns the processes and the CLI and TUI are its clients. devlanes is pre-alpha.
+devlanes runs a project's dev environment once per Git worktree on macOS, Linux and Windows 11. Each worktree is a lane with its own ports, hostnames and data; a per-user daemon owns the processes and the CLI and TUI are its clients. devlanes is pre-alpha.
 
 ## Install
 
@@ -15,6 +15,12 @@ These install release builds for macOS or Linux (glibc), arm64 or x86_64. Homebr
 
 ```sh
 cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes devlanes-hosts-helper
+```
+
+On Windows 11 24H2 or later, x64 or arm64, install from PowerShell; npm and cargo binstall work there too. [Windows](docs/guides/windows.md) lists the requirements and what differs:
+
+```powershell
+irm https://devlanes.run/install.ps1 | iex
 ```
 
 `install.sh` verifies the archive against the release's `SHA256SUMS`, installs to `~/.local/bin` (`DEVLANES_INSTALL_DIR` changes it; `DEVLANES_INSTALL_SUDO=1` allows sudo for a directory you can't write) and takes `DEVLANES_VERSION=X.Y.Z` to pin a release. [packaging](packaging/README.md) describes the release pipeline.

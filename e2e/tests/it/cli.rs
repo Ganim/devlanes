@@ -1,5 +1,6 @@
 //! Ad-hoc units, config errors, daemon protocol skew and agent output wording.
 
+#[cfg(unix)]
 use std::{
     fs,
     io::{Read, Write},
@@ -8,6 +9,8 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
+};
+use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -206,7 +209,10 @@ fn doctor_without_a_daemon_checks_locally() -> Result<()> {
 #[test]
 fn protocol_mismatch_exits_4() -> Result<()> {
     let lab = Lab::new("two-services", BUDGET)?;
+    #[cfg(unix)]
     let _fake = FakeDaemon::serve(&lab.home().join("run"), 999, 3)?;
+    #[cfg(windows)]
+    let _fake = FakeDaemon::serve(&lab, 999, 3)?;
     for args in [&["status"][..], &["start"][..]] {
         let mut command = lab.command(lab.repo(), args)?;
         command.env("DEVLANES_OUTPUT", "plain");
@@ -239,12 +245,14 @@ fn protocol_mismatch_exits_4() -> Result<()> {
 
 /// A Unix socket at the daemon's path that answers every hello with a fixed
 /// protocol and closes. Dropping it stops the thread and removes the socket.
+#[cfg(unix)]
 struct FakeDaemon {
     socket: PathBuf,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
+#[cfg(unix)]
 impl FakeDaemon {
     /// Listens on `<run>/daemon.sock` (`run` is created private, as the client expects).
     fn serve(run: &Path, protocol: u32, managed_processes: usize) -> Result<Self> {
@@ -288,6 +296,7 @@ impl FakeDaemon {
     }
 }
 
+#[cfg(unix)]
 impl Drop for FakeDaemon {
     /// Stops accepting and removes the socket.
     fn drop(&mut self) {
@@ -299,7 +308,117 @@ impl Drop for FakeDaemon {
     }
 }
 
+/// The daemon's named pipe served by a thread that answers every hello with a
+/// fixed protocol and closes. Dropping it stops the thread, which closes the pipe.
+#[cfg(windows)]
+struct FakeDaemon {
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+impl FakeDaemon {
+    /// Serves the pipe the client derives from the lab's home; `daemon status`
+    /// reports its name without starting a daemon.
+    fn serve(lab: &Lab, protocol: u32, managed_processes: usize) -> Result<Self> {
+        let status = lab.devlanes(lab.repo(), &["daemon", "status", "--json"])?;
+        let name = crate::need(status.json()?["socket"].as_str(), "pipe name")?.to_owned();
+        let hello = serde_json::json!({
+            "type": "hello",
+            "body": {
+                "protocol": protocol,
+                "version": "0.0.0-fake",
+                "build_id": "fake",
+                "features": [],
+                "managed_processes": managed_processes,
+            },
+        });
+        let mut frame = vec![0u8];
+        frame.extend_from_slice(&serde_json::to_vec(&hello)?);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        // The daemon's descriptor, so the pipe is owned by this user even on an
+        // elevated runner, where a default one would be owned by Administrators
+        // and fail the client's owner check.
+        let pipes = devlanes_sys_windows::pipe::PipeFactory::current_user(&name)?;
+        // The first instance exists before this returns, so the client never finds
+        // the pipe missing and spawns a real daemon.
+        let first = {
+            let _context = runtime.enter();
+            pipes.create(true)?
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = thread::spawn(move || {
+            runtime.block_on(async move {
+                let deadline = Instant::now() + BUDGET;
+                let mut server = first;
+                while !flag.load(Ordering::Relaxed) && Instant::now() < deadline {
+                    let Ok(connected) =
+                        tokio::time::timeout(Duration::from_millis(20), server.connect()).await
+                    else {
+                        continue;
+                    };
+                    // The next instance exists before this one goes away, for the
+                    // same reason as the first.
+                    let Ok(next) = pipes.create(false) else {
+                        break;
+                    };
+                    if connected.is_ok() {
+                        let _ = answer_pipe(&mut server, &frame).await;
+                    }
+                    server = next;
+                }
+            });
+        });
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for FakeDaemon {
+    /// Stops accepting; the pipe goes with the thread's runtime.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Reads the client's hello frame (u32 length, then the payload), sends `frame`
+/// and waits up to two seconds for the client to hang up, so closing the pipe
+/// cannot discard the answer before it is read.
+#[cfg(windows)]
+async fn answer_pipe(
+    pipe: &mut tokio::net::windows::named_pipe::NamedPipeServer,
+    frame: &[u8],
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let exchange = async {
+        let mut length = [0u8; 4];
+        pipe.read_exact(&mut length).await?;
+        let mut hello = vec![0u8; u32::from_be_bytes(length).min(1 << 20) as usize];
+        pipe.read_exact(&mut hello).await?;
+        let size = u32::try_from(frame.len()).map_err(std::io::Error::other)?;
+        pipe.write_all(&size.to_be_bytes()).await?;
+        pipe.write_all(frame).await?;
+        pipe.flush().await
+    };
+    tokio::time::timeout(Duration::from_secs(5), exchange)
+        .await
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+    let mut rest = [0u8; 64];
+    let _ = tokio::time::timeout(Duration::from_secs(2), pipe.read(&mut rest)).await;
+    Ok(())
+}
+
 /// Reads the client's hello frame (u32 length, then the payload) and sends `frame`.
+#[cfg(unix)]
 fn answer(mut stream: UnixStream, frame: &[u8]) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;

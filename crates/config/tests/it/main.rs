@@ -342,6 +342,47 @@ fn structural_validation() {
     }
 }
 
+/// Unit names that differ only by case would share a log folder on Windows,
+/// so they fail there; Unix keeps them apart and accepts them.
+#[test]
+fn unit_names_differing_by_case() {
+    for (yaml, path) in [
+        (
+            "project: demo\nservices: { web: { run: a }, Web: { run: b } }",
+            "services.Web",
+        ),
+        (
+            "project: demo\nservices: { db: { run: a } }\ntasks: { DB: { run: b } }",
+            "tasks.DB",
+        ),
+        (
+            "project: demo\ntasks: { Setup.seed: { run: b } }\ninfra: { setup: { seed: c } }",
+            "infra.setup.seed",
+        ),
+    ] {
+        let result = parse_project(yaml, None);
+        #[cfg(unix)]
+        assert!(result.is_ok(), "{yaml}: {:?}", result.err());
+        #[cfg(windows)]
+        {
+            let error = result.expect_err(yaml);
+            assert!(
+                error.message.starts_with(&format!("{path}: units `"))
+                    && error.message.contains("ignores case"),
+                "{yaml}: {}",
+                error.message
+            );
+        }
+        let _ = path;
+    }
+    // Names that only Windows would have to encode never collide.
+    parse_project(
+        "project: demo\ntasks: { 'db:migrate': { run: a }, db_migrate: { run: b } }",
+        None,
+    )
+    .expect("distinct folders");
+}
+
 /// Standalone schema generation must include exact preset option keys.
 #[test]
 fn schemas_are_strict_and_include_extensions() {
@@ -435,23 +476,60 @@ fn lane_data_root() {
     let home = std::path::Path::new("/h/.devlanes");
     let defaults = parse_user("{}").expect("defaults").lanes;
     assert_eq!(defaults.data_root(home), home.join("data"));
-    let set = parse_user("lanes: { data_dir: /fast/devlanes }").expect("absolute");
+    let set = parse_user(&format!("lanes: {{ data_dir: {ABSOLUTE_DATA_DIR} }}")).expect("absolute");
     assert_eq!(
         set.lanes.data_root(home),
-        std::path::Path::new("/fast/devlanes")
+        std::path::Path::new(ABSOLUTE_DATA_DIR)
     );
     let tilde = parse_user("lanes: { data_dir: ~/lane-data }").expect("tilde");
-    if let Some(user_home) = std::env::var_os("HOME") {
-        assert_eq!(
-            tilde.lanes.data_root(home),
-            std::path::PathBuf::from(user_home).join("lane-data")
-        );
+    if let Some(user_home) = user_home() {
+        assert_eq!(tilde.lanes.data_root(home), user_home.join("lane-data"));
     }
     let relative = parse_user("lanes: { data_dir: data }").expect_err("relative");
     assert!(
         relative.message.contains("lanes.data_dir"),
         "{}",
         relative.message
+    );
+}
+
+/// An absolute `lanes.data_dir` on this OS.
+#[cfg(unix)]
+const ABSOLUTE_DATA_DIR: &str = "/fast/devlanes";
+#[cfg(windows)]
+const ABSOLUTE_DATA_DIR: &str = r"C:\fast\devlanes";
+
+/// The home `~` expands from: `HOME` on Unix.
+#[cfg(unix)]
+fn user_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+/// The home `~` expands from: the profile directory on Windows.
+#[cfg(windows)]
+fn user_home() -> Option<std::path::PathBuf> {
+    std::env::home_dir()
+}
+
+/// Windows also takes `~\`, expanded from the profile directory, and refuses
+/// rooted paths without a drive, which depend on the current drive.
+#[cfg(windows)]
+#[test]
+fn windows_lane_data_root() {
+    let home = std::path::Path::new(r"C:\h\.devlanes");
+    let profile = std::env::home_dir().expect("profile directory");
+    let tilde = parse_user(r"lanes: { data_dir: '~\lane data' }").expect("tilde");
+    assert_eq!(tilde.lanes.data_root(home), profile.join("lane data"));
+    let forward = parse_user("lanes: { data_dir: C:/fast/devlanes }").expect("absolute");
+    assert_eq!(
+        forward.lanes.data_root(home),
+        std::path::Path::new("C:/fast/devlanes")
+    );
+    let rooted = parse_user("lanes: { data_dir: /fast/devlanes }").expect_err("no drive");
+    assert!(
+        rooted.message.contains("lanes.data_dir"),
+        "{}",
+        rooted.message
     );
 }
 

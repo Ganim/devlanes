@@ -11,6 +11,7 @@ use std::{
 
 use devlanes_config::{HostConfig, Hosts, Scalar, Templated};
 use devlanes_core::{
+    StopSignal,
     contrib::{Contributor, DetectCx, ScriptRunner, SecretsProvider, UnitKind},
     env::EnvLayer,
     ports::{PortBlock, PortName},
@@ -103,6 +104,94 @@ profiles:
         assert_eq!(env.values[key], value, "{key}");
         assert_eq!(env.sources[key], layer, "{key}");
     }
+}
+
+#[tokio::test]
+/// Windows folds variable names where layers merge and in `${{ env.X }}`, so
+/// a client's `Path` and a service's `PATH` are one variable there; Unix keeps
+/// both.
+async fn env_names_fold_on_windows() {
+    let config = parse(
+        r#"
+project: demo
+services:
+  api:
+    run: server
+    env: { PATH: "${{ env.Path }};extra", Home: dir }
+"#,
+    );
+    let facts = facts("demo", 1, Some("x"));
+    let (block, offsets) = allocation(&config, 21_000, &[]);
+    let client = BTreeMap::from([("Path".to_owned(), "client".to_owned())]);
+    let mut input = ResolveInput::new(&config, &facts, block, &offsets);
+    input.client_env = &client;
+    let lane = resolve_lane(input).await.expect("resolves");
+    assert!(lane.errors.is_empty(), "{:?}", lane.errors);
+    let env = &lane.services["api"].launch.env;
+    #[cfg(unix)]
+    {
+        assert_eq!(env.values["Path"], "client");
+        assert_eq!(env.values["PATH"], "client;extra");
+        assert_eq!(env.values["Home"], "dir");
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(env.values["PATH"], "client;extra");
+        assert_eq!(env.sources["PATH"], EnvLayer::Service);
+        assert_eq!(env.values["HOME"], "dir");
+        assert!(
+            env.values
+                .keys()
+                .all(|key| *key == devlanes_core::env::fold_name(key.clone())),
+            "{:?}",
+            env.values.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[tokio::test]
+/// `stop.signal` names parse to stop signals. Only Windows notes a stop that
+/// sends something else, and SIGINT only for a `run:` string, whose programs
+/// ignore Ctrl-C there.
+async fn stop_signals() {
+    let lane = plain(
+        r#"
+project: demo
+services:
+  shell-int:
+    run: server --flag
+    stop: { signal: SIGINT }
+  argv-int:
+    run: [server, --flag]
+    stop: { signal: SIGINT }
+  hup:
+    run: [server]
+    stop: { signal: SIGHUP }
+  term:
+    run: server
+"#,
+        1,
+    )
+    .await;
+    let signal = |unit: &str| lane.services[unit].stop.signal;
+    assert_eq!(signal("shell-int"), StopSignal::Interrupt);
+    assert_eq!(signal("argv-int"), StopSignal::Interrupt);
+    assert_eq!(signal("hup"), StopSignal::Hangup);
+    assert_eq!(signal("term"), StopSignal::Terminate);
+    let noted = |unit: &str| {
+        lane.services[unit]
+            .launch
+            .notes
+            .iter()
+            .any(|note| note.contains("stop.signal"))
+    };
+    let expected = if cfg!(windows) {
+        [true, false, true, false]
+    } else {
+        [false; 4]
+    };
+    let units = ["shell-int", "argv-int", "hup", "term"];
+    assert_eq!(units.map(noted), expected, "{units:?}");
 }
 
 #[tokio::test]
@@ -1279,5 +1368,14 @@ async fn snapshot_reference() {
     input.secrets = Some(&secrets as &dyn SecretsProvider);
     let lane = resolve_lane(input).await.expect("resolves");
     assert!(lane.errors.is_empty(), "{:?}", lane.errors);
+    // The snapshot leaves Windows-only notes out; `queue-worker` stops on
+    // SIGINT through a run string, which Windows can only send as Ctrl-Break.
+    #[cfg(windows)]
+    assert_eq!(
+        lane.services["queue-worker"].launch.notes,
+        [
+            "on Windows stop.signal SIGINT is sent as Ctrl-Break, since programs a run string starts ignore Ctrl-C"
+        ]
+    );
     insta::assert_json_snapshot!(lane_view(&lane));
 }

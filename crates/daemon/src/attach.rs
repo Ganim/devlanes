@@ -2,7 +2,8 @@
 //! input is accepted only on that connection, and only the most recent interactive
 //! viewer of a unit may resize it (agents and observers never do). When that
 //! viewer leaves, the newest remaining interactive viewer takes over with its own
-//! size; the unit returns to 120x40 only when none remains.
+//! size; the unit returns to 120x40 only when none remains, or to
+//! [`TerminalSize::RENDERED_HEADLESS`] when its output renders its terminal.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -69,13 +70,13 @@ impl AttachTable {
     }
 
     /// The size `key` should have now: its active viewer's last request, or
-    /// the default when nobody owns it.
-    fn owner_size(&self, key: &UnitKey) -> TerminalSize {
+    /// `headless` when nobody owns it.
+    fn owner_size(&self, key: &UnitKey, headless: TerminalSize) -> TerminalSize {
         self.active
             .get(key)
             .and_then(|owner| self.streams.get(owner))
             .and_then(|stream| stream.size)
-            .unwrap_or_default()
+            .unwrap_or(headless)
     }
 }
 
@@ -192,7 +193,7 @@ impl Inner {
         host: &UnitHost,
     ) -> Result<TerminalSize, RpcError> {
         let _turn = self.attach_resize.lock().await;
-        let size = lock(&self.attach).owner_size(key);
+        let size = lock(&self.attach).owner_size(key, host.headless_size());
         host.resize(size).await?;
         Ok(size)
     }
@@ -263,6 +264,9 @@ async fn pump(
     if session.bytes(stream_id, snapshot).await.is_err() {
         return;
     }
+    if host.renders_screen() {
+        return pump_rendered(engine, session, stream_id, host, live).await;
+    }
     let disconnected = session.disconnected();
     loop {
         let next = tokio::select! {
@@ -300,5 +304,76 @@ async fn pump(
                 return;
             }
         }
+    }
+}
+
+/// Shortest time between two redraws for one viewer of a rendered unit.
+const REDRAW_GAP: std::time::Duration = std::time::Duration::from_millis(30);
+
+/// Redraws until exit or disconnect, for a unit whose output renders its
+/// terminal. That output is never forwarded: its cursor moves only fit a grid
+/// of the unit's size, while the viewer shows the screen at its own. Output
+/// instead brings a redraw, at most one per [`REDRAW_GAP`]; output arriving in
+/// between stays queued and brings the next one, so the last state always
+/// reaches the viewer. Each redraw changes only the rows that differ from the
+/// one before.
+async fn pump_rendered(
+    engine: &Inner,
+    session: &Session,
+    stream_id: u64,
+    host: &UnitHost,
+    mut live: broadcast::Receiver<Bytes>,
+) {
+    use broadcast::error::{RecvError, TryRecvError};
+    // Skips what is already queued; one redraw covers it. True when anything was.
+    let skip_queued = |live: &mut broadcast::Receiver<Bytes>| {
+        let mut skipped = false;
+        while let Ok(_) | Err(TryRecvError::Lagged(_)) = live.try_recv() {
+            skipped = true;
+        }
+        skipped
+    };
+    // What the viewer shows since the last redraw; the attach snapshot is not
+    // kept, so the first redraw is a whole screen.
+    let mut shown = None;
+    let redraw = async |shown: &mut Option<vt100::Screen>| {
+        // The viewer's latest size, which a resize may have changed since the attach.
+        let size = lock(&engine.attach)
+            .streams
+            .get(&(session.id(), stream_id))
+            .and_then(|stream| stream.size);
+        let (bytes, screen) = host.render(size, shown.take()).await;
+        *shown = screen;
+        // An unreadable screen gives nothing to send; an empty frame would tell
+        // the viewer that the unit exited.
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        session.bytes(stream_id, bytes).await
+    };
+    let disconnected = session.disconnected();
+    let mut next_redraw = tokio::time::Instant::now();
+    loop {
+        let open = tokio::select! {
+            () = disconnected.cancelled() => return,
+            _ = host.wait_exit() => false,
+            received = live.recv() => !matches!(received, Err(RecvError::Closed)),
+        };
+        if !open {
+            if skip_queued(&mut live) && redraw(&mut shown).await.is_err() {
+                return;
+            }
+            let _ = session.bytes(stream_id, Bytes::new()).await;
+            return;
+        }
+        tokio::select! {
+            () = disconnected.cancelled() => return,
+            () = tokio::time::sleep_until(next_redraw) => {}
+        }
+        skip_queued(&mut live);
+        if redraw(&mut shown).await.is_err() {
+            return;
+        }
+        next_redraw = tokio::time::Instant::now() + REDRAW_GAP;
     }
 }

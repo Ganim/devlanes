@@ -1,0 +1,20 @@
+[package]
+name = "devlanes-metrics-windows"
+description = "Windows process collector and pressure source for devlanes-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The crate is empty on other platforms, so its dependencies are Windows-only too.
+[target.'cfg(windows)'.dependencies]
+async-trait.workspace = true
+devlanes-core = { path = "../core" }
+devlanes-metrics = { path = "../metrics" }
+devlanes-sys-windows = { path = "../sys-windows" }
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

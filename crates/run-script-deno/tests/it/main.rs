@@ -23,6 +23,18 @@ fn write_files(root: &Path, files: &[(&str, &str)]) {
     }
 }
 
+/// `text` as is: the snapshots show Unix separators.
+#[cfg(unix)]
+fn slashes(text: String) -> String {
+    text
+}
+
+/// `text` with `/` for `\`, so the Unix snapshots hold on Windows.
+#[cfg(windows)]
+fn slashes(text: String) -> String {
+    text.replace('\\', "/")
+}
+
 fn request<'a>(
     worktree: &'a Path,
     source: &'a str,
@@ -59,12 +71,13 @@ fn renders_deno_task() {
         ("both/deno.json", "dev", &[][..]),
     ] {
         let plan = plan(&request(temp.path(), source, name, args)).expect("plan");
-        let cwd = plan
-            .cwd
-            .strip_prefix(temp.path())
-            .expect("inside worktree")
-            .display()
-            .to_string();
+        let cwd = slashes(
+            plan.cwd
+                .strip_prefix(temp.path())
+                .expect("inside worktree")
+                .display()
+                .to_string(),
+        );
         rendered.push_str(&format!(
             "{source}#{name}: cwd={cwd} argv={} body={:?}\n",
             plan.argv.join(" "),
@@ -89,9 +102,11 @@ fn errors() {
         &[("deno.json", CONFIG), ("bad/deno.json", "{ tasks: }")],
     );
     let error = plan(&request(temp.path(), "deno.json", "start", &[])).expect_err("missing task");
-    let message = error
-        .to_string()
-        .replace(&temp.path().display().to_string(), "<lane>");
+    let message = slashes(
+        error
+            .to_string()
+            .replace(&temp.path().display().to_string(), "<lane>"),
+    );
     insta::assert_snapshot!(message, @"`<lane>/deno.json` has no task `start` (tasks: build, ci, dev)");
     assert!(matches!(
         plan(&request(temp.path(), "bad/deno.json", "dev", &[])),

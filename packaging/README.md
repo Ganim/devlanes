@@ -1,14 +1,16 @@
 # Packaging
 
-Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula and the npm packages all come from `.github/workflows/release.yml` and the scripts here. `install.sh` at the repository root installs from the same archives.
+Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula and the npm packages all come from `.github/workflows/release.yml` and the scripts here. `install.sh` and `install.ps1` at the repository root install from the same archives.
 
 | Path | Purpose |
 |---|---|
-| `scripts/package.sh` | One `devlanes-VERSION-TARGET.tar.gz` per target |
+| `scripts/package.sh` | One `devlanes-VERSION-TARGET.tar.gz` per macOS and Linux target |
+| `scripts/package.ps1` | One `devlanes-VERSION-TARGET.zip` per Windows target |
 | `scripts/manifest.sh` | `SHA256SUMS` and `release-manifest.json` |
 | `homebrew/devlanes.rb`, `homebrew/render.sh` | Formula template and the script that fills in version and checksums |
 | `npm/devlanes/`, `npm/build.sh` | Launcher package and the script that builds all npm packages |
 | `scripts/check.sh` | Dry run of all of the above and `install.sh` against fake binaries; CI runs it |
+| `scripts/check.ps1` | PSScriptAnalyzer on the PowerShell scripts, `package.ps1`, `install.ps1` in Windows PowerShell 5.1 and PowerShell 7, and the npm launcher, against a fake `devlanes.exe`; CI runs it on Windows |
 
 ## Install channels
 
@@ -18,9 +20,10 @@ Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula an
 | npm | `npm install -g devlanes` |
 | cargo binstall | `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes` |
 | Script | `curl -fsSL https://devlanes.run/install.sh \| sh` |
-| Source | `cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes devlanes-hosts-helper` |
+| Script (Windows, PowerShell) | `irm https://devlanes.run/install.ps1 \| iex` |
+| Source | `cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes devlanes-hosts-helper` (Windows: `devlanes` only) |
 
-Every channel except the source build installs the release archives.
+Every channel except the source build installs the release archives. Homebrew has no Windows build.
 
 ## Releasing
 
@@ -31,16 +34,18 @@ The workflow then runs these jobs:
 
 | Job | Does |
 |---|---|
-| `test` | Runs the workspace tests on Linux and macOS, in parallel with `build` |
-| `build` | Builds `devlanes` and `devlanes-hosts` for each target, fails if the committed config schemas differ from the generated ones, and packs the archive |
-| `release` | Writes `SHA256SUMS`, `release-manifest.json` and the formula, copies `schema.json` and `user-schema.json`, attests the archives' build provenance, and uploads everything to a draft release. A rerun refills the draft and refuses to touch a published release |
+| `test` | Runs the workspace tests on Linux, macOS and Windows, in parallel with `build` |
+| `build` | Builds `devlanes` and `devlanes-hosts` for each macOS and Linux target, fails if the committed config schemas differ from the generated ones, and packs the archive |
+| `build-windows` | Builds `devlanes.exe` for each Windows target, checks the schemas, runs `devlanes.exe --version`, fails if the executable imports the Visual C++ runtime (`dumpbin /dependents`), and packs the zip with `package.ps1` |
+| `npm-preflight` | Fails when the `devlanes` package or one of its `optionalDependencies` does not exist on the npm registry, before any draft release exists |
+| `release` | Writes `SHA256SUMS`, `release-manifest.json` and the formula, copies `schema.json`, `user-schema.json`, `install.sh` and `install.ps1`, attests the archives' build provenance, and uploads everything to a draft release. A rerun refills the draft and refuses to touch a published release |
 | `publish` | Publishes the draft |
-| `website` | Stable versions only. Triggers a rebuild of `devlanes-run/website`, which copies `install.sh`, `schema.json` and `user-schema.json` from the latest stable release to `https://devlanes.run/install.sh`, `https://devlanes.run/v1/schema.json` and `https://devlanes.run/v1/user-schema.json` |
+| `website` | Stable versions only. Triggers a rebuild of `devlanes-run/website`, which copies `install.sh`, `install.ps1`, `schema.json` and `user-schema.json` from the latest stable release to `https://devlanes.run/install.sh`, `https://devlanes.run/install.ps1`, `https://devlanes.run/v1/schema.json` and `https://devlanes.run/v1/user-schema.json` |
 | `homebrew-verify` | Stable versions only. Installs the rendered formula on macOS from the published release, then runs `brew audit` and `brew test` |
 | `homebrew-publish` | Commits `Formula/devlanes.rb` to `devlanes-run/homebrew-tap`. It keeps the tap's formula when that one belongs to a newer version |
 | `npm` | Builds the npm packages from the archives and publishes the platform packages, then `devlanes`. Stable versions go to the `latest` dist-tag, prereleases to `next`. Versions already on the registry are skipped |
 
-The release stays a draft until every asset is attached because Homebrew, npm, cargo binstall and `install.sh` all download from the public release URLs, and `releases/latest` must never point at a release with missing archives. Publishing in a separate job keeps that order visible and lets a failed upload be rerun against the draft.
+The release stays a draft until every asset is attached because Homebrew, npm, cargo binstall, `install.sh` and `install.ps1` all download from the public release URLs, and `releases/latest` must never point at a release with missing archives. Publishing in a separate job keeps that order visible and lets a failed upload be rerun against the draft.
 
 | Target | Runner | Notes |
 |---|---|---|
@@ -48,10 +53,14 @@ The release stays a draft until every asset is attached because Homebrew, npm, c
 | `x86_64-apple-darwin` | `macos-latest` | Cross-compiled; CI does not run it |
 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | Built on 22.04 so the binary needs glibc 2.35, which Debian 12 and Ubuntu 22.04 provide |
 | `aarch64-unknown-linux-gnu` | `ubuntu-22.04-arm` | Same glibc baseline |
+| `x86_64-pc-windows-msvc` | `windows-latest` | Windows 11 24H2 (build 26100) or later |
+| `aarch64-pc-windows-msvc` | `windows-11-arm` | Native arm64 runner, so the smoke test runs it |
 
-Each archive holds one directory, `devlanes-VERSION-TARGET/`, with `devlanes`, `devlanes-hosts` and `LICENSE`. `package.sh` fixes owners, file order and times (`SOURCE_DATE_EPOCH`, else the last commit's time) and writes gzip without a timestamp, so the same binaries give the same archive. Both binaries stay side by side in every package because `devlanes certs trust --hosts` copies the `devlanes-hosts` found next to `devlanes` into `/usr/local/libexec`. That installer also requires a release build: `devlanes-hosts version` must report `build=release`, which the `build` job checks on the natively built targets.
+Each `.tar.gz` archive holds one directory, `devlanes-VERSION-TARGET/`, with `devlanes`, `devlanes-hosts` and `LICENSE`. `package.sh` fixes owners, file order and times (`SOURCE_DATE_EPOCH`, else the last commit's time) and writes gzip without a timestamp, so the same binaries give the same archive. Both binaries stay side by side in every package because `devlanes certs trust --hosts` copies the `devlanes-hosts` found next to `devlanes` into `/usr/local/libexec`. That installer also requires a release build: `devlanes-hosts version` must report `build=release`, which the `build` job checks on the natively built targets.
 
-`devlanes daemon install` writes the path of the running executable into the launchd or systemd service. When that path contains a version (a Homebrew Cellar directory, an npm package directory), rerun `devlanes daemon install` after upgrading.
+Each Windows `.zip` archive holds the same directory with `devlanes.exe` and `LICENSE`, and nothing else: `devlanes-hosts` is Unix-only, `daemon install` starts `devlanes.exe daemon run` itself (its manifest keeps a console from opening at logon), and hostnames need no helper on Windows. `.cargo/config.toml` links the C runtime statically, so the executable runs without the Visual C++ Redistributable; `build-windows` checks its imports. `package.ps1` writes the entries in ordinal order with a fixed time (`SOURCE_DATE_EPOCH`, else the last commit's time), so the same binary gives the same zip with the same PowerShell (Windows PowerShell 5.1 and PowerShell 7 ship different zlib builds; the release uses PowerShell 7). The zips are listed in `SHA256SUMS` after the `.tar.gz` archives, and `release-manifest.json` stays Unix-only. The Windows executables are not signed yet.
+
+`devlanes daemon install` writes the path of the running executable into the launchd or systemd service (the HKCU Run key on Windows). When that path contains a version (a Homebrew Cellar directory, an npm package directory), rerun `devlanes daemon install` after upgrading.
 
 ## Verifying a download
 
@@ -59,6 +68,7 @@ Every archive has a build provenance attestation from the `release` job. With th
 
 ```sh
 gh attestation verify devlanes-0.1.0-aarch64-apple-darwin.tar.gz --repo devlanes-run/devlanes
+gh attestation verify devlanes-0.1.0-x86_64-pc-windows-msvc.zip --repo devlanes-run/devlanes
 ```
 
 ## Credentials
@@ -66,6 +76,8 @@ gh attestation verify devlanes-0.1.0-aarch64-apple-darwin.tar.gz --repo devlanes
 `homebrew-publish` pushes to the tap with the repository secret `HOMEBREW_TAP_TOKEN`, a fine-grained token with Contents read and write on `devlanes-run/homebrew-tap` only. It expires on the date set when it was created; replace the secret before then. `website` sends its dispatch with `WEBSITE_DISPATCH_TOKEN`, a fine-grained token with Contents write on `devlanes-run/website` only.
 
 The `npm` job has no npm secret. Each package (`devlanes` and the `@devlanes/*` platform packages) trusts `devlanes-run/devlanes`, workflow `release.yml`, no environment, so npm exchanges the job's OIDC token for a short-lived publish token and adds provenance. Renaming `release.yml` breaks publishing until each package's trusted publisher names the new file. The `0.0.0` versions of the `@devlanes/*` packages are empty placeholders; the launcher pins its optional dependencies to its own version, so nothing installs them.
+
+A trusted publisher can only be configured on a package that exists, so a new platform package is created by hand once: publish a `0.0.0` placeholder as its owner, then add the trusted publisher above, before the first release that lists it in `optionalDependencies`. `npm-preflight` stops a tag before a draft release is created when any listed package is missing from the registry.
 
 ## Release manifest
 
@@ -99,6 +111,8 @@ cargo binstall --git https://github.com/devlanes-run/devlanes devlanes
 cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-hosts-helper
 ```
 
+On Windows the overrides for `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` point `devlanes` at the `.zip` archive (exact targets, because older binstall versions do not read `cfg()` override keys), and `devlanes-hosts-helper` disables every strategy there, since it is Unix-only.
+
 binstall accepts only one crate per `--git` invocation and always clones the default branch: it has no option for a tag, so it installs the release whose version is in `main`'s `Cargo.toml`. The metadata disables the third-party quick-install source. When no archive matches the host or that version, for example right after a version bump and before its tag is released, binstall falls back to compiling the crate from the clone. To pin a release, use `install.sh` with `DEVLANES_VERSION`, or build that tag from source:
 
 ```sh
@@ -109,15 +123,25 @@ cargo install --locked --git https://github.com/devlanes-run/devlanes --tag v0.1
 
 `install.sh` picks the archive for the host (macOS or Linux, arm64 or x86_64; an arm64 Mac under Rosetta gets the arm64 build), reads `SHA256SUMS` from the latest release or from `DEVLANES_VERSION`, checks the archive's SHA-256 and its exact entries, and copies `devlanes` and `devlanes-hosts` to `DEVLANES_INSTALL_DIR` (default `~/.local/bin`). When that directory is not writable it stops, unless `DEVLANES_INSTALL_SUDO=1` allows sudo. Downloads use HTTPS with TLS 1.2 or later only. It refuses musl systems, does not edit shell profiles and does not update itself. `DEVLANES_INSTALL_BASE_URL` points it at a local directory of fake releases for testing. `https://devlanes.run/install.sh` serves the copy attached to the latest stable release, so changes on `main` reach users with the next release.
 
+## install.ps1
+
+`install.ps1` is the Windows counterpart, for Windows PowerShell 5.1 and PowerShell 7:
+
+```powershell
+irm https://devlanes.run/install.ps1 | iex
+```
+
+It reads the same `DEVLANES_VERSION`, `DEVLANES_INSTALL_DIR` and `DEVLANES_INSTALL_BASE_URL` variables (set with `$env:NAME = 'value'` before the command, since `irm | iex` passes no arguments); `DEVLANES_INSTALL_SUDO` has no Windows meaning. It refuses Windows builds below 26100 (`CurrentBuildNumber` in the registry), picks the target from the machine's architecture (the registry's machine `PROCESSOR_ARCHITECTURE`, so x64 PowerShell emulated on an arm64 machine still gets the arm64 build), checks the zip against `SHA256SUMS` and its exact entries, and installs `devlanes.exe` to `DEVLANES_INSTALL_DIR` (default `%LOCALAPPDATA%\Programs\devlanes`). The new file is extracted next to the old one first; a `devlanes.exe` that is running (usually the daemon) is renamed to `devlanes.exe.old-TIMESTAMP` and keeps running, since Windows allows renaming but not replacing a running executable. The script never stops the daemon; `devlanes daemon restart` switches to the new version, and `devlanes doctor` (or the next install) deletes old copies that nothing runs any more. Unlike `install.sh` it puts the directory first in the user `PATH`, keeping the value's registry type (`REG_EXPAND_SZ` entries such as `%USERPROFILE%\bin` keep working), and notifies running programs with `WM_SETTINGCHANGE`; the current session's `PATH` gains it too. The body runs in its own script block, so `irm | iex` leaves no variables or functions in the caller's session, and failures throw instead of calling `exit`, which would close the window. Only HTTPS is accepted, plus `file://` when `DEVLANES_INSTALL_BASE_URL` is set. Every release attaches the script, and `releases/latest/download/install.ps1` serves the latest stable release's copy.
+
 ## npm
 
-The `devlanes` package follows the esbuild layout. Its `bin` entry is `bin/devlanes`, a Node launcher, and it lists one optional dependency per platform: `@devlanes/darwin-arm64`, `@devlanes/darwin-x64`, `@devlanes/linux-arm64`, `@devlanes/linux-x64`. Each platform package declares `os` and `cpu` (and `libc: glibc` on Linux), so npm installs only the matching one.
+The `devlanes` package follows the esbuild layout. Its `bin` entry is `bin/devlanes`, a Node launcher, and it lists one optional dependency per platform: `@devlanes/darwin-arm64`, `@devlanes/darwin-x64`, `@devlanes/linux-arm64`, `@devlanes/linux-x64`, `@devlanes/win32-arm64`, `@devlanes/win32-x64`. Each platform package declares `os` and `cpu` (and `libc: glibc` on Linux), so npm installs only the matching one. The Windows packages hold `bin/devlanes.exe` only.
 
 The postinstall script `install.js` resolves the platform package from the `devlanes` package directory (which also finds it through pnpm's symlinks) and puts its `devlanes-hosts` and `devlanes` into `devlanes/bin/`, replacing the launcher. Each file is hard-linked (copied when that fails) to a temporary name in `bin/`, must report `<name> <package version>` (`devlanes --version`, `devlanes-hosts version`), and is then renamed over the target, so a reinstall or update never leaves a half-written file and never writes into a file pnpm shares with its store. npm, pnpm and Bun then run the binary directly. `devlanes-hosts` has to move too: the package manager's bin link resolves to `devlanes/bin/devlanes`, and `certs trust --hosts` looks for the helper next to the running executable and next to its resolved path, neither of which is the platform package. A symlink into the platform package would also resolve, but its relative target depends on the package manager's layout.
 
-Any failure prints one line and keeps the launcher; the install still succeeds. The script does nothing on Windows and under Yarn: Plug'n'Play keeps packages in zip archives, and Yarn may rerun install scripts in a `node_modules` shared between platforms. Without the script (`--ignore-scripts`, or npm 12, pnpm and Bun, which run dependency scripts only when allowed) the launcher resolves the platform package, runs its `bin/devlanes` with inherited stdio and exits with the binary's status. SIGINT and SIGQUIT reach the binary from the terminal's process group; the launcher forwards SIGTERM and SIGHUP.
+Any failure prints one line and keeps the launcher; the install still succeeds. The script does nothing on Windows and under Yarn: Plug'n'Play keeps packages in zip archives, and Yarn may rerun install scripts in a `node_modules` shared between platforms. Without the script (`--ignore-scripts`, or npm 12, pnpm and Bun, which run dependency scripts only when allowed) the launcher resolves the platform package, runs its `bin/devlanes` with inherited stdio and exits with the binary's status. SIGINT and SIGQUIT reach the binary from the terminal's process group; the launcher forwards SIGTERM and SIGHUP. On Windows the launcher, which npm's `devlanes.cmd` and `devlanes.ps1` shims run with Node, always runs `bin/devlanes.exe` from the platform package. Ctrl-C, Ctrl-Break and closing the console reach the binary through the shared console, so the launcher ignores SIGINT, SIGBREAK and SIGHUP and exits with the binary's exit code. An upgrade through npm replaces that `devlanes.exe`, which Windows refuses while the daemon runs from it, so on Windows the upgrade advice says to run `devlanes daemon stop` first (also for cargo and source builds, but not for `install.ps1`).
 
-`npm/build.sh VERSION DIST_DIR OUT_DIR` extracts the release archives into `OUT_DIR/devlanes-<os>-<cpu>/` and writes `OUT_DIR/devlanes/` with the version filled in and the schemas copied in. `scripts/check.sh` installs the packed tarballs into temporary prefixes with npm and checks that the bin is the binary after postinstall and the launcher with `--ignore-scripts`.
+`npm/build.sh VERSION DIST_DIR OUT_DIR` extracts the release archives (the `.zip` ones with `unzip`) into `OUT_DIR/devlanes-<os>-<cpu>/` and writes `OUT_DIR/devlanes/` with the version filled in and the schemas copied in. `scripts/check.sh` installs the packed tarballs into temporary prefixes with npm and checks that the bin is the binary after postinstall and the launcher with `--ignore-scripts`.
 
 ## JSON Schemas
 

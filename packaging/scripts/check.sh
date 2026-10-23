@@ -1,8 +1,10 @@
 #!/bin/sh
-# Dry run of the release scripts against fake binaries: package.sh for every target,
-# manifest.sh, the Homebrew formula, the npm packages (packed, then installed from
-# the tarballs on macOS and Linux arm64/x64) and install.sh from a local release
-# directory. Needs tar, gzip, jq, node, npm and curl; CI runs it on every push.
+# Dry run of the release scripts against fake binaries: package.sh and package.ps1
+# for every target, manifest.sh, the Homebrew formula, the npm packages (packed,
+# then installed from the tarballs on macOS and Linux arm64/x64) and install.sh from
+# a local release directory. Needs tar, gzip, unzip, jq, node, npm, curl and pwsh;
+# CI runs it on every push. check.ps1 covers package.ps1, install.ps1 and the
+# launcher on Windows.
 set -eu
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -23,13 +25,31 @@ done
 for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
 	sh "$root/packaging/scripts/package.sh" "$version" "$target" "$work/dist" "$work/bin" >/dev/null
 done
+mkdir "$work/winbin"
+printf 'fake devlanes.exe %s\n' "$version" >"$work/winbin/devlanes.exe"
+for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+	pwsh -NoProfile -NonInteractive -File "$root/packaging/scripts/package.ps1" \
+		-Version "$version" -Target "$target" -OutDir "$work/dist" -BinDir "$work/winbin" >/dev/null
+	listed=$(unzip -Z1 "$work/dist/devlanes-$version-$target.zip" | tr '\n' ' ')
+	[ "$listed" = "devlanes-$version-$target/LICENSE devlanes-$version-$target/devlanes.exe " ] || {
+		echo "unexpected entries in the $target zip: $listed" >&2
+		exit 1
+	}
+done
 sh "$root/packaging/scripts/manifest.sh" "$version" "$work/dist" "https://example.invalid/download/v$version" >/dev/null
 jq -e '.artifacts | length == 4' "$work/dist/release-manifest.json" >/dev/null
+[ "$(grep -c '\.tar\.gz$' "$work/dist/SHA256SUMS")" -eq 4 ]
+[ "$(grep -c '\.zip$' "$work/dist/SHA256SUMS")" -eq 2 ]
 
 sh "$root/packaging/homebrew/render.sh" "$version" "$work/dist/SHA256SUMS" >"$work/devlanes.rb"
 if command -v ruby >/dev/null 2>&1; then ruby -c "$work/devlanes.rb" >/dev/null; fi
 
 sh "$root/packaging/npm/build.sh" "$version" "$work/dist" "$work/npm" >/dev/null
+for cpu in x64 arm64; do
+	cmp -s "$work/npm/devlanes-win32-$cpu/bin/devlanes.exe" "$work/winbin/devlanes.exe"
+	jq -e '.os == ["win32"] and .cpu == ["'"$cpu"'"]' "$work/npm/devlanes-win32-$cpu/package.json" >/dev/null
+done
+jq -e '.optionalDependencies | all(. == "'"$version"'")' "$work/npm/devlanes/package.json" >/dev/null
 mkdir "$work/tgz"
 for dir in "$work"/npm/*/; do
 	jq -e .name "$dir/package.json" >/dev/null
@@ -51,7 +71,8 @@ npm_install() {
 		"$work/tgz/devlanes-$version.tgz" "$work/tgz/devlanes-$host-$version.tgz" >/dev/null
 }
 host=$(node -p 'process.platform + "-" + process.arch')
-if [ -f "$work/tgz/devlanes-$host-$version.tgz" ]; then
+# npm's global layout and postinstall differ on Windows; check.ps1 covers the launcher there.
+if [ -f "$work/tgz/devlanes-$host-$version.tgz" ] && [ "${host%%-*}" != win32 ]; then
 	# postinstall swaps the launcher for the binary, with devlanes-hosts next to it.
 	npm_install "$work/prefix"
 	installed=$work/prefix/lib/node_modules/devlanes/bin

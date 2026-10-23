@@ -1,14 +1,19 @@
 //! `run` of a detached task: what the client attaches to right after the answer.
 
-use std::{sync::Arc, time::Duration};
+#[cfg(unix)]
+use std::sync::Arc;
+use std::time::Duration;
 
+#[cfg(unix)]
 use devlanes_daemon::{
     Engine, EngineOptions, Handler,
     integrations::{CoreRunner, Integrations},
 };
+#[cfg(unix)]
 use devlanes_ipc::Frame;
 use devlanes_proto::{LaneSummary, Method, Page};
 use serde_json::json;
+#[cfg(unix)]
 use tokio_util::sync::CancellationToken;
 
 use crate::{LIMIT, Setup, cx, harness, repo, temp};
@@ -94,6 +99,9 @@ async fn a_detached_run_over_a_running_one_is_refused() {
     .expect("timeout");
 }
 
+// Runs `sh` through the PTY runner, which is Unix; this test has no Windows
+// version.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 /// With the real runner, a pipe task's first line is on the attach screen within
 /// a second of the `run` answer.

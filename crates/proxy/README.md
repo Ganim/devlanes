@@ -55,6 +55,10 @@ The proxy replaces `Forwarded` and the `X-Forwarded-*` headers and drops client-
 
 A failed `accept` never stops a listener: client resets are skipped and descriptor exhaustion is retried after a short pause. Check `listener_health` instead of the bind result to know whether a listener is still serving.
 
+## Windows
+
+Wildcard listeners (`lan: true`) set `SO_EXCLUSIVEADDRUSE`, so no other program can bind the same port on a more specific address and take connections. Loopback listeners do not need it. Low ports need no privilege on Windows; access denied means another program holds the port (port 80 is often http.sys, see `netsh http show servicestate`) or the port lies in a range Hyper-V, WSL or Docker reserved (`netsh int ipv4 show excludedportrange protocol=tcp`). Both fall back, and the fallback message names these commands.
+
 ## License
 
 Apache-2.0

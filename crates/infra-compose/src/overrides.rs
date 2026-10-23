@@ -99,8 +99,25 @@ pub async fn write_override(dir: &Path, yaml: &str) -> Result<PathBuf, Error> {
     let path = dir.join(OVERRIDE_FILE);
     let temporary = dir.join(format!(".{OVERRIDE_FILE}.tmp"));
     tokio::fs::write(&temporary, yaml).await?;
-    tokio::fs::rename(&temporary, &path).await?;
+    replace(&temporary, &path).await?;
     Ok(path)
+}
+
+/// Moves the written override into place.
+#[cfg(unix)]
+async fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    tokio::fs::rename(from, to).await
+}
+
+/// Moves the written override into place, retried while a concurrent
+/// `docker compose` still has the old one open, which Windows refuses to
+/// replace. Runs on a blocking thread since the retries sleep.
+#[cfg(windows)]
+async fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let (from, to) = (from.to_owned(), to.to_owned());
+    tokio::task::spawn_blocking(move || devlanes_sys_windows::file::rename_retrying(&from, &to))
+        .await
+        .map_err(std::io::Error::other)?
 }
 
 /// JSON strings are valid YAML double-quoted scalars, which avoids YAML's implicit typing

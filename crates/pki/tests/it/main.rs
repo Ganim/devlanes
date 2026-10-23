@@ -294,7 +294,6 @@ fn imports_mkcert_layout() -> Result {
 /// A root without name constraints (what mkcert makes) permits any name.
 #[test]
 fn unconstrained_roots_report_no_permitted_names() -> Result {
-    use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir()?;
     let key = rcgen::KeyPair::generate()?;
     let mut params = rcgen::CertificateParams::new(Vec::<String>::new())?;
@@ -307,7 +306,11 @@ fn unconstrained_roots_report_no_permitted_names() -> Result {
     let key_path = directory.path().join("rootCA-key.pem");
     fs::write(directory.path().join("rootCA.pem"), cert.pem())?;
     fs::write(&key_path, key.serialize_pem())?;
-    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+    }
     let ca = CertificateAuthority::from_mkcert(directory.path())?;
     assert_eq!(ca.permitted_dns_names(), None);
     Ok(())
@@ -369,6 +372,109 @@ fn resolver_cache_invalidation_and_unknown_host() -> Result {
     assert_eq!(
         config.alpn_protocols,
         [b"h2".to_vec(), b"http/1.1".to_vec()]
+    );
+    Ok(())
+}
+
+/// Grants Everyone read access to `path` (inherited by entries for a
+/// directory) with System32's `icacls`.
+#[cfg(windows)]
+fn grant_everyone(path: &std::path::Path, directory: bool) -> Result {
+    let icacls = devlanes_sys_windows::file::system_directory()?.join("icacls.exe");
+    let grant = if directory {
+        "*S-1-1-0:(OI)(CI)R"
+    } else {
+        "*S-1-1-0:R"
+    };
+    let status = std::process::Command::new(icacls)
+        .arg(path)
+        .args(["/grant", grant])
+        .stdout(std::process::Stdio::null())
+        .status()?;
+    assert!(status.success(), "icacls {}", path.display());
+    Ok(())
+}
+
+/// A key other accounts can read, a key with a second name and a CA
+/// directory others can reach are refused before the key is read, naming the
+/// path, the problem and, for access lists, the `icacls` fix, which works.
+#[cfg(windows)]
+#[test]
+fn refuses_exposed_or_linked_keys() -> Result {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("ca");
+    CertificateAuthority::load_or_create(&path)?;
+    let key = path.join("ca-key.pem");
+
+    grant_everyone(&key, false)?;
+    let error = CertificateAuthority::load_or_create(&path).expect_err("exposed key");
+    let devlanes_pki::Error::InsecurePath { problem, fix, .. } = &error else {
+        panic!("{error:?}");
+    };
+    assert!(problem.contains("S-1-1-0"), "{error}");
+    run_icacls_fix(fix.as_deref().expect("icacls fix"))?;
+    CertificateAuthority::load_or_create(&path)?;
+
+    let second = path.join("second-name.pem");
+    fs::hard_link(&key, &second)?;
+    let error = CertificateAuthority::load_or_create(&path).expect_err("linked key");
+    assert!(error.to_string().contains("2 hard links"), "{error}");
+    fs::remove_file(&second)?;
+    CertificateAuthority::load_or_create(&path)?;
+
+    let open = directory.path().join("open");
+    fs::create_dir(&open)?;
+    grant_everyone(&open, true)?;
+    let error = CertificateAuthority::load_or_create(&open).expect_err("open directory");
+    let devlanes_pki::Error::InsecurePath { fix, .. } = &error else {
+        panic!("{error:?}");
+    };
+    run_icacls_fix(fix.as_deref().expect("icacls fix"))?;
+    CertificateAuthority::load_or_create(&open)?;
+    Ok(())
+}
+
+/// Runs each `icacls` step of `fix` (`icacls "<path>" args; ...`) through
+/// System32's `icacls`, splitting arguments at spaces outside double quotes.
+#[cfg(windows)]
+fn run_icacls_fix(fix: &str) -> Result {
+    let icacls = devlanes_sys_windows::file::system_directory()?.join("icacls.exe");
+    assert!(!fix.contains("&&"), "{fix}");
+    for step in fix.split("; ") {
+        let mut args = Vec::new();
+        let (mut current, mut quoted) = (String::new(), false);
+        for c in step.chars() {
+            match c {
+                '"' => quoted = !quoted,
+                ' ' if !quoted => args.push(std::mem::take(&mut current)),
+                c => current.push(c),
+            }
+        }
+        args.push(current);
+        assert_eq!(args.first().map(String::as_str), Some("icacls"), "{fix}");
+        let status = std::process::Command::new(&icacls)
+            .args(&args[1..])
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        assert!(status.success(), "{step}");
+    }
+    Ok(())
+}
+
+/// A new CA directory is private to this user.
+#[cfg(windows)]
+#[test]
+fn new_ca_directory_is_private() -> Result {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("ca");
+    CertificateAuthority::load_or_create(&path)?;
+    assert_eq!(
+        devlanes_sys_windows::security::check_private_dir(&path)?,
+        Ok(())
+    );
+    assert_eq!(
+        devlanes_sys_windows::security::check_private_file(&path.join("ca-key.pem"))?,
+        Ok(())
     );
     Ok(())
 }

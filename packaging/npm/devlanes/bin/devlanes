@@ -4,19 +4,20 @@
 // Runs the native binary from the @devlanes/<platform>-<arch> package that npm
 // installed as an optional dependency. install.js replaces this file with that
 // binary, so it only runs when the postinstall script did not (--ignore-scripts,
-// Yarn) or could not swap it.
+// Yarn, Windows) or could not swap it.
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 
+const windows = process.platform === "win32";
 const platform = `${process.platform}-${process.arch}`;
 let binary;
 try {
   const manifest = require.resolve(`@devlanes/${platform}/package.json`);
-  binary = path.join(path.dirname(manifest), "bin", "devlanes");
+  binary = path.join(path.dirname(manifest), "bin", windows ? "devlanes.exe" : "devlanes");
 } catch {
   console.error(
     `devlanes: no binary installed for ${platform}. Release builds exist for ` +
-      "darwin-arm64, darwin-x64, linux-arm64 and linux-x64 (glibc).\n" +
+      "darwin-arm64, darwin-x64, linux-arm64 and linux-x64 (glibc), win32-arm64 and win32-x64.\n" +
       "If npm ran with --omit=optional or --no-optional, reinstall without it.",
   );
   process.exit(1);
@@ -24,12 +25,20 @@ try {
 
 const child = spawn(binary, process.argv.slice(2), { stdio: "inherit" });
 
-// The terminal already delivers SIGINT and SIGQUIT to the whole process group,
-// so forwarding them would reach the binary twice. Signals sent only to this
-// wrapper are passed on.
-for (const signal of ["SIGINT", "SIGQUIT"]) process.on(signal, () => {});
-for (const signal of ["SIGTERM", "SIGHUP"]) {
-  process.on(signal, () => child.kill(signal));
+if (windows) {
+  // Ctrl-C, Ctrl-Break and closing the console reach every process attached to
+  // the console, the binary included, which handles them itself. The listeners
+  // only keep Node from exiting before it; child.kill() would end the binary
+  // without notice.
+  for (const signal of ["SIGINT", "SIGBREAK", "SIGHUP"]) process.on(signal, () => {});
+} else {
+  // The terminal already delivers SIGINT and SIGQUIT to the whole process group,
+  // so forwarding them would reach the binary twice. Signals sent only to this
+  // wrapper are passed on.
+  for (const signal of ["SIGINT", "SIGQUIT"]) process.on(signal, () => {});
+  for (const signal of ["SIGTERM", "SIGHUP"]) {
+    process.on(signal, () => child.kill(signal));
+  }
 }
 
 child.on("error", (error) => {
@@ -37,7 +46,9 @@ child.on("error", (error) => {
   process.exit(1);
 });
 child.on("exit", (code, signal) => {
-  if (signal) {
+  // Windows processes end with a code only, such as 0xC000013A after Ctrl-C,
+  // which process.exit passes on unchanged.
+  if (signal && !windows) {
     process.removeAllListeners(signal);
     process.kill(process.pid, signal);
     return;

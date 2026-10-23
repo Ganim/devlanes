@@ -42,6 +42,10 @@ fn security_tool_exists() {
     assert!(Path::new(SECURITY).is_file(), "{SECURITY} is missing");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "macOS keychain paths; this store never runs on Windows"
+)]
 #[tokio::test]
 async fn install_adds_to_login_keychain_with_root_trust() {
     let ca = ca();
@@ -165,6 +169,10 @@ async fn uninstall_deletes_by_sha1_with_trust_settings() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "macOS keychain paths; this store never runs on Windows"
+)]
 #[tokio::test]
 async fn uninstall_with_label_also_removes_older_devlanes_cas() {
     let ca = ca();

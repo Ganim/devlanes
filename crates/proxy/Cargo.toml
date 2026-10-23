@@ -21,12 +21,18 @@ thiserror.workspace = true
 tracing.workspace = true
 socket2 = "0.6"
 
+# `SO_EXCLUSIVEADDRUSE`, which socket2 does not set.
+[target.'cfg(windows)'.dependencies]
+devlanes-sys-windows = { path = "../sys-windows" }
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio-tungstenite = "0.28"
 futures-util.workspace = true
-rustix = { version = "1", features = ["process"] }
 x509-parser = "0.18"
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1", features = ["process"] }
 
 [lints]
 workspace = true

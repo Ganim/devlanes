@@ -1,10 +1,11 @@
 //! Follows the daemon's own log file. Blocking; the runtime calls it from
 //! `spawn_blocking`.
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
-    os::unix::fs::MetadataExt,
     path::Path,
 };
 
@@ -13,12 +14,20 @@ const FIRST_READ: u64 = 256 * 1024;
 /// Upper bound per read, so a burst of logging cannot stall the UI.
 const MAX_READ: u64 = 4 * 1024 * 1024;
 
+/// Which file a log is: `(device, inode)`.
+#[cfg(unix)]
+pub type FileKey = (u64, u64);
+
+/// Which file a log is: `(volume serial, file id)`.
+#[cfg(windows)]
+pub type FileKey = (u64, u128);
+
 /// Where the last read stopped, and in which file.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LogPosition {
     pub offset: u64,
-    /// `(device, inode)`; a rotated log is a different file at the same path.
-    pub file: (u64, u64),
+    /// A rotated log is a different file at the same path.
+    pub file: FileKey,
 }
 
 /// New complete lines since the last read.
@@ -38,7 +47,10 @@ pub fn read(path: &Path, from: LogPosition) -> io::Result<LogChunk> {
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
     let len = metadata.len();
+    #[cfg(unix)]
     let identity = (metadata.dev(), metadata.ino());
+    #[cfg(windows)]
+    let identity = file_key(&file)?;
     let same_file = identity == from.file && from.offset > 0 && len >= from.offset;
     let (mut start, mut reset) = if same_file {
         (from.offset, false)
@@ -71,6 +83,14 @@ pub fn read(path: &Path, from: LogPosition) -> io::Result<LogChunk> {
         },
         reset,
     })
+}
+
+/// The open file's volume serial and file id, which the metadata std gives
+/// does not include.
+#[cfg(windows)]
+fn file_key(file: &File) -> io::Result<FileKey> {
+    let id = devlanes_sys_windows::file::file_identity(file)?;
+    Ok((id.volume, id.file))
 }
 
 #[cfg(test)]

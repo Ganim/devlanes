@@ -8,7 +8,7 @@ devlanes runs a project's dev services once per Git worktree. Each worktree is a
 brew install devlanes-run/tap/devlanes
 ```
 
-The [README](../README.md#install) lists the npm, cargo and `install.sh` options and the source build. devlanes runs on macOS and Linux.
+The [README](../README.md#install) lists the npm, cargo and `install.sh` options and the source build. devlanes runs on macOS, Linux and Windows 11 ([Windows](guides/windows.md) covers its install and differences).
 
 ## First config
 

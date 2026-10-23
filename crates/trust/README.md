@@ -1,6 +1,6 @@
 # devlanes-trust
 
-The `TrustStore` trait and shared types for installing the devlanes CA into OS and browser trust stores. `devlanes-trust-macos` and `devlanes-trust-linux` implement it, and the CLI calls it for `devlanes certs trust` and `devlanes certs untrust`. The NSS store used by Firefox and Chromium on both platforms is also here.
+The `TrustStore` trait and shared types for installing the devlanes CA into OS and browser trust stores. `devlanes-trust-macos`, `devlanes-trust-linux` and `devlanes-trust-windows` implement it, and the CLI calls it for `devlanes certs trust` and `devlanes certs untrust`. The NSS store used by Firefox and Chromium on both platforms is also here.
 
 ## Usage
 
@@ -21,7 +21,7 @@ async fn trust(store: &dyn TrustStore, ca_pem: &str) -> Result<TrustStatus, Trus
 - `TrustTarget`: the `tls.trust` names (`system`, `firefox`, `chrome`, `ios-simulator`, `android-emulator`).
 - `TrustStatus`: `Installed`, `Missing` or `Unknown { reason }`.
 - `CaCertificate`: the public CA plus the name stores file it under. It keeps only the first certificate of the PEM, so a key in the input never reaches a store. `is_name_constrained` tells an older, unconstrained devlanes CA apart.
-- `find_system_program`: absolute path of a root-run tool from the system directories, never `PATH`.
+- `find_system_program`: absolute path of a root-run tool from the system directories, never `PATH`. On Windows it looks only in System32, for `.exe` and `.com` files.
 - `CommandExecutor` and `SystemExecutor`: every external command goes through this trait. The `fake` feature adds `fake::FakeExecutor`, which records argv for tests.
 - `nss::NssStore`: Firefox profiles or a shared NSS database, changed through `certutil`.
 - `TrustError`: typed failures, including `Unsupported`, `ToolMissing { hint }` and `InteractionRequired`.

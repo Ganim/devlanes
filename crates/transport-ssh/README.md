@@ -46,6 +46,8 @@ Bootstrap installs to `$HOME/.devlanes/bin` only when no binary exists, verifyin
 
 The control socket path must stay under 100 bytes for macOS, so pass a short `control_dir` if `DEVLANES_HOME` is deep.
 
+The crate is Unix only and compiles to an empty library on Windows.
+
 ## License
 
 Apache-2.0

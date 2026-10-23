@@ -3,12 +3,19 @@
 use std::{sync::Arc, time::Duration};
 
 use devlanes_daemon::{Handler, Options, Server};
-use devlanes_ipc::{Connection, Frame};
+use devlanes_ipc::{
+    Connection, Frame,
+    local::{self, LocalStream},
+};
 use devlanes_proto::{Context, Control, Hello, Method, Outcome, Request};
 use serde_json::{Value, json};
-use tokio::net::UnixStream;
 
 use crate::{LIMIT, Setup, cx, harness, repo, temp};
+
+/// A connection to the daemon endpoint at `socket`.
+async fn connect(socket: &std::path::Path) -> LocalStream {
+    local::connect(socket).await.expect("connect")
+}
 
 const CONFIG: &str = "project: churn\nservices:\n  one: { run: sleep }\n  two: { run: sleep }\n  three: { run: sleep }\n";
 
@@ -16,14 +23,13 @@ const CONFIG: &str = "project: churn\nservices:\n  one: { run: sleep }\n  two: {
 const ANSWER: Duration = Duration::from_secs(2);
 
 /// A handshaken client connection.
-pub(crate) async fn client(socket: &std::path::Path) -> Connection<UnixStream> {
+pub(crate) async fn client(socket: &std::path::Path) -> Connection<LocalStream> {
     client_with(socket, Hello::current(0)).await
 }
 
 /// A connection that introduced itself with `hello`.
-pub(crate) async fn client_with(socket: &std::path::Path, hello: Hello) -> Connection<UnixStream> {
-    let stream = UnixStream::connect(socket).await.expect("connect");
-    let mut connection = Connection::new(stream);
+pub(crate) async fn client_with(socket: &std::path::Path, hello: Hello) -> Connection<LocalStream> {
+    let mut connection = Connection::new(connect(socket).await);
     connection
         .send(Frame::Control(Control::Hello(hello)))
         .await
@@ -36,7 +42,7 @@ pub(crate) async fn client_with(socket: &std::path::Path, hello: Hello) -> Conne
 
 /// Sends a request and waits for its response, skipping events and bytes.
 pub(crate) async fn request(
-    connection: &mut Connection<UnixStream>,
+    connection: &mut Connection<LocalStream>,
     id: u64,
     method: Method,
     params: Value,
@@ -115,7 +121,7 @@ async fn server_survives_connection_churn() {
             .expect("start");
         let options = Options {
             home: tmp.path.join("srv"),
-            socket: tmp.path.join("srv/run/d.sock"),
+            socket: crate::endpoint(&tmp.path, "srv/run/d.sock"),
         };
         let socket = options.socket.clone();
         let server = Server::bind(options).await.expect("bind");
@@ -123,7 +129,7 @@ async fn server_survives_connection_churn() {
         let handler: Arc<dyn Handler> = Arc::new(h.engine.clone());
         let running = tokio::spawn(server.run(handler, || Ok(())));
         for _ in 0..50 {
-            drop(UnixStream::connect(&socket).await.expect("connect"));
+            drop(connect(&socket).await);
         }
         for (id, unit) in ["one", "two", "three"].into_iter().enumerate() {
             let mut connection = client(&socket).await;
@@ -176,7 +182,7 @@ async fn a_unit_that_never_reads_does_not_stall_the_connection() {
             .expect("start");
         let options = Options {
             home: tmp.path.join("srv"),
-            socket: tmp.path.join("srv/run/d.sock"),
+            socket: crate::endpoint(&tmp.path, "srv/run/d.sock"),
         };
         let socket = options.socket.clone();
         let server = Server::bind(options).await.expect("bind");
@@ -298,7 +304,7 @@ async fn daemon_shutdown_reports_units_and_tasks() {
             .expect("start");
         let options = Options {
             home: tmp.path.join("srv"),
-            socket: tmp.path.join("srv/run/d.sock"),
+            socket: crate::endpoint(&tmp.path, "srv/run/d.sock"),
         };
         let socket = options.socket.clone();
         let server = Server::bind(options).await.expect("bind");
@@ -349,7 +355,7 @@ async fn other_protocols_and_unknown_frames_keep_the_connection() {
         let h = harness(&tmp.path.join("home"), Setup::default()).await;
         let options = Options {
             home: tmp.path.join("srv"),
-            socket: tmp.path.join("srv/run/d.sock"),
+            socket: crate::endpoint(&tmp.path, "srv/run/d.sock"),
         };
         let socket = options.socket.clone();
         let server = Server::bind(options).await.expect("bind");

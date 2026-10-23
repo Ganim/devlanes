@@ -193,6 +193,8 @@ pub fn evaluate(text: &str, context: &ExpressionContext) -> Result<Value, Config
         Some(value) => minijinja::Value::from(minijinja::value::Serde(value)),
         None => minijinja::Value::from(minijinja::value::Serde(context)),
     };
+    #[cfg(windows)]
+    let context = env_lookups::fold(context);
     let env = environment()?;
     if chunks.len() == 1 && chunks[0].0 == 0 && chunks[0].1 == text.len() {
         let expression = env
@@ -211,6 +213,69 @@ pub fn evaluate(text: &str, context: &ExpressionContext) -> Result<Value, Config
     env.render_str(text, context)
         .map(Value::String)
         .map_err(|e| ConfigError::plain(format!("expression failed: {}", describe(&e))))
+}
+
+/// `${{ env.X }}` on Windows, where variable names ignore case: the `env`
+/// namespace holds names folded by `devlanes_core::env::fold_name`, and a
+/// lookup folds the name it asks for the same way, so `env.Path` finds `PATH`.
+#[cfg(windows)]
+mod env_lookups {
+    use std::sync::Arc;
+
+    use minijinja::value::{Enumerator, Object, Value};
+
+    /// `context` with an `env` namespace that answers names in any case.
+    pub(super) fn fold(context: Value) -> Value {
+        Value::from_object(Context(context))
+    }
+
+    /// The evaluation context; only `env` is wrapped.
+    #[derive(Debug)]
+    struct Context(Value);
+
+    impl Object for Context {
+        /// The namespace `key`, with `env` wrapped in [`Env`].
+        fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
+            let value = defined(self.0.get_item(key).ok()?)?;
+            if key.as_str() == Some("env") {
+                Some(Value::from_object(Env(value)))
+            } else {
+                Some(value)
+            }
+        }
+
+        /// The namespace names.
+        fn enumerate(self: &Arc<Self>) -> Enumerator {
+            keys(&self.0)
+        }
+    }
+
+    /// The `env` namespace.
+    #[derive(Debug)]
+    struct Env(Value);
+
+    impl Object for Env {
+        /// The variable `key` names, looked up by its folded name.
+        fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
+            let name = devlanes_core::env::fold_name(key.as_str()?.to_owned());
+            defined(self.0.get_item(&Value::from(name)).ok()?)
+        }
+
+        /// The variable names.
+        fn enumerate(self: &Arc<Self>) -> Enumerator {
+            keys(&self.0)
+        }
+    }
+
+    /// `value` unless it is undefined, which a missing key gives.
+    fn defined(value: Value) -> Option<Value> {
+        (!value.is_undefined()).then_some(value)
+    }
+
+    /// The keys of the map `value`.
+    fn keys(value: &Value) -> Enumerator {
+        Enumerator::Values(value.try_iter().map(Iterator::collect).unwrap_or_default())
+    }
 }
 
 /// Offsets added to `lane.port` in literal sums such as `lane.port + 5`, `lane['port'] + 5`
@@ -552,4 +617,45 @@ pub(crate) fn check_cycles(
         visit(node, graph, &mut Vec::new(), &mut done)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A context whose `env` namespace holds `PATH`.
+    fn context() -> ExpressionContext {
+        ExpressionContext {
+            env: serde_json::json!({"PATH": "C:/bin", "A-B": "dashed"}),
+            lane: serde_json::json!({"index": 2}),
+            ..ExpressionContext::default()
+        }
+    }
+
+    #[test]
+    /// `env` names match exactly on Unix and ignoring case on Windows, where
+    /// `Path` is `PATH`; other namespaces and filters behave the same.
+    fn env_lookups_follow_the_platform() {
+        let context = context();
+        let eval = |text: &str| evaluate(text, &context).map_err(|e| e.to_string());
+        assert_eq!(eval("${{ env.PATH }}"), Ok(Value::String("C:/bin".into())));
+        assert_eq!(eval("${{ lane.index }}"), Ok(Value::from(2)));
+        assert_eq!(
+            eval("${{ env.MISSING | default('none') }}"),
+            Ok(Value::String("none".into()))
+        );
+        assert!(eval("${{ env.MISSING }}").is_err());
+        assert_eq!(eval("${{ env.A_B }}"), Ok(Value::String("dashed".into())));
+        #[cfg(unix)]
+        assert!(eval("${{ env.Path }}").is_err());
+        #[cfg(windows)]
+        {
+            assert_eq!(eval("${{ env.Path }}"), Ok(Value::String("C:/bin".into())));
+            assert_eq!(
+                eval("x-${{ env['path'] }}"),
+                Ok(Value::String("x-C:/bin".into()))
+            );
+            assert_eq!(eval("${{ 'Path' in env }}"), Ok(Value::Bool(true)));
+        }
+    }
 }

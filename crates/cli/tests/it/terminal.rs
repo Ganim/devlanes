@@ -237,20 +237,33 @@ fn human_output_links_urls_and_marks_sections() {
     }
 }
 
+/// An absolute config path and its `file://` URL.
+#[cfg(unix)]
+const CONFIG: (&str, &str) = (
+    "/work/acme/devlanes.yaml",
+    "file:///work/acme/devlanes.yaml",
+);
+#[cfg(windows)]
+const CONFIG: (&str, &str) = (
+    r"C:\work\acme\devlanes.yaml",
+    "file:///C:/work/acme/devlanes.yaml",
+);
+
 #[test]
 fn config_errors_link_the_file_at_its_line() {
+    let (file, url) = CONFIG;
     let error = RpcError::new(
         "config_error",
-        json!({"message": "unknown field `prot`", "file": "/work/acme/devlanes.yaml",
+        json!({"message": "unknown field `prot`", "file": file,
                "line": 5, "column": 12}),
         1,
     );
     let human = featured(runtime(&["devlanes"], true, false));
     let stderr = human.reporter().error(&error, None).stderr;
     assert!(
-        stderr.contains(
-            "\x1b]8;;file:///work/acme/devlanes.yaml#5:12\x1b\\/work/acme/devlanes.yaml\x1b]8;;\x1b\\ is invalid at line 5, column 12"
-        ),
+        stderr.contains(&format!(
+            "\x1b]8;;{url}#5:12\x1b\\{file}\x1b]8;;\x1b\\ is invalid at line 5, column 12"
+        )),
         "{stderr:?}"
     );
     let plain = featured(runtime(&["devlanes", "--output", "plain"], false, false));

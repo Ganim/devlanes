@@ -20,6 +20,9 @@ memchr = "2"
 zstd = "0.13"
 tracing = "0.1"
 
+[target.'cfg(windows)'.dependencies]
+devlanes-sys-windows = { path = "../sys-windows" }
+
 [dev-dependencies]
 tempfile = "3"
 

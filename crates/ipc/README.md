@@ -1,6 +1,6 @@
 # devlanes-ipc
 
-Length-delimited framing for daemon connections. `devlanes-client`, the daemon and `devlanes-tunnel` wrap a Unix socket or a tunneled stream in a `Connection` and exchange `devlanes-proto` control messages and raw terminal bytes over it.
+Length-delimited framing for daemon connections, and the daemon's local endpoint. `devlanes-client`, the daemon and `devlanes-tunnel` wrap a local stream or a tunneled one in a `Connection` and exchange `devlanes-proto` control messages and raw terminal bytes over it.
 
 ## Usage
 
@@ -24,10 +24,13 @@ async fn echo() -> Result<(), Error> {
 - `Connection`: `new` wraps any `AsyncRead + AsyncWrite` stream; `send` and `recv` move one frame.
 - `Frame`: `Control` for JSON protocol messages, `Bytes` for a numbered byte stream such as an attached terminal.
 - `Error`: I/O, malformed JSON, invalid or oversized frames, and `Disconnected` on orderly EOF.
+- `local`: `LocalListener` (`bind`, `accept`), `connect`, `LocalStream`, `remove` and `probe` for the daemon's endpoint.
 
 ## Behaviour
 
 Frames are capped at `devlanes_proto::MAX_FRAME_SIZE`, checked before the payload is allocated. Byte frames carry a big-endian stream id. A malformed frame is an error and the connection is not resynchronised; hello negotiation is left to the caller.
+
+The local endpoint is a Unix socket whose peers are checked by uid, or on Windows a named pipe (`\\.\pipe\...`) that only the current user can open and whose owner the client checks. A pipe name another process created first is refused at bind.
 
 ## License
 

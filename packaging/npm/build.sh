@@ -2,6 +2,7 @@
 # Generates the npm packages for VERSION from the release archives in DIST_DIR:
 # OUT_DIR/devlanes-<platform>-<arch>/ (published as @devlanes/<platform>-<arch>)
 # and OUT_DIR/devlanes/ (the launcher). Publish the platform packages first.
+# Needs tar and, for the Windows archives, unzip.
 set -eu
 
 if [ $# -ne 3 ]; then
@@ -24,20 +25,27 @@ for spec in \
 	aarch64-apple-darwin:darwin:arm64:macOS \
 	x86_64-apple-darwin:darwin:x64:macOS \
 	aarch64-unknown-linux-gnu:linux:arm64:Linux \
-	x86_64-unknown-linux-gnu:linux:x64:Linux; do
+	x86_64-unknown-linux-gnu:linux:x64:Linux \
+	x86_64-pc-windows-msvc:win32:x64:Windows \
+	aarch64-pc-windows-msvc:win32:arm64:Windows; do
 	IFS=: read -r target os cpu label <<EOF
 $spec
 EOF
 	archive=$dist/devlanes-$version-$target.tar.gz
+	if [ "$os" = win32 ]; then archive=$dist/devlanes-$version-$target.zip; fi
 	if [ ! -f "$archive" ]; then
 		echo "missing $archive" >&2
 		exit 1
 	fi
 	pkg=$out/devlanes-$os-$cpu
 	mkdir -p "$pkg/bin"
-	tar -xzf "$archive" -C "$pkg/bin" --strip-components 1 \
-		"devlanes-$version-$target/devlanes" "devlanes-$version-$target/devlanes-hosts"
-	chmod 755 "$pkg/bin/devlanes" "$pkg/bin/devlanes-hosts"
+	if [ "$os" = win32 ]; then
+		unzip -q -j "$archive" "devlanes-$version-$target/devlanes.exe" -d "$pkg/bin"
+	else
+		tar -xzf "$archive" -C "$pkg/bin" --strip-components 1 \
+			"devlanes-$version-$target/devlanes" "devlanes-$version-$target/devlanes-hosts"
+		chmod 755 "$pkg/bin/devlanes" "$pkg/bin/devlanes-hosts"
+	fi
 	cp "$root/LICENSE" "$pkg/LICENSE"
 	# Linux builds link glibc; the libc field keeps npm from installing them on musl.
 	libc=

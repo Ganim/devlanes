@@ -39,6 +39,29 @@ pub mod exit {
     pub const NOT_FOUND: u8 = 3;
     pub const DAEMON: u8 = 4;
     pub const TIMEOUT: u8 = 124;
+
+    /// `STATUS_CONTROL_C_EXIT` (`0xC000013A`) as the signed exit code
+    /// devlanes reports: a Windows process that a console Ctrl-C or
+    /// Ctrl-Break ended.
+    #[cfg(windows)]
+    const CONTROL_C_EXIT: i64 = -1_073_741_510;
+
+    /// Words for a process's exit `code` where they say more than the
+    /// number: on Windows, a process a console Ctrl-C or Ctrl-Break ended
+    /// reads "interrupted by Ctrl-C or Ctrl-Break" (Windows reports both as
+    /// one code). `None` for every other code.
+    #[cfg(windows)]
+    pub fn words(code: i64) -> Option<&'static str> {
+        (code == CONTROL_C_EXIT || code == CONTROL_C_EXIT + (1 << 32))
+            .then_some("interrupted by Ctrl-C or Ctrl-Break")
+    }
+
+    /// Words for a process's exit `code` where they say more than the
+    /// number; none on this platform, where codes stay numbers.
+    #[cfg(unix)]
+    pub fn words(_code: i64) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Argument validation is separate from transport and daemon failures.

@@ -1,7 +1,8 @@
 //! Operating-system process queries for supervision, reconciliation and diagnostics.
 //!
 //! Platform code is selected at compile time: procfs on Linux, libproc and `lsof`
-//! on macOS. Every query is blocking; async callers should use `spawn_blocking`.
+//! on macOS, `devlanes-sys-windows` on Windows. Every query is blocking; async
+//! callers should use `spawn_blocking`.
 //!
 //! ```
 //! let me = devlanes_sys::identity(std::process::id())?.expect("own process is visible");
@@ -16,6 +17,7 @@
 use std::net::SocketAddr;
 
 pub use devlanes_core::ProcessIdentity;
+#[cfg(unix)]
 pub use rustix::process::Signal;
 
 mod rlimit;
@@ -34,6 +36,10 @@ mod os;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 #[path = "macos.rs"]
+mod os;
+
+#[cfg(windows)]
+#[path = "windows.rs"]
 mod os;
 
 /// Safe wrappers over macOS libproc, mach and sysctl calls for the metrics and
@@ -78,12 +84,17 @@ impl From<Error> for devlanes_core::Error {
 pub struct ProcessInfo {
     pub pid: u32,
     pub ppid: u32,
+    // Unix only: Windows has no process groups and names users by SID.
+    #[cfg(unix)]
     pub pgid: u32,
-    /// Absent when the platform refused to report the session.
+    /// Absent when the platform refused to report the session, and always on
+    /// Windows, which has none.
     pub sid: Option<u32>,
+    #[cfg(unix)]
     pub uid: u32,
     pub start_time: u64,
-    /// Exited but not yet reaped by its parent; signals have no effect.
+    /// Exited but not yet reaped by its parent; signals have no effect. On
+    /// Windows: exited while some process still holds a handle to it.
     pub zombie: bool,
     pub name: String,
 }
@@ -133,15 +144,17 @@ pub fn process(pid: u32) -> Result<Option<ProcessInfo>, Error> {
 }
 
 /// Returns the platform birth token: clock ticks since boot on Linux, microseconds
-/// since the epoch on macOS. Compare tokens only on the machine that produced them.
+/// since the epoch on macOS, the creation `FILETIME` (100 ns ticks since 1601) on
+/// Windows. Compare tokens only on the machine that produced them.
 pub fn start_time(pid: u32) -> Result<Option<u64>, Error> {
     Ok(process(pid)?.map(|info| info.start_time))
 }
 
 /// Identifies the current boot: `/proc/sys/kernel/random/boot_id` on Linux,
-/// `kern.bootsessionuuid` on macOS. PIDs and start times recorded under another
-/// boot name unrelated processes. Compare values for equality only. The first
-/// successful read is cached, so later calls do not touch the kernel.
+/// `kern.bootsessionuuid` on macOS, the kernel's boot time on Windows. PIDs and
+/// start times recorded under another boot name unrelated processes. Compare
+/// values for equality only. The first successful read is cached, so later
+/// calls do not touch the kernel.
 pub fn boot_id() -> Result<String, Error> {
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     if let Some(id) = BOOT.get() {
@@ -169,6 +182,7 @@ pub fn matches(identity: &ProcessIdentity) -> Result<bool, Error> {
 ///
 /// Reconciliation uses this so a recycled PID is never killed. The check and the
 /// signal are not atomic, but reuse within that window requires PID wraparound.
+#[cfg(unix)]
 pub fn signal_verified(identity: &ProcessIdentity, signal: Signal) -> Result<SignalOutcome, Error> {
     let Some(info) = process(identity.pid)? else {
         return Ok(SignalOutcome::Gone);
@@ -189,6 +203,19 @@ pub fn signal_verified(identity: &ProcessIdentity, signal: Signal) -> Result<Sig
     }
 }
 
+/// Terminates the process with `exit_code` only if the PID still belongs to the
+/// recorded process; the Windows counterpart of `signal_verified` with SIGKILL.
+///
+/// The start time is checked on the handle that terminates, so a reused PID is
+/// never reached.
+#[cfg(windows)]
+pub fn terminate_verified(
+    identity: &ProcessIdentity,
+    exit_code: u32,
+) -> Result<SignalOutcome, Error> {
+    os::terminate_verified(identity, exit_code)
+}
+
 /// Lists TCP listeners owned by `pids`, sorted and deduplicated.
 ///
 /// Diagnostics only (ready-check timeouts); never used to assign ports. On macOS this
@@ -204,12 +231,14 @@ pub fn listening_tcp(pids: &[u32]) -> Result<Vec<ListeningSocket>, Error> {
 }
 
 /// Session ID of `pid`, or `None` once it exited or the kernel refused to say.
+#[cfg(unix)]
 pub fn session(pid: u32) -> Option<u32> {
     let sid = rustix::process::getsid(Some(raw_pid(pid)?)).ok()?;
     u32::try_from(sid.as_raw_nonzero().get()).ok()
 }
 
 /// Real user ID of this process; other users' processes are never a unit's.
+#[cfg(unix)]
 pub fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()
 }
@@ -226,6 +255,7 @@ pub enum OpenFile {
 
 /// Identifies what `fd` refers to, for a later [`holders`] lookup. Only character
 /// devices and pipes are supported.
+#[cfg(unix)]
 pub fn open_file(fd: std::os::fd::BorrowedFd<'_>) -> Result<OpenFile, Error> {
     os::open_file(fd)
 }
@@ -240,6 +270,7 @@ pub fn open_file(fd: std::os::fd::BorrowedFd<'_>) -> Result<OpenFile, Error> {
 /// returned can still hold the parent's close-on-exec descriptors until the kernel
 /// finishes its exec, and is then reported as a holder. Blocking; the cost
 /// grows with the descriptors of every candidate, so pass a filtered set.
+#[cfg(unix)]
 pub fn holders(target: OpenFile, pids: &[u32]) -> Result<Vec<u32>, Error> {
     let mut found = Vec::new();
     for &pid in pids {
@@ -251,6 +282,7 @@ pub fn holders(target: OpenFile, pids: &[u32]) -> Result<Vec<u32>, Error> {
 }
 
 /// Converts a kernel PID; 0 and values beyond `pid_t` are not addressable processes.
+#[cfg(unix)]
 fn raw_pid(pid: u32) -> Option<rustix::process::Pid> {
     rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)
 }

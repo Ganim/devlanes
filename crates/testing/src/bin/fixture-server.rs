@@ -11,11 +11,9 @@ use axum::{
 };
 use clap::Parser;
 use futures_util::stream;
-use tokio::{
-    net::TcpListener,
-    process::Command,
-    signal::unix::{SignalKind, signal},
-};
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::{net::TcpListener, process::Command};
 
 /// Options for deterministic server and process-lifecycle tests.
 #[derive(Debug, Parser)]
@@ -38,6 +36,9 @@ struct Args {
     bind_ipv6_only: bool,
     #[arg(long)]
     print_env: bool,
+    /// Prints `got <line>` for every line read from stdin.
+    #[arg(long)]
+    echo_input: bool,
     #[arg(long, hide = true, value_parser = ["child", "grandchild"])]
     descendant: Option<String>,
 }
@@ -46,7 +47,14 @@ struct Args {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    // Refused before anything binds or spawns.
+    #[cfg(windows)]
+    if args.setsid_grandchild {
+        return Err("--setsid-grandchild needs Unix sessions".into());
+    }
+    #[cfg(unix)]
     let mut terminate = signal(SignalKind::terminate())?;
+    #[cfg(unix)]
     if args.descendant.as_deref() == Some("grandchild") && args.setsid_grandchild {
         rustix::process::setsid()?;
     }
@@ -81,15 +89,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if let Some(role) = &args.descendant {
+        #[cfg(unix)]
         println!(
             "{role} pid={} sid={}",
             std::process::id(),
             rustix::process::getsid(None)?.as_raw_nonzero()
         );
+        // Windows has no sessions to report.
+        #[cfg(windows)]
+        println!("{role} pid={}", std::process::id());
     } else if let Some(listener) = &listener {
         println!("LISTENING {}", listener.local_addr()?);
     }
     std::io::stdout().flush()?;
+    if args.echo_input {
+        // Blocking reads; the thread ends with the process.
+        std::thread::spawn(|| {
+            for line in std::io::stdin().lines().map_while(Result::ok) {
+                println!("got {}", line.trim_end_matches('\r'));
+            }
+        });
+    }
 
     let server = async {
         if let Some(listener) = listener {
@@ -105,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::future::pending::<()>().await;
         }
     };
+    #[cfg(unix)]
     let shutdown = async {
         loop {
             terminate.recv().await;
@@ -113,11 +134,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
+    #[cfg(unix)]
+    let interrupt = tokio::signal::ctrl_c();
+    // Windows stops send Ctrl-Break for SIGTERM and Ctrl-C for SIGINT; with
+    // `--ignore-sigterm` both are swallowed, so only termination ends it.
+    #[cfg(windows)]
+    let (mut ctrl_break, mut ctrl_c) = (
+        tokio::signal::windows::ctrl_break()?,
+        tokio::signal::windows::ctrl_c()?,
+    );
+    #[cfg(windows)]
+    let shutdown = async {
+        loop {
+            tokio::select! {
+                _ = ctrl_break.recv() => {}
+                _ = ctrl_c.recv() => {}
+            }
+            if !args.ignore_sigterm {
+                break;
+            }
+        }
+    };
+    #[cfg(windows)]
+    let interrupt = std::future::pending::<std::io::Result<()>>();
     tokio::select! {
         result = server => result?,
         () = deadline => {},
         () = shutdown => {},
-        result = tokio::signal::ctrl_c() => result?,
+        result = interrupt => result?,
     }
     // Descendants intentionally survive parent termination for supervisor cleanup tests.
     // A supplied exit deadline is inherited so failed tests can bound their lifetime.
@@ -164,7 +208,10 @@ fn bind(args: &Args) -> std::io::Result<TcpListener> {
     }
     // A killed earlier server leaves its connections in TIME_WAIT on this port;
     // without this, a test reusing the port right after fails with AddrInUse.
-    // A live listener still refuses the bind.
+    // A live listener still refuses the bind. Windows lets TIME_WAIT ports be
+    // bound anyway, and there the option would let the bind take over a port
+    // another socket listens on.
+    #[cfg(unix)]
     socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&addr.into())?;

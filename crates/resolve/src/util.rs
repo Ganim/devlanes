@@ -38,25 +38,6 @@ pub fn public_url_env_key(service: &str) -> String {
     format!("DEVLANES_PUBLIC_URL_{suffix}")
 }
 
-/// Maps the stop signals accepted by config validation to numbers. SIGUSR1/2
-/// differ between macOS and Linux, so they are compile-time per OS.
-pub(crate) fn signal_number(name: &str) -> Option<i32> {
-    #[cfg(target_os = "linux")]
-    const USR: (i32, i32) = (10, 12);
-    #[cfg(not(target_os = "linux"))]
-    const USR: (i32, i32) = (30, 31);
-    Some(match name {
-        "SIGHUP" => 1,
-        "SIGINT" => 2,
-        "SIGQUIT" => 3,
-        "SIGKILL" => 9,
-        "SIGTERM" => 15,
-        "SIGUSR1" => USR.0,
-        "SIGUSR2" => USR.1,
-        _ => return None,
-    })
-}
-
 /// Collects every string containing `${{` in a serialized config value.
 pub(crate) fn expression_strings(value: &Value, out: &mut Vec<String>) {
     match value {
@@ -85,12 +66,5 @@ mod tests {
     fn env_keys() {
         assert_eq!(public_url_env_key("api"), "DEVLANES_PUBLIC_URL_API");
         assert_eq!(public_url_env_key("a.b-c"), "DEVLANES_PUBLIC_URL_A_B_C");
-    }
-
-    #[test]
-    /// Unknown signals are rejected rather than mapped to SIGTERM.
-    fn signals() {
-        assert_eq!(signal_number("SIGINT"), Some(2));
-        assert_eq!(signal_number("SIGWINCH"), None);
     }
 }

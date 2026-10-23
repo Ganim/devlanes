@@ -17,3 +17,13 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+devlanes-sys-windows = { path = "../sys-windows" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -108,6 +108,10 @@ impl Unit for CoreUnit {
     async fn subjects(&self) -> Result<Vec<ProcessIdentity>, devlanes_core::Error> {
         self.unit.subjects().await
     }
+    /// Delegates to the wrapped unit.
+    fn renders_screen(&self) -> bool {
+        self.unit.renders_screen()
+    }
 }
 
 #[async_trait]
@@ -518,6 +522,22 @@ pub trait ProcessTable: Send + Sync {
     /// SIGKILL after `grace`. Only processes whose identity matches are signalled,
     /// and the session is swept only while the leader itself still verifies.
     async fn terminate(&self, identity: ProcessIdentity, grace: Duration);
+    /// Stops one orphaned unit: its recorded `leader` and the `members`
+    /// recorded with it. The default terminates each of them through
+    /// [`Self::terminate`] at once; Windows asks the unit as a whole first.
+    async fn terminate_unit(
+        &self,
+        leader: ProcessIdentity,
+        members: &[ProcessIdentity],
+        grace: Duration,
+    ) {
+        futures_util::future::join_all(
+            std::iter::once(leader)
+                .chain(members.iter().copied())
+                .map(|identity| self.terminate(identity, grace)),
+        )
+        .await;
+    }
 }
 
 /// [`ProcessTable`] over `devlanes-sys`; blocking reads run off the executor.
@@ -532,7 +552,28 @@ impl ProcessTable for SysProcesses {
             .unwrap_or(false)
     }
 
+    /// Terminates the process with exit code 1 if it still verifies, checking
+    /// its start time on the handle that terminates it. Asking a whole unit to
+    /// stop first (one console event per unit) needs the console helper, so
+    /// the composition root's table does that in `terminate_unit`.
+    #[cfg(windows)]
+    async fn terminate(&self, identity: ProcessIdentity, _grace: Duration) {
+        let result =
+            tokio::task::spawn_blocking(move || devlanes_sys::terminate_verified(&identity, 1))
+                .await;
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, pid = identity.pid, "terminating an orphaned process failed");
+            }
+            Err(error) => {
+                tracing::warn!(%error, pid = identity.pid, "terminating an orphaned process failed");
+            }
+        }
+    }
+
     /// SIGTERM to the verified session, then SIGKILL to verified survivors.
+    #[cfg(unix)]
     async fn terminate(&self, identity: ProcessIdentity, grace: Duration) {
         let signal_all = move |signal: devlanes_sys::Signal| {
             let snapshot = devlanes_sys::processes().unwrap_or_default();
@@ -631,6 +672,10 @@ pub struct Integrations {
     pub remote: Arc<dyn RemoteConnector>,
     /// The `/etc/hosts` fallback; `None` leaves the hosts file alone.
     pub hosts: Option<Arc<crate::hosts::HostsFile>>,
+    /// What Windows reports instead of the fallback, which it never needs:
+    /// the startup probe of `*.localhost`. `doctor` shows it.
+    #[cfg(windows)]
+    pub native_hosts: Option<crate::hosts::NativeHosts>,
     /// The machine-wide start gate; `None` spawns every service at once.
     pub start_gate: Option<Arc<dyn devlanes_core::gate::StartGate>>,
     /// System pressure, for the upfront memory warning.
@@ -641,6 +686,11 @@ pub struct Integrations {
     pub system_pressure: Option<Arc<dyn devlanes_core::gate::PressureSource>>,
     /// Checks the OS resolver file for the `resolver` hostname strategy.
     pub resolver_files: Option<Arc<dyn ResolverFiles>>,
+    /// Git for Windows' `sh.exe`, found once at daemon start, which runs
+    /// `ready.cmd` probes as it runs `run:` strings; `None` fails those
+    /// probes with `shell_missing`. Unix runs them with `/bin/sh`.
+    #[cfg(windows)]
+    pub shell: Option<PathBuf>,
 }
 
 /// Reports whether the OS forwards the devlanes TLD to the embedded DNS server.
@@ -743,10 +793,14 @@ impl Integrations {
             launch_checks: Vec::new(),
             remote: Arc::new(NoRemote),
             hosts: None,
+            #[cfg(windows)]
+            native_hosts: None,
             start_gate: None,
             pressure: None,
             system_pressure: None,
             resolver_files: None,
+            #[cfg(windows)]
+            shell: None,
         }
     }
 }

@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 
 use crate::target::{TEMP_PREFIX, blocking};
@@ -37,13 +38,26 @@ impl LocalTarget {
                     }
                 })
                 .collect();
-            let held = probe.as_file().metadata()?;
-            // The same inode, so an unrelated file with that spelling cannot pass.
-            Ok(fs::symlink_metadata(root.join(swapped))
-                .is_ok_and(|meta| meta.dev() == held.dev() && meta.ino() == held.ino()))
+            // The same file, so an unrelated file with that spelling cannot pass.
+            same_file(probe.as_file(), &root.join(swapped))
         })
         .await
     }
+}
+
+/// Whether `path` names the open `file`: the same device and inode.
+#[cfg(unix)]
+fn same_file(file: &fs::File, path: &std::path::Path) -> std::io::Result<bool> {
+    let held = file.metadata()?;
+    Ok(fs::symlink_metadata(path)
+        .is_ok_and(|meta| meta.dev() == held.dev() && meta.ino() == held.ino()))
+}
+
+/// Whether `path` names the open `file`: the same volume and file id.
+#[cfg(windows)]
+fn same_file(file: &fs::File, path: &std::path::Path) -> std::io::Result<bool> {
+    let held = devlanes_sys_windows::file::file_identity(file)?;
+    Ok(devlanes_sys_windows::file::path_identity(path).is_ok_and(|id| id == held))
 }
 
 /// The spellings a case-insensitive destination holds, so a second spelling of

@@ -1,6 +1,7 @@
 //! Syncer behavior in tempdirs with the real filesystem watcher.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -39,8 +40,46 @@ fn read(path: &Path) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
+/// A symbolic link at `link` to the file `target`.
+#[cfg(unix)]
+fn symlink_file(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
+    symlink(target, link)
+}
+
+/// A symbolic link at `link` to the directory `target`.
+#[cfg(unix)]
+fn symlink_dir(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
+    symlink(target, link)
+}
+
+/// A symbolic link at `link` to the file `target`. Windows needs Developer
+/// Mode or an elevated shell for it, as on the CI runners.
+#[cfg(windows)]
+fn symlink_file(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+/// A symbolic link at `link` to the directory `target`; see [`symlink_file`].
+#[cfg(windows)]
+fn symlink_dir(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     fs::metadata(path).expect("metadata").permissions().mode() & 0o777
+}
+
+/// Which file is at `path`: its inode.
+#[cfg(unix)]
+fn file_id(path: &Path) -> u64 {
+    fs::metadata(path).expect("meta").ino()
+}
+
+/// Which file is at `path`: its volume serial and file id.
+#[cfg(windows)]
+fn file_id(path: &Path) -> devlanes_sys_windows::file::FileId {
+    devlanes_sys_windows::file::path_identity(path).expect("identity")
 }
 
 fn options(ignore: &[&str]) -> SyncOptions {
@@ -98,6 +137,7 @@ async fn files_over_the_limit_are_reported_and_skipped() {
     assert!(status.errors[0].message.contains("over the sync limit"));
 }
 
+// Modes are Unix only; Windows checks the rest.
 #[tokio::test]
 async fn initial_copy_keeps_modes_skips_symlinks_and_ignores() {
     let d = dirs();
@@ -106,10 +146,11 @@ async fn initial_copy_keeps_modes_skips_symlinks_and_ignores() {
     write(&d.src.join("js/app.js.map"), "map");
     write(&d.src.join("node_modules/x/index.js"), "dep");
     write(&d.src.join("bin/run.sh"), "#!/bin/sh");
+    #[cfg(unix)]
     fs::set_permissions(d.src.join("bin/run.sh"), fs::Permissions::from_mode(0o750))
         .expect("chmod");
-    symlink(d.src.join("index.html"), d.src.join("link.html")).expect("file symlink");
-    symlink(d.src.join("js"), d.src.join("jslink")).expect("dir symlink");
+    symlink_file(d.src.join("index.html"), d.src.join("link.html")).expect("file symlink");
+    symlink_dir(d.src.join("js"), d.src.join("jslink")).expect("dir symlink");
     fs::create_dir_all(d.src.join("empty")).expect("empty dir");
 
     let handle = syncer(&d, &["*.map", "node_modules"])
@@ -124,6 +165,7 @@ async fn initial_copy_keeps_modes_skips_symlinks_and_ignores() {
 
     assert_eq!(read(&d.dst.join("index.html")).as_deref(), Some("<html>"));
     assert_eq!(read(&d.dst.join("js/app.js")).as_deref(), Some("app"));
+    #[cfg(unix)]
     assert_eq!(mode(&d.dst.join("bin/run.sh")), 0o750);
     for absent in [
         "js/app.js.map",
@@ -219,11 +261,11 @@ async fn ignored_and_symlinked_paths_created_later_stay_out() {
     write(&d.src.join("a.js.map"), "map");
     write(&d.src.join("cache/blob"), "blob");
     write(&d.src.join("sub/cache/kept"), "kept");
-    symlink(d.src.join("real.txt"), d.src.join("alias.txt")).expect("symlink");
+    symlink_file(d.src.join("real.txt"), d.src.join("alias.txt")).expect("symlink");
     eventually("non-ignored file", || d.dst.join("sub/cache/kept").exists()).await;
     // A replacement of a synced file by a symlink removes it.
     fs::remove_file(d.src.join("real.txt")).expect("rm");
-    symlink("/etc/hosts", d.src.join("real.txt")).expect("symlink over file");
+    symlink_file("/etc/hosts", d.src.join("real.txt")).expect("symlink over file");
     eventually("symlinked file removed", || {
         !d.dst.join("real.txt").exists()
     })
@@ -235,6 +277,8 @@ async fn ignored_and_symlinked_paths_created_later_stay_out() {
     handle.stop().await;
 }
 
+// Unix mode bits; Windows only has the read-only attribute (unit test in target.rs).
+#[cfg(unix)]
 #[tokio::test]
 async fn chmod_alone_updates_the_mode() {
     let d = dirs();
@@ -256,12 +300,12 @@ async fn initial_copy_reuses_matching_files_and_prunes_stale_ones() {
     write(&d.dst.join("changed.txt"), "old");
     write(&d.dst.join("stale.txt"), "stale");
     write(&d.dst.join("local.map"), "user file under an ignored name");
-    let inode = fs::metadata(d.dst.join("same.txt")).expect("meta").ino();
+    let inode = file_id(&d.dst.join("same.txt"));
 
     let status = syncer(&d, &["*.map"]).sync_once().await.expect("sync");
     assert_eq!((status.written, status.removed, status.files), (1, 1, 2));
     assert_eq!(
-        fs::metadata(d.dst.join("same.txt")).expect("meta").ino(),
+        file_id(&d.dst.join("same.txt")),
         inode,
         "identical file not rewritten"
     );
@@ -284,7 +328,7 @@ async fn offered_held_files_replace_the_target_manifest() {
     write(&d.dst.join("stale.txt"), "stale");
     write(&d.dst.join("dir/also-stale/x.txt"), "stale");
     write(&d.dst.join("local.map"), "user file under an ignored name");
-    let inode = fs::metadata(d.dst.join("same.txt")).expect("meta").ino();
+    let inode = file_id(&d.dst.join("same.txt"));
     // The source mtimes must be settled, or the pass rehashes (correctly, but
     // then this test would not show that matches are skipped without reading).
     let settled = std::time::SystemTime::now() - Duration::from_secs(60);
@@ -309,7 +353,7 @@ async fn offered_held_files_replace_the_target_manifest() {
     let status = syncer.sync_once().await.expect("sync");
     assert_eq!((status.written, status.removed), (2, 2), "{status:?}");
     assert_eq!(
-        fs::metadata(d.dst.join("same.txt")).expect("meta").ino(),
+        file_id(&d.dst.join("same.txt")),
         inode,
         "identical file not rewritten"
     );

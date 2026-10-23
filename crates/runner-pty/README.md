@@ -64,6 +64,8 @@ Children get the open-file limit the daemon started with, even after the daemon 
 
 `unsafe` code is confined to the pre-exec hook in `spawn.rs` and the PTY master's registration with the tokio reactor in `unit.rs`.
 
+The crate is Unix only and compiles to an empty library on Windows.
+
 ## License
 
 Apache-2.0

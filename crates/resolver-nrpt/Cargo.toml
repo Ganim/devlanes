@@ -1,0 +1,22 @@
+[package]
+name = "devlanes-resolver-nrpt"
+description = "Windows NRPT rule that sends the devlanes TLD to the embedded DNS server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The rule lives in the Windows registry, so the crate is empty on other platforms.
+[target.'cfg(windows)'.dependencies]
+devlanes-resolver-dns = { path = "../resolver-dns" }
+devlanes-sys-windows = { path = "../sys-windows" }
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

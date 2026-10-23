@@ -256,7 +256,7 @@ fn write_cache(path: &Path, cached: &Cached) -> std::io::Result<()> {
     let text = serde_json::to_string(cached).map_err(std::io::Error::other)?;
     let temporary = PathBuf::from(format!("{}.tmp", path.display()));
     std::fs::write(&temporary, text)?;
-    std::fs::rename(&temporary, path)
+    crate::files::rename(&temporary, path)
 }
 
 /// Fetches the manifest with curl, which follows GitHub's redirect to the asset

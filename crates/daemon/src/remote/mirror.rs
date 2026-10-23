@@ -342,7 +342,8 @@ impl Mirror {
                             )
                         } else {
                             format!(
-                                "port {port} cannot be bound on {address}: {error}; not mirrored"
+                                "port {port} cannot be bound on {address}: {error}{}; not mirrored",
+                                denied_hint(&error)
                             )
                         };
                         if !mirror.conflicts.contains_key(&address) {
@@ -585,6 +586,26 @@ async fn process_name(pid: u32) -> String {
     .ok()
     .flatten()
     .unwrap_or_else(|| "an unknown process".to_owned())
+}
+
+/// Nothing to add to a bind error on Unix.
+#[cfg(unix)]
+fn denied_hint(_error: &std::io::Error) -> &'static str {
+    ""
+}
+
+/// Windows refuses binds inside its reserved port ranges with access denied,
+/// which reads like a permissions problem; name the ranges' command.
+#[cfg(windows)]
+fn denied_hint(error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        format!(
+            " (the port may lie in a Windows reserved port range; `{}` lists them)",
+            crate::reserved_ports::LIST_COMMAND
+        )
+    } else {
+        String::new()
+    }
 }
 
 /// Binds a mirror listener. `SO_REUSEADDR` only on Linux, where it merely skips

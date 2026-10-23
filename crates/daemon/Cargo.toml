@@ -27,6 +27,7 @@ devlanes-sync = { path = "../sync" }
 devlanes-transport = { path = "../transport" }
 async-trait.workspace = true
 base64.workspace = true
+dunce.workspace = true
 futures-util.workspace = true
 globset = "0.4"
 indexmap = "2"
@@ -35,14 +36,20 @@ regex = "1"
 strip-ansi-escapes = "0.2"
 vt100 = "0.18"
 bytes.workspace = true
-fs2 = "0.4"
-rustix = { version = "1", features = ["process", "fs", "stdio"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+
+[target.'cfg(unix)'.dependencies]
+fs2 = "0.4"
+rustix = { version = "1", features = ["process", "fs", "stdio"] }
+
+[target.'cfg(windows)'.dependencies]
+devlanes-shell-windows = { path = "../shell-windows" }
+devlanes-sys-windows = { path = "../sys-windows" }
 
 [dev-dependencies]
 devlanes-client = { path = "../client" }
@@ -51,5 +58,6 @@ devlanes-resolver-hosts = { path = "../resolver-hosts", features = ["fake"] }
 devlanes-runner-pty = { path = "../runner-pty" }
 devlanes-start-gate = { path = "../start-gate" }
 devlanes-tunnel = { path = "../tunnel" }
+dunce.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

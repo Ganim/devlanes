@@ -28,9 +28,17 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const FINISH_ATTEMPTS: u32 = 3;
 
 /// Exit recorded when this daemon terminated an orphan (SIGTERM, maybe SIGKILL).
+#[cfg(unix)]
 const TERMINATED: ExitOutcome = ExitOutcome {
     code: None,
     signal: Some(15),
+};
+/// Exit recorded when this daemon terminated an orphan: Windows has no
+/// signals, and terminated processes exit with code 1.
+#[cfg(windows)]
+const TERMINATED: ExitOutcome = ExitOutcome {
+    code: Some(1),
+    signal: None,
 };
 /// Exit recorded for an orphan whose process ended on its own: unknown.
 const GONE: ExitOutcome = ExitOutcome {
@@ -199,8 +207,9 @@ impl Inner {
         }
     }
 
-    /// Records descendants of a running unit that left its leader's session, so a
-    /// daemon started after a crash can stop them with the run. Reads the runner's
+    /// Records descendants of a running unit that left its leader's session (on
+    /// Windows, every process of the unit), so a daemon started after a crash
+    /// can stop them with the run. Reads the runner's
     /// last snapshot (no process-table scan) every few seconds until the unit
     /// exits; each batch of new identities is one store write.
     pub(crate) fn track_escaped(self: &Arc<Self>, host: UnitHost, run: UnitRunId) {
@@ -220,7 +229,7 @@ impl Inner {
                     .subjects()
                     .await
                     .into_iter()
-                    .filter(|p| p.pid != leader.pid && p.sid != leader.sid)
+                    .filter(|p| outlives_leader(p, &leader))
                     .filter(|p| !seen.contains(&(p.pid, p.start_time)))
                     .collect();
                 if escaped.is_empty() {
@@ -326,12 +335,26 @@ impl Inner {
     /// Terminates the leader's session and each escaped descendant's, every
     /// target checked by identity before it is signalled.
     async fn terminate_all(&self, leader: ProcessIdentity, members: &[ProcessIdentity]) {
-        let processes = &self.integ.processes;
-        join_all(
-            std::iter::once(leader)
-                .chain(members.iter().copied())
-                .map(|identity| processes.terminate(identity, ORPHAN_GRACE)),
-        )
-        .await;
+        self.integ
+            .processes
+            .terminate_unit(leader, members, ORPHAN_GRACE)
+            .await;
     }
+}
+
+/// Whether a unit's process must be recorded to be stopped with an orphaned
+/// run: a descendant that left the leader's session, which a session sweep
+/// would miss.
+#[cfg(unix)]
+fn outlives_leader(process: &ProcessIdentity, leader: &ProcessIdentity) -> bool {
+    process.pid != leader.pid && process.sid != leader.sid
+}
+
+/// Whether a unit's process must be recorded to be stopped with an orphaned
+/// run: every one but the leader. A unit's job cannot be reopened after the
+/// daemon that created it exits, so the recorded members are all an orphan
+/// stop can reach.
+#[cfg(windows)]
+fn outlives_leader(process: &ProcessIdentity, leader: &ProcessIdentity) -> bool {
+    process.pid != leader.pid || process.start_time != leader.start_time
 }

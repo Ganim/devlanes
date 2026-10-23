@@ -597,7 +597,7 @@ fn recover_tail(
         .set_len(meta.uncompressed_bytes)?;
     remove_if_exists(&duplicate)?;
     if meta.records == 0 {
-        fs::remove_file(path)?;
+        remove_file(path)?;
         return Ok(None);
     }
     close_segment(directory, compress, &mut meta)?;
@@ -681,10 +681,35 @@ fn load_metadata(path: &Path, first: u64) -> Result<SegmentMetadata> {
 fn quarantine(path: &Path) -> Result<()> {
     let mut destination = path.as_os_str().to_owned();
     destination.push(".corrupt");
-    match fs::rename(path, destination) {
+    match rename(path, Path::new(&destination)) {
         Err(error) if error.kind() != ErrorKind::NotFound => Err(error.into()),
         _ => Ok(()),
     }
+}
+
+/// [`fs::rename`].
+#[cfg(unix)]
+fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::rename(from, to)
+}
+
+/// [`fs::rename`], retried while a reader (`devlanes logs`, an editor, an
+/// indexer) briefly holds the file, which Windows refuses to rename.
+#[cfg(windows)]
+fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    devlanes_sys_windows::file::rename_retrying(from, to)
+}
+
+/// [`fs::remove_file`].
+#[cfg(unix)]
+fn remove_file(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path)
+}
+
+/// [`fs::remove_file`], retried as [`rename`] is.
+#[cfg(windows)]
+fn remove_file(path: &Path) -> std::io::Result<()> {
+    devlanes_sys_windows::file::remove_file_retrying(path)
 }
 
 fn is_not_found(error: &Error) -> bool {
@@ -693,7 +718,7 @@ fn is_not_found(error: &Error) -> bool {
 
 /// Retention and the daemon's maintenance pass may race on the same file.
 fn remove_if_exists(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
+    match remove_file(path) {
         Err(error) if error.kind() != ErrorKind::NotFound => Err(error.into()),
         _ => Ok(()),
     }
@@ -709,8 +734,8 @@ fn close_segment(directory: &Path, compress: bool, meta: &mut SegmentMetadata) -
         let mut target = File::create(&temporary)?;
         zstd::stream::copy_encode(&mut source, &mut target, 3)?;
         target.flush()?;
-        fs::rename(&temporary, &destination)?;
-        fs::remove_file(&meta.path)?;
+        rename(&temporary, &destination)?;
+        remove_file(&meta.path)?;
         meta.path = destination;
         meta.compressed = true;
         meta.bytes = fs::metadata(&meta.path)?.len();
@@ -718,7 +743,7 @@ fn close_segment(directory: &Path, compress: bool, meta: &mut SegmentMetadata) -
     let metadata_path = directory.join(metadata_name(meta.first_seq));
     let temporary = metadata_path.with_extension("json.tmp");
     fs::write(&temporary, serde_json::to_vec(meta)?)?;
-    fs::rename(temporary, metadata_path)?;
+    rename(&temporary, &metadata_path)?;
     Ok(())
 }
 

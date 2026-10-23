@@ -10,6 +10,8 @@ pub mod banner;
 pub mod daemonlog;
 pub mod doctor;
 pub mod graph;
+#[cfg(windows)]
+mod home;
 pub mod hyperlink;
 pub mod input;
 pub mod logfile;

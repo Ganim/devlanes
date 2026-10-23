@@ -161,17 +161,22 @@ impl NssStore {
     /// Creates the shared database so Chromium finds the CA on its first start.
     async fn create_shared(&self, certutil: &str, dir: &Path) -> Result<(), TrustError> {
         let owned = dir.to_owned();
-        tokio::task::spawn_blocking(move || {
+        #[cfg(unix)]
+        let create = move || {
             use std::os::unix::fs::DirBuilderExt as _;
             // Chromium creates this directory 0700; match it since it can hold client keys.
             std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
                 .create(&owned)
-        })
-        .await
-        .map_err(|error| TrustError::io("creating the NSS database", io::Error::other(error)))?
-        .map_err(|error| TrustError::io(format!("creating {}", dir.display()), error))?;
+        };
+        // The profile directory's ACL already keeps other users out on Windows.
+        #[cfg(windows)]
+        let create = move || std::fs::DirBuilder::new().recursive(true).create(&owned);
+        tokio::task::spawn_blocking(create)
+            .await
+            .map_err(|error| TrustError::io("creating the NSS database", io::Error::other(error)))?
+            .map_err(|error| TrustError::io(format!("creating {}", dir.display()), error))?;
         let command = CommandLine::new(certutil)
             .args(["-N", "-d"])
             .arg(sql_arg(dir)?)

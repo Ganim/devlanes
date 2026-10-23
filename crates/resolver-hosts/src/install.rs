@@ -13,9 +13,10 @@
 //! rule is never read before it is renamed. A failure after activation starts puts
 //! the previous helper and rule back.
 
-use std::io::{self, Read as _, Write as _};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::{io::Write as _, os::unix::fs::OpenOptionsExt as _};
 
 use devlanes_hosts_helper::{INSTALL_PATH, PROTOCOL, SUDOERS_PATH};
 
@@ -903,7 +904,19 @@ impl PrivateCopies {
     }
 }
 
+/// Refuses, since [`Platform::current`] has no Windows install to stage files for.
+/// Windows answers `*.localhost` itself, so `certs trust --hosts` installs
+/// nothing there and never reaches this.
+#[cfg(windows)]
+fn write_new(path: &Path, _bytes: &[u8], _mode: u32) -> Result<(), InstallError> {
+    Err(InstallError::io(
+        format!("writing {}", path.display()),
+        io::Error::new(io::ErrorKind::Unsupported, "not supported on Windows"),
+    ))
+}
+
 /// Creates `path` exclusively with `mode` and writes `bytes`.
+#[cfg(unix)]
 fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), InstallError> {
     std::fs::OpenOptions::new()
         .write(true)
@@ -914,8 +927,11 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), InstallError> {
         .map_err(|error| InstallError::io(format!("writing {}", path.display()), error))
 }
 
+// Tests marked `cfg(unix)` stage real files or check Unix paths; the installer
+// is Unix only, since Windows needs no hosts helper.
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::sync::{Arc, Mutex, PoisonError};
 
     use super::*;
@@ -979,6 +995,7 @@ mod tests {
         assert!(sudoers_contents("a\nb").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn macos_install_plan_snapshot() {
         let plan = install_plan(&inputs(Platform::Macos, true)).expect("plan");
@@ -1079,6 +1096,7 @@ mod tests {
         assert!(commands.iter().all(|command| !command.contains("wheel")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn relative_paths_become_absolute() {
         let plan = install_plan(&InstallInputs {
@@ -1091,6 +1109,7 @@ mod tests {
         assert_eq!(plan.stage[0].command.args[7], "--");
     }
 
+    #[cfg(unix)]
     #[test]
     /// A path that does not exist fails under sudo as "command not found", so every
     /// tool must be where this platform keeps it.
@@ -1209,10 +1228,12 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn version_line(build: &str) -> String {
         format!("devlanes-hosts 0.1.0 protocol={PROTOCOL} build={build}\n")
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn debug_builds_are_refused() {
         let executor = FakeExecutor::new(|_| Ok(CommandOutput::ok(version_line("debug"))));
@@ -1295,6 +1316,7 @@ mod tests {
     }
 
     /// What a fake install run sees and does.
+    #[cfg(unix)]
     #[derive(Default)]
     struct World {
         /// Bytes `install` copied into the helper staging path.
@@ -1316,6 +1338,7 @@ mod tests {
     }
 
     /// A fake executor and filesystem acting out the plan against `world`.
+    #[cfg(unix)]
     fn fake_install(world: Arc<Mutex<World>>) -> (FakeExecutor, Arc<FakeFs>) {
         let fs = Arc::new(FakeFs::standard());
         let executor = {
@@ -1388,6 +1411,7 @@ mod tests {
     }
 
     /// A helper binary in a temp dir; the dir must outlive the install.
+    #[cfg(unix)]
     fn source() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("devlanes-hosts");
@@ -1395,10 +1419,12 @@ mod tests {
         (dir, path)
     }
 
+    #[cfg(unix)]
     fn ran(executor: &FakeExecutor) -> Vec<String> {
         strings(&executor.calls())
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn full_install_with_fakes() {
         let world = Arc::new(Mutex::new(World::default()));
@@ -1449,6 +1475,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_source_rebuilt_after_the_check_does_not_reach_root() {
         let (_dir, source) = source();
@@ -1467,6 +1494,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_private_copy_changed_during_the_check_is_refused() {
         let world = Arc::new(Mutex::new(World {
@@ -1486,6 +1514,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_swapped_staged_helper_is_discarded_before_activation() {
         let world = Arc::new(Mutex::new(World {
@@ -1514,6 +1543,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_edited_staged_rule_is_discarded_before_activation() {
         let world = Arc::new(Mutex::new(World {
@@ -1542,6 +1572,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_failing_full_check_restores_the_previous_rule() {
         let world = Arc::new(Mutex::new(World {
@@ -1583,6 +1614,7 @@ mod tests {
         }));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_ineffective_rule_is_reported() {
         let fs = FakeFs::standard();

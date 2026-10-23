@@ -370,6 +370,12 @@ mod tests {
         })
         .expect("valid input");
         insta::assert_snapshot!(result.args.join(" "), @"--port 20010 --inspector-port 20011 --var A:1 --var PUBLIC_BASE_URL:https://api.acme-1.localhost --env-file .dev.vars.stripe");
+        let registry = Path::new("/data/acme/7").join(REGISTRY_DIR);
+        assert_eq!(
+            result.env.get(REGISTRY_ENV).map(String::as_str),
+            Some(registry.display().to_string().as_str())
+        );
+        #[cfg(unix)]
         assert_eq!(
             result.env.get(REGISTRY_ENV).map(String::as_str),
             Some("/data/acme/7/wrangler-registry")

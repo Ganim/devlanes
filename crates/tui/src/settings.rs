@@ -1004,12 +1004,17 @@ pub fn perform(request: Request, home: Option<PathBuf>, sender: mpsc::Sender<Msg
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
             Err(error) => Err(format!("Cannot read {}: {error}.", path.display())),
         };
+        #[cfg(unix)]
         let shown = match std::env::var_os("HOME").map(PathBuf::from) {
             Some(user) if path.starts_with(&user) => {
                 format!("~/{}", path.strip_prefix(&user).unwrap_or(&path).display())
             }
             _ => path.display().to_string(),
         };
+        #[cfg(windows)]
+        let shown = devlanes_client::user_home()
+            .and_then(|user| crate::home::shorten(&user, &path))
+            .unwrap_or_else(|| path.display().to_string());
         let reply = Reply::Loaded {
             path: shown,
             source,

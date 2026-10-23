@@ -1,0 +1,30 @@
+[package]
+name = "devlanes-trust-windows"
+description = "Windows user root store trust for the devlanes CA, read by Chrome, Edge and Firefox."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The store calls go through devlanes-sys-windows, so the crate is empty on other platforms.
+[target.'cfg(windows)'.dependencies]
+async-trait.workspace = true
+base64.workspace = true
+devlanes-sys-windows = { path = "../sys-windows" }
+devlanes-trust = { path = "../trust" }
+sha1 = "0.10"
+tokio.workspace = true
+# Mozilla's roots for bundle.pem: Windows fetches public roots on first use, so
+# its own store lacks many of them.
+webpki-root-certs = "1"
+
+[target.'cfg(windows)'.dev-dependencies]
+devlanes-pki = { path = "../pki" }
+devlanes-sys-windows = { path = "../sys-windows", features = ["test-support"] }
+rcgen = "0.14"
+tempfile.workspace = true
+tokio.workspace = true

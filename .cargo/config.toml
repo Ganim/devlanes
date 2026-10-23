@@ -3,3 +3,13 @@
 warnings = "deny"
 # Every compile goes through the kache build cache; see CONTRIBUTING.md.
 rustc-wrapper = "kache"
+
+# Windows binaries link the C runtime statically, so they run without the Visual C++
+# Redistributable, and load the DLLs they import from System32 only, so a DLL placed
+# next to devlanes.exe is never loaded, including when it runs elevated. A RUSTFLAGS
+# environment variable replaces these flags.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/DEPENDENTLOADFLAG:0x800"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/DEPENDENTLOADFLAG:0x800"]

@@ -10,7 +10,8 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[dependencies]
+# The crate is empty on Windows, which gets its own runner.
+[target.'cfg(unix)'.dependencies]
 async-trait.workspace = true
 bytes.workspace = true
 devlanes-core = { path = "../core" }

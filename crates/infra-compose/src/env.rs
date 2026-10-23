@@ -2,6 +2,15 @@ use std::collections::BTreeMap;
 
 use crate::{Error, cli::ComposeProject};
 
+/// Compose splits `COMPOSE_FILE` on `COMPOSE_PATH_SEPARATOR`, which defaults to
+/// the host's path-list separator.
+#[cfg(unix)]
+pub(crate) const COMPOSE_FILE_SEPARATOR: &str = ":";
+/// Compose splits `COMPOSE_FILE` on `COMPOSE_PATH_SEPARATOR`, which defaults to
+/// `;` on Windows, where `:` follows every drive letter.
+#[cfg(windows)]
+pub(crate) const COMPOSE_FILE_SEPARATOR: &str = ";";
+
 /// Variables for `infra.setup`/`teardown` entries, so `docker compose exec` inside them
 /// targets the shared project: `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE` (absolute paths of
 /// the primary worktree's files), `COMPOSE_PROFILES` when profiles are active, and
@@ -22,13 +31,16 @@ pub fn setup_env(
     for file in shared.absolute_files() {
         let text = file.to_string_lossy().into_owned();
         // COMPOSE_FILE is split on the platform path separator.
-        if text.contains(':') {
+        if text.contains(COMPOSE_FILE_SEPARATOR) {
             return Err(Error::PathSeparator(file));
         }
         files.push(text);
     }
     if !files.is_empty() {
-        env.insert("COMPOSE_FILE".to_owned(), files.join(":"));
+        env.insert(
+            "COMPOSE_FILE".to_owned(),
+            files.join(COMPOSE_FILE_SEPARATOR),
+        );
     }
     if !shared.profiles.is_empty() {
         env.insert("COMPOSE_PROFILES".to_owned(), shared.profiles.join(","));
@@ -61,6 +73,21 @@ mod tests {
     fn builds_setup_env() {
         let env = setup_env(&shared(), Some("acme-lane2")).expect("valid");
         assert_eq!(env["COMPOSE_PROJECT_NAME"], "monorepo");
+        let file = |name: &str| {
+            std::path::Path::new("/work/acme")
+                .join(name)
+                .display()
+                .to_string()
+        };
+        assert_eq!(
+            env["COMPOSE_FILE"],
+            format!(
+                "{}{COMPOSE_FILE_SEPARATOR}{}",
+                file("docker-compose.yml"),
+                file("docker-compose.dev.yml")
+            )
+        );
+        #[cfg(unix)]
         assert_eq!(
             env["COMPOSE_FILE"],
             "/work/acme/docker-compose.yml:/work/acme/docker-compose.dev.yml"
@@ -81,10 +108,23 @@ mod tests {
     #[test]
     fn rejects_separator_in_paths() {
         let mut project = shared();
-        project.working_dir = "/work/a:b".into();
+        project.working_dir = format!("/work/a{COMPOSE_FILE_SEPARATOR}b").into();
         assert!(matches!(
             setup_env(&project, None),
             Err(Error::PathSeparator(_))
         ));
+    }
+
+    /// Drive letters are not the separator on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_paths_are_accepted() {
+        let mut project = shared();
+        project.working_dir = r"C:\work\acme".into();
+        let env = setup_env(&project, None).expect("valid");
+        assert_eq!(
+            env["COMPOSE_FILE"],
+            r"C:\work\acme\docker-compose.yml;C:\work\acme\docker-compose.dev.yml"
+        );
     }
 }

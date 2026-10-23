@@ -2,9 +2,10 @@
 //! hosts helper and the OS resolver file (they prompt for a password) and
 //! `secrets unlock` (fnox asks for the vault there).
 
+#[cfg(unix)]
+use std::net::SocketAddr;
 use std::{
     collections::BTreeSet,
-    net::SocketAddr,
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -13,12 +14,21 @@ use std::{
 use devlanes_cli::{Action, Rendered, Runtime};
 use devlanes_client::{Client, Paths};
 use devlanes_proto::{Context, Method, RpcError};
+#[cfg(unix)]
 use devlanes_resolver_dns::ResolverFile;
+#[cfg(unix)]
 use devlanes_resolver_hosts::CommandSpec;
 use devlanes_trust::{CaCertificate, TrustStatus, TrustStore, TrustTarget};
 use serde_json::{Value, json};
 
 use crate::{driver::rpc_error, output::emit};
+
+/// `certs trust --resolver` through an NRPT rule, Windows' counterpart of the
+/// resolver file.
+#[cfg(windows)]
+pub(crate) mod nrpt;
+#[cfg(windows)]
+use nrpt::resolver_install;
 
 /// Name shown in keychains and NSS databases.
 const CA_NAME: &str = "devlanes development CA";
@@ -194,9 +204,21 @@ pub(crate) const UNCONSTRAINED_CA: &str = "the devlanes CA has no name constrain
 
 /// The commands that replace the CA under `home` with a constrained one
 /// (`crates/pki/README.md`, "Name constraints").
+#[cfg(unix)]
 pub(crate) fn recreate_ca_command(home: &Path) -> String {
     format!(
         "devlanes certs untrust && rm -r {} && devlanes certs trust && devlanes daemon restart",
+        home.join("ca").display()
+    )
+}
+
+/// The steps that replace the CA under `home` with a constrained one
+/// (`crates/pki/README.md`, "Name constraints"), in words: Windows shells
+/// disagree on both `&&` and recursive delete.
+#[cfg(windows)]
+pub(crate) fn recreate_ca_command(home: &Path) -> String {
+    format!(
+        "devlanes certs untrust, delete the folder {}, then devlanes certs trust and devlanes daemon restart",
         home.join("ca").display()
     )
 }
@@ -227,7 +249,8 @@ fn targets(config: &devlanes_config::UserConfig) -> Vec<TrustTarget> {
 }
 
 /// The OS decides the store implementation at compile time. `own_ca` lets the
-/// macOS keychain also remove older devlanes CAs by label; mkcert's CA is not ours.
+/// macOS keychain and the Windows root store also remove older devlanes CAs by
+/// label or subject; mkcert's CA is not ours.
 /// On Linux, sudo may ask for a password only when this invocation may prompt.
 fn store(
     target: TrustTarget,
@@ -245,7 +268,20 @@ fn store(
         };
         trust.store(target)
     }
-    #[cfg(not(target_os = "macos"))]
+    // Windows confirms each change in its own dialog, as macOS does, so
+    // `can_prompt` changes nothing; without a desktop the store refuses first.
+    #[cfg(windows)]
+    {
+        let _ = can_prompt;
+        let trust = devlanes_trust_windows::WindowsTrust::default();
+        let trust = if own_ca {
+            trust.with_ca_subject(devlanes_trust_windows::DEVLANES_CA_SUBJECT)
+        } else {
+            trust
+        };
+        trust.store(target)
+    }
+    #[cfg(target_os = "linux")]
     {
         use devlanes_trust_linux::{LinuxTrust, Privilege};
         let _ = own_ca;
@@ -406,6 +442,7 @@ async fn trust(runtime: &Runtime, paths: &Paths, install: bool) -> Result<u8, Rp
 
 /// The OS resolver file that sends `tld` lookups to the daemon's DNS server at
 /// `server`. Blocking: on Linux it asks `systemctl` for the systemd version.
+#[cfg(unix)]
 pub fn resolver_file(tld: &str, server: SocketAddr) -> Result<ResolverFile, String> {
     let zone = devlanes_resolver_dns::Zone::new(tld).map_err(|error| error.to_string())?;
     #[cfg(target_os = "macos")]
@@ -429,7 +466,7 @@ pub fn resolver_file(tld: &str, server: SocketAddr) -> Result<ResolverFile, Stri
 }
 
 /// The version from `systemctl --version`'s first line, `systemd 255 (255.4-1)`.
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(all(unix, any(not(target_os = "macos"), test)))]
 fn systemd_version(output: &str) -> Option<u32> {
     let mut words = output.lines().next()?.split_whitespace();
     (words.next()? == "systemd").then_some(())?;
@@ -437,6 +474,7 @@ fn systemd_version(output: &str) -> Option<u32> {
 }
 
 /// Absolute path of a root-run program from the system directories, never `PATH`.
+#[cfg(unix)]
 fn system_program(name: &str) -> Result<String, RpcError> {
     devlanes_trust::find_system_program(&devlanes_trust::SystemExecutor, name)
         .map(|path| path.display().to_string())
@@ -451,11 +489,13 @@ fn system_program(name: &str) -> Result<String, RpcError> {
 
 /// Where `certs trust --resolver` records the file it wrote, so `untrust` removes
 /// that file even after `hostnames.tld` changes.
+#[cfg(unix)]
 fn resolver_record(paths: &Paths) -> PathBuf {
     paths.home.join("resolver-file")
 }
 
 /// What occupies a resolver file path now.
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Occupant {
     Absent,
@@ -466,6 +506,7 @@ enum Occupant {
 }
 
 /// Reads `path` to see whose file it is. Blocking.
+#[cfg(unix)]
 fn occupant(path: &Path) -> Result<Occupant, String> {
     match std::fs::read_to_string(path) {
         Ok(contents) if devlanes_resolver_dns::is_managed(&contents) => Ok(Occupant::Devlanes),
@@ -477,6 +518,7 @@ fn occupant(path: &Path) -> Result<Occupant, String> {
 }
 
 /// Files to remove and the file to write for one `--resolver` run.
+#[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 struct ResolverPlan {
     remove: Vec<ResolverFile>,
@@ -486,6 +528,7 @@ struct ResolverPlan {
 /// Decides what `--resolver` changes. `configured` is the file for the current
 /// `hostnames.tld`, `recorded` the file the last install wrote. Only files that
 /// start with the devlanes marker are overwritten or removed.
+#[cfg(unix)]
 fn resolver_plan(
     install: bool,
     configured: Option<ResolverFile>,
@@ -547,6 +590,7 @@ fn not_configured() -> RpcError {
 /// sudo; `certs untrust --resolver` removes the file the last install recorded.
 /// Either way the OS is told to reload. Files without the devlanes marker are
 /// never touched.
+#[cfg(unix)]
 async fn resolver_install(runtime: &Runtime, paths: &Paths, install: bool) -> Result<u8, RpcError> {
     let (tld, config_error) = match crate::user_config::load(paths).await {
         Ok(config) => {
@@ -815,6 +859,8 @@ mod tests {
         assert_eq!(code, 1, "a later success does not hide the failure");
     }
 
+    // Resolver files are the Unix form; Windows writes an NRPT rule.
+    #[cfg(unix)]
     #[test]
     /// The systemd version picks the resolved file form.
     fn systemd_version_from_systemctl() {
@@ -828,10 +874,22 @@ mod tests {
     }
 
     /// An `Output` with exit `code` and `stdout`.
+    #[cfg(unix)]
     fn output(code: i32, stdout: &str) -> std::process::Output {
         use std::os::unix::process::ExitStatusExt;
         std::process::Output {
             status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: b"boom".to_vec(),
+        }
+    }
+
+    /// An `Output` with exit `code` and `stdout`.
+    #[cfg(windows)]
+    fn output(code: u32, stdout: &str) -> std::process::Output {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code),
             stdout: stdout.as_bytes().to_vec(),
             stderr: b"boom".to_vec(),
         }
@@ -858,12 +916,22 @@ oA==
     #[test]
     /// An old unconstrained CA gets recreate instructions; a new one does not.
     fn unconstrained_ca_is_reported() {
-        let home = Path::new("/home/me/.devlanes");
+        #[cfg(unix)]
+        let (home, ca) = (Path::new("/home/me/.devlanes"), "/home/me/.devlanes/ca");
+        #[cfg(windows)]
+        let (home, ca) = (
+            Path::new(r"C:\Users\me\.devlanes"),
+            r"C:\Users\me\.devlanes\ca",
+        );
         let old = CaCertificate::from_pem(UNCONSTRAINED_CA, CA_NAME).expect("parse");
         let hint = unconstrained_ca_hint(&old, home).expect("hint");
+        #[cfg(unix)]
+        let remove = format!("rm -r {ca}");
+        #[cfg(windows)]
+        let remove = format!("delete the folder {ca}");
         for step in [
             "devlanes certs untrust",
-            "rm -r /home/me/.devlanes/ca",
+            &remove,
             "devlanes certs trust",
             "devlanes daemon restart",
         ] {
@@ -899,11 +967,13 @@ oA==
     #[test]
     /// CAROOT needs a successful exit and a non-empty absolute path.
     fn mkcert_caroot_is_validated() {
+        #[cfg(unix)]
+        let root = "/Users/me/Library/Application Support/mkcert";
+        #[cfg(windows)]
+        let root = r"C:\Users\me\AppData\Local\mkcert";
         assert_eq!(
-            mkcert_caroot(&output(0, "/Users/me/Library/Application Support/mkcert\n")),
-            Ok(PathBuf::from(
-                "/Users/me/Library/Application Support/mkcert"
-            ))
+            mkcert_caroot(&output(0, &format!("{root}\n"))),
+            Ok(PathBuf::from(root))
         );
         assert!(mkcert_caroot(&output(1, "/abs\n")).is_err_and(|e| e.contains("boom")));
         assert!(mkcert_caroot(&output(0, " \n")).is_err());
@@ -911,6 +981,7 @@ oA==
     }
 
     /// A resolver file at `path` (contents are irrelevant to planning).
+    #[cfg(unix)]
     fn file(path: &str) -> ResolverFile {
         ResolverFile {
             path: PathBuf::from(path),
@@ -920,6 +991,7 @@ oA==
     }
 
     /// Occupants by path for planning tests.
+    #[cfg(unix)]
     fn occupants(
         entries: &'static [(&'static str, Occupant)],
     ) -> impl Fn(&Path) -> Result<Occupant, String> {
@@ -931,6 +1003,7 @@ oA==
         }
     }
 
+    #[cfg(unix)]
     #[test]
     /// Valet's or puma-dev's `/etc/resolver/test` is neither overwritten nor removed.
     fn foreign_resolver_files_are_refused() {
@@ -943,6 +1016,7 @@ oA==
         assert_eq!(error.code, "resolver_file_foreign");
     }
 
+    #[cfg(unix)]
     #[test]
     /// Install writes the configured file and drops the recorded one after a TLD
     /// change; untrust removes the recorded file, not the configured one.
@@ -1004,6 +1078,7 @@ oA==
         );
     }
 
+    #[cfg(unix)]
     #[test]
     /// Only marker-first files count as devlanes'.
     fn occupant_reads_the_marker() {

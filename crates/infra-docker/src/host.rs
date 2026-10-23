@@ -5,7 +5,12 @@ use serde::Deserialize;
 use crate::Error;
 
 /// The engine Docker uses without `DOCKER_HOST` or a context.
+#[cfg(unix)]
 pub const DEFAULT_HOST: &str = "unix:///var/run/docker.sock";
+/// The engine Docker uses without `DOCKER_HOST` or a context: Docker Desktop's
+/// named pipe, which bollard reaches through its `npipe://` support.
+#[cfg(windows)]
+pub const DEFAULT_HOST: &str = "npipe:////./pipe/docker_engine";
 
 #[derive(Deserialize)]
 struct CliConfig {
@@ -55,12 +60,27 @@ pub fn resolve_host(
         .ok_or(Error::UnknownContext(context))
 }
 
-/// The CLI config directory: `DOCKER_CONFIG`, else `$HOME/.docker`.
+/// The CLI config directory: `DOCKER_CONFIG`, else `.docker` in the user's home
+/// (`$HOME` on Unix, the profile directory on Windows).
 pub fn config_dir(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     env("DOCKER_CONFIG")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|home| PathBuf::from(home).join(".docker")))
+        .or_else(|| user_home(&env).map(|home| home.join(".docker")))
+}
+
+/// The home the Docker CLI keeps `.docker` in: `$HOME`.
+#[cfg(unix)]
+fn user_home(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    env("HOME").map(PathBuf::from)
+}
+
+/// The home the Docker CLI keeps `.docker` in: the profile directory. The
+/// Windows Docker CLI and Docker Desktop ignore `HOME`, which Git Bash and
+/// MSYS tools may set to somewhere else.
+#[cfg(windows)]
+fn user_home(_env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    devlanes_core::paths::user_home()
 }
 
 fn read_current_context(path: &Path) -> Result<Option<String>, Error> {
@@ -194,10 +214,22 @@ mod tests {
             config_dir(env(&[("DOCKER_CONFIG", "/c"), ("HOME", "/h")])),
             Some(PathBuf::from("/c"))
         );
-        assert_eq!(
-            config_dir(env(&[("HOME", "/h")])),
-            Some(PathBuf::from("/h/.docker"))
-        );
-        assert_eq!(config_dir(env(&[])), None);
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                config_dir(env(&[("HOME", "/h")])),
+                Some(PathBuf::from("/h/.docker"))
+            );
+            assert_eq!(config_dir(env(&[])), None);
+        }
+        #[cfg(windows)]
+        {
+            let profile = std::env::home_dir().expect("profile directory");
+            assert_eq!(
+                config_dir(env(&[("HOME", "/h")])),
+                Some(profile.join(".docker"))
+            );
+            assert_eq!(config_dir(env(&[])), Some(profile.join(".docker")));
+        }
     }
 }

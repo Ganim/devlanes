@@ -17,7 +17,7 @@ use devlanes_proto::{Actor, LogLine, LogQuery, Page, RpcError};
 use serde_json::json;
 use tokio::sync::{broadcast, watch};
 
-use crate::screen::Screen;
+use crate::{rendered::Rendered, screen::Screen};
 
 /// Most output chunks fed to the screen model per blocking-pool trip.
 const PUMP_BATCH: usize = 64;
@@ -144,7 +144,9 @@ struct Inner {
     exit: watch::Sender<Option<ExitOutcome>>,
     /// The screen lock also orders re-broadcast, so an attacher's snapshot and its
     /// subscription never leave a gap or a duplicate.
-    screen: StdMutex<Screen>,
+    screen: StdMutex<Model>,
+    /// The model is [`Model::Rendered`]; fixed at start.
+    rendered: bool,
     live: broadcast::Sender<Bytes>,
     log: Arc<StdMutex<UnitLog>>,
     log_tx: std::sync::mpsc::SyncSender<LogCommand>,
@@ -162,6 +164,67 @@ struct Inner {
     exit_claimed: std::sync::atomic::AtomicBool,
     /// When the exit was published (Unix ms); 0 while the run lasts.
     ended_at_ms: AtomicU64,
+}
+
+/// The screen model behind attach snapshots.
+enum Model {
+    /// Replays recent output at the viewer's size; every Unix unit.
+    Replay(Screen),
+    /// Re-wraps rendered rows at the viewer's size, for units whose output
+    /// renders their terminal ([`Unit::renders_screen`]).
+    Rendered(Rendered),
+}
+
+impl Model {
+    /// The model `unit` needs, at the size its terminal starts at.
+    fn for_unit(unit: &dyn Unit) -> Self {
+        if unit.renders_screen() {
+            Self::Rendered(Rendered::new(TerminalSize::RENDERED_HEADLESS))
+        } else {
+            Self::Replay(Screen::new(TerminalSize::default()))
+        }
+    }
+
+    /// Feeds output.
+    fn process(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Replay(screen) => screen.process(bytes),
+            Self::Rendered(screen) => screen.process(bytes),
+        }
+    }
+
+    /// Resizes the grid, as the terminal was. A rendered grid ignores this: it
+    /// resizes where the unit's output marks the new size.
+    fn resize(&mut self, size: TerminalSize) {
+        match self {
+            Self::Replay(screen) => screen.resize(size),
+            Self::Rendered(_) => {}
+        }
+    }
+
+    /// The grid as the program (or the console host) drew it.
+    fn screen(&self) -> &vt100::Screen {
+        match self {
+            Self::Replay(screen) => screen.screen(),
+            Self::Rendered(screen) => screen.screen(),
+        }
+    }
+
+    /// A full-screen redraw for a viewer of `size` (the grid's when `None`).
+    fn snapshot(&self, size: Option<TerminalSize>) -> Bytes {
+        match self {
+            Self::Replay(screen) => screen.snapshot(size),
+            Self::Rendered(screen) => screen.snapshot(size),
+        }
+    }
+
+    /// A rendered model's copy for one redraw (see [`Rendered::frame`]).
+    fn frame(&self, size: Option<TerminalSize>) -> Option<crate::rendered::Frame> {
+        match self {
+            Self::Replay(_) => None,
+            Self::Rendered(screen) => Some(screen.frame(size)),
+        }
+    }
 }
 
 /// How long the exit waits for remaining output to reach the log after the leader died.
@@ -191,6 +254,7 @@ impl UnitHost {
         let (log_tx, log_rx) = std::sync::mpsc::sync_channel(LOG_QUEUE);
         let log_signals = Arc::new(LogSignals::default());
         let log_done = watch::channel(false).0;
+        let model = Model::for_unit(unit.as_ref());
         spawn_log_thread(
             log.clone(),
             log_rx,
@@ -205,7 +269,8 @@ impl UnitHost {
                 identity,
                 state: watch::channel(UnitState::Starting).0,
                 exit: watch::channel(None).0,
-                screen: StdMutex::new(Screen::new(TerminalSize::default())),
+                rendered: matches!(model, Model::Rendered(_)),
+                screen: StdMutex::new(model),
                 live: broadcast::channel(1024).0,
                 log,
                 log_tx,
@@ -426,6 +491,15 @@ impl UnitHost {
         let inner = self.inner.clone();
         // Replaying recent output is CPU work proportional to it; keep it off the executor.
         let snapshot = tokio::task::spawn_blocking(move || match inner.screen.lock() {
+            Ok(model) if inner.rendered => {
+                let frame = model.frame(size);
+                let live = inner.live.subscribe();
+                // Rendered viewers only ever get redraws, so the replay may run
+                // after the lock is released.
+                drop(model);
+                let snapshot = frame.map(|frame| frame.render(None).0);
+                (snapshot.unwrap_or_default(), live)
+            }
             Ok(screen) => {
                 let snapshot = screen.snapshot(size);
                 tracing::debug!(
@@ -454,6 +528,41 @@ impl UnitHost {
                 .lock()
                 .map(|screen| screen.snapshot(size))
                 .unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    /// Whether the output renders the unit's terminal (see
+    /// [`Unit::renders_screen`]); viewers then get redraws from
+    /// [`Self::render`] instead of live bytes.
+    pub fn renders_screen(&self) -> bool {
+        self.inner.rendered
+    }
+
+    /// The size the unit's terminal has while no interactive viewer owns it.
+    pub fn headless_size(&self) -> TerminalSize {
+        if self.renders_screen() {
+            TerminalSize::RENDERED_HEADLESS
+        } else {
+            TerminalSize::default()
+        }
+    }
+
+    /// Redraw of a rendered unit for a viewer of `size` (the unit's own size
+    /// when `None`) that shows `shown`, the screen the last redraw left (a
+    /// whole screen when `None`), plus the screen this one leaves. Only the
+    /// copy of the model holds the screen lock, so the unit's output is not
+    /// held up by the replay. Empty for other units.
+    pub async fn render(
+        &self,
+        size: Option<TerminalSize>,
+        shown: Option<vt100::Screen>,
+    ) -> (Bytes, Option<vt100::Screen>) {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let frame = inner.screen.lock().ok().and_then(|model| model.frame(size));
+            frame.map_or((Bytes::new(), None), |frame| frame.render(shown.as_ref()))
         })
         .await
         .unwrap_or_default()
@@ -961,7 +1070,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use async_trait::async_trait;
-    use devlanes_core::{Error, OutputChunk, OutputStream};
+    use devlanes_core::{Error, OutputChunk, OutputStream, StopSignal};
 
     use super::*;
 
@@ -1024,7 +1133,9 @@ mod tests {
             Err(Error::Unsupported("pipe units have no terminal".into()))
         }
         async fn stop(&self, policy: StopPolicy) -> Result<(), Error> {
-            self.end(None, Some(policy.signal));
+            // These tests only stop with SIGTERM; report it the way the PTY runner does.
+            assert_eq!(policy.signal, StopSignal::Terminate);
+            self.end(None, Some(15));
             Ok(())
         }
         async fn wait(&self) -> Result<ExitOutcome, Error> {
@@ -1192,7 +1303,7 @@ mod tests {
     async fn overdue_stop_is_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
         let policy = StopPolicy {
-            signal: 15,
+            signal: StopSignal::Terminate,
             timeout: Duration::ZERO,
         };
         let margin = Duration::from_millis(200);

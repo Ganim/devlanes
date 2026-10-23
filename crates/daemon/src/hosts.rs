@@ -166,6 +166,41 @@ pub fn helper_check(result: &Result<HelperVersion, HostsError>, expected: &str) 
     }
 }
 
+/// The hosts status on Windows, which resolves every `*.localhost` name by
+/// itself, so devlanes never writes the hosts file there whatever
+/// `hosts_file` says. Names under a `resolver` TLD go through the NRPT rule,
+/// which `doctor`'s DNS check reports.
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+pub struct NativeHosts {
+    policy: HostsFilePolicy,
+    resolution: Option<LocalhostResolution>,
+}
+
+#[cfg(windows)]
+impl NativeHosts {
+    /// The user's policy and the startup probe, `None` when `never` skipped it.
+    pub fn new(policy: HostsFilePolicy, resolution: Option<LocalhostResolution>) -> Self {
+        Self { policy, resolution }
+    }
+
+    /// `doctor`'s `hosts` object in [`HostsFile::status`]'s shape, with
+    /// `state: native`: nothing is written and no helper is involved.
+    pub fn status(&self) -> Value {
+        json!({
+            "mode": self.policy.user_mode().to_string(),
+            "probe": self.resolution.map(probe_word),
+            "state": "native",
+            "names": null,
+            "desired": 0,
+            "skipped": 0,
+            "last_error": null,
+            "tld_error": null,
+            "helper": null,
+        })
+    }
+}
+
 /// The daemon's view of the hosts fallback: policy, probe result and the sync task.
 pub struct HostsFile {
     policy: HostsFilePolicy,
@@ -386,6 +421,10 @@ impl Inner {
 
     /// `doctor`'s `hosts` entry; `null` without the fallback.
     pub(crate) fn hosts_status(&self) -> Value {
+        #[cfg(windows)]
+        if let Some(native) = &self.integ.native_hosts {
+            return native.status();
+        }
         self.integ
             .hosts
             .as_ref()
@@ -502,6 +541,19 @@ mod tests {
         assert!(desired.names.iter().all(|name| !name.contains('*')));
         assert_eq!(desired.skipped.len(), 1);
         assert_eq!(desired.skipped[0].name, "*.pages-2.acme.localhost");
+    }
+
+    /// Windows reports the probe and writes nothing, whatever the mode.
+    #[cfg(windows)]
+    #[test]
+    fn windows_reports_the_probe_instead_of_a_helper() {
+        let status = NativeHosts::new(HostsFilePolicy::new(Some(Always)), Some(Loopback)).status();
+        assert_eq!(status["state"], "native");
+        assert_eq!(status["mode"], "always");
+        assert_eq!(status["probe"], "loopback");
+        assert!(status["helper"].is_null() && status["last_error"].is_null());
+        let never = NativeHosts::new(HostsFilePolicy::new(Some(Never)), None).status();
+        assert!(never["probe"].is_null(), "{never}");
     }
 
     #[test]

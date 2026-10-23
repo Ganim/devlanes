@@ -54,3 +54,11 @@ The TUI wraps each frame in synchronized output (`CSI ?2026h`/`l`) so terminals 
 `tui.theme: auto` uses true colour only when the terminal advertises it (`COLORTERM=truecolor`) and reports its background (`COLORFGBG`), otherwise the 16 ANSI colours; `dark`, `light` or `ansi` force one. `NO_COLOR` turns colours off everywhere, `CLICOLOR_FORCE` keeps them in pipes. `tui.glyphs: ascii` replaces the Unicode state symbols for fonts or locales without them; `auto` picks by `LANG`.
 
 A unit's colour is the first of its tags with a `tags.<name>.color` in `devlanes.yaml`, else the first category word in its tags, preset or name (`api` blue, `web` green, `worker` magenta, …), else a hash of its first tag or name; red is reserved for failures.
+
+## Windows consoles
+
+On Windows the CLI turns on escape-sequence processing for its console when it starts. A console that refuses it gets plain output with colours and every feature above turned off, whatever the settings say.
+
+Windows Terminal gets the progress bar, links, OSC 133 marks and bell notifications under `auto`, and no title unless you choose `always`, as listed above. A classic console window (conhost) is not detected as any of the terminals above, so under `auto` it gets bell notifications and none of the other features; `always` still writes them. Copying from the TUI with OSC 52 works in Windows Terminal; the classic console window does not support OSC 52. If its font lacks the state symbols, set `tui.glyphs: ascii`.
+
+Git Bash's own window (mintty) gives Windows programs no console, so prompts are cancelled with a message and `attach` fails there; use Windows Terminal or a console window for those. [Windows](windows.md#commands-you-type) has more on shells.

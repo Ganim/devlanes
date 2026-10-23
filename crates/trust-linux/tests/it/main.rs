@@ -1,4 +1,6 @@
 //! Argv tests for the Linux stores, plus ignored tests against real sudo and certutil.
+// The crate is empty on Windows.
+#![cfg(unix)]
 
 use std::sync::{Arc, Mutex};
 

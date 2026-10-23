@@ -22,6 +22,10 @@ tokio-util.workspace = true
 tracing.workspace = true
 walkdir = "2"
 
+[target.'cfg(windows)'.dependencies]
+# Folder identity, to notice a source root deleted and created again.
+devlanes-sys-windows = { path = "../sys-windows" }
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true

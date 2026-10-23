@@ -42,7 +42,11 @@ fn spawn_failure_names_the_program_and_reaches_the_log() -> Result<()> {
     assert_eq!(failure["reason"]["code"], "spawn_failed", "{result}");
     assert_eq!(data["program"], "devlanes-no-such-program", "{result}");
     assert_eq!(data["reason"], "not_found", "{result}");
+    #[cfg(unix)]
     assert_eq!(data["errno"], "ENOENT", "{result}");
+    // The runner searches PATH with PATHEXT itself, so no system call fails.
+    #[cfg(windows)]
+    assert!(data["errno"].is_null(), "{result}");
     assert!(
         data["path_searched"]
             .as_array()
@@ -148,7 +152,12 @@ fn verbose_output_stays_on_stderr_and_hides_secrets() -> Result<()> {
     bundle.expect_code(0)?;
     let unpacked = lab.home().join("bundle");
     fs::create_dir_all(&unpacked)?;
-    let status = Command::new("tar")
+    // System32's bsdtar: Git's GNU tar would read `C:` in the path as a remote host.
+    #[cfg(windows)]
+    let tar = devlanes_e2e::system32("tar.exe");
+    #[cfg(unix)]
+    let tar = "tar";
+    let status = Command::new(tar)
         .arg("-xzf")
         .arg(&archive)
         .arg("-C")

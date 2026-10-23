@@ -348,7 +348,7 @@ impl Store {
     /// Records the verified leader identity immediately after spawn. A second
     /// unfinished run of the same lane and unit fails with [`Error::Conflict`].
     pub async fn record_unit_run(&self, input: UnitRunInput) -> Result<UnitRun, Error> {
-        if input.unit.is_empty() || input.process.pid == 0 || input.process.sid == 0 {
+        if input.unit.is_empty() || input.process.pid == 0 || stored_session(&input.process) == 0 {
             return Err(Error::Invalid(
                 "unit name, PID and SID must be nonempty/nonzero".into(),
             ));
@@ -368,7 +368,7 @@ impl Store {
                     lane_id: input.lane_id.0,
                     unit: input.unit,
                     pid: i64::from(input.process.pid),
-                    sid: i64::from(input.process.sid),
+                    sid: stored_session(&input.process),
                     process_start_time: input.process.start_time.to_string(),
                     started_at: now()?,
                     actor_kind: actor_kind(input.actor.kind),
@@ -563,6 +563,22 @@ pub(crate) fn require_changed(changed: usize, record: &'static str) -> Result<()
     } else {
         Ok(())
     }
+}
+/// The `unit_runs.sid` value for a leader: its session.
+#[cfg(unix)]
+fn stored_session(process: &ProcessIdentity) -> i64 {
+    i64::from(process.sid)
+}
+/// The `unit_runs.sid` value for a leader. The column must be positive and
+/// Windows has no sessions (`sid` 0), so the leader's PID fills it; nothing
+/// on Windows reads it as a session.
+#[cfg(windows)]
+fn stored_session(process: &ProcessIdentity) -> i64 {
+    i64::from(if process.sid == 0 {
+        process.pid
+    } else {
+        process.sid
+    })
 }
 /// Unix milliseconds for audit timestamps.
 pub(crate) fn now() -> Result<i64, Error> {

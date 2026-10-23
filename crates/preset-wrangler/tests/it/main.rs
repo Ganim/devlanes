@@ -124,6 +124,12 @@ async fn adapter_renders_flags_and_env() {
     fake.script_body = Some("wrangler dev --persist-to .state");
     let draft = fake.apply().await.expect("apply");
     insta::assert_snapshot!(draft.args.join(" "), @"--port 20010 --inspector-port 20011 --var DEBUG:true --var PUBLIC_BASE_URL:https://api.acme-1.localhost --var RETRIES:3 --env-file .dev.vars");
+    let registry = Path::new(DATA).join("wrangler-registry");
+    assert_eq!(
+        draft.env.get(REGISTRY_ENV).map(String::as_str),
+        Some(registry.display().to_string().as_str())
+    );
+    #[cfg(unix)]
     assert_eq!(
         draft.env.get(REGISTRY_ENV).map(String::as_str),
         Some("/data/acme/7/wrangler-registry")
@@ -292,5 +298,9 @@ fn preset_arg_rendering_matrix() {
             ));
         }
     }
+    // The tauri overlay is joined below the lane data folder with `\` on
+    // Windows; the snapshot shows the Unix spelling.
+    #[cfg(windows)]
+    let rendered = rendered.replace('\\', "/");
     insta::assert_snapshot!(rendered);
 }

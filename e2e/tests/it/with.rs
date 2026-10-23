@@ -13,7 +13,7 @@ const CURL_API: &str = r#"url="$DEVLANES_PUBLIC_URL_API"
 case "$url" in *":$E2E_HTTPS_PORT") ;; *) echo "public URL without the proxy port: $url" >&2; exit 90 ;; esac
 host="${url#https://}"
 host="${host%%:*}"
-curl -fsS --max-time 10 --cacert "$DEVLANES_CA_CERT" \
+curl -fsS --max-time 10 --cacert "$DEVLANES_CA_CERT" $E2E_CURL_FLAGS \
   --resolve "$host:$E2E_HTTPS_PORT:127.0.0.1" "$url/healthz""#;
 
 /// Runs `devlanes with --logs-dir <dir> -- sh -c <script>` in the primary worktree.
@@ -30,7 +30,9 @@ fn with(lab: &Lab, logs: &Path, script: &str) -> Result<Output> {
             script,
         ],
     )?;
-    command.env("E2E_HTTPS_PORT", lab.https_port().to_string());
+    command
+        .env("E2E_HTTPS_PORT", lab.https_port().to_string())
+        .env("E2E_CURL_FLAGS", devlanes_e2e::CURL_FLAGS);
     lab.run(command, Duration::from_secs(90))
 }
 

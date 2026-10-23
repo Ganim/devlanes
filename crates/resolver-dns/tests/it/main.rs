@@ -177,3 +177,22 @@ async fn shutdown_stops_serving_and_frees_the_port() {
     let rebound = DnsServer::bind(addr, Zone::new("test").expect("zone")).await;
     assert!(rebound.is_ok(), "port is free after shutdown: {rebound:?}");
 }
+
+/// On Windows the server listens where NRPT rules point, and a held address
+/// names how to find its holder.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_held_address_names_the_way_to_its_holder() {
+    assert_eq!(
+        devlanes_resolver_dns::default_listen(),
+        "127.53.0.1:53".parse::<SocketAddr>().expect("addr")
+    );
+    let holder = std::net::UdpSocket::bind((Ipv4Addr::new(127, 53, 0, 1), 0)).expect("holder");
+    let addr = holder.local_addr().expect("addr");
+    let error = DnsServer::bind(addr, Zone::new("test").expect("zone"))
+        .await
+        .expect_err("held");
+    let message = error.to_string();
+    assert!(message.contains("another program holds port"), "{message}");
+    assert!(message.contains("Get-NetUDPEndpoint"), "{message}");
+}

@@ -22,6 +22,10 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
+# System32, where `find_system_program` looks on Windows.
+[target.'cfg(windows)'.dependencies]
+devlanes-sys-windows = { path = "../sys-windows" }
+
 [dev-dependencies]
 devlanes-pki = { path = "../pki" }
 rcgen = "0.14"

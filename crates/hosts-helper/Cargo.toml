@@ -15,6 +15,14 @@ bin-dir = "devlanes-{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 disabled-strategies = ["quick-install"]
 
+# devlanes-hosts is Unix-only and not in the Windows archives, so binstall neither
+# downloads nor compiles it for Windows.
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+disabled-strategies = ["crate-meta-data", "quick-install", "compile"]
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+disabled-strategies = ["crate-meta-data", "quick-install", "compile"]
+
 # Runs as root through a NOPASSWD sudo rule, so it stays std-only: every line that
 # runs privileged is in this crate. See README.md.
 [lib]

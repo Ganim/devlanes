@@ -28,6 +28,22 @@ const OVERRIDDEN_VARIABLES: &[&str] = &[
 /// Timeout for read-only commands (`version`, `config`, `ps`, `inspect`).
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Working directory for commands that address a project by name only, so no
+/// worktree (which may be gone) is involved: `/` on Unix.
+#[cfg(unix)]
+fn neutral_cwd() -> PathBuf {
+    PathBuf::from("/")
+}
+
+/// Working directory for commands that address a project by name only, so no
+/// worktree (which may be gone) is involved. `/` on Windows is the root of
+/// whatever drive the daemon started on, where Compose would pick up a stray
+/// `compose.yaml` or `.env`; the temp directory is the user's own.
+#[cfg(windows)]
+fn neutral_cwd() -> PathBuf {
+    std::env::temp_dir()
+}
+
 /// One Compose project invocation: `docker compose -p <name> -f <files> --env-file <file>
 /// --profile <p>` run in `working_dir` with `env` added to the process environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,7 +172,7 @@ impl ComposeCli {
     pub async fn version(&self) -> Result<ComposeVersion, Error> {
         let args = vec!["compose".into(), "version".into(), "--short".into()];
         let output = self
-            .run(Path::new("/"), args, &BTreeMap::new(), QUERY_TIMEOUT)
+            .run(&neutral_cwd(), args, &BTreeMap::new(), QUERY_TIMEOUT)
             .await?;
         ComposeVersion::parse(&output)
     }
@@ -223,7 +239,7 @@ impl ComposeCli {
         let args = by_name(project, ["ps", "--all", "--format", "json"]);
         let command = display(&args);
         let output = self
-            .run(Path::new("/"), args, &BTreeMap::new(), QUERY_TIMEOUT)
+            .run(&neutral_cwd(), args, &BTreeMap::new(), QUERY_TIMEOUT)
             .await?;
         parse_ps(&output).map_err(|source| Error::Json { command, source })
     }
@@ -231,7 +247,7 @@ impl ComposeCli {
     /// Stops the project's containers and keeps them and their data.
     pub async fn stop(&self, project: &str, timeout: Duration) -> Result<(), Error> {
         let args = by_name(project, ["stop"]);
-        self.run(Path::new("/"), args, &BTreeMap::new(), timeout)
+        self.run(&neutral_cwd(), args, &BTreeMap::new(), timeout)
             .await
             .map(drop)
     }
@@ -243,7 +259,7 @@ impl ComposeCli {
         if volumes {
             args.push("--volumes".into());
         }
-        self.run(Path::new("/"), args, &BTreeMap::new(), timeout)
+        self.run(&neutral_cwd(), args, &BTreeMap::new(), timeout)
             .await
             .map(drop)
     }
@@ -261,7 +277,7 @@ impl ComposeCli {
         let command = display(&args);
         // `inspect` exits 1 when any name is missing but still prints the found ones.
         let output = self
-            .spawn(Path::new("/"), &args, &BTreeMap::new(), QUERY_TIMEOUT)
+            .spawn(&neutral_cwd(), &args, &BTreeMap::new(), QUERY_TIMEOUT)
             .await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -412,6 +428,11 @@ mod tests {
             .collect()
     }
 
+    /// `base` joined with `file` the way the host spells it.
+    fn joined(base: &str, file: &str) -> String {
+        Path::new(base).join(file).display().to_string()
+    }
+
     #[test]
     fn project_args_resolve_paths_and_order_files() {
         let project = ComposeProject {
@@ -430,13 +451,13 @@ mod tests {
                 "-p",
                 "acme",
                 "-f",
-                "/work/acme/docker-compose.yml",
+                joined("/work/acme", "docker-compose.yml").as_str(),
                 "-f",
                 "/abs/extra.yml",
                 "-f",
                 "/state/override.yaml",
                 "--env-file",
-                "/work/acme/.env",
+                joined("/work/acme", ".env").as_str(),
                 "--profile",
                 "search"
             ]
@@ -453,7 +474,10 @@ mod tests {
             profiles: Vec::new(),
             env: BTreeMap::new(),
         };
-        assert_eq!(strings(&project.args(&[])), ["compose", "-f", "/w/c.yml"]);
+        assert_eq!(
+            strings(&project.args(&[])),
+            ["compose", "-f", joined("/w", "c.yml").as_str()]
+        );
     }
 
     #[test]

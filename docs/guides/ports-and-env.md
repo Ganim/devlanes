@@ -94,6 +94,8 @@ Layers, lowest first. A later layer wins on the same key.
 7. The profile's `env` (later `--profile` flags win).
 8. `--env KEY=VALUE` on the command line.
 
+On Windows, variable names are uppercased in every layer, since Windows treats `Path` and `PATH` as one variable; `${{ env.Path }}` reads `PATH`.
+
 `devlanes env show api --explain` prints every variable with its layer; `devlanes env shell api` opens a shell with that environment; `devlanes env export | eval` loads the lane's variables into the current shell.
 
 `DEVLANES_ORIGINS` is the comma-separated list of every https origin in the lane plus `http://localhost:<port>` and `http://127.0.0.1:<port>` for each service. Feed it to the CORS and CSRF allow-lists of your APIs so lane 3's frontend may call lane 3's API.
@@ -190,6 +192,8 @@ It lives at `~/.devlanes/data/<project>/<lane id>`, where the lane id is a numbe
 lanes:
   data_dir: /Volumes/fast/devlanes
 ```
+
+On Windows the folder is under `%USERPROFILE%\.devlanes\data`, `lanes.data_dir` may also start with `~\` or a drive letter, and `${{ lane.data_path }}` and `DEVLANES_LANE_DATA` are written with `/` (`C:/Users/acme/.devlanes/data/acme/3`), which Windows programs accept and `sh` strings leave intact.
 
 devlanes creates the folder when the lane is created and again before each start, run and container start, so deleting it by hand is safe while the lane is stopped. `devlanes lane clean` deletes it after `lane.clean` tasks and teardown have run, and the project's folder goes with its last lane. A lane that comes back after a clean starts with an empty folder.
 

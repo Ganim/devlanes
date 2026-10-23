@@ -50,7 +50,8 @@ impl Namespaces {
 }
 
 /// `${{ env.X }}` lookup order is client env, then secrets, then `.env`, so the
-/// map is built lowest first.
+/// map is built lowest first. Names go through `fold_name`, so on Windows a
+/// `.env` file's `Path` and the client's `PATH` are one entry.
 pub(crate) fn env_namespace(
     client: &BTreeMap<String, String>,
     secrets: Option<&BTreeMap<String, String>>,
@@ -59,7 +60,10 @@ pub(crate) fn env_namespace(
     let mut map = serde_json::Map::new();
     for source in [Some(dotenv), secrets, Some(client)].into_iter().flatten() {
         for (key, value) in source {
-            map.insert(key.clone(), value.clone().into());
+            map.insert(
+                devlanes_core::env::fold_name(key.clone()),
+                value.clone().into(),
+            );
         }
     }
     Value::Object(map)
@@ -94,7 +98,8 @@ fn base_namespaces(project: &str, facts: &LaneFacts, port: Option<u16>) -> (Valu
         "name": facts.name,
         "label": facts.label,
         "path": facts.path.display().to_string(),
-        "data_path": facts.data_path.display().to_string(),
+        // `/` on Windows too, so the path survives interpolation into `sh` strings.
+        "data_path": devlanes_core::paths::forward_slashes(&facts.data_path),
         "domain": default_domain(project, facts.index),
     });
     if let (Some(port), Some(map)) = (port, lane.as_object_mut()) {
@@ -297,7 +302,7 @@ pub(crate) fn build<E: Extensions>(
         ("DEVLANES_LANE_NAME".to_owned(), facts.name.clone()),
         (
             LANE_DATA_ENV.to_owned(),
-            facts.data_path.display().to_string(),
+            devlanes_core::paths::forward_slashes(&facts.data_path),
         ),
     ]);
     // Services without hosts get their internal URL so tests always find a base URL.

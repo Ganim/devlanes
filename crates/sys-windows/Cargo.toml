@@ -1,0 +1,59 @@
+[package]
+name = "devlanes-sys-windows"
+description = "Safe wrappers over the Win32 calls devlanes uses on Windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# `cert::ScratchStore`, throwaway certificate stores for tests; only
+# dev-dependencies enable it.
+test-support = []
+
+# The crate is empty on other platforms, so its dependencies are Windows-only too.
+[target.'cfg(windows)'.dependencies]
+thiserror.workspace = true
+# Named pipe servers and clients for the daemon's IPC.
+tokio = { workspace = true, features = ["net"] }
+windows-sys = { workspace = true, features = [
+    "Wdk_System_SystemInformation",
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    # `WNDCLASSW` names a GDI brush.
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    # `PROCESS_BASIC_INFORMATION` names the kernel's PEB.
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# The integration tests use the scratch certificate stores.
+devlanes-sys-windows = { path = ".", features = ["test-support"] }
+rcgen = "0.14"
+tempfile.workspace = true
+tokio.workspace = true

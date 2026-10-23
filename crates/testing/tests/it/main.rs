@@ -20,10 +20,16 @@ struct Server {
 }
 
 impl Server {
-    /// Waits for an explicit listening announcement instead of racing a free-port probe.
+    /// Starts a fixture that exits after 10 s, see [`Server::start_with_deadline`].
     async fn start(args: &[&str]) -> Result<Self> {
+        Self::start_with_deadline("10s", args).await
+    }
+
+    /// Waits for an explicit listening announcement instead of racing a free-port probe.
+    /// `exit_after` bounds the fixture and every descendant it spawns.
+    async fn start_with_deadline(exit_after: &str, args: &[&str]) -> Result<Self> {
         let mut child = Command::new(env!("CARGO_BIN_EXE_fixture-server"))
-            .args(["--exit-after", "10s"])
+            .args(["--exit-after", exit_after])
             .args(args)
             .env("PORT", "0")
             .env("FIXTURE_MARKER", "test-value")
@@ -138,6 +144,9 @@ async fn alternate_ipv6_binding() -> Result {
 }
 
 /// SIGTERM resistance leaves the listener alive until explicitly killed.
+// Windows stops send console events, which need the runner's console helper;
+// runner-windows tests cover `--ignore-sigterm` there.
+#[cfg(unix)]
 #[tokio::test]
 async fn ignores_sigterm() -> Result {
     let mut server = Server::start(&["--ignore-sigterm"]).await?;
@@ -154,24 +163,26 @@ async fn ignores_sigterm() -> Result {
 /// Explicit environment output, log lines and exit deadlines work without a daemon.
 #[tokio::test]
 async fn output_and_deadline() -> Result {
-    let output = timeout(
-        Duration::from_secs(5),
-        Command::new(env!("CARGO_BIN_EXE_fixture-server"))
-            .args([
-                "--port",
-                "0",
-                "--log-line",
-                "ready marker",
-                "--print-env",
-                "--exit-after",
-                "20ms",
-            ])
-            .env_clear()
-            .env("FIXTURE_MARKER", "value")
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await??;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fixture-server"));
+    command
+        .args([
+            "--port",
+            "0",
+            "--log-line",
+            "ready marker",
+            "--print-env",
+            "--exit-after",
+            "20ms",
+        ])
+        .env_clear()
+        .env("FIXTURE_MARKER", "value")
+        .kill_on_drop(true);
+    // Winsock fails to start without SystemRoot, even in an otherwise empty environment.
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", root);
+    }
+    let output = timeout(Duration::from_secs(5), command.output()).await??;
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout)?;
     assert!(stdout.contains("ready marker\n"));
@@ -201,6 +212,8 @@ async fn bind_failure_does_not_spawn() -> Result {
 }
 
 /// A real grandchild can escape into its own session and remains deadline-bounded.
+// Sessions are Unix; on Windows the flag is refused, see below.
+#[cfg(unix)]
 #[tokio::test]
 async fn escaped_grandchild() -> Result {
     let mut server = Server::start(&["--setsid-grandchild"]).await?;
@@ -238,4 +251,115 @@ async fn escaped_grandchild() -> Result {
     })
     .await??;
     Ok(())
+}
+
+/// Descendants announce their PID and exit with the inherited deadline.
+#[cfg(windows)]
+#[tokio::test]
+async fn spawned_grandchild_announces_itself() -> Result {
+    let mut server = Server::start_with_deadline("2s", &["--spawn-grandchild"]).await?;
+    let mut announced = server
+        .startup
+        .iter()
+        .any(|line| line.starts_with("grandchild pid="));
+    // Every holder of stdout exits at the 2 s deadline, which ends the stream.
+    timeout(Duration::from_secs(12), async {
+        while let Some(line) = server.lines.next_line().await? {
+            announced |= line.starts_with("grandchild pid=");
+        }
+        server.child.wait().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
+    .await??;
+    assert!(announced, "grandchild announcement missing");
+    Ok(())
+}
+
+/// Without Unix sessions, `--setsid-grandchild` fails before anything binds or
+/// spawns.
+#[cfg(windows)]
+#[tokio::test]
+async fn setsid_grandchild_is_refused() -> Result {
+    let output = timeout(
+        Duration::from_secs(5),
+        Command::new(env!("CARGO_BIN_EXE_fixture-server"))
+            .args(["--port", "0", "--setsid-grandchild", "--exit-after", "1s"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--setsid-grandchild"));
+    Ok(())
+}
+
+/// An installed fake checks its arguments, records them, prints expanded output
+/// and exits with the configured code; a wrong call exits 2 without recording.
+#[tokio::test]
+async fn fake_tool_follows_its_behaviour() -> Result {
+    use devlanes_testing::fake_tool::{Behaviour, install};
+    let bin = tempfile::tempdir()?;
+    let cwd = tempfile::tempdir()?;
+    let calls = bin.path().join("calls");
+    let fake = install(
+        bin.path(),
+        "acme",
+        &Behaviour::new()
+            .args(["env", "--json"])
+            .record(&calls)
+            .stderr("loading\n")
+            .stdout("text {env:MARK} ")
+            .stdout_json(serde_json::json!({"DIR": "{cwd}", "GONE": null}))
+            .exit(3),
+    )?;
+    let output = run_fake(&fake, cwd.path(), &["env", "--json"]).await?;
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(String::from_utf8(output.stderr)?, "loading\n");
+    let stdout = String::from_utf8(output.stdout)?;
+    let json = stdout.strip_prefix("text seen ").ok_or("text prefix")?;
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    let dir = cwd.path().canonicalize()?.display().to_string();
+    assert_eq!(value, serde_json::json!({"DIR": dir, "GONE": null}));
+
+    let output = run_fake(&fake, cwd.path(), &["other"]).await?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8(output.stderr)?.contains("bad args: other"));
+    assert_eq!(std::fs::read_to_string(&calls)?, "[\"env\",\"--json\"]\n");
+    Ok(())
+}
+
+/// Fakes whose names differ after a dot (`fnox` and `fnox.old`) keep their own
+/// behaviours: the sidecar adds `.json` to the full file name.
+#[tokio::test]
+async fn fake_tool_names_with_dots_keep_their_behaviour() -> Result {
+    use devlanes_testing::fake_tool::{Behaviour, install, sidecar};
+    let bin = tempfile::tempdir()?;
+    let current = install(bin.path(), "fnox", &Behaviour::new().stdout("current"))?;
+    let old = install(bin.path(), "fnox.old", &Behaviour::new().stdout("old"))?;
+    assert_eq!(
+        sidecar(&old).file_name().and_then(|name| name.to_str()),
+        Some(format!("fnox.old{}.json", std::env::consts::EXE_SUFFIX).as_str())
+    );
+    for (fake, expected) in [(&current, "current"), (&old, "old")] {
+        let output = run_fake(fake, bin.path(), &[]).await?;
+        assert_eq!(String::from_utf8(output.stdout)?, expected);
+    }
+    Ok(())
+}
+
+/// Runs an installed fake in `cwd` with only `MARK` in its environment.
+async fn run_fake(
+    fake: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[&str],
+) -> Result<std::process::Output> {
+    let mut command = Command::new(fake);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .env("MARK", "seen")
+        .kill_on_drop(true);
+    Ok(timeout(Duration::from_secs(5), command.output()).await??)
 }

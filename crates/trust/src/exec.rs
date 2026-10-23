@@ -140,6 +140,7 @@ pub trait CommandExecutor: Send + Sync {
 }
 
 /// Root-owned directories searched for privileged programs, in order.
+#[cfg(unix)]
 pub const SYSTEM_PROGRAM_DIRS: [&str; 4] = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"];
 
 /// Absolute path of `name` in [`SYSTEM_PROGRAM_DIRS`].
@@ -147,10 +148,54 @@ pub const SYSTEM_PROGRAM_DIRS: [&str; 4] = ["/usr/sbin", "/usr/bin", "/sbin", "/
 /// Commands run through sudo or as root must not come from the user's `PATH`: a
 /// directory the user (or anything running as the user) can write would turn a
 /// trust change into arbitrary code running as root.
+#[cfg(unix)]
 pub fn find_system_program(executor: &dyn CommandExecutor, name: &str) -> Option<PathBuf> {
     SYSTEM_PROGRAM_DIRS
         .iter()
         .map(|dir| Path::new(dir).join(name))
+        .find(|candidate| executor.is_executable(candidate))
+}
+
+/// Absolute path of `name` (`netsh`, or `netsh.exe`) in System32, as a `.exe`
+/// or `.com` file.
+///
+/// Like the Unix version this never reads `PATH`: elevated commands must not
+/// come from a directory the user can write. Batch files are left out, since
+/// they would run through `cmd.exe` with its own quoting rules.
+#[cfg(windows)]
+pub fn find_system_program(executor: &dyn CommandExecutor, name: &str) -> Option<PathBuf> {
+    let directory = devlanes_sys_windows::file::system_directory().ok()?;
+    system_program_in(executor, &directory, name)
+}
+
+/// [`find_system_program`] in `directory`.
+#[cfg(windows)]
+fn system_program_in(
+    executor: &dyn CommandExecutor,
+    directory: &Path,
+    name: &str,
+) -> Option<PathBuf> {
+    const EXTENSIONS: [&str; 2] = ["exe", "com"];
+    // A bare file name only: `..\x` or `C:x` would leave System32.
+    if Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
+        return None;
+    }
+    let candidates: Vec<PathBuf> = match Path::new(name).extension() {
+        Some(extension)
+            if EXTENSIONS
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known)) =>
+        {
+            vec![directory.join(name)]
+        }
+        Some(_) => Vec::new(),
+        None => EXTENSIONS
+            .iter()
+            .map(|extension| directory.join(format!("{name}.{extension}")))
+            .collect(),
+    };
+    candidates
+        .into_iter()
         .find(|candidate| executor.is_executable(candidate))
 }
 
@@ -195,7 +240,19 @@ impl CommandExecutor for SystemExecutor {
     }
 }
 
+/// Whether `path` is a regular file with an extension Windows runs directly.
+#[cfg(windows)]
+fn is_executable(path: &Path) -> bool {
+    let runnable = path.extension().is_some_and(|extension| {
+        ["exe", "com", "bat", "cmd"]
+            .iter()
+            .any(|known| extension.eq_ignore_ascii_case(known))
+    });
+    runnable && std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+}
+
 /// Whether `path` is a regular file with an execute bit.
+#[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::metadata(path)
@@ -294,6 +351,7 @@ mod tests {
         assert_eq!(command.argv(), ["certutil", "-n", "devlanes CA", ""]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn system_programs_never_come_from_path() {
         let fake = crate::fake::FakeExecutor::new(|_| Ok(CommandOutput::ok("")))
@@ -324,6 +382,56 @@ mod tests {
         );
     }
 
+    /// System32 programs resolve to `.exe` or `.com` files there, never to a
+    /// batch file, another extension or a path that leaves the directory.
+    #[cfg(windows)]
+    #[test]
+    fn system_programs_come_from_system32() {
+        let dir = Path::new(r"C:\Windows\System32");
+        let fake = crate::fake::FakeExecutor::new(|_| Ok(CommandOutput::ok(""))).with_programs(&[
+            r"C:\Windows\System32\netsh.exe",
+            r"C:\Windows\System32\more.com",
+            r"C:\Windows\System32\tool.bat",
+            r"C:\Windows\tool.exe",
+            "certutil",
+        ]);
+        let found = |name| system_program_in(&fake, dir, name);
+        assert_eq!(found("netsh"), Some(dir.join("netsh.exe")));
+        assert_eq!(found("netsh.exe"), Some(dir.join("netsh.exe")));
+        assert_eq!(found("more"), Some(dir.join("more.com")));
+        assert_eq!(found("tool"), None, "batch files are not programs here");
+        assert_eq!(found("tool.bat"), None);
+        assert_eq!(found(r"..\tool"), None);
+        assert_eq!(found("certutil"), None, "bare PATH entry");
+        let real = find_system_program(&SystemExecutor, "netsh").expect("netsh");
+        assert_eq!(
+            real.parent(),
+            Some(
+                devlanes_sys_windows::file::system_directory()
+                    .expect("System32")
+                    .as_path()
+            )
+        );
+    }
+
+    /// Exit code, stdout and stderr come back separately.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn system_executor_captures_output() {
+        let cmd = find_system_program(&SystemExecutor, "cmd").expect("cmd");
+        let command = CommandLine::new(cmd.display().to_string()).args([
+            "/d",
+            "/c",
+            "echo out&& echo err 1>&2&& exit 3",
+        ]);
+        let output = SystemExecutor.run(&command).await.expect("run cmd");
+        assert_eq!(output.code, Some(3));
+        assert_eq!(output.stdout, "out\r\n");
+        assert_eq!(output.stderr, "err \r\n");
+        assert!(SystemExecutor.find_program("cmd.exe", &[]).is_some());
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn system_executor_captures_output() {
         let command = CommandLine::new("sh").args(["-c", "echo out; echo err >&2; exit 3"]);

@@ -34,7 +34,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         &config.join("user-schema.json"),
         &devlanes_config::schema_artifact(devlanes_config::user_schema())?,
     )?;
+    embed_manifest(Path::new(&manifest));
     Ok(())
+}
+
+/// Embeds `devlanes.manifest` into the `devlanes` binary on Windows (MSVC),
+/// so the logon Run key starts `daemon run` without a console window. Only
+/// that binary: this package's test executables keep the default console.
+fn embed_manifest(package: &Path) {
+    let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    let msvc = std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if !(windows && msvc) {
+        return;
+    }
+    let file = package.join("devlanes.manifest");
+    println!("cargo:rerun-if-changed=devlanes.manifest");
+    println!("cargo:rustc-link-arg-bin=devlanes=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg-bin=devlanes=/MANIFESTINPUT:{}",
+        file.display()
+    );
 }
 
 /// Preserve file mtimes when generation produces identical bytes.

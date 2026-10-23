@@ -1,6 +1,6 @@
 # devlanes-sys
 
-Process-table queries for macOS and Linux. `devlanes-runner-pty` uses it to track and signal unit processes, and the daemon uses it to reconcile processes left by a crashed daemon and to report listening ports when a ready check times out.
+Process-table queries for macOS, Linux and Windows. `devlanes-runner-pty` uses it to track and signal unit processes, and the daemon uses it to reconcile processes left by a crashed daemon and to report listening ports when a ready check times out.
 
 ## Usage
 
@@ -42,6 +42,8 @@ Start times are clock ticks since boot on Linux and microseconds since the epoch
 On macOS, `listening_tcp` runs `/usr/sbin/lsof`, and zombies are read through `sysctl` because libproc no longer reports them. Linux reads everything from procfs.
 
 `unsafe` code is confined to the macOS modules (libproc, mach and sysctl calls).
+
+On Windows the queries delegate to `devlanes-sys-windows`. Start times are creation `FILETIME`s, a zombie is a process that exited while a handle to it is still open, and `sid` is always `None`, so the tracker and session helpers only follow parent links there. `terminate_verified` replaces `signal_verified`, and checks the start time on the handle it terminates through. Both open-file limit functions report no limit, and process groups, user IDs, sessions and descriptor holders do not exist.
 
 ## License
 

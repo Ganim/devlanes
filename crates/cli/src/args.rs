@@ -705,10 +705,16 @@ pub enum InterruptPolicy {
 
 impl Cli {
     /// Captures cwd and captures environment only for process-starting methods.
+    /// Names go through `fold_name`, so Windows' `Path` arrives as `PATH`.
     pub fn action(&self, runtime: &Runtime) -> Result<Action, Error> {
         self.action_with(runtime, std::env::current_dir()?, || {
             std::env::vars_os()
-                .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+                .filter_map(|(k, v)| {
+                    Some((
+                        devlanes_core::env::fold_name(k.into_string().ok()?),
+                        v.into_string().ok()?,
+                    ))
+                })
                 .collect()
         })
     }

@@ -17,6 +17,9 @@ mod metrics;
 mod orphans;
 mod pacing;
 mod profiles;
+// Real processes through the PTY runner, which is Unix. The Windows runner has
+// its own live tests in devlanes-runner-windows.
+#[cfg(unix)]
 mod pty;
 mod remote;
 mod resolver;
@@ -60,14 +63,32 @@ pub struct Temp {
     pub path: PathBuf,
 }
 
-/// Creates a canonical temporary directory with a short path.
+/// Creates a canonical temporary directory with a short path (`/tmp` on Unix,
+/// for socket path limits; the user's temp directory on Windows).
 pub fn temp() -> Temp {
+    #[cfg(unix)]
+    let parent = PathBuf::from("/tmp");
+    #[cfg(windows)]
+    let parent = std::env::temp_dir();
     let dir = tempfile::Builder::new()
         .prefix("dle-")
-        .tempdir_in("/tmp")
+        .tempdir_in(parent)
         .expect("tempdir");
-    let path = dir.path().canonicalize().expect("canonical");
+    // dunce: Git prints `C:\...`, never the verbatim `\\?\C:\...` form.
+    let path = dunce::canonicalize(dir.path()).expect("canonical");
     Temp { _dir: dir, path }
+}
+
+/// The server endpoint `relative` below `dir`: that socket path on Unix, a
+/// pipe named after it on Windows, where pipes have their own namespace.
+pub fn endpoint(dir: &Path, relative: &str) -> PathBuf {
+    let path = dir.join(relative);
+    #[cfg(windows)]
+    let path = PathBuf::from(format!(
+        r"\\.\pipe\devlanes-test-{}",
+        path.to_string_lossy().replace(['\\', '/', ':'], "-")
+    ));
+    path
 }
 
 /// Runs git with test-local identity and no global config.
@@ -178,6 +199,12 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
     integ.system_pressure = setup.system;
     if let Some(ports) = setup.ports {
         integ.ports = ports;
+    }
+    // Container `cmd` checks and `ready.cmd` run through Git's sh.exe on
+    // Windows, found the way the daemon finds it at start.
+    #[cfg(windows)]
+    {
+        integ.shell = devlanes_shell_windows::windows_shell().await;
     }
     std::fs::create_dir_all(home).expect("home");
     let store = Store::open(home.join("state.db")).await.expect("store");

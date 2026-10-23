@@ -29,7 +29,9 @@ fn main() -> Result<(), AllocationError> {
 
 - `ports`: block sizing, stable named offsets, reservations, and explicit offset GC.
 - `refs`: lane and unit reference parsing, context-aware resolution, globs, and tags.
+- `paths`: path comparison that ignores case on Windows (`same_path`, `path_starts_with`), and `name_on_disk`, the file name a project, service or task name is stored under (the name itself on macOS and Linux, a reversible `%XX` encoding on Windows).
 - `env::assemble`: environment precedence with source-layer attribution.
+- `env::fold_name`, `env::fold_names`: variable names as devlanes keeps them; unchanged on Unix, uppercased on Windows, where `Path` and `PATH` are one variable.
 - `Runner` and `Unit`: process launch, terminal I/O, stopping, exit waiting, and tracked process identities.
 - `contrib::{Contributor, SecretsProvider, ScriptRunner}`: launch customization, secret lookup, and script command rendering.
 - `gate::{StartGate, PressureSource}`: startup pacing slots and queue snapshots, and system CPU and memory pressure readings.

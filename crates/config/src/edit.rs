@@ -72,7 +72,7 @@ fn rewrite(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(ConfigError::io(path, error)),
     };
-    let edited = edit(&source)?;
+    let edited = edit_keeping_line_breaks(&source, edit)?;
     if edited == source {
         return Ok(());
     }
@@ -81,7 +81,44 @@ fn rewrite(
     }
     let temporary = path.with_extension("yaml.tmp");
     std::fs::write(&temporary, edited).map_err(|error| ConfigError::io(&temporary, error))?;
-    std::fs::rename(&temporary, path).map_err(|error| ConfigError::io(path, error))
+    rename(&temporary, path).map_err(|error| ConfigError::io(path, error))
+}
+
+/// Applies `edit` to the file's text.
+#[cfg(unix)]
+fn edit_keeping_line_breaks(
+    source: &str,
+    edit: impl FnOnce(&str) -> Result<String, ConfigError>,
+) -> Result<String, ConfigError> {
+    edit(source)
+}
+
+/// Applies `edit` to the file's text. A file whose every line break is CRLF,
+/// as Windows editors write it, is edited as LF text and written back with
+/// CRLF, so the lines the edit adds match the rest.
+#[cfg(windows)]
+fn edit_keeping_line_breaks(
+    source: &str,
+    edit: impl FnOnce(&str) -> Result<String, ConfigError>,
+) -> Result<String, ConfigError> {
+    let breaks = source.matches('\n').count();
+    if breaks == 0 || source.matches("\r\n").count() != breaks {
+        return edit(source);
+    }
+    Ok(edit(&source.replace("\r\n", "\n"))?.replace('\n', "\r\n"))
+}
+
+/// Replaces the config with the edited file. Blocks.
+#[cfg(unix)]
+fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
+}
+
+/// Replaces the config with the edited file, retried while an editor or
+/// another program briefly holds it. Blocks for up to about 0.6 s more.
+#[cfg(windows)]
+fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    devlanes_sys_windows::file::rename_retrying(from, to)
 }
 
 /// Setting names are plain words; anything else could address YAML the
@@ -445,6 +482,26 @@ history:
         assert_eq!(
             std::fs::read_to_string(&path).expect("read"),
             "# top\ntui:\n  glyphs: ascii\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_crlf_files_stay_crlf() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "# top\r\ntui:\r\n  theme: dark\r\n").expect("write");
+        set_user_value(&path, "tui.glyphs", &json!("ascii")).expect("edited");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "# top\r\ntui:\r\n  theme: dark\r\n  glyphs: ascii\r\n"
+        );
+        // Mixed line breaks are edited as they are.
+        std::fs::write(&path, "# top\ntui:\r\n  theme: dark\n").expect("write");
+        set_user_value(&path, "tui.theme", &json!("light")).expect("edited");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "# top\ntui:\r\n  theme: light\n"
         );
     }
 }

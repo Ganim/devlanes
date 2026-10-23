@@ -42,6 +42,8 @@ With `mkcert`, the daemon loads mkcert's root from `mkcert -CAROOT` through `Cer
 
 New CA directories use mode `0700`; key files use `0600`. Loading rejects mismatched pairs and a certificate without its key. The key is written before the certificate, so a key without a certificate is treated as an interrupted creation and replaced by a new CA. This crate does not modify system trust stores.
 
+On Windows a new CA directory gets an explicit owner and an access list for the user, SYSTEM and Administrators that its files inherit. An existing directory, the key and the lock file must already be owned by the user, grant no other account access and be no symlink or junction; the key must also have a single hard link. `Error::InsecurePath` then names the path, the problem and, for access lists, the `icacls` command that fixes it.
+
 ## Name constraints
 
 New devlanes CAs carry X.509 name constraints that permit DNS names under `localhost`, `test`, `internal` and `home.arpa`, plus the TLD passed to `load_or_create_with_tld`. Clients that enforce constraints reject leaves for any other name, so a leaked CA key cannot impersonate public sites. CAs created before this change, and mkcert roots, have no constraints and keep working. To get the constraints, or to pick up a TLD configured later, recreate the CA: run `devlanes certs untrust`, delete the `ca` directory under the devlanes home, run `devlanes certs trust` to create and trust the new root, then `devlanes daemon restart` so the proxy signs with it. `certs untrust` alone keeps the old root on disk.

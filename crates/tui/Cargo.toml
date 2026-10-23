@@ -17,6 +17,8 @@ devlanes-client = { path = "../client" }
 devlanes-cli = { path = "../cli" }
 # The options page reads the user config schema and edits config.yaml in place.
 devlanes-config = { path = "../config" }
+# Path comparison for the lane that holds the working directory.
+devlanes-core = { path = "../core" }
 devlanes-proto = { path = "../proto" }
 devlanes-term = { path = "../term" }
 futures-util.workspace = true
@@ -32,10 +34,13 @@ tui-term = { version = "0.3", default-features = false }
 unicode-width = "0.2"
 vt100 = "0.18"
 
+[target.'cfg(windows)'.dependencies]
+# File identity for following a rotated daemon.log.
+devlanes-sys-windows = { path = "../sys-windows" }
+
 [dev-dependencies]
 # The `screens` example draws every TUI page to PNG for design review.
 ab_glyph = "0.2"
-devlanes-core = { path = "../core" }
 insta = { version = "1", features = ["filters"] }
 png = "0.17"
 tempfile.workspace = true

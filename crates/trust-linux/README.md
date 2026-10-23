@@ -36,6 +36,8 @@ With a terminal on stdin, sudo prompts for a password. Without one it runs `sudo
 
 The NSS stores run `certutil` as the user and need `libnss3-tools` (Debian/Ubuntu), `nss-tools` (Fedora) or `nss` (Arch). The `chrome` target creates `~/.pki/nssdb` when it is missing. Playwright's Chromium reads it too.
 
+The crate builds on every Unix, so its argv tests also run on macOS, and compiles to an empty library on Windows.
+
 ## License
 
 Apache-2.0

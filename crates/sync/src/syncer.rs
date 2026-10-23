@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read as _};
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +17,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::held::{Probe, probe_source};
-use crate::target::MODE_MASK;
+use crate::mode::mode_of;
 use crate::{ContentHash, HeldFile, IgnoreRules, Manifest, RelPath, SyncError, SyncTarget};
 
 /// Default quiet period before a burst of events is processed.
@@ -336,7 +337,7 @@ impl From<&fs::Metadata> for FileMeta {
         Self {
             size: meta.len(),
             mtime: meta.modified().ok(),
-            mode: meta.permissions().mode() & MODE_MASK,
+            mode: mode_of(meta),
         }
     }
 }
@@ -722,8 +723,8 @@ struct SourceWatch {
     _watcher: RecommendedWatcher,
     events: mpsc::Receiver<notify::Result<Event>>,
     overflow: Arc<AtomicBool>,
-    /// Device and inode of the root when the watch started.
-    identity: Option<(u64, u64)>,
+    /// Identity of the root when the watch started.
+    identity: Option<RootId>,
 }
 
 impl SourceWatch {
@@ -761,18 +762,39 @@ impl SourceWatch {
     }
 }
 
-/// Device and inode of `root`, or `None` when it is missing or not a directory.
-async fn root_identity(root: &Path) -> Option<(u64, u64)> {
+/// Which directory the root is: device and inode.
+#[cfg(unix)]
+type RootId = (u64, u64);
+
+/// Which directory the root is: volume serial and file id.
+#[cfg(windows)]
+type RootId = devlanes_sys_windows::file::FileId;
+
+/// Identity of `root`, or `None` when it is missing or not a directory.
+async fn root_identity(root: &Path) -> Option<RootId> {
     let root = root.to_owned();
     tokio::task::spawn_blocking(move || {
-        fs::symlink_metadata(root)
+        fs::symlink_metadata(&root)
             .ok()
             .filter(fs::Metadata::is_dir)
-            .map(|meta| (meta.dev(), meta.ino()))
+            .and_then(|meta| identity(&root, &meta))
     })
     .await
     .ok()
     .flatten()
+}
+
+/// Device and inode, which change when the folder is deleted and recreated.
+#[cfg(unix)]
+fn identity(_root: &Path, meta: &fs::Metadata) -> Option<RootId> {
+    Some((meta.dev(), meta.ino()))
+}
+
+/// Volume serial and file id of the folder itself, which change when it is
+/// deleted and recreated. The metadata std gives does not include them.
+#[cfg(windows)]
+fn identity(root: &Path, _meta: &fs::Metadata) -> Option<RootId> {
+    devlanes_sys_windows::file::path_identity(root).ok()
 }
 
 /// Polls until `source` is a directory; `None` when cancelled first.
@@ -992,7 +1014,7 @@ fn read_source(
     let tracked = Tracked {
         size: contents.len() as u64,
         mtime: settled_mtime(&meta),
-        mode: meta.permissions().mode() & MODE_MASK,
+        mode: mode_of(&meta),
         hash: ContentHash::of(&contents),
     };
     Ok(Some((Bytes::from(contents), tracked)))

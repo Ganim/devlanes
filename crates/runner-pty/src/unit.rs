@@ -14,7 +14,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_core::{
-    Error, ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, TerminalSize, Unit,
+    Error, ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopSignal, TerminalSize, Unit,
 };
 use devlanes_sys::{
     DescendantTracker, ListeningSocket, OpenFile, ProcessInfo, Signal, SignalOutcome,
@@ -148,6 +148,20 @@ const UNKNOWN: ExitOutcome = ExitOutcome {
     code: None,
     signal: None,
 };
+
+/// The POSIX signal for a configured stop signal. rustix gives SIGUSR1 and
+/// SIGUSR2 their numbers on this OS (10 and 12 on Linux, 30 and 31 on macOS).
+fn posix_signal(signal: StopSignal) -> Signal {
+    match signal {
+        StopSignal::Hangup => Signal::HUP,
+        StopSignal::Interrupt => Signal::INT,
+        StopSignal::Quit => Signal::QUIT,
+        StopSignal::Kill => Signal::KILL,
+        StopSignal::Terminate => Signal::TERM,
+        StopSignal::User1 => Signal::USR1,
+        StopSignal::User2 => Signal::USR2,
+    }
+}
 
 /// Launches the leader, wires output readers and starts its supervisor.
 pub(crate) async fn spawn(runner: &PtyRunner, spec: LaunchSpec) -> Result<Arc<PtyUnit>, Error> {
@@ -763,8 +777,7 @@ impl PtyUnit {
         &self,
         policy: devlanes_core::StopPolicy,
     ) -> Result<ExitReport, Error> {
-        let signal = Signal::from_named_raw(policy.signal)
-            .ok_or_else(|| Error::InvalidInput(format!("unknown signal {}", policy.signal)))?;
+        let signal = posix_signal(policy.signal);
         let request = StopRequest {
             signal,
             timeout: policy.timeout,
@@ -1007,6 +1020,29 @@ mod tests {
         }
     }
 
+    /// Configured stop signals keep the numbers the runner sent when the policy
+    /// held a raw number: SIGUSR1 and SIGUSR2 differ between Linux and macOS.
+    #[test]
+    fn stop_signals_keep_their_numbers() {
+        #[cfg(target_os = "linux")]
+        const USR: (i32, i32) = (10, 12);
+        #[cfg(not(target_os = "linux"))]
+        const USR: (i32, i32) = (30, 31);
+        let numbers = StopSignal::ALL.map(|signal| (signal, posix_signal(signal).as_raw()));
+        assert_eq!(
+            numbers,
+            [
+                (StopSignal::Hangup, 1),
+                (StopSignal::Interrupt, 2),
+                (StopSignal::Quit, 3),
+                (StopSignal::Kill, 9),
+                (StopSignal::Terminate, 15),
+                (StopSignal::User1, USR.0),
+                (StopSignal::User2, USR.1),
+            ]
+        );
+    }
+
     /// With the supervisor gone, stop still signals the processes and reaps the leader
     /// instead of returning the crash placeholder as if the unit had ended.
     #[tokio::test]
@@ -1025,7 +1061,7 @@ mod tests {
 
             let report = unit
                 .stop_with_report(StopPolicy {
-                    signal: 15,
+                    signal: StopSignal::Terminate,
                     timeout: Duration::from_secs(2),
                 })
                 .await

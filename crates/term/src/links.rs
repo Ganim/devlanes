@@ -90,6 +90,7 @@ pub fn link(links: Option<&Links>, text: &str, url: &str) -> String {
 
 /// `file://` and the absolute path, percent-encoded. The host is left out,
 /// which RFC 8089 reads as this machine.
+#[cfg(unix)]
 pub fn file_url(path: &Path) -> String {
     let mut url = String::from("file://");
     for byte in path.to_string_lossy().bytes() {
@@ -100,6 +101,67 @@ pub fn file_url(path: &Path) -> String {
         }
     }
     url
+}
+
+/// `file:///C:/x/y` for a drive path and `file://host/share/x` for a UNC one
+/// (RFC 8089), the verbatim `\\?\` forms included, with each segment
+/// percent-encoded. A rooted path without a drive (`\x\y`) keeps its
+/// segments after `file://`, as on Unix.
+#[cfg(windows)]
+pub fn file_url(path: &Path) -> String {
+    use std::path::{Component, Prefix};
+    let mut url = String::from("file://");
+    let mut segments = 0;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
+                    url.push('/');
+                    url.push(char::from(drive.to_ascii_uppercase()));
+                    url.push(':');
+                }
+                Prefix::UNC(host, share) | Prefix::VerbatimUNC(host, share) => {
+                    push_segment(&mut url, &host.to_string_lossy());
+                    url.push('/');
+                    push_segment(&mut url, &share.to_string_lossy());
+                }
+                // Device and volume paths have no file URL form; encoded
+                // whole they at least stay one segment.
+                Prefix::Verbatim(_) | Prefix::DeviceNS(_) => {
+                    url.push('/');
+                    push_segment(&mut url, &prefix.as_os_str().to_string_lossy());
+                }
+            },
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                url.push_str("/..");
+                segments += 1;
+            }
+            Component::Normal(name) => {
+                url.push('/');
+                push_segment(&mut url, &name.to_string_lossy());
+                segments += 1;
+            }
+        }
+    }
+    // `C:\` itself.
+    if segments == 0 {
+        url.push('/');
+    }
+    url
+}
+
+/// `segment` percent-encoded, keeping the characters [`file_url`] keeps on
+/// Unix except the separator.
+#[cfg(windows)]
+fn push_segment(url: &mut String, segment: &str) {
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            url.push(char::from(byte));
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
 }
 
 /// `url` with every byte outside printable ASCII percent-encoded, so neither
@@ -149,13 +211,25 @@ mod tests {
         );
     }
 
+    /// An absolute config path and its `file://` URL.
+    #[cfg(unix)]
+    const CONFIG: (&str, &str) = ("/srv/acme/devlanes.yaml", "file:///srv/acme/devlanes.yaml");
+    #[cfg(windows)]
+    const CONFIG: (&str, &str) = (
+        r"C:\srv\acme\devlanes.yaml",
+        "file:///C:/srv/acme/devlanes.yaml",
+    );
+
     #[test]
     fn file_links_carry_the_line_only_where_the_terminal_opens_it() {
-        let path = Path::new("/srv/acme/devlanes.yaml");
+        let path = Path::new(CONFIG.0);
         let iterm = Links::new(true);
         assert_eq!(
             iterm.file("devlanes.yaml:5:12", path, Some(5), Some(12)),
-            "\x1b]8;;file:///srv/acme/devlanes.yaml#5:12\x1b\\devlanes.yaml:5:12\x1b]8;;\x1b\\"
+            format!(
+                "\x1b]8;;{}#5:12\x1b\\devlanes.yaml:5:12\x1b]8;;\x1b\\",
+                CONFIG.1
+            )
         );
         assert!(iterm.file("x", path, Some(5), None).contains("#5\x1b"));
         let other = Links::new(false);
@@ -164,6 +238,33 @@ mod tests {
         assert_eq!(
             other.file("devlanes.yaml", Path::new("devlanes.yaml"), None, None),
             "devlanes.yaml"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_file_urls_name_the_drive_or_the_share() {
+        for (path, url) in [
+            (
+                r"C:\Users\acme\my app\devlanes.yaml",
+                "file:///C:/Users/acme/my%20app/devlanes.yaml",
+            ),
+            (r"d:/work/acme", "file:///D:/work/acme"),
+            (r"\\?\C:\work\café", "file:///C:/work/caf%C3%A9"),
+            (r"C:\", "file:///C:/"),
+            (
+                r"\\server\share\acme\a#b.yaml",
+                "file://server/share/acme/a%23b.yaml",
+            ),
+            (r"\\?\UNC\server\share\acme", "file://server/share/acme"),
+            (r"\\server\share\", "file://server/share/"),
+        ] {
+            assert_eq!(file_url(Path::new(path)), url, "{path}");
+        }
+        // Links reach the encoder with the drive's colon intact.
+        assert_eq!(
+            Links::new(false).file("x", Path::new(r"C:\a b"), None, None),
+            "\x1b]8;;file:///C:/a%20b\x1b\\x\x1b]8;;\x1b\\"
         );
     }
 

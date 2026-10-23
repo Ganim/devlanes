@@ -1,6 +1,6 @@
 [package]
 name = "devlanes-sys"
-description = "Process-table queries, PID-safe signalling and descendant tracking for macOS and Linux"
+description = "Process-table queries, PID-safe signalling and descendant tracking for macOS, Linux and Windows"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,11 +12,16 @@ workspace = true
 
 [dependencies]
 devlanes-core = { path = "../core" }
-rustix = { version = "1", features = ["process", "std"] }
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+devlanes-sys-windows = { path = "../sys-windows" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 
-[dev-dependencies]
+[target.'cfg(unix)'.dev-dependencies]
 rustix = { version = "1", features = ["fs", "process", "pty", "std"] }

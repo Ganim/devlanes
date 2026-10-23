@@ -82,7 +82,19 @@ fn table(cases: &[(&str, &[(&str, &str)])]) -> String {
         let result = detect_package_manager(&worktree.join("packages/app"), &worktree);
         table.push_str(&format!("{label}: {}\n", describe(&worktree, result)));
     }
-    table
+    slashes(table)
+}
+
+/// `text` as is: the snapshots show Unix separators.
+#[cfg(unix)]
+fn slashes(text: String) -> String {
+    text
+}
+
+/// `text` with `/` for `\`, so the Unix snapshots hold on Windows.
+#[cfg(windows)]
+fn slashes(text: String) -> String {
+    text.replace('\\', "/")
 }
 
 /// Declared fields: `packageManager` beats `devEngines`, nearest manifest
@@ -353,9 +365,11 @@ fn missing_script_lists_available() {
         extra_args: &[],
     })
     .expect_err("missing script");
-    let message = error
-        .to_string()
-        .replace(&temp.path().display().to_string(), "<lane>");
+    let message = slashes(
+        error
+            .to_string()
+            .replace(&temp.path().display().to_string(), "<lane>"),
+    );
     insta::assert_snapshot!(message, @"`<lane>/package.json` has no script `dev` (available: build, start)");
 }
 

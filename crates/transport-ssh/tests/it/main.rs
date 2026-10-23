@@ -8,6 +8,9 @@
 //! - `DEVLANES_TEST_SSH_LANE=1`: `run.sh` started a lane with an echo service and a
 //!   synced folder on the box; the mirroring test needs it.
 
+// The transport is Unix only; the crate is empty on Windows.
+#![cfg(unix)]
+
 use std::path::Path;
 use std::time::Duration;
 

@@ -3,7 +3,8 @@
 //! The daemon answers A and AAAA queries for names under the configured TLD with
 //! `127.0.0.1` and `::1` and refuses everything else. The OS forwards only that TLD
 //! here through `/etc/resolver/<tld>` (macOS) or systemd-resolved (Linux); this
-//! crate generates those files, and the CLI writes them with sudo.
+//! crate generates those files, and the CLI writes them with sudo. On Windows
+//! an NRPT rule from `devlanes-resolver-nrpt` does the same.
 //!
 //! The responder is hand-written instead of using `hickory-server`. It needs one
 //! synthesized zone with two fixed answers, which takes a few hundred lines of

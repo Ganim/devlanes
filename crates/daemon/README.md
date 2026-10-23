@@ -1,6 +1,6 @@
 # devlanes-daemon
 
-The per-user daemon behind every `devlanes` command and the TUI. It owns lanes, processes, containers, the proxy routes and `state.db`, and answers `devlanes-proto` requests over a Unix socket; concrete integrations (PTY runner, Compose, Docker, proxy, metrics) are injected by `bins/devlanes`.
+The per-user daemon behind every `devlanes` command and the TUI. It owns lanes, processes, containers, the proxy routes and `state.db`, and answers `devlanes-proto` requests over a Unix socket (a named pipe on Windows, through `devlanes_ipc::local`); concrete integrations (PTY runner, Compose, Docker, proxy, metrics) are injected by `bins/devlanes`.
 
 ## Usage
 
@@ -27,6 +27,8 @@ async fn serve(home: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `Server::bind` takes the singleton lock first and fails with `Error::AlreadyRunning` when another daemon holds it. `run` reconciles before calling the readiness callback, then serves until the shutdown token is cancelled.
+
+On Windows `Options::socket` is a pipe name (`\\.\pipe\...`). The home and `run` get an access list for the user, SYSTEM and Administrators (an empty directory others can reach is tightened, a non-empty one refused), junctions are refused, the lock is `LockFileEx` on `run\daemon.lock`, and a pipe name another process created first fails with `Error::EndpointTaken`.
 
 ## API
 

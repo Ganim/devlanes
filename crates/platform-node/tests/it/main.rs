@@ -179,7 +179,13 @@ async fn cloudflare_registry() {
         .apply(&mut found, &fixture.cx(Some("python")))
         .await
         .expect("apply");
-    assert_eq!(found.env[REGISTRY_ENV], "/data/acme/3/wrangler-registry");
+    let registry = |data: &str| {
+        Path::new(data)
+            .join("wrangler-registry")
+            .display()
+            .to_string()
+    };
+    assert_eq!(found.env[REGISTRY_ENV], registry("/data/acme/3"));
     // A second lane on the same folder gets its own registry.
     let mut other = Fixture::new(dir.path().to_path_buf());
     other.data = PathBuf::from("/data/acme/4");
@@ -188,7 +194,7 @@ async fn cloudflare_registry() {
         .apply(&mut second, &other.cx(None))
         .await
         .expect("apply");
-    assert_eq!(second.env[REGISTRY_ENV], "/data/acme/4/wrangler-registry");
+    assert_eq!(second.env[REGISTRY_ENV], registry("/data/acme/4"));
     // Cached per lane: removing the file does not change this resolution.
     std::fs::remove_file(dir.path().join("apps/gateway/wrangler.jsonc")).expect("remove");
     let mut cached = draft();

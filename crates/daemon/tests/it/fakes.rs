@@ -12,7 +12,9 @@
 //! its first stop request; with [`FakeRunner::stubborn_identity`] set it also
 //! carries that real identity, so an overdue stop finds it alive), `lag`
 //! (the spawn returns 500 ms after the journal recorded it, like a slow
-//! `fork`/`exec`, which widens the window before the daemon registers the unit).
+//! `fork`/`exec`, which widens the window before the daemon registers the unit),
+//! `render` (the unit's output renders its terminal, as a Windows pseudo
+//! console's does: see `Unit::renders_screen`).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -27,7 +29,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_core::{
     Error, ExitOutcome, LaunchSpec, OutputChunk, OutputStream, ProcessIdentity, StopPolicy,
-    TerminalSize, Unit,
+    StopSignal, TerminalSize, Unit,
 };
 use devlanes_daemon::integrations::{
     ExitDetails, InfraContainer, InfraError, InfraEvent, InfraPortNeed, InfraProvider, InfraSpec,
@@ -36,6 +38,19 @@ use devlanes_daemon::integrations::{
 use devlanes_proto::{LeftProcess, PhaseContainer};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
+
+/// The Linux number a fake unit reports as its exit signal after a stop.
+fn signal_number(signal: StopSignal) -> i32 {
+    match signal {
+        StopSignal::Hangup => 1,
+        StopSignal::Interrupt => 2,
+        StopSignal::Quit => 3,
+        StopSignal::Kill => 9,
+        StopSignal::User1 => 10,
+        StopSignal::User2 => 12,
+        StopSignal::Terminate => 15,
+    }
+}
 
 /// Identities handed out by the fake runner; far above real PIDs.
 static NEXT_PID: AtomicU32 = AtomicU32::new(4_000_000);
@@ -109,6 +124,7 @@ impl UnitRunner for FakeRunner {
         let stubborn = script
             .split(';')
             .any(|command| command.trim() == "stubborn");
+        let renders = script.split(';').any(|command| command.trim() == "render");
         let real = if stubborn {
             self.stubborn_identity
                 .lock()
@@ -124,6 +140,7 @@ impl UnitRunner for FakeRunner {
                 start_time: 1,
             }),
             stubborn: AtomicBool::new(stubborn),
+            renders,
             sender: Mutex::new(Some(sender)),
             first: Mutex::new(Some(first)),
             exit: watch::channel(None).0,
@@ -144,6 +161,8 @@ pub struct FakeUnit {
     identity: ProcessIdentity,
     /// Set by `stubborn`: the next stop request is ignored.
     stubborn: AtomicBool,
+    /// Set by `render`.
+    renders: bool,
     sender: Mutex<Option<broadcast::Sender<OutputChunk>>>,
     first: Mutex<Option<broadcast::Receiver<OutputChunk>>>,
     exit: watch::Sender<Option<ExitOutcome>>,
@@ -206,6 +225,8 @@ impl FakeUnit {
                     }
                 }
                 "deaf" => self.deaf.store(true, Ordering::SeqCst),
+                // Read at spawn.
+                "render" => {}
                 "printenv" => self.print(env.get(rest).map_or("", String::as_str)),
                 "daemonize" | "escape" => {
                     let process = LeftProcess {
@@ -370,7 +391,7 @@ impl Unit for FakeUnit {
         self.stop.send_replace(true);
         self.end(ExitOutcome {
             code: None,
-            signal: Some(policy.signal),
+            signal: Some(signal_number(policy.signal)),
         });
         Ok(())
     }
@@ -403,6 +424,10 @@ impl Unit for FakeUnit {
     /// The leader only.
     async fn subjects(&self) -> Result<Vec<ProcessIdentity>, Error> {
         Ok(vec![self.identity])
+    }
+    /// Set by `render`.
+    fn renders_screen(&self) -> bool {
+        self.renders
     }
 }
 

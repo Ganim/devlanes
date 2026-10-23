@@ -269,12 +269,8 @@ impl Inner {
                 let Some(index) = lane.st().index() else {
                     return Ok(Page::complete(Vec::new()));
                 };
-                let dir = self
-                    .opts
-                    .logs
-                    .join(project.name())
-                    .join(index.to_string())
-                    .join(unit.replace('/', "_"));
+                let dir =
+                    crate::lifecycle::unit_log_dir(&self.opts.logs, &project.name(), index, unit);
                 query_log_dir(dir, unit.to_owned(), query).await
             }
         }
@@ -979,7 +975,8 @@ impl Inner {
             "codex_sandbox": std::env::var_os("CODEX_SANDBOX").is_some(),
             "app_sandbox": std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some(),
         });
-        Ok(json!({
+        #[cfg_attr(unix, expect(unused_mut, reason = "Windows adds facts"))]
+        let mut doctor = json!({
             "version": env!("CARGO_PKG_VERSION"),
             "pid": std::process::id(),
             "home": self.opts.home,
@@ -1003,7 +1000,53 @@ impl Inner {
             "user_config": self.user_config_doctor().await,
             // The CLI compares them with the service manager's stop window.
             "stop_timeouts": self.stop_timeouts(),
-        }))
+        });
+        // An elevated daemon runs every unit elevated; `doctor` warns.
+        #[cfg(windows)]
+        {
+            doctor["elevated"] = json!(devlanes_sys_windows::token::elevated().ok());
+            doctor["reserved_ports"] = self.reserved_ports_doctor().await;
+            // `run:` strings and `ready.cmd` need Git for Windows' sh.exe.
+            doctor["shell"] = json!({ "path": self.integ.shell });
+        }
+        Ok(doctor)
+    }
+
+    /// `doctor`'s `reserved_ports`: the Windows reserved port ranges checked
+    /// against `ports.range`, the lanes' assigned ports, the proxy ports and
+    /// the mirrored ports. Read through the shared cache, since the TUI polls
+    /// `doctor`.
+    #[cfg(windows)]
+    async fn reserved_ports_doctor(&self) -> Value {
+        let reading = crate::reserved_ports::RESERVED.get().await;
+        let user = &self.opts.user;
+        let assigned: Vec<(String, std::collections::BTreeSet<u16>)> = self
+            .all_lanes()
+            .into_iter()
+            .filter_map(|(project, lane)| {
+                let st = lane.st();
+                let allocation = st.allocation.as_ref()?;
+                let block = allocation.block;
+                let ports = allocation
+                    .offsets
+                    .values()
+                    .chain(&allocation.reserved)
+                    .filter(|offset| **offset < block.size)
+                    .filter_map(|offset| block.start.checked_add(*offset))
+                    .collect();
+                Some((st.reference(&project.name()), ports))
+            })
+            .collect();
+        crate::reserved_ports::report(
+            &reading,
+            user.ports.bounds().ok(),
+            &assigned,
+            [
+                ("http", user.proxy.http_port),
+                ("https", user.proxy.https_port),
+            ],
+            &self.remote.advertised_ports(),
+        )
     }
 
     /// `doctor`'s `stop_timeouts`: the longest stop timeout of each service of

@@ -56,7 +56,8 @@ fn killed_client_during_start_still_brings_the_lane_up() -> Result<()> {
 #[test]
 fn daemon_crash_reconciles_and_resumes() -> Result<()> {
     // A pipe-runner service survives its daemon (no PTY hangup), so reconciliation has
-    // a real orphan; the PTY services die with the old daemon's terminals.
+    // a real orphan; the PTY services die with the old daemon's terminals (on Windows
+    // about 5 s after it, when their pseudo consoles close).
     let yaml = format!(
         "{}  bg:\n    run: [fixture-server, --log-line, bg-ready]\n    pty: false\n    ready: {{ http: {{ path: /healthz }} }}\n",
         fixture_yaml("two-services")?

@@ -398,6 +398,36 @@ fn output_precedence_and_attribution_are_deterministic() {
 }
 
 #[test]
+fn a_console_without_escape_sequences_gets_plain_output() {
+    let signals = Signals {
+        stdout_tty: true,
+        stdin_tty: true,
+        no_escapes: true,
+        ..Signals::default()
+    };
+    let resolved = Runtime::resolve(&Cli::parse_from(["devlanes"]), signals.clone()).expect("mode");
+    assert_eq!(
+        (resolved.mode, resolved.reason, resolved.color),
+        (
+            OutputMode::Plain,
+            "the console cannot render escape sequences",
+            false
+        )
+    );
+    assert!(!resolved.can_open_ui());
+    // An explicit choice still wins, without color.
+    let cli = Cli::parse_from(["devlanes", "--output", "human"]);
+    let resolved = Runtime::resolve(&cli, signals.clone()).expect("mode");
+    assert_eq!((resolved.mode, resolved.color), (OutputMode::Human, false));
+    let forced = Signals {
+        force_color: true,
+        ..signals
+    };
+    let resolved = Runtime::resolve(&Cli::parse_from(["devlanes"]), forced).expect("mode");
+    assert!(!resolved.color);
+}
+
+#[test]
 fn environment_is_captured_only_for_relevant_methods() {
     for (args, capture) in [
         (vec!["start"], true),

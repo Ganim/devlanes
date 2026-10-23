@@ -16,6 +16,16 @@ bin-dir = "devlanes-{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 disabled-strategies = ["quick-install"]
 
+# Windows releases are zip archives with devlanes.exe in the same directory. Exact
+# targets rather than a cfg() key, which older binstall versions do not read.
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/devlanes-{ version }-{ target }.zip"
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/devlanes-{ version }-{ target }.zip"
+pkg-fmt = "zip"
+
 [lints]
 workspace = true
 
@@ -23,11 +33,28 @@ workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 devlanes-trust-macos = { path = "../../crates/trust-macos" }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 devlanes-trust-linux = { path = "../../crates/trust-linux" }
+
+[target.'cfg(unix)'.dependencies]
+devlanes-runner-pty = { path = "../../crates/runner-pty" }
+devlanes-transport-ssh = { path = "../../crates/transport-ssh" }
+devlanes-tunnel = { path = "../../crates/tunnel" }
+rustix = { version = "1", features = ["process", "termios"] }
+
+[target.'cfg(windows)'.dependencies]
+devlanes-resolver-nrpt = { path = "../../crates/resolver-nrpt" }
+devlanes-runner-windows = { path = "../../crates/runner-windows" }
+devlanes-shell-windows = { path = "../../crates/shell-windows" }
+devlanes-sys-windows = { path = "../../crates/sys-windows" }
+devlanes-trust-windows = { path = "../../crates/trust-windows" }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# `fake-tool` stands in for mkcert on Windows, where `#!/bin/sh` fakes cannot run.
+[target.'cfg(windows)'.dev-dependencies]
+devlanes-testing = { path = "../../crates/testing" }
 
 [build-dependencies]
 devlanes-config = { path = "../../crates/config" }
@@ -59,6 +86,7 @@ devlanes-metrics = { path = "../../crates/metrics" }
 devlanes-metrics-docker = { path = "../../crates/metrics-docker" }
 devlanes-metrics-linux = { path = "../../crates/metrics-linux" }
 devlanes-metrics-macos = { path = "../../crates/metrics-macos" }
+devlanes-metrics-windows = { path = "../../crates/metrics-windows" }
 devlanes-platform-node = { path = "../../crates/platform-node" }
 devlanes-platform-python = { path = "../../crates/platform-python" }
 devlanes-run-script-cargo = { path = "../../crates/run-script-cargo" }
@@ -77,20 +105,16 @@ devlanes-resolver-hosts = { path = "../../crates/resolver-hosts" }
 devlanes-run-script-just = { path = "../../crates/run-script-just" }
 devlanes-run-script-make = { path = "../../crates/run-script-make" }
 devlanes-run-script-npm = { path = "../../crates/run-script-npm" }
-devlanes-runner-pty = { path = "../../crates/runner-pty" }
 devlanes-start-gate = { path = "../../crates/start-gate" }
 devlanes-state = { path = "../../crates/state" }
 devlanes-sys = { path = "../../crates/sys" }
 devlanes-transport = { path = "../../crates/transport" }
-devlanes-transport-ssh = { path = "../../crates/transport-ssh" }
-devlanes-tunnel = { path = "../../crates/tunnel" }
 futures-util.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 crossterm = "0.29"
-rustix = { version = "1", features = ["process", "termios"] }
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

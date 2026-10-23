@@ -3,29 +3,115 @@
 //!
 //! The commands and their checks live in `devlanes_resolver_hosts::install`; this
 //! module picks the helper binary, decides whether sudo may prompt, and reports.
+//!
+//! Windows answers every `*.localhost` name itself, so there both commands only
+//! say so and change nothing.
 
+#[cfg(unix)]
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
 use async_trait::async_trait;
 use devlanes_cli::{Rendered, Runtime};
+#[cfg(unix)]
 use devlanes_client::{Client, Paths};
-use devlanes_proto::{Context, Method, RpcError};
+use devlanes_proto::RpcError;
+#[cfg(unix)]
+use devlanes_proto::{Context, Method};
+#[cfg(unix)]
 use devlanes_resolver_hosts::{
     CommandOutput, CommandSpec, Executor, FileKind, FsProbe, INSTALL_PATH, InstallError,
     SystemExecutor, SystemFs,
     install::{self, HELPER_SOURCE_ENV},
 };
+#[cfg(unix)]
 use serde_json::{Value, json};
 
 use crate::output::emit;
 
 /// Marker the helper writes first; its presence means a block exists.
+#[cfg(unix)]
 const BLOCK_BEGIN: &str = "# devlanes begin";
 
+/// Bound on the `*.localhost` probe, as at daemon start.
+#[cfg(windows)]
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Probes `*.localhost` and says there is nothing to install: Windows answers
+/// those names itself, and names under a `resolver` TLD need the NRPT rule
+/// from `certs trust --resolver`. A failing probe is a warning, since the
+/// hosts file is no remedy devlanes offers on Windows.
+#[cfg(windows)]
+pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
+    let resolution = devlanes_resolver_hosts::probe_localhost(PROBE_TIMEOUT).await;
+    let mut tld = None;
+    if let Ok(paths) = devlanes_client::Paths::discover() {
+        let hostnames = crate::user_config::lenient(&paths).await.hostnames;
+        if hostnames.resolver == devlanes_config::Resolver::Resolver {
+            tld = hostnames.tld;
+        }
+    }
+    let (mut stdout, stderr) = native_report(resolution, tld.as_deref());
+    if runtime.quiet {
+        stdout.clear();
+    }
+    emit(&Rendered {
+        stdout,
+        stderr,
+        ..Rendered::default()
+    });
+    Ok(0)
+}
+
+/// What `certs trust --hosts` says on Windows for the probe's `resolution`
+/// and the `resolver` strategy's `tld`: `(stdout, stderr)`.
+#[cfg(windows)]
+fn native_report(
+    resolution: devlanes_resolver_hosts::LocalhostResolution,
+    tld: Option<&str>,
+) -> (String, String) {
+    use devlanes_resolver_hosts::LocalhostResolution;
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    match resolution {
+        LocalhostResolution::Loopback => stdout.push_str(
+            "nothing to install: Windows resolves every *.localhost name to loopback, so devlanes writes no hosts file entries\n",
+        ),
+        other => {
+            let word = match other {
+                LocalhostResolution::NotLoopback => "answered with an address that is not loopback",
+                _ => "failed",
+            };
+            stderr.push_str(&format!(
+                "warning: a test lookup of a *.localhost name {word}, and devlanes does not write the hosts file on Windows; set hostnames.resolver: resolver and hostnames.tld, then run devlanes certs trust --resolver\n"
+            ));
+        }
+    }
+    if let Some(tld) = tld {
+        stdout.push_str(&format!(
+            "names under .{tld} resolve through the NRPT rule from devlanes certs trust --resolver\n"
+        ));
+    }
+    (stdout, stderr)
+}
+
+/// Nothing to remove: devlanes never writes the hosts file on Windows.
+#[cfg(windows)]
+pub async fn uninstall(runtime: &Runtime) -> Result<u8, RpcError> {
+    if !runtime.quiet {
+        emit(&Rendered {
+            stdout: "nothing to remove: devlanes writes no hosts file entries on Windows\n".into(),
+            ..Rendered::default()
+        });
+    }
+    Ok(0)
+}
+
 /// Installs the helper and its sudo rule, then asks a running daemon to reapply.
+#[cfg(unix)]
 pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
     let source = helper_source(
         &SystemFs,
@@ -75,6 +161,7 @@ pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
 }
 
 /// Clears the block, removes the rule and the helper, and prints what could not be done.
+#[cfg(unix)]
 pub async fn uninstall(runtime: &Runtime) -> Result<u8, RpcError> {
     let had_helper = matches!(
         SystemFs.lstat(Path::new(INSTALL_PATH)),
@@ -106,6 +193,7 @@ pub async fn uninstall(runtime: &Runtime) -> Result<u8, RpcError> {
 
 /// The helper to install: `DEVLANES_HOSTS_HELPER` when set, else `devlanes-hosts`
 /// next to this binary (also next to the target of a symlinked `devlanes`).
+#[cfg(unix)]
 pub fn helper_source(
     fs: &dyn FsProbe,
     override_path: Option<OsString>,
@@ -127,6 +215,7 @@ pub fn helper_source(
 /// The executor for privileged steps. sudo may prompt in an interactive terminal;
 /// agents and CI get `sudo -n` on every step, and only when it already works.
 /// `command` is what the user should run from a terminal instead.
+#[cfg(unix)]
 pub(crate) async fn privileged(
     runtime: &Runtime,
     command: &str,
@@ -154,8 +243,10 @@ pub(crate) async fn privileged(
 
 /// Runs every `sudo` as `sudo -n`, so a session that cannot answer a prompt fails
 /// instead of waiting on one when the sudo timestamp lapses mid-install.
+#[cfg(unix)]
 struct NonInteractive<E>(E);
 
+#[cfg(unix)]
 #[async_trait]
 impl<E: Executor> Executor for NonInteractive<E> {
     /// Adds `-n` to sudo commands and runs them with the inner executor.
@@ -165,6 +256,7 @@ impl<E: Executor> Executor for NonInteractive<E> {
 }
 
 /// `sudo X` (or `/usr/bin/sudo X`) becomes `sudo -n X`; other commands are unchanged.
+#[cfg(unix)]
 fn non_interactive(command: &CommandSpec) -> CommandSpec {
     let mut command = command.clone();
     let sudo = Path::new(&command.program)
@@ -177,6 +269,7 @@ fn non_interactive(command: &CommandSpec) -> CommandSpec {
 }
 
 /// Maps installer failures to the CLI's error shape, keeping their stable codes.
+#[cfg(unix)]
 fn install_error(error: InstallError) -> RpcError {
     let exit = match error {
         InstallError::Unsupported => 2,
@@ -186,6 +279,7 @@ fn install_error(error: InstallError) -> RpcError {
 }
 
 /// Whether `/etc/hosts` (world-readable) still holds a devlanes block.
+#[cfg(unix)]
 async fn block_present() -> bool {
     tokio::fs::read_to_string("/etc/hosts")
         .await
@@ -194,6 +288,7 @@ async fn block_present() -> bool {
 
 /// Asks a running daemon to reapply now; a stopped daemon applies at its next start.
 /// Returns the daemon's `hosts` status after the attempt.
+#[cfg(unix)]
 async fn retry_daemon() -> Option<Value> {
     let paths = Paths::discover().ok()?;
     let mut client = Client::connect(&paths).await.ok()?;
@@ -204,7 +299,34 @@ async fn retry_daemon() -> Option<Value> {
     reply.get("hosts").filter(|hosts| !hosts.is_null()).cloned()
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use devlanes_resolver_hosts::LocalhostResolution;
+
+    use super::*;
+
+    /// A working probe means nothing to install; a failing one warns; a
+    /// resolver TLD points at the NRPT rule.
+    #[test]
+    fn windows_reports_instead_of_installing() {
+        let (stdout, stderr) = native_report(LocalhostResolution::Loopback, None);
+        assert!(stdout.starts_with("nothing to install: "), "{stdout}");
+        assert!(stderr.is_empty());
+        let (stdout, stderr) = native_report(LocalhostResolution::Fails, Some("test"));
+        assert!(stderr.starts_with("warning: "), "{stderr}");
+        assert!(
+            stderr.contains("devlanes certs trust --resolver"),
+            "{stderr}"
+        );
+        assert_eq!(
+            stdout,
+            "names under .test resolve through the NRPT rule from devlanes certs trust --resolver\n"
+        );
+    }
+}
+
+// The helper and sudo are Unix only; Windows needs no hosts file entries.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

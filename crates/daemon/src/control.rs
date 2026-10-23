@@ -511,7 +511,8 @@ impl Inner {
             })?;
         let canonical = tokio::task::spawn_blocking({
             let destination = destination.clone();
-            move || std::fs::canonicalize(&destination).unwrap_or(destination)
+            // dunce: Git lists `C:\...`, never the verbatim `\\?\C:\...` form.
+            move || dunce::canonicalize(&destination).unwrap_or(destination)
         })
         .await
         .unwrap_or(destination);
@@ -522,7 +523,7 @@ impl Inner {
             .into_iter()
             .find(|lane| {
                 let st = lane.st();
-                st.path == canonical && st.alias().is_none()
+                devlanes_core::paths::same_path(&st.path, &canonical) && st.alias().is_none()
             })
             .ok_or_else(|| RpcError::new("not_found", json!({"reference": canonical}), 3))?;
         // Made by devlanes, so it is a lane like one devlanes ran in.

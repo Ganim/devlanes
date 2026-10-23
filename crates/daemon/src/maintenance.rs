@@ -343,13 +343,13 @@ fn lock_dir(dir: &Path) -> io::Result<DirLock> {
 
 /// Removes a file and its sidecar index; false when someone removed it first.
 fn remove(file: &Removable) -> io::Result<bool> {
-    let removed = match std::fs::remove_file(&file.path) {
+    let removed = match crate::files::remove_file(&file.path) {
         Ok(()) => true,
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Err(error) => return Err(error),
     };
     if let Some(sidecar) = &file.sidecar
-        && let Err(error) = std::fs::remove_file(sidecar)
+        && let Err(error) = crate::files::remove_file(sidecar)
         && error.kind() != io::ErrorKind::NotFound
     {
         return Err(error);

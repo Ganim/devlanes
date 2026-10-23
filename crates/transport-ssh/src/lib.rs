@@ -4,6 +4,9 @@
 //! session runs `devlanes tunnel --stdio` on the box over that master. Prompts
 //! go through [`askpass`]; a missing binary yields a [`BootstrapPlan`].
 
+// ControlMaster and the askpass socket are Unix; there is no Windows transport yet.
+#![cfg(unix)]
+
 pub mod askpass;
 mod bootstrap;
 mod ssh;

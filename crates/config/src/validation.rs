@@ -468,6 +468,8 @@ fn validate_inner<E: Extensions>(
         task_graph.insert(name.clone(), edges);
     }
     crate::expression::check_cycles(&task_graph).map_err(|e| fail("tasks", e.message))?;
+    #[cfg(windows)]
+    windows_unit_folders(config)?;
     for (name, profile) in &config.profiles {
         let path = format!("profiles.{name}");
         match profile {
@@ -608,6 +610,52 @@ fn validate_inner<E: Extensions>(
     crate::expression::validate_constants(config)?;
     validate_port_capacity(config, preset_ports)?;
     Ok(report)
+}
+
+/// Rejects unit names that would share one log folder on Windows, which
+/// ignores case: services `web` and `Web`, or task `Setup.db` and infra setup
+/// command `db` (unit `setup.db`). Unix keeps every such name apart.
+#[cfg(windows)]
+fn windows_unit_folders<E: Extensions>(config: &ProjectConfig<E>) -> Result<(), ConfigError> {
+    let mut units: Vec<(String, String)> = Vec::new();
+    units.extend(
+        config
+            .services
+            .keys()
+            .map(|name| (format!("services.{name}"), name.clone())),
+    );
+    units.extend(
+        config
+            .tasks
+            .keys()
+            .map(|name| (format!("tasks.{name}"), name.clone())),
+    );
+    for (phase, entries) in [
+        ("setup", &config.infra.setup),
+        ("teardown", &config.infra.teardown),
+    ] {
+        units.extend(
+            entries
+                .keys()
+                .map(|name| (format!("infra.{phase}.{name}"), format!("{phase}.{name}"))),
+        );
+    }
+    let Some((first, second)) =
+        devlanes_core::paths::colliding_names(units.iter().map(|(_, unit)| unit.as_str()))
+    else {
+        return Ok(());
+    };
+    let path = units
+        .iter()
+        .rev()
+        .find(|(_, unit)| unit == second)
+        .map_or(second, |(path, _)| path.as_str());
+    Err(fail(
+        path,
+        format!(
+            "units `{first}` and `{second}` would share one log folder on Windows, which ignores case; rename one"
+        ),
+    ))
 }
 
 /// Count distinct allocated names, including preset ports, before accepting a fixed block.

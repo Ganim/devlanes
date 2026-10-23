@@ -12,9 +12,15 @@ use tokio::sync::mpsc;
 /// Detach chord, as in tmux/screen: Ctrl-A then `d`.
 const PREFIX: u8 = 0x01;
 
+// A console's raw mode differs from termios (VT input, UTF-16 reads).
+#[cfg(windows)]
+use crate::console::RawGuard;
+
 /// Restores the terminal mode even when attach ends through an error path.
+#[cfg(unix)]
 struct RawGuard(bool);
 
+#[cfg(unix)]
 impl RawGuard {
     /// Only an interactive terminal is switched to raw mode.
     fn enable(interactive: bool) -> std::io::Result<Self> {
@@ -25,6 +31,7 @@ impl RawGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for RawGuard {
     /// Leaving raw mode enabled would break the user's shell.
     fn drop(&mut self) {
@@ -73,6 +80,11 @@ pub async fn run(runtime: &Runtime, paths: &Paths, request: Request) -> anyhow::
     // stdin blocks; a thread keeps it off the runtime and is abandoned at exit.
     let (input_tx, mut input) = mpsc::channel::<Vec<u8>>(64);
     std::thread::spawn(move || {
+        #[cfg(windows)]
+        if interactive {
+            crate::console::read_input(&input_tx);
+            return;
+        }
         let mut stdin = std::io::stdin();
         let mut buffer = [0_u8; 4096];
         while let Ok(read) = stdin.read(&mut buffer) {
@@ -81,7 +93,12 @@ pub async fn run(runtime: &Runtime, paths: &Paths, request: Request) -> anyhow::
             }
         }
     });
+    #[cfg(unix)]
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+    #[cfg(windows)]
+    let mut winch = crate::console::Resizes::new();
+    #[cfg(windows)]
+    let mut text = crate::console::ConsoleText::stdout();
     let mut prefix = false;
     loop {
         tokio::select! {
@@ -91,6 +108,8 @@ pub async fn run(runtime: &Runtime, paths: &Paths, request: Request) -> anyhow::
                         if interactive { let _ = write!(stdout, "\r\n[unit exited]\r\n"); }
                         return Ok(0);
                     }
+                    #[cfg(windows)]
+                    let data = text.convert(&data);
                     stdout.write_all(&data)?;
                     stdout.flush()?;
                 }
