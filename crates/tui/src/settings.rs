@@ -1929,6 +1929,10 @@ mod tests {
             "tui.glyphs",
             "tui.open_on_start",
             "terminal.progress",
+            "terminal.title",
+            "terminal.links",
+            "terminal.notifications",
+            "terminal.marks",
             "updates.check",
             "proxy.https_port",
             "hostnames.resolver",
@@ -1957,6 +1961,16 @@ mod tests {
         };
         // The reserved public resolver is not offered.
         assert!(choices.iter().all(|choice| choice.value != "public"));
+        let title = categories[0]
+            .items
+            .iter()
+            .find(|item| item.key == "terminal.title")
+            .expect("title");
+        let Kind::Choice(choices) = &title.kind else {
+            panic!("{:?}", title.kind);
+        };
+        let values: Vec<&str> = choices.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(values, ["auto", "always", "never"]);
     }
 
     #[test]

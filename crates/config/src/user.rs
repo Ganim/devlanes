@@ -576,10 +576,11 @@ pub enum TerminalConfig {
     Settings(TerminalSettings),
 }
 
-/// How devlanes uses the terminal's own progress bar.
+/// How devlanes uses the terminal: its progress bar, tab title, links, notifications and
+/// marks.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-#[schemars(extend("examples" = [{"progress":"auto"},{"progress":"never"}]))]
+#[schemars(extend("examples" = [{"progress":"auto"},{"progress":"never","title":"never"}]))]
 pub struct TerminalSettings {
     /// A terminal app from older configs; ignored with a warning.
     #[serde(skip_serializing)]
@@ -588,6 +589,57 @@ pub struct TerminalSettings {
     /// Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto.
     #[schemars(extend("examples" = ["auto","never"]))]
     pub progress: TerminalProgress,
+    /// Whether the terminal tab's title says what devlanes is doing (`devlanes · acme@0 ·
+    /// starting 3/8` in the TUI, `devlanes start acme@0 · 3/8` or `devlanes logs -f api`
+    /// for long commands); defaults to `auto`. The previous title is saved on the
+    /// terminal's title stack and put back on exit, so `auto` sets it only where that
+    /// stack exists: xterm, iTerm2, kitty, Ghostty and VTE terminals such as GNOME
+    /// Terminal. Never inside tmux or screen, which manage titles themselves.
+    /// `DEVLANES_TERM_TITLE=0` or `1` overrides this setting.
+    #[schemars(extend("examples" = ["auto","never"]))]
+    pub title: TerminalFeature,
+    /// Whether service URLs, config error locations and log or bundle paths are
+    /// clickable links (the OSC 8 sequence); defaults to `auto`, which writes them in
+    /// iTerm2, kitty, WezTerm, Ghostty, Windows Terminal, VTE terminals, Konsole,
+    /// Alacritty and foot. Elsewhere the same text prints without a link.
+    /// `DEVLANES_TERM_LINKS=0` or `1` overrides this setting.
+    #[schemars(extend("examples" = ["auto","never"]))]
+    pub links: TerminalFeature,
+    /// Whether a start that took a while finishing or failing, and a running service
+    /// crashing, show a desktop notification while the terminal is not focused; defaults
+    /// to `auto`. The TUI knows focus from the terminal; a command such as `devlanes
+    /// start` does not, so with `auto` it notifies only in kitty, which itself skips a
+    /// focused window. Terminals without notifications get the bell. At most one
+    /// notification per 10 seconds. `DEVLANES_TERM_NOTIFICATIONS=0` or `1` overrides
+    /// this setting.
+    #[schemars(extend("examples" = ["auto","never"]))]
+    pub notifications: TerminalFeature,
+    /// Whether long command output (logs of several services, failed starts) marks where
+    /// each section starts, so the terminal's jump-to-mark or jump-to-prompt keys move
+    /// between them; defaults to `auto`: marks in iTerm2, and prompt marks (OSC 133) in
+    /// WezTerm, Ghostty, kitty, foot and Windows Terminal. `DEVLANES_TERM_MARKS=0` or
+    /// `1` overrides this setting.
+    #[schemars(extend("examples" = ["auto","never"]))]
+    pub marks: TerminalFeature,
+}
+
+/// When devlanes uses a terminal feature (title, links, notifications, marks).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(extend("examples" = ["auto","always","never"]))]
+pub enum TerminalFeature {
+    /// Only in terminals known to support it, on human output to a terminal; never
+    /// inside tmux, screen, CI or a dumb terminal.
+    #[default]
+    #[schemars(extend("examples" = ["auto"]))]
+    Auto,
+    /// In every terminal, tmux included; a terminal without support may ignore it, or
+    /// keep a title devlanes cannot put back.
+    #[schemars(extend("examples" = ["always"]))]
+    Always,
+    /// Never use it.
+    #[schemars(extend("examples" = ["never"]))]
+    Never,
 }
 
 /// When start progress goes to the terminal tab's progress bar. Only a terminal
@@ -611,9 +663,17 @@ pub enum TerminalProgress {
 impl TerminalConfig {
     /// The progress-bar setting; the legacy app name keeps it on auto.
     pub fn progress(&self) -> TerminalProgress {
+        self.settings().progress
+    }
+
+    /// Every terminal setting; the legacy app name keeps them all on auto.
+    pub fn settings(&self) -> TerminalSettings {
         match self {
-            Self::Legacy(_) => TerminalProgress::Auto,
-            Self::Settings(settings) => settings.progress,
+            Self::Legacy(_) => TerminalSettings::default(),
+            Self::Settings(settings) => TerminalSettings {
+                app: None,
+                ..settings.clone()
+            },
         }
     }
 

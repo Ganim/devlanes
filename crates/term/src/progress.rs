@@ -122,7 +122,7 @@ pub fn progress_support_from_env(mode: ProgressMode, tty: bool) -> Option<Wrap> 
 }
 
 /// CI runners that set a marker; their logs are no place for escape sequences.
-fn in_ci(env: &impl Fn(&str) -> Option<String>) -> bool {
+pub(crate) fn in_ci(env: &impl Fn(&str) -> Option<String>) -> bool {
     let ci = env("CI").is_some_and(|value| !matches!(value.as_str(), "" | "0" | "false"));
     ci || [
         "GITHUB_ACTIONS",
@@ -464,12 +464,56 @@ impl StartTracker {
                 Progress::Clear
             };
         }
-        let filter = self.unit_filter(&lanes);
+        let (tally, busy) = self.tally(&lanes);
+        let Tally {
+            ready,
+            total,
+            held,
+            failed,
+            phase_failed,
+        } = tally;
+        let percent = (ready * 100)
+            .checked_div(total)
+            .map_or(0, |share| u8::try_from(share).unwrap_or(100));
+        if failed > 0 || phase_failed {
+            Progress::Error(percent)
+        } else if total == 0 || busy.is_some() && ready == 0 {
+            Progress::Indeterminate
+        } else if held > 0 && held == total - ready {
+            Progress::Paused(percent)
+        } else {
+            Progress::Percent(percent)
+        }
+    }
+
+    /// The same start in numbers, for a title or a line of text.
+    pub fn counts(&self) -> StartCounts {
+        let lanes = self.followed();
+        let (tally, phase) = self.tally(&lanes);
+        StartCounts {
+            lanes: lanes
+                .iter()
+                .map(|(reference, _)| (*reference).clone())
+                .collect(),
+            ready: tally.ready,
+            total: tally.total,
+            failed: tally.failed,
+            phase_failed: tally.phase_failed,
+            phase,
+        }
+    }
+
+    /// Counts the units of `lanes` in the start, plus the first phase before
+    /// services that still runs.
+    fn tally(&self, lanes: &[(&String, &Followed)]) -> (Tally, Option<String>) {
+        let filter = self.unit_filter(lanes);
         let mut tally = Tally::default();
-        let mut busy = false;
-        for (reference, followed) in &lanes {
-            tally.failed |= followed.failed;
-            busy |= followed.phase.as_deref().is_some_and(|p| p != "services");
+        let mut busy = None;
+        for (reference, followed) in lanes {
+            tally.phase_failed |= followed.failed;
+            if busy.is_none() {
+                busy = followed.phase.clone().filter(|phase| phase != "services");
+            }
             let wanted = |name: &str| filter.is_empty() || named(&filter, reference, name);
             let unit = |name: &str| {
                 followed
@@ -493,24 +537,7 @@ impl StartTracker {
                 }
             }
         }
-        let Tally {
-            ready,
-            total,
-            held,
-            failed,
-        } = tally;
-        let percent = (ready * 100)
-            .checked_div(total)
-            .map_or(0, |share| u8::try_from(share).unwrap_or(100));
-        if failed {
-            Progress::Error(percent)
-        } else if total == 0 || busy && ready == 0 {
-            Progress::Indeterminate
-        } else if held > 0 && held == total - ready {
-            Progress::Paused(percent)
-        } else {
-            Progress::Percent(percent)
-        }
+        (tally, busy)
     }
 
     /// The lanes the bar is about, by reference.
@@ -547,6 +574,23 @@ impl StartTracker {
     }
 }
 
+/// A followed start in numbers ([`StartTracker::counts`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartCounts {
+    /// The lanes followed, by reference.
+    pub lanes: Vec<String>,
+    /// Units of the start that are ready or running.
+    pub ready: usize,
+    /// Units the start waits for.
+    pub total: usize,
+    /// Units that failed during this start.
+    pub failed: usize,
+    /// A phase failed (infra, setup, tasks), whatever the units did.
+    pub phase_failed: bool,
+    /// The phase before services that runs now (`infra`, `setup`, `tasks`).
+    pub phase: Option<String>,
+}
+
 /// Unit counts behind the bar.
 #[derive(Debug, Default)]
 struct Tally {
@@ -554,7 +598,9 @@ struct Tally {
     total: usize,
     /// Queued units waiting for memory.
     held: usize,
-    failed: bool,
+    /// Units that failed during this start.
+    failed: usize,
+    phase_failed: bool,
 }
 
 impl Tally {
@@ -574,7 +620,7 @@ impl Tally {
             "starting" => self.total += 1,
             "failed" if fresh => {
                 self.total += 1;
-                self.failed = true;
+                self.failed += 1;
             }
             _ if planned => self.total += 1,
             _ => {}

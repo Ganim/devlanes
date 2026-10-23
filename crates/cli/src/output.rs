@@ -200,7 +200,8 @@ pub trait Reporter: Send + Sync {
     /// Errors always go to stderr in the same one-line/context/hint shape.
     fn error(&self, error: &RpcError, hint: Option<&Hint>) -> Rendered {
         let (message, fallback_hint) = error_message(error);
-        let mut stderr = format!("error: {}\n", clean(&message));
+        let message = link_location(self.runtime(), self.mode(), error, &clean(&message));
+        let mut stderr = format!("error: {message}\n");
         if let Some(context) = error.data.get("context").and_then(Value::as_array) {
             for line in context {
                 if let Some(line) = line.as_str() {
@@ -224,6 +225,33 @@ pub trait Reporter: Send + Sync {
             ..Rendered::default()
         }
     }
+}
+
+/// `message` with the config file an error names (`data.file`, absolute)
+/// turned into a link to it at the error's line and column, on human output
+/// to a terminal that shows links; otherwise `message` as it is.
+fn link_location(runtime: &Runtime, mode: OutputMode, error: &RpcError, message: &str) -> String {
+    let Some(links) = runtime.terminal.links.filter(|_| mode == OutputMode::Human) else {
+        return message.to_owned();
+    };
+    let Some(file) = error.data.get("file").and_then(Value::as_str) else {
+        return message.to_owned();
+    };
+    let path = std::path::Path::new(file);
+    let file = clean(file);
+    if !path.is_absolute() || file.is_empty() || !message.contains(&file) {
+        return message.to_owned();
+    }
+    let number = |key: &str| {
+        error
+            .data
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0)
+    };
+    let linked = links.file(&file, path, number("line"), number("column"));
+    message.replacen(&file, &linked, 1)
 }
 
 pub struct HumanReporter(pub Runtime);

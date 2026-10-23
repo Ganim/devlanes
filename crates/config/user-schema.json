@@ -645,6 +645,40 @@
         }
       ]
     },
+    "TerminalFeature": {
+      "description": "When devlanes uses a terminal feature (title, links, notifications, marks).",
+      "examples": [
+        "auto",
+        "always",
+        "never"
+      ],
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Only in terminals known to support it, on human output to a terminal; never\ninside tmux, screen, CI or a dumb terminal.",
+          "examples": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "always",
+          "description": "In every terminal, tmux included; a terminal without support may ignore it, or\nkeep a title devlanes cannot put back.",
+          "examples": [
+            "always"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Never use it.",
+          "examples": [
+            "never"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "TerminalProgress": {
       "description": "When start progress goes to the terminal tab's progress bar. Only a terminal\nsession in human output ever gets it; `DEVLANES_TERM_PROGRESS=0` or `1` overrides this.",
       "examples": [
@@ -681,20 +715,57 @@
     },
     "TerminalSettings": {
       "additionalProperties": false,
-      "description": "How devlanes uses the terminal's own progress bar.",
+      "description": "How devlanes uses the terminal: its progress bar, tab title, links, notifications and\nmarks.",
       "examples": [
         {
           "progress": "auto"
         },
         {
-          "progress": "never"
+          "progress": "never",
+          "title": "never"
         }
       ],
       "properties": {
+        "links": {
+          "$ref": "#/$defs/TerminalFeature",
+          "default": "auto",
+          "description": "Whether service URLs, config error locations and log or bundle paths are\nclickable links (the OSC 8 sequence); defaults to `auto`, which writes them in\niTerm2, kitty, WezTerm, Ghostty, Windows Terminal, VTE terminals, Konsole,\nAlacritty and foot. Elsewhere the same text prints without a link.\n`DEVLANES_TERM_LINKS=0` or `1` overrides this setting.",
+          "examples": [
+            "auto",
+            "never"
+          ]
+        },
+        "marks": {
+          "$ref": "#/$defs/TerminalFeature",
+          "default": "auto",
+          "description": "Whether long command output (logs of several services, failed starts) marks where\neach section starts, so the terminal's jump-to-mark or jump-to-prompt keys move\nbetween them; defaults to `auto`: marks in iTerm2, and prompt marks (OSC 133) in\nWezTerm, Ghostty, kitty, foot and Windows Terminal. `DEVLANES_TERM_MARKS=0` or\n`1` overrides this setting.",
+          "examples": [
+            "auto",
+            "never"
+          ]
+        },
+        "notifications": {
+          "$ref": "#/$defs/TerminalFeature",
+          "default": "auto",
+          "description": "Whether a start that took a while finishing or failing, and a running service\ncrashing, show a desktop notification while the terminal is not focused; defaults\nto `auto`. The TUI knows focus from the terminal; a command such as `devlanes\nstart` does not, so with `auto` it notifies only in kitty, which itself skips a\nfocused window. Terminals without notifications get the bell. At most one\nnotification per 10 seconds. `DEVLANES_TERM_NOTIFICATIONS=0` or `1` overrides\nthis setting.",
+          "examples": [
+            "auto",
+            "never"
+          ]
+        },
         "progress": {
           "$ref": "#/$defs/TerminalProgress",
           "default": "auto",
           "description": "Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto.",
+          "examples": [
+            "auto",
+            "never"
+          ]
+        },
+        "title": {
+          "$ref": "#/$defs/TerminalFeature",
+          "default": "auto",
+          "description": "Whether the terminal tab's title says what devlanes is doing (`devlanes · acme@0 ·\nstarting 3/8` in the TUI, `devlanes start acme@0 · 3/8` or `devlanes logs -f api`\nfor long commands); defaults to `auto`. The previous title is saved on the\nterminal's title stack and put back on exit, so `auto` sets it only where that\nstack exists: xterm, iTerm2, kitty, Ghostty and VTE terminals such as GNOME\nTerminal. Never inside tmux or screen, which manage titles themselves.\n`DEVLANES_TERM_TITLE=0` or `1` overrides this setting.",
           "examples": [
             "auto",
             "never"

@@ -1314,3 +1314,4 @@ mod progress;
 mod reference_docs;
 mod render;
 mod start_ui;
+mod terminal;

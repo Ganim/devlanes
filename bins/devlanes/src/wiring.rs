@@ -36,12 +36,19 @@ pub async fn tui_options(paths: &Paths) -> devlanes_tui::Options {
     let tui = devlanes_config::load_user(paths.home.join("config.yaml"))
         .map(|config| config.tui)
         .unwrap_or_default();
+    // The TUI is always human output; each feature still needs a terminal
+    // that supports it.
+    let features = devlanes_term::Features::detect(
+        &crate::terminal::settings(paths),
+        std::io::stdout().is_terminal(),
+        |key| std::env::var(key).ok(),
+    );
     devlanes_tui::Options {
-        // The TUI is always human output; it still needs a terminal that draws the bar.
-        progress: devlanes_term::progress_support_from_env(
-            crate::progress::configured_mode(paths),
-            std::io::stdout().is_terminal(),
-        ),
+        progress: features.progress,
+        title: features.title,
+        links: features.links,
+        notifications: features.notifications,
+        sync_output: true,
         theme: Some(tui.theme.as_str().to_owned()),
         glyphs: Some(tui.glyphs.as_str().to_owned()),
         on_quit: Some(tui.on_quit.as_str().to_owned()),

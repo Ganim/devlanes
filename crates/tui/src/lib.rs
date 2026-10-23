@@ -10,6 +10,7 @@ pub mod banner;
 pub mod daemonlog;
 pub mod doctor;
 pub mod graph;
+pub mod hyperlink;
 pub mod input;
 pub mod logfile;
 pub mod menu;
@@ -53,6 +54,17 @@ pub struct Options {
     /// How to draw start progress in the tab's progress bar, from
     /// [`devlanes_term::progress_support`]; `None` draws nothing.
     pub progress: Option<devlanes_term::Wrap>,
+    /// Whether the tab title says which lane is shown and how it stands
+    /// ([`devlanes_term::title_support`]); the previous title returns on exit.
+    pub title: bool,
+    /// Clickable service URLs in the pane, from [`devlanes_term::links_support`].
+    pub links: Option<devlanes_term::Links>,
+    /// Desktop notifications while the terminal is not focused, from
+    /// [`devlanes_term::notifications_support`].
+    pub notifications: Option<devlanes_term::Notifications>,
+    /// Wraps each frame in synchronized output (`CSI ? 2026 h` / `l`), so the
+    /// terminal shows it at once; terminals without it ignore the mode.
+    pub sync_output: bool,
     /// `tui.theme` from the user config: `auto` (or unset), `dark`, `light` or `ansi`.
     pub theme: Option<String>,
     /// `tui.glyphs` from the user config: `auto` (or unset), `unicode` or `ascii`.

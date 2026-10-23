@@ -25,7 +25,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 /// Terminal output the test reads after the loop ended.
 #[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Captured(Arc<Mutex<Vec<u8>>>);
 
 impl Write for Captured {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -41,7 +41,7 @@ impl Write for Captured {
 }
 
 impl Captured {
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         self.0
             .lock()
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -49,7 +49,7 @@ impl Captured {
     }
 
     /// Waits up to 4 s until `text` was written after byte `from`.
-    async fn wait_for(&self, from: usize, text: &str) {
+    pub(crate) async fn wait_for(&self, from: usize, text: &str) {
         for _ in 0..400 {
             if self
                 .text()

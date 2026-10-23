@@ -14,9 +14,8 @@ use std::{
 };
 
 use devlanes_cli::{ERROR_HOLD, Runtime, start_tracker};
-use devlanes_client::Paths;
 use devlanes_proto::{Event, Request};
-use devlanes_term::{Progress, ProgressBar, ProgressMode, StartTracker, Wrap};
+use devlanes_term::{Progress, ProgressBar, StartTracker, Wrap};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -27,22 +26,9 @@ static SHOWN: AtomicU8 = AtomicU8::new(0);
 /// The longest `finish` waits for the follower to clear before giving up on it.
 const FINISH_WAIT: Duration = Duration::from_secs(3);
 
-/// The `terminal.progress` setting from the user config; auto when unset or unreadable.
-pub fn configured_mode(paths: &Paths) -> ProgressMode {
-    let config = devlanes_config::load_user(paths.home.join("config.yaml")).ok();
-    match config
-        .and_then(|config| config.terminal)
-        .map(|t| t.progress())
-    {
-        Some(devlanes_config::TerminalProgress::Always) => ProgressMode::Always,
-        Some(devlanes_config::TerminalProgress::Never) => ProgressMode::Never,
-        _ => ProgressMode::Auto,
-    }
-}
-
-/// Whether this invocation draws the bar at all.
-pub fn wrap(paths: &Paths, runtime: &Runtime) -> Option<Wrap> {
-    runtime.progress_wrap(configured_mode(paths), |key| std::env::var(key).ok())
+/// Whether this invocation draws the bar at all ([`crate::terminal::detect`]).
+pub fn wrap(runtime: &Runtime) -> Option<Wrap> {
+    runtime.terminal.progress
 }
 
 /// A running follower; [`Follower::finish`] ends it and clears the bar.
@@ -54,12 +40,9 @@ pub struct Follower {
 
 impl Follower {
     /// Follows `request`'s start when it is one and this invocation draws the
-    /// bar; otherwise does nothing. The config is read only for a start.
-    pub fn start(paths: &Paths, runtime: &Runtime, request: &Request) -> Self {
-        if start_tracker(request).is_none() {
-            return Self::idle();
-        }
-        Self::start_with(wrap(paths, runtime), request)
+    /// bar; otherwise does nothing.
+    pub fn start(runtime: &Runtime, request: &Request) -> Self {
+        Self::start_with(wrap(runtime), request)
     }
 
     /// Like [`Follower::start`] with the bar's [`wrap`] already resolved.

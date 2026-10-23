@@ -130,9 +130,14 @@ pub async fn run(
             stdout: if runtime.mode == OutputMode::Json {
                 format!("{}\n", json!({"path": archive, "files": names}))
             } else {
+                let shown = archive.display().to_string();
+                // Clickable where the terminal shows links; `--to` may be relative.
+                let linked = match (runtime.terminal.links, std::path::absolute(&archive)) {
+                    (Some(links), Ok(path)) => links.file(&shown, &path, None, None),
+                    _ => shown,
+                };
                 format!(
-                    "wrote {}\n{}\n",
-                    archive.display(),
+                    "wrote {linked}\n{}\n",
                     "secret-looking values are replaced; read the files before you send them"
                 )
             },

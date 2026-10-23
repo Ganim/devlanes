@@ -37,6 +37,24 @@ impl Ctx<'_> {
         self.mode == OutputMode::Human
     }
 
+    /// `text` as a clickable link to `url` where the terminal shows links
+    /// (human output on one only); otherwise `text` as it is.
+    pub fn link(&self, text: &str, url: &str) -> String {
+        match self.runtime.terminal.links.filter(|_| self.human()) {
+            Some(links) => links.url(text, url),
+            None => text.to_owned(),
+        }
+    }
+
+    /// A section heading with the marks the terminal jumps between, where it
+    /// has them; otherwise the heading as it is.
+    pub fn section(&self, heading: &str) -> String {
+        devlanes_term::marked(
+            self.runtime.terminal.marks.filter(|_| self.human()),
+            heading,
+        )
+    }
+
     /// Wraps `text` in an SGR color when color is on.
     pub fn paint(&self, text: &str, sgr: &str) -> String {
         if self.color {

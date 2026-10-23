@@ -112,6 +112,10 @@ pub struct Runtime {
     /// Diagnostics on stderr: 0 none, 1 debug, 2 trace (`-v`, `-vv`,
     /// `DEVLANES_VERBOSE`). Independent of the output mode.
     pub verbose: u8,
+    /// Links, marks and the rest this invocation writes to its terminal;
+    /// none until the binary reads the user's `terminal` settings
+    /// ([`Runtime::detect_terminal`]).
+    pub terminal: devlanes_term::Features,
 }
 
 impl Runtime {
@@ -157,6 +161,7 @@ impl Runtime {
             ci_state: crate::CiShared::default(),
             no_ui: signals.no_ui,
             verbose: cli.verbose.max(signals.env_verbose).min(2),
+            terminal: devlanes_term::Features::default(),
         })
     }
 

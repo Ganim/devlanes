@@ -448,6 +448,8 @@ pub enum Msg {
     Resize(u16, u16),
     /// One second passed.
     Tick,
+    /// The terminal gained (`true`) or lost focus.
+    Focus(bool),
     Status(Result<Vec<LaneSummary>, ApiError>),
     Subscribed(Result<(), ApiError>),
     Event(Event),
@@ -546,6 +548,13 @@ pub enum Effect {
     },
     Refresh,
     Subscribe,
+    /// A desktop notification, asked for only while the terminal is not
+    /// focused; the runtime drops it where notifications are off and when
+    /// the last one is too recent.
+    Notify {
+        title: String,
+        body: String,
+    },
     ScheduleReconnect {
         after_ms: u64,
     },
@@ -790,6 +799,15 @@ pub struct App {
     pub user_home: Option<PathBuf>,
     /// [`Effect::QuitWith`] runs; q again quits at once.
     quitting: bool,
+    /// The terminal has focus, as its focus reports say; assumed until one
+    /// says otherwise, so a terminal that never reports never notifies.
+    pub focused: bool,
+    /// A start must run this long before its end is worth a notification.
+    pub notify_after: std::time::Duration,
+    /// Each lane's state when last seen, and since when it is starting.
+    watched: HashMap<String, (String, Option<std::time::Instant>)>,
+    /// Each service's state when last seen, by `(lane, unit)`.
+    watched_units: HashMap<(String, String), String>,
 }
 
 /// Ticks (seconds) a failed start stays red in the tab's progress bar.
@@ -852,6 +870,126 @@ impl App {
             service_report: None,
             user_home: None,
             quitting: false,
+            focused: true,
+            notify_after: devlanes_term::LONG_START,
+            watched: HashMap::new(),
+            watched_units: HashMap::new(),
+        }
+    }
+
+    /// The URLs worth a click on screen: the first of each unit of the lane
+    /// shown, as the pane header, its details and section lists print them.
+    pub fn link_targets(&self) -> Vec<String> {
+        self.selected_lane()
+            .map(|lane| {
+                lane.units
+                    .iter()
+                    .filter_map(|unit| unit.urls.first())
+                    .map(|url| text::clean(url))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The tab title: `devlanes · acme@0`, with how the lane stands when that
+    /// is worth a glance (`starting 3/8`, `stopping`, `cleaning`, `2 failed`,
+    /// `reconnecting`).
+    pub fn tab_title(&self) -> String {
+        let Some(lane) = self.selected_lane() else {
+            return "devlanes".into();
+        };
+        let mut title = format!("devlanes · {}", lane.reference);
+        let counts = tree::counts(lane);
+        let state = if matches!(self.connection, Connection::Reconnecting { .. }) {
+            Some("reconnecting".to_owned())
+        } else if lane.state == "starting" {
+            Some(if counts.total > 0 {
+                format!("starting {}/{}", counts.up, counts.total)
+            } else {
+                "starting".into()
+            })
+        } else if lane.state == "stopping" {
+            Some("stopping".into())
+        } else if self.cleaning.contains(&lane.reference) {
+            Some("cleaning".into())
+        } else {
+            (counts.failed > 0).then(|| format!("{} failed", counts.failed))
+        };
+        if let Some(state) = state {
+            title.push_str(" · ");
+            title.push_str(&state);
+        }
+        title
+    }
+
+    /// Compares every lane and service with how it was last seen, and asks
+    /// for a notification while the terminal is not focused when a start
+    /// that ran at least [`App::notify_after`] ended, or a running service
+    /// failed outside a start.
+    fn watch(&mut self, effects: &mut Vec<Effect>) {
+        let now = std::time::Instant::now();
+        let mut notes = Vec::new();
+        let mut seen_units = HashMap::new();
+        for lane in &self.lanes {
+            let before = self.watched.get(&lane.reference);
+            let was_starting = before.is_some_and(|(state, _)| state == "starting");
+            let since = if lane.state == "starting" {
+                Some(before.and_then(|(_, since)| *since).unwrap_or(now))
+            } else {
+                None
+            };
+            if was_starting
+                && lane.state != "starting"
+                && before
+                    .and_then(|(_, since)| *since)
+                    .is_some_and(|since| now.duration_since(since) >= self.notify_after)
+            {
+                let counts = tree::counts(lane);
+                notes.push(if counts.failed > 0 {
+                    (
+                        format!("start of {} failed", lane.reference),
+                        format!("{} failed", counts.failed),
+                    )
+                } else {
+                    (
+                        format!("{} is up", lane.reference),
+                        format!("{} of {} ready", counts.up, counts.total),
+                    )
+                });
+            }
+            for unit in lane
+                .units
+                .iter()
+                .filter(|unit| tree::role(unit) == tree::Role::Service)
+            {
+                let key = (lane.reference.clone(), unit.name.clone());
+                let was_up = self
+                    .watched_units
+                    .get(&key)
+                    .is_some_and(|state| matches!(state.as_str(), "ready" | "running"));
+                // A failure during a start is the start's, reported when it ends.
+                if was_up && unit.state == "failed" && lane.state != "starting" && !was_starting {
+                    let body = unit
+                        .exit_code
+                        .map(|code| format!("exited {code}"))
+                        .unwrap_or_default();
+                    notes.push((format!("{}:{} crashed", lane.reference, unit.name), body));
+                }
+                seen_units.insert(key, unit.state.clone());
+            }
+            self.watched
+                .insert(lane.reference.clone(), (lane.state.clone(), since));
+        }
+        let lanes: HashSet<&str> = self.lanes.iter().map(|l| l.reference.as_str()).collect();
+        self.watched
+            .retain(|reference, _| lanes.contains(reference.as_str()));
+        self.watched_units = seen_units;
+        if !self.focused {
+            effects.extend(
+                notes
+                    .into_iter()
+                    .map(|(title, body)| Effect::Notify { title, body }),
+            );
         }
     }
 
@@ -1014,6 +1152,7 @@ impl App {
                 self.resize_pane(&mut effects);
             }
             Msg::Tick => self.tick(&mut effects),
+            Msg::Focus(focused) => self.focused = focused,
             Msg::Settings(reply) => match self.dialog.as_mut() {
                 Some(Dialog::Settings(settings)) => settings.reply(reply),
                 // The page closed before the write finished; only a failure matters.
@@ -1674,6 +1813,7 @@ impl App {
     /// Keeps selection, list scroll, task lists and the attach stream
     /// consistent with the lanes.
     fn after_change(&mut self, effects: &mut Vec<Effect>) {
+        self.watch(effects);
         let lane_known = self
             .selected
             .as_ref()

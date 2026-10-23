@@ -77,6 +77,8 @@ pub struct ClientDriver {
     signals: Option<Signals>,
     /// The tab progress bar during the start phase, when this invocation draws it.
     progress: Option<devlanes_term::Wrap>,
+    /// The tab title for the whole run; put back when the driver drops.
+    title: Option<crate::terminal::Title>,
 }
 
 impl ClientDriver {
@@ -93,7 +95,14 @@ impl ClientDriver {
             ownership,
             signals: None,
             progress: None,
+            title: None,
         }
+    }
+
+    /// Keeps the tab's title current from the start's events.
+    pub fn with_title(mut self, title: Option<crate::terminal::Title>) -> Self {
+        self.title = title;
+        self
     }
 
     /// Lets SIGINT/SIGTERM cancel the start and reach the test command.
@@ -407,6 +416,7 @@ impl WithDriver for ClientDriver {
                             lane = Some(name.to_owned());
                         }
                         progress.event(&event);
+                        crate::terminal::title_event(&mut self.title, &event);
                         events(event)
                     }
                     Frame::Control(Control::Response(response)) if response.id == id => {
