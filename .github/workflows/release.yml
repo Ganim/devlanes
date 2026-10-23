@@ -199,13 +199,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Refresh website release files
+      # The website takes the docs, JSON Schemas and install.sh from this tag.
+      - name: Publish this release on the website
         env:
           # Fine-grained token scoped to website with Contents write permission.
           GH_TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
         run: |
           gh api --method POST repos/devlanes-run/website/dispatches \
-            -f event_type=devlanes-release
+            -f event_type=source-release \
+            -f "client_payload[repository]=$GITHUB_REPOSITORY" \
+            -f "client_payload[tag]=$GITHUB_REF_NAME"
 
   homebrew-verify:
     needs: [release, publish]
