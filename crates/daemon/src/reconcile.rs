@@ -2,7 +2,8 @@
 //! clients. Unfinished `unit_runs` whose recorded identity still verifies belong
 //! to a crashed or restarted daemon: they keep running as `orphaned` units
 //! (decision 16 overrides plan 4.3, see `orphans`); the rest are marked ended.
-//! Containers are only re-adopted by label, never stopped.
+//! Containers are only re-adopted by label, never stopped, in the background
+//! after readiness.
 
 use std::sync::Arc;
 
@@ -62,10 +63,17 @@ impl Inner {
         self.load_known_projects().await?;
         self.track_orphans(runs).await;
         let names: Vec<String> = self.all_projects().iter().map(|p| p.name()).collect();
-        match self.integ.infra.adopt(&names).await {
-            Ok(adopted) => tracing::info!(%adopted, "re-adopted containers"),
-            Err(error) => tracing::debug!(code = %error.code, "container adoption skipped"),
-        }
+        // The first Docker call waits for the engine to wake (Docker Desktop's
+        // Resource Saver took 18 s once), which would outlast the spawning
+        // client's start timeout. Adoption only re-attaches event watchers, so
+        // no request needs it before readiness.
+        let infra = self.integ.infra.clone();
+        tokio::spawn(async move {
+            match infra.adopt(&names).await {
+                Ok(adopted) => tracing::info!(%adopted, "re-adopted containers"),
+                Err(error) => tracing::debug!(code = %error.code, "container adoption skipped"),
+            }
+        });
         self.start_dns().await;
         self.start_background();
         Ok(())

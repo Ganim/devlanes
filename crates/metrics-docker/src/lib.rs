@@ -248,15 +248,9 @@ pub struct DockerSource {
 }
 
 impl DockerSource {
-    /// Connects using `DOCKER_HOST` or the platform's default socket. No request is
-    /// made until the first sample.
-    pub fn connect() -> Result<Self, Error> {
-        Docker::connect_with_defaults()
-            .map(Self::new)
-            .map_err(unavailable)
-    }
-
-    /// Wraps an existing client, e.g. one shared with the infra integration.
+    /// Wraps an existing client. Pass the infra integration's client so metrics
+    /// come from the engine the Docker context selects; bollard's defaults only
+    /// read `DOCKER_HOST`. No request is made until the first sample.
     pub fn new(docker: Docker) -> Self {
         Self {
             docker,

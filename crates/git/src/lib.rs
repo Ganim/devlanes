@@ -19,6 +19,11 @@ pub enum Error {
     Encoding,
     #[error("malformed worktree output: {0}")]
     Porcelain(String),
+    #[error(
+        "worktree {} has lost its .git entry; restore it or run `git worktree prune`",
+        .0.display()
+    )]
+    MissingGitEntry(PathBuf),
     #[error("watch setup failed: {0}")]
     Watch(#[from] notify::Error),
 }
@@ -112,6 +117,17 @@ pub async fn discover(cwd: &Path, primary: Option<&str>) -> Result<Option<Reposi
         None => default_branch(&root).await?,
     };
     let worktrees = list(&root, &common_dir).await?;
+    // Inside a linked worktree that lost its `.git` entry, Git answers for the
+    // enclosing main checkout; refuse instead of treating it as part of `root`.
+    let canonical = tokio::fs::canonicalize(cwd)
+        .await
+        .unwrap_or_else(|_| cwd.to_owned());
+    if let Some(broken) = worktrees
+        .iter()
+        .find(|tree| !tree.present && tree.path != root && canonical.starts_with(&tree.path))
+    {
+        return Err(Error::MissingGitEntry(broken.path.clone()));
+    }
     Ok(Some(Repository {
         common_dir,
         root,
@@ -127,12 +143,11 @@ pub async fn list(root: &Path, common_dir: &Path) -> Result<Vec<Worktree>, Error
     for worktree in &mut worktrees {
         worktree.present = tokio::fs::try_exists(&worktree.path).await? && !worktree.prunable;
         if worktree.present {
-            let admin = git(
-                &worktree.path,
-                &["rev-parse", "--path-format=absolute", "--git-dir"],
-            )
-            .await?;
-            let admin = PathBuf::from(text(&admin)?.trim_end_matches('\n'));
+            // `.git` can vanish after the listing (a race with `git worktree remove`).
+            let Some(admin) = admin_dir(&worktree.path).await? else {
+                worktree.present = false;
+                continue;
+            };
             worktree.identity = if admin == common_dir {
                 "main".into()
             } else {
@@ -164,6 +179,39 @@ pub async fn list(root: &Path, common_dir: &Path) -> Result<Vec<Worktree>, Error
         }
     }
     Ok(worktrees)
+}
+
+/// The absolute administration directory of the worktree at `path`, or `None`
+/// when `path` no longer holds its `.git` entry.
+async fn admin_dir(path: &Path) -> Result<Option<PathBuf>, Error> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--path-format=absolute", "--git-dir"])
+        .stdin(Stdio::null());
+    // Worktrees live inside the main checkout (`.worktrees/`), so without a
+    // ceiling Git would climb to the main `.git` and the worktree would take the
+    // identity `main`. `join_paths` refuses a parent containing `:`, which the
+    // variable cannot carry; then no ceiling is set.
+    if let Some(parent) = path.parent().filter(|parent| parent.is_absolute())
+        && let Ok(ceiling) = std::env::join_paths([parent])
+    {
+        command.env("GIT_CEILING_DIRECTORIES", ceiling);
+    }
+    let output = command.output().await?;
+    if output.status.success() {
+        return Ok(Some(PathBuf::from(
+            text(&output.stdout)?.trim_end_matches('\n'),
+        )));
+    }
+    // Checking the entry instead of matching stderr keeps this locale-independent.
+    if !tokio::fs::try_exists(path.join(".git")).await? {
+        return Ok(None);
+    }
+    Err(Error::Git(
+        String::from_utf8_lossy(&output.stderr).trim().into(),
+    ))
 }
 
 /// NUL records preserve spaces and newlines in worktree paths.
@@ -396,6 +444,88 @@ mod tests {
         fn path(&self) -> &Path {
             &self.0
         }
+    }
+
+    /// Creates a repository with one commit and a linked worktree under
+    /// `.worktrees/lane`, the layout devlanes uses.
+    async fn repository_with_nested_lane(root: &Path) -> Result<PathBuf, Error> {
+        git(root, &["init", "-b", "main"]).await?;
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        )
+        .await?;
+        let lane = root.join(".worktrees/lane");
+        add(root, &lane, "feat/nested").await?;
+        Ok(lane)
+    }
+
+    /// When `.git` vanishes after `git worktree list`, the admin lookup must
+    /// not climb into the enclosing main checkout.
+    #[tokio::test]
+    async fn admin_lookup_never_answers_for_the_enclosing_checkout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let dir = tempfile::tempdir()?;
+            let temp = TempPath(dir.path().canonicalize()?);
+            let lane = repository_with_nested_lane(temp.path()).await?;
+            let common = temp.path().join(".git");
+            let admin = admin_dir(&lane).await?.ok_or("the worktree has its link")?;
+            assert!(admin.starts_with(common.join("worktrees")), "{admin:?}");
+            std::fs::remove_file(lane.join(".git"))?;
+            // Without the ceiling, Git answers for the main checkout.
+            let outer = git(&lane, &["rev-parse", "--path-format=absolute", "--git-dir"]).await?;
+            assert_eq!(PathBuf::from(text(&outer)?.trim_end_matches('\n')), common);
+            assert_eq!(admin_dir(&lane).await?, None);
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    /// Discovery from inside a worktree without its `.git` entry is an error,
+    /// never the main checkout.
+    #[tokio::test]
+    async fn discover_refuses_a_worktree_without_its_git_entry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let dir = tempfile::tempdir()?;
+            let temp = TempPath(dir.path().canonicalize()?);
+            let lane = repository_with_nested_lane(temp.path()).await?;
+            let nested = lane.join("apps");
+            std::fs::create_dir(&nested)?;
+            assert!(discover(&nested, None).await?.is_some());
+            std::fs::remove_file(lane.join(".git"))?;
+            let error = discover(&nested, None).await.err().ok_or("discovered")?;
+            assert!(
+                matches!(&error, Error::MissingGitEntry(path) if path == &lane),
+                "{error}"
+            );
+            let main = discover(temp.path(), None)
+                .await?
+                .ok_or("missing repository")?;
+            let tree = main
+                .worktrees
+                .iter()
+                .find(|tree| tree.path == lane)
+                .ok_or("missing lane")?;
+            assert!(!tree.present);
+            assert_eq!(tree.identity, "worktrees/lane");
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        Ok(())
     }
 
     #[tokio::test]

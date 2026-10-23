@@ -34,6 +34,7 @@ async fn sync_extension(worktree: &Path, to: &Path) -> Result<SyncHandle, SyncEr
 - `LocalTarget::held`: walks a destination and yields `HeldFile` batches, reusing a `HashCache` while size, mode and mtime match.
 - `LocalTarget`: writes a temp file and renames it into place. It never writes or deletes through a symlinked directory.
 - `IgnoreRules`: a pattern without `/` matches at any depth, and a pattern with `/` is anchored at the source root.
+- `LocalTarget::case_insensitive` and `CaseNames`: probe whether a destination ignores case, and track the spelling it holds for each name.
 
 ## Config example
 
@@ -60,6 +61,8 @@ The first pass deletes destination files that are missing from the source. Files
 With `offer_held`, each batch is compared with the source when it arrives: files whose size, mode and hash match become entries of the syncer's index, which covers the whole source after the first pass anyway, and files the source lacks stay in it until the first pass deletes them. Nothing else of the target's list is kept, and the first pass then reads no file it already knows matches.
 
 Changes are debounced and detected by size and mtime, then confirmed by content hash. Permission bits are copied. Symlinks, special files and empty directories are skipped.
+
+When a box syncs to a destination whose file system ignores case (macOS volumes by default), two box names that differ only by case, such as `README.md` and `Readme.md` or a file `build` and a folder `Build`, map to one path. The daemon keeps the spelling the destination already holds, reports the other as skipped, and never deletes the held file because the other spelling went away on the box. The probe decides this per destination, not per OS.
 
 A source that does not exist yet is polled until it appears. If the source folder is deleted and recreated, the sync mirrors the new folder and watches it.
 

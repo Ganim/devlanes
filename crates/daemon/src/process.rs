@@ -80,8 +80,15 @@ impl Readiness {
             return Ok(());
         }
         let mut stdout = std::io::stdout().lock();
-        stdout.write_all(line)?;
-        stdout.flush()?;
+        match stdout.write_all(line).and_then(|()| stdout.flush()) {
+            Ok(()) => {}
+            // The client stopped waiting (its start timeout passed). This daemon
+            // still serves, and the client's next command connects to it.
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                tracing::info!("the spawning client stopped waiting for readiness");
+            }
+            Err(error) => return Err(error),
+        }
         let null = File::options().write(true).open("/dev/null")?;
         rustix::stdio::dup2_stdout(&null)?;
         Ok(())

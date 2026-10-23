@@ -9,8 +9,9 @@ use devlanes_core::{LaneId, ProjectId};
 use devlanes_metrics::{ContainerTarget, MetricsSource, SampleRequest};
 use devlanes_metrics_docker::DockerSource;
 
-async fn sample_postgres() -> Result<(), Box<dyn std::error::Error>> {
-    let source = DockerSource::connect()?; // DOCKER_HOST or the default socket
+async fn sample_postgres(docker: bollard::Docker) -> Result<(), Box<dyn std::error::Error>> {
+    // The binary passes the infra integration's client, so both use one engine.
+    let source = DockerSource::new(docker);
     let request = SampleRequest {
         units: Vec::new(),
         containers: vec![ContainerTarget {

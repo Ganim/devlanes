@@ -1,7 +1,9 @@
 //! Path discovery is read-only so shell completion never creates daemon state.
 
 use std::{
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     io::Write,
     os::unix::{
         ffi::OsStrExt,
@@ -25,11 +27,10 @@ pub struct Paths {
 impl Paths {
     /// Resolves overrides without creating directories, including in completion clients.
     pub fn discover() -> Result<Self> {
-        let home = match env::var_os("DEVLANES_HOME") {
-            Some(home) if !home.is_empty() => PathBuf::from(home),
-            _ => PathBuf::from(env::var_os("HOME").ok_or(Error::MissingHome)?).join(".devlanes"),
-        };
-        Self::new(home)
+        Self::new(home_directory(
+            env::var_os("DEVLANES_HOME"),
+            env::var_os("HOME"),
+        )?)
     }
 
     /// Derives an absolute home and a socket that fits macOS's 104-byte sun_path.
@@ -91,6 +92,16 @@ impl Paths {
                 .map_err(|error| error.error)?;
         }
         Ok(())
+    }
+}
+
+/// Picks `DEVLANES_HOME`, else `$HOME/.devlanes`; empty values count as unset.
+fn home_directory(devlanes_home: Option<OsString>, home: Option<OsString>) -> Result<PathBuf> {
+    match (devlanes_home, home) {
+        (Some(devlanes_home), _) if !devlanes_home.is_empty() => Ok(PathBuf::from(devlanes_home)),
+        // An empty HOME would make `.devlanes` relative, giving each directory its own daemon.
+        (_, Some(home)) if !home.is_empty() => Ok(PathBuf::from(home).join(".devlanes")),
+        _ => Err(Error::MissingHome),
     }
 }
 
@@ -184,6 +195,28 @@ mod tests {
         std::os::unix::fs::symlink(runtime.path(), &link)?;
         assert!(runtime_socket(&link, Path::new("/home/first")).is_none());
         Ok(())
+    }
+
+    /// Empty variables count as unset, so an empty HOME never yields a relative home.
+    #[test]
+    fn empty_home_is_missing() {
+        let set = |value: &str| Some(OsString::from(value));
+        assert!(matches!(
+            home_directory(None, set("")),
+            Err(Error::MissingHome)
+        ));
+        assert!(matches!(
+            home_directory(set(""), None),
+            Err(Error::MissingHome)
+        ));
+        assert_eq!(
+            home_directory(set(""), set("/home/acme")).ok(),
+            Some(PathBuf::from("/home/acme/.devlanes"))
+        );
+        assert_eq!(
+            home_directory(set("/srv/devlanes"), set("")).ok(),
+            Some(PathBuf::from("/srv/devlanes"))
+        );
     }
 
     /// Missing or invalid runtime settings preserve the home-local socket on every platform.

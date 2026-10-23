@@ -9,7 +9,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_sync::{
-    LocalTarget, Manifest, RelPath, SyncError, SyncOptions, SyncState, SyncTarget, Syncer,
+    CaseNames, LocalTarget, Manifest, RelPath, SyncError, SyncOptions, SyncState, SyncTarget,
+    Syncer,
 };
 
 /// Generous because FSEvents and inotify latency varies on loaded CI machines.
@@ -465,4 +466,33 @@ async fn stop_ends_the_task_and_reports_stopped() {
         .await
         .expect("stops in time");
     assert_eq!(updates.borrow().state, SyncState::Stopped);
+}
+
+/// On a case-insensitive destination (the macOS default), the spellings held
+/// on disk win over box names that differ only by case. Skipped elsewhere.
+#[tokio::test]
+async fn case_insensitive_destinations_keep_the_held_spelling() {
+    let d = dirs();
+    let target = LocalTarget::owned(&d.dst).await.expect("claim");
+    if !target.case_insensitive().await.expect("probe") {
+        eprintln!("skipped: the temp directory is case-sensitive");
+        return;
+    }
+    write(&d.dst.join("README.md"), "held");
+    write(&d.dst.join("build"), "a file");
+    write(&d.dst.join("src/App.ts"), "app");
+    let mut names = CaseNames::default();
+    let mut walk = target.held(Default::default(), 2);
+    while let Some(batch) = walk.next().await {
+        for file in &batch {
+            names.insert(&file.path);
+        }
+    }
+    let rel = |path: &str| RelPath::new(path).expect("path");
+    assert_eq!(names.conflict(&rel("Readme.md")), Some("README.md"));
+    assert_eq!(names.conflict(&rel("Build/index.js")), Some("build"));
+    assert_eq!(names.conflict(&rel("SRC/main.ts")), Some("src"));
+    assert_eq!(names.conflict(&rel("src/main.ts")), None);
+    // Why the check matters: the second spelling names the same file here.
+    assert_eq!(read(&d.dst.join("readme.md")).as_deref(), Some("held"));
 }

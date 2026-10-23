@@ -109,9 +109,9 @@ pub async fn engine(
     integ.contributors = contributors();
     integ.script_runners = script_runners();
     integ.secrets = Some(Arc::new(devlanes_secrets_fnox::FnoxProvider::default()));
+    integ.metrics = metrics_sources(infra.docker.as_ref());
     integ.infra = infra;
     integ.routes = routes;
-    integ.metrics = metrics_sources();
     integ.ports = Arc::new(SysPorts);
     integ.processes = Arc::new(SysProcesses);
     integ.ca_env = ca_env;
@@ -326,8 +326,11 @@ fn start_gate(
     }
 }
 
-/// Process collectors for this OS plus Docker container stats.
-fn metrics_sources() -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
+/// Process collectors for this OS plus Docker container stats. Container stats
+/// reuse the infra client so they read the engine the Docker context selects.
+fn metrics_sources(
+    docker: Option<&devlanes_infra_docker::DockerInfra>,
+) -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
     let mut sources: Vec<Arc<dyn devlanes_metrics::MetricsSource>> = Vec::new();
     #[cfg(target_os = "macos")]
     match devlanes_metrics_macos::MacosSource::new() {
@@ -336,9 +339,11 @@ fn metrics_sources() -> Vec<Arc<dyn devlanes_metrics::MetricsSource>> {
     }
     #[cfg(target_os = "linux")]
     sources.push(Arc::new(devlanes_metrics_linux::LinuxSource::new()));
-    match devlanes_metrics_docker::DockerSource::connect() {
-        Ok(source) => sources.push(Arc::new(source)),
-        Err(error) => tracing::debug!(%error, "container metrics unavailable"),
+    match docker {
+        Some(docker) => sources.push(Arc::new(devlanes_metrics_docker::DockerSource::new(
+            docker.client().clone(),
+        ))),
+        None => tracing::debug!("container metrics unavailable without a Docker client"),
     }
     sources
 }

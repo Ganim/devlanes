@@ -376,7 +376,7 @@ fn clear_directory(dest: &Path, owned: bool) -> io::Result<()> {
 }
 
 /// Runs blocking filesystem work off the async executor.
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     context: String,
     work: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> Result<T, SyncError> {

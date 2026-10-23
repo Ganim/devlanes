@@ -215,11 +215,11 @@ async fn empty_request_makes_no_engine_calls() {
 async fn docker_live_stats_and_info() {
     use bollard::query_parameters::ListContainersOptions;
 
-    let source = DockerSource::connect().expect("connect");
+    let docker = bollard::Docker::connect_with_defaults().expect("client");
+    let source = DockerSource::new(docker.clone());
     let info = source.vm_info().await.expect("docker info");
     assert!(info.cpus > 0 && info.memory_total_bytes > 0, "{info:?}");
 
-    let docker = bollard::Docker::connect_with_defaults().expect("client");
     let running = docker
         .list_containers(None::<ListContainersOptions>)
         .await
