@@ -792,6 +792,10 @@ pub struct App {
     /// Where daemon.log times are shown: UTC until the runtime sets the
     /// system's zone, so tests draw the same everywhere.
     pub time_zone: jiff::tz::TimeZone,
+    /// This TUI's version: the menu shows it and the release notice compares
+    /// it with the daemon's. The screens example pins it, so a release does
+    /// not change the committed screens.
+    pub version: &'static str,
     /// The per-user service definition (`Options::service`), merged into
     /// doctor facts for the stop-window check.
     pub service_report: Option<serde_json::Value>,
@@ -867,6 +871,7 @@ impl App {
             start_run: None,
             on_quit: OnQuit::Ask,
             time_zone: jiff::tz::TimeZone::UTC,
+            version: env!("CARGO_PKG_VERSION"),
             service_report: None,
             user_home: None,
             quitting: false,
@@ -4521,7 +4526,7 @@ impl App {
     pub fn release_badge(&self) -> Option<(String, String)> {
         use devlanes_client::update;
         let status = self.daemon.status.as_ref()?;
-        let own = env!("CARGO_PKG_VERSION");
+        let own = self.version;
         let daemon = status.get("version").and_then(Value::as_str);
         let notice = match daemon {
             Some(daemon) if daemon != own => Some((

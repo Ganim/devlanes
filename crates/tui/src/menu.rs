@@ -140,8 +140,8 @@ pub(crate) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
-/// Draws the menu over `area`.
-pub fn render(theme: &Theme, menu: &Menu, frame: &mut Frame, area: Rect) {
+/// Draws the menu over `area`, with this TUI's `version` under the banner.
+pub fn render(theme: &Theme, menu: &Menu, version: &str, frame: &mut Frame, area: Rect) {
     // Room for the border, the version, the items and blank rows around them.
     let size = Size::pick(
         theme,
@@ -177,7 +177,7 @@ pub fn render(theme: &Theme, menu: &Menu, frame: &mut Frame, area: Rect) {
         art_height,
     );
     y += art_height + 1;
-    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let version = format!("v{version}");
     let version_width = u16::try_from(version.len()).unwrap_or(0);
     let version_rect = Rect::new(
         inner.x + inner.width.saturating_sub(version_width) / 2,
@@ -351,7 +351,7 @@ mod tests {
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
                     .expect("terminal");
             terminal
-                .draw(|frame| render(&theme, &Menu::default(), frame, frame.area()))
+                .draw(|frame| render(&theme, &Menu::default(), "1.2.3", frame, frame.area()))
                 .expect("draw");
             let text = terminal.backend().to_string();
             for wanted in [banner, "options", "help", "quit"] {
@@ -367,7 +367,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
         terminal
-            .draw(|frame| render(&theme, &menu.borrow(), frame, frame.area()))
+            .draw(|frame| render(&theme, &menu.borrow(), "1.2.3", frame, frame.area()))
             .expect("draw");
         let mut menu = menu.into_inner();
         let quit = menu.hits.borrow().1[2];

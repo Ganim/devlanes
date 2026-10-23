@@ -1,0 +1,82 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●                        starting acme@1: task migrate  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8     3 fix/cache @2 ·    +1 more              1-9 or [ ] switch lanes
+┌ feat/checkout @1 · starting ─────────────────┐┌ feat/checkout @1 · starting · 4 of 8 ready ──────────────────────────┐
+│ ▾ services                                 6 ││   ⠋ tasks      running                                               │
+│   ● api-gateway                              ││                                                                      │
+│   ⠋ api-orders                      starting ││ starting  api-orders, api-users                                      │
+│   ⠋ api-users                       starting ││ queued    web-app, wrk-email: 4 services start at a time             │
+│   … web-app                           queued ││ x stops the start. Select a unit to watch its output.                │
+│   … wrk-email                         queued ││                                                                      │
+│   ● stub-stripe                              ││ branch    feat/checkout                                              │
+│                                              ││ worktree  /work/acme-checkout                                        │
+│ ▾ tasks                                    7 ││ profile   web                                                        │
+│   ⠋ migrate          running · runs at start ││ ports     41100-41199                                                │
+│   · seed                             not run ││ services  2 of 6 up                                                  │
+│   · lint                             not run ││           ⠋ api-orders       starting                                │
+│   · typecheck                        not run ││           ⠋ api-users        starting                                │
+│   · test-e2e                         not run ││           … web-app          queued                                  │
+│   · codegen                          not run ││           … wrk-email        queued                                  │
+│   · clean-cache                      not run ││ tasks     1 running, 6 not run                                       │
+│                                              ││ setup     1 of 1 done                                                │
+│ ▾ infra                                      ││ infra     postgres :5432 (shared), redis :6379 (shared)              │
+│   ▾ shared                              3 up ││                                                                      │
+│     ● pgbouncer                              ││ lanes in acme                                                        │
+│     ● postgres                               ││   main @0                  1 failed · 1 starting · 34 up             │
+│     ● redis                                  ││ ▌ feat/checkout @1         starting · 4 of 8 ready                   │
+│   ▸ setup                             1 done ││   fix/cache @2             not running · config changed              │
+│                                              ││   spike/old-search @3      worktree missing                          │
+│                                              ││                                                                      │
+│                                              ││ 1-9, [ and ] or a click on a chip switch lanes. devlanes lane new    │
+│                                              ││ <branch> adds one.                                                   │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+ x stop lane   r restart lane   p start with profiles   C clean lane   [ ] switch lane            ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 99 bold, 100-107 dim, 111 bold, 112-118 dim
+1: 0-5 dim, 10-11 dim, 16-19 dim, 20 red, 25-50 bold reversed, 55-56 dim, 66-70 dim, 72-81 dim, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
+2: 0 darkgray, 1-29 bold reversed, 30-48 darkgray, 50-62 bold, 66-68 dim, 77-91 dim, 93-119 darkgray
+3: 0 darkgray, 2-3 dim, 45 dim, 47-48 darkgray, 65-71 dim, 119 darkgray
+4: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 119 darkgray
+5: 0 darkgray, 6-15 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+6: 0 darkgray, 6-14 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+7: 0 darkgray, 4-5 dim, 6-12 dim green, 40-45 dim, 47-48 darkgray, 50-102 dim, 119 darkgray
+8: 0 darkgray, 4-5 dim, 6-14 dim magenta, 40-45 dim, 47-48 darkgray, 119 darkgray
+9: 0 darkgray, 4-5 green, 6-16 darkgray, 47-48 darkgray, 50-59 dim, 119 darkgray
+10: 0 darkgray, 47-48 darkgray, 50-59 dim, 119 darkgray
+11: 0 darkgray, 2-3 dim, 45 dim, 47-48 darkgray, 50-59 dim, 119 darkgray
+12: 0 darkgray, 30-45 dim, 47-48 darkgray, 50-59 dim, 119 darkgray
+13: 0 darkgray, 4-9 dim, 39-45 dim, 47-48 darkgray, 50-59 dim, 119 darkgray
+14: 0 darkgray, 4-9 dim, 39-45 dim, 47-48 darkgray, 119 darkgray
+15: 0 darkgray, 4-14 dim, 39-45 dim, 47-48 darkgray, 119 darkgray
+16: 0 darkgray, 4-13 dim, 39-45 dim, 47-48 darkgray, 60-61 dim, 79-84 dim, 119 darkgray
+17: 0 darkgray, 4-12 dim, 39-45 dim, 47-48 darkgray, 60-61 dim, 79-84 dim, 119 darkgray
+18: 0 darkgray, 4-16 dim, 39-45 dim, 47-48 darkgray, 50-59 dim, 119 darkgray
+19: 0 darkgray, 47-48 darkgray, 50-59 dim, 119 darkgray
+20: 0 darkgray, 2-3 dim, 47-48 darkgray, 50-59 dim, 119 darkgray
+21: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 119 darkgray
+22: 0 darkgray, 6-7 green, 8-16 dim magenta, 47-48 darkgray, 50-62 bold, 119 darkgray
+23: 0 darkgray, 6-7 green, 8-15 cyan, 47-48 darkgray, 50-51 bold, 77-84 red, 85-87 dim, 98-105 dim, 119 darkgray
+24: 0 darkgray, 6-7 green, 8-12 cyan, 47-48 darkgray, 50-51 bold, 85-99 dim, 119 darkgray
+25: 0 darkgray, 4-5 dim, 40-45 dim, 47-48 darkgray, 50-51 bold, 77-104 dim, 119 darkgray
+26: 0 darkgray, 47-48 darkgray, 50-51 bold, 77-92 yellow, 119 darkgray
+27: 0 darkgray, 47-48 darkgray, 119 darkgray
+28: 0 darkgray, 47-48 darkgray, 50-114 dim, 119 darkgray
+29: 0 darkgray, 47-48 darkgray, 50-67 dim, 119 darkgray
+30: 0 darkgray, 47-48 darkgray, 119 darkgray
+31: 0 darkgray, 47-48 darkgray, 119 darkgray
+32: 0 darkgray, 47-48 darkgray, 119 darkgray
+33: 0 darkgray, 47-48 darkgray, 119 darkgray
+34: 0 darkgray, 47-48 darkgray, 119 darkgray
+35: 0 darkgray, 47-48 darkgray, 119 darkgray
+36: 0 darkgray, 47-48 darkgray, 119 darkgray
+37: 0 darkgray, 47-48 darkgray, 119 darkgray
+38: 0-119 darkgray
+39: 1 bold, 2-14 dim, 15 bold, 16-31 dim, 32 bold, 33-55 dim, 56 bold, 57-70 dim, 71-73 bold, 74-88 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim

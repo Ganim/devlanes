@@ -1,0 +1,82 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8     3 fix/cache @2 ·    +1 more              1-9 or [ ] switch lanes
+┌ main @0 ─────────────────────────────────────┐┌ wrk-export  failed · exit 1 ─────────────────────────────────────────┐
+│ ▾ services                                34 ││ failed    exited with code 1                                         │
+│   ● Gateway API                              ││ next      r restarts it                                              │
+│   ● api-auth                                 ││           devlanes logs acme@0:wrk-export prints the whole log       │
+│   ┌ options ● 1 unsaved change ───────────────────────────────────────────────────────── ~/.devlanes/config.yaml ┐───┤
+│   │ 1 general   2 network   3 startup   4 storage                                                                │40m│
+│   │ ──────────────────────────────────────────────────────────────────────────────────────────────────────────── │   │
+│   │   tui.open_on_start                     true│ tui.theme                                                      │53m│
+│   │ ▌ tui.theme                      ● ◂ light ▸│ Color palette of the TUI; defaults to `auto`, which picks one  │   │
+│   │   tui.glyphs                            auto│ from what the terminal reports. Choose `dark` or `light` when  │66m│
+│   │   tui.on_quit                            ask│ auto guesses wrong; `NO_COLOR` in the environment turns colors │   │
+│   │   terminal.progress                     auto│ off whatever this says.                                        │79m│
+│   │   terminal.title                        auto│                                                                │   │
+│   │   terminal.links                        auto│  auto   Use the true-color dark or light palette when the      │92m│
+│   │   terminal.notifications                auto│         terminal reports true color (`COLORTERM`) and its      │   │
+│   │   terminal.marks                        auto│         background (`COLORFGBG`); otherwise the terminal's 16  │105│
+│   │   updates.check                         true│         colors.                                                │   │
+│   │   lanes.data_dir                     default│  dark   Always use the true-color palette made for a dark      │118│
+│   │                                             │         background.                                            │   │
+│   │                                             │ ▌light  Always use the true-color palette made for a light     │131│
+│   │                                             │         background.                                            │   │
+│   │                                             │  ansi   Use only the terminal's 16 named colors, so the TUI    │144│
+│   │                                             │         follows the terminal's color scheme.                   │   │
+│   │                                             │                                                                │157│
+│   │                                             │ default  auto                                                  │   │
+│   │                                             │ saved    dark                                                  │170│
+│   │                                             │                                                                │   │
+│   │                                             │ Previews at once; s saves it.                                  │183│
+│   │                                             │                                                                │   │
+│   │                                             │                                                                │196│
+│   │ not saved yet   s saves to config.yaml                                                                       │   │
+│   └ ←→ change  enter done  esc undo  d default ───────────────────────────────────────────────────────────[save] ┘209│
+│   ● docs-search                              ││ ms                                                                   │
+│   ● ml-ranker                                ││                                                                      │
+│   ⠋ ml-embed                        starting ││                                                                      │
+│   ● cache-warm                               ││                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+ r restart   n next problem   pgup scroll back   c select text   / filter                         ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1 bold #9a6b00, 2 bold #9e6900, 3 bold #a16700, 4 bold #a56500, 5 bold #a86200, 6 bold #ac6000, 7 bold #af5e00, 8 bold #b35c00, 10-19 bold #1a1917 on #f5c542, 22-23 dim, 32-33 #a35a00, 36-37 dim, 43-44 #1d7a46, 99 bold, 100-107 dim, 111 bold, 112-118 dim
+1: 0-5 dim, 9 bold on #f7e7b4, 10-11 bold dim on #f7e7b4, 12-15 bold on #f7e7b4, 16-19 bold dim on #f7e7b4, 20 bold #c0392b on #f7e7b4, 21 bold on #f7e7b4, 26-27 dim, 41-44 dim, 55-56 dim, 66-70 dim, 72-81 dim, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
+2: 0 #8f8a7f, 2-5 bold, 10-48 #8f8a7f, 50-59 bold, 60-61 dim, 62-67 #c0392b, 68-70 dim, 71-76 #c0392b, 78-119 #8f8a7f
+3: 0 #8f8a7f, 2-3 dim, 44-45 dim, 47-48 #8f8a7f, 50-59 dim, 60-77 #c0392b, 119 #8f8a7f
+4: 0 #8f8a7f, 4-5 #1d7a46, 6-16 blue, 47-48 #8f8a7f, 50-59 dim, 119 #8f8a7f
+5: 0 #8f8a7f, 4-5 #1d7a46, 6-13 blue, 47-48 #8f8a7f, 50-111 dim, 119 #8f8a7f
+6: 0 #8f8a7f, 4-13 #9a6b00, 14-32 #a35a00, 33-89 #9a6b00, 90-114 dim #9a6b00, 115 #9a6b00, 116-119 #8f8a7f
+7: 0 #8f8a7f, 4 #9a6b00, 6-7 dim, 8-14 bold underlined #9a6b00, 18-19 dim, 30-31 dim, 42-43 dim, 115 #9a6b00, 119 #8f8a7f
+8: 0 #8f8a7f, 4 #9a6b00, 6-113 #8f8a7f, 115 #9a6b00, 119 #8f8a7f
+9: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 52-60 bold, 115 #9a6b00, 119 #8f8a7f
+10: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00 on #f7e7b4, 7-38 on #f7e7b4, 39-40 #a35a00 on #f7e7b4, 41-49 bold reversed #9a6b00 on #f7e7b4, 50 #8f8a7f, 115 #9a6b00, 119 #8f8a7f
+11: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 115 #9a6b00, 119 #8f8a7f
+12: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 47-49 dim, 50 #8f8a7f, 115 #9a6b00, 119 #8f8a7f
+13: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 115 #9a6b00, 119 #8f8a7f
+14: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 115 #9a6b00, 119 #8f8a7f
+15: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 52 #9a6b00, 60-108 dim, 115 #9a6b00, 119 #8f8a7f
+16: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 60-108 dim, 115 #9a6b00, 119 #8f8a7f
+17: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 60-112 dim, 115 #9a6b00, 119 #8f8a7f
+18: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 46-49 dim, 50 #8f8a7f, 60-66 dim, 115 #9a6b00, 119 #8f8a7f
+19: 0 #8f8a7f, 4 #9a6b00, 6 #9a6b00, 43-49 dim, 50 #8f8a7f, 52 #9a6b00, 60-108 dim, 115 #9a6b00, 119 #8f8a7f
+20: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 60-70 dim, 115 #9a6b00, 119 #8f8a7f
+21: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 52 #9a6b00, 53-59 bold #9a6b00, 60-109 dim, 115 #9a6b00, 119 #8f8a7f
+22: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 60-70 dim, 115 #9a6b00, 119 #8f8a7f
+23: 0 #8f8a7f, 1-3 on #f7e7b4, 4 #9a6b00, 50 #8f8a7f, 52 #9a6b00, 60-110 dim, 115 #9a6b00, 119 #8f8a7f
+24: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 60-95 dim, 115 #9a6b00, 119 #8f8a7f
+25: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 115 #9a6b00, 119 #8f8a7f
+26: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 52-60 dim, 115 #9a6b00, 119 #8f8a7f
+27: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 52-60 dim, 115 #9a6b00, 119 #8f8a7f
+28: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 115 #9a6b00, 119 #8f8a7f
+29: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 52-80 dim, 115 #9a6b00, 119 #8f8a7f
+30: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 115 #9a6b00, 119 #8f8a7f
+31: 0 #8f8a7f, 4 #9a6b00, 50 #8f8a7f, 115 #9a6b00, 119 #8f8a7f
+32: 0 #8f8a7f, 4 #9a6b00, 6-21 #a35a00, 22 bold, 23-43 dim, 115 #9a6b00, 119 #8f8a7f
+33: 0 #8f8a7f, 4-5 #9a6b00, 6-7 bold #9a6b00, 8-14 dim #9a6b00, 15-16 #9a6b00, 17-21 bold #9a6b00, 22-26 dim #9a6b00, 27-28 #9a6b00, 29-31 bold #9a6b00, 32-36 dim #9a6b00, 37-38 #9a6b00, 39 bold #9a6b00, 40-47 dim #9a6b00, 48-107 #9a6b00, 108-113 bold #9a6b00, 114-115 #9a6b00, 119 #8f8a7f
+34: 0 #8f8a7f, 4-5 #1d7a46, 6-16 cyan, 47-48 #8f8a7f, 119 #8f8a7f
+35: 0 #8f8a7f, 4-5 #1d7a46, 6-14 green, 47-48 #8f8a7f, 119 #8f8a7f
+36: 0 #8f8a7f, 6-13 green, 47-48 #8f8a7f, 119 #8f8a7f
+37: 0 #8f8a7f, 4-5 #1d7a46, 6-15 dim blue, 47-48 #8f8a7f, 119 #8f8a7f
+38: 0-119 #8f8a7f
+39: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 49 bold, 50-64 dim, 65 bold, 66-75 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim

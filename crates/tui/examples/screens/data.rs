@@ -435,6 +435,10 @@ pub fn log_page(unit: &str) -> Vec<LogLine> {
         .collect()
 }
 
+/// The version of the fake daemon and of the TUI drawn against it, pinned so
+/// a release does not change the committed screens.
+pub const VERSION: &str = "1.0.0";
+
 /// The fake's clock: every history ends here.
 pub const NOW_MS: u64 = 1_792_000_000_000;
 /// One sample a second for 15 minutes, the daemon's raw ring.
@@ -612,7 +616,7 @@ pub fn profiles(lane: &str) -> ProfileList {
 /// `daemon.status`.
 pub fn daemon_status() -> Value {
     json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": VERSION,
         "pid": 4242,
         "uptime_ms": 27_500_000,
         "managed_processes": 41,
@@ -623,7 +627,7 @@ pub fn daemon_status() -> Value {
 /// `doctor` facts: one warning (fallback port) and one error (no CA).
 pub fn doctor() -> Value {
     json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": VERSION,
         "pid": 4242,
         "home": "/Users/acme/.devlanes",
         "db_path": "/Users/acme/.devlanes/state.db",

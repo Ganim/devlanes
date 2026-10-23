@@ -1,0 +1,122 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●                                                                                                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8     3 fix/cache @2 ·     4 spike/old-search @3 !                                                                             1-9 or [ ] switch lanes
+┌ main @0 ─────────────────────────────────────┐┌ Gateway API  api-gateway · ready · https://gateway.acme.localhost ─────────────────────────────────────────────────── watching · enter types into it ┐
+│ ▾ services                                34 ││ > @acme/api-gateway@2.4.0 dev                                                                                                                        │
+│   ● Gateway API                              ││ > tsx watch src/server.ts                                                                                                                            │
+│   ● api-auth                                 ││                                                                                                                                                      │
+│   ● api-users                                ││ ✓ connected to postgres (acme_lane0)                                                                                                                 │
+│   ● api-billing                              ││ ✓ connected to redis                                                                                                                                 │
+│   ● api-orders                               ││ listening on :41000                                                                                                                                  │
+│   ● api-search                               ││ 10:42:00 GET /v1/orders/1000 200 3ms                                                                                                                 │
+│   ● api-catalog                              ││ 10:42:11 GET /v1/orders/1017 200 4ms                                                                                                                 │
+│   ● api-inventory                            ││ 10:42:22 GET /v1/orders/1034 200 5ms                                                                                                                 │
+│   ● api-notify                               ││ 10:42:33 GET /v1/orders/1051 200 6ms                                                                                                                 │
+│   ● api-reports                              ││ 10:42:44 GET /v1/orders/1068 404 7ms                                                                                                                 │
+│   ● web-app                                  ││ 10:42:55 GET /v1/orders/1085 200 3ms                                                                                                                 │
+│   ● web-admin                                ││ 10:42:06 GET /v1/orders/1102 200 4ms                                                                                                                 │
+│   ● web-docs                                 ││ 10:42:17 GET /v1/orders/1119 200 5ms                                                                                                                 │
+│   · web-storybook                            ││ 10:42:28 GET /v1/orders/1136 200 6ms                                                                                                                 │
+│   ● web-landing                              ││ 10:42:39 GET /v1/orders/1153 200 7ms                                                                                                                 │
+│   ◉ wrk-email                                ││ 10:43:50 GET /v1/orders/1170 200 3ms                                                                                                                 │
+│   ◉ wrk-billing                              ││ 10:43:01 GET /v1/orders/1187 200 4ms                                                                                                                 │
+│   ◉ wrk-index                                ││ 10:43:12 GET /v1/orders/1204 200 5ms                                                                                                                 │
+│   ◉ wrk-thumbs                               ││ 10:43:23 GET /v1/orders/1221 404 6ms                                                                                                                 │
+│   ✕ wrk-export               failed · exit 1 ││ 10:43:34 GET /v1/orders/1238 200 7ms                                                                                                                 │
+│   ◉ wrk-cron                                 ││ 10:43:45 GET /v1/orders/1255 200 3ms                                                                                                                 │
+│   ◉ wrk-webhooks                             ││ 10:43:56 GET /v1/orders/1272 200 4ms                                                                                                                 │
+│   ◉ wrk-ledger                               ││ 10:43:07 GET /v1/orders/1289 200 5ms                                                                                                                 │
+│   ● stub-stripe                              ││                                                                                                                                                      │
+│   ● stub-s3                                  ││                                                                                                                                                      │
+│   ◆ stub-twilio         orphaned · pid 48211 ││                                                                                                                                                      │
+│   ● stub-sendgrid                            ││                                                                                                                                                      │
+│   ● stub-segment                             ││                                                                                                                                                      │
+│   ● stub-auth0                               ││                                                                                                                                                      │
+│   ● proxy-edge                               ││                                                                                                                                                      │
+│   ● docs-search                              ││                                                                                                                                                      │
+│   ● ml-ranker                                ││                                                                                                                                                      │
+│   ⠋ ml-embed                        starting ││                                                                                                                                                      │
+│   ● cache-warm                               ││                                                                                                                                                      │
+│                                              ││                                                                                                                                                      │
+│ ▾ tasks                                    7 ││                                                                                                                                                      │
+│   ✓ migrate             done · runs at start ││                                                                                                                                                      │
+│   ✓ seed                                done ││                                                                                                                                                      │
+│   · lint                             not run ││                                                                                                                                                      │
+│   · typecheck                        not run ││                                                                                                                                                      │
+│   · test-e2e                         not run ││                                                                                                                                                      │
+│   ✓ codegen                             done ││                                                                                                                                                      │
+│   · clean-cache                      not run ││                                                                                                                                                      │
+│                                              ││                                                                                                                                                      │
+│ ▾ infra                                      ││                                                                                                                                                      │
+│   ▾ containers                          2 up ││                                                                                                                                                      │
+│     ● localstack                             ││                                                                                                                                                      │
+│     ● rabbitmq                               ││                                                                                                                                                      │
+│   ▾ shared                              3 up ││                                                                                                                                                      │
+│     ● pgbouncer                              ││                                                                                                                                                      │
+│     ● postgres                               ││                                                                                                                                                      │
+│     ● redis                                  ││                                                                                                                                                      │
+│   ▸ setup                             4 done ││                                                                                                                                                      │
+│                                              ││                                                                                                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ enter type into it   x stop   r restart   o open in browser   c select text   z zoom   / filter                                                                                  ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-8 bold, 10-19 bold reversed, 22-23 dim, 36-37 dim, 179 bold, 180-187 dim, 191 bold, 192-198 dim
+1: 0-5 dim, 9-21 bold reversed, 26-27 dim, 41-44 dim, 55-56 dim, 66-70 dim, 76-77 dim, 94-97 dim, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
+2: 0-1 dim, 2-5 bold dim, 6-49 dim, 50-60 bold dim, 61-199 dim
+3: 0 dim, 2-3 dim, 44-45 dim, 47-48 dim, 50-78 dim, 199 dim
+4: 0 dim, 1-46 reversed, 47-48 dim, 50-74 dim, 199 dim
+5: 0 dim, 47-48 dim, 199 dim
+6: 0 dim, 47-48 dim, 50 color2, 199 dim
+7: 0 dim, 47-48 dim, 50 color2, 199 dim
+8: 0 dim, 47-48 dim, 50-68 bold, 199 dim
+9: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+10: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+11: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+12: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+13: 0 dim, 47-48 dim, 50-57 dim, 79-81 color3, 199 dim
+14: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+15: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+16: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+17: 0 dim, 4-18 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+18: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+19: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+20: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+21: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+22: 0 dim, 47-48 dim, 50-57 dim, 79-81 color3, 199 dim
+23: 0 dim, 37-39 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+24: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+25: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+26: 0 dim, 47-48 dim, 50-57 dim, 79-81 color2, 199 dim
+27: 0 dim, 47-48 dim, 199 dim
+28: 0 dim, 47-48 dim, 199 dim
+29: 0 dim, 34-45 dim, 47-48 dim, 199 dim
+30: 0 dim, 47-48 dim, 199 dim
+31: 0 dim, 47-48 dim, 199 dim
+32: 0 dim, 47-48 dim, 199 dim
+33: 0 dim, 47-48 dim, 199 dim
+34: 0 dim, 47-48 dim, 199 dim
+35: 0 dim, 47-48 dim, 199 dim
+36: 0 dim, 47-48 dim, 199 dim
+37: 0 dim, 6-15 dim, 47-48 dim, 199 dim
+38: 0 dim, 47-48 dim, 199 dim
+39: 0 dim, 2-3 dim, 45 dim, 47-48 dim, 199 dim
+40: 0 dim, 26-45 dim, 47-48 dim, 199 dim
+41: 0 dim, 42-45 dim, 47-48 dim, 199 dim
+42: 0 dim, 4-9 dim, 39-45 dim, 47-48 dim, 199 dim
+43: 0 dim, 4-14 dim, 39-45 dim, 47-48 dim, 199 dim
+44: 0 dim, 4-13 dim, 39-45 dim, 47-48 dim, 199 dim
+45: 0 dim, 42-45 dim, 47-48 dim, 199 dim
+46: 0 dim, 4-16 dim, 39-45 dim, 47-48 dim, 199 dim
+47: 0 dim, 47-48 dim, 199 dim
+48: 0 dim, 2-3 dim, 47-48 dim, 199 dim
+49: 0 dim, 4-5 dim, 42-45 dim, 47-48 dim, 199 dim
+50: 0 dim, 47-48 dim, 199 dim
+51: 0 dim, 47-48 dim, 199 dim
+52: 0 dim, 4-5 dim, 42-45 dim, 47-48 dim, 199 dim
+53: 0 dim, 8-16 dim, 47-48 dim, 199 dim
+54: 0 dim, 47-48 dim, 199 dim
+55: 0 dim, 47-48 dim, 199 dim
+56: 0 dim, 4-5 dim, 40-45 dim, 47-48 dim, 199 dim
+57: 0 dim, 47-48 dim, 199 dim
+58: 0-199 dim
+59: 1-5 bold, 6-21 dim, 22 bold, 23-30 dim, 31 bold, 32-42 dim, 43 bold, 44-62 dim, 63 bold, 64-78 dim, 79 bold, 80-87 dim, 88 bold, 89-98 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim

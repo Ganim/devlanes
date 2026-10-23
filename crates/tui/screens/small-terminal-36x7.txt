@@ -1,0 +1,10 @@
+
+
+          terminal is 36x7
+    devlanes needs 40x8 or larger
+
+
+
+
+--- styles (row: columns style) ---
+3: 4-32 dim

@@ -1,0 +1,50 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●   starting …  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8    … 1-9 or [ ] switch lanes
+┌ main @0 ─────────────────────┐┌ Gateway API  api-gateway · ready ────────────┐
+│   ● Gateway API              ││ listening on :41000                          │
+│   ● api-auth                 ││ 10:42:00 GET /v1/orders/1000 200 3ms         │
+│   ● api-users                ││ 10:42:11 GET /v1/orders/1017 200 4ms         │
+│   ● api-billing              ││ 10:42:22 GET /v1/orders/1034 200 5ms         │
+│   ● api-orders               ││ 10:42:33 GET /v1/orders/1051 200 6ms         │
+│   ● api-search               ││ 10:42:44 GET /v1/orders/1068 404 7ms         │
+│   ● api-catalog              ││ 10:42:55 GET /v1/orders/1085 200 3ms         │
+│   ● api-inventory            ││ 10:42:06 GET /v1/orders/1102 200 4ms         │
+│   ● api-notify               ││ 10:42:17 GET /v1/orders/1119 200 5ms         │
+│   ● api-reports              ││ 10:42:28 GET /v1/orders/1136 200 6ms         │
+│   ● web-app                  ││ 10:42:39 GET /v1/orders/1153 200 7ms         │
+│   ● web-admin                ││ 10:43:50 GET /v1/orders/1170 200 3ms         │
+│   ● web-docs                 ││ 10:43:01 GET /v1/orders/1187 200 4ms         │
+│   · web-storybook            ││ 10:43:12 GET /v1/orders/1204 200 5ms         │
+│   ● web-landing              ││ 10:43:23 GET /v1/orders/1221 404 6ms         │
+│   ◉ wrk-email                ││ 10:43:34 GET /v1/orders/1238 200 7ms         │
+│   ◉ wrk-billing              ││ 10:43:45 GET /v1/orders/1255 200 3ms         │
+│   ◉ wrk-index                ││ 10:43:56 GET /v1/orders/1272 200 4ms         │
+│   ◉ wrk-thumbs               ││ 10:43:07 GET /v1/orders/1289 200 5ms         │
+└──────────────────────────────┘└──────────────────────────────────────────────┘
+ enter type into it   x stop   r restart                  ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1 bold #9a6b00, 2 bold #9e6900, 3 bold #a16700, 4 bold #a56500, 5 bold #a86200, 6 bold #ac6000, 7 bold #af5e00, 8 bold #b35c00, 10-19 bold #1a1917 on #f5c542, 22-23 dim, 32-33 #a35a00, 36-37 dim, 43-44 #1d7a46, 59 bold, 60-67 dim, 71 bold, 72-78 dim
+1: 0-5 dim, 9 bold on #f7e7b4, 10-11 bold dim on #f7e7b4, 12-15 bold on #f7e7b4, 16-19 bold dim on #f7e7b4, 20 bold #c0392b on #f7e7b4, 21 bold on #f7e7b4, 26-27 dim, 41-44 dim, 51-54 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
+2: 0 #8f8a7f, 2-5 bold, 10-32 #8f8a7f, 34-44 bold, 45-60 dim, 61-65 #1d7a46, 67-79 #8f8a7f
+3: 0 #8f8a7f, 1-3 on #f7e7b4, 4-5 #1d7a46 on #f7e7b4, 6-16 blue on #f7e7b4, 17-30 on #f7e7b4, 31-32 #8f8a7f, 34-52 bold, 79 #8f8a7f
+4: 0 #8f8a7f, 4-5 #1d7a46, 6-13 blue, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+5: 0 #8f8a7f, 4-5 #1d7a46, 6-14 blue, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+6: 0 #8f8a7f, 4-5 #1d7a46, 6-16 blue, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+7: 0 #8f8a7f, 4-5 #1d7a46, 6-15 blue, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+8: 0 #8f8a7f, 4-5 #1d7a46, 6-15 blue, 31-32 #8f8a7f, 34-41 dim, 63-65 color3, 79 #8f8a7f
+9: 0 #8f8a7f, 4-5 #1d7a46, 6-16 blue, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+10: 0 #8f8a7f, 4-5 #1d7a46, 6-18 blue, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+11: 0 #8f8a7f, 4-5 #1d7a46, 6-15 blue, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+12: 0 #8f8a7f, 4-5 #1d7a46, 6-16 blue, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+13: 0 #8f8a7f, 4-5 #1d7a46, 6-12 green, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+14: 0 #8f8a7f, 4-5 #1d7a46, 6-14 green, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+15: 0 #8f8a7f, 4-5 #1d7a46, 6-13 green, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+16: 0 #8f8a7f, 4-5 dim, 6-18 dim green, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+17: 0 #8f8a7f, 4-5 #1d7a46, 6-16 green, 31-32 #8f8a7f, 34-41 dim, 63-65 color3, 79 #8f8a7f
+18: 0 #8f8a7f, 4-5 #1d7a46, 6-14 magenta, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+19: 0 #8f8a7f, 4-5 #1d7a46, 6-16 magenta, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+20: 0 #8f8a7f, 4-5 #1d7a46, 6-14 magenta, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+21: 0 #8f8a7f, 4-5 #1d7a46, 6-15 magenta, 31-32 #8f8a7f, 34-41 dim, 63-65 color2, 79 #8f8a7f
+22: 0-79 #8f8a7f
+23: 1-5 bold, 6-21 dim, 22 bold, 23-30 dim, 31 bold, 32-42 dim, 58 bold, 59-70 dim, 71 bold, 72-79 dim

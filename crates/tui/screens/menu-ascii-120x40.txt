@@ -1,0 +1,82 @@
+ devlanes  1 acme x   2 billing !   3 shop *                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ lanes    1 main @0 x     2 feat/checkout @1 - 4/8     3 fix/cache @2 -    +1 more              1-9 or [ ] switch lanes
++ main @0 -------------------------------------++ wrk-export  failed · exit 1 -----------------------------------------+
+| v services                                34 || failed    exited with code 1                                         |
+|   * Gateway API                              || next      r restarts it                                              |
+|   * api-auth                                 ||           devlanes logs acme@0:wrk-export prints the whole log       |
+|   * api-users                                |+- last output --------------------------------------------------------+
+|   * api-billing                              || 2026-10-21T10:40:00Z INFO job done queue=default id=job_8120 took=40m|
+|   * api-orders                               || s                                                                    |
+|   * api-search                               || 2026-10-21T10:40:07Z INFO job done queue=default id=job_8121 took=53m|
+|   * api-catalog                              || s                                                                    |
+|   * api-inventory                            || 2026-10-21T10:40:14Z INFO job done queue=default id=job_8122 took=66m|
+|   * api-notify                               || s                                                                    |
+|   * api-reports                         +----------------------------------+b done queue=default id=job_8123 took=79m|
+|   * web-app                             | :       :       ||      :       :|                                         |
+|   * web-admin                           | :       :   devlanes    :       :|b done queue=default id=job_8124 took=92m|
+|   * web-docs                            | :       :       ||      :       :|                                         |
+|   - web-storybook                       | :       :    v1.0.0     :       :|b done queue=default id=job_8125 took=105|
+|   * web-landing                         | :       :       ||      :       :|                                         |
+|   o wrk-email                           | :       >  o  options           :|b done queue=default id=job_8126 took=118|
+|   o wrk-billing                         | :       :       ||      :       :|                                         |
+|   o wrk-index                           | :          h  help              :|b done queue=default id=job_8127 took=131|
+|   o wrk-thumbs                          | :       :       ||      :       :|                                         |
+|   x wrk-export               failed · ex| :          q  quit              :|b done queue=default id=job_8128 took=144|
+|   o wrk-cron                            | :       :       ||      :       :|                                         |
+|   o wrk-webhooks                        +---------------------- esc closes +b done queue=default id=job_8129 took=157|
+|   o wrk-ledger                               || ms                                                                   |
+|   * stub-stripe                              || 2026-10-21T10:41:10Z INFO job done queue=default id=job_8130 took=170|
+|   * stub-s3                                  || ms                                                                   |
+|   ! stub-twilio         orphaned · pid 48211 || 2026-10-21T10:41:17Z INFO job done queue=default id=job_8131 took=183|
+|   * stub-sendgrid                            || ms                                                                   |
+|   * stub-segment                             || 2026-10-21T10:42:24Z INFO job done queue=default id=job_8132 took=196|
+|   * stub-auth0                               || ms                                                                   |
+|   * proxy-edge                               || 2026-10-21T10:42:31Z INFO job done queue=default id=job_8133 took=209|
+|   * docs-search                              || ms                                                                   |
+|   * ml-ranker                                ||                                                                      |
+|   - ml-embed                        starting ||                                                                      |
+|   * cache-warm                               ||                                                                      |
++----------------------------------------------++----------------------------------------------------------------------+
+ r restart   n next problem   pgup scroll back   c select text   / filter                         ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 99 bold, 100-107 dim, 111 bold, 112-118 dim
+1: 0-5 dim, 9-21 bold reversed, 26-27 dim, 41-44 dim, 55-56 dim, 66-70 dim, 72-81 dim, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
+2: 0 darkgray, 2-5 bold, 10-48 darkgray, 50-59 bold, 60-61 dim, 62-67 red, 68-70 dim, 71-76 red, 78-119 darkgray
+3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 50-59 dim, 60-77 red, 119 darkgray
+4: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+5: 0 darkgray, 4-5 green, 6-13 blue, 47-48 darkgray, 50-111 dim, 119 darkgray
+6: 0 darkgray, 4-5 green, 6-14 blue, 47-119 darkgray
+7: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 119 darkgray
+8: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 119 darkgray
+9: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 119 darkgray
+10: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 119 darkgray
+11: 0 darkgray, 4-5 green, 6-18 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 119 darkgray
+12: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 119 darkgray
+13: 0 darkgray, 4-5 green, 6-16 blue, 42-77 bold, 119 darkgray
+14: 0 darkgray, 4-12 green, 42 bold, 44 darkgray, 52 darkgray, 60-61 dim yellow, 68 darkgray, 76 darkgray, 77 bold, 119 darkgray
+15: 0 darkgray, 4-14 green, 42 bold, 44 darkgray, 52 darkgray, 56-59 bold lightyellow, 60-63 bold yellow, 68 darkgray, 76 darkgray, 77 bold, 119 darkgray
+16: 0 darkgray, 4-13 green, 42 bold, 44 darkgray, 52 darkgray, 60-61 dim yellow, 68 darkgray, 76 darkgray, 77 bold, 119 darkgray
+17: 0 darkgray, 4-5 dim, 6-18 dim green, 42 bold, 44 darkgray, 52 darkgray, 57-62 dim, 68 darkgray, 76 darkgray, 77 bold, 119 darkgray
+18: 0 darkgray, 4-16 green, 42 bold, 44 darkgray, 52 darkgray, 60-61 dim yellow, 68 darkgray, 76 darkgray, 77 bold, 119 darkgray
+19: 0 darkgray, 4-5 green, 6-14 magenta, 42 bold, 44 darkgray, 52 bold reversed, 53-54 reversed, 55 bold reversed, 56-67 reversed, 76 darkgray, 77 bold, 119 darkgray
+20: 0 darkgray, 4-5 green, 6-16 magenta, 42 bold, 44 darkgray, 52 darkgray, 60-61 dim yellow, 68 darkgray, 76 darkgray, 77 bold, 119 darkgray
+21: 0 darkgray, 4-5 green, 6-14 magenta, 42 bold, 44 darkgray, 52 bold, 55 bold, 76 darkgray, 77 bold, 119 darkgray
+22: 0 darkgray, 4-5 green, 6-15 magenta, 42 bold, 44 darkgray, 52 darkgray, 60-61 dim yellow, 68 darkgray, 76 darkgray, 77 bold, 119 darkgray
+23: 0 darkgray, 1-41 reversed, 42 bold, 44 darkgray, 52 bold, 55 bold, 76 darkgray, 77 bold, 119 darkgray
+24: 0 darkgray, 4-5 green, 6-13 magenta, 42 bold, 44 darkgray, 52 darkgray, 60-61 dim yellow, 68 darkgray, 76 darkgray, 77 bold, 119 darkgray
+25: 0 darkgray, 4-5 green, 6-17 magenta, 42-64 bold, 65-76 bold dim, 77 bold, 119 darkgray
+26: 0 darkgray, 4-5 green, 6-15 magenta, 47-48 darkgray, 119 darkgray
+27: 0 darkgray, 4-5 green, 6-16 darkgray, 47-48 darkgray, 50-69 dim, 71-74 color2, 119 darkgray
+28: 0 darkgray, 4-5 green, 6-12 darkgray, 47-48 darkgray, 119 darkgray
+29: 0 darkgray, 4-5 yellow, 6-16 darkgray, 26-33 yellow, 34-45 dim, 47-48 darkgray, 50-69 dim, 71-74 color2, 119 darkgray
+30: 0 darkgray, 4-5 green, 6-18 darkgray, 47-48 darkgray, 119 darkgray
+31: 0 darkgray, 4-5 green, 6-17 darkgray, 47-48 darkgray, 50-69 dim, 71-74 color2, 119 darkgray
+32: 0 darkgray, 4-5 green, 6-15 darkgray, 47-48 darkgray, 119 darkgray
+33: 0 darkgray, 4-5 green, 6-15 cyan, 47-48 darkgray, 50-69 dim, 71-74 color2, 119 darkgray
+34: 0 darkgray, 4-5 green, 6-16 cyan, 47-48 darkgray, 119 darkgray
+35: 0 darkgray, 4-14 green, 47-48 darkgray, 119 darkgray
+36: 0 darkgray, 6-13 green, 47-48 darkgray, 119 darkgray
+37: 0 darkgray, 4-5 green, 6-15 dim blue, 47-48 darkgray, 119 darkgray
+38: 0-119 darkgray
+39: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 49 bold, 50-64 dim, 65 bold, 66-75 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim

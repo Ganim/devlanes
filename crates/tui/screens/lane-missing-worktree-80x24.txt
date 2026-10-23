@@ -1,0 +1,50 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●   starting …  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8    … 1-9 or [ ] switch lanes
+┌ spike/old-search @3 ─────────┐┌ spike/old-search @3 · worktree missing ──────┐
+│ ▾ tasks                    7 ││ ! The worktree /work/acme-old-search is gone.│
+│   · migrate          not run ││   The lane still holds its ports. C cleans   │
+│   · seed             not run ││   this lane and frees them.                  │
+│   · lint             not run ││   X on the daemon page cleans every lane like│
+│   · typecheck        not run ││   this one.                                  │
+│   · test-e2e         not run ││                                              │
+│   · codegen          not run ││ branch    spike/old-search                   │
+│   · clean-cache      not run ││ worktree  /work/acme-old-search (missing)    │
+│                              ││ tasks     7 not run                          │
+│ ▾ infra                      ││                                              │
+│   ▾ shared              3 up ││ lanes in acme                                │
+│     ● pgbouncer              ││   main @0                  1 failed · 1 star…│
+│     ● postgres               ││   feat/checkout @1         starting · 4 of 8…│
+│     ● redis                  ││   fix/cache @2             not running · con…│
+│                              ││ ▌ spike/old-search @3      worktree missing  │
+│                              ││                                              │
+│                              ││ 1-9, [ and ] or a click on a chip switch     │
+│                              ││ lanes. devlanes lane new <branch> adds one.  │
+│                              ││                                              │
+└──────────────────────────────┘└──────────────────────────────────────────────┘
+ C clean lane   [ ] switch lane                           ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 59 bold, 60-67 dim, 71 bold, 72-78 dim
+1: 0-5 dim, 10-11 dim, 16-19 dim, 20 red, 26-27 dim, 41-44 dim, 51-54 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
+2: 0 darkgray, 1-21 bold reversed, 22-32 darkgray, 34-49 bold, 53-55 dim, 56-71 yellow, 73-79 darkgray
+3: 0 darkgray, 2-3 dim, 29 dim, 31-32 darkgray, 34-35 yellow, 79 darkgray
+4: 0 darkgray, 4-12 dim, 23-29 dim, 31-32 darkgray, 79 darkgray
+5: 0 darkgray, 4-9 dim, 23-29 dim, 31-32 darkgray, 79 darkgray
+6: 0 darkgray, 4-9 dim, 23-29 dim, 31-32 darkgray, 79 darkgray
+7: 0 darkgray, 4-14 dim, 23-29 dim, 31-32 darkgray, 79 darkgray
+8: 0 darkgray, 4-13 dim, 23-29 dim, 31-32 darkgray, 79 darkgray
+9: 0 darkgray, 4-12 dim, 23-29 dim, 31-32 darkgray, 34-43 dim, 79 darkgray
+10: 0 darkgray, 4-16 dim, 23-29 dim, 31-32 darkgray, 34-43 dim, 79 darkgray
+11: 0 darkgray, 31-32 darkgray, 34-43 dim, 79 darkgray
+12: 0 darkgray, 2-3 dim, 31-32 darkgray, 79 darkgray
+13: 0 darkgray, 4-5 dim, 26-29 dim, 31-32 darkgray, 34-46 bold, 79 darkgray
+14: 0 darkgray, 6-7 green, 8-16 dim magenta, 31-32 darkgray, 34-35 bold, 61-68 red, 69-71 dim, 79 darkgray
+15: 0 darkgray, 6-7 green, 8-15 cyan, 31-32 darkgray, 34-35 bold, 69-78 dim, 79 darkgray
+16: 0 darkgray, 6-7 green, 8-12 cyan, 31-32 darkgray, 34-35 bold, 61-78 dim, 79 darkgray
+17: 0 darkgray, 31-32 darkgray, 34-35 bold, 61-76 yellow, 79 darkgray
+18: 0 darkgray, 31-32 darkgray, 79 darkgray
+19: 0 darkgray, 31-32 darkgray, 34-73 dim, 79 darkgray
+20: 0 darkgray, 31-32 darkgray, 34-76 dim, 79 darkgray
+21: 0 darkgray, 31-32 darkgray, 79 darkgray
+22: 0-79 darkgray
+23: 1 bold, 2-15 dim, 16-18 bold, 19-33 dim, 58 bold, 59-70 dim, 71 bold, 72-79 dim

@@ -1,0 +1,82 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8     3 fix/cache @2 ·    +1 more              1-9 or [ ] switch lanes
+┌ main @0 ─────────────────────────────────────┐┌ Gateway API  api-gateway · ready ──────────── watching · enter types ┐
+│ ▾ services                                34 ││ > @acme/api-gateway@2.4.0 dev                                        │
+│   ● Gateway API                              ││ > tsx watch src/server.ts                                            │
+│   ● api-auth                                 ││                                                                      │
+│   ● api-users                                ││ ✓ connected to postgres (acme_lane0)                                 │
+│   ● api-billing                              ││ ✓ connected to redis                                                 │
+│   ● api-orders                               ││ listening on :41000                                                  │
+│   ● api-search                               ││ 10:42:00 GET /v1/orders/1000 200 3ms                                 │
+│   ● api-catalog                              ││ 10:42:11 GET /v1/orders/1017 200 4ms                                 │
+│   ● api-inventory                            ││ 10:42:22 GET /v1/orders/1034 200 5ms                                 │
+│   ● api-notify                               ││ 10:42:33 GET /v1/orders/1051 200 6ms                                 │
+│   ● api-reports                              ││ 10:42:44 GET /v1/orders/1068 404 7ms                                 │
+│   ● web-app                                  ││ 10:42:55 GET /v1/orders/1085 200 3ms                                 │
+│   ● web-admin                                ││ 10:42:06 GET /v1/orders/1102 200 4ms                                 │
+│   ● web-docs                                 ││ 10:42:17 GET /v1/orders/1119 200 5ms                                 │
+│   · web-storybook                            ││ 10:42:28 GET /v1/orders/1136 200 6ms                                 │
+│   ● web-landing                              ││ 10:42:39 GET /v1/orders/1153 200 7ms                                 │
+│   ◉ wrk-email                                ││ 10:43:50 GET /v1/orders/1170 200 3ms                                 │
+│   ◉ wrk-billing                              ││ 10:43:01 GET /v1/orders/1187 200 4ms                                 │
+│   ◉ wrk-index                                ││ 10:43:12 GET /v1/orders/1204 200 5ms                                 │
+│   ◉ wrk-thumbs                               ││ 10:43:23 GET /v1/orders/1221 404 6ms                                 │
+│   ✕ wrk-export               failed · exit 1 ││ 10:43:34 GET /v1/orders/1238 200 7ms                                 │
+│   ◉ wrk-cron                                 ││ 10:43:45 GET /v1/orders/1255 200 3ms                                 │
+│   ◉ wrk-webhooks                             ││ 10:43:56 GET /v1/orders/1272 200 4ms                                 │
+│   ◉ wrk-ledger                               ││ 10:43:07 GET /v1/orders/1289 200 5ms                                 │
+│   ● stub-stripe                              ││                                                                      │
+│   ● stub-s3                                  ││                                                                      │
+│   ◆ stub-twilio         orphaned · pid 48211 ││                                                                      │
+│   ● stub-sendgrid                            ││                                                                      │
+│   ● stub-segment                             ││                                                                      │
+│   ● stub-auth0                               ││                                                                      │
+│   ● proxy-edge                               ││                                                                      │
+│   ● docs-search                              ││                                                                      │
+│   ● ml-ranker                                ││                                                                      │
+│   ⠋ ml-embed                        starting ││                                                                      │
+│   ● cache-warm                               ││                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+ enter type into it   x stop   r restart   o open in browser   c select text   z zoom             ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1 bold #f5c542, 2 bold #f3bd41, 3 bold #f1b440, 4 bold #efac3f, 5 bold #eea33f, 6 bold #ec9b3e, 7 bold #ea923d, 8 bold #e88a3c, 10-19 bold #1a1917 on #f5c542, 22-23 dim, 32-33 #e8a13c, 36-37 dim, 43-44 #4cbf7f, 99 bold, 100-107 dim, 111 bold, 112-118 dim
+1: 0-5 dim, 9 bold on #3b3423, 10-11 bold dim on #3b3423, 12-15 bold on #3b3423, 16-19 bold dim on #3b3423, 20 bold #e5584a on #3b3423, 21 bold on #3b3423, 26-27 dim, 41-44 dim, 55-56 dim, 66-70 dim, 72-81 dim, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
+2: 0 #6b675e, 2-5 bold, 10-48 #6b675e, 50-60 bold, 61-76 dim, 77-81 #4cbf7f, 83-94 #6b675e, 96-117 dim, 119 #6b675e
+3: 0 #6b675e, 2-3 dim, 44-45 dim, 47-48 #6b675e, 50-78 dim, 119 #6b675e
+4: 0 #6b675e, 1-3 on #3b3423, 4-5 #4cbf7f on #3b3423, 6-16 blue on #3b3423, 17-46 on #3b3423, 47-48 #6b675e, 50-74 dim, 119 #6b675e
+5: 0 #6b675e, 4-5 #4cbf7f, 6-13 blue, 47-48 #6b675e, 119 #6b675e
+6: 0 #6b675e, 4-5 #4cbf7f, 6-14 blue, 47-48 #6b675e, 50 color2, 119 #6b675e
+7: 0 #6b675e, 4-5 #4cbf7f, 6-16 blue, 47-48 #6b675e, 50 color2, 119 #6b675e
+8: 0 #6b675e, 4-5 #4cbf7f, 6-15 blue, 47-48 #6b675e, 50-68 bold, 119 #6b675e
+9: 0 #6b675e, 4-5 #4cbf7f, 6-15 blue, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+10: 0 #6b675e, 4-5 #4cbf7f, 6-16 blue, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+11: 0 #6b675e, 4-5 #4cbf7f, 6-18 blue, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+12: 0 #6b675e, 4-5 #4cbf7f, 6-15 blue, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+13: 0 #6b675e, 4-5 #4cbf7f, 6-16 blue, 47-48 #6b675e, 50-57 dim, 79-81 color3, 119 #6b675e
+14: 0 #6b675e, 4-5 #4cbf7f, 6-12 green, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+15: 0 #6b675e, 4-5 #4cbf7f, 6-14 green, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+16: 0 #6b675e, 4-5 #4cbf7f, 6-13 green, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+17: 0 #6b675e, 4-5 dim, 6-18 dim green, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+18: 0 #6b675e, 4-5 #4cbf7f, 6-16 green, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+19: 0 #6b675e, 4-5 #4cbf7f, 6-14 magenta, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+20: 0 #6b675e, 4-5 #4cbf7f, 6-16 magenta, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+21: 0 #6b675e, 4-5 #4cbf7f, 6-14 magenta, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+22: 0 #6b675e, 4-5 #4cbf7f, 6-15 magenta, 47-48 #6b675e, 50-57 dim, 79-81 color3, 119 #6b675e
+23: 0 #6b675e, 4-5 #e5584a, 6-15 magenta, 31-36 #e5584a, 37-39 dim, 40-45 #e5584a, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+24: 0 #6b675e, 4-5 #4cbf7f, 6-13 magenta, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+25: 0 #6b675e, 4-5 #4cbf7f, 6-17 magenta, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+26: 0 #6b675e, 4-5 #4cbf7f, 6-15 magenta, 47-48 #6b675e, 50-57 dim, 79-81 color2, 119 #6b675e
+27: 0 #6b675e, 4-5 #4cbf7f, 6-16 darkgray, 47-48 #6b675e, 119 #6b675e
+28: 0 #6b675e, 4-5 #4cbf7f, 6-12 darkgray, 47-48 #6b675e, 119 #6b675e
+29: 0 #6b675e, 4-5 #e8a13c, 6-16 darkgray, 26-33 #e8a13c, 34-45 dim, 47-48 #6b675e, 119 #6b675e
+30: 0 #6b675e, 4-5 #4cbf7f, 6-18 darkgray, 47-48 #6b675e, 119 #6b675e
+31: 0 #6b675e, 4-5 #4cbf7f, 6-17 darkgray, 47-48 #6b675e, 119 #6b675e
+32: 0 #6b675e, 4-5 #4cbf7f, 6-15 darkgray, 47-48 #6b675e, 119 #6b675e
+33: 0 #6b675e, 4-5 #4cbf7f, 6-15 cyan, 47-48 #6b675e, 119 #6b675e
+34: 0 #6b675e, 4-5 #4cbf7f, 6-16 cyan, 47-48 #6b675e, 119 #6b675e
+35: 0 #6b675e, 4-5 #4cbf7f, 6-14 green, 47-48 #6b675e, 119 #6b675e
+36: 0 #6b675e, 6-13 green, 47-48 #6b675e, 119 #6b675e
+37: 0 #6b675e, 4-5 #4cbf7f, 6-15 dim blue, 47-48 #6b675e, 119 #6b675e
+38: 0-119 #6b675e
+39: 1-5 bold, 6-21 dim, 22 bold, 23-30 dim, 31 bold, 32-42 dim, 43 bold, 44-62 dim, 63 bold, 64-78 dim, 79 bold, 80-87 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim

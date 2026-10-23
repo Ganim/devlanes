@@ -212,7 +212,7 @@ pub fn render(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
     // `body` may be cut to fit; `tail` (the keys) always stays.
     let (title, body, tail): (String, Vec<Line>, Vec<Line>) = match dialog {
         // The Esc menu and its options page draw themselves.
-        Dialog::Menu(menu) => return crate::menu::render(theme, menu, frame, area),
+        Dialog::Menu(menu) => return crate::menu::render(theme, menu, app.version, frame, area),
         Dialog::Settings(settings) => {
             return crate::settings::render(theme, settings, frame, area);
         }

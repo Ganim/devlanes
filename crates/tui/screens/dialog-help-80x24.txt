@@ -1,0 +1,50 @@
+ ┌ keys ──────────────────────────────────────────────────────────────────────┐
+ │ glyphs                                                                     │
+┌│   ● ready (check passed)      ◉ running (no ready check)  · stopped, not … │┐
+││   ⠸ starting, stopping        … queued                    ✕ failed       … ││
+││   ◆ orphaned                  ✓ task done                 ▍ the unit's co… ││
+││                                                                            ││
+││ list                                                                       ││
+││   j k  up down      move; k from the top selects the lane                  │┤
+││   g G               the lane, the last row                                 ││
+││   h l               fold, unfold; h moves to the section                   ││
+││   enter  space      fold a section, or type into a running unit            ││
+││   [ ]  1-9          previous, next lane; lane by number                    ││
+││   n N               next, previous problem                                 ││
+││   s  x  r           start, stop, restart the selection; s runs a task      ││
+││   s  S              on the lane: its default services; every service       ││
+││   p                 start the lane with chosen profiles                    ││
+││   C                 clean the lane (asks first)                            ││
+││   o                 open the unit's address in a browser                   ││
+││   /                 filter by name or +tag; enter keeps, esc clears        ││
+││                                                                            ││
+││ pane                                                                       ││
+││ …                                                                          ││
+└│ any key closes                                                             │┘
+ └────────────────────────────────────────────────────────────────────────────┘
+
+--- styles (row: columns style) ---
+0: 1-78 bold
+1: 0 dim, 1 bold, 3-8 dim, 78 bold, 79 dim
+2: 0 darkgray, 1 bold, 5-6 green, 33-34 green, 61-62 dim, 78 bold, 79 darkgray
+3: 0 darkgray, 1 bold, 33-34 dim, 61-62 red, 78 bold, 79 darkgray
+4: 0 darkgray, 1 bold, 5-6 yellow, 33-34 green, 78 bold, 79 darkgray
+5: 0 darkgray, 1 bold, 78 bold, 79 darkgray
+6: 0 darkgray, 1 bold, 3-6 dim, 78 bold, 79 darkgray
+7: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+8: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+9: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+10: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+11: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+12: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+13: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+14: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+15: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+16: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+17: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+18: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+19: 0 darkgray, 1 bold, 78 bold, 79 darkgray
+20: 0 darkgray, 1 bold, 3-6 dim, 78 bold, 79 darkgray
+21: 0 darkgray, 1 bold, 3 dim, 78 bold, 79 darkgray
+22: 0 darkgray, 1 bold, 3-16 dim, 78 bold, 79 darkgray
+23: 1-78 bold, 79 dim

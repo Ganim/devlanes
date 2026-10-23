@@ -168,6 +168,8 @@ Run a crate's ignored tests with `cargo nextest run -p <crate> --run-ignored onl
 
 `crates/config/schema.json` and `crates/config/user-schema.json` are rewritten by `cargo build -p devlanes` whenever the config types change. Commit them together with the change; a test fails when they're stale.
 
+`crates/tui/screens/*.txt` and its `index.md` are every TUI state drawn against a fake daemon, as text with the styles of each cell, so a pull request shows what changed on screen. Any change to what the TUI draws changes them, including changes outside `crates/tui`. Rewrite them with `DEVLANES_BLESS=1 cargo nextest run -p devlanes-tui -E 'test(screens_are_current)'`, check the diff and commit them with the change; the test fails in CI while they're stale. `cargo run -p devlanes-tui --example screens` writes the same files plus gitignored PNG and ANSI versions for looking at the screens.
+
 ## Releases
 
 `packaging/README.md` describes the tag-driven release workflow and the Homebrew and npm packages.

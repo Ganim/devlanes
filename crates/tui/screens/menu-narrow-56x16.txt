@@ -1,0 +1,34 @@
+ d┌──────────────────────────────────────────────────┐n
+ l│ ╎       ╎       ╎       ║       ╎       ╎       ╎│s
+┌ │ ╎   ▀▀▀▀▀   ░█▀▄░█▀▀░█░█░█░░░█▀█░█▀█░█▀▀░█▀▀    ╎│─┐
+│ │ ╎    ▀▀▀▀▀  ░█░█░█▀▀░▀▄▀░█░░░█▀█░█░█░█▀▀░▀▀█    ╎│ │
+│ │ ╎     ▀▀▀▀▀ ░▀▀░░▀▀▀░░▀░░▀▀▀░▀░▀░▀░▀░▀▀▀░▀▀▀    ╎│ │
+│ │ ╎       ╎       ╎       ║       ╎       ╎       ╎│t│
+│ │ ╎       ╎       ╎    v1.0.0     ╎       ╎       ╎│s│
+│ │ ╎       ╎       ╎       ║       ╎       ╎       ╎│x│
+│ │ ╎       ╎       ▌  o  options           ╎       ╎│ │
+│ │ ╎       ╎       ╎       ║       ╎       ╎       ╎│g│
+│ │ ╎       ╎          h  help              ╎       ╎│─┤
+│ │ ╎       ╎       ╎       ║       ╎       ╎       ╎│u│
+│ │ ╎       ╎          q  quit              ╎       ╎│9│
+│ │ ╎       ╎       ╎       ║       ╎       ╎       ╎│ │
+└─└────────────────────────────────────── esc closes ┘─┘
+ r restart   n next problem       ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1 bold color220, 2-53 bold, 54 dim
+1: 0-1 dim, 2 bold, 4 darkgray, 12 darkgray, 20 darkgray, 28 dim yellow, 36 darkgray, 44 darkgray, 52 darkgray, 53 bold, 54-55 dim
+2: 0 darkgray, 2 bold, 4 darkgray, 8-12 yellow, 16 darkgray, 17-19 lightyellow, 20 darkgray, 21-23 lightyellow, 24 darkgray, 25 lightyellow, 26 darkgray, 27 lightyellow, 28 darkgray, 29 lightyellow, 30-32 darkgray, 33-35 lightyellow, 36 darkgray, 37-39 lightyellow, 40 darkgray, 41-43 lightyellow, 44 darkgray, 45-47 lightyellow, 52 darkgray, 53 bold, 54-55 darkgray
+3: 0 darkgray, 2 bold, 4 darkgray, 9-13 gray, 16 darkgray, 17 lightyellow, 18 darkgray, 19 lightyellow, 20 darkgray, 21-23 lightyellow, 24 darkgray, 25-27 lightyellow, 28 darkgray, 29 lightyellow, 30-32 darkgray, 33-35 lightyellow, 36 darkgray, 37 lightyellow, 38 darkgray, 39 lightyellow, 40 darkgray, 41-43 lightyellow, 44 darkgray, 45-47 lightyellow, 52 darkgray, 53 bold, 55 darkgray
+4: 0 darkgray, 2 bold, 4 darkgray, 10-14 gray, 16 darkgray, 17-18 lightyellow, 19-20 darkgray, 21-23 lightyellow, 24-25 darkgray, 26 lightyellow, 27-28 darkgray, 29-31 lightyellow, 32 darkgray, 33 lightyellow, 34 darkgray, 35 lightyellow, 36 darkgray, 37 lightyellow, 38 darkgray, 39 lightyellow, 40 darkgray, 41-43 lightyellow, 44 darkgray, 45-47 lightyellow, 52 darkgray, 53 bold, 55 darkgray
+5: 0 darkgray, 2 bold, 4 darkgray, 12 darkgray, 20 darkgray, 28 dim yellow, 36 darkgray, 44 darkgray, 52 darkgray, 53 bold, 55 darkgray
+6: 0 darkgray, 2 bold, 4 darkgray, 12 darkgray, 20 darkgray, 25-30 dim, 36 darkgray, 44 darkgray, 52 darkgray, 53 bold, 54 dim, 55 darkgray
+7: 0 darkgray, 2 bold, 4 darkgray, 12 darkgray, 20 darkgray, 28 dim yellow, 36 darkgray, 44 darkgray, 52 darkgray, 53 bold, 54 dim, 55 darkgray
+8: 0 darkgray, 2 bold, 4 darkgray, 12 darkgray, 20 bold reversed, 21-22 reversed, 23 bold reversed, 24-35 reversed, 44 darkgray, 52 darkgray, 53 bold, 55 darkgray
+9: 0 darkgray, 2 bold, 4 darkgray, 12 darkgray, 20 darkgray, 28 dim yellow, 36 darkgray, 44 darkgray, 52 darkgray, 53 bold, 54 dim, 55 darkgray
+10: 0 darkgray, 2 bold, 4 darkgray, 12 darkgray, 20 bold, 23 bold, 44 darkgray, 52 darkgray, 53 bold, 54-55 darkgray
+11: 0 darkgray, 2 bold, 4 darkgray, 12 darkgray, 20 darkgray, 28 dim yellow, 36 darkgray, 44 darkgray, 52 darkgray, 53 bold, 55 darkgray
+12: 0 darkgray, 2 bold, 4 darkgray, 12 darkgray, 20 bold, 23 bold, 44 darkgray, 52 darkgray, 53 bold, 55 darkgray
+13: 0 darkgray, 1 reversed, 2 bold, 4 darkgray, 12 darkgray, 20 darkgray, 28 dim yellow, 36 darkgray, 44 darkgray, 52 darkgray, 53 bold, 55 darkgray
+14: 0-1 darkgray, 2-40 bold, 41-52 bold dim, 53 bold, 54-55 darkgray
+15: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 34 bold, 35-46 dim, 47 bold, 48-55 dim

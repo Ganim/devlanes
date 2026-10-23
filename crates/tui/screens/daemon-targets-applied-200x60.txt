@@ -1,0 +1,122 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●                                                                                      starting feat/checkout: 4 of 8 ready  M monitor   D daemon · 2 issues
+┌ daemon ────────────────────────────────────┐┌ checks ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1 fail · 1 warn · i all ┐
+│version   1.0.0 · pid 4242                  ││fail tls     no CA: no CA has been created yet                                                                                                          │
+│uptime    7h 38m                            ││             fix: devlanes certs trust                                                                                                                  │
+│socket    /Users/acme/.devlanes/run/daemon.…││warn proxy   https on fallback port 8443: port 443 needs root                                                                                           │
+│managed   41 processes · 2 projects         ││             fix: free the standard port or set proxy ports in ~/.devlanes/config.yaml                                                                  │
+│clients   3 event subscribers               ││ok           daemon · sandbox · docker · proxy · hosts                                                                                                  │
+│state     schema 7 · /Users/acme/.devlanes/…││                                                                                                                                                        │
+└────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ daemon.log ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── following · all levels · repeats folded · 1 target · 40 lines ┐
+│── 2026-10-21 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+│10:35:12 WARN  daemon::gate         start window full  lane=acme@1 queued=2                                                                                                             ×5 since 10:03│
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ j k scroll   F pause   w level   / filter   T targets   c copy   i checks   d unfold   R restart   S stop                                                                        ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 18-19 red, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 168 bold, 169-176 dim, 180 bold, 181-187 bold underlined, 188-198 red
+1: 0 darkgray, 1-8 bold, 9-46 darkgray, 47-54 bold, 55-173 darkgray, 175-180 red, 181-183 dim, 184-189 yellow, 190-198 dim, 199 darkgray
+2: 0 darkgray, 1-10 dim, 45-46 darkgray, 47-59 red, 199 darkgray
+3: 0 darkgray, 1-10 dim, 45-46 darkgray, 47-59 red, 60-84 dim, 199 darkgray
+4: 0 darkgray, 1-10 dim, 45-46 darkgray, 47-59 yellow, 199 darkgray
+5: 0 darkgray, 1-10 dim, 45-46 darkgray, 47-59 yellow, 60-132 dim, 199 darkgray
+6: 0 darkgray, 1-10 dim, 45-46 darkgray, 47-59 green, 199 darkgray
+7: 0 darkgray, 1-10 dim, 45-46 darkgray, 199 darkgray
+8: 0-199 darkgray
+9: 0 darkgray, 1-12 bold, 13-135 darkgray, 136-198 dim, 199 darkgray
+10: 0-199 darkgray
+11: 0 darkgray, 1-9 dim, 10-14 yellow, 55-60 dim, 68-74 dim, 185-198 dim, 199 darkgray
+12: 0 darkgray, 199 darkgray
+13: 0 darkgray, 199 darkgray
+14: 0 darkgray, 199 darkgray
+15: 0 darkgray, 199 darkgray
+16: 0 darkgray, 199 darkgray
+17: 0 darkgray, 199 darkgray
+18: 0 darkgray, 199 darkgray
+19: 0 darkgray, 199 darkgray
+20: 0 darkgray, 199 darkgray
+21: 0 darkgray, 199 darkgray
+22: 0 darkgray, 199 darkgray
+23: 0 darkgray, 199 darkgray
+24: 0 darkgray, 199 darkgray
+25: 0 darkgray, 199 darkgray
+26: 0 darkgray, 199 darkgray
+27: 0 darkgray, 199 darkgray
+28: 0 darkgray, 199 darkgray
+29: 0 darkgray, 199 darkgray
+30: 0 darkgray, 199 darkgray
+31: 0 darkgray, 199 darkgray
+32: 0 darkgray, 199 darkgray
+33: 0 darkgray, 199 darkgray
+34: 0 darkgray, 199 darkgray
+35: 0 darkgray, 199 darkgray
+36: 0 darkgray, 199 darkgray
+37: 0 darkgray, 199 darkgray
+38: 0 darkgray, 199 darkgray
+39: 0 darkgray, 199 darkgray
+40: 0 darkgray, 199 darkgray
+41: 0 darkgray, 199 darkgray
+42: 0 darkgray, 199 darkgray
+43: 0 darkgray, 199 darkgray
+44: 0 darkgray, 199 darkgray
+45: 0 darkgray, 199 darkgray
+46: 0 darkgray, 199 darkgray
+47: 0 darkgray, 199 darkgray
+48: 0 darkgray, 199 darkgray
+49: 0 darkgray, 199 darkgray
+50: 0 darkgray, 199 darkgray
+51: 0 darkgray, 199 darkgray
+52: 0 darkgray, 199 darkgray
+53: 0 darkgray, 199 darkgray
+54: 0 darkgray, 199 darkgray
+55: 0 darkgray, 199 darkgray
+56: 0 darkgray, 199 darkgray
+57: 0 darkgray, 199 darkgray
+58: 0-199 darkgray
+59: 1-3 bold, 4-13 dim, 14 bold, 15-23 dim, 24 bold, 25-33 dim, 34 bold, 35-44 dim, 45 bold, 46-56 dim, 57 bold, 58-65 dim, 66 bold, 67-76 dim, 77 bold, 78-87 dim, 88 bold, 89-99 dim, 100 bold, 101-108 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim

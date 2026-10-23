@@ -1,0 +1,50 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●   starting …  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8    … 1-9 or [ ] switch lanes
+┌ main @0 ─────────────────────┐┌ Gateway API  api-gateway · ready ────────────┐
+│   ● Gateway API              ││ 10:42:00 GET /v1/orders/1000 200 3ms         │
+│   ● api-auth                 ││ 10:42:11 GET /v1/orders/1017 200 4ms         │
+│   ● api-users                ││ 10:42:22 GET /v1/orders/1034 200 5ms         │
+│   ● api-billing              ││ 10:42:33 GET /v1/orders/1051 200 6ms         │
+│   ● api-orders               ││ 10:42:44 GET /v1/orders/1068 404 7ms         │
+│   ● api-search               ││ 10:42:55 GET /v1/orders/1085 200 3ms         │
+│   ● api-catalog              ││ 10:42:06 GET /v1/orders/1102 200 4ms         │
+│   ● api-inventory            ││ 10:42:17 GET /v1/orders/1119 200 5ms         │
+│   ● api-notify               ││ 10:42:28 GET /v1/orders/1136 200 6ms         │
+│   ● api-reports              ││ 10:42:39 GET /v1/orders/1153 200 7ms         │
+│   ● web-app                  ││ 10:43:50 GET /v1/orders/1170 200 3ms         │
+│   ● web-admin                ││ 10:43:01 GET /v1/orders/1187 200 4ms         │
+│   ● web-docs                 ││ 10:43:12 GET /v1/orders/1204 200 5ms         │
+│   · web-storybook            ││ 10:43:23 GET /v1/orders/1221 404 6ms         │
+│   ● web-landing              ││ 10:43:34 GET /v1/orders/1238 200 7ms         │
+│   ◉ wrk-email                ││ 10:43:45 GET /v1/orders/1255 200 3ms         │
+│   ◉ wrk-billing              ││ 10:43:56 GET /v1/orders/1272 200 4ms         │
+│   ◉ wrk-index                ││ 10:43:07 GET /v1/orders/1289 200 5ms         │
+└──────────────────────────────┘└──────────────────────────────────────────────┘
+ j k move  enter types into a service  tab next project  ? all keys  u hides th…
+ enter type into it   x stop   r restart                  ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 59 bold, 60-67 dim, 71 bold, 72-78 dim
+1: 0-5 dim, 9-21 bold reversed, 26-27 dim, 41-44 dim, 51-54 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
+2: 0 darkgray, 2-5 bold, 10-32 darkgray, 34-44 bold, 45-60 dim, 61-65 green, 67-79 darkgray
+3: 0 darkgray, 1-30 reversed, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+4: 0 darkgray, 4-5 green, 6-13 blue, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+5: 0 darkgray, 4-5 green, 6-14 blue, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+6: 0 darkgray, 4-5 green, 6-16 blue, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+7: 0 darkgray, 4-5 green, 6-15 blue, 31-32 darkgray, 34-41 dim, 63-65 color3, 79 darkgray
+8: 0 darkgray, 4-5 green, 6-15 blue, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+9: 0 darkgray, 4-5 green, 6-16 blue, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+10: 0 darkgray, 4-5 green, 6-18 blue, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+11: 0 darkgray, 4-5 green, 6-15 blue, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+12: 0 darkgray, 4-5 green, 6-16 blue, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+13: 0 darkgray, 4-12 green, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+14: 0 darkgray, 4-14 green, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+15: 0 darkgray, 4-13 green, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+16: 0 darkgray, 4-5 dim, 6-18 dim green, 31-32 darkgray, 34-41 dim, 63-65 color3, 79 darkgray
+17: 0 darkgray, 4-16 green, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+18: 0 darkgray, 4-5 green, 6-14 magenta, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+19: 0 darkgray, 4-5 green, 6-16 magenta, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+20: 0 darkgray, 4-5 green, 6-14 magenta, 31-32 darkgray, 34-41 dim, 63-65 color2, 79 darkgray
+21: 0-79 darkgray
+22: 1-3 bold, 4-10 dim, 11-15 bold, 16-38 dim, 39-41 bold, 42-56 dim, 57 bold, 58-68 dim, 69 bold, 70-79 dim
+23: 1-5 bold, 6-21 dim, 22 bold, 23-30 dim, 31 bold, 32-42 dim, 58 bold, 59-70 dim, 71 bold, 72-79 dim

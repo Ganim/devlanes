@@ -1,0 +1,50 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●   starting …  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8    … 1-9 or [ ] switch lanes
+┌ feat/checkout @1 · starting──┐┌ feat/checkout @1 · starting ─────────────────┐
+│ ▾ services                 6 ││   ✓ infra      done                          │
+│   ● api-gateway              ││   ✓ setup      done                          │
+│   ⠋ api-orders      starting ││   ⠋ tasks      running                       │
+│   ⠋ api-users       starting ││                                              │
+│   … web-app           queued ││ starting  api-orders, api-users              │
+│   … wrk-email         queued ││ queued    web-app, wrk-email: 4 services     │
+│   ● stub-stripe              ││           start at a time                    │
+│                              ││ x stops the start. Select a unit to watch its│
+│ ▾ tasks                    7 ││ output.                                      │
+│   ⠋ migrate          running ││                                              │
+│   · seed             not run ││ branch    feat/checkout                      │
+│   · lint             not run ││ worktree  /work/acme-checkout                │
+│   · typecheck        not run ││ profile   web                                │
+│   · test-e2e         not run ││ ports     41100-41199                        │
+│   · codegen          not run ││ services  2 of 6 up                          │
+│   · clean-cache      not run ││           ⠋ api-orders       starting        │
+│                              ││           ⠋ api-users        starting        │
+│ ▾ infra                      ││           … web-app          queued          │
+│   ▾ shared              3 up ││ … z shows the rest                           │
+└──────────────────────────────┘└──────────────────────────────────────────────┘
+ x stop lane   r restart lane   p start with profiles     ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 59 bold, 60-67 dim, 71 bold, 72-78 dim
+1: 0-5 dim, 10-11 dim, 16-19 dim, 20 red, 25-50 bold reversed, 51-54 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
+2: 0 darkgray, 1-28 bold reversed, 29-32 darkgray, 34-46 bold, 50-52 dim, 62-79 darkgray
+3: 0 darkgray, 2-3 dim, 29 dim, 31-32 darkgray, 36-37 green, 49-52 dim, 79 darkgray
+4: 0 darkgray, 4-5 green, 6-16 blue, 31-32 darkgray, 36-37 green, 49-52 dim, 79 darkgray
+5: 0 darkgray, 6-15 blue, 31-32 darkgray, 49-55 dim, 79 darkgray
+6: 0 darkgray, 6-14 blue, 31-32 darkgray, 79 darkgray
+7: 0 darkgray, 4-5 dim, 6-12 dim green, 24-29 dim, 31-32 darkgray, 34-43 dim, 79 darkgray
+8: 0 darkgray, 4-5 dim, 6-14 dim magenta, 24-29 dim, 31-32 darkgray, 34-43 dim, 79 darkgray
+9: 0 darkgray, 4-5 green, 6-16 darkgray, 31-32 darkgray, 34-43 dim, 79 darkgray
+10: 0 darkgray, 31-32 darkgray, 34-78 dim, 79 darkgray
+11: 0 darkgray, 2-3 dim, 29 dim, 31-32 darkgray, 34-40 dim, 79 darkgray
+12: 0 darkgray, 31-32 darkgray, 79 darkgray
+13: 0 darkgray, 4-9 dim, 23-29 dim, 31-32 darkgray, 34-43 dim, 79 darkgray
+14: 0 darkgray, 4-9 dim, 23-29 dim, 31-32 darkgray, 34-43 dim, 79 darkgray
+15: 0 darkgray, 4-14 dim, 23-29 dim, 31-32 darkgray, 34-43 dim, 79 darkgray
+16: 0 darkgray, 4-13 dim, 23-29 dim, 31-32 darkgray, 34-43 dim, 79 darkgray
+17: 0 darkgray, 4-12 dim, 23-29 dim, 31-32 darkgray, 34-43 dim, 79 darkgray
+18: 0 darkgray, 4-16 dim, 23-29 dim, 31-32 darkgray, 79 darkgray
+19: 0 darkgray, 31-32 darkgray, 79 darkgray
+20: 0 darkgray, 2-3 dim, 31-32 darkgray, 44-45 dim, 63-68 dim, 79 darkgray
+21: 0 darkgray, 4-5 dim, 26-29 dim, 31-32 darkgray, 34-51 dim, 79 darkgray
+22: 0-79 darkgray
+23: 1 bold, 2-14 dim, 15 bold, 16-31 dim, 32 bold, 33-55 dim, 58 bold, 59-70 dim, 71 bold, 72-79 dim

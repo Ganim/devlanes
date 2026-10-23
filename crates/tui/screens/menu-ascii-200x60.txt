@@ -1,0 +1,122 @@
+ devlanes  1 acme x   2 billing !   3 shop *                                                                                                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ lanes    1 main @0 x     2 feat/checkout @1 - 4/8     3 fix/cache @2 -     4 spike/old-search @3 !                                                                             1-9 or [ ] switch lanes
++ main @0 -------------------------------------++ wrk-export  failed · exit 1 -------------------------------------------------------------------------------------------------------------------------+
+| v services                                34 || failed    exited with code 1                                                                                                                         |
+|   * Gateway API                              || next      r restarts it                                                                                                                              |
+|   * api-auth                                 ||           devlanes logs acme@0:wrk-export prints the whole log                                                                                       |
+|   * api-users                                |+- last output ----------------------------------------------------------------------------------------------------------------------------------------+
+|   * api-billing                              || 2026-10-21T10:40:00Z INFO job done queue=default id=job_8120 took=40ms                                                                               |
+|   * api-orders                               || 2026-10-21T10:40:07Z INFO job done queue=default id=job_8121 took=53ms                                                                               |
+|   * api-search                               || 2026-10-21T10:40:14Z INFO job done queue=default id=job_8122 took=66ms                                                                               |
+|   * api-catalog                              || 2026-10-21T10:40:21Z INFO job done queue=default id=job_8123 took=79ms                                                                               |
+|   * api-inventory                            || 2026-10-21T10:40:28Z INFO job done queue=default id=job_8124 took=92ms                                                                               |
+|   * api-notify                               || 2026-10-21T10:40:35Z INFO job done queue=default id=job_8125 took=105ms                                                                              |
+|   * api-reports                              || 2026-10-21T10:41:42Z INFO job done queue=default id=job_8126 took=118ms                                                                              |
+|   * web-app                                  || 2026-10-21T10:41:49Z INFO job done queue=default id=job_8127 took=131ms                                                                              |
+|   * web-admin                                || 2026-10-21T10:41:56Z INFO job done queue=default id=job_8128 took=144ms                                                                              |
+|   * web-docs                                 || 2026-10-21T10:41:03Z INFO job done queue=default id=job_8129 took=157ms                                                                              |
+|   - web-storybook                            || 2026-10-21T10:41:10Z INFO job done queue=default id=job_8130 took=170ms                                                                              |
+|   * web-landing                              || 2026-10-21T10:41:17Z INFO job done queue=default id=job_8131 took=183ms                                                                              |
+|   o wrk-email                                || 2026-10-21T10:42:24Z INFO job done queue=default id=job_8132 took=196ms                                                                              |
+|   o wrk-billing                              || 2026-10-21T10:42:31Z INFO job done queue=default id=job_8133 took=209ms                                                                              |
+|   o wrk-index                                ||                                                                                                                                                      |
+|   o wrk-thumbs                               ||                                                                                                                                                      |
+|   x wrk-export               failed · exit 1 ||                                 +----------------------------------+                                                                                 |
+|   o wrk-cron                                 ||                                 | :       :       ||      :       :|                                                                                 |
+|   o wrk-webhooks                             ||                                 | :       :   devlanes    :       :|                                                                                 |
+|   o wrk-ledger                               ||                                 | :       :       ||      :       :|                                                                                 |
+|   * stub-stripe                              ||                                 | :       :    v1.0.0     :       :|                                                                                 |
+|   * stub-s3                                  ||                                 | :       :       ||      :       :|                                                                                 |
+|   ! stub-twilio         orphaned · pid 48211 ||                                 | :       >  o  options           :|                                                                                 |
+|   * stub-sendgrid                            ||                                 | :       :       ||      :       :|                                                                                 |
+|   * stub-segment                             ||                                 | :          h  help              :|                                                                                 |
+|   * stub-auth0                               ||                                 | :       :       ||      :       :|                                                                                 |
+|   * proxy-edge                               ||                                 | :          q  quit              :|                                                                                 |
+|   * docs-search                              ||                                 | :       :       ||      :       :|                                                                                 |
+|   * ml-ranker                                ||                                 +---------------------- esc closes +                                                                                 |
+|   - ml-embed                        starting ||                                                                                                                                                      |
+|   * cache-warm                               ||                                                                                                                                                      |
+|                                              ||                                                                                                                                                      |
+| v tasks                                    7 ||                                                                                                                                                      |
+|   + migrate             done · runs at start ||                                                                                                                                                      |
+|   + seed                                done ||                                                                                                                                                      |
+|   - lint                             not run ||                                                                                                                                                      |
+|   - typecheck                        not run ||                                                                                                                                                      |
+|   - test-e2e                         not run ||                                                                                                                                                      |
+|   + codegen                             done ||                                                                                                                                                      |
+|   - clean-cache                      not run ||                                                                                                                                                      |
+|                                              ||                                                                                                                                                      |
+| v infra                                      ||                                                                                                                                                      |
+|   v containers                          2 up ||                                                                                                                                                      |
+|     * localstack                             ||                                                                                                                                                      |
+|     * rabbitmq                               ||                                                                                                                                                      |
+|   v shared                              3 up ||                                                                                                                                                      |
+|     * pgbouncer                              ||                                                                                                                                                      |
+|     * postgres                               ||                                                                                                                                                      |
+|     * redis                                  ||                                                                                                                                                      |
+|   > setup                             4 done ||                                                                                                                                                      |
+|                                              ||                                                                                                                                                      |
++----------------------------------------------++------------------------------------------------------------------------------------------------------------------------------------------------------+
+ r restart   n next problem   pgup scroll back   c select text   / filter                                                                                                         ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 179 bold, 180-187 dim, 191 bold, 192-198 dim
+1: 0-5 dim, 9-21 bold reversed, 26-27 dim, 41-44 dim, 55-56 dim, 66-70 dim, 76-77 dim, 94-97 dim, 98 yellow, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
+2: 0 darkgray, 2-5 bold, 10-48 darkgray, 50-59 bold, 60-61 dim, 62-67 red, 68-70 dim, 71-76 red, 78-199 darkgray
+3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 50-59 dim, 60-77 red, 199 darkgray
+4: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+5: 0 darkgray, 4-5 green, 6-13 blue, 47-48 darkgray, 50-111 dim, 199 darkgray
+6: 0 darkgray, 4-5 green, 6-14 blue, 47-199 darkgray
+7: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+8: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+9: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+10: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+11: 0 darkgray, 4-5 green, 6-18 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+12: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+13: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+14: 0 darkgray, 4-12 green, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+15: 0 darkgray, 4-14 green, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+16: 0 darkgray, 4-13 green, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+17: 0 darkgray, 4-5 dim, 6-18 dim green, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+18: 0 darkgray, 4-16 green, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+19: 0 darkgray, 4-5 green, 6-14 magenta, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+20: 0 darkgray, 4-5 green, 6-16 magenta, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+21: 0 darkgray, 4-5 green, 6-14 magenta, 47-48 darkgray, 199 darkgray
+22: 0 darkgray, 4-5 green, 6-15 magenta, 47-48 darkgray, 199 darkgray
+23: 0 darkgray, 1-46 reversed, 47-48 darkgray, 82-117 bold, 199 darkgray
+24: 0 darkgray, 4-5 green, 6-13 magenta, 47-48 darkgray, 82 bold, 84 darkgray, 92 darkgray, 100-101 dim yellow, 108 darkgray, 116 darkgray, 117 bold, 199 darkgray
+25: 0 darkgray, 4-5 green, 6-17 magenta, 47-48 darkgray, 82 bold, 84 darkgray, 92 darkgray, 96-99 bold lightyellow, 100-103 bold yellow, 108 darkgray, 116 darkgray, 117 bold, 199 darkgray
+26: 0 darkgray, 4-5 green, 6-15 magenta, 47-48 darkgray, 82 bold, 84 darkgray, 92 darkgray, 100-101 dim yellow, 108 darkgray, 116 darkgray, 117 bold, 199 darkgray
+27: 0 darkgray, 4-5 green, 6-16 darkgray, 47-48 darkgray, 82 bold, 84 darkgray, 92 darkgray, 97-102 dim, 108 darkgray, 116 darkgray, 117 bold, 199 darkgray
+28: 0 darkgray, 4-5 green, 6-12 darkgray, 47-48 darkgray, 82 bold, 84 darkgray, 92 darkgray, 100-101 dim yellow, 108 darkgray, 116 darkgray, 117 bold, 199 darkgray
+29: 0 darkgray, 4-5 yellow, 6-16 darkgray, 26-33 yellow, 34-45 dim, 47-48 darkgray, 82 bold, 84 darkgray, 92 bold reversed, 93-94 reversed, 95 bold reversed, 96-107 reversed, 116 darkgray, 117 bold, 199 darkgray
+30: 0 darkgray, 4-5 green, 6-18 darkgray, 47-48 darkgray, 82 bold, 84 darkgray, 92 darkgray, 100-101 dim yellow, 108 darkgray, 116 darkgray, 117 bold, 199 darkgray
+31: 0 darkgray, 4-5 green, 6-17 darkgray, 47-48 darkgray, 82 bold, 84 darkgray, 92 bold, 95 bold, 116 darkgray, 117 bold, 199 darkgray
+32: 0 darkgray, 4-5 green, 6-15 darkgray, 47-48 darkgray, 82 bold, 84 darkgray, 92 darkgray, 100-101 dim yellow, 108 darkgray, 116 darkgray, 117 bold, 199 darkgray
+33: 0 darkgray, 4-5 green, 6-15 cyan, 47-48 darkgray, 82 bold, 84 darkgray, 92 bold, 95 bold, 116 darkgray, 117 bold, 199 darkgray
+34: 0 darkgray, 4-5 green, 6-16 cyan, 47-48 darkgray, 82 bold, 84 darkgray, 92 darkgray, 100-101 dim yellow, 108 darkgray, 116 darkgray, 117 bold, 199 darkgray
+35: 0 darkgray, 4-14 green, 47-48 darkgray, 82-104 bold, 105-116 bold dim, 117 bold, 199 darkgray
+36: 0 darkgray, 6-13 green, 47-48 darkgray, 199 darkgray
+37: 0 darkgray, 4-5 green, 6-15 dim blue, 47-48 darkgray, 199 darkgray
+38: 0 darkgray, 47-48 darkgray, 199 darkgray
+39: 0 darkgray, 2-3 dim, 45 dim, 47-48 darkgray, 199 darkgray
+40: 0 darkgray, 4-5 green, 26-45 dim, 47-48 darkgray, 199 darkgray
+41: 0 darkgray, 4-5 green, 42-45 dim, 47-48 darkgray, 199 darkgray
+42: 0 darkgray, 4-9 dim, 39-45 dim, 47-48 darkgray, 199 darkgray
+43: 0 darkgray, 4-14 dim, 39-45 dim, 47-48 darkgray, 199 darkgray
+44: 0 darkgray, 4-13 dim, 39-45 dim, 47-48 darkgray, 199 darkgray
+45: 0 darkgray, 4-5 green, 42-45 dim, 47-48 darkgray, 199 darkgray
+46: 0 darkgray, 4-16 dim, 39-45 dim, 47-48 darkgray, 199 darkgray
+47: 0 darkgray, 47-48 darkgray, 199 darkgray
+48: 0 darkgray, 2-3 dim, 47-48 darkgray, 199 darkgray
+49: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 199 darkgray
+50: 0 darkgray, 6-17 green, 47-48 darkgray, 199 darkgray
+51: 0 darkgray, 6-7 green, 8-15 cyan, 47-48 darkgray, 199 darkgray
+52: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 199 darkgray
+53: 0 darkgray, 6-7 green, 8-16 dim magenta, 47-48 darkgray, 199 darkgray
+54: 0 darkgray, 6-7 green, 8-15 cyan, 47-48 darkgray, 199 darkgray
+55: 0 darkgray, 6-7 green, 8-12 cyan, 47-48 darkgray, 199 darkgray
+56: 0 darkgray, 4-5 dim, 40-45 dim, 47-48 darkgray, 199 darkgray
+57: 0 darkgray, 47-48 darkgray, 199 darkgray
+58: 0-199 darkgray
+59: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 49 bold, 50-64 dim, 65 bold, 66-75 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim

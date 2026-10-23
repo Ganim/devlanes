@@ -1,0 +1,50 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●   starting …  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8    … 1-9 or [ ] switch lanes
+┌ ┌ options ──────────────────────────────────────── ~/.devlanes/config.yaml ┐─┐
+│ │ 1 general   2 network   3 startup   4 storage                            │ │
+│ │ ──────────────────────────────────────────────────────────────────────── │ │
+│ │ ▌ proxy.https_port               8080▏ │ ✕ must differ from              │ │
+│ │   proxy.http_port                  8080│ proxy.http_port                 │ │
+│ │   proxy.lan                       false│                                 │─┤
+│ │   hostnames.resolver          localhost│ proxy.https_port                │a│
+│ │   hostnames.hosts_fi…           default│ Port the HTTPS proxy listens    │ │
+│ │   hostnames.tld                 default│ on; defaults to 443. When the   │a│
+│ │   ports.range               20000-32767│ port is taken or not allowed    │ │
+│ │   tls.ca                       devlanes│ (low ports on Linux need extra  │a│
+│ │   tls.trust                        none│ permission), the daemon falls   │ │
+│ │                                        │ back to 8443 and service URLs   │a│
+│ │                                        │ carry the port.                 │ │
+│ │                                        │                                 │a│
+│ │                                        │ default  443                    │ │
+│ │                                        │ example  443, 8443              │a│
+│ │                                        │                                 │ │
+│ │                                                                          │a│
+│ └ ←→ step  enter done  esc undo  d default ─────────────────────────[save] ┘ │
+└──────────────────────────────┘└──────────────────────────────────────────────┘
+ r restart   n next problem   pgup scroll back            ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 59 bold, 60-67 dim, 71 bold, 72-78 dim
+1: 0-5 dim, 9-21 bold reversed, 26-27 dim, 41-44 dim, 51-54 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
+2: 0 darkgray, 2-51 bold, 52-76 bold dim, 77 bold, 78-79 darkgray
+3: 0 darkgray, 2 bold, 4-5 dim, 16-17 dim, 18-24 bold underlined, 28-29 dim, 40-41 dim, 77 bold, 79 darkgray
+4: 0 darkgray, 2 bold, 4-75 darkgray, 77 bold, 79 darkgray
+5: 0 darkgray, 2 bold, 4 bold reversed, 5-35 reversed, 36-42 bold, 43 darkgray, 45-62 red, 77 bold, 79 darkgray
+6: 0 darkgray, 2 bold, 4 bold, 43 darkgray, 45-59 red, 77 bold, 79 darkgray
+7: 0 darkgray, 2 bold, 4 bold, 38-42 dim, 43 darkgray, 77 bold, 78-79 darkgray
+8: 0 darkgray, 2 bold, 4 bold, 34-42 dim, 43 darkgray, 45-60 bold, 77 bold, 79 darkgray
+9: 0 darkgray, 2 bold, 4 bold, 36-42 dim, 43 darkgray, 77 bold, 79 darkgray
+10: 0 darkgray, 2 bold, 4 bold, 36-42 dim, 43 darkgray, 77 bold, 79 darkgray
+11: 0 darkgray, 2 bold, 4 bold, 32-42 dim, 43 darkgray, 77 bold, 79 darkgray
+12: 0 darkgray, 2 bold, 4 bold, 35-42 dim, 43 darkgray, 77 bold, 79 darkgray
+13: 0 darkgray, 2 bold, 4 bold, 39-42 dim, 43 darkgray, 77 bold, 79 darkgray
+14: 0 darkgray, 2 bold, 43 darkgray, 77 bold, 79 darkgray
+15: 0 darkgray, 2 bold, 43 darkgray, 77 bold, 79 darkgray
+16: 0 darkgray, 2 bold, 43 darkgray, 77 bold, 79 darkgray
+17: 0 darkgray, 2 bold, 43 darkgray, 45-53 dim, 77 bold, 79 darkgray
+18: 0 darkgray, 2 bold, 43 darkgray, 45-53 dim, 77 bold, 79 darkgray
+19: 0 darkgray, 2 bold, 43 darkgray, 77 bold, 79 darkgray
+20: 0 darkgray, 2 bold, 77 bold, 79 darkgray
+21: 0 darkgray, 1 reversed, 2-5 bold, 6-10 bold dim, 11-17 bold, 18-22 bold dim, 23-27 bold, 28-32 bold dim, 33-35 bold, 36-43 bold dim, 44-69 bold, 70-75 bold dim, 76-77 bold, 79 darkgray
+22: 0-79 darkgray
+23: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 58 bold, 59-70 dim, 71 bold, 72-79 dim

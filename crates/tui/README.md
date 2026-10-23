@@ -55,7 +55,9 @@ While lanes start, the terminal tab's progress bar shows ready services over the
 
 ## Screens for design review
 
-`cargo run -p devlanes-tui --example screens` draws every page and dialog against a fake 45-unit monorepo at 200x60, 120x40 and 80x24, and writes a PNG, the plain text and an ANSI dump of each to `target/tui-screens/`, with `index.md` listing them. The PNGs use Menlo or DejaVu Sans Mono; `DEVLANES_SCREENS_FONT` names another font file.
+`screens/` holds every page and dialog drawn against a fake 45-unit monorepo at 200x60, 120x40 and 80x24, one `.txt` per state with the screen and the styles of its cells, and `index.md` listing them. They are committed so a pull request shows what changed on screen. The `screens_are_current` test fails when they are stale, and `DEVLANES_BLESS=1 cargo nextest run -p devlanes-tui -E 'test(screens_are_current)'` rewrites them; `screens/AGENTS.md` has the details.
+
+`cargo run -p devlanes-tui --example screens` writes the same files plus a PNG and an ANSI dump of each state, which are gitignored. The PNGs use Menlo or DejaVu Sans Mono; `DEVLANES_SCREENS_FONT` names another font file.
 
 Only the selected unit is parsed client-side. tui-term 0.3 depends on vt100 0.16, so it renders through a newtype over vt100 0.18 (`screen::ScreenView`).
 

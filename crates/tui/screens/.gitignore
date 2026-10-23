@@ -1,0 +1,4 @@
+# Drawn by `cargo run -p devlanes-tui --example screens` for local review;
+# only the .txt files and index.md are committed.
+*.png
+*.ansi

@@ -1,0 +1,82 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8     3 fix/cache @2 ·    +1 more              1-9 or [ ] switch lanes
+┌ fix/cache @2 ────────────────────────────────┐┌ fix/cache @2 · not running · config changed ─────────────────────────┐
+│ ▾ services                                 2 ││ Not running. s starts the lane with its default profile, p picks     │
+│   · api-gateway                              ││ profiles.                                                            │
+│   · web-app                                  ││                                                                      │
+│                                              ││ branch    fix/cache                                                  │
+│ ▾ tasks                                    7 ││ worktree  /work/acme-cache                                           │
+│   · migrate          not run · runs at start ││ services  0 of 2 up                                                  │
+│   · seed                             not run ││           · api-gateway      stopped                                 │
+│   · lint                             not run ││           · web-app          stopped                                 │
+│   · typecheck                        not run ││ tasks     7 not run                                                  │
+│   · test-e2e                         not run ││ config    changed since the lane started; r restarts with it         │
+│   · codegen                          not run ││                                                                      │
+│   · clean-cache                 ┌ clean acme@2 ───────────────────────────────────┐                                  │
+│                                 │ Clean fix/cache (acme@2)?                       │ · 1 starting · 34 up             │
+│ ▾ infra                         │                                                 │ · 4 of 8 ready                   │
+│   ▾ shared                      │ It stops every unit in the lane, then:          │ing · config changed              │
+│     ● pgbouncer                 │   runs its lane.clean tasks and infra teardown  │ missing                          │
+│     ● postgres                  │   removes the lane's own containers and volumes │                                  │
+│     ● redis                     │   frees its ports and setup records             │witch lanes. devlanes lane new    │
+│                                 │ Files in /work/acme-cache stay as they are.     │                                  │
+│                                 │                                                 │                                  │
+│                                 │ enter clean   esc cancel                        │                                  │
+│                                 └─────────────────────────────────────────────────┘                                  │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+ s start lane   S start all   p start with profiles   C clean lane   [ ] switch lane   / filter … ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 99 bold, 100-107 dim, 111 bold, 112-118 dim
+1: 0-5 dim, 10-11 dim, 16-19 dim, 20 red, 26-27 dim, 41-44 dim, 54-71 bold reversed, 72-81 dim, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
+2: 0 darkgray, 1-14 bold reversed, 15-48 darkgray, 50-58 bold, 62-92 dim, 94-119 darkgray
+3: 0 darkgray, 2-3 dim, 45 dim, 47-48 darkgray, 119 darkgray
+4: 0 darkgray, 4-5 dim, 6-16 dim blue, 47-48 darkgray, 119 darkgray
+5: 0 darkgray, 4-5 dim, 6-12 dim green, 47-48 darkgray, 119 darkgray
+6: 0 darkgray, 47-48 darkgray, 50-59 dim, 119 darkgray
+7: 0 darkgray, 2-3 dim, 45 dim, 47-48 darkgray, 50-59 dim, 119 darkgray
+8: 0 darkgray, 4-12 dim, 23-45 dim, 47-48 darkgray, 50-59 dim, 119 darkgray
+9: 0 darkgray, 4-9 dim, 39-45 dim, 47-48 darkgray, 60-61 dim, 79-85 dim, 119 darkgray
+10: 0 darkgray, 4-9 dim, 39-45 dim, 47-48 darkgray, 60-61 dim, 79-85 dim, 119 darkgray
+11: 0 darkgray, 4-14 dim, 39-45 dim, 47-48 darkgray, 50-59 dim, 119 darkgray
+12: 0 darkgray, 4-13 dim, 39-45 dim, 47-48 darkgray, 50-59 dim, 119 darkgray
+13: 0 darkgray, 4-12 dim, 39-45 dim, 47-48 darkgray, 119 darkgray
+14: 0 darkgray, 4-16 dim, 34-84 bold, 119 darkgray
+15: 0 darkgray, 34 bold, 36-60 bold, 84 bold, 85-87 dim, 98-105 dim, 119 darkgray
+16: 0 darkgray, 2-3 dim, 34 bold, 84 bold, 85-99 dim, 119 darkgray
+17: 0 darkgray, 4-5 dim, 34 bold, 84 bold, 85-104 dim, 119 darkgray
+18: 0 darkgray, 6-7 green, 8-16 dim magenta, 34 bold, 84 bold, 85-92 yellow, 119 darkgray
+19: 0 darkgray, 6-7 green, 8-15 cyan, 34 bold, 84 bold, 119 darkgray
+20: 0 darkgray, 6-7 green, 8-12 cyan, 34 bold, 84 bold, 85-114 dim, 119 darkgray
+21: 0 darkgray, 34 bold, 84 bold, 119 darkgray
+22: 0 darkgray, 34 bold, 84 bold, 119 darkgray
+23: 0 darkgray, 34 bold, 36-40 bold, 41-46 dim, 50-52 bold, 53-59 dim, 84 bold, 119 darkgray
+24: 0 darkgray, 34-84 bold, 119 darkgray
+25: 0 darkgray, 47-48 darkgray, 119 darkgray
+26: 0 darkgray, 47-48 darkgray, 119 darkgray
+27: 0 darkgray, 47-48 darkgray, 119 darkgray
+28: 0 darkgray, 47-48 darkgray, 119 darkgray
+29: 0 darkgray, 47-48 darkgray, 119 darkgray
+30: 0 darkgray, 47-48 darkgray, 119 darkgray
+31: 0 darkgray, 47-48 darkgray, 119 darkgray
+32: 0 darkgray, 47-48 darkgray, 119 darkgray
+33: 0 darkgray, 47-48 darkgray, 119 darkgray
+34: 0 darkgray, 47-48 darkgray, 119 darkgray
+35: 0 darkgray, 47-48 darkgray, 119 darkgray
+36: 0 darkgray, 47-48 darkgray, 119 darkgray
+37: 0 darkgray, 47-48 darkgray, 119 darkgray
+38: 0-119 darkgray
+39: 1 bold, 2-15 dim, 16 bold, 17-29 dim, 30 bold, 31-53 dim, 54 bold, 55-68 dim, 69-71 bold, 72-86 dim, 87 bold, 88-96 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim

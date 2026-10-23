@@ -1,6 +1,8 @@
-//! Turns a rendered ratatui buffer into plain text, an ANSI dump and a PNG.
+//! Turns a rendered ratatui buffer into an ANSI dump and a PNG, the local
+//! files next to the committed text.
 //!
-//! The PNG draws each cell on a fixed grid with a system monospace font.
+//! The PNG draws each cell on a fixed grid with a system monospace font, so
+//! it differs between macOS and Linux; the committed text does not.
 //! Box-drawing and block characters are drawn as shapes, so borders join up
 //! across cells the way a terminal shows them.
 
@@ -183,27 +185,6 @@ fn colors(cell: &ratatui::buffer::Cell, light: bool) -> ([u8; 3], [u8; 3]) {
         fg = [0, 1, 2].map(|i| ((u16::from(fg[i]) + u16::from(bg[i])) / 2) as u8);
     }
     (fg, bg)
-}
-
-/// The buffer's rows, each a line of text with trailing spaces trimmed.
-pub fn text(buffer: &Buffer) -> String {
-    let mut out = String::new();
-    for y in 0..buffer.area.height {
-        let mut line = String::new();
-        let mut skip = 0;
-        for x in 0..buffer.area.width {
-            if skip > 0 {
-                skip -= 1;
-                continue;
-            }
-            let symbol = buffer[(x, y)].symbol();
-            skip = symbol.width().saturating_sub(1);
-            line.push_str(symbol);
-        }
-        out.push_str(line.trim_end());
-        out.push('\n');
-    }
-    out
 }
 
 /// SGR parameters for a color as foreground (`base` 30) or background (40).

@@ -1,0 +1,50 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●               M monitor   D daemon
+┌ main @0 ─────────────────────┐┌ main @0 · config has an error ───────────────┐
+│                              ││ devlanes.yaml in /work/billing doesn't load  │
+│                              ││                                              │
+│                              ││ error     services.invoices.port: expected a │
+│                              ││           number, found "auto"               │
+│                              ││           line 42, column 11                 │
+│                              ││ next      fix the file, then s starts the    │
+│                              ││           lane                               │
+│                              ││           devlanes config check in that      │
+│                              ││           folder lists every problem         │
+│                              ││                                              │
+│                              ││ branch    main                               │
+│                              ││ worktree  /work/billing                      │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+└──────────────────────────────┘└──────────────────────────────────────────────┘
+ s start lane   S start all   p start with profiles       ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 18-19 red, 21-33 bold black on yellow, 36-37 dim, 43-44 green, 59 bold, 60-67 dim, 71 bold, 72-78 dim
+1: 0 darkgray, 1-9 bold reversed, 10-32 darkgray, 34-37 bold, 41-43 dim, 44-62 yellow, 64-79 darkgray
+2: 0 darkgray, 31-32 darkgray, 79 darkgray
+3: 0 darkgray, 31-32 darkgray, 79 darkgray
+4: 0 darkgray, 31-32 darkgray, 34-43 dim, 44-77 yellow, 79 darkgray
+5: 0 darkgray, 31-32 darkgray, 34-43 dim, 44-63 yellow, 79 darkgray
+6: 0 darkgray, 31-32 darkgray, 34-61 dim, 79 darkgray
+7: 0 darkgray, 31-32 darkgray, 34-43 dim, 79 darkgray
+8: 0 darkgray, 31-32 darkgray, 34-43 dim, 79 darkgray
+9: 0 darkgray, 31-32 darkgray, 34-72 dim, 79 darkgray
+10: 0 darkgray, 31-32 darkgray, 34-69 dim, 79 darkgray
+11: 0 darkgray, 31-32 darkgray, 79 darkgray
+12: 0 darkgray, 31-32 darkgray, 34-43 dim, 79 darkgray
+13: 0 darkgray, 31-32 darkgray, 34-43 dim, 79 darkgray
+14: 0 darkgray, 31-32 darkgray, 79 darkgray
+15: 0 darkgray, 31-32 darkgray, 79 darkgray
+16: 0 darkgray, 31-32 darkgray, 79 darkgray
+17: 0 darkgray, 31-32 darkgray, 79 darkgray
+18: 0 darkgray, 31-32 darkgray, 79 darkgray
+19: 0 darkgray, 31-32 darkgray, 79 darkgray
+20: 0 darkgray, 31-32 darkgray, 79 darkgray
+21: 0 darkgray, 31-32 darkgray, 79 darkgray
+22: 0-79 darkgray
+23: 1 bold, 2-15 dim, 16 bold, 17-29 dim, 30 bold, 31-53 dim, 58 bold, 59-70 dim, 71 bold, 72-79 dim

@@ -1,0 +1,50 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●   starting …  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8    … 1-9 or [ ] switch lanes
+┌ ┌ options ● 1 unsaved change ───────────────────── ~/.devlanes/config.yaml ┐─┐
+│ │ 1 general   2 network   3 startup   4 storage                            │ │
+│ │ ──────────────────────────────────────────────────────────────────────── │ │
+│ │   tui.open_on_start                true│ tui.theme                       │ │
+│ │ ▌ tui.theme                 ● ◂ light ▸│ Color palette of the TUI;       │ │
+│ │   tui.glyphs                       auto│ defaults to `auto`, which picks │─┤
+│ │   tui.on_quit                       ask│ one from what the terminal      │a│
+│ │   terminal.progress                auto│ reports. Choose `dark` or       │ │
+│ │   terminal.title                   auto│ `light` when auto guesses       │a│
+│ │   terminal.links                   auto│ wrong; `NO_COLOR` in the        │ │
+│ │   terminal.notifications           auto│ environment turns colors off    │a│
+│ │   terminal.marks                   auto│ whatever this says.             │ │
+│ │   updates.check                    true│                                 │a│
+│ │   lanes.data_dir                default│  auto   Use the true-color dark │ │
+│ │                                        │         or light palette when   │a│
+│ │                                        │         the terminal reports    │ │
+│ │                                        │         true color              │a│
+│ │                                        │         (`COLORTERM`) and its   │ │
+│ │ not saved yet   s saves to config.yaml                                   │a│
+│ └ ←→ change  enter done  esc undo  d default ───────────────────────[save] ┘ │
+└──────────────────────────────┘└──────────────────────────────────────────────┘
+ r restart   n next problem   pgup scroll back            ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1 bold #9a6b00, 2 bold #9e6900, 3 bold #a16700, 4 bold #a56500, 5 bold #a86200, 6 bold #ac6000, 7 bold #af5e00, 8 bold #b35c00, 10-19 bold #1a1917 on #f5c542, 22-23 dim, 32-33 #a35a00, 36-37 dim, 43-44 #1d7a46, 59 bold, 60-67 dim, 71 bold, 72-78 dim
+1: 0-5 dim, 9 bold on #f7e7b4, 10-11 bold dim on #f7e7b4, 12-15 bold on #f7e7b4, 16-19 bold dim on #f7e7b4, 20 bold #c0392b on #f7e7b4, 21 bold on #f7e7b4, 26-27 dim, 41-44 dim, 51-54 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
+2: 0 #8f8a7f, 2-11 #9a6b00, 12-30 #a35a00, 31-51 #9a6b00, 52-76 dim #9a6b00, 77 #9a6b00, 78-79 #8f8a7f
+3: 0 #8f8a7f, 2 #9a6b00, 4-5 dim, 6-12 bold underlined #9a6b00, 16-17 dim, 28-29 dim, 40-41 dim, 77 #9a6b00, 79 #8f8a7f
+4: 0 #8f8a7f, 2 #9a6b00, 4-75 #8f8a7f, 77 #9a6b00, 79 #8f8a7f
+5: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 45-53 bold, 77 #9a6b00, 79 #8f8a7f
+6: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00 on #f7e7b4, 5-31 on #f7e7b4, 32-33 #a35a00 on #f7e7b4, 34-42 bold reversed #9a6b00 on #f7e7b4, 43 #8f8a7f, 77 #9a6b00, 79 #8f8a7f
+7: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 77 #9a6b00, 78-79 #8f8a7f
+8: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 40-42 dim, 43 #8f8a7f, 77 #9a6b00, 79 #8f8a7f
+9: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 77 #9a6b00, 79 #8f8a7f
+10: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 77 #9a6b00, 79 #8f8a7f
+11: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 77 #9a6b00, 79 #8f8a7f
+12: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 77 #9a6b00, 79 #8f8a7f
+13: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 77 #9a6b00, 79 #8f8a7f
+14: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 39-42 dim, 43 #8f8a7f, 77 #9a6b00, 79 #8f8a7f
+15: 0 #8f8a7f, 2 #9a6b00, 4 #9a6b00, 36-42 dim, 43 #8f8a7f, 45 #9a6b00, 53-75 dim, 77 #9a6b00, 79 #8f8a7f
+16: 0 #8f8a7f, 2 #9a6b00, 43 #8f8a7f, 53-73 dim, 77 #9a6b00, 79 #8f8a7f
+17: 0 #8f8a7f, 2 #9a6b00, 43 #8f8a7f, 53-72 dim, 77 #9a6b00, 79 #8f8a7f
+18: 0 #8f8a7f, 2 #9a6b00, 43 #8f8a7f, 53-62 dim, 77 #9a6b00, 79 #8f8a7f
+19: 0 #8f8a7f, 2 #9a6b00, 43 #8f8a7f, 53-73 dim, 77 #9a6b00, 79 #8f8a7f
+20: 0 #8f8a7f, 2 #9a6b00, 4-19 #a35a00, 20 bold, 21-41 dim, 77 #9a6b00, 79 #8f8a7f
+21: 0 #8f8a7f, 1 on #f7e7b4, 2-3 #9a6b00, 4-5 bold #9a6b00, 6-12 dim #9a6b00, 13-14 #9a6b00, 15-19 bold #9a6b00, 20-24 dim #9a6b00, 25-26 #9a6b00, 27-29 bold #9a6b00, 30-34 dim #9a6b00, 35-36 #9a6b00, 37 bold #9a6b00, 38-45 dim #9a6b00, 46-69 #9a6b00, 70-75 bold #9a6b00, 76-77 #9a6b00, 79 #8f8a7f
+22: 0-79 #8f8a7f
+23: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 58 bold, 59-70 dim, 71 bold, 72-79 dim

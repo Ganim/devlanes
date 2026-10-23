@@ -1,0 +1,122 @@
+ devlanes  1 acme ✕   2 billing !   3 shop ●                                                                                                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8     3 fix/cache @2 ·     4 spike/old-search @3 !                                                                             1-9 or [ ] switch lanes
+┌ main @0 ─────────────────────────────────────┐┌ wrk-export  failed · exit 1 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ ▾ services                                34 ││ failed    exited with code 1                                                                                                                         │
+│   ● Gateway API                              ││ next      r restarts it                                                                                                                              │
+│   ● api-auth                                 ││           devlanes logs acme@0:wrk-export prints the whole log                                                                                       │
+│   ● api-users                                │├─ last output ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│   ● api-billing                              ││ 2026-10-21T10:40:00Z INFO job done queue=default id=job_8120 took=40ms                                                                               │
+│   ● api-orders                               ││ 2026-10-21T10:40:07Z INFO job done queue=default id=job_8121 took=53ms                                                                               │
+│   ● api-search                               ││ 2026-10-21T10:40:14Z INFO job done queue=default id=job_8122 took=66ms                                                                               │
+│   ● api-catalog                              ││ 2026-10-21T10:40:21Z INFO job done queue=default id=job_8123 took=79ms                                                                               │
+│   ● api-inventory                            ││ 2026-10-21T10:40:28Z INFO job done queue=default id=job_8124 took=92ms                                                                               │
+│   ● api-notify                               ││ 2026-10-21T10:40:35Z INFO job done queue=default id=job_8125 took=105ms                                                                              │
+│   ● api-reports                              ││ 2026-10-21T10:41:42Z INFO job done queue=default id=job_8126 took=118ms                                                                              │
+│   ● web-app                                  ││ 2026-10-21T10:41:49Z INFO job done queue=default id=job_8127 took=131ms                                                                              │
+│   ● web-admin                                ││ 2026-10-21T10:41:56Z INFO job done queue=default id=job_8128 took=144ms                                                                              │
+│   ● web-docs                                 ││ 2026-10-21T10:41:03Z INFO job done queue=default id=job_8129 took=157ms                                                                              │
+│   · web-storybook                            ││ 2026-10-21T10:41:10Z INFO job done queue=default id=job_8130 took=170ms                                                                              │
+│   ● web-landing                              ││ 2026-10-21T10:41:17Z INFO job done queue=default id=job_8131 took=183ms                                                                              │
+│   ◉ wrk-email                                ││ 2026-10-21T10:42:24Z INFO job done queue=default id=job_8132 took=196ms                                                                              │
+│   ◉ wrk-billing                           ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────┐                                           │
+│   ◉ wrk-index                             │       ╎       ╎       ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎       ╎       ╎      │                                           │
+│   ◉ wrk-thumbs                            │                                   █████                      ████                                            │                                           │
+│   ✕ wrk-export               failed · exit│                                  ░░███                      ░░███                                            │                                           │
+│   ◉ wrk-cron                              │     ██████████████             ███████   ██████  █████ █████ ░███   ██████   ████████    ██████   █████      │                                           │
+│   ◉ wrk-webhooks                          │                               ███░░███  ███░░███░░███ ░░███  ░███  ░░░░░███ ░░███░░███  ███░░███ ███░░       │                                           │
+│   ◉ wrk-ledger                            │         ██████████████       ░███ ░███ ░███████  ░███  ░███  ░███   ███████  ░███ ░███ ░███████ ░░█████      │                                           │
+│   ● stub-stripe                           │                              ░███ ░███ ░███░░░   ░░███ ███   ░███  ███░░███  ░███ ░███ ░███░░░   ░░░░███     │                                           │
+│   ● stub-s3                               │             ██████████████   ░░████████░░██████   ░░█████    █████░░████████ ████ █████░░██████  ██████      │                                           │
+│   ◆ stub-twilio         orphaned · pid 482│                               ░░░░░░░░  ░░░░░░     ░░░░░    ░░░░░  ░░░░░░░░ ░░░░ ░░░░░  ░░░░░░  ░░░░░░       │                                           │
+│   ● stub-sendgrid                         │       ╎       ╎       ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎       ╎       ╎      │                                           │
+│   ● stub-segment                          │       ╎       ╎       ╎       ╎       ╎       ╎    v1.0.0     ╎       ╎       ╎       ╎       ╎       ╎      │                                           │
+│   ● stub-auth0                            │       ╎       ╎       ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎       ╎       ╎      │                                           │
+│   ● proxy-edge                            │       ╎       ╎       ╎       ╎       ╎          o  options           ╎       ╎       ╎       ╎       ╎      │                                           │
+│   ● docs-search                           │       ╎       ╎       ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎       ╎       ╎      │                                           │
+│   ● ml-ranker                             │       ╎       ╎       ╎       ╎       ╎          h  help              ╎       ╎       ╎       ╎       ╎      │                                           │
+│   ⠋ ml-embed                        starti│       ╎       ╎       ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎       ╎       ╎      │                                           │
+│   ● cache-warm                            │       ╎       ╎       ╎       ╎       ╎       ▌  q  quit              ╎       ╎       ╎       ╎       ╎      │                                           │
+│                                           │       ╎       ╎       ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎       ╎       ╎      │                                           │
+│ ▾ tasks                                   └────────────────────────────────────────────────────────────────────────────────────────────────── esc closes ┘                                           │
+│   ✓ migrate             done · runs at start ││                                                                                                                                                      │
+│   ✓ seed                                done ││                                                                                                                                                      │
+│   · lint                             not run ││                                                                                                                                                      │
+│   · typecheck                        not run ││                                                                                                                                                      │
+│   · test-e2e                         not run ││                                                                                                                                                      │
+│   ✓ codegen                             done ││                                                                                                                                                      │
+│   · clean-cache                      not run ││                                                                                                                                                      │
+│                                              ││                                                                                                                                                      │
+│ ▾ infra                                      ││                                                                                                                                                      │
+│   ▾ containers                          2 up ││                                                                                                                                                      │
+│     ● localstack                             ││                                                                                                                                                      │
+│     ● rabbitmq                               ││                                                                                                                                                      │
+│   ▾ shared                              3 up ││                                                                                                                                                      │
+│     ● pgbouncer                              ││                                                                                                                                                      │
+│     ● postgres                               ││                                                                                                                                                      │
+│     ● redis                                  ││                                                                                                                                                      │
+│   ▸ setup                             4 done ││                                                                                                                                                      │
+│                                              ││                                                                                                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ r restart   n next problem   pgup scroll back   c select text   / filter                                                                                                         ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1 bold #9a6b00, 2 bold #9e6900, 3 bold #a16700, 4 bold #a56500, 5 bold #a86200, 6 bold #ac6000, 7 bold #af5e00, 8 bold #b35c00, 10-19 bold #1a1917 on #f5c542, 22-23 dim, 32-33 #a35a00, 36-37 dim, 43-44 #1d7a46, 179 bold, 180-187 dim, 191 bold, 192-198 dim
+1: 0-5 dim, 9 bold on #f7e7b4, 10-11 bold dim on #f7e7b4, 12-15 bold on #f7e7b4, 16-19 bold dim on #f7e7b4, 20 bold #c0392b on #f7e7b4, 21 bold on #f7e7b4, 26-27 dim, 41-44 dim, 55-56 dim, 66-70 dim, 76-77 dim, 94-97 dim, 98 #a35a00, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
+2: 0 #8f8a7f, 2-5 bold, 10-48 #8f8a7f, 50-59 bold, 60-61 dim, 62-67 #c0392b, 68-70 dim, 71-76 #c0392b, 78-199 #8f8a7f
+3: 0 #8f8a7f, 2-3 dim, 44-45 dim, 47-48 #8f8a7f, 50-59 dim, 60-77 #c0392b, 199 #8f8a7f
+4: 0 #8f8a7f, 4-5 #1d7a46, 6-16 blue, 47-48 #8f8a7f, 50-59 dim, 199 #8f8a7f
+5: 0 #8f8a7f, 4-5 #1d7a46, 6-13 blue, 47-48 #8f8a7f, 50-111 dim, 199 #8f8a7f
+6: 0 #8f8a7f, 4-5 #1d7a46, 6-14 blue, 47-199 #8f8a7f
+7: 0 #8f8a7f, 4-5 #1d7a46, 6-16 blue, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+8: 0 #8f8a7f, 4-5 #1d7a46, 6-15 blue, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+9: 0 #8f8a7f, 4-5 #1d7a46, 6-15 blue, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+10: 0 #8f8a7f, 4-5 #1d7a46, 6-16 blue, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+11: 0 #8f8a7f, 4-5 #1d7a46, 6-18 blue, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+12: 0 #8f8a7f, 4-5 #1d7a46, 6-15 blue, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+13: 0 #8f8a7f, 4-5 #1d7a46, 6-16 blue, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+14: 0 #8f8a7f, 4-5 #1d7a46, 6-12 green, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+15: 0 #8f8a7f, 4-5 #1d7a46, 6-14 green, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+16: 0 #8f8a7f, 4-5 #1d7a46, 6-13 green, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+17: 0 #8f8a7f, 4-5 dim, 6-18 dim green, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+18: 0 #8f8a7f, 4-5 #1d7a46, 6-16 green, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+19: 0 #8f8a7f, 4-5 #1d7a46, 6-14 magenta, 47-48 #8f8a7f, 50-69 dim, 71-74 color2, 199 #8f8a7f
+20: 0 #8f8a7f, 4-5 #1d7a46, 6-16 magenta, 44-155 #9a6b00, 199 #8f8a7f
+21: 0 #8f8a7f, 4-5 #1d7a46, 6-14 magenta, 44 #9a6b00, 52 #8f8a7f, 60 #8f8a7f, 68 #8f8a7f, 76 #8f8a7f, 84 #8f8a7f, 92 #8f8a7f, 100 #d8bf72, 108 #8f8a7f, 116 #8f8a7f, 124 #8f8a7f, 132 #8f8a7f, 140 #8f8a7f, 148 #8f8a7f, 155 #9a6b00, 199 #8f8a7f
+22: 0 #8f8a7f, 4-5 #1d7a46, 6-15 magenta, 44 #9a6b00, 80-84 #9a6b00, 107-110 #9a6b00, 155 #9a6b00, 199 #8f8a7f
+23: 0 #8f8a7f, 1-3 on #f7e7b4, 4-5 #c0392b on #f7e7b4, 6-15 magenta on #f7e7b4, 16-30 on #f7e7b4, 31-36 #c0392b on #f7e7b4, 37-39 dim on #f7e7b4, 40-43 #c0392b on #f7e7b4, 44 #9a6b00, 79-80 #d8bf72, 81-83 #9a6b00, 106-107 #d8bf72, 108-110 #9a6b00, 155 #9a6b00, 199 #8f8a7f
+24: 0 #8f8a7f, 4-5 #1d7a46, 6-13 magenta, 44 #9a6b00, 50-63 #9a6b00, 77-83 #9a6b00, 87-92 #9a6b00, 95-99 #9a6b00, 101-105 #9a6b00, 107 #d8bf72, 108-110 #9a6b00, 114-119 #9a6b00, 123-130 #9a6b00, 135-140 #9a6b00, 144-148 #9a6b00, 155 #9a6b00, 199 #8f8a7f
+25: 0 #8f8a7f, 4-5 #1d7a46, 6-17 magenta, 44 #9a6b00, 76-78 #9a6b00, 79-80 #d8bf72, 81-83 #9a6b00, 86-88 #9a6b00, 89-90 #d8bf72, 91-93 #9a6b00, 94-95 #d8bf72, 96-98 #9a6b00, 100-101 #d8bf72, 102-104 #9a6b00, 107 #d8bf72, 108-110 #9a6b00, 113-117 #d8bf72, 118-120 #9a6b00, 122-123 #d8bf72, 124-126 #9a6b00, 127-128 #d8bf72, 129-131 #9a6b00, 134-136 #9a6b00, 137-138 #d8bf72, 139-141 #9a6b00, 143-145 #9a6b00, 146-147 #d8bf72, 155 #9a6b00, 199 #8f8a7f
+26: 0 #8f8a7f, 4-5 #1d7a46, 6-15 magenta, 44 #9a6b00, 54-67 #6b675e, 75 #d8bf72, 76-78 #9a6b00, 80 #d8bf72, 81-83 #9a6b00, 85 #d8bf72, 86-92 #9a6b00, 95 #d8bf72, 96-98 #9a6b00, 101 #d8bf72, 102-104 #9a6b00, 107 #d8bf72, 108-110 #9a6b00, 114-120 #9a6b00, 123 #d8bf72, 124-126 #9a6b00, 128 #d8bf72, 129-131 #9a6b00, 133 #d8bf72, 134-140 #9a6b00, 142-143 #d8bf72, 144-148 #9a6b00, 155 #9a6b00, 199 #8f8a7f
+27: 0 #8f8a7f, 4-5 #1d7a46, 6-16 darkgray, 44 #9a6b00, 75 #d8bf72, 76-78 #9a6b00, 80 #d8bf72, 81-83 #9a6b00, 85 #d8bf72, 86-88 #9a6b00, 89-91 #d8bf72, 95-96 #d8bf72, 97-99 #9a6b00, 101-103 #9a6b00, 107 #d8bf72, 108-110 #9a6b00, 113-115 #9a6b00, 116-117 #d8bf72, 118-120 #9a6b00, 123 #d8bf72, 124-126 #9a6b00, 128 #d8bf72, 129-131 #9a6b00, 133 #d8bf72, 134-136 #9a6b00, 137-139 #d8bf72, 143-146 #d8bf72, 147-149 #9a6b00, 155 #9a6b00, 199 #8f8a7f
+28: 0 #8f8a7f, 4-5 #1d7a46, 6-12 darkgray, 44 #9a6b00, 58-71 #6b675e, 75-76 #d8bf72, 77-84 #9a6b00, 85-86 #d8bf72, 87-92 #9a6b00, 96-97 #d8bf72, 98-102 #9a6b00, 107-111 #9a6b00, 112-113 #d8bf72, 114-121 #9a6b00, 123-126 #9a6b00, 128-132 #9a6b00, 133-134 #d8bf72, 135-140 #9a6b00, 143-148 #9a6b00, 155 #9a6b00, 199 #8f8a7f
+29: 0 #8f8a7f, 4-5 #a35a00, 6-16 darkgray, 26-33 #a35a00, 34-43 dim, 44 #9a6b00, 76-83 #d8bf72, 86-91 #d8bf72, 97-101 #d8bf72, 106-110 #d8bf72, 113-120 #d8bf72, 122-125 #d8bf72, 127-131 #d8bf72, 134-139 #d8bf72, 142-147 #d8bf72, 155 #9a6b00, 199 #8f8a7f
+30: 0 #8f8a7f, 4-5 #1d7a46, 6-18 darkgray, 44 #9a6b00, 52 #8f8a7f, 60 #8f8a7f, 68 #8f8a7f, 76 #8f8a7f, 84 #8f8a7f, 92 #8f8a7f, 100 #d8bf72, 108 #8f8a7f, 116 #8f8a7f, 124 #8f8a7f, 132 #8f8a7f, 140 #8f8a7f, 148 #8f8a7f, 155 #9a6b00, 199 #8f8a7f
+31: 0 #8f8a7f, 4-5 #1d7a46, 6-17 darkgray, 44 #9a6b00, 52 #8f8a7f, 60 #8f8a7f, 68 #8f8a7f, 76 #8f8a7f, 84 #8f8a7f, 92 #8f8a7f, 97-102 dim, 108 #8f8a7f, 116 #8f8a7f, 124 #8f8a7f, 132 #8f8a7f, 140 #8f8a7f, 148 #8f8a7f, 155 #9a6b00, 199 #8f8a7f
+32: 0 #8f8a7f, 4-5 #1d7a46, 6-15 darkgray, 44 #9a6b00, 52 #8f8a7f, 60 #8f8a7f, 68 #8f8a7f, 76 #8f8a7f, 84 #8f8a7f, 92 #8f8a7f, 100 #d8bf72, 108 #8f8a7f, 116 #8f8a7f, 124 #8f8a7f, 132 #8f8a7f, 140 #8f8a7f, 148 #8f8a7f, 155 #9a6b00, 199 #8f8a7f
+33: 0 #8f8a7f, 4-5 #1d7a46, 6-15 cyan, 44 #9a6b00, 52 #8f8a7f, 60 #8f8a7f, 68 #8f8a7f, 76 #8f8a7f, 84 #8f8a7f, 92 #9a6b00, 95 bold, 116 #8f8a7f, 124 #8f8a7f, 132 #8f8a7f, 140 #8f8a7f, 148 #8f8a7f, 155 #9a6b00, 199 #8f8a7f
+34: 0 #8f8a7f, 4-5 #1d7a46, 6-16 cyan, 44 #9a6b00, 52 #8f8a7f, 60 #8f8a7f, 68 #8f8a7f, 76 #8f8a7f, 84 #8f8a7f, 92 #8f8a7f, 100 #d8bf72, 108 #8f8a7f, 116 #8f8a7f, 124 #8f8a7f, 132 #8f8a7f, 140 #8f8a7f, 148 #8f8a7f, 155 #9a6b00, 199 #8f8a7f
+35: 0 #8f8a7f, 4-5 #1d7a46, 6-14 green, 44 #9a6b00, 52 #8f8a7f, 60 #8f8a7f, 68 #8f8a7f, 76 #8f8a7f, 84 #8f8a7f, 92 #9a6b00, 95 bold, 116 #8f8a7f, 124 #8f8a7f, 132 #8f8a7f, 140 #8f8a7f, 148 #8f8a7f, 155 #9a6b00, 199 #8f8a7f
+36: 0 #8f8a7f, 6-13 green, 44 #9a6b00, 52 #8f8a7f, 60 #8f8a7f, 68 #8f8a7f, 76 #8f8a7f, 84 #8f8a7f, 92 #8f8a7f, 100 #d8bf72, 108 #8f8a7f, 116 #8f8a7f, 124 #8f8a7f, 132 #8f8a7f, 140 #8f8a7f, 148 #8f8a7f, 155 #9a6b00, 199 #8f8a7f
+37: 0 #8f8a7f, 4-5 #1d7a46, 6-15 dim blue, 44 #9a6b00, 52 #8f8a7f, 60 #8f8a7f, 68 #8f8a7f, 76 #8f8a7f, 84 #8f8a7f, 92 #9a6b00 on #f7e7b4, 93-94 on #f7e7b4, 95 bold on #f7e7b4, 96-107 on #f7e7b4, 116 #8f8a7f, 124 #8f8a7f, 132 #8f8a7f, 140 #8f8a7f, 148 #8f8a7f, 155 #9a6b00, 199 #8f8a7f
+38: 0 #8f8a7f, 44 #9a6b00, 52 #8f8a7f, 60 #8f8a7f, 68 #8f8a7f, 76 #8f8a7f, 84 #8f8a7f, 92 #8f8a7f, 100 #d8bf72, 108 #8f8a7f, 116 #8f8a7f, 124 #8f8a7f, 132 #8f8a7f, 140 #8f8a7f, 148 #8f8a7f, 155 #9a6b00, 199 #8f8a7f
+39: 0 #8f8a7f, 2-3 dim, 44-142 #9a6b00, 143-154 dim #9a6b00, 155 #9a6b00, 199 #8f8a7f
+40: 0 #8f8a7f, 4-5 #1d7a46, 26-45 dim, 47-48 #8f8a7f, 199 #8f8a7f
+41: 0 #8f8a7f, 4-5 #1d7a46, 42-45 dim, 47-48 #8f8a7f, 199 #8f8a7f
+42: 0 #8f8a7f, 4-9 dim, 39-45 dim, 47-48 #8f8a7f, 199 #8f8a7f
+43: 0 #8f8a7f, 4-14 dim, 39-45 dim, 47-48 #8f8a7f, 199 #8f8a7f
+44: 0 #8f8a7f, 4-13 dim, 39-45 dim, 47-48 #8f8a7f, 199 #8f8a7f
+45: 0 #8f8a7f, 4-5 #1d7a46, 42-45 dim, 47-48 #8f8a7f, 199 #8f8a7f
+46: 0 #8f8a7f, 4-16 dim, 39-45 dim, 47-48 #8f8a7f, 199 #8f8a7f
+47: 0 #8f8a7f, 47-48 #8f8a7f, 199 #8f8a7f
+48: 0 #8f8a7f, 2-3 dim, 47-48 #8f8a7f, 199 #8f8a7f
+49: 0 #8f8a7f, 4-5 dim, 42-45 dim, 47-48 #8f8a7f, 199 #8f8a7f
+50: 0 #8f8a7f, 6-7 #1d7a46, 8-17 green, 47-48 #8f8a7f, 199 #8f8a7f
+51: 0 #8f8a7f, 6-7 #1d7a46, 8-15 cyan, 47-48 #8f8a7f, 199 #8f8a7f
+52: 0 #8f8a7f, 4-5 dim, 42-45 dim, 47-48 #8f8a7f, 199 #8f8a7f
+53: 0 #8f8a7f, 6-7 #1d7a46, 8-16 dim magenta, 47-48 #8f8a7f, 199 #8f8a7f
+54: 0 #8f8a7f, 6-7 #1d7a46, 8-15 cyan, 47-48 #8f8a7f, 199 #8f8a7f
+55: 0 #8f8a7f, 6-7 #1d7a46, 8-12 cyan, 47-48 #8f8a7f, 199 #8f8a7f
+56: 0 #8f8a7f, 4-5 dim, 40-45 dim, 47-48 #8f8a7f, 199 #8f8a7f
+57: 0 #8f8a7f, 47-48 #8f8a7f, 199 #8f8a7f
+58: 0-199 #8f8a7f
+59: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 49 bold, 50-64 dim, 65 bold, 66-75 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim
