@@ -40,6 +40,7 @@ pub fn facts(project: &str, index: u32, branch: Option<&str>) -> LaneFacts {
         format!("/work/{project}"),
         index,
         path,
+        format!("/home/dev/.devlanes/data/{project}/{}", index + 10),
         branch.map(str::to_owned),
     )
 }

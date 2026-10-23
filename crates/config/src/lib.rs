@@ -58,11 +58,23 @@ pub fn schema_with<E: Extensions>() -> schemars::Schema {
     let mut schema = schemars::schema_for!(ProjectConfig<E>);
     E::extend_schema(&mut schema);
     schema.insert("$id".into(), "https://devlanes.run/v1/schema.json".into());
+    // The version tells which release a cached copy came from. It lives in the description:
+    // yaml-language-server prints a root title as a heading on every field hover.
+    schema.insert(
+        "description".into(),
+        format!("{VERSION} project config. {HEADLINE} https://devlanes.run").into(),
+    );
     // The same modeline supports partial local overrides; loading still requires a base project.
     schema.remove("required");
-    schema_docs::prepare(&mut schema, "devlanes");
+    schema_docs::prepare(&mut schema);
     schema
 }
+
+/// Product name and version, leading each schema's root description.
+const VERSION: &str = concat!("devlanes v", env!("CARGO_PKG_VERSION"));
+
+/// Product headline, matching the CLI's about text.
+const HEADLINE: &str = "Run a dev environment per git worktree, side by side.";
 
 /// Return the project/local-override schema for yaml-language-server.
 pub fn project_schema() -> serde_json::Value {
@@ -95,10 +107,9 @@ pub fn project_schema_with_presets(presets: &[(&str, schemars::Schema)]) -> serd
             }
             rebase_schema_refs(&mut options, &reference);
             defs.insert(key, options);
-            properties.insert(
-                (*name).to_owned(),
-                serde_json::json!({"type":"object","$ref":reference}),
-            );
+            // A plain `$ref`: a constraint beside it makes yaml-language-server wrap the
+            // property in `allOf`, which shows the definition's examples a second time.
+            properties.insert((*name).to_owned(), serde_json::json!({"$ref": reference}));
         }
         // An options key only works with its own preset. The preset may come from a template,
         // so the rule constrains `preset` when present instead of requiring it.
@@ -134,7 +145,7 @@ pub fn project_schema_with_presets(presets: &[(&str, schemars::Schema)]) -> serd
             }
         }
     }
-    schema_docs::prepare_value(&mut schema, "devlanes");
+    schema_docs::prepare_value(&mut schema);
     schema
 }
 
@@ -167,7 +178,15 @@ pub fn user_schema() -> serde_json::Value {
         "$id".into(),
         "https://devlanes.run/v1/user-schema.json".into(),
     );
-    schema_docs::prepare(&mut schema, "devlanes user config");
+    schema.insert(
+        "description".into(),
+        format!(
+            "{VERSION} user config: per-user settings in ~/.devlanes/config.yaml. {HEADLINE} \
+             https://devlanes.run"
+        )
+        .into(),
+    );
+    schema_docs::prepare(&mut schema);
     schema.to_value()
 }
 

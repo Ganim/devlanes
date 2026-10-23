@@ -1110,15 +1110,17 @@ fn has_type(node: &Value, kind: &str) -> bool {
     }
 }
 
-/// The values of a `oneOf` of constants, without the reserved ones.
+/// The values of an `enum` with what each does, without the reserved ones.
 fn choices(node: &Value) -> Option<Vec<Choice>> {
-    let branches = node.get("oneOf")?.as_array()?;
-    let all: Option<Vec<Choice>> = branches
+    let values = node.get("enum")?.as_array()?;
+    let abouts = node.get("enumDescriptions").and_then(Value::as_array);
+    let all: Option<Vec<Choice>> = values
         .iter()
-        .map(|branch| {
+        .enumerate()
+        .map(|(index, value)| {
             Some(Choice {
-                value: branch.get("const")?.as_str()?.to_owned(),
-                about: one_line(branch.get("description")),
+                value: value.as_str()?.to_owned(),
+                about: one_line(abouts.and_then(|abouts| abouts.get(index))),
             })
         })
         .collect();

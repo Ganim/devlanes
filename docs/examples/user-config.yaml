@@ -1,6 +1,8 @@
 # Per-user settings, normally at ~/.devlanes/config.yaml.
 # devlanes refuses a home other users can read: if you create ~/.devlanes
 # yourself, use `mkdir -m 700 ~/.devlanes` (or `chmod 700 ~/.devlanes`).
+# An unknown key or invalid value stops the daemon from starting, with the
+# file and line to fix; `devlanes doctor` checks the file without restarting.
 
 # How lane hostnames resolve on this machine.
 hostnames:
@@ -13,6 +15,10 @@ hostnames:
 # Machine-wide pool that every lane's port block comes from.
 ports:
   range: 20000-32767
+# Root of the lane data folders (${{ lane.data_path }}, DEVLANES_LANE_DATA):
+# <data_dir>/<project>/<lane id>. Absolute or starting with ~/; default ~/.devlanes/data.
+lanes:
+  data_dir: ~/.devlanes/data
 tls:
   # Certificate authority: devlanes keeps its own under ~/.devlanes/ca; mkcert reuses mkcert's.
   ca: devlanes
@@ -44,7 +50,9 @@ startup:
   reserve_memory: 2GiB
 # Service output kept on disk, by age and total size; days also bounds database log metadata.
 logs:
-  retention: { days: 7, max_size: 5GiB }
+  retention:
+    days: 7
+    max_size: 5GiB
 # How long CPU and memory history is kept, including database aggregates and run summaries.
 metrics:
   retention: 7d

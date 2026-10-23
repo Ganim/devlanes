@@ -68,6 +68,7 @@ async fn apply(
         lane_index: 1,
         lane_name: "lane1",
         lane_path: &lane,
+        lane_data_path: std::path::Path::new("/data/demo/1"),
         primary_path: &lane,
         platform: Some(platform),
         preset: None,

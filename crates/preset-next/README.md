@@ -25,14 +25,16 @@ services:
   site:
     # Adds Next's port and hostname flags to the command.
     preset: next
-    run_script: apps/site/package.json#dev
+    run_script:
+      file: apps/site/package.json
+      name: dev
     # Options for the next preset.
     next:
       # Appended after the preset's flags.
       args: [--turbopack]
 ```
 
-The preset adds `--port <self.port> --hostname 127.0.0.1`; Next binds `0.0.0.0` by default. With `run_script` the script runner places the flags (after `--` for npm); a plain `run` gets them appended, with `--` first when it is `npm run ...`.
+The preset adds `--port <self.port> --hostname 127.0.0.1`; Next binds `0.0.0.0` by default. The script runner places the flags after the script name (after `--` for npm). The preset needs `run_script`: config validation refuses it next to `run`.
 
 ## License
 

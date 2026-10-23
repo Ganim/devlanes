@@ -36,7 +36,8 @@ services:
   admin-api:
     run: pnpm -F admin dev
     # This service's own profile instead of the project's.
-    fnox: { profile: admin-api }
+    fnox:
+      profile: admin-api
 ```
 
 Each unit gets the variables in fnox's `set`, at the secrets layer: above the client env and contributors, below `DEVLANES_*`, `global_env` and service `env`. Names in fnox's `remove` are dropped from the client environment. When a provider needs a sign-in, the start fails and asks for `devlanes secrets unlock`, which runs fnox in the user's terminal.

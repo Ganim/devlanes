@@ -2,21 +2,22 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{fmt, str::FromStr, time::Duration};
 
-/// A scalar suitable for environment variables and free-form lane variables.
+/// A text, number or boolean value. Process environments receive it as text, such as
+/// `true` or `20000`.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("examples" = ["acme",20000,true]))]
 pub enum Scalar {
-    /// Text used verbatim in the environment or lane variables.
+    /// Text, used as written.
     #[schemars(extend("examples" = ["acme"]))]
     String(String),
-    /// Boolean value, rendered as true or false in process environments.
+    /// Boolean, passed to processes as `true` or `false`.
     #[schemars(extend("examples" = [true,false]))]
     Bool(bool),
-    /// Whole number, such as a port or lane index.
+    /// Whole number, such as a port or a database index.
     #[schemars(extend("examples" = [20000]))]
     Integer(i64),
-    /// Decimal number, rendered as text in process environments.
+    /// Decimal number, passed to processes as text.
     #[schemars(extend("examples" = [1.5]))]
     Float(f64),
 }
@@ -33,16 +34,18 @@ impl fmt::Display for Scalar {
     }
 }
 
-/// A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.
-/// Write `${{ '${{' }}` for a literal `${{`.
+/// A plain value or text with `${{ ... }}` expressions, evaluated for each lane with names
+/// such as `lane`, `self`, `services`, `infra` and `env`. A value that is one whole
+/// expression keeps its type, which must fit the setting. Write `${{ '${{' }}` for a
+/// literal `${{`.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(rename = "Templated_{T}")]
 #[schemars(extend("examples" = ["${{ lane.index }}"]))]
 pub enum Templated<T> {
-    /// Literal value used without expression evaluation.
+    /// Plain value, used as written.
     Literal(T),
-    /// Text containing `${{ ... }}`, evaluated for each lane; write `${{ '${{' }}` for a literal `${{`.
+    /// Text containing `${{ ... }}`, evaluated for each lane.
     #[schemars(extend("pattern" = "\\$\\{\\{", "examples" = ["${{ lane.index }}"]))]
     Expression(String),
 }
@@ -100,7 +103,8 @@ impl<T: Clone + serde::de::DeserializeOwned> Templated<T> {
     }
 }
 
-/// A duration written with `ms`, `s`, `m`, `h`, or `d` units.
+/// A duration: a whole number followed by `ms`, `s`, `m`, `h` or `d`, such as `500ms`, `15s`
+/// or `10m`. Units cannot be combined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(into = "String")]
 #[schemars(with = "String")]

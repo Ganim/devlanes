@@ -27,28 +27,37 @@ pub const NAME: &str = "tauri";
 /// themselves and do not forward extra arguments.
 pub const CONFIG_ENV: &str = "DEVLANES_TAURI_CONFIG";
 
-/// Options under the service's `tauri:` key, after expression evaluation.
+/// Options for `preset: tauri`, which lets several Tauri v2 dev apps run side by side, one per
+/// lane and replica. The values go into a config overlay at
+/// `${{ lane.data_path }}/tauri/<service>.<replica>.conf.json`, passed with `--config` and
+/// in `DEVLANES_TAURI_CONFIG`, which Tauri merges over `tauri.conf.json`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(extend("examples" = [{"identifier":"io.acme.app.lane${{ lane.index }}.client${{ replica.index }}","dev_url":"${{ svc.desktop_web.url }}","before_dev_command":""}]))]
+#[schemars(extend("examples" = [{"identifier":"io.acme.app.lane${{ lane.index }}.client${{ replica.index }}","dev_url":"${{ services.desktop_web.url }}","before_dev_command":""}]))]
 pub struct TauriOptions {
-    /// Bundle identifier for this lane and replica. Required; it must differ per
-    /// lane and replica, for example
-    /// `com.acme.app.dev${{ '' if lane.index == 0 else '.lane' ~ lane.index }}.client${{ replica.index }}`.
+    /// Bundle identifier for this lane and replica, which keys the app data, webview data and
+    /// keychain entries. Required and must differ per lane and replica, for example
+    /// `com.acme.app.dev.lane${{ lane.index }}.client${{ replica.index }}`; two instances with
+    /// the same value are refused at start. Only letters, digits, `-` and `.` are allowed, with
+    /// no empty part between dots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("examples" = ["io.acme.app.lane${{ lane.index }}.client${{ replica.index }}"]))]
     pub identifier: Option<String>,
-    /// `productName` override, shown in the dock and window menus.
+    /// Replaces the app's `productName` from `tauri.conf.json` for this instance, for example
+    /// to tell lanes apart. Default: the value in `tauri.conf.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("examples" = ["Acme Dev"]))]
     pub product_name: Option<String>,
-    /// `build.devUrl`, usually another service's `url`.
+    /// Frontend address the app loads, written to `build.devUrl`. Usually another service's
+    /// `url`, such as `${{ services.desktop_web.url }}`, so each lane's app loads that lane's
+    /// frontend. Must start with `http://` or `https://`; when unset, `tauri.conf.json` decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("examples" = ["${{ svc.desktop_web.url }}"]))]
+    #[schemars(extend("examples" = ["${{ services.desktop_web.url }}"]))]
     pub dev_url: Option<String>,
-    /// `build.beforeDevCommand` override. Set it to an empty string when the
-    /// frontend runs as its own devlanes service; otherwise every replica
-    /// starts its own frontend on the port from `tauri.conf.json`.
+    /// Replaces `build.beforeDevCommand`, the command Tauri runs before the app. Set it to `""`
+    /// when the frontend runs as its own devlanes service; otherwise every replica starts its
+    /// own frontend on the port from `tauri.conf.json`. Default: the command in
+    /// `tauri.conf.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("examples" = ["","pnpm dev"]))]
     pub before_dev_command: Option<String>,
@@ -138,10 +147,10 @@ pub fn required_ports() -> &'static [&'static str] {
     &[]
 }
 
-/// Returns the conventional overlay path for `service` replica `replica` in a lane.
-pub fn overlay_path(lane_worktree: &Path, service: &str, replica: u32) -> PathBuf {
-    lane_worktree
-        .join(".devlanes")
+/// Returns the overlay path for `service` replica `replica`: `tauri/` in the lane data
+/// folder, which no other lane shares, even one running from the same worktree.
+pub fn overlay_path(lane_data: &Path, service: &str, replica: u32) -> PathBuf {
+    lane_data
         .join("tauri")
         .join(format!("{service}.{replica}.conf.json"))
 }
@@ -296,7 +305,7 @@ impl Contributor for TauriPreset {
         }
         let options = parse_options(cx.preset_options)?;
         let replica = cx.replica.unwrap_or(1);
-        let path = overlay_path(cx.lane_path, cx.name, u32::from(replica));
+        let path = overlay_path(cx.lane_data_path, cx.name, u32::from(replica));
         let launch = contribution(&TauriInput {
             options: &options,
             overlay_path: &path,
@@ -309,7 +318,8 @@ impl Contributor for TauriPreset {
             .map_err(|e| Error::Integration(format!("cannot render the tauri overlay: {e}")))?;
         contents.push(b'\n');
         draft.files.push(PreparedFile { path, contents });
-        devlanes_run_script_npm::forward_args(draft, launch.contribution.args);
+        // Presets require `run_script`; its runner places the arguments for the tool.
+        draft.args.extend(launch.contribution.args);
         draft.env.extend(launch.contribution.env);
         Ok(())
     }
@@ -364,6 +374,7 @@ mod tests {
             lane_index: 1,
             lane_name: "lane1",
             lane_path: Path::new("/lanes/acme-1"),
+            lane_data_path: Path::new("/data/acme/5"),
             primary_path: Path::new("/lanes/acme"),
             platform: Some("node"),
             preset: Some(NAME),
@@ -404,7 +415,7 @@ mod tests {
             let draft = apply_replica(&memo, Some(options), replica)
                 .await
                 .expect("apply");
-            let expected = format!("/lanes/acme-1/.devlanes/tauri/desktop.{replica}.conf.json");
+            let expected = format!("/data/acme/5/tauri/desktop.{replica}.conf.json");
             assert_eq!(draft.args, ["--config", expected.as_str()]);
             assert_eq!(draft.env.get(CONFIG_ENV), Some(&expected));
             let [file] = draft.files.as_slice() else {
@@ -499,16 +510,16 @@ mod tests {
     #[test]
     fn contribution_points_at_overlay() {
         let options = options("com.acme.app.dev.client1");
-        let path = overlay_path(Path::new("/lanes/acme"), "desktop", 1);
+        let path = overlay_path(Path::new("/data/acme/5"), "desktop", 1);
         let launch = contribution(&TauriInput {
             options: &options,
             overlay_path: &path,
         })
         .expect("valid options");
-        insta::assert_snapshot!(launch.contribution.args.join(" "), @"--config /lanes/acme/.devlanes/tauri/desktop.1.conf.json");
+        insta::assert_snapshot!(launch.contribution.args.join(" "), @"--config /data/acme/5/tauri/desktop.1.conf.json");
         assert_eq!(
             launch.contribution.env.get(CONFIG_ENV).map(String::as_str),
-            Some("/lanes/acme/.devlanes/tauri/desktop.1.conf.json")
+            Some("/data/acme/5/tauri/desktop.1.conf.json")
         );
     }
 

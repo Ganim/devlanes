@@ -8,10 +8,15 @@ services:
     # HTTPS hostnames routed by the proxy; lane.domain is fixture-two.localhost or fixture-two-<N>.localhost.
     hosts: ["api.${{ lane.domain }}"]
     # Ready once GET /healthz on the service's port answers.
-    ready: { http: { path: /healthz } }
+    ready:
+      http:
+        path: /healthz
   web:
     run: [fixture-server, --log-line, web-ready]
     hosts: ["${{ lane.domain }}"]
-    # svc.api.url is http://127.0.0.1:<port> of the api service in the same lane.
-    env: { API_URL: "${{ svc.api.url }}" }
-    ready: { http: { path: /healthz } }
+    # services.api.url is http://127.0.0.1:<port> of the api service in the same lane.
+    env:
+      API_URL: "${{ services.api.url }}"
+    ready:
+      http:
+        path: /healthz

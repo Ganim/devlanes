@@ -1,4 +1,4 @@
-//! `run_script` support for Cargo binaries: `Cargo.toml#<bin>` runs
+//! `run_script` support for Cargo binaries: `{ file: Cargo.toml, name: <bin> }` runs
 //! `cargo run --bin <bin> -- <args>` in the manifest's directory.
 //!
 //! "All the arguments following the two dashes (`--`) are passed to the

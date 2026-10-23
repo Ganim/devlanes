@@ -69,7 +69,9 @@ infra:
       command: [server, --config=/policies/config.yaml]
       volumes: ["./infra/cerbos:/policies:ro"]
       # Container ports by name; the host side is read as infra.cerbos.ports.http.
-      ports: { http: 3592, grpc: 3593 }
+      ports:
+        http: 3592
+        grpc: 3593
       # One container per lane instead of one shared by all lanes.
       per_lane: true
 ```

@@ -1,6 +1,17 @@
 # Run and run_script
 
-A service, task or infra command needs exactly one of `run` and `run_script`. `run` is a command; `run_script` names a script in a file and lets devlanes build the command for you. The file decides which runner is used.
+A service or task needs exactly one of `run` and `run_script`. `run_script` names a script in a project file (`package.json`, `Makefile`, `justfile`, `deno.json`, `Cargo.toml`, `pyproject.toml`) and devlanes builds the command for you. `run` is a command devlanes runs exactly as written.
+
+Use `run_script` whenever the command is a script in one of those files. devlanes then knows what it runs, which `run` text cannot tell it:
+
+- Presets work only with `run_script`. The runner places their flags after the script name in the form the package manager needs, so `preset: vite` on a pnpm, yarn, bun or npm script gets `--port` where Vite sees it.
+- The script must exist before anything starts; a typo fails with the list of scripts the file has.
+- The package manager comes from the project (`packageManager` or the lockfile), not from what you typed.
+- Profiles can swap the script (`run_scripts: { dev: start }`).
+- Wrangler can refuse a script that hardcodes `--port`.
+- The process starts in the file's directory and platform detection reads the file.
+
+Use `run` for everything else: a binary, a pipeline, a multi-line script, a wrapper such as `turbo`, or a tool with no script file. `infra.setup` and `infra.teardown` take only `run`, since those commands are written out on purpose (`docker compose exec -T postgres ...`).
 
 ## run
 
@@ -19,21 +30,29 @@ services:
 
 `run` starts in the lane's worktree root, or in `cwd` when set. Expressions work in both forms: `run: uvicorn app:main --port ${{ self.port }}`.
 
+devlanes never edits a `run` command, so it cannot be combined with `preset`: `devlanes config check` refuses the pair. To keep a hand-written command, drop the preset and add its flags yourself; [presets](presets.md) lists what each one adds.
+
 ## run_script
 
 ```yaml
 services:
   api:
-    run_script: apps/api/package.json#dev
+    run_script:
+      file: apps/api/package.json
+      name: dev
+tasks:
   fixtures:
-    run_script: { source: justfile, name: fixtures }
+    run_script:
+      file: justfile
+      name: fixtures
 ```
 
-The shorthand splits on the last `#`. `source` is relative to the worktree root (not to the directory of `devlanes.yaml`), and it must stay inside the worktree. The command always runs in the directory of the source file; a `cwd` on the same unit is ignored.
+`run_script` is a mapping with two keys, both required:
 
-`run_script` values are plain strings. `${{ }}` is not evaluated in them.
+- `file`: the file that defines the script, relative to the worktree root (not to the directory of `devlanes.yaml`). It must stay inside the worktree. Its name picks the runner (table below).
+- `name`: the script, target, recipe, task or binary in that file.
 
-Prefer `run_script` over `run: pnpm -F pkg dev` for anything a preset touches: the runner knows where the preset's flags go, and profiles can swap the script name (`run_scripts: { dev: start }`).
+A string such as `run_script: apps/api/package.json#dev` is refused with the mapping to write instead. The command always runs in the directory of `file`, so `devlanes config check` refuses a `cwd` on the same unit, including one inherited through `extends`. `${{ }}` is not evaluated in `file` or `name`.
 
 ## Runners
 
@@ -70,7 +89,7 @@ Preset flags are appended after the script name. Only npm gets a `--` separator 
 
 Targets are checked with a conservative parser. Files that `include` others, use pattern rules or `$(eval` are not checked and the target runs anyway.
 
-make cannot take extra arguments, so a preset on a Makefile service fails at start: `make cannot pass arguments to target dev`. Put the framework command in a package.json script or a justfile recipe instead, or use `run`.
+make cannot take extra arguments, so a preset on a Makefile service fails at start: `make cannot pass arguments to target dev`. Put the framework command in a package.json script or a justfile recipe instead, or drop the preset and use `run` with the flags written out.
 
 ### justfile
 
@@ -89,7 +108,7 @@ A recipe with required positional parameters cannot be used, since `run_script` 
 
 ### Cargo.toml
 
-`Cargo.toml#server` runs `cargo run --bin server`. From a workspace root it finds the member that owns the binary and adds `-p <member>`; a binary defined in two members is an error asking you to point at the member's manifest. Binaries come from `src/main.rs`, `src/bin/*.rs`, `src/bin/*/main.rs` and `[[bin]]`. There is no `--release`, `--example` or `--features`; use `run: cargo run --release --bin server` for those.
+`{ file: Cargo.toml, name: server }` runs `cargo run --bin server`. From a workspace root it finds the member that owns the binary and adds `-p <member>`; a binary defined in two members is an error asking you to point at the member's manifest. Binaries come from `src/main.rs`, `src/bin/*.rs`, `src/bin/*/main.rs` and `[[bin]]`. There is no `--release`, `--example` or `--features`; use `run: cargo run --release --bin server` for those.
 
 ### pyproject.toml
 
@@ -103,20 +122,22 @@ Console scripts are entry points, so `run_script` fits a `serve = "acme.server:m
 profiles:
   e2e:
     include: [+api, +web]
-    run_scripts: { dev: start }
+    run_scripts:
+      dev: start
 ```
 
-Every service whose `run_script` names `dev` runs `start` from the same file instead. The map is a single lookup (no chaining) and applies to services only; tasks and infra commands keep their names. With several `--profile` flags, the later profile wins per key. A remapped name that does not exist fails at start with the runner's missing-script error.
+Every service whose `run_script` names `dev` runs `start` from the same file instead. The map is a single lookup (no chaining) and applies to services only; tasks keep their names. With several `--profile` flags, the later profile wins per key. A remapped name that does not exist fails at start with the runner's missing-script error.
 
 ## Overrides and templates
 
-`run_script` in object form merges per key, so a local override or a template child can change only the name:
+`run_script` merges per key, so a local override or a template child can change only the name:
 
 ```yaml
 # devlanes.local.yaml
 services:
   api:
-    run_script: { name: dev:debug }   # keeps the inherited source
+    run_script:  # keeps the inherited file
+      name: dev:debug
 ```
 
-The shorthand replaces the whole value. Setting `run` clears an inherited `run_script` and the reverse; for tasks, `steps` clears both.
+Setting `run` clears an inherited `run_script` and the reverse; for tasks, `steps` clears both.

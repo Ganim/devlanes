@@ -1,6 +1,6 @@
 # devlanes-run-script-npm
 
-Runs `run_script: <dir>/package.json#<name>` with the package manager the project declares. Lane resolution calls it through `NpmScripts`, a `devlanes-core` `ScriptRunner`, and the preset crates use `forward_args` to add their flags to a launch.
+Runs `run_script: { file: <dir>/package.json, name: <name> }` with the package manager the project declares. Lane resolution calls it through `NpmScripts`, a `devlanes-core` `ScriptRunner`, which also places preset flags after the script name.
 
 ## Usage
 
@@ -28,7 +28,6 @@ The composition root registers `Arc::new(NpmScripts)` as a script runner. `plan`
 - `detect_package_manager`: the manager lookup on its own.
 - `PackageManager::run_argv`: argv for a known manager; each manager's rules live in its own module.
 - `yarn_linker`: the yarn 2+ `nodeLinker` of a directory.
-- `forward_args`: appends preset arguments to a `LaunchDraft`, adding `--` for a plain `run: npm run dev`.
 
 ## Config example
 
@@ -36,7 +35,9 @@ The composition root registers `Arc::new(NpmScripts)` as a script runner. `plan`
 services:
   api:
     # Runs the dev script of apps/api/package.json with the project's package manager.
-    run_script: apps/api/package.json#dev
+    run_script:
+      file: apps/api/package.json
+      name: dev
 ```
 
 With `"packageManager": "pnpm@10.4.1"` this runs `pnpm run dev` in `apps/api`; with npm it is `npm run dev`, and preset flags follow a `--`.

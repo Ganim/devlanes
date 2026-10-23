@@ -59,7 +59,7 @@ services:
   desktop:
     # Xpra's HTML5 client at https://desktop.<lane domain>
     run: "xpra start :100 --daemon=no --html=on --bind-tcp=127.0.0.1:${{ self.port }} --start=gedit"
-    hosts: ["desktop.${{ lane.domain }}"]
+    hosts: "desktop.${{ lane.domain }}"
   adb:
     # Android emulator on the box; locally: ANDROID_ADB_SERVER_PORT=<port> adb devices
     run: "adb -P ${{ self.port }} nodaemon server"

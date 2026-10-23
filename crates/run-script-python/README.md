@@ -1,6 +1,6 @@
 # devlanes-run-script-python
 
-Runs `run_script: pyproject.toml#<script>` as `uv run <script>` or `poetry run <script>` in the project's directory. Lane resolution calls it through `PythonScripts`, a `devlanes-core` `ScriptRunner`.
+Runs `run_script: { file: pyproject.toml, name: <script> }` as `uv run <script>` or `poetry run <script>` in the project's directory. Lane resolution calls it through `PythonScripts`, a `devlanes-core` `ScriptRunner`.
 
 ## Usage
 
@@ -34,7 +34,9 @@ The composition root registers `Arc::new(PythonScripts)` as a script runner. `pl
 services:
   api:
     # Runs the serve script of pyproject.toml with uv or poetry.
-    run_script: pyproject.toml#serve
+    run_script:
+      file: pyproject.toml
+      name: serve
 ```
 
 With `serve = "acme.server:main"` under `[project.scripts]` and a `uv.lock`, this runs `uv run serve`; with a `poetry.lock` instead it runs `poetry run serve`.

@@ -404,11 +404,11 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
             Method::TaskList,
             json!({
                 "items": [
-                    {"name": "migrate", "when": "lane.start", "after": null, "profiles": null, "steps": null, "confirm": false, "interactive": false, "run_script": {"source": "package.json", "name": "db:migrate"}},
+                    {"name": "migrate", "when": "lane.start", "after": null, "profiles": null, "steps": null, "confirm": false, "interactive": false, "run_script": {"file": "package.json", "name": "db:migrate"}},
                     {"name": "seed", "when": "lane.create", "after": "services", "profiles": ["dev"], "steps": null, "confirm": true, "interactive": false, "run_script": null},
                     {"name": "reset", "when": null, "after": null, "profiles": null, "steps": ["drop", "migrate"], "confirm": false, "interactive": false, "run_script": null},
                 ],
-                "sources": [{"source": "package.json", "runner": "npm"}],
+                "sources": [{"file": "package.json", "runner": "npm"}],
                 "truncated": false, "next_cursor": null,
             }),
         ),
@@ -1369,4 +1369,66 @@ fn daemon_errors_are_worded_with_hints() {
         output.push_str(&rendered.stderr);
     }
     insta::assert_snapshot!("render_daemon_errors", output);
+}
+
+/// An http readiness timeout names the last status the probe got; a non-2xx
+/// answer without a configured `status` gets the fix instead of the logs hint.
+#[test]
+fn http_ready_timeouts_name_the_last_answer() {
+    let unit = json!({"lane": "acme@2", "unit": "web", "check": "http", "timeout_ms": 60000,
+        "expected_port": 20100, "listening": [20100]});
+    let with = |extra: Value| {
+        let mut data = unit.clone();
+        data.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        data
+    };
+    let errors = [
+        RpcError::new(
+            "ready_timeout",
+            with(json!({"last_status": 302, "expected_status": null})),
+            1,
+        ),
+        RpcError::new(
+            "ready_timeout",
+            with(json!({"last_status": 404, "expected_status": 200})),
+            1,
+        ),
+        RpcError::new("ready_timeout", with(json!({"expected_status": null})), 1),
+        RpcError::new(
+            "container_not_ready",
+            json!({"container": "db", "check": "http", "timeout_ms": 30000,
+                "last_status": 401, "expected_status": null}),
+            1,
+        ),
+    ];
+    let reporter = runtime(OutputMode::Agent).reporter();
+    let mut output = String::new();
+    for error in &errors {
+        output.push_str(&reporter.error(error, None).stderr);
+    }
+    let why = json!({
+        "lane": "acme@2", "unit": "web", "state": "failed",
+        "reasons": [{"code": "ready_timeout", "data": with(json!({"last_status": 302, "expected_status": null}))}],
+    });
+    output.push_str(
+        &runtime(OutputMode::Agent)
+            .reporter()
+            .result(&Report::new(Method::Why, &why))
+            .expect("render")
+            .stdout,
+    );
+    insta::assert_snapshot!(output, @r"
+    error: acme@2:web wasn't ready in time; last answer 302
+    hint: set `ready.http.status: 302` or use a path that answers 2xx
+    error: acme@2:web wasn't ready in time; last answer 404, expected 200
+    hint: devlanes logs acme@2:web --tail 200
+    error: acme@2:web wasn't ready in time
+    hint: devlanes logs acme@2:web --tail 200
+    error: container db did not pass its http check within 30s; last answer 401
+    hint: set `ready.http.status: 401` or use a path that answers 2xx
+    failed acme@2:web
+      did not become ready before the timeout; last answer 302 (set `ready.http.status: 302` or use a path that answers 2xx)
+    ");
 }

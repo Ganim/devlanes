@@ -19,7 +19,7 @@ pub use clap_complete::Shell;
 pub use completion::*;
 pub use output::*;
 pub use progress::*;
-pub use render::{DoctorCheck, DoctorState, doctor_checks_of};
+pub use render::{DoctorCheck, DoctorState, doctor_checks_of, status_hint};
 pub use runtime::*;
 pub use terminal::*;
 pub use with::*;

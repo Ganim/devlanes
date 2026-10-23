@@ -36,7 +36,9 @@ Use `ingest_stream` for separate stdout and stderr streams.
 ```yaml
 # ~/.devlanes/config.yaml: service output kept on disk, by age and total size.
 logs:
-  retention: { days: 7, max_size: 5GiB }
+  retention:
+    days: 7
+    max_size: 5GiB
 ```
 
 The daemon passes these bounds to every unit's `LogOptions`. Its maintenance pass

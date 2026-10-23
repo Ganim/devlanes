@@ -10,7 +10,6 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 devlanes-core = { path = "../core" }
-devlanes-run-script-npm = { path = "../run-script-npm" }
 schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
@@ -20,6 +19,7 @@ thiserror.workspace = true
 devlanes-preset-next = { path = "../preset-next" }
 devlanes-preset-tauri = { path = "../preset-tauri" }
 devlanes-preset-vite = { path = "../preset-vite" }
+devlanes-run-script-npm = { path = "../run-script-npm" }
 insta = "1"
 tempfile.workspace = true
 tokio.workspace = true

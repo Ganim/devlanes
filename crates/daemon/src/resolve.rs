@@ -20,6 +20,9 @@ use crate::{
     registry::{lane_context, read_dotenv, store_error},
 };
 
+/// Folder under the lane's data folder that holds the generated Compose override.
+pub(crate) const COMPOSE_DIR: &str = "compose";
+
 /// Shapes resolution failures as machine codes with data.
 pub(crate) fn resolve_error(error: &ResolveError) -> RpcError {
     let (code, data, exit) = match error {
@@ -208,14 +211,19 @@ impl Inner {
             overrides.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
         let facts = self.facts(project, lane)?;
+        // Every launch (service, task, hook, `exec`) is planned here, and may write to it.
+        self.ensure_lane_data(project, lane).await?;
         let (lane_dir, primary_dir) = self.config_dirs(project, lane);
         let dotenv = read_dotenv(lane_dir, primary_dir).await;
         let lanes_main = if index == Some(0) {
             None
         } else {
-            project
-                .lane_by_index(0)
-                .and_then(|main| main.st().view.as_ref().map(|view| view.svc.clone()))
+            project.lane_by_index(0).and_then(|main| {
+                main.st()
+                    .view
+                    .as_ref()
+                    .map(|view| view.services_namespace.clone())
+            })
         };
         let projects = self.projects_namespace(project, lane);
         let mut input = ResolveInput::new(&config, &facts, allocation.block, &allocation.offsets);
@@ -238,7 +246,7 @@ impl Inner {
             .map_err(|error| resolve_error(&error))
     }
 
-    /// `projects.<name>.svc` for other projects with running lanes: the lane on the
+    /// `projects.<name>.services` for other projects with running lanes: the lane on the
     /// same branch label, else the same lane name, else lane 0 (plan 10.3).
     fn projects_namespace(&self, project: &ProjectRt, lane: &LaneRt) -> Value {
         let (label, name) = {
@@ -271,7 +279,7 @@ impl Inner {
             if let Some(chosen) = chosen
                 && let Some(view) = chosen.st().view.clone()
             {
-                namespace.insert(other.name(), json!({"svc": view.svc}));
+                namespace.insert(other.name(), json!({"services": view.services_namespace}));
             }
         }
         Value::Object(namespace)
@@ -304,6 +312,8 @@ impl Inner {
             )
         };
         let facts = self.facts(project, lane)?;
+        // Before infra: Docker creates a missing bind-mount source itself (as root on Linux).
+        self.ensure_lane_data(project, lane).await?;
         let (lane_dir, primary_dir) = self.config_dirs(project, lane);
         let dotenv = read_dotenv(lane_dir.clone(), primary_dir.clone()).await;
         let client: EnvMap = env.map(|e| (*e).clone()).unwrap_or_default();
@@ -462,12 +472,7 @@ impl Inner {
             block: (allocation.block.start, allocation.block.size),
             shared_block: shared.map(|s| (s.block.start, s.block.size)),
             ports,
-            state_dir: self
-                .opts
-                .home
-                .join("infra")
-                .join(project.name())
-                .join(format!("lane{index}")),
+            state_dir: facts.data_path.join(COMPOSE_DIR),
         })
     }
 }

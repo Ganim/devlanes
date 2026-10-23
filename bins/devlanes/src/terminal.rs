@@ -13,12 +13,16 @@ use devlanes_config::{TerminalFeature, TerminalProgress};
 use devlanes_proto::Event;
 use devlanes_term::{Features, Mode, ProgressMode, Settings, TitleGuard};
 
-/// The `terminal` settings from the user config; auto when unset or unreadable.
+/// The `terminal` settings from the user config; auto when unset. Read leniently, so
+/// a bad key elsewhere only warns instead of resetting these.
 pub fn settings(paths: &Paths) -> Settings {
-    let terminal = devlanes_config::load_user(paths.home.join("config.yaml"))
-        .ok()
-        .and_then(|config| config.terminal)
-        .map(|terminal| terminal.settings())
+    settings_of(crate::user_config::display(paths).terminal.as_ref())
+}
+
+/// [`settings`] for a parsed `terminal` section; auto when there is none.
+fn settings_of(terminal: Option<&devlanes_config::TerminalConfig>) -> Settings {
+    let terminal = terminal
+        .map(devlanes_config::TerminalConfig::settings)
         .unwrap_or_default();
     let mode = |feature: TerminalFeature| match feature {
         TerminalFeature::Auto => Mode::Auto,
@@ -117,15 +121,17 @@ mod tests {
 
     #[test]
     fn settings_come_from_the_user_config_and_default_to_auto() -> anyhow::Result<()> {
-        let home = tempfile::tempdir()?;
-        let paths = Paths::new(home.path())?;
-        assert_eq!(settings(&paths), Settings::default(), "no config.yaml");
-        std::fs::write(
-            home.path().join("config.yaml"),
+        let parsed = |source: &str| {
+            devlanes_config::parse_user_lenient("config.yaml", source)
+                .0
+                .terminal
+        };
+        assert_eq!(settings_of(None), Settings::default(), "no config.yaml");
+        let set = parsed(
             "terminal:\n  progress: never\n  title: never\n  links: always\n  marks: never\n",
-        )?;
+        );
         assert_eq!(
-            settings(&paths),
+            settings_of(set.as_ref()),
             Settings {
                 progress: ProgressMode::Never,
                 title: Mode::Never,
@@ -135,8 +141,10 @@ mod tests {
             }
         );
         // A config that does not load leaves everything on auto.
-        std::fs::write(home.path().join("config.yaml"), "terminal: [\n")?;
-        assert_eq!(settings(&paths), Settings::default());
+        assert_eq!(
+            settings_of(parsed("terminal: [\n").as_ref()),
+            Settings::default()
+        );
         Ok(())
     }
 }

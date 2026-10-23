@@ -1,5 +1,59 @@
 use std::time::Duration;
 
+/// The config crate repeats the DNS zone's TLD rule to reject a bad `hostnames.tld`
+/// at load; both must accept and refuse the same names.
+#[test]
+fn config_and_resolver_agree_on_tlds() {
+    let long = format!("{}.test", "a".repeat(64));
+    let longest = format!("{}.test", vec!["a".repeat(63); 4].join("."));
+    for tld in [
+        "test",
+        "Test.",
+        "internal",
+        "dev.internal",
+        "home.arpa",
+        "lab.home.arpa",
+        "a.b.test",
+        "dev.localhost",
+        "x-1.test",
+        "",
+        ".",
+        "..",
+        "a..test",
+        "-x.test",
+        "x-.test",
+        "x_y.test",
+        "café.test",
+        "123",
+        "1.123",
+        "localhost",
+        "local",
+        "dev",
+        "com",
+        "example",
+        "contest",
+        "test.com",
+        "xhome.arpa",
+        "test..",
+        &long,
+        &longest,
+    ] {
+        let source = format!("hostnames: {{ tld: {} }}", serde_json::json!(tld));
+        let config = devlanes_config::parse_user(&source);
+        let zone = devlanes_resolver_dns::Zone::new(tld);
+        assert_eq!(
+            config.is_ok(),
+            zone.is_ok(),
+            "{tld:?}: config {:?}, zone {zone:?}",
+            config.err().map(|error| error.message)
+        );
+    }
+    assert_eq!(
+        devlanes_resolver_dns::RESERVED_ZONES,
+        ["test", "internal", "home.arpa"]
+    );
+}
+
 /// Config and state remain independent crates but must agree on retention defaults.
 #[test]
 fn config_and_state_retention_defaults_match() {

@@ -16,7 +16,7 @@ Services and tasks. A process that keeps running is a service. A command that en
 
 Containers are infra. Processes that run `docker compose up`, `docker run`, a local database or a broker become `infra.compose` or `infra.containers`, with per-lane databases, vhosts and buckets created in `infra.setup` from `lanes.vars`. A local reverse proxy (Caddy, nginx, Traefik) goes in `infra.exclude`: the devlanes proxy serves `hosts` over HTTPS.
 
-Ports. Each lane gives each service its own port in `PORT` and `${{ self.port }}`. Replace a literal port in a command (`--port 3000`, `-p 3000`, `PORT=3000`, `localhost:3000`) with `${{ self.port }}`, or use a preset that adds the flag. Drop a literal `PORT` from env. Never write `env: { PORT: "${{ self.port }}" }`: devlanes rejects it as a cycle and `PORT` already has that value. Where another process reached this one at `localhost:3000`, use `${{ svc.<name>.port }}`, `${{ svc.<name>.url }}` or `${{ svc.<name>.public_url }}`. Pass an app that reads its port from its own variable `MY_PORT: ${{ self.port }}`. When a command has several literal ports, find out which one the process listens on before replacing anything.
+Ports. Each lane gives each service its own port in `PORT` and `${{ self.port }}`. Replace a literal port in a command (`--port 3000`, `-p 3000`, `PORT=3000`, `localhost:3000`) with `${{ self.port }}`, or use a preset that adds the flag. Drop a literal `PORT` from env. Never write `env: { PORT: "${{ self.port }}" }`: devlanes rejects it as a cycle and `PORT` already has that value. Where another process reached this one at `localhost:3000`, use `${{ services.<name>.port }}`, `${{ services.<name>.url }}` or `${{ services.<name>.public_url }}`. Pass an app that reads its port from its own variable `MY_PORT: ${{ self.port }}`. When a command has several literal ports, find out which one the process listens on before replacing anything.
 
 Readiness. Give every service a `ready` check that fails when the app is broken: `http` on a health route, `tcp: true` for a plain server, `log` with the line a worker prints once connected. Under a watcher (`tsx --watch`, `nodemon`) a crashed process keeps running, so `ready: started` would report it ready. If a worker prints nothing usable, tell the user which line to add. Translate the source's own checks: a substring match becomes an escaped `ready.log` regex, a probe on the service's own port becomes `tcp: true` or `http: { path }`, a command becomes `ready.cmd`.
 
@@ -35,7 +35,7 @@ Profiles. A source's "start these by default" set becomes `profiles.default` (us
 | mprocs | devlanes |
 | --- | --- |
 | `procs.<name>: "cmd"` or `shell: cmd` | `run: cmd` (both use `sh -c`) |
-| `procs.<name>: [..]` or `cmd: [..]` | `run: [..]`; `[pnpm, -F, pkg, dev]` is better as `run_script: <pkg dir>/package.json#dev` |
+| `procs.<name>: [..]` or `cmd: [..]` | `run: [..]`; `[pnpm, -F, pkg, dev]` is better as `run_script: { file: <pkg dir>/package.json, name: dev }` |
 | proc name | unit key (lowercase, dashes) plus `name:` with the original label |
 | `cwd` (`<CONFIG_DIR>` prefix) | `cwd:` relative to the project |
 | `env` | `env:`; a `null` value cannot be expressed (devlanes cannot unset a variable) |
@@ -79,17 +79,26 @@ infra:
   compose: docker-compose.yml
 tasks:
   migrate-db:
-    run_script: packages/models/package.json#db-deploy
+    run_script:
+      file: packages/models/package.json
+      name: db-deploy
     when: lane.start
 services:
   api-admin:
-    run_script: servers/admin/package.json#dev
-    hosts: ["admin-api.${{ lane.domain }}"]
-    ready: { http: { path: /-/health } }
+    run_script:
+      file: servers/admin/package.json
+      name: dev
+    hosts: "admin-api.${{ lane.domain }}"
+    ready:
+      http:
+        path: /-/health
     tags: [api, essential]
   wrk-mailer:
-    run_script: workers/mailer/package.json#dev
-    ready: { log: "mailer ready" }   # a line the worker prints once connected
+    run_script:
+      file: workers/mailer/package.json
+      name: dev
+    ready:
+      log: "mailer ready"  # a line the worker prints once connected
     tags: [worker]
 profiles:
   default: [+essential]
@@ -127,7 +136,8 @@ Before:
 tasks:
   db:
     cmd: ["postgres", "-D", ".data/db"]
-    ready: {log: "ready to accept connections"}
+    ready:
+      log: "ready to accept connections"
   migrate:
     type: job
     cmd: ["./migrate.sh"]
@@ -135,7 +145,8 @@ tasks:
   api:
     cmd: ["cargo", "run", "-p", "api"]
     deps: [db, migrate]
-    ready: {http: "http://localhost:3000/health"}
+    ready:
+      http: "http://localhost:3000/health"
     autostart: true
 ```
 
@@ -152,8 +163,10 @@ tasks:
 services:
   api:
     run: cargo run -p api -- --port ${{ self.port }}   # the app must listen on the port it is given
-    hosts: ["api.${{ lane.domain }}"]
-    ready: { http: { path: /health } }
+    hosts: "api.${{ lane.domain }}"
+    ready:
+      http:
+        path: /health
 ```
 
 ## process-compose
@@ -191,10 +204,15 @@ processes:
     command: go run ./cmd/api --port 8080
     working_dir: ./services/api
     depends_on:
-      migrate: { condition: process_completed_successfully }
+      migrate:
+        condition: process_completed_successfully
     readiness_probe:
-      http_get: { host: 127.0.0.1, port: 8080, path: /health }
-    availability: { restart: on_failure }
+      http_get:
+        host: 127.0.0.1
+        port: 8080
+        path: /health
+    availability:
+      restart: on_failure
   web:
     command: npm run dev -- --port 5173
     working_dir: web
@@ -213,14 +231,20 @@ services:
   api:
     run: go run ./cmd/api --port ${{ self.port }}
     cwd: services/api
-    hosts: ["api.${{ lane.domain }}"]
-    ready: { http: { path: /health } }
+    hosts: "api.${{ lane.domain }}"
+    ready:
+      http:
+        path: /health
   web:
     preset: vite
-    run_script: web/package.json#dev
-    env: { API_URL: "${{ svc.api.url }}" }
-    hosts: ["${{ lane.domain }}"]
-    ready: { tcp: true }
+    run_script:
+      file: web/package.json
+      name: dev
+    env:
+      API_URL: "${{ services.api.url }}"
+    hosts: "${{ lane.domain }}"
+    ready:
+      tcp: true
 ```
 
 ## Procfile (foreman, overmind, hivemind, honcho)
@@ -230,7 +254,7 @@ The Procfile named by `OVERMIND_PROCFILE` (in `.overmind.env` or `.env`), `procf
 | Procfile runners | devlanes |
 | --- | --- |
 | `name: command` | service with `run: command`; `$PORT` keeps working because devlanes sets `PORT` |
-| `$OVERMIND_PROCESS_<name>_PORT` | `${{ svc.<name>.port }}` |
+| `$OVERMIND_PROCESS_<name>_PORT` | `${{ services.<name>.port }}` |
 | `OVERMIND_FORMATION` / `.foreman` `formation` (`web=2`) | `replicas: 2`; `=0` means left out of the default |
 | `OVERMIND_PROCESSES`, `OVERMIND_IGNORED_PROCESSES` | `profiles.default`, or `autostart: false` on the others |
 | `OVERMIND_CAN_DIE` | task with `when: lane.start` |
@@ -258,14 +282,18 @@ tasks:
 services:
   web:
     run: bin/rails server -p $PORT -b 127.0.0.1
-    hosts: ["${{ lane.domain }}"]
-    ready: { http: { path: /up } }
+    hosts: "${{ lane.domain }}"
+    ready:
+      http:
+        path: /up
   css:
     run: bin/rails tailwindcss:watch
-    ready: { log: "Done in" }
+    ready:
+      log: "Done in"
   worker:
     run: bundle exec sidekiq
-    ready: { log: "Booted Rails" }
+    ready:
+      log: "Booted Rails"
     tags: [worker]
 ```
 
@@ -304,14 +332,19 @@ project: acme
 services:
   api:
     run: node ./api/server.js --port ${{ self.port }}
-    env: { NODE_ENV: development }
+    env:
+      NODE_ENV: development
     replicas: 2
-    stop: { signal: SIGINT, timeout: 3s }
-    ready: { tcp: true }
+    stop:
+      signal: SIGINT
+      timeout: 3s
+    ready:
+      tcp: true
 profiles:
   production:
     include: [api]
-    env: { NODE_ENV: production }
+    env:
+      NODE_ENV: production
 ```
 
 ## tmuxinator and tmuxp
@@ -356,13 +389,17 @@ tasks:
 services:
   server:
     run: bundle exec rails s -p ${{ self.port }} -b 127.0.0.1
-    hosts: ["${{ lane.domain }}"]
-    ready: { tcp: true }
+    hosts: "${{ lane.domain }}"
+    ready:
+      tcp: true
   frontend:
     preset: vite
-    run_script: web/package.json#dev
-    hosts: ["app.${{ lane.domain }}"]
-    ready: { tcp: true }
+    run_script:
+      file: web/package.json
+      name: dev
+    hosts: "app.${{ lane.domain }}"
+    ready:
+      tcp: true
 ```
 
 ## package.json with concurrently or npm-run-all
@@ -371,7 +408,7 @@ A root `package.json` script (usually `dev` or `start`) that runs `concurrently`
 
 | package.json | devlanes |
 | --- | --- |
-| concurrently `npm:` / `pnpm:` / `yarn:` / `bun:` / `node:` shortcut, with `*` and `(!x)` | a service per matching script, `run_script: package.json#<script>` |
+| concurrently `npm:` / `pnpm:` / `yarn:` / `bun:` / `node:` shortcut, with `*` and `(!x)` | a service per matching script, `run_script: { file: package.json, name: <script> }` |
 | concurrently `npm run <script>` (and the pnpm, yarn, bun forms) | `run_script:` |
 | concurrently other commands | `run:`; a package binary needs `pnpm exec`, `npx`, `yarn run` or `bun x`, because `node_modules/.bin` is on PATH only inside scripts |
 | concurrently `-n` / `--names` | unit keys |
@@ -397,17 +434,21 @@ project: acme
 services:
   api:
     run: pnpm exec tsx watch src/server.ts --port ${{ self.port }}
-    hosts: ["api.${{ lane.domain }}"]
-    ready: { http: { path: /health } }
+    hosts: "api.${{ lane.domain }}"
+    ready:
+      http:
+        path: /health
   web:
-    preset: vite
-    run: pnpm exec vite
-    env: { VITE_API_URL: "${{ svc.api.public_url }}" }
-    hosts: ["${{ lane.domain }}"]
-    ready: { tcp: true }
+    # Not a script in package.json, so no preset: write the flags preset vite would add.
+    run: pnpm exec vite --port ${{ self.port }} --strictPort --host 127.0.0.1
+    env:
+      VITE_API_URL: "${{ services.api.public_url }}"
+    hosts: "${{ lane.domain }}"
+    ready:
+      tcp: true
 ```
 
-`dev:api` keeps its literal port, so it runs as its own command with `${{ self.port }}`; a script that reads `PORT` stays `run_script: package.json#dev:api`.
+`dev:api` keeps its literal port, so it runs as its own command with `${{ self.port }}`; a script that reads `PORT` stays `run_script: { file: package.json, name: dev:api }`.
 
 ## mise tasks
 
@@ -466,7 +507,7 @@ tasks:
 | services every lane can share (Postgres, Redis, RabbitMQ, S3 mocks) | shared by default; per-lane databases, vhosts and buckets through `infra.setup` and `lanes.vars` |
 | services each lane needs its own copy of (mail catchers) | `infra.per_lane:` |
 | a reverse proxy (Caddy, nginx, Traefik) | `infra.exclude:`; give the services `hosts` instead |
-| an HTTP container users open in the browser | `infra.hosts: { s3mock: ["s3.${{ lane.domain }}"] }` |
+| an HTTP container users open in the browser | `infra.hosts: { s3mock: "s3.${{ lane.domain }}" }` |
 | `${VAR}` in the file | `infra.env:` (Compose interpolation only) |
 | `profiles:` | `infra.profiles:` |
 | fixed host ports | keep them for shared containers; processes read the port from `${{ infra.<service>.port }}` |

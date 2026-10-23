@@ -139,7 +139,7 @@ fn broken_diagnostics() {
         ),
         (
             "dash",
-            "project: demo\nservices:\n  crm-api: { run: server }\n  web:\n    run: server\n    env: { URL: '${{ svc.crm-api.url }}' }\n",
+            "project: demo\nservices:\n  crm-api: { run: server }\n  web:\n    run: server\n    env: { URL: '${{ services.crm-api.url }}' }\n",
         ),
         (
             "duration",
@@ -210,7 +210,7 @@ fn duration_size_and_templated_types() {
 fn expression_evaluation() {
     let ctx = ExpressionContext {
         lane: json!({"index":2,"port":20000}),
-        svc: json!({"crm-api":{"port":20001}}),
+        services: json!({"crm-api":{"port":20001}}),
         ..Default::default()
     };
     assert_eq!(
@@ -226,11 +226,11 @@ fn expression_evaluation() {
         json!("port=20000 ${SHELL_VAR}")
     );
     assert_eq!(
-        evaluate("${{ svc.crm_api.port }}", &ctx).expect("alias"),
+        evaluate("${{ services.crm_api.port }}", &ctx).expect("alias"),
         json!(20001)
     );
     assert_eq!(
-        evaluate("${{ svc['crm-api'].port }}", &ctx).expect("bracket"),
+        evaluate("${{ services['crm-api'].port }}", &ctx).expect("bracket"),
         json!(20001)
     );
     assert_eq!(
@@ -250,7 +250,7 @@ fn expression_evaluation() {
 fn cross_project_default() {
     assert_eq!(
         evaluate(
-            "${{ projects.absent.svc.api.public_url | default('https://example.test') }}",
+            "${{ projects.absent.services.api.public_url | default('https://example.test') }}",
             &ExpressionContext::default()
         )
         .expect("missing project fallback"),
@@ -258,18 +258,19 @@ fn cross_project_default() {
     );
     assert_eq!(
         evaluate(
-            "${{ projects['absent-project'].svc.api.public_url | default('fallback') }}",
+            "${{ projects['absent-project'].services.api.public_url | default('fallback') }}",
             &ExpressionContext::default()
         )
         .expect("missing dashed project"),
         json!("fallback")
     );
     let context = ExpressionContext {
-        projects: json!({"other-project":{"svc":{"api":{"url":"http://localhost:20000"}}}}),
+        projects: json!({"other-project":{"services":{"api":{"url":"http://localhost:20000"}}}}),
         ..Default::default()
     };
     assert_eq!(
-        evaluate("${{ projects.other_project.svc.api.url }}", &context).expect("project alias"),
+        evaluate("${{ projects.other_project.services.api.url }}", &context)
+            .expect("project alias"),
         json!("http://localhost:20000")
     );
 }
@@ -280,7 +281,7 @@ fn structural_validation() {
     for (yaml, expected) in [
         ("project: invalid@name", "project: expected"),
         (
-            "project: demo\nservices: { api: { run: a, run_script: 'package.json#b' } }",
+            "project: demo\nservices: { api: { run: a, run_script: { file: package.json, name: b } } }",
             "services.api: exactly one of run, run_script",
         ),
         (
@@ -427,6 +428,101 @@ fn user_validation() {
     );
 }
 
+/// Lane data folders default to `data` in the devlanes home; a set folder must be
+/// absolute or start with `~/`.
+#[test]
+fn lane_data_root() {
+    let home = std::path::Path::new("/h/.devlanes");
+    let defaults = parse_user("{}").expect("defaults").lanes;
+    assert_eq!(defaults.data_root(home), home.join("data"));
+    let set = parse_user("lanes: { data_dir: /fast/devlanes }").expect("absolute");
+    assert_eq!(
+        set.lanes.data_root(home),
+        std::path::Path::new("/fast/devlanes")
+    );
+    let tilde = parse_user("lanes: { data_dir: ~/lane-data }").expect("tilde");
+    if let Some(user_home) = std::env::var_os("HOME") {
+        assert_eq!(
+            tilde.lanes.data_root(home),
+            std::path::PathBuf::from(user_home).join("lane-data")
+        );
+    }
+    let relative = parse_user("lanes: { data_dir: data }").expect_err("relative");
+    assert!(
+        relative.message.contains("lanes.data_dir"),
+        "{}",
+        relative.message
+    );
+}
+
+/// `hostnames.tld` must be a special-use name whatever the strategy, so a TLD that
+/// could belong to a real site fails at load, located at the key; a lenient load
+/// drops only that key.
+#[test]
+fn user_tld_validation() {
+    for tld in [
+        "test",
+        "Test.",
+        "internal",
+        "dev.internal",
+        "home.arpa",
+        "lab.home.arpa",
+        "dev.localhost",
+    ] {
+        for resolver in ["resolver", "localhost"] {
+            parse_user(&format!(
+                "hostnames: {{ resolver: {resolver}, tld: '{tld}' }}"
+            ))
+            .unwrap_or_else(|error| panic!("{tld} with {resolver}: {}", error.message));
+        }
+    }
+    for tld in [
+        "dev",
+        "local",
+        "localhost",
+        "com",
+        "test.com",
+        "contest",
+        "a..test",
+        "-x.test",
+        "x_y.test",
+        "123",
+    ] {
+        for resolver in ["resolver", "localhost"] {
+            let source = format!("hostnames:\n  resolver: {resolver}\n  tld: '{tld}'\n");
+            let error = parse_user(&source).expect_err(&source);
+            assert!(
+                error.message.starts_with("hostnames.tld: `"),
+                "{source}: {}",
+                error.message
+            );
+            assert_eq!(error.location.line, 3, "{source}: {}", error.message);
+        }
+    }
+    assert!(
+        parse_user("hostnames: { tld: dev }")
+            .expect_err("public TLD")
+            .message
+            .contains("must be test, internal or home.arpa")
+    );
+    assert!(
+        parse_user("hostnames: { resolver: resolver, tld: '' }")
+            .expect_err("empty")
+            .message
+            .contains("required for the resolver strategy")
+    );
+    let (config, issues) = parse_user_lenient(
+        "config.yaml",
+        "hostnames:\n  tld: dev\n  hosts_file: never\n",
+    );
+    assert_eq!(config.hostnames.tld, None);
+    assert!(matches!(
+        config.hostnames.hosts_file,
+        Some(HostsFile::Never)
+    ));
+    assert_eq!(issues.len(), 1, "{issues:?}");
+}
+
 /// Startup pacing parses typed percentages and derives windows from the core count.
 #[test]
 fn startup_settings() {
@@ -489,7 +585,7 @@ fn startup_settings() {
 fn local_error_location() {
     let error = parse_project(
         "project: demo\nservices:\n  api: { run: server }\n",
-        Some("services:\n  api:\n    run: other\n    run_script: package.json#dev\n"),
+        Some("services:\n  api:\n    run: other\n    run_script: { file: package.json, name: dev }\n"),
     )
     .expect_err("conflicting command");
     assert_eq!(error.location.file, "devlanes.local.yaml");
@@ -524,7 +620,7 @@ fn nested_map_and_empty_list_overrides() {
 /// The caller can resolve lane/env graphs and then evaluate typed service fields.
 #[test]
 fn typed_runtime_evaluation() {
-    let config = parse_project("project: demo\nlanes:\n  vars:\n    url: 'http://${{ lane.host }}'\n    host: localhost\nservices:\n  api:\n    run: 'server --port ${{ self.port }}'\n    replicas: '${{ lane.index + 1 }}'\n    env: { URL: '${{ lane.url }}' }\n",None).expect("config");
+    let config = parse_project("project: demo\nlanes:\n  vars:\n    url: 'http://${{ lane.host }}'\n    host: localhost\nservices:\n  api:\n    run: 'server --port ${{ self.port }}'\n    autostart: '${{ lane.index == 1 }}'\n    env: { URL: '${{ lane.url }}' }\n",None).expect("config");
     let mut context = ExpressionContext {
         lane: json!({"index":1}),
         service: json!({"port":20001}),
@@ -536,7 +632,7 @@ fn typed_runtime_evaluation() {
         context.lane[name] = serde_json::to_value(value).expect("scalar");
     }
     let service = evaluate_typed(&config.services["api"], &context).expect("typed service");
-    assert_eq!(service.replicas, Some(Templated::Literal(2)));
+    assert_eq!(service.autostart, Some(Templated::Literal(true)));
     assert_eq!(
         service.env["URL"],
         Templated::Literal(Scalar::String("http://localhost".into()))
@@ -547,6 +643,51 @@ fn typed_runtime_evaluation() {
         evaluate_env(&env, &context).expect("outer env")["B"].to_string(),
         "outer-suffix"
     );
+}
+
+/// `hosts` takes one hostname or route as well as a list, and validates either form.
+#[test]
+fn single_host_shorthand() {
+    let config = parse_project(
+        "project: demo\nservices:\n  api: { run: server, hosts: 'api.${{ lane.domain }}' }\n  web: { run: server, hosts: { host: web.localhost, fallback: true } }\n  docs: { run: server, hosts: [docs.localhost, { host: '*.docs.localhost' }] }\n",
+        None,
+    )
+    .expect("config");
+    let hosts = |name: &str| config.services[name].hosts.clone().expect("hosts");
+    assert!(
+        matches!(&hosts("api")[..], [HostConfig::Name(Templated::Expression(text))] if text == "api.${{ lane.domain }}")
+    );
+    assert!(matches!(&hosts("web")[..], [HostConfig::Route(route)] if route.fallback.is_some()));
+    assert_eq!(hosts("docs").len(), 2);
+    let context = ExpressionContext {
+        lane: json!({"domain": "demo.localhost"}),
+        ..Default::default()
+    };
+    let api = evaluate_typed(&config.services["api"], &context).expect("typed service");
+    assert!(
+        matches!(&api.hosts.expect("hosts")[..], [HostConfig::Name(Templated::Literal(host))] if host == "api.demo.localhost")
+    );
+    assert!(
+        parse_project(
+            "project: demo\nservices:\n  api: { run: server, hosts: bad_host }\n",
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        parse_project(
+            "project: demo\nservices:\n  api: { run: server, hosts: 3 }\n",
+            None
+        )
+        .is_err()
+    );
+    assert!(parse_project("project: demo\nservices:\n  api: { run: server, hosts: { host: a.localhost, prot: x } }\n", None).is_err());
+    let infra = parse_project(
+        "project: demo\ninfra:\n  containers:\n    s3: { image: s3mock, ports: { http: 9090 } }\n  hosts: { s3: s3.localhost }\n",
+        None,
+    )
+    .expect("infra config");
+    assert_eq!(infra.infra.hosts["s3"].len(), 1);
 }
 
 /// Outer env references do not create sibling cycles; fixed port capacity remains checked.
@@ -613,7 +754,7 @@ fn schema_parser_type_agreement() {
     let validator = jsonschema::validator_for(&schema).expect("schema");
     for value in [
         json!({"services":{"api":{"run":"server","autostart":true,"replicas":2}}}),
-        json!({"services":{"api":{"run":"server","replicas":"${{ lane.index + 1 }}"}}}),
+        json!({"services":{"api":{"run":"server","autostart":"${{ lane.index == 0 }}"}}}),
         json!({"services":{"api":{"preset":"wrangler","wrangler":{"vars":{"COUNT":3},"args":["--local"]}}}}),
     ] {
         assert!(validator.is_valid(&value), "schema rejected {value}");
@@ -624,6 +765,7 @@ fn schema_parser_type_agreement() {
         json!({"services":{"api":{"wrangler":{"unknown":true}}}}),
         json!({"services":{"api":{"tauri":{"identifier":42}}}}),
         json!({"services":{"api":{"replicas":false}}}),
+        json!({"services":{"api":{"replicas":"${{ lane.index + 1 }}"}}}),
     ] {
         assert!(!validator.is_valid(&value), "schema accepted {value}");
     }
@@ -707,7 +849,7 @@ impl Extensions for TestExtensions {
 /// Extension registration controls parsing and schema without core/integration dependencies.
 #[test]
 fn custom_extension_seam() {
-    let source = "project: demo\nservices:\n  api:\n    run: server\n    custom: { flag: true }\n    preset: custom\n";
+    let source = "project: demo\nservices:\n  api:\n    run_script: { file: package.json, name: dev }\n    custom: { flag: true }\n    preset: custom\n";
     let config = parse_project_with::<TestExtensions>(source, None).expect("custom preset");
     assert_eq!(
         config.services["api"].preset_options["custom"].flag,
@@ -723,10 +865,10 @@ fn custom_extension_seam() {
     assert!(parse_project(source, None).is_ok());
 }
 
-/// Profile remapping applies once to service script names and preserves both source syntaxes.
+/// Profile remapping applies once to service script names and keeps the file.
 #[test]
 fn profile_script_remapping() {
-    let source = "project: demo\ntasks:\n  build: { run: pnpm build, when: lane.start, profiles: [e2e] }\nservices:\n  api: { run_script: 'apps/api/package.json#dev' }\nprofiles:\n  e2e:\n    include: [api]\n    run_scripts: { dev: start, start: production }\n    env: { NODE_ENV: production }\n";
+    let source = "project: demo\ntasks:\n  build: { run: pnpm build, when: lane.start, profiles: [e2e] }\nservices:\n  api: { run_script: { file: apps/api/package.json, name: dev } }\nprofiles:\n  e2e:\n    include: [api]\n    run_scripts: { dev: start, start: production }\n    env: { NODE_ENV: production }\n";
     let local = "profiles:\n  e2e:\n    run_scripts: { watch: serve }\n";
     let config = parse_project(source, Some(local)).expect("e2e profile");
     let ProfileConfig::Object(profile) = &config.profiles["e2e"] else {
@@ -738,22 +880,21 @@ fn profile_script_remapping() {
     let script = config.services["api"].run_script.as_ref().expect("script");
     assert_eq!(
         script
-            .source_and_name_for_profile(Some(profile))
+            .file_and_name_for_profile(Some(profile))
             .expect("remapped"),
         ("apps/api/package.json", "start")
     );
     assert_eq!(
-        script.source_and_name_for_profile(None).expect("unmapped"),
+        script.file_and_name_for_profile(None).expect("unmapped"),
         ("apps/api/package.json", "dev")
     );
-    let object = RunScript::Object(ScriptSource {
-        source: "Makefile".into(),
+    let make = RunScript {
+        file: "Makefile".into(),
         name: "dev".into(),
-    });
+    };
     assert_eq!(
-        object
-            .source_and_name_for_profile(Some(profile))
-            .expect("object remapped"),
+        make.file_and_name_for_profile(Some(profile))
+            .expect("make remapped"),
         ("Makefile", "start")
     );
     assert_eq!(config.tasks["build"].when, Some(TaskWhen::Start));
@@ -775,7 +916,7 @@ fn profile_script_remapping() {
 /// Integration-owned fields survive loading, merging, and evaluation as JSON objects.
 #[test]
 fn opaque_preset_options_and_registry_validation() {
-    let source = "project: demo\nservices:\n  worker:\n    preset: wrangler\n    run: server\n    wrangler:\n      isolate_registry: false\n      vars: { COUNT: '${{ lane.index }}' }\n  desktop:\n    preset: tauri\n    run: server\n    tauri: { product_name: Demo, before_dev_command: '' }\n  web:\n    preset: vite\n    run: server\n    vite: { args: [--open] }\n  next:\n    preset: next\n    run: server\n    next: { args: [--turbo] }\n";
+    let source = "project: demo\nservices:\n  worker:\n    preset: wrangler\n    run_script: { file: package.json, name: dev }\n    wrangler:\n      isolate_registry: false\n      vars: { COUNT: '${{ lane.index }}' }\n  desktop:\n    preset: tauri\n    run_script: { file: package.json, name: dev }\n    tauri: { product_name: Demo, before_dev_command: '' }\n  web:\n    preset: vite\n    run_script: { file: package.json, name: dev }\n    vite: { args: [--open] }\n  next:\n    preset: next\n    run_script: { file: package.json, name: dev }\n    next: { args: [--turbo] }\n";
     let config = parse_project(source, None).expect("opaque options");
     assert_eq!(
         config.services["worker"].preset_options["wrangler"]["isolate_registry"],
@@ -799,7 +940,7 @@ fn opaque_preset_options_and_registry_validation() {
     .expect("evaluated JSON");
     assert_eq!(options["vars"]["COUNT"], 3);
 
-    let custom = parse_project("project: demo\ntemplates:\n  base:\n    preset: custom\n    custom: { nested: { keep: true, replace: old }, args: [old] }\nservices:\n  api:\n    extends: base\n    run: server\n    custom: { nested: { replace: new }, args: [] }\n",None).expect("unregistered preset before integration validation");
+    let custom = parse_project("project: demo\ntemplates:\n  base:\n    preset: custom\n    custom: { nested: { keep: true, replace: old }, args: [old] }\nservices:\n  api:\n    extends: base\n    run_script: { file: package.json, name: dev }\n    custom: { nested: { replace: new }, args: [] }\n",None).expect("unregistered preset before integration validation");
     assert_eq!(
         custom.services["api"].preset_options["custom"],
         json!({"nested":{"keep":true,"replace":"new"},"args":[]})
@@ -811,7 +952,7 @@ fn opaque_preset_options_and_registry_validation() {
             .starts_with("services.api.preset: unregistered preset `custom`")
     );
     let invalid = parse_project(
-        "project: demo\nservices:\n  api: { preset: vite, run: server, vite: { unknown: true } }\n",
+        "project: demo\nservices:\n  api: { preset: vite, run_script: { file: package.json, name: dev }, vite: { unknown: true } }\n",
         None,
     )
     .expect("options deferred");
@@ -821,7 +962,7 @@ fn opaque_preset_options_and_registry_validation() {
     assert!(error.message.contains("unknown"));
 
     let absent = parse_project(
-        "project: demo\nservices:\n  api: { preset: custom, run: server }\n",
+        "project: demo\nservices:\n  api: { preset: custom, run_script: { file: package.json, name: dev } }\n",
         None,
     )
     .expect("no options");
@@ -838,17 +979,17 @@ fn opaque_preset_options_and_registry_validation() {
 fn preset_block_diagnostics() {
     for value in ["42", "[]", "null", "text"] {
         let source = format!(
-            "project: demo\nservices:\n  api:\n    preset: custom\n    run: server\n    custom: {value}\n"
+            "project: demo\nservices:\n  api:\n    preset: custom\n    run_script: {{ file: package.json, name: dev }}\n    custom: {value}\n"
         );
         let error = parse_project(&source, None).expect_err("options must be mapping");
         assert!(error.message.contains("map"));
         assert_eq!(error.location.line, 6);
     }
-    let source = "project: demo\nservices:\n  api:\n    preset: vite\n    run: server\n    next: { args: [] }\n";
+    let source = "project: demo\nservices:\n  api:\n    preset: vite\n    run_script: { file: package.json, name: dev }\n    next: { args: [] }\n";
     let error = parse_project(source, None).expect_err("mismatched preset key");
     assert!(error.message.contains("services.api.next"));
     assert_eq!(error.location.line, 6);
-    let source = "project: demo\nservices:\n  api:\n    custom: { nested: true }\n    run: server\n    preset: custom\n";
+    let source = "project: demo\nservices:\n  api:\n    custom: { nested: true }\n    run_script: { file: package.json, name: dev }\n    preset: custom\n";
     assert!(
         parse_project(source, None).is_ok(),
         "key order must not matter"

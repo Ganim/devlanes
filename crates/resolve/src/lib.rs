@@ -11,7 +11,7 @@
 //! 3. [`resolve_lane`] with the block, offsets, infra endpoints and the client env.
 //!
 //! [`lane_layout`] is the synchronous subset (ports, URLs, routes) for idle lanes,
-//! routing tables and the `lanes.main.svc` namespace of lane 0.
+//! routing tables and the `lanes.main.services` namespace of lane 0.
 
 mod error;
 mod facts;
@@ -23,10 +23,12 @@ mod select;
 mod util;
 
 pub use error::ResolveError;
-pub use facts::{LaneFacts, branch_label, lane_name};
+pub use facts::{LANE_DATA_ENV, LaneFacts, branch_label, lane_name};
 pub use layout::{fixed_block_start, https_url, lane_layout, tag_colors};
 pub use model::*;
 pub use plan::{container_ready, detect_platform, resolve_lane};
 pub use ports::{PortNeeds, port_needs, port_unit, reserved_offsets};
-pub use select::{ProfileSummary, Selection, profile_summaries, select, select_profiles};
+pub use select::{
+    ProfileSummary, Selection, profile_summaries, retain_autostart, select, select_profiles,
+};
 pub use util::{public_url_env_key, shell_quote};

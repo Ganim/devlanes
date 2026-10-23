@@ -32,10 +32,8 @@ use tokio_util::sync::CancellationToken;
 /// timeouts with.
 pub async fn tui_options(paths: &Paths) -> devlanes_tui::Options {
     use std::io::IsTerminal;
-    // A config that does not load leaves the TUI on its detected defaults.
-    let tui = devlanes_config::load_user(paths.home.join("config.yaml"))
-        .map(|config| config.tui)
-        .unwrap_or_default();
+    // An invalid key leaves only that setting on its default, with a warning.
+    let tui = &crate::user_config::display(paths).tui;
     // The TUI is always human output; each feature still needs a terminal
     // that supports it.
     let features = devlanes_term::Features::detect(
@@ -80,7 +78,7 @@ pub async fn ui(paths: &Paths) -> Result<u8, RpcError> {
 
 /// Builds the daemon engine with every concrete integration. Integrations that
 /// cannot start (no Docker, no CA, a busy proxy port) degrade to reported errors
-/// instead of failing the daemon.
+/// instead of failing the daemon; an invalid user config fails it.
 pub async fn engine(
     paths: &Paths,
     shutdown: CancellationToken,
@@ -89,7 +87,7 @@ pub async fn engine(
         Ok(limit) => tracing::info!(?limit, "raised the open-file limit"),
         Err(error) => tracing::warn!(%error, "cannot raise the open-file limit"),
     }
-    let (user, user_config_errors) = load_user_config(&paths.home).await;
+    let user = load_user_config(&paths.home).await?;
     let (hosts_policy, hosts_tld) = devlanes_daemon::hosts::user_policy(&user);
     // The probe can wait on upstream DNS, so it runs while the store, CA and proxy start.
     let hosts_probe = (hosts_policy.user_mode() != devlanes_resolver_hosts::HostsFileMode::Never)
@@ -136,7 +134,6 @@ pub async fn engine(
     options.db_path = paths.db.clone();
     options.logs = paths.logs.clone();
     options.user = user;
-    options.user_config_errors = user_config_errors;
     let engine: Arc<dyn Handler> = Arc::new(Engine::new(options, store, integ, shutdown));
     Ok(engine)
 }
@@ -191,32 +188,20 @@ async fn hosts_file(
     ))
 }
 
-/// `~/.devlanes/config.yaml`, or defaults when absent or invalid (logged).
-async fn load_user_config(home: &Path) -> (devlanes_config::UserConfig, Vec<Value>) {
+/// `~/.devlanes/config.yaml`, or defaults when the file is absent. An invalid file stops
+/// the daemon from starting: running with silently defaulted settings (another CA, other
+/// ports) surprises more than an error naming the line to fix. The error is one
+/// `USER_CONFIG_INVALID:` line, which the spawning CLI turns back into a `config_error`.
+async fn load_user_config(home: &Path) -> anyhow::Result<devlanes_config::UserConfig> {
     let path = home.join("config.yaml");
     tokio::task::spawn_blocking(move || {
         if !path.exists() {
-            return (devlanes_config::UserConfig::default(), Vec::new());
+            return Ok(devlanes_config::UserConfig::default());
         }
-        // A bad key falls back to its default alone; `daemon status` and doctor
-        // list what was left out.
-        let (config, errors) = devlanes_config::load_user_lenient(&path);
-        let located: Vec<Value> = errors
-            .iter()
-            .map(|error| {
-                tracing::warn!(error = %error.message, "user config setting ignored");
-                json!({
-                    "message": error.message,
-                    "file": error.location.file,
-                    "line": error.location.line,
-                    "column": error.location.column,
-                })
-            })
-            .collect();
-        (config, located)
+        devlanes_config::load_user(&path)
+            .map_err(|error| anyhow::anyhow!(crate::user_config::startup_reason(&error)))
     })
-    .await
-    .unwrap_or_default()
+    .await?
 }
 
 /// Platform, env-manager and preset contributors (priority orders them).
@@ -2055,35 +2040,62 @@ mod tests {
             first.contains("devlanes daemon reset-state --yes"),
             "{message}"
         );
-        assert!(first.len() < 127, "fits the readiness line");
+        assert!(
+            (first.len() as u64) < devlanes_client::READY_LINE_LIMIT,
+            "fits the readiness line"
+        );
         assert!(message.contains(&db.display().to_string()));
     }
 
     #[tokio::test]
-    /// A bad user config key falls back to its default alone and keeps the
-    /// located error for `daemon status` and `doctor`; a missing file is no error.
-    async fn invalid_user_config_is_kept_for_doctor() {
+    /// A missing user config means defaults; an invalid one stops the daemon with
+    /// one coded line that the spawning CLI turns into the same `config_error` a
+    /// strict load gives (file, line, column, whole message), instead of running
+    /// on defaults.
+    async fn invalid_user_config_refuses_to_start() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (_, errors) = load_user_config(tmp.path()).await;
-        assert!(errors.is_empty(), "no file, no error");
+        // Temp folders are short on Linux (`/tmp/.tmpXXXX`); a long home makes the
+        // line longer than the old 126-byte cut on every platform.
+        let home = tmp
+            .path()
+            .join("a-devlanes-home-long-enough-to-pass-the-old-readiness-cut");
+        std::fs::create_dir(&home).expect("home");
+        let user = load_user_config(&home).await.expect("no file, defaults");
+        assert_eq!(
+            user.proxy.https_port,
+            devlanes_config::UserConfig::default().proxy.https_port
+        );
+        let path = home.join("config.yaml");
         std::fs::write(
-            tmp.path().join("config.yaml"),
+            &path,
             "proxy:\n  http_port: [not, a, port]\n  https_port: 9443\n",
         )
         .expect("config");
-        let (user, errors) = load_user_config(tmp.path()).await;
-        assert_eq!(user.proxy.https_port, 9443, "the valid key stays");
-        let error = errors.first().expect("error kept");
-        assert!(!error["message"].as_str().unwrap_or_default().is_empty());
-        assert_eq!(error["line"], 2, "{error}");
+        let message = load_user_config(&home)
+            .await
+            .expect_err("invalid config refused")
+            .to_string();
+        assert!(message.starts_with("USER_CONFIG_INVALID: "), "{message}");
+        assert!(!message.contains('\n'), "one readiness line: {message}");
+        // Longer than the old 126-byte cut, still whole within the client's bound.
+        assert!(message.len() > 126, "{message}");
         assert!(
-            error["file"]
-                .as_str()
-                .is_some_and(|file| file.ends_with("config.yaml"))
+            (message.len() as u64) < devlanes_client::READY_LINE_LIMIT,
+            "{message}"
         );
-        assert_eq!(
-            user.proxy.http_port,
-            devlanes_config::UserConfig::default().proxy.http_port
+        // What the spawning client turns the line into.
+        let error = devlanes_client::user_config_startup_error(&message).expect("parsed line");
+        let paths = Paths::new(&home).expect("paths");
+        let strict = crate::user_config::load(&paths)
+            .await
+            .expect_err("strict load refuses it too");
+        assert_eq!(error, strict, "{message}");
+        assert_eq!((error.code.as_str(), error.exit_code), ("config_error", 1));
+        assert_eq!(error.data["file"], path.display().to_string());
+        assert_eq!(error.data["line"], 2);
+        assert!(
+            error.data["column"].as_u64().is_some_and(|c| c > 0),
+            "{error:?}"
         );
     }
 
@@ -2125,7 +2137,9 @@ mod tests {
 
     #[tokio::test]
     /// The offline reset refuses while a daemon holds the lock, then moves the
-    /// legacy database and its sidecars aside (never deleting) so a fresh store opens.
+    /// legacy database and its sidecars aside (never deleting) so a fresh store
+    /// opens, and the project data folders with them, leaving whatever else the
+    /// data folder holds.
     async fn offline_reset_moves_a_legacy_database_aside() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().join("home");
@@ -2144,16 +2158,26 @@ mod tests {
         // Written after the failed open, which discards an invalid WAL.
         std::fs::write(home.join("state.db-wal"), b"wal").expect("wal");
         assert_eq!(crate::daemon::state_files(&db).len(), 2);
+        // `lanes.data_dir` may name a folder that also holds other things.
+        let data = tmp.path().join("lanes");
+        for folder in ["acme/1", "acme/3", "photos/beach", "empty"] {
+            std::fs::create_dir_all(data.join(folder)).expect("folder");
+        }
+        std::fs::write(data.join("acme/1/dump.sql"), "rows").expect("lane file");
+        std::fs::write(data.join("notes.txt"), "notes").expect("file");
 
         let daemon = devlanes_daemon::lock_singleton(&home).expect("daemon lock");
-        let refused = crate::daemon::move_state_aside(&home, &db, "20261021T150405Z")
+        let refused = crate::daemon::move_state_aside(&home, &db, &data, "20261021T150405Z")
             .expect_err("a running daemon keeps its state");
         assert_eq!(refused.code, "daemon_running");
         assert!(db.exists(), "nothing moved");
+        assert!(data.join("acme/1").exists(), "nothing moved");
         drop(daemon);
 
-        let moved = crate::daemon::move_state_aside(&home, &db, "20261021T150405Z").expect("moved");
+        let moved =
+            crate::daemon::move_state_aside(&home, &db, &data, "20261021T150405Z").expect("moved");
         let aside = home.join("state.db.legacy-20261021T150405Z");
+        let data_aside = data.join(".legacy-20261021T150405Z");
         assert_eq!(
             moved,
             [
@@ -2162,14 +2186,23 @@ mod tests {
                     home.join("state.db-wal"),
                     home.join("state.db.legacy-20261021T150405Z-wal")
                 ),
+                (data.join("acme"), data_aside.join("acme")),
             ]
         );
         assert_eq!(std::fs::read(&aside).expect("kept"), legacy);
         assert!(crate::daemon::state_files(&db).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(data_aside.join("acme/1/dump.sql")).expect("kept"),
+            "rows"
+        );
+        assert!(data_aside.join("acme/3").is_dir());
+        for kept in ["photos/beach", "empty", "notes.txt"] {
+            assert!(data.join(kept).exists(), "{kept} stays");
+        }
 
         // A second reset in the same second must not overwrite the first.
         std::fs::write(&db, &legacy).expect("db again");
-        let clash = crate::daemon::move_state_aside(&home, &db, "20261021T150405Z")
+        let clash = crate::daemon::move_state_aside(&home, &db, &data, "20261021T150405Z")
             .expect_err("target exists");
         assert!(db.exists() && aside.exists());
         assert!(

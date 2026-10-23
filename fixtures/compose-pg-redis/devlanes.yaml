@@ -22,4 +22,6 @@ services:
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/app
       # One Redis database per lane in the shared server.
       REDIS_URL: redis://127.0.0.1:${{ infra.redis.port }}/${{ lane.index }}
-    ready: { http: { path: /healthz } }
+    ready:
+      http:
+        path: /healthz

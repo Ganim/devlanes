@@ -18,6 +18,7 @@ mod progress;
 mod remote;
 mod start_ui;
 mod terminal;
+mod user_config;
 mod verbose;
 mod wiring;
 

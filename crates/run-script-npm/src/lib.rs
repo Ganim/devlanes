@@ -8,8 +8,8 @@
 //!
 //! Each manager's argv and `--` rules live in its own module (`npm`, `pnpm`,
 //! `yarn`, `bun`). [`NpmScripts`] adapts [`plan`] to
-//! `devlanes_core::contrib::ScriptRunner`, and [`forward_args`] is the helper
-//! presets use to add arguments to a draft.
+//! `devlanes_core::contrib::ScriptRunner`, which places preset arguments after
+//! the script name with the separator the manager needs.
 
 mod adapter;
 mod bun;
@@ -19,7 +19,7 @@ mod npm;
 mod pnpm;
 mod yarn;
 
-pub use adapter::{NpmScripts, forward_args, needs_npm_separator};
+pub use adapter::NpmScripts;
 pub use detect::{Detection, DetectionSource, detect_package_manager};
 pub use manager::PackageManager;
 pub use yarn::{YarnLinker, linker as yarn_linker};

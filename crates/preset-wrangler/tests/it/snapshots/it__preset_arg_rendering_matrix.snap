@@ -5,20 +5,20 @@ expression: rendered
 Npm x vite: npm run dev -- --port 20012 --strictPort --host 127.0.0.1
 Npm x next: npm run dev -- --port 20013 --hostname 127.0.0.1
 Npm x wrangler: npm run dev -- --port 20010 --inspector-port 20011 --var PUBLIC_BASE_URL:https://api.acme-1.localhost --env-file .dev.vars
-Npm x tauri: npm run dev -- --config /lanes/acme-1/.devlanes/tauri/desktop.1.conf.json
+Npm x tauri: npm run dev -- --config /data/acme/7/tauri/desktop.1.conf.json
 Pnpm x vite: pnpm run dev --port 20012 --strictPort --host 127.0.0.1
 Pnpm x next: pnpm run dev --port 20013 --hostname 127.0.0.1
 Pnpm x wrangler: pnpm run dev --port 20010 --inspector-port 20011 --var PUBLIC_BASE_URL:https://api.acme-1.localhost --env-file .dev.vars
-Pnpm x tauri: pnpm run dev --config /lanes/acme-1/.devlanes/tauri/desktop.1.conf.json
+Pnpm x tauri: pnpm run dev --config /data/acme/7/tauri/desktop.1.conf.json
 YarnClassic x vite: yarn run dev --port 20012 --strictPort --host 127.0.0.1
 YarnClassic x next: yarn run dev --port 20013 --hostname 127.0.0.1
 YarnClassic x wrangler: yarn run dev --port 20010 --inspector-port 20011 --var PUBLIC_BASE_URL:https://api.acme-1.localhost --env-file .dev.vars
-YarnClassic x tauri: yarn run dev --config /lanes/acme-1/.devlanes/tauri/desktop.1.conf.json
+YarnClassic x tauri: yarn run dev --config /data/acme/7/tauri/desktop.1.conf.json
 YarnBerry x vite: yarn run dev --port 20012 --strictPort --host 127.0.0.1
 YarnBerry x next: yarn run dev --port 20013 --hostname 127.0.0.1
 YarnBerry x wrangler: yarn run dev --port 20010 --inspector-port 20011 --var PUBLIC_BASE_URL:https://api.acme-1.localhost --env-file .dev.vars
-YarnBerry x tauri: yarn run dev --config /lanes/acme-1/.devlanes/tauri/desktop.1.conf.json
+YarnBerry x tauri: yarn run dev --config /data/acme/7/tauri/desktop.1.conf.json
 Bun x vite: bun run dev --port 20012 --strictPort --host 127.0.0.1
 Bun x next: bun run dev --port 20013 --hostname 127.0.0.1
 Bun x wrangler: bun run dev --port 20010 --inspector-port 20011 --var PUBLIC_BASE_URL:https://api.acme-1.localhost --env-file .dev.vars
-Bun x tauri: bun run dev --config /lanes/acme-1/.devlanes/tauri/desktop.1.conf.json
+Bun x tauri: bun run dev --config /data/acme/7/tauri/desktop.1.conf.json

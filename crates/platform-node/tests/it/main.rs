@@ -14,6 +14,7 @@ use devlanes_platform_node::{CloudflareContributor, NodeContributor, REGISTRY_EN
 /// Owned data behind a [`ContribCx`].
 struct Fixture {
     lane: PathBuf,
+    data: PathBuf,
     client: BTreeMap<String, String>,
     ca: BTreeMap<String, String>,
     ports: BTreeMap<String, u16>,
@@ -25,6 +26,7 @@ impl Fixture {
     fn new(lane: PathBuf) -> Self {
         Self {
             lane,
+            data: PathBuf::from("/data/acme/3"),
             client: BTreeMap::new(),
             ca: BTreeMap::from([(CA_CERT_ENV.to_owned(), "/ca/root.pem".to_owned())]),
             ports: BTreeMap::new(),
@@ -42,6 +44,7 @@ impl Fixture {
             lane_index: 1,
             lane_name: "lane1",
             lane_path: &self.lane,
+            lane_data_path: &self.data,
             primary_path: &self.lane,
             platform,
             preset: None,
@@ -176,13 +179,16 @@ async fn cloudflare_registry() {
         .apply(&mut found, &fixture.cx(Some("python")))
         .await
         .expect("apply");
-    assert_eq!(
-        found.env[REGISTRY_ENV],
-        dir.path()
-            .join(".devlanes/wrangler-registry")
-            .display()
-            .to_string()
-    );
+    assert_eq!(found.env[REGISTRY_ENV], "/data/acme/3/wrangler-registry");
+    // A second lane on the same folder gets its own registry.
+    let mut other = Fixture::new(dir.path().to_path_buf());
+    other.data = PathBuf::from("/data/acme/4");
+    let mut second = draft();
+    CloudflareContributor
+        .apply(&mut second, &other.cx(None))
+        .await
+        .expect("apply");
+    assert_eq!(second.env[REGISTRY_ENV], "/data/acme/4/wrangler-registry");
     // Cached per lane: removing the file does not change this resolution.
     std::fs::remove_file(dir.path().join("apps/gateway/wrangler.jsonc")).expect("remove");
     let mut cached = draft();

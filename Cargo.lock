@@ -1338,7 +1338,6 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
- "devlanes-run-script-npm",
  "insta",
  "schemars",
  "serde",
@@ -1352,7 +1351,6 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
- "devlanes-run-script-npm",
  "insta",
  "schemars",
  "serde",
@@ -1368,7 +1366,6 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "devlanes-core",
- "devlanes-run-script-npm",
  "insta",
  "schemars",
  "serde",

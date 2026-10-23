@@ -41,7 +41,10 @@ expression: "parse_project(MINIMAL, None).expect(\"minimal reference\")"
   "tasks": {
     "migrate": {
       "run": null,
-      "run_script": "api/package.json#migrate",
+      "run_script": {
+        "file": "api/package.json",
+        "name": "migrate"
+      },
       "cwd": null,
       "env": {},
       "fnox": null,
@@ -57,19 +60,21 @@ expression: "parse_project(MINIMAL, None).expect(\"minimal reference\")"
   },
   "services": {
     "api": {
-      "run_script": "api/package.json#dev",
-      "hosts": [
-        "api.${{ lane.domain }}"
-      ]
+      "run_script": {
+        "file": "api/package.json",
+        "name": "dev"
+      },
+      "hosts": "api.${{ lane.domain }}"
     },
     "web": {
-      "run_script": "web/package.json#dev",
+      "run_script": {
+        "file": "web/package.json",
+        "name": "dev"
+      },
       "preset": "vite",
-      "hosts": [
-        "${{ lane.domain }}"
-      ],
+      "hosts": "${{ lane.domain }}",
       "env": {
-        "VITE_API_URL": "${{ svc.api.public_url }}"
+        "VITE_API_URL": "${{ services.api.public_url }}"
       }
     }
   },

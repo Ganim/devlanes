@@ -197,7 +197,7 @@ fn command_options(command: InfraCommand) -> InfraCommandOptions {
     }
 }
 
-/// Merge named infra commands per key; shorthand counts as `run`, which clears `run_script`.
+/// Merge named infra commands per key; shorthand counts as `run`.
 fn merge_command(base: &mut InfraCommand, overlay: InfraCommand) {
     if matches!(
         (&*base, &overlay),
@@ -210,18 +210,7 @@ fn merge_command(base: &mut InfraCommand, overlay: InfraCommand) {
         base,
         InfraCommand::Object(Box::default()),
     ));
-    let mut overlay = command_options(overlay);
-    if overlay.run.is_some() {
-        merged.run_script = None;
-    }
-    if overlay.run_script.is_some() {
-        merged.run = None;
-    }
-    merge_option(
-        &mut merged.run_script,
-        overlay.run_script.take(),
-        merge_script,
-    );
+    let overlay = command_options(overlay);
     replace!(merged, overlay, run, container, ignore_errors, cwd, timeout);
     merged.env.extend(overlay.env);
     *base = InfraCommand::Object(Box::new(merged));
@@ -316,18 +305,13 @@ pub(crate) fn merge_ready(base: &mut crate::ReadyConfig, overlay: crate::ReadyCo
     }
 }
 
-/// Merge `{ source, name }` per key; the `file#name` shorthand replaces the whole selection.
+/// Merge `{ file, name }` per key; a key the overlay leaves out keeps the base value.
 pub(crate) fn merge_script(base: &mut crate::RunScript, overlay: crate::RunScript) {
-    match (base, overlay) {
-        (crate::RunScript::Object(base), crate::RunScript::Object(overlay)) => {
-            if !overlay.source.is_empty() {
-                base.source = overlay.source;
-            }
-            if !overlay.name.is_empty() {
-                base.name = overlay.name;
-            }
-        }
-        (base, overlay) => *base = overlay,
+    if !overlay.file.is_empty() {
+        base.file = overlay.file;
+    }
+    if !overlay.name.is_empty() {
+        base.name = overlay.name;
     }
 }
 
@@ -455,6 +439,20 @@ pub(crate) fn parse_yaml<T: DeserializeOwned>(file: &str, source: &str) -> Resul
         });
         // Miette owns source rendering and the location, so drop serde-saphyr's own copies.
         let mut message = strip_location(&error.without_snippet().to_string()).to_owned();
+        // serde-saphyr names a scalar that does not parse by its Rust type alone.
+        if let Some(ty) = message
+            .strip_prefix("invalid ")
+            .filter(|ty| matches!(*ty, "u16" | "u32" | "u64" | "i64" | "f64"))
+        {
+            message = format!("invalid value, expected {ty}");
+        }
+        message = crate::scalar::plain_type_names(&message);
+        // Templated settings take an expression before decoding, so one failing here
+        // sits in a setting that takes only a plain value, such as `replicas`.
+        let value = source.get(offset..).unwrap_or_default();
+        if value.trim_start_matches(['\'', '"']).starts_with("${{") {
+            message.push_str("; this setting takes a plain value, not a `${{ ... }}` expression");
+        }
         if let Some((_, unknown)) = message.split_once("unknown field `")
             && let Some((key, expected)) = unknown.split_once('`')
             && let Some(hint) = unknown_key_hint(key, expected)
@@ -512,10 +510,15 @@ fn unknown_key_hint(key: &str, expected: &str) -> Option<String> {
         .trim_start()
         .trim_start_matches("expected ")
         .trim_start_matches("one of ");
-    expected
+    let names = expected
         .split(", ")
         .map(|name| name.trim().trim_matches('`'))
-        .filter(|name| !name.is_empty() && !name.contains(' '))
+        .filter(|name| !name.is_empty() && !name.contains(' '));
+    // 0.2 named the `run_script` file `source`, too far from `file` for the typo match.
+    if key == "source" && names.clone().eq(["file", "name"]) {
+        return Some("unknown key `source`; `source` is now `file`".into());
+    }
+    names
         .max_by(|a, b| strsim::jaro_winkler(key, a).total_cmp(&strsim::jaro_winkler(key, b)))
         .filter(|name| strsim::jaro_winkler(key, name) > 0.75)
         .map(|name| format!("unknown key `{key}`; did you mean `{name}`?"))

@@ -2,11 +2,11 @@
 source: crates/config/tests/it/main.rs
 expression: output
 ---
-  × services.web.env.URL: `svc.crm-api.url` reads as `svc.crm - api.url`; write
-  │ `svc['crm-api'].url` or `svc.crm_api.url` for a dashed name
+  × services.web.env.URL: `services.crm-api.url` reads as `services.crm - api.url`;
+  │ write `services['crm-api'].url` or `services.crm_api.url` for a dashed name
    ╭─[devlanes.yaml:6:17]
  5 │     run: server
- 6 │     env: { URL: '${{ svc.crm-api.url }}' }
+ 6 │     env: { URL: '${{ services.crm-api.url }}' }
    ·                 ┬
-   ·                 ╰── services.web.env.URL: `svc.crm-api.url` reads as `svc.crm - api.url`; write `svc['crm-api'].url` or `svc.crm_api.url` for a dashed name
+   ·                 ╰── services.web.env.URL: `services.crm-api.url` reads as `services.crm - api.url`; write `services['crm-api'].url` or `services.crm_api.url` for a dashed name
    ╰────

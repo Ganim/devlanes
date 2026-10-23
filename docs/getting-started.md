@@ -19,15 +19,18 @@ project: acme
 services:
   api:
     run: pnpm --filter api dev
-    hosts: ["api.${{ lane.domain }}"]
+    hosts: "api.${{ lane.domain }}"
   web:
     preset: vite
-    run: pnpm --filter web dev
-    env: { VITE_API_URL: "${{ svc.api.public_url }}" }
-    hosts: ["${{ lane.domain }}"]
+    run_script:
+      file: web/package.json
+      name: dev
+    env:
+      VITE_API_URL: "${{ services.api.public_url }}"
+    hosts: "${{ lane.domain }}"
 ```
 
-devlanes gives every service a port from the lane's block and passes it as `PORT`. A service must listen on that port; `preset: vite` adds Vite's `--port` and `--host` flags for you. `lane.domain` is `acme.localhost` in lane 0 (the worktree on the primary branch) and `acme-<N>.localhost` in lane N. Expressions such as `${{ svc.api.public_url }}` are evaluated per lane, so the web app of lane 2 talks to the API of lane 2.
+devlanes gives every service a port from the lane's block and passes it as `PORT`. A service must listen on that port; `preset: vite` adds Vite's `--port` and `--host` flags for you. A preset needs `run_script`, which names a script in a project file; prefer it to `run` whenever the command is such a script ([run and run_script](guides/run-scripts.md)). `lane.domain` is `acme.localhost` in lane 0 (the worktree on the primary branch) and `acme-<N>.localhost` in lane N. Expressions such as `${{ services.api.public_url }}` are evaluated per lane, so the web app of lane 2 talks to the API of lane 2.
 
 `devlanes config check` validates the file and points at the line of any mistake. [examples/minimal.yaml](examples/minimal.yaml) adds shared Postgres with a database per lane, [examples/devlanes.yaml](examples/devlanes.yaml) shows every form, and the [config reference](reference/config.md) lists each field.
 
@@ -94,7 +97,7 @@ devlanes does not stream windows. A GUI tool that serves HTTP or TCP is an ordin
 services:
   ios-sim:
     run: npx serve-sim --port ${{ self.port }}
-    hosts: ["sim.${{ lane.domain }}"]
+    hosts: "sim.${{ lane.domain }}"
     autostart: false
 ```
 

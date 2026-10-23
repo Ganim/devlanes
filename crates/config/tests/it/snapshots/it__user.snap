@@ -13,6 +13,9 @@ expression: user
   "ports": {
     "range": "20000-32767"
   },
+  "lanes": {
+    "data_dir": "~/.devlanes/data"
+  },
   "tls": {
     "ca": "devlanes",
     "trust": [

@@ -48,10 +48,6 @@ pub struct EngineOptions {
     /// Where the embedded DNS server listens under the `resolver` hostname
     /// strategy; port 0 picks an ephemeral port (tests).
     pub dns_listen: std::net::SocketAddr,
-    /// Problems of the user config at load, each `{message, file, line, column}`;
-    /// the keys they name use their defaults in `user`, every other key its
-    /// value. `daemon status` shows them; `doctor` checks the file again.
-    pub user_config_errors: Vec<Value>,
     /// Release checks (see `update`); never downloads or installs anything.
     pub update_check: crate::update::UpdateCheckOptions,
 }
@@ -69,7 +65,6 @@ impl EngineOptions {
             watch: true,
             start_timeout: Duration::from_secs(180),
             dns_listen: devlanes_resolver_dns::default_listen(),
-            user_config_errors: Vec::new(),
             update_check: crate::update::UpdateCheckOptions::from_env(),
         }
     }
@@ -354,10 +349,10 @@ impl Inner {
                 "pid": std::process::id(),
                 "uptime_ms": self.started.elapsed().as_millis(),
                 "release_check": self.release_check(),
-                // As loaded at startup, so `daemon restart` shows what it applied.
+                // As loaded at startup, so `daemon restart` shows what it applied. A file
+                // with errors stops the daemon from starting, so only warnings remain.
                 "user_config": {
                     "path": self.opts.home.join("config.yaml"),
-                    "errors": self.opts.user_config_errors,
                     "warnings": self.opts.user.warnings(),
                 },
             }))),

@@ -120,6 +120,61 @@ async fn a_folder_can_hold_several_lanes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+/// Two lanes of one folder get different data folders under the devlanes home; each
+/// exists once its lane does, and `lane clean` deletes only the cleaned lane's.
+async fn lanes_of_one_folder_have_their_own_data_folders() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config = "project: demo\nservices:\n  worker:\n    run: \"echo ${{ lane.data_path }}; sleep\"\n    pty: false\n";
+        let main = repo(&tmp.path, "r", config);
+        let home = tmp.path.join("home");
+        let h = harness(&home, Setup::default()).await;
+        h.call(Method::LaneNew, json!({"name": "review"}), cx(&main))
+            .await
+            .expect("lane new");
+        start(&h, cx(&main), json!({})).await;
+        start(&h, on_lane(&main, "review"), json!({})).await;
+        let paths: Vec<std::path::PathBuf> = h
+            .runner
+            .journal
+            .entries()
+            .iter()
+            .filter_map(|script| script.strip_prefix("echo "))
+            .filter_map(|rest| rest.split(';').next())
+            .map(std::path::PathBuf::from)
+            .collect();
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert_ne!(paths[0], paths[1], "one folder each");
+        for path in &paths {
+            assert!(path.starts_with(home.join("data/demo")), "{path:?}");
+            assert!(path.is_dir(), "{path:?} exists");
+        }
+
+        h.call(Method::Stop, json!({}), on_lane(&main, "review"))
+            .await
+            .expect("stop review");
+        h.call(
+            Method::LaneClean,
+            json!({}),
+            Context {
+                yes: true,
+                ..on_lane(&main, "review")
+            },
+        )
+        .await
+        .expect("clean review");
+        assert!(!paths[1].exists(), "the cleaned lane's folder is gone");
+        assert!(paths[0].is_dir(), "the other lane keeps its folder");
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop main");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 /// Cleaning every lane of a project forgets it: a restarted daemon does not bring
 /// it back, and the next command in its folder registers it again.
 async fn a_project_whose_lanes_were_all_cleaned_is_forgotten() {
@@ -139,6 +194,10 @@ async fn a_project_whose_lanes_were_all_cleaned_is_forgotten() {
         )
         .await
         .expect("clean");
+        assert!(
+            !home.join("data/demo").exists(),
+            "the project's data folder goes with its last lane"
+        );
         // Outside any project, status lists every project the daemon knows.
         assert!(status(&h, cx(&tmp.path)).await.is_empty());
         h.close().await;

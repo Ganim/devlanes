@@ -42,7 +42,9 @@ async fn serve_pipe(paths: Paths, stream: impl Duplex + 'static) -> Result<(), S
 # devlanes.yaml on the box
 services:
   extension:
-    run_script: apps/extension/package.json#dev
+    run_script:
+      file: apps/extension/package.json
+      name: dev
     # Streamed to the connected machine while the lane runs.
     sync:
       - from: apps/extension/.output/chrome-mv3

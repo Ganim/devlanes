@@ -425,10 +425,13 @@ async fn run_step(step: &Step) -> Result<(), RpcError> {
 /// Installs a per-user service so the daemon starts outside agent sandboxes and
 /// at login. Running it again rewrites a definition that differs (another
 /// binary, an older one without a stop window) and has the manager reload it.
+/// An invalid user config fails first: a reload stops the running daemon with its
+/// lanes, and the one the manager starts would refuse the file.
 pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
     let exe = std::env::current_exe().map_err(io)?;
     let paths = Paths::discover()
         .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
+    crate::user_config::load(&paths).await?;
     let manager = Manager::current();
     let path = manager.path(&user_home()?);
     let contents = manager.definition(&exe, &paths.home);
@@ -570,21 +573,34 @@ pub fn hold_daemon_lock(home: &Path) -> Result<std::fs::File, RpcError> {
 
 /// `daemon reset-state` without a daemon: under the daemon lock, renames
 /// `state.db`, `-wal` and `-shm` to `state.db.legacy-<stamp>[-wal|-shm]`, so the
-/// pair stays readable with SQLite. Nothing is deleted; an existing target fails
-/// the whole move before anything is renamed. Returns `(from, to)` pairs.
+/// pair stays readable with SQLite, then moves the project folders of
+/// `data_root` into `<data_root>/.legacy-<stamp>`. Lane data folders are named by
+/// lane record id, which a new database hands out again from 1, so left in place
+/// they would give new lanes old data. Nothing is deleted; an existing target
+/// fails the whole move before anything is renamed. Returns `(from, to)` pairs.
 pub fn move_state_aside(
     home: &Path,
     db: &Path,
+    data_root: &Path,
     stamp: &str,
 ) -> Result<Vec<(PathBuf, PathBuf)>, RpcError> {
     let _lock = hold_daemon_lock(home)?;
     let base = with_suffix(db, &format!(".legacy-{stamp}"));
-    let moves: Vec<(PathBuf, PathBuf)> = STATE_SUFFIXES
+    let mut moves: Vec<(PathBuf, PathBuf)> = STATE_SUFFIXES
         .iter()
         .map(|suffix| (with_suffix(db, suffix), with_suffix(&base, suffix)))
         .filter(|(from, _)| from.symlink_metadata().is_ok())
         .collect();
-    if let Some((_, taken)) = moves.iter().find(|(_, to)| to.symlink_metadata().is_ok()) {
+    let data_aside = data_root.join(format!(".legacy-{stamp}"));
+    let data_moves: Vec<(PathBuf, PathBuf)> = project_data_folders(data_root)?
+        .into_iter()
+        .map(|name| (data_root.join(&name), data_aside.join(&name)))
+        .collect();
+    if let Some((_, taken)) = moves
+        .iter()
+        .chain(&data_moves)
+        .find(|(_, to)| to.symlink_metadata().is_ok())
+    {
         return Err(RpcError::new(
             "io",
             json!({"message": format!("{} already exists; nothing was moved", taken.display())}),
@@ -594,7 +610,54 @@ pub fn move_state_aside(
     for (from, to) in &moves {
         std::fs::rename(from, to).map_err(io)?;
     }
+    if !data_moves.is_empty() {
+        std::fs::create_dir_all(&data_aside).map_err(io)?;
+    }
+    for (from, to) in &data_moves {
+        std::fs::rename(from, to).map_err(io)?;
+    }
+    moves.extend(data_moves);
     Ok(moves)
+}
+
+/// Names of the folders under `data_root` shaped like the daemon's project data
+/// folders: real directories holding only lane folders named by number. Anything
+/// else stays, since `lanes.data_dir` may name a folder shared with other files.
+fn project_data_folders(data_root: &Path) -> Result<Vec<std::ffi::OsString>, RpcError> {
+    let entries = match std::fs::read_dir(data_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io(error)),
+    };
+    let is_dir = |path: &Path| path.symlink_metadata().is_ok_and(|meta| meta.is_dir());
+    let holds_only_lanes = |path: &Path| -> bool {
+        let Ok(children) = std::fs::read_dir(path) else {
+            return false;
+        };
+        let mut any = false;
+        for child in children {
+            let Ok(child) = child else { return false };
+            let numbered = child
+                .file_name()
+                .to_str()
+                .is_some_and(|name| !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()));
+            if !numbered || !is_dir(&child.path()) {
+                return false;
+            }
+            any = true;
+        }
+        any
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(io)?;
+        let path = entry.path();
+        if is_dir(&path) && holds_only_lanes(&path) {
+            names.push(entry.file_name());
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 /// `YYYYMMDDTHHMMSSZ` for Unix seconds, in UTC.

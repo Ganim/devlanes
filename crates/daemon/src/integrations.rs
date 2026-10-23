@@ -232,7 +232,8 @@ pub struct InfraSpec {
     pub shared_block: Option<(u16, u16)>,
     /// Host ports allocated for [`InfraPortNeed`]s, keyed by `<unit>/<name>`.
     pub ports: BTreeMap<String, u16>,
-    /// devlanes-owned directory for generated files such as compose overrides.
+    /// devlanes-owned directory for generated files such as compose overrides:
+    /// `compose` in the lane's data folder, so `lane clean` deletes it.
     pub state_dir: PathBuf,
 }
 

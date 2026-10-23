@@ -1,6 +1,6 @@
 # devlanes-run-script-make
 
-Runs `run_script: Makefile#<target>` as `make <target>` in the Makefile's directory. Lane resolution calls it through `MakeTargets`, a `devlanes-core` `ScriptRunner`.
+Runs `run_script: { file: Makefile, name: <target> }` as `make <target>` in the Makefile's directory. Lane resolution calls it through `MakeTargets`, a `devlanes-core` `ScriptRunner`.
 
 ## Usage
 
@@ -31,7 +31,9 @@ The composition root registers `Arc::new(MakeTargets)` as a script runner. `plan
 tasks:
   certs:
     # Runs the certs target of infra/Makefile with make.
-    run_script: infra/Makefile#certs
+    run_script:
+      file: infra/Makefile
+      name: certs
 ```
 
 `devlanes run certs` then runs `make certs` in `infra/`. Services with a preset cannot use a Makefile target, because make cannot pass the preset's flags.

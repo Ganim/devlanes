@@ -2,25 +2,31 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{fmt, str::FromStr};
 
-/// Optional display overrides for a tag; services may also use undeclared tags.
+/// Settings for one tag used in `services.<name>.tags`. Declaring a tag here is optional:
+/// services can use any tag and `+tag` selectors work without it. Declare one to pin its
+/// color or describe it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(extend("examples" = [{"color":"cyan","description":"HTTP APIs"}]))]
 pub struct TagConfig {
-    /// Terminal palette color; inferred by the resolver when omitted.
+    /// Color of services with this tag in the TUI and CLI output. When a service has several
+    /// tags with a color, the first one in its `tags` list wins. Without one, devlanes infers
+    /// a color from category words such as `api` (blue), `web` (green) or `worker` (magenta)
+    /// in the service's tags, preset or name.
     pub color: Option<TagColor>,
-    /// Human-readable description available to the TUI.
+    /// Note on what the tag groups, for people reading the config.
     #[schemars(extend("examples" = ["HTTP APIs","Background workers"]))]
     pub description: Option<String>,
 }
 
 macro_rules! palette {
     ($($variant:ident => $name:literal),* $(,)?) => {
-        /// Fixed terminal palette for tag color overrides.
+        /// A color from the terminal's basic palette; the exact shade follows the terminal
+        /// theme, and `bright-` variants are the lighter shades.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
         #[schemars(extend("examples" = [$($name,)*]))]
         pub enum TagColor {
-            $(#[doc = concat!("Use the terminal's ", $name, " palette color.")]
+            $(#[doc = concat!("Show the tag's services in the terminal's ", $name, " color.")]
             #[schemars(extend("examples" = [$name]))]
             #[serde(rename = $name)] $variant,)*
         }

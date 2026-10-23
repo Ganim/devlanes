@@ -114,16 +114,22 @@ fn sections(page: &mut String, schema: &Value) {
 
 /// The documented row for the field at `path`.
 fn row(path: &str, node: &Value, root: &Value) -> Row {
+    let mut description = annotation(node, root, "description")
+        .as_ref()
+        .map(text)
+        .unwrap_or_default();
+    let values = enum_values(node, root, &mut Vec::new());
+    if values.iter().any(|(_, meaning)| !meaning.is_empty()) {
+        let listed: Vec<String> = values
+            .iter()
+            .map(|(value, meaning)| format!("`{value}`: {meaning}"))
+            .collect();
+        description = format!("{description} Values: {}", listed.join(" "));
+    }
     Row {
         path: path.to_owned(),
         kind: kind(node, root, &mut Vec::new()),
-        description: annotation(node, root, "description")
-            .as_ref()
-            .map(text)
-            .unwrap_or_default()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" "),
+        description: description.split_whitespace().collect::<Vec<_>>().join(" "),
         example: annotation(node, root, "examples")
             .and_then(|examples| examples.as_array().and_then(|e| e.first()).cloned())
             .map(|example| code(&example))
@@ -169,6 +175,37 @@ fn children(node: &Value, path: &str, root: &Value, rows: &mut Vec<Row>, stack: 
             children(branch, path, root, rows, stack);
         }
     }
+}
+
+/// Each allowed value of an enum field with what it does, found through references and
+/// optional wrappers; empty when the field is not an enum.
+fn enum_values(node: &Value, root: &Value, stack: &mut Vec<String>) -> Vec<(String, String)> {
+    if let (Some(values), Some(meanings)) =
+        (node["enum"].as_array(), node["enumDescriptions"].as_array())
+    {
+        return values
+            .iter()
+            .zip(meanings)
+            .map(|(value, meaning)| (text(value), text(meaning)))
+            .collect();
+    }
+    if let Some(reference) = node["$ref"].as_str() {
+        if stack.iter().any(|seen| seen == reference) {
+            return Vec::new();
+        }
+        stack.push(reference.to_owned());
+        let found = resolve(reference, root)
+            .map(|target| enum_values(target, root, stack))
+            .unwrap_or_default();
+        stack.pop();
+        return found;
+    }
+    ["anyOf", "oneOf"]
+        .iter()
+        .flat_map(|keyword| node[*keyword].as_array().into_iter().flatten())
+        .map(|branch| enum_values(branch, root, stack))
+        .find(|values| !values.is_empty())
+        .unwrap_or_default()
 }
 
 /// The node a local `#/$defs/...` reference points at.

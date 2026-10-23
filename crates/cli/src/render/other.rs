@@ -222,7 +222,11 @@ fn joined(value: &Value, key: &str) -> String {
 /// What a task runs: its script, its steps, or its own command.
 fn task_runs(task: &Value) -> String {
     let mut runs = if let Some(script) = task.get("run_script").filter(|s| s.is_object()) {
-        format!("script {}#{}", text(script, "source"), text(script, "name"))
+        format!(
+            "script {} in {}",
+            text(script, "name"),
+            text(script, "file")
+        )
     } else if !list(task, "steps").is_empty() {
         format!("tasks {} in order", joined(task, "steps"))
     } else {
@@ -259,8 +263,8 @@ pub(super) fn tasks(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
             }
             if let Some(script) = task.get("run_script").filter(|s| s.is_object()) {
                 line.push_str(&format!(
-                    " script={}#{}",
-                    text(script, "source"),
+                    " script_file={} script={}",
+                    text(script, "file"),
                     text(script, "name")
                 ));
             }
@@ -302,7 +306,7 @@ pub(super) fn tasks(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
                 .get("runner")
                 .and_then(Value::as_str)
                 .map_or("no runner".into(), clean);
-            format!("{} ({runner})", text(source, "source"))
+            format!("{} ({runner})", text(source, "file"))
         })
         .collect();
     if !sources.is_empty() {

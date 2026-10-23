@@ -273,6 +273,8 @@ fn terminal_foreground() -> bool {
 }
 
 /// Transport errors become exit code 4 (daemon unreachable), RPC errors keep their own.
+/// A daemon that refused an invalid user config already arrives as the client's
+/// `config_error`, so it reads and hints like a strict load of that file.
 pub fn rpc_error(error: ClientError) -> RpcError {
     match error {
         ClientError::Rpc(error) => error,
@@ -893,6 +895,13 @@ mod tests {
         assert_eq!(
             (error.code.as_str(), error.data["reason"].as_str()),
             ("daemon_unreachable", Some("state_legacy_schema"))
+        );
+        // An unreadable user config line (the client parses a whole one into a
+        // `config_error`) keeps its code as the reason, like other startup codes.
+        let error = rpc_error(ClientError::Startup("USER_CONFIG_INVALID: cut{".into()));
+        assert_eq!(
+            (error.code.as_str(), error.data["reason"].as_str()),
+            ("daemon_unreachable", Some("user_config_invalid"))
         );
     }
 

@@ -94,7 +94,6 @@ expression: config
     "setup": {
       "vhost": {
         "run": "docker compose exec -T rabbitmq rabbitmqctl add_vhost ${{ lane.vhost }} || true\ndocker compose exec -T rabbitmq rabbitmqctl set_permissions -p ${{ lane.vhost }} acme '.*' '.*' '.*'\n",
-        "run_script": null,
         "container": "rabbitmq",
         "ignore_errors": null,
         "cwd": null,
@@ -103,7 +102,6 @@ expression: config
       },
       "buckets": {
         "run": "set -eu\nfor bucket in projects avatars; do\n  curl -fsS -o /dev/null -X PUT \"http://127.0.0.1:${{ infra.object_store.port }}/acme-$bucket${{ lane.bucket_suffix }}\" || true\ndone\n",
-        "run_script": null,
         "container": "object-store",
         "ignore_errors": null,
         "cwd": null,
@@ -116,7 +114,6 @@ expression: config
       "redis": "docker compose exec -T redis redis-cli -n ${{ lane.redis_db }} FLUSHDB",
       "vhost": {
         "run": "docker compose exec -T rabbitmq rabbitmqctl delete_vhost ${{ lane.vhost }}",
-        "run_script": null,
         "container": null,
         "ignore_errors": true,
         "cwd": null,
@@ -158,7 +155,10 @@ expression: config
     },
     "build-deps": {
       "run": null,
-      "run_script": "package.json#build-deps",
+      "run_script": {
+        "file": "package.json",
+        "name": "build-deps"
+      },
       "cwd": null,
       "env": {},
       "fnox": null,
@@ -178,7 +178,10 @@ expression: config
     },
     "migrate": {
       "run": null,
-      "run_script": "models/package.json#db-deploy",
+      "run_script": {
+        "file": "models/package.json",
+        "name": "db-deploy"
+      },
       "cwd": null,
       "env": {},
       "fnox": null,
@@ -198,7 +201,10 @@ expression: config
     },
     "build": {
       "run": null,
-      "run_script": "package.json#build",
+      "run_script": {
+        "file": "package.json",
+        "name": "build"
+      },
       "cwd": null,
       "env": {},
       "fnox": null,
@@ -215,7 +221,10 @@ expression: config
     },
     "seed": {
       "run": null,
-      "run_script": "tools/seed/package.json#start",
+      "run_script": {
+        "file": "tools/seed/package.json",
+        "name": "start"
+      },
       "cwd": null,
       "env": {},
       "fnox": null,
@@ -233,7 +242,10 @@ expression: config
     },
     "seed-large": {
       "run": null,
-      "run_script": "tools/seed/package.json#start:large",
+      "run_script": {
+        "file": "tools/seed/package.json",
+        "name": "start:large"
+      },
       "cwd": null,
       "env": {},
       "fnox": null,
@@ -279,7 +291,10 @@ expression: config
     },
     "db-reset": {
       "run": null,
-      "run_script": "models/package.json#db-reset",
+      "run_script": {
+        "file": "models/package.json",
+        "name": "db-reset"
+      },
       "cwd": null,
       "env": {},
       "fnox": null,
@@ -314,7 +329,10 @@ expression: config
   "services": {
     "core-api": {
       "extends": "fastify-api",
-      "run_script": "servers/core/package.json#dev",
+      "run_script": {
+        "file": "servers/core/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "hosts": [
         "core.${{ lane.domain }}"
@@ -340,7 +358,10 @@ expression: config
     },
     "crm-api": {
       "extends": "fastify-api",
-      "run_script": "servers/crm/package.json#dev",
+      "run_script": {
+        "file": "servers/crm/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "hosts": [
         "crm.${{ lane.domain }}"
@@ -366,7 +387,10 @@ expression: config
     },
     "messaging-api": {
       "extends": "fastify-api",
-      "run_script": "servers/messaging-api/package.json#dev",
+      "run_script": {
+        "file": "servers/messaging-api/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "hosts": [
         "messaging.${{ lane.domain }}"
@@ -391,7 +415,10 @@ expression: config
     },
     "pages-server": {
       "extends": "fastify-api",
-      "run_script": "servers/pages-server/package.json#dev",
+      "run_script": {
+        "file": "servers/pages-server/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "hosts": [
         "pages-server.${{ lane.domain }}"
@@ -415,7 +442,10 @@ expression: config
       }
     },
     "messaging-worker": {
-      "run_script": "servers/messaging-worker/package.json#dev",
+      "run_script": {
+        "file": "servers/messaging-worker/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "tags": [
         "queue"
@@ -430,7 +460,10 @@ expression: config
     },
     "app-web": {
       "extends": "vite-web",
-      "run_script": "web/app/package.json#dev",
+      "run_script": {
+        "file": "web/app/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "vite",
       "hosts": [
@@ -445,7 +478,7 @@ expression: config
         "tcp": null,
         "http": {
           "path": "/",
-          "status": null,
+          "status": 302,
           "timeout": null
         },
         "log": null,
@@ -458,7 +491,10 @@ expression: config
     },
     "members-portal": {
       "extends": "vite-web",
-      "run_script": "web/members-portal/package.json#dev",
+      "run_script": {
+        "file": "web/members-portal/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "vite",
       "hosts": [
@@ -476,7 +512,10 @@ expression: config
     },
     "admin-web": {
       "extends": "vite-web",
-      "run_script": "pages/admin/package.json#dev",
+      "run_script": {
+        "file": "pages/admin/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "vite",
       "hosts": [
@@ -503,7 +542,10 @@ expression: config
     },
     "api-gateway": {
       "extends": "wrangler-worker",
-      "run_script": "workers/api-gateway/package.json#dev",
+      "run_script": {
+        "file": "workers/api-gateway/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "hosts": [
@@ -536,7 +578,10 @@ expression: config
     },
     "pages-worker": {
       "extends": "wrangler-worker",
-      "run_script": "workers/pages/package.json#dev",
+      "run_script": {
+        "file": "workers/pages/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "hosts": [
@@ -563,12 +608,15 @@ expression: config
       },
       "env": {
         "ACME_PAGES_WORKER_PORT": "${{ self.port }}",
-        "ACME_PAGES_SERVER_PORT": "${{ svc.pages_server.port }}"
+        "ACME_PAGES_SERVER_PORT": "${{ services.pages_server.port }}"
       }
     },
     "mcp-worker": {
       "extends": "wrangler-worker",
-      "run_script": "workers/mcp/package.json#dev",
+      "run_script": {
+        "file": "workers/mcp/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "hosts": [
@@ -584,7 +632,10 @@ expression: config
     },
     "sms-worker": {
       "extends": "wrangler-worker",
-      "run_script": "workers/sms/package.json#dev",
+      "run_script": {
+        "file": "workers/sms/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "hosts": [
@@ -607,7 +658,10 @@ expression: config
       }
     },
     "sms-stub": {
-      "run_script": "servers/sms-stub/package.json#dev",
+      "run_script": {
+        "file": "servers/sms-stub/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "hosts": [
         "sms-stub.${{ lane.domain }}"

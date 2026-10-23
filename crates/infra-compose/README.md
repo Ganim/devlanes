@@ -36,7 +36,8 @@ async fn start_lane() -> Result<(), Error> {
         exclude: shared.exclude.clone(),
         per_lane: shared.per_lane.clone(),
         env: BTreeMap::new(),
-        state_dir: "/home/me/.devlanes/lanes/acme/2".into(),
+        // The daemon passes `compose` in the lane data folder.
+        state_dir: "/home/me/.devlanes/data/acme/7/compose".into(),
     };
     let block = PortBlock::new(21000, 10)?;
     let mut ports = LanePorts::new();

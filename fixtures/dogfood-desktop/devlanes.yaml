@@ -15,7 +15,9 @@ templates:
     preset: wrangler
     tags: [backend]
     # Ready once the service's port accepts a TCP connection.
-    ready: { tcp: true, timeout: 180s }
+    ready:
+      tcp: true
+      timeout: 180s
 
   watcher:
     platform: node
@@ -36,39 +38,50 @@ infra:
         - ./policy/.cerbos.yaml:/config/.cerbos.yaml:ro
         - ./policy/policies:/policies:ro
       # Container ports by name; the host side is read as infra.policy.ports.http.
-      ports: { http: 3592, grpc: 3593 }
+      ports:
+        http: 3592
+        grpc: 3593
       # One container per lane instead of one shared by all lanes.
       per_lane: true
-      ready: { http: { path: /_cerbos/health, timeout: 45s } }
+      ready:
+        http:
+          path: /_cerbos/health
+          timeout: 45s
 
 # Variables for every task and service of the lane.
 global_env:
   ACME_CHANNEL: dev
   RUST_BACKTRACE: "1"
-  # svc.<name>.url is http://127.0.0.1:<port> of that service in this lane.
-  PUBLIC_BUILD_CHAT_API_URL: ${{ svc.chat.url }}
-  PUBLIC_BUILD_MESSAGES_API_URL: ${{ svc.messages.url }}
-  DIRECTORY_API_URL: ${{ svc.directory.url }}
-  AUTHZ_API_URL: ${{ svc.authz.url }}
-  BILLING_API_URL: ${{ svc.billing.url }}
-  SKILLS_API_URL: ${{ svc.skills.url }}
-  ACME_WEBHOOKS_BASE_URL: ${{ svc.webhooks.url }}
+  # services.<name>.url is http://127.0.0.1:<port> of that service in this lane.
+  PUBLIC_BUILD_CHAT_API_URL: ${{ services.chat.url }}
+  PUBLIC_BUILD_MESSAGES_API_URL: ${{ services.messages.url }}
+  DIRECTORY_API_URL: ${{ services.directory.url }}
+  AUTHZ_API_URL: ${{ services.authz.url }}
+  BILLING_API_URL: ${{ services.billing.url }}
+  SKILLS_API_URL: ${{ services.skills.url }}
+  ACME_WEBHOOKS_BASE_URL: ${{ services.webhooks.url }}
 
 # One-shot commands, run on demand with devlanes run or at a lane event.
 tasks:
   sync-env:
     # Runs a script from package.json with the project's package manager.
-    run_script: package.json#sync:env
+    run_script:
+      file: package.json
+      name: sync:env
     # Needs the user's terminal, so it never runs at a lane event.
     interactive: true
   sidecar-build:
-    run_script: package.json#sidecar:build
+    run_script:
+      file: package.json
+      name: sidecar:build
     # Run on every devlanes start.
     when: lane.start
     # Run automatically only when one of these profiles is active.
     profiles: [default, backend, desktop, attach, remote]
   build-deps:
-    run_script: package.json#build:deps
+    run_script:
+      file: package.json
+      name: build:deps
     when: lane.start
     profiles: [default, backend, desktop, attach, remote]
   typegen:
@@ -93,7 +106,9 @@ tasks:
     when: lane.start
     profiles: [default, backend]
   seed:
-    run_script: package.json#db:seed
+    run_script:
+      file: package.json
+      name: db:seed
     # Wait until the selected services are ready.
     after: services
     # Run when the lane is first set up.
@@ -108,26 +123,37 @@ tasks:
 services:
   chat:
     extends: worker
-    run_script: workers/chat/package.json#dev
+    run_script:
+      file: workers/chat/package.json
+      name: dev
     # Options for the wrangler preset; vars are passed as --var flags.
     wrangler:
-      vars: { CHAT_API_PUBLIC_URL: "${{ self.url }}" }
+      vars:
+        CHAT_API_PUBLIC_URL: "${{ self.url }}"
 
   messages:
     extends: worker
-    run_script: workers/messages/package.json#dev
+    run_script:
+      file: workers/messages/package.json
+      name: dev
     wrangler:
-      vars: { MEDIA_PUBLIC_ORIGIN: "${{ svc.media.url }}" }
+      vars:
+        MEDIA_PUBLIC_ORIGIN: "${{ services.media.url }}"
 
   billing:
     extends: worker
-    run_script: workers/billing/package.json#dev
+    run_script:
+      file: workers/billing/package.json
+      name: dev
     wrangler:
-      vars: { PUBLIC_BASE_URL: "${{ self.url }}" }
+      vars:
+        PUBLIC_BASE_URL: "${{ self.url }}"
 
   authz:
     extends: worker
-    run_script: platform/authz/worker/package.json#dev
+    run_script:
+      file: platform/authz/worker/package.json
+      name: dev
     wrangler:
       vars:
         POLICY_HTTP_URL: http://127.0.0.1:${{ infra.policy.ports.http }}
@@ -135,11 +161,15 @@ services:
 
   directory:
     extends: worker
-    run_script: workers/directory/package.json#dev
+    run_script:
+      file: workers/directory/package.json
+      name: dev
 
   skills:
     extends: worker
-    run_script: workers/skills/package.json#dev
+    run_script:
+      file: workers/skills/package.json
+      name: dev
     wrangler:
       vars:
         CHECKOUT_REDIRECT_URL: ${{ self.url }}/checkout/callback
@@ -147,15 +177,19 @@ services:
 
   webhooks:
     extends: worker
-    run_script: workers/webhooks/package.json#dev
+    run_script:
+      file: workers/webhooks/package.json
+      name: dev
 
   media:
     extends: worker
-    run_script: workers/media/package.json#dev
+    run_script:
+      file: workers/media/package.json
+      name: dev
 
   payments-webhooks:
     platform: node
-    run: pnpm --filter @acme/billing-worker dev:payments -- --port ${{ svc.billing.port }}
+    run: pnpm --filter @acme/billing-worker dev:payments -- --port ${{ services.billing.port }}
     # Starts only when named explicitly.
     autostart: false
     tags: [backend]
@@ -166,31 +200,45 @@ services:
 
   desktop-package:
     extends: watcher
-    run_script: apps/desktop/package.json#build:watch
+    run_script:
+      file: apps/desktop/package.json
+      name: build:watch
 
   docs:
     platform: node
-    run_script: apps/docs/package.json#dev
+    run_script:
+      file: apps/docs/package.json
+      name: dev
     # Extra variables for this service; self.port is the port devlanes allocated to it.
-    env: { ACME_DOCS_PORT: "${{ self.port }}" }
-    ready: { http: { path: / } }
+    env:
+      ACME_DOCS_PORT: "${{ self.port }}"
+    ready:
+      http:
+        path: /
+        status: 302
     tags: [watcher]
 
   desktop-web:
     platform: node
     run: pnpm --filter @acme/desktop-web dev --port ${{ self.port }} --strict-port
-    ready: { http: { path: /, timeout: 180s } }
+    ready:
+      http:
+        path: /
+        status: 302
+        timeout: 180s
     tags: [desktop]
 
   desktop:
     platform: node
     # Gives each lane and replica its own Tauri identifier and dev URL.
     preset: tauri
-    run_script: apps/desktop/package.json#dev
+    run_script:
+      file: apps/desktop/package.json
+      name: dev
     tauri:
       # replica.index counts the service's instances from 1.
       identifier: invalid.example.desktop.dev${{ '' if lane.index == 0 else '.slot-' ~ lane.index }}.client-${{ replica.index }}
-      dev_url: ${{ svc.desktop_web.url }}
+      dev_url: ${{ services.desktop_web.url }}
       before_dev_command: ""
     # Instances of this service per lane.
     replicas: 1
@@ -200,9 +248,11 @@ services:
       CEF_REMOTE_DEBUGGING_PORT: ${{ self.ports.cdp }}
       DEEP_LINK_DEV_PORT: ${{ self.ports.deep_link }}
       ACME_DESKTOP_REUSE_SERVER: "1"
-      ACME_DESKTOP_REUSE_SERVER_URL: ${{ svc.desktop_web.url }}
+      ACME_DESKTOP_REUSE_SERVER_URL: ${{ services.desktop_web.url }}
     # Ready once the named port cdp accepts a TCP connection.
-    ready: { tcp: cdp, timeout: 15m }
+    ready:
+      tcp: cdp
+      timeout: 15m
     tags: [desktop]
 
 # Which services devlanes start --profile X starts; default applies when no profile is given.
@@ -217,14 +267,14 @@ profiles:
     infra: false
     # Variables for the profile's services, above their own env.
     env:
-      # lanes.main.svc reads services of this project's lane 0.
-      PUBLIC_BUILD_CHAT_API_URL: ${{ lanes.main.svc.chat.url }}
-      PUBLIC_BUILD_MESSAGES_API_URL: ${{ lanes.main.svc.messages.url }}
-      DIRECTORY_API_URL: ${{ lanes.main.svc.directory.url }}
-      AUTHZ_API_URL: ${{ lanes.main.svc.authz.url }}
-      BILLING_API_URL: ${{ lanes.main.svc.billing.url }}
-      SKILLS_API_URL: ${{ lanes.main.svc.skills.url }}
-      ACME_WEBHOOKS_BASE_URL: ${{ lanes.main.svc.webhooks.url }}
+      # lanes.main.services reads services of this project's lane 0.
+      PUBLIC_BUILD_CHAT_API_URL: ${{ lanes.main.services.chat.url }}
+      PUBLIC_BUILD_MESSAGES_API_URL: ${{ lanes.main.services.messages.url }}
+      DIRECTORY_API_URL: ${{ lanes.main.services.directory.url }}
+      AUTHZ_API_URL: ${{ lanes.main.services.authz.url }}
+      BILLING_API_URL: ${{ lanes.main.services.billing.url }}
+      SKILLS_API_URL: ${{ lanes.main.services.skills.url }}
+      ACME_WEBHOOKS_BASE_URL: ${{ lanes.main.services.webhooks.url }}
   remote:
     include: [+watcher, +desktop]
     infra: false

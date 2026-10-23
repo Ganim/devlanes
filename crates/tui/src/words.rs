@@ -141,6 +141,31 @@ fn logs_hint(data: &Value) -> Option<String> {
     (!field(data, "unit").is_empty()).then(|| format!("devlanes logs {found} --tail 200"))
 }
 
+/// `; last answer 302` (`, expected 200` when a status was set) from an http
+/// check's `ready_timeout` data, as the CLI words it; empty when nothing answered.
+fn last_answer(data: &Value) -> String {
+    let Some(code) = data.get("last_status").and_then(Value::as_u64) else {
+        return String::new();
+    };
+    match data.get("expected_status").and_then(Value::as_u64) {
+        Some(expected) => format!("; last answer {code}, expected {expected}"),
+        None => format!("; last answer {code}"),
+    }
+}
+
+/// The fix for an http check that timed out on a non-2xx answer without a
+/// configured `status`, as the CLI words it.
+fn status_hint(data: &Value) -> Option<String> {
+    let code = data
+        .get("last_status")
+        .and_then(Value::as_u64)
+        .filter(|code| !(200..300).contains(code))?;
+    data.get("expected_status")
+        .and_then(Value::as_u64)
+        .is_none()
+        .then(|| format!("set `ready.http.status: {code}` or use a path that answers 2xx"))
+}
+
 /// A failed helper command split into its parts. The daemon formats these as
 /// "`<command>` failed (<status>): <stderr>"; structured fields win when present.
 fn command_failure(data: &Value) -> Option<(String, String, String)> {
@@ -363,7 +388,15 @@ pub fn rpc(error: &RpcError) -> Worded {
         "config_error" => (
             config_invalid(data, &message),
             rest,
-            Some("devlanes config check".into()),
+            // `config check` reads project files only; doctor also checks the user config.
+            Some(
+                if known(data, "file").ends_with("/config.yaml") {
+                    "devlanes doctor"
+                } else {
+                    "devlanes config check"
+                }
+                .into(),
+            ),
         ),
         "no_config" => (
             "no devlanes.yaml in this worktree".into(),
@@ -388,9 +421,19 @@ pub fn rpc(error: &RpcError) -> Worded {
         "units_required" => ("name at least one unit".into(), Vec::new(), None),
         "unit_failed" => (format!("{} failed", target(data)), rest, logs_hint(data)),
         "ready_timeout" => (
-            format!("{} wasn't ready in time", target(data)),
+            format!("{} wasn't ready in time{}", target(data), last_answer(data)),
             rest,
-            logs_hint(data),
+            status_hint(data).or_else(|| logs_hint(data)),
+        ),
+        "container_not_ready" => (
+            format!(
+                "container {} didn't pass its {} check in time{}",
+                known(data, "container"),
+                known(data, "check"),
+                last_answer(data)
+            ),
+            Vec::new(),
+            status_hint(data).or_else(|| Some("devlanes infra status".into())),
         ),
         "spawn_failed" => (
             format!("{} couldn't start: {message}", target(data)),
@@ -466,6 +509,58 @@ mod tests {
             worded.one_line(),
             "docker compose failed (exit status 1); open /work/acme/compose.yaml: no such file; retry later"
         );
+    }
+
+    /// An http check that saw a non-2xx answer without `status` set says which
+    /// code came back and how to accept it; a configured status keeps the logs hint.
+    #[test]
+    fn ready_timeout_names_the_last_http_answer() {
+        let base = json!({"lane": "acme@0", "unit": "web", "check": "http"});
+        let mut redirected = base.clone();
+        redirected["last_status"] = json!(302);
+        redirected["expected_status"] = Value::Null;
+        let worded = rpc(&RpcError::new("ready_timeout", redirected, 1));
+        assert_eq!(
+            worded.summary,
+            "acme@0:web wasn't ready in time; last answer 302"
+        );
+        assert_eq!(
+            worded.hint.as_deref(),
+            Some("set `ready.http.status: 302` or use a path that answers 2xx")
+        );
+        let mut expected = base.clone();
+        expected["last_status"] = json!(404);
+        expected["expected_status"] = json!(200);
+        let worded = rpc(&RpcError::new("ready_timeout", expected, 1));
+        assert_eq!(
+            worded.summary,
+            "acme@0:web wasn't ready in time; last answer 404, expected 200"
+        );
+        assert_eq!(
+            worded.hint.as_deref(),
+            Some("devlanes logs acme@0:web --tail 200")
+        );
+        let worded = rpc(&RpcError::new("ready_timeout", base, 1));
+        assert_eq!(worded.summary, "acme@0:web wasn't ready in time");
+    }
+
+    /// A container's http check names its last answer like a service's, and a
+    /// user config error points at doctor, which checks that file.
+    #[test]
+    fn container_timeouts_and_user_config_errors_have_their_fix() {
+        let data = json!({"container": "minio", "check": "http", "last_status": 403, "expected_status": null});
+        let worded = rpc(&RpcError::new("container_not_ready", data, 1));
+        assert_eq!(
+            worded.summary,
+            "container minio didn't pass its http check in time; last answer 403"
+        );
+        assert_eq!(
+            worded.hint.as_deref(),
+            Some("set `ready.http.status: 403` or use a path that answers 2xx")
+        );
+        let user = json!({"message": "tui.theme: unknown variant", "file": "/home/acme/.devlanes/config.yaml", "line": 4, "column": 10});
+        let worded = rpc(&RpcError::new("config_error", user, 1));
+        assert_eq!(worded.hint.as_deref(), Some("devlanes doctor"));
     }
 
     #[test]

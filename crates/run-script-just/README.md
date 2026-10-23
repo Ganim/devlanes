@@ -1,6 +1,6 @@
 # devlanes-run-script-just
 
-Runs `run_script: justfile#<recipe>` as `just <recipe>` in the justfile's directory. Lane resolution calls it through `JustRecipes`, a `devlanes-core` `ScriptRunner`.
+Runs `run_script: { file: justfile, name: <recipe> }` as `just <recipe>` in the justfile's directory. Lane resolution calls it through `JustRecipes`, a `devlanes-core` `ScriptRunner`.
 
 ## Usage
 
@@ -34,7 +34,9 @@ The composition root registers `Arc::new(JustRecipes)` as a script runner. `plan
 services:
   web:
     # Runs the dev recipe of the justfile with just.
-    run_script: justfile#dev
+    run_script:
+      file: justfile
+      name: dev
     # Adds Vite's port and host flags, which need a variadic last parameter on the recipe.
     preset: vite
 ```
@@ -43,7 +45,7 @@ With `dev *ARGS:` in the justfile this runs `just dev --port <port> --strictPort
 
 ## Behaviour
 
-Extra arguments go right after the recipe name without `--`, because just passes a `--` through as a literal argument. They need a variadic last parameter (`*ARGS` or `+ARGS`); otherwise `plan` fails and suggests one. Recipes with required positional parameters fail too, since `run_script` has no way to fill them.
+Extra arguments go right after the recipe name without `--`, because just passes a `--` through as a literal argument. They need a variadic last parameter; otherwise `plan` fails and suggests one. `plan` accepts `*ARGS` and `+ARGS`, but lane resolution first renders the recipe without arguments, so a `+ARGS` recipe fails there and services need `*ARGS`. Recipes with required positional parameters fail too, since `run_script` has no way to fill them.
 
 A recipe is reported missing only when the file has no `import` or `mod`; with either, the check is `Unverifiable` and just decides at run time.
 

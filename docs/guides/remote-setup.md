@@ -49,7 +49,9 @@ The box daemon inherits the environment of whatever started it. Over ssh that is
 
 ```yaml
 services:
-  admin: { run: ./admin, hidden: true }
+  admin:
+    run: ./admin
+    hidden: true
 infra:
   hidden: [postgres]
 ```

@@ -1,5 +1,5 @@
 use crate::{
-    ConfigDuration, Env, Extensions, FnoxConfig, HostConfig, OpaqueExtensions, ReadyConfig, Run,
+    ConfigDuration, Env, Extensions, FnoxConfig, Hosts, OpaqueExtensions, ReadyConfig, Run,
     RunScript, SyncConfig, Templated,
 };
 use indexmap::IndexMap;
@@ -14,28 +14,40 @@ use std::{fmt, marker::PhantomData};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Signal and grace period used when stopping a process tree.
+/// How devlanes stops the service on `devlanes stop`, a restart or a lane stop: it sends
+/// `signal` to every process of the service, waits up to `timeout`, then SIGKILLs whatever
+/// is still running. Defaults to SIGTERM and 10s.
 #[schemars(extend("examples" = [{"signal":"SIGINT","timeout":"15s"}]))]
 pub struct StopConfig {
-    /// Initial stop signal; defaults to SIGTERM, followed by SIGKILL if the grace period expires.
+    /// Signal sent to the service's whole process tree when devlanes stops or restarts it.
+    /// One of `SIGTERM` (default), `SIGINT`, `SIGHUP`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2` or
+    /// `SIGKILL`; use `SIGINT` for programs that only shut down cleanly on Ctrl-C.
     #[schemars(extend("examples" = ["SIGTERM","SIGINT"]))]
     pub signal: Option<String>,
-    /// Grace period before SIGKILL; defaults to 10s.
+    /// How long to wait after `signal` before devlanes SIGKILLs every process of the service
+    /// that is still running. The service then shows as stopped; devlanes never restarts it.
+    /// Defaults to 10s; raise it for programs that need time to flush or close connections.
     #[schemars(extend("examples" = ["15s","10m"]))]
     pub timeout: Option<Templated<ConfigDuration>>,
 }
 
 macro_rules! service_fields {
     ($($(#[$meta:meta])* $field:ident: $ty:ty),* $(,)?) => {
-        /// Service settings after typed local and template merging.
+        /// A long-running process started with the lane, such as a dev server or a worker.
+        /// Each service gets its own port from the lane's block (`PORT`, `${{ self.port }}`);
+        /// devlanes stops it with the lane and never restarts it when it exits. A service needs
+        /// `run` or `run_script`, directly or through `extends`.
         #[derive(Debug, Clone, JsonSchema)]
         #[schemars(bound = "E: Extensions", deny_unknown_fields)]
-        #[schemars(extend("examples" = [{"run_script":"apps/api/package.json#dev","hosts":["api.${{ lane.domain }}"],"tags":["api"]}]))]
+        #[schemars(extend("examples" = [{"run_script":{"file":"apps/api/package.json","name":"dev"},"hosts":"api.${{ lane.domain }}","tags":["api"]}]))]
         pub struct ServiceConfig<E: Extensions = OpaqueExtensions> {
             $($(#[$meta])* pub $field: Option<$ty>,)*
-            /// Service-specific environment overrides, above global_env.
+            /// Environment variables for this service's process. They override `global_env` and
+            /// are overridden by the active profile's `env` and `--env`; values may be text,
+            /// numbers, booleans or `${{ ... }}` expressions. Setting `PORT` replaces the port
+            /// devlanes allocated; a literal number is the same in every lane, so lanes collide.
             #[schemars(default)]
-            #[schemars(extend("examples" = [{"API_URL":"${{ svc.api.url }}"}]))]
+            #[schemars(extend("examples" = [{"API_URL":"${{ services.api.url }}"}]))]
             pub env: Env,
             #[schemars(skip)]
             /// Options under the selected preset's name, validated by that integration.
@@ -66,7 +78,7 @@ macro_rules! service_fields {
 
         impl<E: Extensions> PartialService<E> {
             /// Apply a local override or an `extends` child. Mappings (`ready`, `stop`, `fnox`,
-            /// `{ source, name }` scripts, `env`, preset options) merge per key; lists and
+            /// `run_script`, `env`, preset options) merge per key; lists and
             /// scalars replace. `run` and `run_script` are alternatives, so setting one clears
             /// the other. Merged values keep the overlay's source position for diagnostics.
             pub(crate) fn merge(&mut self, mut overlay: Self) {
@@ -202,53 +214,116 @@ macro_rules! service_fields {
 }
 
 service_fields! {
-    /// Display name shown in the TUI and human output instead of the service key;
-    /// any text, spaces allowed. Commands, references and `svc.<key>` keep using the key.
+    /// Label shown in the TUI and human output instead of the service key; any text, spaces
+    /// allowed, with ` #N` added per replica. Commands, profiles and `${{ services.<key> }}`
+    /// keep using the key.
     #[schemars(extend("examples" = ["Admin API","Storefront (web)"]))]
     name: String,
-    /// Template name; resolved after devlanes.local.yaml is merged.
+    /// Template under `templates` whose settings this service inherits; its own settings
+    /// apply on top. Mappings (`env`, `ready`, `stop`, `fnox`, preset options, `run_script`)
+    /// merge by key, lists (`tags`, `hosts`, `sync`) and single values replace. Setting `run`
+    /// or `run_script` drops the inherited other one, and one `ready` probe (`tcp`, `http`,
+    /// `log`, `cmd`) drops the inherited probe. Templates may extend other templates and are
+    /// resolved after devlanes.local.yaml is merged.
     #[schemars(extend("examples" = ["fastify-api"]))]
     extends: String,
-    /// Shell command or argv; exactly one of run and run_script is required after inheritance.
+    /// Command that starts the service. A string runs with `/bin/sh -c`, so pipes, `&&` and
+    /// multi-line scripts work; a list is an argv run directly without a shell. It starts in
+    /// the lane's worktree root unless `cwd` is set. devlanes runs it exactly as written, so
+    /// it cannot be combined with `preset`; prefer `run_script` when the command is a script
+    /// in a project file. Exactly one of `run` and `run_script` is required after templates
+    /// are applied.
     run: Run,
-    /// Script file and name, in shorthand or object form.
+    /// Script to run from a project file, as `{ file, name }`, such as
+    /// `{ file: apps/api/package.json, name: dev }`. devlanes picks the tool from the file
+    /// name (`package.json`, `Makefile`, `justfile`, `deno.json`, `pyproject.toml`,
+    /// `Cargo.toml`), runs the script in that file's directory and checks that it exists
+    /// before starting. Presets need it to place their flags, and a profile's `run_scripts`
+    /// can swap the script name. Exactly one of `run` and `run_script` is required after
+    /// templates are applied.
     run_script: RunScript,
-    /// Working directory relative to the lane worktree.
+    /// Directory `run` starts in, relative to the lane's worktree; defaults to the worktree
+    /// root. Platform detection also looks here. Cannot be combined with `run_script`, which
+    /// runs in the script file's directory; `devlanes config check` refuses the pair,
+    /// including a `cwd` inherited through `extends`.
     #[schemars(extend("examples" = ["apps/api"]))]
     cwd: Templated<String>,
-    /// Platform: node, bun, deno, python or rust; detected from project files when omitted.
+    /// Runtime of the service: `node`, `bun`, `deno`, `python` or `rust`. It decides which
+    /// variables devlanes adds, such as the devlanes CA (`NODE_EXTRA_CA_CERTS`,
+    /// `SSL_CERT_FILE`) and color settings. Detected from the `run_script` file or the working
+    /// directory when omitted; set it only when detection is wrong.
     #[schemars(extend("examples" = ["node","bun","deno","python","rust"]))]
     platform: String,
-    /// Registered framework preset; options use a sibling key with this name.
+    /// Framework integration that adds the flags and variables a dev server needs to run in
+    /// a lane, such as `--port <port> --strictPort --host 127.0.0.1` for `vite`, so you do
+    /// not pass them yourself. Requires `run_script`; with a hand-written `run`, drop the
+    /// preset and pass its flags yourself. Its options go under a sibling key with the
+    /// preset's name, for example `vite: { args: [--open] }`.
     #[schemars(extend("examples" = ["vite","next","wrangler","tauri"]))]
     preset: String,
-    /// HTTP hosts, wildcard hosts, and routes to named ports.
-    #[schemars(extend("examples" = [["api.${{ lane.domain }}"],[{"host":"inspect.${{ lane.domain }}","port":"inspector"}]]))]
-    hosts: Vec<HostConfig>,
-    /// Tags used by +tag profile selectors.
+    /// Hostnames the devlanes HTTPS proxy routes to this service, so `https://<host>` reaches
+    /// it. One entry or a list; an entry is a hostname or a mapping with `host` and optional
+    /// `port` (a named port), `fallback` and `host_header`. A `*.` wildcard matches
+    /// subdomains, and an exact host wins over it. The first non-wildcard host becomes
+    /// `public_url` and `DEVLANES_PUBLIC_URL`, non-wildcard hosts join the lane's
+    /// `DEVLANES_ORIGINS`, and having hosts makes the default `ready` a TCP check. Keep them
+    /// under `${{ lane.domain }}` so lanes do not collide.
+    #[schemars(extend("examples" = ["api.${{ lane.domain }}",["api.${{ lane.domain }}"],[{"host":"inspect.${{ lane.domain }}","port":"inspector"}]]))]
+    hosts: Hosts,
+    /// Labels for selecting and grouping services. `+tag` selects every service with the
+    /// tag in profiles, in commands such as `devlanes start +api`, and in the TUI filter.
+    /// Tags also set the service's color: the first tag with a `color` under the top-level
+    /// `tags` wins, then the first tag naming a category such as `api`, `web` or `worker`,
+    /// so put that tag first.
     #[schemars(extend("examples" = [["api","essential"],["worker"],["web"]]))]
     tags: Vec<String>,
-    /// Readiness policy; defaults to TCP with hosts, otherwise started.
+    /// When the service counts as up: `devlanes start` waits for it, and `after: services`
+    /// tasks run once every started service is ready. Write `started` (ready once the
+    /// process runs) or a mapping with one of `tcp`, `http`, `log` or `cmd`, plus `timeout`
+    /// (default 60s). Without it, a service with `hosts` waits for TCP on its port and one
+    /// without hosts uses `started`. A check that times out marks the service failed, which
+    /// also skips `after: services` tasks; the process keeps running and is not restarted.
     ready: ReadyConfig,
-    /// Use a pseudoterminal; defaults to true.
+    /// Run the service in a pseudoterminal, so it sees a terminal as it would in your shell
+    /// and you can type into it from the TUI. Set false to use pipes instead: stdin is empty
+    /// and stdout and stderr are read separately. Defaults to true.
     #[schemars(extend("examples" = [true,false]))]
     pty: Templated<bool>,
-    /// Stop signal and grace period before killing the process tree.
+    /// How devlanes stops the service: `signal` goes to its whole process tree, and after
+    /// `timeout` every process still running is SIGKILLed. The service then shows as
+    /// stopped and is not restarted. Defaults to SIGTERM and 10s.
     stop: StopConfig,
-    /// Prevent remote port mirroring; defaults to false.
+    /// Keep this service's ports and hosts off machines connected with
+    /// `devlanes remote connect`: they are not mirrored there and cannot be reached from
+    /// there. The service still runs and works on this machine. Defaults to false.
     #[schemars(extend("examples" = [false,true]))]
     hidden: Templated<bool>,
-    /// Start by default unless explicitly selected; defaults to true.
+    /// Set false for an on-demand service: a plain `devlanes start` without a `default`
+    /// profile skips it, and so do globs such as `*` in profiles. Naming it or its `+tag`,
+    /// on the command line or in a profile, still starts it. An expression is evaluated for
+    /// each lane and acts like the `true` or `false` it gives, such as
+    /// `${{ lane.index == 0 }}` to autostart only in the main lane. With `replicas`, the
+    /// service starts all its copies when any copy's expression gives true. Defaults to true.
     #[schemars(extend("examples" = [true,false]))]
     autostart: Templated<bool>,
-    /// Override the project fnox profile for this service.
+    /// Secrets profile for this service, replacing the project's `fnox.profile`. fnox puts
+    /// that profile's secrets into the service's environment and `${{ env.X }}`; use it when
+    /// one service needs different credentials.
     fnox: FnoxConfig,
-    /// Folders copied to stable local or remote-client paths.
+    /// Folders mirrored while the service runs, such as build output a browser loads
+    /// unpacked from a fixed path. Each entry copies `from` to `to` (default
+    /// `~/devlanes/sync/<project>/<lane>/<folder>`) and follows changes; machines connected
+    /// with `devlanes remote connect` get their own copy.
     #[schemars(extend("examples" = [[{"from":"apps/extension/.output/chrome-mv3","ignore":["*.map"]}]]))]
     sync: Vec<SyncConfig>,
-    /// Number of instances; replica.index starts at one. Defaults to one.
+    /// Number of copies of this service to run, each with its own port, for example several
+    /// queue workers. They run as `<name>.1` to `<name>.N`, `${{ replica.index }}` counts
+    /// from 1, and `services.<name>` in expressions means the first copy; use
+    /// `${{ replica.index }}` in `hosts` to give each copy its own hostname. A plain number
+    /// of at least 1, the same in every lane, because each copy reserves ports in every
+    /// lane's block; `${{ ... }}` expressions are not allowed. Defaults to 1.
     #[schemars(extend("examples" = [1,2]))]
-    replicas: Templated<u16>,
+    replicas: u16,
 }
 
 impl<E: Extensions> ServiceConfig<E> {

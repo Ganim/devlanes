@@ -43,10 +43,10 @@ pub struct ResolveInput<'a, E: Extensions = OpaqueExtensions> {
     pub dotenv: &'a BTreeMap<String, String>,
     /// `infra` namespace: `{name: {port, ports: {...}}}`.
     pub infra: &'a Value,
-    /// `lanes.main.svc` namespace from lane 0's [`LaneLayout::svc_namespace`].
+    /// `lanes.main.services` namespace from lane 0's [`LaneLayout::services_namespace`].
     /// Lane 0 itself may leave it unset; its own services are used.
     pub lanes_main: Option<&'a Value>,
-    /// `projects` namespace: `{project: {svc: {...}}}` for other running projects.
+    /// `projects` namespace: `{project: {services: {...}}}` for other running projects.
     pub projects: &'a Value,
     /// Requested profile from single-profile callers; counts as the first entry
     /// of `profiles`. With neither set, `default` applies when the config defines it.
@@ -122,10 +122,10 @@ pub struct LaneLayout {
 }
 
 impl LaneLayout {
-    /// The `svc` namespace of this lane (replica 1 of each service), for use as
+    /// The `services` namespace of this lane (replica 1 of each service), for use as
     /// another lane's `lanes_main` when this is lane 0.
-    pub fn svc_namespace(&self) -> Value {
-        svc_namespace(self.services.values())
+    pub fn services_namespace(&self) -> Value {
+        services_namespace(self.services.values())
     }
 
     /// Variables for `devlanes with` and `devlanes env show`: `DEVLANES`,
@@ -137,7 +137,7 @@ impl LaneLayout {
 }
 
 /// Builds `{service: {name, port, ports, url, public_url, hosts}}` from replica 1.
-pub(crate) fn svc_namespace<'a>(services: impl Iterator<Item = &'a ServiceLayout>) -> Value {
+pub(crate) fn services_namespace<'a>(services: impl Iterator<Item = &'a ServiceLayout>) -> Value {
     Value::Object(
         services
             .filter(|s| s.replica == 1)
@@ -177,7 +177,7 @@ pub struct ServiceLayout {
 }
 
 impl ServiceLayout {
-    /// The value of `self` (and of `svc.<name>`) in expressions. `public_url` is
+    /// The value of `self` (and of `services.<name>`) in expressions. `public_url` is
     /// absent without hosts, so using it fails unless filtered with `default`.
     pub fn self_value(&self) -> Value {
         let mut map = serde_json::Map::new();
@@ -429,7 +429,7 @@ pub struct ResolvedLane {
     pub errors: IndexMap<String, ResolveError>,
     pub warnings: Vec<String>,
     pub(crate) lane_env: BTreeMap<String, String>,
-    pub(crate) svc: Value,
+    pub(crate) services_namespace: Value,
 }
 
 impl ResolvedLane {
@@ -438,14 +438,22 @@ impl ResolvedLane {
         &self.lane_env
     }
 
-    /// See [`LaneLayout::svc_namespace`].
-    pub fn svc_namespace(&self) -> &Value {
-        &self.svc
+    /// See [`LaneLayout::services_namespace`].
+    pub fn services_namespace(&self) -> &Value {
+        &self.services_namespace
     }
 
     /// Replicas of `service` in replica order.
     pub fn units_of<'s>(&'s self, service: &'s str) -> impl Iterator<Item = &'s ResolvedService> {
         self.services.values().filter(move |s| s.name == service)
+    }
+
+    /// Evaluated `autostart` of `service`: true when any replica's is, `None` when
+    /// no replica planned (the failure is in [`Self::errors`]).
+    pub fn autostart(&self, service: &str) -> Option<bool> {
+        self.units_of(service)
+            .map(|unit| unit.autostart)
+            .reduce(|any, next| any || next)
     }
 
     /// Fails with the first planning error among `services`, so a start can

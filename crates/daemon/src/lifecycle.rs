@@ -169,23 +169,24 @@ fn ready_word(spec: &ReadySpec) -> &'static str {
     }
 }
 
-/// Writes contributor files atomically. Paths must stay inside the lane worktree;
-/// the files must not contain secrets because they land on disk.
+/// Writes contributor files atomically. Paths must stay inside one of `roots` (the lane
+/// worktree, which relative paths are joined to, then the lane data folder); the files
+/// must not contain secrets because they land on disk.
 async fn write_files(
-    lane_path: std::path::PathBuf,
+    roots: &[std::path::PathBuf],
     files: Vec<PreparedFile>,
 ) -> Result<(), RpcError> {
     if files.is_empty() {
         return Ok(());
     }
+    let roots = roots.to_vec();
     tokio::task::spawn_blocking(move || {
         for file in files {
-            let path = if file.path.is_absolute() {
-                file.path.clone()
-            } else {
-                lane_path.join(&file.path)
+            let path = match roots.first() {
+                Some(worktree) if !file.path.is_absolute() => worktree.join(&file.path),
+                _ => file.path.clone(),
             };
-            if !path.starts_with(&lane_path)
+            if !roots.iter().any(|root| path.starts_with(root))
                 || path
                     .components()
                     .any(|c| c == std::path::Component::ParentDir)
@@ -316,6 +317,9 @@ pub(crate) struct StartCx {
     pub reference: String,
     pub actor: Actor,
     pub services: Vec<String>,
+    /// `Selection::autostart_pending`: entries of `services` that resolution drops
+    /// when their `autostart` expression evaluates to false.
+    pub autostart_pending: Vec<String>,
     /// Profiles in effect, in the order given.
     pub profiles: Vec<String>,
     /// False when the profiles turn infra off. Set from the selection before infra
@@ -550,6 +554,11 @@ impl LanePhase for ResolvePhase {
             Ok(resolved) => {
                 // Infra came up already when it was on; this governs `infra.setup`.
                 cx.infra_enabled &= resolved.infra_enabled;
+                // A failed plan keeps its service, so the services phase reports it.
+                let pending = std::mem::take(&mut cx.autostart_pending);
+                devlanes_resolve::retain_autostart(&mut cx.services, &pending, |name| {
+                    resolved.autostart(name)
+                });
                 // From here a stop can name the tasks and setup entries this start
                 // may run, also between their spawn and their record on the lane.
                 for (name, task) in &resolved.tasks {
@@ -1124,7 +1133,8 @@ impl Inner {
                 }
             }
         }
-        write_files(lane_path, request.files.clone()).await?;
+        let data_path = self.lane_data_path(&project.name(), record.id);
+        write_files(&[lane_path, data_path], request.files.clone()).await?;
         // The process exists before its run row does. A daemon crash between the
         // spawn and `record_unit_run` below leaves a process no later daemon knows
         // about: reconcile cannot list it as an orphan and nothing stops it. The
@@ -1884,6 +1894,7 @@ impl Inner {
             reference: reference.clone(),
             actor: options.actor.clone(),
             services: selection.services.clone(),
+            autostart_pending: selection.autostart_pending.clone(),
             profiles: selection.profiles.clone(),
             infra_enabled,
             infra_templated,
@@ -2665,6 +2676,7 @@ impl Inner {
             reference: reference.clone(),
             actor: options.actor.clone(),
             services,
+            autostart_pending: Vec::new(),
             profiles: lane.st().profiles.clone(),
             infra_enabled: true,
             infra_templated: false,
@@ -2797,6 +2809,8 @@ impl Inner {
                 .clean_lane(record.id)
                 .await
                 .map_err(store_error)?;
+            // Last, so a clean that fails earlier keeps the data its teardown may need.
+            self.remove_lane_data(&project.name(), record.id).await;
         }
         let path = lane.st().path.clone();
         self.secrets.forget(Some(&path));
@@ -3014,11 +3028,29 @@ impl Inner {
         }
     }
 
-    /// The lane's profiles and the services they select, for `why`.
+    /// The lane's profiles and the services they select, for `why`. `autostart`
+    /// expressions use the lane's precomputed layout.
+    // TODO: the layout is evaluated without secrets and with the infra values known when it
+    // was built, while a start evaluates `autostart` with both. An expression reading a
+    // secret or an infra value (a port, a container's state) can make `why` report a
+    // selection that differs from what a start picks. Evaluate it the way a start does.
     pub(crate) fn profile_services(lane: &LaneRt) -> Option<(Vec<String>, BTreeSet<String>)> {
         let st = lane.st();
         let config = st.config.loaded()?;
-        let selection = devlanes_resolve::select_profiles(config, &st.profiles, &[]).ok()?;
+        let mut selection = devlanes_resolve::select_profiles(config, &st.profiles, &[]).ok()?;
+        devlanes_resolve::retain_autostart(
+            &mut selection.services,
+            &selection.autostart_pending,
+            |name| {
+                st.view.as_ref().and_then(|view| {
+                    view.services
+                        .iter()
+                        .filter(|s| s.name == name)
+                        .map(|s| s.autostart)
+                        .reduce(|any, next| any || next)
+                })
+            },
+        );
         Some((selection.profiles, selection.services.into_iter().collect()))
     }
 

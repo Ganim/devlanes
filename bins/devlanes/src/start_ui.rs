@@ -25,10 +25,9 @@ const OPEN_AFTER: Duration = Duration::from_millis(300);
 const DETACHED: u8 = 130;
 
 /// Whether `tui.open_on_start` in the user config allows it; true when unset
-/// or unreadable.
+/// or invalid (with a warning).
 pub fn open_on_start(paths: &Paths) -> bool {
-    devlanes_config::load_user(paths.home.join("config.yaml"))
-        .map_or(true, |config| config.tui.open_on_start)
+    crate::user_config::display(paths).tui.open_on_start
 }
 
 /// The command's verb, shown in the TUI's header.

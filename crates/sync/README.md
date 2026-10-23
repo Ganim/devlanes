@@ -40,7 +40,9 @@ async fn sync_extension(worktree: &Path, to: &Path) -> Result<SyncHandle, SyncEr
 ```yaml
 services:
   extension:
-    run_script: apps/extension/package.json#dev
+    run_script:
+      file: apps/extension/package.json
+      name: dev
     # Folders copied to a stable path, locally or on a machine connected with devlanes remote connect.
     sync:
       - from: apps/extension/.output/chrome-mv3

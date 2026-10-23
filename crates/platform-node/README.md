@@ -19,7 +19,9 @@ let contributors: Vec<Arc<dyn Contributor>> =
 ```yaml
 services:
   web:
-    run_script: web/package.json#dev   # platform inferred: node
+    run_script:  # platform inferred: node
+      file: web/package.json
+      name: dev
   worker:
     platform: node
     run: node worker.mjs
@@ -34,7 +36,7 @@ Node units get:
 
 Without `platform`, `NodeContributor` claims a unit whose `run_script` source is a `package.json`, or whose working directory contains one. `devlanes-platform-bun` and `devlanes-platform-deno` claim the same directory more strongly when it has a Bun lockfile or a Deno config.
 
-`CloudflareContributor` applies to every unit of a lane whose worktree contains `wrangler.toml`, `wrangler.json` or `wrangler.jsonc` within four directory levels, skipping `node_modules`, build output and hidden directories. It sets `WRANGLER_REGISTRY_PATH=<lane>/.devlanes/wrangler-registry`, so same-named workers in two lanes do not bind to each other. The scan runs on a blocking thread once per lane resolution.
+`CloudflareContributor` applies to every unit of a lane whose worktree contains `wrangler.toml`, `wrangler.json` or `wrangler.jsonc` within four directory levels, skipping `node_modules`, build output and hidden directories. It sets `WRANGLER_REGISTRY_PATH=<lane data>/wrangler-registry` (the lane data folder, outside the worktree), so same-named workers in two lanes do not bind to each other, including lanes that run from one folder. The scan runs on a blocking thread once per lane resolution.
 
 ## License
 

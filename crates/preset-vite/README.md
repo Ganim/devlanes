@@ -25,14 +25,16 @@ services:
   web:
     # Adds Vite's port and host flags to the command.
     preset: vite
-    run_script: apps/web/package.json#dev
+    run_script:
+      file: apps/web/package.json
+      name: dev
     # Options for the vite preset.
     vite:
       # Appended after the preset's flags.
       args: [--mode, staging]
 ```
 
-The preset adds `--port <self.port> --strictPort --host 127.0.0.1`. `--strictPort` makes Vite exit instead of moving to another port, which would break the proxy route. With `run_script` the script runner places the flags (after `--` for npm); a plain `run` gets them appended, with `--` first when it is `npm run ...`.
+The preset adds `--port <self.port> --strictPort --host 127.0.0.1`. `--strictPort` makes Vite exit instead of moving to another port, which would break the proxy route. The script runner places the flags after the script name (after `--` for npm). The preset needs `run_script`: config validation refuses it next to `run`.
 
 ## License
 

@@ -25,8 +25,8 @@ fn unknown_service_keys_have_suggestions_and_spans() {
 #[test]
 fn misspelled_preset_key_uses_effective_preset() {
     for source in [
-        "project: acme\nservices:\n  api:\n    run: server\n    wranglr: {}\n    preset: wrangler\n",
-        "project: acme\ntemplates:\n  worker: { preset: wrangler }\nservices:\n  api:\n    extends: worker\n    run: server\n    wranglr: {}\n",
+        "project: acme\nservices:\n  api:\n    run_script: { file: package.json, name: dev }\n    wranglr: {}\n    preset: wrangler\n",
+        "project: acme\ntemplates:\n  worker: { preset: wrangler }\nservices:\n  api:\n    extends: worker\n    run_script: { file: package.json, name: dev }\n    wranglr: {}\n",
     ] {
         let error = parse_project(source, None).expect_err("wrong preset key");
         assert!(
@@ -45,7 +45,7 @@ fn misspelled_preset_key_uses_effective_preset() {
                 + 1
         );
     }
-    let source = "project: acme\ntemplates:\n  worker: { preset: wrangler }\nservices:\n  api: { extends: worker, run: server }\n";
+    let source = "project: acme\ntemplates:\n  worker: { preset: wrangler }\nservices:\n  api: { extends: worker, run_script: { file: package.json, name: dev } }\n";
     let error = parse_project(source, Some("services:\n  api:\n    wranglr: {}\n"))
         .expect_err("local typo");
     assert!(error.message.contains("did you mean `wrangler`?"));
@@ -89,8 +89,7 @@ fn options_without_preset_explain_selection() {
         "{}",
         error.message
     );
-    let source =
-        "project: acme\nservices:\n  api:\n    run: server\n    custm: {}\n    preset: custom\n";
+    let source = "project: acme\nservices:\n  api:\n    run_script: { file: package.json, name: dev }\n    custm: {}\n    preset: custom\n";
     let error = parse_project_with::<super::TestExtensions>(source, None)
         .expect_err("registered preset typo");
     assert!(
@@ -103,6 +102,6 @@ fn options_without_preset_explain_selection() {
 /// Deferred option parsing must retain duplicate-key rejection.
 #[test]
 fn duplicate_preset_option_is_rejected() {
-    let source = "project: acme\nservices:\n  api:\n    run: server\n    preset: wrangler\n    wrangler:\n      isolate_registry: true\n      isolate_registry: false\n";
+    let source = "project: acme\nservices:\n  api:\n    run_script: { file: package.json, name: dev }\n    preset: wrangler\n    wrangler:\n      isolate_registry: true\n      isolate_registry: false\n";
     assert!(parse_project(source, None).is_err());
 }

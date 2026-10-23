@@ -25,6 +25,37 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PENDING_FRAMES: usize = 256;
+/// Most bytes read from a spawned daemon's readiness pipe, newline included.
+/// Bounds a misbehaving child's output; a failure reason such as an invalid user
+/// config with its path and message still fits.
+pub const READY_LINE_LIMIT: u64 = 4096;
+
+/// Readiness-line code of a daemon that refused an invalid user config. The line is
+/// `USER_CONFIG_INVALID: {"message","file","line","column"}`; JSON keeps a message
+/// with colons or newlines whole.
+pub const USER_CONFIG_INVALID: &str = "USER_CONFIG_INVALID";
+
+/// The `config_error` behind a daemon's [`USER_CONFIG_INVALID`] startup line, so
+/// every client reports it like a strict load of the file; `None` for any other line
+/// or one that does not parse.
+pub fn user_config_startup_error(reason: &str) -> Option<RpcError> {
+    let details = reason
+        .strip_prefix(USER_CONFIG_INVALID)?
+        .strip_prefix(':')?
+        .trim();
+    let details: Value = serde_json::from_str(details).ok()?;
+    let file = details.get("file").and_then(Value::as_str)?;
+    Some(RpcError::new(
+        "config_error",
+        serde_json::json!({
+            "message": details.get("message").and_then(Value::as_str).unwrap_or_default(),
+            "file": file,
+            "line": details.get("line").and_then(Value::as_u64).unwrap_or_default(),
+            "column": details.get("column").and_then(Value::as_u64).unwrap_or_default(),
+        }),
+        1,
+    ))
+}
 
 /// Transport errors stay separate from structured daemon failures for exit-code rendering.
 #[derive(Debug, thiserror::Error)]
@@ -252,10 +283,9 @@ impl Client {
         let deadline = Instant::now() + START_TIMEOUT;
         let mut message = Vec::new();
         timeout(START_TIMEOUT, async {
-            // Bound an invalid child's output rather than buffering arbitrary stdout.
             use tokio::io::AsyncReadExt;
             (&mut reader)
-                .take(128)
+                .take(READY_LINE_LIMIT)
                 .read_until(b'\n', &mut message)
                 .await
         })
@@ -263,6 +293,11 @@ impl Client {
         .map_err(|_| Error::Timeout)??;
         if message != b"ready\n" && message != b"already-running\n" {
             let reason = String::from_utf8_lossy(&message).trim().to_owned();
+            // A refused user config is a structured error, so the CLI and the TUI word it
+            // like any `config_error` instead of a transport failure.
+            if let Some(error) = user_config_startup_error(&reason) {
+                return Err(Error::Rpc(error));
+            }
             // A daemon that died before writing a reason left it in its own log.
             return Err(Error::Startup(if reason.is_empty() {
                 format!(
@@ -569,7 +604,28 @@ fn frame_size(frame: &Frame) -> Result<usize> {
 mod tests {
     use std::ffi::OsString;
 
-    use super::daemon_env;
+    use super::{daemon_env, user_config_startup_error};
+
+    /// A refused user config becomes a located `config_error`; other or cut lines do not.
+    #[test]
+    fn user_config_startup_lines_become_config_errors() {
+        let error = user_config_startup_error(
+            r#"USER_CONFIG_INVALID: {"message":"tui.theme: unknown variant `neon`: pick one","file":"/home/acme/.devlanes/config.yaml","line":4,"column":10}"#,
+        )
+        .expect("config error");
+        assert_eq!((error.code.as_str(), error.exit_code), ("config_error", 1));
+        assert_eq!(
+            error.data,
+            serde_json::json!({
+                "message": "tui.theme: unknown variant `neon`: pick one",
+                "file": "/home/acme/.devlanes/config.yaml",
+                "line": 4,
+                "column": 10,
+            })
+        );
+        assert!(user_config_startup_error("USER_CONFIG_INVALID: cut{").is_none());
+        assert!(user_config_startup_error("STATE_LEGACY_SCHEMA: old").is_none());
+    }
 
     /// Allowlisted names and prefixes pass, secrets and removed names do not.
     #[test]

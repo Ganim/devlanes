@@ -45,10 +45,10 @@ async fn runner_notes_reach_launch() {
 project: demo
 services:
   plain:
-    run_script: web/package.json#dev
+    run_script: { file: web/package.json, name: dev }
   preset:
     preset: vite
-    run_script: web/package.json#dev
+    run_script: { file: web/package.json, name: dev }
 "#,
     );
     let facts = facts("demo", 1, None);

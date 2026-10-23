@@ -856,6 +856,31 @@ impl DaemonApi for ClientApi {
     /// Shutdown, then a new daemon from this binary that starts again what
     /// ran, as `devlanes daemon restart` does.
     async fn restart_daemon(&self) -> Result<Value, ApiError> {
+        // The new daemon refuses an invalid user config, so check it before the old
+        // one stops every lane, as `devlanes daemon restart` does.
+        let path = self.paths.home.join("config.yaml");
+        let checked = tokio::task::spawn_blocking(move || {
+            if !path.exists() {
+                return Ok(());
+            }
+            devlanes_config::load_user(&path)
+                .map(drop)
+                .map_err(|error| {
+                    RpcError::new(
+                        "config_error",
+                        json!({
+                            "message": error.message,
+                            "file": path.display().to_string(),
+                            "line": error.location.line,
+                            "column": error.location.column,
+                        }),
+                        1,
+                    )
+                })
+        })
+        .await
+        .map_err(|error| ApiError::Disconnected(error.to_string()))?;
+        checked.map_err(ApiError::Rpc)?;
         // What runs now; a failure to read it only means nothing is resumed
         // (the restart itself still goes ahead, as in the CLI).
         let running = match self.fresh().await {

@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 
+/// Environment variable holding [`LaneFacts::data_path`], set for every unit.
+pub const LANE_DATA_ENV: &str = "DEVLANES_LANE_DATA";
+
 /// What the daemon knows about one lane before resolving its config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneFacts {
@@ -14,6 +17,9 @@ pub struct LaneFacts {
     pub label: String,
     /// The lane's worktree directory.
     pub path: PathBuf,
+    /// The lane's data folder outside the worktree (`lane.data_path`). It belongs to
+    /// this lane alone, also when another lane runs from the same worktree.
+    pub data_path: PathBuf,
     /// Checked-out branch; `None` on a detached HEAD or outside git.
     pub branch: Option<String>,
 }
@@ -25,6 +31,7 @@ impl LaneFacts {
         primary_path: impl Into<PathBuf>,
         index: u32,
         path: impl Into<PathBuf>,
+        data_path: impl Into<PathBuf>,
         branch: Option<String>,
     ) -> Self {
         let name = lane_name(index);
@@ -36,6 +43,7 @@ impl LaneFacts {
             name,
             label,
             path: path.into(),
+            data_path: data_path.into(),
             branch,
         }
     }
@@ -62,14 +70,14 @@ mod tests {
     #[test]
     /// Names follow the index; labels follow the branch with slashes replaced.
     fn names_and_labels() {
-        let main = LaneFacts::new("acme", "/w", 0, "/w", Some("main".into()));
+        let main = LaneFacts::new("acme", "/w", 0, "/w", "/d/1", Some("main".into()));
         assert_eq!((main.name.as_str(), main.label.as_str()), ("main", "main"));
-        let lane = LaneFacts::new("acme", "/w", 3, "/x", Some("feat/a/b".into()));
+        let lane = LaneFacts::new("acme", "/w", 3, "/x", "/d/2", Some("feat/a/b".into()));
         assert_eq!(
             (lane.name.as_str(), lane.label.as_str()),
             ("lane3", "feat-a-b")
         );
-        let detached = LaneFacts::new("acme", "/w", 2, "/y", None);
+        let detached = LaneFacts::new("acme", "/w", 2, "/y", "/d/3", None);
         assert_eq!(detached.label, "lane2");
     }
 }

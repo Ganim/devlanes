@@ -1,11 +1,12 @@
-//! Several profiles per start, `profile.list`, and unit colors.
+//! Several profiles per start, `profile.list`, `autostart` expressions and unit
+//! colors.
 
 use std::time::Duration;
 
-use devlanes_proto::{LaneSummary, Method, Page};
+use devlanes_proto::{LaneSummary, Method, Page, StartResult};
 use serde_json::{Value, json};
 
-use crate::{LIMIT, Setup, cx, eventually, harness, repo, temp};
+use crate::{LIMIT, Setup, cx, eventually, harness, repo, temp, worktree};
 
 const CONFIG: &str = r#"project: demo
 tags:
@@ -194,6 +195,75 @@ async fn empty_keeps_and_default_resets_profiles() {
         all.sort_unstable();
         assert_eq!(all, ["api", "web", "worker"], "every autostart service");
         h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A plain start settles an `autostart` expression per lane: `worker` starts in
+/// lane 0 and stays idle in lane 1, and `why` agrees with what each start picked.
+async fn autostart_expression_decides_per_lane() {
+    const AUTOSTART: &str = "project: demo\nservices:\n  api: { run: serve }\n  worker: { run: serve, autostart: \"${{ lane.index == 0 }}\" }\n";
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", AUTOSTART);
+        let other = tmp.path.join("wt");
+        worktree(&main, &other, "feat/other");
+        let h = harness(&tmp.path.join("home"), Setup::default()).await;
+        // Registers both lanes, so the main worktree gets index 0.
+        h.call(Method::LaneList, json!({}), cx(&main))
+            .await
+            .expect("lane list");
+        for (cwd, expected) in [
+            (&main, &["demo@0:api", "demo@0:worker"][..]),
+            (&other, &["demo@1:api"][..]),
+        ] {
+            let started: StartResult = serde_json::from_value(
+                h.call(Method::Start, json!({}), cx(cwd))
+                    .await
+                    .expect("start"),
+            )
+            .expect("start result");
+            assert_eq!(started.started, expected);
+        }
+        let reasons = |why: &Value| -> Vec<String> {
+            why["reasons"]
+                .as_array()
+                .expect("reasons")
+                .iter()
+                .filter_map(|reason| reason["code"].as_str().map(str::to_owned))
+                .collect()
+        };
+        let idle = h
+            .call(Method::Why, json!({"unit": "worker"}), cx(&other))
+            .await
+            .expect("why in lane 1");
+        assert_eq!(idle["lane"], "demo@1");
+        assert!(
+            reasons(&idle).contains(&"autostart_off".to_owned()),
+            "{idle}"
+        );
+        // Stopped, lane 0's worker is idle too, yet still selected by a plain start.
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        let selected = h
+            .call(Method::Why, json!({"unit": "worker"}), cx(&main))
+            .await
+            .expect("why in lane 0");
+        assert_eq!(selected["lane"], "demo@0");
+        let codes = reasons(&selected);
+        assert!(
+            !codes
+                .iter()
+                .any(|c| c == "autostart_off" || c == "not_in_profile"),
+            "{selected}"
+        );
+        h.call(Method::Stop, json!({}), cx(&other))
             .await
             .expect("stop");
         h.close().await;

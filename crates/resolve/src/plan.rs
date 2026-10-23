@@ -117,6 +117,10 @@ async fn plan_lane<E: Extensions>(
         ("DEVLANES_PROJECT".to_owned(), config.project.clone()),
         ("DEVLANES_LANE".to_owned(), input.facts.index.to_string()),
         ("DEVLANES_LANE_NAME".to_owned(), input.facts.name.clone()),
+        (
+            crate::LANE_DATA_ENV.to_owned(),
+            input.facts.data_path.display().to_string(),
+        ),
     ]);
     devlanes.extend(input.ca_env.iter().map(|(k, v)| (k.clone(), v.clone())));
 
@@ -192,7 +196,7 @@ async fn plan_lane<E: Extensions>(
             }
         }
     }
-    let svc = ns.svc.clone();
+    let services_namespace = ns.services.clone();
     Ok(ResolvedLane {
         facts: input.facts.clone(),
         domain: layout.domain,
@@ -210,7 +214,7 @@ async fn plan_lane<E: Extensions>(
         errors,
         warnings: layout.warnings,
         lane_env: layout.lane_env,
-        svc,
+        services_namespace,
     })
 }
 
@@ -341,7 +345,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
         let script = match &service.run_script {
             Some(script) => {
                 let (source, name) = script
-                    .source_and_name_for_profile(self.remap)
+                    .file_and_name_for_profile(self.remap)
                     .map_err(|e| ResolveError::expression(format!("{path}.run_script"), e))?;
                 Some((source.to_owned(), name.to_owned()))
             }
@@ -426,7 +430,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
             let script = match &task.run_script {
                 Some(script) => {
                     let (source, name) = script
-                        .source_and_name()
+                        .file_and_name()
                         .map_err(|e| ResolveError::expression(format!("{path}.run_script"), e))?;
                     Some((source.to_owned(), name.to_owned()))
                 }
@@ -490,25 +494,12 @@ impl<E: Extensions> Planner<'_, '_, E> {
     ) -> Result<ResolvedCommand, ResolveError> {
         let path = format!("infra.{phase}.{name}");
         let empty = Env::default();
-        let (run, script, options) = match entry {
-            InfraCommand::Command(run) => (Some(run), None, None),
-            InfraCommand::Object(options) => (
-                options.run.as_ref(),
-                options.run_script.as_ref(),
-                Some(options.as_ref()),
-            ),
+        let (run, options) = match entry {
+            InfraCommand::Command(run) => (Some(run), None),
+            InfraCommand::Object(options) => (options.run.as_ref(), Some(options.as_ref())),
         };
         let secrets = self.unit_secrets(None).await?;
         let context = self.context(&secrets, json!({"name": name}), json!({}));
-        let script = match script {
-            Some(script) => {
-                let (source, name) = script
-                    .source_and_name()
-                    .map_err(|e| ResolveError::expression(format!("{path}.run_script"), e))?;
-                Some((source.to_owned(), name.to_owned()))
-            }
-            None => None,
-        };
         let launch = self
             .launch(
                 LaunchInput {
@@ -517,7 +508,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
                     name,
                     unit: &path,
                     run,
-                    script,
+                    script: None,
                     cwd: options.and_then(|o| o.cwd.as_ref()),
                     env: options.map_or(&empty, |o| &o.env),
                     platform: None,
@@ -632,6 +623,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
             lane_index: facts.index,
             lane_name: &facts.name,
             lane_path,
+            lane_data_path: &facts.data_path,
             primary_path: &facts.primary_path,
             platform: platform.as_deref(),
             preset: spec.preset,

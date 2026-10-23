@@ -6,8 +6,9 @@
 //!   Node needs no unbuffering switch: `process.stdout` writes are not held back
 //!   in a userspace buffer.
 //! - [`CloudflareContributor`]: when the lane worktree contains a Wrangler config,
-//!   points every process at a per-lane dev registry, so same-named workers in two
-//!   lanes do not bind to each other.
+//!   points every process at a dev registry in the lane data folder, so same-named
+//!   workers in two lanes do not bind to each other, even when both lanes run from
+//!   one folder.
 
 use std::{
     path::{Path, PathBuf},
@@ -44,8 +45,8 @@ async fn exists(path: &Path) -> bool {
 /// Wrangler's dev registry variable (see `devlanes-preset-wrangler`).
 pub const REGISTRY_ENV: &str = "WRANGLER_REGISTRY_PATH";
 
-/// Registry directory relative to the lane worktree, shared by the lane's workers.
-pub const REGISTRY_DIR: &str = ".devlanes/wrangler-registry";
+/// Registry directory in the lane data folder, shared by the lane's workers.
+pub const REGISTRY_DIR: &str = "wrangler-registry";
 
 /// Wrangler config file names.
 const WRANGLER_FILES: &[&str] = &["wrangler.toml", "wrangler.json", "wrangler.jsonc"];
@@ -112,8 +113,8 @@ impl Contributor for NodeContributor {
     }
 }
 
-/// Sets `WRANGLER_REGISTRY_PATH` for every process of lanes whose worktree
-/// contains a Wrangler config.
+/// Sets `WRANGLER_REGISTRY_PATH` to `<lane data>/wrangler-registry` for every process
+/// of lanes whose worktree contains a Wrangler config.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CloudflareContributor;
 
@@ -144,16 +145,16 @@ impl Contributor for CloudflareContributor {
         if found {
             draft.env.insert(
                 REGISTRY_ENV.to_owned(),
-                registry_path(cx.lane_path).display().to_string(),
+                registry_path(cx.lane_data_path).display().to_string(),
             );
         }
         Ok(())
     }
 }
 
-/// Returns `<lane>/.devlanes/wrangler-registry`.
-pub fn registry_path(lane: &Path) -> PathBuf {
-    lane.join(REGISTRY_DIR)
+/// Returns `<lane data>/wrangler-registry`.
+pub fn registry_path(lane_data: &Path) -> PathBuf {
+    lane_data.join(REGISTRY_DIR)
 }
 
 /// Looks for `wrangler.toml|json|jsonc` up to [`SEARCH_DEPTH`] levels below

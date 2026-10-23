@@ -69,14 +69,9 @@ impl Readiness {
     }
 
     /// Reports a startup failure; the spawning client shows the line as the error.
-    /// The client reads at most 128 bytes, so longer messages are cut.
+    /// Only the first line of `message` is sent, cut to the client's bound.
     pub fn failed(self, message: &str) -> std::io::Result<()> {
-        let mut line: String = message.lines().next().unwrap_or_default().to_owned();
-        while line.len() > 126 {
-            line.pop();
-        }
-        line.push('\n');
-        self.finish(line.as_bytes())
+        self.finish(failure_line(message).as_bytes())
     }
 
     /// Redirecting stdout matters because a held pipe keeps the CLI's reader waiting forever.
@@ -90,5 +85,41 @@ impl Readiness {
         let null = File::options().write(true).open("/dev/null")?;
         rustix::stdio::dup2_stdout(&null)?;
         Ok(())
+    }
+}
+
+/// Longest failure line, newline excluded. The spawning client reads at most
+/// `devlanes_client::READY_LINE_LIMIT` bytes, newline included, so a longer line
+/// would arrive without its end.
+const FAILURE_LINE_MAX: usize = 4095;
+
+/// The first line of `message`, cut to [`FAILURE_LINE_MAX`] bytes on a character
+/// boundary, with its newline.
+fn failure_line(message: &str) -> String {
+    let first = message.lines().next().unwrap_or_default();
+    let mut line = first[..first.floor_char_boundary(FAILURE_LINE_MAX)].to_owned();
+    line.push('\n');
+    line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    /// A long reason keeps everything the client reads, and the cut never splits
+    /// a character or exceeds the client's bound.
+    fn failure_lines_fit_the_client_bound() {
+        assert_eq!(
+            FAILURE_LINE_MAX + 1,
+            usize::try_from(devlanes_client::READY_LINE_LIMIT).expect("fits")
+        );
+        assert_eq!(failure_line("CODE: first\nsecond"), "CODE: first\n");
+        let long = format!("CODE: {}", "x".repeat(1000));
+        assert_eq!(failure_line(&long), format!("{long}\n"));
+        let wide = "é".repeat(FAILURE_LINE_MAX);
+        let line = failure_line(&wide);
+        assert!(line.len() <= FAILURE_LINE_MAX + 1);
+        assert!(line.trim_end().chars().all(|c| c == 'é'));
     }
 }

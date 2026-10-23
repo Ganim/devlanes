@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use devlanes_config::{HostConfig, Scalar, Templated};
+use devlanes_config::{HostConfig, Hosts, Scalar, Templated};
 use devlanes_core::{
     contrib::{Contributor, DetectCx, ScriptRunner, SecretsProvider, UnitKind},
     env::EnvLayer,
@@ -17,7 +17,7 @@ use devlanes_core::{
 };
 use devlanes_resolve::{
     ReadySpec, ResolveError, ResolveInput, detect_platform, lane_layout, port_needs,
-    profile_summaries, resolve_lane, select, select_profiles,
+    profile_summaries, resolve_lane, retain_autostart, select, select_profiles,
 };
 use serde_json::json;
 use support::*;
@@ -250,12 +250,58 @@ fn selection() {
     );
 }
 
+#[tokio::test]
+/// An `autostart` expression acts like the literal it evaluates to in each lane: a
+/// glob in the default profile, or no profile at all, keeps it only when true, while
+/// names and command-line selectors start it either way.
+async fn autostart_expressions_follow_the_lane() {
+    let services = "project: demo\nservices:\n  api: { run: a }\n  worker: { run: w, autostart: '${{ lane.index == 0 }}' }\n  tool: { run: t, autostart: false }\n";
+    let profiled = format!("{services}profiles:\n  default: ['*']\n  named: [worker]\n");
+    for yaml in [services.to_owned(), profiled.clone()] {
+        let config = parse(&yaml);
+        for (index, expected) in [(0, &["api", "worker"][..]), (1, &["api"][..])] {
+            let lane = plain(&yaml, index).await;
+            assert_eq!(lane.autostart("worker"), Some(index == 0));
+            let mut selection = select(&config, None, &[]).expect("default");
+            assert_eq!(selection.services, ["api", "worker"]);
+            assert_eq!(selection.autostart_pending, ["worker"]);
+            retain_autostart(
+                &mut selection.services,
+                &selection.autostart_pending,
+                |name| lane.autostart(name),
+            );
+            assert_eq!(selection.services, expected, "lane {index}");
+        }
+    }
+    let config = parse(&profiled);
+    let lane = plain(&profiled, 1).await;
+    let mut named = select(&config, Some("named"), &[]).expect("named");
+    assert!(named.autostart_pending.is_empty());
+    retain_autostart(&mut named.services, &named.autostart_pending, |name| {
+        lane.autostart(name)
+    });
+    assert_eq!(named.services, ["worker"]);
+    for selector in ["worker", "w*", "t*"] {
+        let mut chosen = select(&config, None, &[selector.to_owned()]).expect("selector");
+        assert!(chosen.autostart_pending.is_empty(), "{selector}");
+        retain_autostart(&mut chosen.services, &chosen.autostart_pending, |name| {
+            lane.autostart(name)
+        });
+        assert_eq!(chosen.services.len(), 1, "{selector}");
+    }
+    // A pending service that did not plan has no answer and stays, so the start
+    // reports its failure.
+    let mut services = vec!["api".to_owned(), "worker".to_owned()];
+    retain_autostart(&mut services, &["worker".to_owned()], |_| None);
+    assert_eq!(services, ["api", "worker"]);
+}
+
 /// Config with overlapping profiles for the multi-profile tests.
 const PROFILES: &str = r#"
 project: demo
 services:
-  api: { run_script: package.json#dev, tags: [api] }
-  tester: { run_script: package.json#test }
+  api: { run_script: { file: package.json, name: dev }, tags: [api] }
+  tester: { run_script: { file: package.json, name: test } }
   web: { run: web, tags: [web] }
 tasks:
   only-a: { run: a, when: lane.start, profiles: [a] }
@@ -432,7 +478,7 @@ async fn public_https_port() {
         let api = &lane.services["api"];
         assert_eq!(api.public_url.as_deref(), Some(api_url.as_str()));
         assert_eq!(api.launch.env.values["DEVLANES_PUBLIC_URL"], api_url);
-        // svc.api.public_url feeds web's env through an expression.
+        // services.api.public_url feeds web's env through an expression.
         assert_eq!(
             lane.services["web"].launch.env.values["VITE_API_URL"],
             api_url
@@ -440,7 +486,7 @@ async fn public_https_port() {
         assert_eq!(lane.lane_env()["DEVLANES_PUBLIC_URL_API"], api_url);
         assert_eq!(lane.lane_env()["DEVLANES_PUBLIC_URL_WEB"], web_url);
         assert_eq!(
-            lane.svc_namespace()["api"]["public_url"],
+            lane.services_namespace()["api"]["public_url"],
             json!(api_url.as_str())
         );
         assert!(lane.origins.contains(&api_url) && lane.origins.contains(&web_url));
@@ -471,7 +517,7 @@ tags:
 services:
   catalog: { run: a, tags: [essential, api] }
   backend: { run: b, tags: [api] }
-  web: { run: w, preset: vite }
+  web: { run_script: { file: web/package.json, name: dev }, preset: vite }
   thing: { run: t }
   stub-sms: { run: s, replicas: 2 }
 tasks:
@@ -484,9 +530,10 @@ tasks:
     );
     let facts = facts("demo", 1, None);
     let (block, offsets) = allocation(&config, 21_000, &[]);
-    let lane = resolve_lane(ResolveInput::new(&config, &facts, block, &offsets))
-        .await
-        .expect("resolves");
+    let runners: [Arc<dyn ScriptRunner>; 1] = [Arc::new(FakeRunner::new())];
+    let mut input = ResolveInput::new(&config, &facts, block, &offsets);
+    input.script_runners = &runners;
+    let lane = resolve_lane(input).await.expect("resolves");
     let color = |unit: &str| lane.services[unit].color.as_str();
     assert_eq!(color("catalog"), "bright-yellow");
     assert_eq!(color("backend"), "blue");
@@ -565,7 +612,7 @@ async fn projects_namespace_with_default() {
     let facts = facts("acme", 1, Some("feature"));
     let (block, offsets) = allocation(&config, 21_000, &[]);
     let infra = infra();
-    let projects = json!({"workflows": {"svc": {"referee": {"public_url": "https://referee.workflows-1.localhost"}}}});
+    let projects = json!({"workflows": {"services": {"referee": {"public_url": "https://referee.workflows-1.localhost"}}}});
     let client = BTreeMap::from([("SENTRY_DSN".to_owned(), "dsn".to_owned())]);
     let mut input = ResolveInput::new(&config, &facts, block, &offsets);
     input.infra = &infra;
@@ -578,7 +625,7 @@ async fn projects_namespace_with_default() {
 }
 
 #[tokio::test]
-/// `lanes.main.svc` comes from lane 0's layout; without it only affected units fail.
+/// `lanes.main.services` comes from lane 0's layout; without it only affected units fail.
 async fn lanes_main_namespace() {
     let config = parse(FULL);
     let infra = infra();
@@ -587,7 +634,7 @@ async fn lanes_main_namespace() {
     let mut main_input = ResolveInput::new(&config, &main_facts, block0, &offsets);
     main_input.infra = &infra;
     let main = lane_layout(&main_input).expect("lane 0 layout");
-    let namespace = main.svc_namespace();
+    let namespace = main.services_namespace();
     assert_eq!(
         namespace["crm-api"]["public_url"],
         json!("https://crm.acme.localhost")
@@ -595,10 +642,13 @@ async fn lanes_main_namespace() {
 
     let lane_facts = facts("acme", 1, Some("desktop-fix"));
     let block1 = PortBlock::new(22_000, block0.size).expect("block");
+    // `desktop` uses run_script, which needs a runner to plan.
+    let runners: [Arc<dyn ScriptRunner>; 1] = [Arc::new(FakeRunner::new())];
     let mut input = ResolveInput::new(&config, &lane_facts, block1, &offsets);
     input.infra = &infra;
     input.profile = Some("attach");
     input.lanes_main = Some(&namespace);
+    input.script_runners = &runners;
     let lane = resolve_lane(input).await.expect("resolves");
     assert!(!lane.infra_enabled);
     assert_eq!(
@@ -609,6 +659,7 @@ async fn lanes_main_namespace() {
     let mut input = ResolveInput::new(&config, &lane_facts, block1, &offsets);
     input.infra = &infra;
     input.profile = Some("attach");
+    input.script_runners = &runners;
     let lane = resolve_lane(input)
         .await
         .expect("lane-level resolution still works");
@@ -621,6 +672,7 @@ async fn lanes_main_namespace() {
     let mut input = ResolveInput::new(&config, &main_facts, block0, &offsets);
     input.infra = &infra;
     input.profile = Some("attach");
+    input.script_runners = &runners;
     let lane = resolve_lane(input).await.expect("resolves");
     assert_eq!(
         lane.services["desktop.2"].launch.env.values["ACME_CRM_BASE_URL"],
@@ -685,21 +737,15 @@ async fn public_url_variables() {
 }
 
 #[tokio::test]
-/// Contributor args go after a shell command and through the script runner.
+/// Contributor args reach the command through the script runner.
 async fn contributor_args_reach_commands() {
     let config = parse(
         r#"
 project: demo
 services:
-  shell:
-    preset: vite
-    run: pnpm dev
   script:
     preset: vite
-    run_script: web/package.json#dev
-  argv:
-    preset: vite
-    run: [vite, "--mode", "dev x"]
+    run_script: { file: web/package.json, name: dev }
 "#,
     );
     let facts = facts("demo", 1, None);
@@ -717,22 +763,6 @@ services:
     input.script_runners = &runners;
     let lane = resolve_lane(input).await.expect("resolves");
     let port = |unit: &str| lane.services[unit].port.to_string();
-    assert_eq!(
-        lane.services["shell"].launch.args,
-        [
-            "-c".to_owned(),
-            format!("pnpm dev --port {}", port("shell"))
-        ]
-    );
-    assert_eq!(
-        lane.services["argv"].launch.args,
-        [
-            "--mode".to_owned(),
-            "dev x".into(),
-            "--port".into(),
-            port("argv")
-        ]
-    );
     assert_eq!(
         lane.services["script"].launch.args,
         [
@@ -821,12 +851,12 @@ async fn identity_cycles_are_rejected() {
     let mut config = parse(
         "project: demo\nservices:\n  a: { run: a, hosts: [a.localhost] }\n  b: { run: b, hosts: [b.localhost] }\n",
     );
-    config.services["a"].hosts = Some(vec![HostConfig::Name(Templated::Expression(
-        "a${{ svc.b.port }}.localhost".into(),
-    ))]);
-    config.services["b"].hosts = Some(vec![HostConfig::Name(Templated::Expression(
-        "b${{ svc.a.port }}.localhost".into(),
-    ))]);
+    config.services["a"].hosts = Some(Hosts::One(HostConfig::Name(Templated::Expression(
+        "a${{ services.b.port }}.localhost".into(),
+    ))));
+    config.services["b"].hosts = Some(Hosts::One(HostConfig::Name(Templated::Expression(
+        "b${{ services.a.port }}.localhost".into(),
+    ))));
     let facts = facts("demo", 1, None);
     let (block, offsets) = allocation(&config, 21_000, &[]);
     let error =
@@ -916,7 +946,8 @@ async fn platform_inference() {
     let config = parse(
         "project: demo\nservices:\n  web: { run: dev, cwd: web }\n  ml: { run: dev, cwd: ml }\n  bare: { run: dev }\n  forced: { run: dev, cwd: web, platform: python }\n",
     );
-    let facts = devlanes_resolve::LaneFacts::new("demo", dir.path(), 0, dir.path(), None);
+    let facts =
+        devlanes_resolve::LaneFacts::new("demo", dir.path(), 0, dir.path(), "/data/demo/1", None);
     let (block, offsets) = allocation(&config, 21_000, &[]);
     let contributors: [Arc<dyn Contributor>; 2] = [
         Arc::new(devlanes_platform_python::PythonContributor),
@@ -994,7 +1025,8 @@ async fn detection_precedence() {
     let config = parse(
         "project: demo\nservices:\n  api: { run: dev, platform: rust }\n  free: { run: dev }\n",
     );
-    let facts = devlanes_resolve::LaneFacts::new("demo", dir.path(), 0, dir.path(), None);
+    let facts =
+        devlanes_resolve::LaneFacts::new("demo", dir.path(), 0, dir.path(), "/data/demo/1", None);
     let (block, offsets) = allocation(&config, 21_000, &[]);
     let contributors = [fake("claims", 50, "node", 99)];
     let mut input = ResolveInput::new(&config, &facts, block, &offsets);
@@ -1037,8 +1069,8 @@ project: demo
 services:
   plain: { run: dev, cwd: plain }
   bunlock: { run: dev, cwd: bunlock }
-  bunscript: { run_script: bunlock/package.json#dev }
-  nodescript: { run_script: plain/package.json#dev }
+  bunscript: { run_script: { file: bunlock/package.json, name: dev } }
+  nodescript: { run_script: { file: plain/package.json, name: dev } }
   pinned: { run: dev, cwd: pinned }
   denoapp: { run: dev, cwd: denoapp }
   crate: { run: cargo run, cwd: crate }
@@ -1048,7 +1080,7 @@ services:
   forced-deno: { run: dev, platform: deno }
 "#,
     );
-    let facts = devlanes_resolve::LaneFacts::new("demo", root, 0, root, None);
+    let facts = devlanes_resolve::LaneFacts::new("demo", root, 0, root, "/data/demo/1", None);
     let contributors: [Arc<dyn Contributor>; 5] = [
         Arc::new(devlanes_platform_rust::RustContributor),
         Arc::new(devlanes_platform_deno::DenoContributor),
@@ -1196,7 +1228,7 @@ async fn only_plans_the_named_units() {
         format!("{:?}", part.teardown.get("database")),
         format!("{:?}", full.teardown.get("database"))
     );
-    assert_eq!(part.svc_namespace(), full.svc_namespace());
+    assert_eq!(part.services_namespace(), full.services_namespace());
     assert_eq!(part.lane_env(), full.lane_env());
     assert_eq!(scripts, ["db-deploy", "start"], "only migrate and seed");
 }

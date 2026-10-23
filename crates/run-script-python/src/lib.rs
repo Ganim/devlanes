@@ -1,4 +1,4 @@
-//! `run_script` support for Python project scripts: `pyproject.toml#<script>`
+//! `run_script` support for Python project scripts: `{ file: pyproject.toml, name: <script> }`
 //! runs `uv run <script>` or `poetry run <script>` in the project directory.
 //!
 //! Scripts come from `[project.scripts]` and `[tool.poetry.scripts]`. uv is

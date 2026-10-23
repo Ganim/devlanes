@@ -27,20 +27,27 @@ pub const INSPECTOR_PORT: &str = "inspector";
 /// each other's service bindings through the shared global registry.
 pub const REGISTRY_ENV: &str = "WRANGLER_REGISTRY_PATH";
 
-/// Registry directory relative to the lane worktree, shared by the lane's workers.
-pub const REGISTRY_DIR: &str = ".devlanes/wrangler-registry";
+/// Registry directory in the lane data folder, shared by the lane's workers. Not in the
+/// worktree: lanes that run from one folder would share it there.
+pub const REGISTRY_DIR: &str = "wrangler-registry";
 
-/// Script flags that collide with the ones this preset adds. yargs also accepts
-/// the camelCase spelling of every dashed option.
+/// Script and `args` flags that collide with the ones this preset adds. yargs also
+/// accepts the camelCase spelling of every dashed option.
 const RESERVED_FLAGS: &[&str] = &["--port", "--inspector-port", "--inspectorPort"];
 
-/// Options under the service's `wrangler:` key.
+/// Options for `preset: wrangler`, which gives each lane's `wrangler dev` its own
+/// `--port <self.port>`, `--inspector-port <self.ports.inspector>` and dev registry. The
+/// `inspector` port is allocated automatically. `args` that pass either port flag are refused
+/// by `devlanes config check`, and a `run_script` script that does is refused at start.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(extend("examples" = [{"vars":{"PUBLIC_BASE_URL":"${{ self.public_url }}"},"args":["--env-file",".dev.vars"],"isolate_registry":true}]))]
 pub struct WranglerOptions {
-    /// Worker variables, passed as `--var KEY:VALUE`. Numbers and booleans are
-    /// accepted because config scalars evaluate to them; wrangler sees strings.
+    /// Worker variables for this lane, each passed as `--var KEY:VALUE` so it overrides the
+    /// same name in the Wrangler config's `vars`. Values can be strings, numbers or booleans
+    /// (sent as text) and may use expressions such as `${{ self.public_url }}`; names must be
+    /// non-empty and cannot contain `:`. Local overrides and `extends` children merge with
+    /// inherited vars per name.
     #[serde(
         default,
         skip_serializing_if = "BTreeMap::is_empty",
@@ -48,12 +55,18 @@ pub struct WranglerOptions {
     )]
     #[schemars(schema_with = "scalar_map_schema", extend("examples" = [{"PUBLIC_BASE_URL":"${{ self.public_url }}"}]))]
     pub vars: BTreeMap<String, String>,
-    /// Extra arguments appended after the preset's flags.
+    /// Extra arguments for `wrangler dev`, added after the port and `--var` flags, for example
+    /// `[--env-file, .dev.vars]`. `--port` and `--inspector-port` (or `--inspectorPort`) are
+    /// refused here, since the preset already sets them per lane. A local override or
+    /// `extends` child that sets `args` replaces the inherited list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("examples" = [["--env-file",".dev.vars"]]))]
     pub args: Option<Vec<String>>,
-    /// Give each lane its own dev registry through `WRANGLER_REGISTRY_PATH`.
-    /// Default: true.
+    /// Points `WRANGLER_REGISTRY_PATH` at `wrangler-registry` in the lane's data folder
+    /// (`${{ lane.data_path }}`), so service bindings resolve to workers of the same lane
+    /// instead of same-named workers in another lane, also when two lanes run from one
+    /// folder. Set `false` to drop the variable for this service, which then uses
+    /// Wrangler's shared default registry. Default: `true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("examples" = [true,false]))]
     pub isolate_registry: Option<bool>,
@@ -113,7 +126,8 @@ pub struct WranglerInput<'a> {
     pub port: u16,
     /// `self.ports.<name>`; must contain [`INSPECTOR_PORT`].
     pub ports: &'a BTreeMap<String, u16>,
-    pub lane_worktree: &'a Path,
+    /// The lane data folder (`lane.data_path`); the registry goes below it.
+    pub lane_data: &'a Path,
     /// Options after expression evaluation.
     pub options: &'a WranglerOptions,
     /// Body of the `run_script` script, when the service uses one.
@@ -133,6 +147,12 @@ pub enum WranglerError {
         if .flags.len() == 1 { "it" } else { "them" }
     )]
     HardcodedFlags { flags: Vec<String> },
+    #[error(
+        "`args` passes {}, which preset wrangler sets per lane. Remove {} from `args`; devlanes passes `--port <self.port> --inspector-port <self.ports.inspector>`. To keep the flags, drop `preset: wrangler` and use `run` with `--port ${{{{ self.port }}}} --inspector-port ${{{{ self.ports.inspector }}}}`",
+        .flags.join(", "),
+        if .flags.len() == 1 { "it" } else { "them" }
+    )]
+    ArgsFlags { flags: Vec<String> },
 }
 
 /// Returns the named ports to allocate before expressions are evaluated, so
@@ -152,6 +172,28 @@ pub fn check_script(body: &str) -> Result<(), WranglerError> {
         .split_whitespace()
         .map(|token| token.trim_matches(|c| c == '"' || c == '\''))
         .collect();
+    let flags = reserved_flags(&tokens);
+    if flags.is_empty() {
+        Ok(())
+    } else {
+        Err(WranglerError::HardcodedFlags { flags })
+    }
+}
+
+/// Rejects `args` that pass `--port` or `--inspector-port`, which the preset
+/// adds itself.
+pub fn check_args(args: &[String]) -> Result<(), WranglerError> {
+    let tokens: Vec<&str> = args.iter().map(String::as_str).collect();
+    let flags = reserved_flags(&tokens);
+    if flags.is_empty() {
+        Ok(())
+    } else {
+        Err(WranglerError::ArgsFlags { flags })
+    }
+}
+
+/// Renders each reserved flag in `tokens` with its value, such as `` `--port 8787` ``.
+fn reserved_flags(tokens: &[&str]) -> Vec<String> {
     let mut flags = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
         let (flag, inline_value) = token
@@ -167,11 +209,7 @@ pub fn check_script(body: &str) -> Result<(), WranglerError> {
         };
         flags.push(format!("`{rendered}`"));
     }
-    if flags.is_empty() {
-        Ok(())
-    } else {
-        Err(WranglerError::HardcodedFlags { flags })
-    }
+    flags
 }
 
 /// Renders `--port`, `--inspector-port`, `--var` and user args, plus the
@@ -180,6 +218,7 @@ pub fn contribution(input: &WranglerInput<'_>) -> Result<Contribution, WranglerE
     if let Some(body) = input.script_body {
         check_script(body)?;
     }
+    check_args(input.options.args.as_deref().unwrap_or_default())?;
     let inspector = input
         .ports
         .get(INSPECTOR_PORT)
@@ -201,7 +240,7 @@ pub fn contribution(input: &WranglerInput<'_>) -> Result<Contribution, WranglerE
     args.extend(input.options.args.iter().flatten().cloned());
     let mut env = BTreeMap::new();
     if input.options.isolate_registry != Some(false) {
-        let registry = input.lane_worktree.join(REGISTRY_DIR);
+        let registry = input.lane_data.join(REGISTRY_DIR);
         env.insert(
             REGISTRY_ENV.to_owned(),
             registry.to_string_lossy().into_owned(),
@@ -231,12 +270,16 @@ pub fn options_schema() -> schemars::Schema {
 }
 
 /// Parses evaluated options; a service without a `wrangler:` key gets defaults.
+/// Port flags in `args` are refused here so `devlanes config check` reports them.
 pub fn parse_options(value: Option<&serde_json::Value>) -> Result<WranglerOptions, Error> {
-    match value {
-        None | Some(serde_json::Value::Null) => Ok(WranglerOptions::default()),
+    let options: WranglerOptions = match value {
+        None | Some(serde_json::Value::Null) => return Ok(WranglerOptions::default()),
         Some(value) => serde_json::from_value(value.clone())
-            .map_err(|e| Error::InvalidInput(format!("{NAME} options: {e}"))),
-    }
+            .map_err(|e| Error::InvalidInput(format!("{NAME} options: {e}")))?,
+    };
+    check_args(options.args.as_deref().unwrap_or_default())
+        .map_err(|e| Error::InvalidInput(format!("{NAME} options: {e}")))?;
+    Ok(options)
 }
 
 /// Core contributor for services with `preset: wrangler`.
@@ -278,12 +321,13 @@ impl Contributor for WranglerPreset {
         let contribution = contribution(&WranglerInput {
             port,
             ports: cx.ports,
-            lane_worktree: cx.lane_path,
+            lane_data: cx.lane_data_path,
             options: &options,
             script_body: cx.script.and_then(|script| script.body.as_deref()),
         })
         .map_err(|e| Error::InvalidInput(e.to_string()))?;
-        devlanes_run_script_npm::forward_args(draft, contribution.args);
+        // Presets require `run_script`; its runner places the arguments for the tool.
+        draft.args.extend(contribution.args);
         if options.isolate_registry == Some(false) {
             // The cloudflare platform contributor (priority 60) may already
             // have set the lane registry; opting out must undo that too.
@@ -320,7 +364,7 @@ mod tests {
         let result = contribution(&WranglerInput {
             port: 20010,
             ports: &ports,
-            lane_worktree: Path::new("/lanes/acme-1"),
+            lane_data: Path::new("/data/acme/7"),
             options: &options,
             script_body: Some("wrangler dev --persist-to .wrangler-state"),
         })
@@ -328,7 +372,7 @@ mod tests {
         insta::assert_snapshot!(result.args.join(" "), @"--port 20010 --inspector-port 20011 --var A:1 --var PUBLIC_BASE_URL:https://api.acme-1.localhost --env-file .dev.vars.stripe");
         assert_eq!(
             result.env.get(REGISTRY_ENV).map(String::as_str),
-            Some("/lanes/acme-1/.devlanes/wrangler-registry")
+            Some("/data/acme/7/wrangler-registry")
         );
     }
 
@@ -343,7 +387,7 @@ mod tests {
         let result = contribution(&WranglerInput {
             port: 1,
             ports: &ports,
-            lane_worktree: Path::new("/w"),
+            lane_data: Path::new("/d"),
             options: &options,
             script_body: None,
         })
@@ -358,7 +402,7 @@ mod tests {
         let error = contribution(&WranglerInput {
             port: 1,
             ports: &ports,
-            lane_worktree: Path::new("/w"),
+            lane_data: Path::new("/d"),
             options: &WranglerOptions::default(),
             script_body: None,
         });
@@ -381,7 +425,7 @@ mod tests {
         let error = contribution(&WranglerInput {
             port: 1,
             ports: &ports,
-            lane_worktree: Path::new("/w"),
+            lane_data: Path::new("/d"),
             options: &options,
             script_body: None,
         });
@@ -432,6 +476,71 @@ mod tests {
         insta::assert_snapshot!(error.to_string(), @"the script hardcodes `--port 8787`, which preset wrangler sets per lane. Remove it from the script; devlanes passes `--port <self.port> --inspector-port <self.ports.inspector>`. To keep the flags, drop `preset: wrangler` and use `run` with `--port ${{ self.port }} --inspector-port ${{ self.ports.inspector }}`");
     }
 
+    /// Table of `args` lists and the flags reported for them.
+    #[test]
+    fn args_flag_detection() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (&[], &[]),
+            (&["--env-file", ".dev.vars", "--local"], &[]),
+            (&["--port", "8787"], &["`--port 8787`"]),
+            (&["--port=8787"], &["`--port=8787`"]),
+            (&["--inspector-port", "9229"], &["`--inspector-port 9229`"]),
+            (&["--inspectorPort=9229"], &["`--inspectorPort=9229`"]),
+            (
+                &["--port", "8787", "--inspectorPort", "9229"],
+                &["`--port 8787`", "`--inspectorPort 9229`"],
+            ),
+            (&["--port", "--local"], &["`--port`"]),
+            (&["--portal", "1", "--report-port", "2"], &[]),
+        ];
+        for (args, expected) in cases {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            let found = match check_args(&args) {
+                Ok(()) => Vec::new(),
+                Err(WranglerError::ArgsFlags { flags }) => flags,
+                Err(other) => panic!("unexpected error for {args:?}: {other}"),
+            };
+            assert_eq!(&found, expected, "args: {args:?}");
+        }
+    }
+
+    /// The `args` message names the flag and both ways out, like the script one.
+    #[test]
+    fn args_flag_message_has_the_fix() {
+        let error =
+            check_args(&["--inspector-port".into(), "9229".into()]).expect_err("port flag in args");
+        insta::assert_snapshot!(error.to_string(), @"`args` passes `--inspector-port 9229`, which preset wrangler sets per lane. Remove it from `args`; devlanes passes `--port <self.port> --inspector-port <self.ports.inspector>`. To keep the flags, drop `preset: wrangler` and use `run` with `--port ${{ self.port }} --inspector-port ${{ self.ports.inspector }}`");
+    }
+
+    /// Port flags in `args` fail both parsing and the contribution.
+    #[test]
+    fn args_flags_are_refused() {
+        let value = serde_json::json!({ "args": ["--port", "8787"] });
+        let error = parse_options(Some(&value)).expect_err("port flag in args");
+        assert!(
+            matches!(&error, Error::InvalidInput(message) if message.starts_with("wrangler options: `args` passes `--port 8787`")),
+            "{error}"
+        );
+        let options = WranglerOptions {
+            args: Some(vec!["--port=8787".into()]),
+            ..WranglerOptions::default()
+        };
+        let ports = ports();
+        let error = contribution(&WranglerInput {
+            port: 1,
+            ports: &ports,
+            lane_data: Path::new("/d"),
+            options: &options,
+            script_body: None,
+        });
+        assert_eq!(
+            error,
+            Err(WranglerError::ArgsFlags {
+                flags: vec!["`--port=8787`".to_owned()]
+            })
+        );
+    }
+
     /// Hardcoded flags fail the contribution when a script body is supplied.
     #[test]
     fn contribution_checks_script_body() {
@@ -439,7 +548,7 @@ mod tests {
         let error = contribution(&WranglerInput {
             port: 1,
             ports: &ports,
-            lane_worktree: Path::new("/w"),
+            lane_data: Path::new("/d"),
             options: &WranglerOptions::default(),
             script_body: Some("wrangler dev --inspector-port 9229"),
         });

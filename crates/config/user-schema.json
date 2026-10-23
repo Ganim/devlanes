@@ -6,49 +6,48 @@
       "examples": [
         "5GiB"
       ],
+      "markdownDescription": "A byte count with decimal or binary size units.",
       "pattern": "^[0-9]+(B|KB|MB|GB|KiB|MiB|GiB)$",
       "type": "string"
     },
     "CaKind": {
-      "description": "Certificate authority used to issue certificates for local project hostnames.",
+      "description": "Certificate authority that signs HTTPS certificates for lane hostnames.",
+      "enum": [
+        "devlanes",
+        "mkcert"
+      ],
+      "enumDescriptions": [
+        "devlanes creates its own CA in `~/.devlanes/ca` on first use, limited to names under `localhost`, `test`, `internal`, `home.arpa` and `hostnames.tld`, so it cannot sign for real sites. Trust it once with `devlanes certs trust`.",
+        "Load mkcert's existing root CA (from `mkcert -CAROOT`) instead, so browsers that already trust it need nothing new. HTTPS stays off when `mkcert` is not on `PATH`; the mkcert CA has no name limits, and `certs untrust` leaves it trusted."
+      ],
       "examples": [
         "devlanes",
         "mkcert"
       ],
-      "oneOf": [
-        {
-          "const": "devlanes",
-          "description": "Use the CA managed in the devlanes home directory.",
-          "examples": [
-            "devlanes"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "mkcert",
-          "description": "Reuse the CA in mkcert's CAROOT directory.",
-          "examples": [
-            "mkcert"
-          ],
-          "type": "string"
-        }
-      ]
+      "markdownDescription": "Certificate authority that signs HTTPS certificates for lane hostnames.",
+      "markdownEnumDescriptions": [
+        "devlanes creates its own CA in `~/.devlanes/ca` on first use, limited to names under `localhost`, `test`, `internal`, `home.arpa` and `hostnames.tld`, so it cannot sign for real sites. Trust it once with `devlanes certs trust`.",
+        "Load mkcert's existing root CA (from `mkcert -CAROOT`) instead, so browsers that already trust it need nothing new. HTTPS stays off when `mkcert` is not on `PATH`; the mkcert CA has no name limits, and `certs untrust` leaves it trusted."
+      ],
+      "type": "string"
     },
     "CloudflareDns": {
       "additionalProperties": false,
-      "description": "Cloudflare DNS credentials for the reserved public resolver.",
+      "description": "Reserved Cloudflare DNS credentials for the planned `public` resolver; not supported yet.",
       "examples": [
         {
           "token": "${{ env.CF_API_TOKEN }}"
         }
       ],
+      "markdownDescription": "Reserved Cloudflare DNS credentials for the planned `public` resolver; not supported yet.",
       "properties": {
         "token": {
           "$ref": "#/$defs/Templated_string",
-          "description": "API token with permission to edit the domain's DNS records; prefer an environment expression.",
+          "description": "Reserved: Cloudflare API token allowed to edit the domain's DNS records. Write an environment expression such as `${{ env.CF_API_TOKEN }}`, not the token itself.",
           "examples": [
             "${{ env.CF_API_TOKEN }}"
-          ]
+          ],
+          "markdownDescription": "Reserved: Cloudflare API token allowed to edit the domain's DNS records. Write an environment expression such as `${{ env.CF_API_TOKEN }}`, not the token itself."
         }
       },
       "required": [
@@ -57,17 +56,18 @@
       "type": "object"
     },
     "ConfigDuration": {
-      "description": "A duration written with `ms`, `s`, `m`, `h`, or `d` units.",
+      "description": "A duration: a whole number followed by `ms`, `s`, `m`, `h` or `d`, such as `500ms`, `15s` or `10m`. Units cannot be combined.",
       "examples": [
         "15s",
         "10m"
       ],
+      "markdownDescription": "A duration: a whole number followed by `ms`, `s`, `m`, `h` or `d`, such as `500ms`, `15s` or `10m`. Units cannot be combined.",
       "pattern": "^[0-9]+(ms|s|m|h|d)$",
       "type": "string"
     },
     "DnsProvider": {
       "additionalProperties": false,
-      "description": "Reserved DNS-01 provider configuration; not supported yet.",
+      "description": "Reserved DNS-01 provider settings for the planned `public` resolver; not supported yet.",
       "examples": [
         {
           "cloudflare": {
@@ -75,15 +75,17 @@
           }
         }
       ],
+      "markdownDescription": "Reserved DNS-01 provider settings for the planned `public` resolver; not supported yet.",
       "properties": {
         "cloudflare": {
           "$ref": "#/$defs/CloudflareDns",
-          "description": "Cloudflare DNS API credentials supplied by an environment expression.",
+          "description": "Reserved: Cloudflare credentials for DNS-01 certificates; not supported yet.",
           "examples": [
             {
               "token": "${{ env.CF_API_TOKEN }}"
             }
-          ]
+          ],
+          "markdownDescription": "Reserved: Cloudflare credentials for DNS-01 certificates; not supported yet."
         }
       },
       "required": [
@@ -93,38 +95,41 @@
     },
     "HistoryConfig": {
       "additionalProperties": false,
-      "description": "Age limits for finished unit/task history and disconnected remote-host records.",
+      "description": "How long the daemon's database keeps records of finished runs and of remote boxes. An hourly cleanup deletes what is older.",
       "examples": [
         {
           "remote_hosts_retention": "90d",
           "retention": "7d"
         }
       ],
+      "markdownDescription": "How long the daemon's database keeps records of finished runs and of remote boxes. An hourly cleanup deletes what is older.",
       "properties": {
         "remote_hosts_retention": {
           "$ref": "#/$defs/ConfigDuration",
           "default": "7776000000ms",
-          "description": "Maximum age since a remote host last connected successfully; defaults to 90d. Records without a timestamp are retained.",
+          "description": "How long a remote box stays listed by `devlanes remote ls` after its last successful connection; defaults to `90d` and must be longer than `0s`. A record without a connection time is never deleted by age, and `state.max_size` can delete records sooner.",
           "examples": [
             "90d",
             "180d"
-          ]
+          ],
+          "markdownDescription": "How long a remote box stays listed by `devlanes remote ls` after its last successful connection; defaults to `90d` and must be longer than `0s`. A record without a connection time is never deleted by age, and `state.max_size` can delete records sooner."
         },
         "retention": {
           "$ref": "#/$defs/ConfigDuration",
           "default": "604800000ms",
-          "description": "Maximum age since a unit or task finished; defaults to 7d. Disk pressure may prune it sooner.",
+          "description": "How long records of finished service and task runs (start and end times, exit status) are kept after the run ends; defaults to `7d` and must be longer than `0s`. A run that still has log index entries or a metrics summary in the database stays until those expire, and `state.max_size` can delete runs sooner.",
           "examples": [
             "7d",
             "30d"
-          ]
+          ],
+          "markdownDescription": "How long records of finished service and task runs (start and end times, exit status) are kept after the run ends; defaults to `7d` and must be longer than `0s`. A run that still has log index entries or a metrics summary in the database stays until those expire, and `state.max_size` can delete runs sooner."
         }
       },
       "type": "object"
     },
     "HostnamesConfig": {
       "additionalProperties": false,
-      "description": "Hostname resolution and optional system hosts-file entries.",
+      "description": "How lane hostnames resolve to this machine, and whether they are also written to `/etc/hosts` for programs that cannot resolve them otherwise.",
       "examples": [
         {
           "hosts_file": "auto",
@@ -135,13 +140,15 @@
           "tld": "test"
         }
       ],
+      "markdownDescription": "How lane hostnames resolve to this machine, and whether they are also written to `/etc/hosts` for programs that cannot resolve them otherwise.",
       "properties": {
         "base_domain": {
           "default": null,
-          "description": "Reserved public-resolver base domain; not supported yet.",
+          "description": "Reserved for the planned `public` resolver; any value is rejected for now.",
           "examples": [
             "dev.example.invalid"
           ],
+          "markdownDescription": "Reserved for the planned `public` resolver; any value is rejected for now.",
           "type": [
             "string",
             "null"
@@ -150,56 +157,66 @@
         "dns_provider": {
           "anyOf": [
             {
-              "$ref": "#/$defs/DnsProvider"
+              "$ref": "#/$defs/DnsProvider",
+              "description": "",
+              "examples": [],
+              "markdownDescription": ""
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Reserved DNS-01 provider settings; not supported yet.",
+          "description": "Reserved for the planned `public` resolver's DNS-01 certificates; any value is rejected for now.",
           "examples": [
             {
               "cloudflare": {
                 "token": "${{ env.CF_API_TOKEN }}"
               }
             }
-          ]
+          ],
+          "markdownDescription": "Reserved for the planned `public` resolver's DNS-01 certificates; any value is rejected for now."
         },
         "hosts_file": {
           "anyOf": [
             {
-              "$ref": "#/$defs/HostsFile"
+              "$ref": "#/$defs/HostsFile",
+              "description": "",
+              "examples": [],
+              "markdownDescription": ""
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Whether exact hostnames should also be written to the system hosts file.",
+          "description": "Whether lane hostnames are also written to `/etc/hosts`, for programs that do not resolve `*.localhost` themselves (workerd, musl or pure-Go binaries); defaults to `auto`, which writes them only when a probe at daemon start shows the system resolver fails `*.localhost`. `never` here wins over every project; otherwise a project's `lanes.hosts_file` replaces this value for that project. Writing needs the helper `devlanes certs trust --hosts` installs, only exact names are written (no wildcards), and `resolver: hosts_file` ignores this key.",
           "examples": [
             "auto",
             "never",
             "always"
-          ]
+          ],
+          "markdownDescription": "Whether lane hostnames are also written to `/etc/hosts`, for programs that do not resolve `*.localhost` themselves (workerd, musl or pure-Go binaries); defaults to `auto`, which writes them only when a probe at daemon start shows the system resolver fails `*.localhost`. `never` here wins over every project; otherwise a project's `lanes.hosts_file` replaces this value for that project. Writing needs the helper `devlanes certs trust --hosts` installs, only exact names are written (no wildcards), and `resolver: hosts_file` ignores this key."
         },
         "resolver": {
           "$ref": "#/$defs/Resolver",
           "default": "localhost",
-          "description": "localhost or resolver in v1; public parses but is not supported yet.",
+          "description": "Which domain lanes get and what makes their hostnames resolve; defaults to `localhost`. `resolver` also needs `tld` and a one-time `devlanes certs trust --resolver`; `public` is not supported yet.",
           "examples": [
             "localhost",
             "hosts_file",
             "resolver",
             "public"
-          ]
+          ],
+          "markdownDescription": "Which domain lanes get and what makes their hostnames resolve; defaults to `localhost`. `resolver` also needs `tld` and a one-time `devlanes certs trust --resolver`; `public` is not supported yet."
         },
         "tld": {
           "default": null,
-          "description": "Custom top-level domain for the embedded DNS strategy.",
+          "description": "Top-level domain for the `resolver` strategy, such as `test`; required there. It must be `test`, `internal`, `home.arpa` or a domain under one of them (or under `localhost`), made of valid DNS labels, because any other name could belong to a real site; the file is rejected otherwise, whatever the strategy. A new devlanes CA may sign names under the `tld` set when it is created, whatever the strategy, so switching to another `tld` later needs a new CA.",
           "examples": [
             "test"
           ],
+          "markdownDescription": "Top-level domain for the `resolver` strategy, such as `test`; required there. It must be `test`, `internal`, `home.arpa` or a domain under one of them (or under `localhost`), made of valid DNS labels, because any other name could belong to a real site; the file is rejected otherwise, whatever the strategy. A new devlanes CA may sign names under the `tld` set when it is created, whatever the strategy, so switching to another `tld` later needs a new CA.",
           "type": [
             "string",
             "null"
@@ -209,73 +226,67 @@
       "type": "object"
     },
     "HostsFile": {
-      "description": "Whether project hostnames are also written to the system hosts file.",
+      "description": "Whether routed hostnames are also written to `/etc/hosts`.",
+      "enum": [
+        "auto",
+        "never",
+        "always"
+      ],
+      "enumDescriptions": [
+        "Write the exact hostnames only when the daemon's startup check finds that the system resolver does not answer `*.localhost` with a loopback address.",
+        "Never write hostnames to `/etc/hosts`. Set in the user config, it applies to every project whatever the project sets.",
+        "Always write the exact hostnames, even when the system resolver handles `*.localhost`, for programs that send `*.localhost` to DNS themselves."
+      ],
       "examples": [
         "auto",
         "never",
         "always"
       ],
-      "oneOf": [
-        {
-          "const": "auto",
-          "description": "Write entries when the system cannot resolve the configured hostnames.",
-          "examples": [
-            "auto"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "never",
-          "description": "Do not write hosts entries.",
-          "examples": [
-            "never"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "always",
-          "description": "Always write exact hostnames, including for runtimes without localhost subdomain support.",
-          "examples": [
-            "always"
-          ],
-          "type": "string"
-        }
-      ]
+      "markdownDescription": "Whether routed hostnames are also written to `/etc/hosts`.",
+      "markdownEnumDescriptions": [
+        "Write the exact hostnames only when the daemon's startup check finds that the system resolver does not answer `*.localhost` with a loopback address.",
+        "Never write hostnames to `/etc/hosts`. Set in the user config, it applies to every project whatever the project sets.",
+        "Always write the exact hostnames, even when the system resolver handles `*.localhost`, for programs that send `*.localhost` to DNS themselves."
+      ],
+      "type": "string"
     },
     "LogRetention": {
       "additionalProperties": false,
-      "description": "Disk retention bounded by both age and total log size.",
+      "description": "Limits for stored service output; reaching either one deletes the oldest output first.",
       "examples": [
         {
           "days": 7,
           "max_size": "5GiB"
         }
       ],
+      "markdownDescription": "Limits for stored service output; reaching either one deletes the oldest output first.",
       "properties": {
         "days": {
           "default": 7,
-          "description": "Number of days to retain logs and database log-segment metadata; defaults to 7.",
+          "description": "Delete output older than this many days, along with its index entries in the database; defaults to 7 and must be at least 1. The newest log file of each stopped service is kept.",
           "examples": [
             7
           ],
           "format": "uint32",
-          "minimum": 0,
+          "markdownDescription": "Delete output older than this many days, along with its index entries in the database; defaults to 7 and must be at least 1. The newest log file of each stopped service is kept.",
+          "minimum": 1,
           "type": "integer"
         },
         "max_size": {
           "$ref": "#/$defs/ByteSize",
           "default": "5368709120B",
-          "description": "Maximum total size of retained logs; defaults to 5GiB.",
+          "description": "Total size of stored output across all projects and lanes; defaults to `5GiB` and must be above zero. Over it, the oldest output goes first wherever it is, but each stopped service's newest file and up to 1 MiB of a running service's current file are kept.",
           "examples": [
             "5GiB"
-          ]
+          ],
+          "markdownDescription": "Total size of stored output across all projects and lanes; defaults to `5GiB` and must be above zero. Over it, the oldest output goes first wherever it is, but each stopped service's newest file and up to 1 MiB of a running service's current file are kept."
         }
       },
       "type": "object"
     },
     "LogsConfig": {
       "additionalProperties": false,
-      "description": "Retention settings for stored service/task output and database log metadata.",
+      "description": "Retention of the service output stored under `~/.devlanes/logs`.",
       "examples": [
         {
           "retention": {
@@ -284,6 +295,7 @@
           }
         }
       ],
+      "markdownDescription": "Retention of the service output stored under `~/.devlanes/logs`.",
       "properties": {
         "retention": {
           "$ref": "#/$defs/LogRetention",
@@ -291,34 +303,37 @@
             "days": 7,
             "max_size": "5368709120B"
           },
-          "description": "Age and total-size bounds for log files; the age limit also bounds database log-segment metadata.",
+          "description": "Age and total-size limits for stored service output; a cleanup every 10 minutes deletes the oldest output past either one. Defaults to 7 days and `5GiB`.",
           "examples": [
             {
               "days": 7,
               "max_size": "5GiB"
             }
-          ]
+          ],
+          "markdownDescription": "Age and total-size limits for stored service output; a cleanup every 10 minutes deletes the oldest output past either one. Defaults to 7 days and `5GiB`."
         }
       },
       "type": "object"
     },
     "MetricsConfig": {
       "additionalProperties": false,
-      "description": "Retention for monitor history used by graphs and service baselines, including database aggregates.",
+      "description": "Retention of the CPU and memory history in the daemon's database.",
       "examples": [
         {
           "retention": "7d"
         }
       ],
+      "markdownDescription": "Retention of the CPU and memory history in the daemon's database.",
       "properties": {
         "retention": {
           "$ref": "#/$defs/ConfigDuration",
           "default": "604800000ms",
-          "description": "Maximum age of persisted monitor samples and database run summaries; defaults to 7d.",
+          "description": "How long per-minute CPU and memory samples, per-run summaries and startup memory peaks are kept; defaults to `7d` and must be longer than `0s`. Shorter keeps less history for graphs and for the memory a start is expected to need; `state.max_size` can delete samples sooner.",
           "examples": [
             "7d",
             "30d"
-          ]
+          ],
+          "markdownDescription": "How long per-minute CPU and memory samples, per-run summaries and startup memory peaks are kept; defaults to `7d` and must be longer than `0s`. Shorter keeps less history for graphs and for the memory a start is expected to need; `state.max_size` can delete samples sooner."
         }
       },
       "type": "object"
@@ -329,24 +344,27 @@
         "75%",
         "12.5%"
       ],
+      "markdownDescription": "A percentage with a `%` suffix, such as `75%` or `12.5%`.",
       "pattern": "^\\s*([0-9]+\\.?[0-9]*|\\.[0-9]+)\\s*%\\s*$",
       "type": "string"
     },
     "PortsConfig": {
       "additionalProperties": false,
-      "description": "Machine-wide port pool shared by all projects and lanes.",
+      "description": "Machine-wide pool every lane's block of ports comes from.",
       "examples": [
         {
           "range": "20000-32767"
         }
       ],
+      "markdownDescription": "Machine-wide pool every lane's block of ports comes from.",
       "properties": {
         "range": {
           "default": "20000-32767",
-          "description": "Inclusive port range, written start-end; defaults to 20000-32767.",
+          "description": "Ports devlanes may hand out, written `start-end` (both included, start above 0); defaults to `20000-32767`, below Linux's usual ephemeral range so the OS does not pick them for outgoing connections. Each lane of each project gets its own block of consecutive ports from it, so a smaller range fits fewer lanes.",
           "examples": [
             "20000-32767"
           ],
+          "markdownDescription": "Ports devlanes may hand out, written `start-end` (both included, start above 0); defaults to `20000-32767`, below Linux's usual ephemeral range so the OS does not pick them for outgoing connections. Each lane of each project gets its own block of consecutive ports from it, so a smaller range fits fewer lanes.",
           "pattern": "^[0-9]+-[0-9]+$",
           "type": "string"
         }
@@ -355,7 +373,7 @@
     },
     "ProxyConfig": {
       "additionalProperties": false,
-      "description": "Ports and network access policy for the local HTTP/HTTPS proxy.",
+      "description": "Ports and network exposure of the daemon's proxy, which routes each lane hostname to its service.",
       "examples": [
         {
           "http_port": 80,
@@ -363,89 +381,79 @@
           "lan": false
         }
       ],
+      "markdownDescription": "Ports and network exposure of the daemon's proxy, which routes each lane hostname to its service.",
       "properties": {
         "http_port": {
           "default": 80,
-          "description": "HTTP listening port; defaults to 80 and redirects to HTTPS when TLS is enabled.",
+          "description": "Port for plain HTTP; defaults to 80, falling back to 8080 like `https_port`, and must differ from it. While HTTPS runs it redirects known hostnames to HTTPS; without a CA it serves them over plain HTTP.",
           "examples": [
             80,
             8080
           ],
           "format": "uint16",
+          "markdownDescription": "Port for plain HTTP; defaults to 80, falling back to 8080 like `https_port`, and must differ from it. While HTTPS runs it redirects known hostnames to HTTPS; without a CA it serves them over plain HTTP.",
           "maximum": 65535,
           "minimum": 0,
           "type": "integer"
         },
         "https_port": {
           "default": 443,
-          "description": "HTTPS listening port; defaults to 443.",
+          "description": "Port the HTTPS proxy listens on; defaults to 443. When the port is taken or not allowed (low ports on Linux need extra permission), the daemon falls back to 8443 and service URLs carry the port.",
           "examples": [
             443,
             8443
           ],
           "format": "uint16",
+          "markdownDescription": "Port the HTTPS proxy listens on; defaults to 443. When the port is taken or not allowed (low ports on Linux need extra permission), the daemon falls back to 8443 and service URLs carry the port.",
           "maximum": 65535,
           "minimum": 0,
           "type": "integer"
         },
         "lan": {
           "default": false,
-          "description": "Accept connections from other machines; defaults to loopback-only access.",
+          "description": "Accept connections from other devices on the network; defaults to false, which refuses every peer that is not this machine. Those devices must still resolve the hostnames to this machine and trust the CA.",
           "examples": [
             false,
             true
           ],
+          "markdownDescription": "Accept connections from other devices on the network; defaults to false, which refuses every peer that is not this machine. Those devices must still resolve the hostnames to this machine and trust the CA.",
           "type": "boolean"
         }
       },
       "type": "object"
     },
     "Resolver": {
-      "description": "Strategy for resolving local project hostnames; defaults to localhost.",
+      "description": "Strategy that makes lane hostnames resolve to this machine.",
+      "enum": [
+        "localhost",
+        "hosts_file",
+        "resolver",
+        "public"
+      ],
+      "enumDescriptions": [
+        "Lane domains end in `.localhost` (`acme.localhost`, `acme-2.localhost`), which browsers and many system resolvers send to loopback by themselves. `hosts_file` covers programs that do not.",
+        "Keep `.localhost` names and always write exact hostnames to `/etc/hosts`, as `hosts_file: always` does, whatever `hosts_file` says; a project's `lanes.hosts_file` still takes precedence. Needs the helper from `devlanes certs trust --hosts`.",
+        "Lane domains become `<project>.<tld>` and `<project>-<N>.<tld>`, answered by a DNS server the daemon runs on `127.0.0.1:15353`, so wildcard hostnames resolve too for programs that use the system resolver. Needs `tld` and a one-time `devlanes certs trust --resolver`; projects that set `lanes.vars.domain` or `lanes.matrix` keep their own domains.",
+        "Reserved for public DNS names with DNS-01 certificates; not supported yet, so the config is rejected."
+      ],
       "examples": [
         "localhost",
         "hosts_file",
         "resolver",
         "public"
       ],
-      "oneOf": [
-        {
-          "const": "localhost",
-          "description": "Use names under .localhost, resolved by browsers without a custom DNS service.",
-          "examples": [
-            "localhost"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "hosts_file",
-          "description": "Resolve exact project names through system hosts-file entries.",
-          "examples": [
-            "hosts_file"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "resolver",
-          "description": "Use the daemon's DNS resolver for the configured custom top-level domain.",
-          "examples": [
-            "resolver"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "public",
-          "description": "Reserved public DNS and DNS-01 strategy; not supported yet.",
-          "examples": [
-            "public"
-          ],
-          "type": "string"
-        }
-      ]
+      "markdownDescription": "Strategy that makes lane hostnames resolve to this machine.",
+      "markdownEnumDescriptions": [
+        "Lane domains end in `.localhost` (`acme.localhost`, `acme-2.localhost`), which browsers and many system resolvers send to loopback by themselves. `hosts_file` covers programs that do not.",
+        "Keep `.localhost` names and always write exact hostnames to `/etc/hosts`, as `hosts_file: always` does, whatever `hosts_file` says; a project's `lanes.hosts_file` still takes precedence. Needs the helper from `devlanes certs trust --hosts`.",
+        "Lane domains become `<project>.<tld>` and `<project>-<N>.<tld>`, answered by a DNS server the daemon runs on `127.0.0.1:15353`, so wildcard hostnames resolve too for programs that use the system resolver. Needs `tld` and a one-time `devlanes certs trust --resolver`; projects that set `lanes.vars.domain` or `lanes.matrix` keep their own domains.",
+        "Reserved for public DNS names with DNS-01 certificates; not supported yet, so the config is rejected."
+      ],
+      "type": "string"
     },
     "StartupConfig": {
       "additionalProperties": false,
-      "description": "Startup pacing. Machine settings, so they live in user config only.",
+      "description": "Pacing of service starts, shared by every lane and project on this machine. Starts queue first come, first served; only spawning waits, running processes are never limited.",
       "examples": [
         {
           "max": 4,
@@ -461,14 +469,16 @@
           "target_cpu": "75%"
         }
       ],
+      "markdownDescription": "Pacing of service starts, shared by every lane and project on this machine. Starts queue first come, first served; only spawning waits, running processes are never limited.",
       "properties": {
         "initial": {
           "default": null,
-          "description": "Adaptive starting window; defaults to `max`, so starts run at full speed until\nthe machine is under pressure. Set it lower to ramp up from a few slots instead;\nnever above `max`.",
+          "description": "Adaptive starting window; defaults to `max`, so starts run at full speed until the machine is under pressure. Set it lower to ramp up from a few slots instead; never above `max`.",
           "examples": [
             2
           ],
           "format": "uint32",
+          "markdownDescription": "Adaptive starting window; defaults to `max`, so starts run at full speed until the machine is under pressure. Set it lower to ramp up from a few slots instead; never above `max`.",
           "minimum": 1,
           "type": [
             "integer",
@@ -477,11 +487,12 @@
         },
         "max": {
           "default": null,
-          "description": "Largest window (the fixed window in `fixed` mode); default CPU cores.",
+          "description": "Most services starting at once: the constant window in `fixed` mode and the ceiling in `adaptive` mode. Defaults to the number of CPU cores; `all` ignores it.",
           "examples": [
             8
           ],
           "format": "uint32",
+          "markdownDescription": "Most services starting at once: the constant window in `fixed` mode and the ceiling in `adaptive` mode. Defaults to the number of CPU cores; `all` ignores it.",
           "minimum": 1,
           "type": [
             "integer",
@@ -491,110 +502,111 @@
         "mode": {
           "$ref": "#/$defs/StartupMode",
           "default": "adaptive",
-          "description": "`adaptive`, `fixed` or `all`; default `adaptive`. A starting service holds its\nslot until its ready check (`tcp`, `http`, `log` or `cmd`) passes, it fails, or\n`slot_timeout` passes; one without a check (`ready: started`) holds it until it\nsettles (`settle_cpu`).",
+          "description": "`adaptive`, `fixed` or `all`; default `adaptive`. A starting service holds its slot until its ready check (`tcp`, `http`, `log` or `cmd`) passes, it fails, or `slot_timeout` passes; one without a check (`ready: started`) holds it until it settles (`settle_cpu`).",
           "examples": [
             "adaptive",
             "fixed",
             "all"
-          ]
+          ],
+          "markdownDescription": "`adaptive`, `fixed` or `all`; default `adaptive`. A starting service holds its slot until its ready check (`tcp`, `http`, `log` or `cmd`) passes, it fails, or `slot_timeout` passes; one without a check (`ready: started`) holds it until it settles (`settle_cpu`)."
         },
         "reserve_memory": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ByteSize"
+              "$ref": "#/$defs/ByteSize",
+              "description": "",
+              "examples": [],
+              "markdownDescription": ""
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Free memory every new start must leave, on top of the memory the services already\nstarting are expected to still need (each one's past startup peak, or 512 MiB\nwithout history). Defaults to 10% of RAM, at most `2GiB`; `0B` turns it off. A\nstart with nothing else starting never waits for it. `all` ignores it.",
+          "description": "Free memory every new start must leave, on top of the memory the services already starting are expected to still need (each one's past startup peak, or 512 MiB without history). Defaults to 10% of RAM, at most `2GiB`; `0B` turns it off. A start with nothing else starting never waits for it. `all` ignores it.",
           "examples": [
             "2GiB",
             "0B"
-          ]
+          ],
+          "markdownDescription": "Free memory every new start must leave, on top of the memory the services already starting are expected to still need (each one's past startup peak, or 512 MiB without history). Defaults to 10% of RAM, at most `2GiB`; `0B` turns it off. A start with nothing else starting never waits for it. `all` ignores it."
         },
         "settle_cpu": {
           "$ref": "#/$defs/Percent",
           "default": "10%",
-          "description": "Only for services without a ready check (`ready: started`, the default for a\nservice without `hosts`): such a service gives its slot back once its process tree\nuses less than this share of one core for 2 s, meaning it has finished starting up.\nServices with a `tcp`, `http`, `log` or `cmd` check keep their slot until the check\npasses instead. Defaults to `10%`.",
+          "description": "Only for services without a ready check (`ready: started`, the default for a service without `hosts`): such a service gives its slot back once its process tree uses less than this share of one core for 2 s, meaning it has finished starting up. Services with a `tcp`, `http`, `log` or `cmd` check keep their slot until the check passes instead. Defaults to `10%`.",
           "examples": [
             "10%",
             "12.5%"
-          ]
+          ],
+          "markdownDescription": "Only for services without a ready check (`ready: started`, the default for a service without `hosts`): such a service gives its slot back once its process tree uses less than this share of one core for 2 s, meaning it has finished starting up. Services with a `tcp`, `http`, `log` or `cmd` check keep their slot until the check passes instead. Defaults to `10%`."
         },
         "slot_timeout": {
           "$ref": "#/$defs/ConfigDuration",
           "default": "20000ms",
-          "description": "A start slot is given back after this even if the service is not ready,\nso services waiting on each other cannot block the queue; default 20s.",
+          "description": "Longest a starting service holds its slot; after it, the next queued service may start even if this one is not ready, so services waiting on each other cannot block the queue. Defaults to `20s` and must be above zero; the service itself keeps starting.",
           "examples": [
             "15s",
             "10m"
-          ]
+          ],
+          "markdownDescription": "Longest a starting service holds its slot; after it, the next queued service may start even if this one is not ready, so services waiting on each other cannot block the queue. Defaults to `20s` and must be above zero; the service itself keeps starting."
         },
         "target_cpu": {
           "$ref": "#/$defs/Percent",
           "default": "75%",
-          "description": "Adaptive mode grows the window while system CPU stays below this; default 75%.",
+          "description": "System CPU use below which `adaptive` mode adds slots; defaults to `75%`, and must be above 0% and at most 100%. Lower it to keep the machine responsive during large starts; other modes ignore it.",
           "examples": [
             "75%",
             "80%"
-          ]
+          ],
+          "markdownDescription": "System CPU use below which `adaptive` mode adds slots; defaults to `75%`, and must be above 0% and at most 100%. Lower it to keep the machine responsive during large starts; other modes ignore it."
         }
       },
       "type": "object"
     },
     "StartupMode": {
-      "description": "How the start gate sizes its window.",
+      "description": "How the number of services allowed to start at once is chosen.",
+      "enum": [
+        "adaptive",
+        "fixed",
+        "all"
+      ],
+      "enumDescriptions": [
+        "Begin each burst of starts at `initial` (by default `max`, full speed). Halve the slots after 3 s above 90% CPU or when the system reports memory pressure, start nothing while that pressure is critical, and add a slot every 2 s while system CPU stays below `target_cpu`, up to `max`.",
+        "Allow `max` starts at a time, never more or fewer. A start also waits while free memory cannot fit what it needs.",
+        "Start every service immediately, with no limit and no memory check."
+      ],
       "examples": [
         "adaptive",
         "fixed",
         "all"
       ],
-      "oneOf": [
-        {
-          "const": "adaptive",
-          "description": "Begin each burst of starts at `initial` (by default `max`, full speed). Halve the\nslots after 3 s above 90% CPU or when the system reports memory pressure, start\nnothing while that pressure is critical, and add a slot every 2 s while system CPU\nstays below `target_cpu`, up to `max`.",
-          "examples": [
-            "adaptive"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "fixed",
-          "description": "Always `max` starts at a time.",
-          "examples": [
-            "fixed"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "all",
-          "description": "No pacing: every service starts at once.",
-          "examples": [
-            "all"
-          ],
-          "type": "string"
-        }
-      ]
+      "markdownDescription": "How the number of services allowed to start at once is chosen.",
+      "markdownEnumDescriptions": [
+        "Begin each burst of starts at `initial` (by default `max`, full speed). Halve the slots after 3 s above 90% CPU or when the system reports memory pressure, start nothing while that pressure is critical, and add a slot every 2 s while system CPU stays below `target_cpu`, up to `max`.",
+        "Allow `max` starts at a time, never more or fewer. A start also waits while free memory cannot fit what it needs.",
+        "Start every service immediately, with no limit and no memory check."
+      ],
+      "type": "string"
     },
     "StateConfig": {
       "additionalProperties": false,
-      "description": "Soft disk budget for the database; live registry and completion records are preserved.",
+      "description": "Size budget for the daemon's SQLite database, enforced by its hourly cleanup.",
       "examples": [
         {
           "max_size": "512MiB"
         }
       ],
+      "markdownDescription": "Size budget for the daemon's SQLite database, enforced by its hourly cleanup.",
       "properties": {
         "max_size": {
           "$ref": "#/$defs/ByteSize",
           "default": "536870912B",
-          "description": "Budget for the database plus WAL and shared-memory files; defaults to 512MiB and must be nonzero. Old metrics and history are pruned first; protected live state may exceed it.",
+          "description": "Size the database (`state.db` with its WAL and shared-memory files) should stay under; defaults to `512MiB` and must be above zero. When it is larger, the cleanup deletes the oldest metric samples first, then the oldest history (finished runs, log index entries, remote boxes), even before their retention ends. Lanes, ports and running units are never deleted, so the file can stay above the budget.",
           "examples": [
             "512MiB",
             "1GiB"
-          ]
+          ],
+          "markdownDescription": "Size the database (`state.db` with its WAL and shared-memory files) should stay under; defaults to `512MiB` and must be above zero. When it is larger, the cleanup deletes the oldest metric samples first, then the oldest history (finished runs, log index entries, remote boxes), even before their retention ends. Lanes, ports and running units are never deleted, so the file can stay above the budget."
         }
       },
       "type": "object"
@@ -602,120 +614,92 @@
     "Templated_string": {
       "anyOf": [
         {
-          "description": "Literal value used without expression evaluation.",
           "type": "string"
         },
         {
-          "description": "Text containing `${{ ... }}`, evaluated for each lane; write `${{ '${{' }}` for a literal `${{`.",
-          "examples": [
-            "${{ lane.index }}"
-          ],
           "pattern": "\\$\\{\\{",
           "type": "string"
         }
       ],
-      "description": "A literal value or a `${{ ... }}` expression, checked for the required type after evaluation.\nWrite `${{ '${{' }}` for a literal `${{`.",
+      "description": "A plain value or text with `${{ ... }}` expressions, evaluated for each lane with names such as `lane`, `self`, `services`, `infra` and `env`. A value that is one whole expression keeps its type, which must fit the setting. Write `${{ '${{' }}` for a literal `${{`.",
       "examples": [
         "${{ lane.index }}"
-      ]
+      ],
+      "markdownDescription": "A plain value or text with `${{ ... }}` expressions, evaluated for each lane with names such as `lane`, `self`, `services`, `infra` and `env`. A value that is one whole expression keeps its type, which must fit the setting. Write `${{ '${{' }}` for a literal `${{`."
     },
     "TerminalConfig": {
       "anyOf": [
         {
-          "description": "A terminal app name from when devlanes opened units in a new terminal\nwindow; that feature is gone, so the name is ignored with a warning.",
-          "examples": [
-            "ghostty"
-          ],
           "type": "string"
         },
         {
           "$ref": "#/$defs/TerminalSettings",
-          "description": "How devlanes uses the terminal's own progress bar.",
-          "examples": [
-            {
-              "progress": "never"
-            }
-          ]
+          "description": "",
+          "examples": [],
+          "markdownDescription": ""
         }
       ],
-      "description": "How devlanes uses the terminal, or (from older configs) a terminal app\nname, which is ignored.",
+      "description": "Terminal integration of the CLI, or a terminal app name from older versions, which is ignored.",
       "examples": [
         {
           "progress": "auto"
         }
-      ]
+      ],
+      "markdownDescription": "Terminal integration of the CLI, or a terminal app name from older versions, which is ignored."
     },
     "TerminalFeature": {
       "description": "When devlanes uses a terminal feature (title, links, notifications, marks).",
+      "enum": [
+        "auto",
+        "always",
+        "never"
+      ],
+      "enumDescriptions": [
+        "Only in terminals known to support it, on human output to a terminal; never inside tmux, screen, CI or a dumb terminal.",
+        "In every terminal, tmux included; a terminal without support may ignore it, or keep a title devlanes cannot put back.",
+        "Never use it."
+      ],
       "examples": [
         "auto",
         "always",
         "never"
       ],
-      "oneOf": [
-        {
-          "const": "auto",
-          "description": "Only in terminals known to support it, on human output to a terminal; never\ninside tmux, screen, CI or a dumb terminal.",
-          "examples": [
-            "auto"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "always",
-          "description": "In every terminal, tmux included; a terminal without support may ignore it, or\nkeep a title devlanes cannot put back.",
-          "examples": [
-            "always"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "never",
-          "description": "Never use it.",
-          "examples": [
-            "never"
-          ],
-          "type": "string"
-        }
-      ]
+      "markdownDescription": "When devlanes uses a terminal feature (title, links, notifications, marks).",
+      "markdownEnumDescriptions": [
+        "Only in terminals known to support it, on human output to a terminal; never inside tmux, screen, CI or a dumb terminal.",
+        "In every terminal, tmux included; a terminal without support may ignore it, or keep a title devlanes cannot put back.",
+        "Never use it."
+      ],
+      "type": "string"
     },
     "TerminalProgress": {
-      "description": "When start progress goes to the terminal tab's progress bar. Only a terminal\nsession in human output ever gets it; `DEVLANES_TERM_PROGRESS=0` or `1` overrides this.",
+      "description": "When start progress goes to the terminal tab's progress bar.",
+      "enum": [
+        "auto",
+        "always",
+        "never"
+      ],
+      "enumDescriptions": [
+        "Only in terminals known to draw it (Ghostty, WezTerm, iTerm2 3.6.6+, Windows Terminal, ConEmu, Ptyxis 48+, Konsole 26.04+); never inside tmux, screen, CI or a dumb terminal.",
+        "In every terminal, for ones `auto` does not recognize such as kitty; a terminal without support may ignore it or show it as text or a notification. Inside tmux it is passed through, which needs `allow-passthrough on`.",
+        "Never draw the progress bar."
+      ],
       "examples": [
         "auto",
         "always",
         "never"
       ],
-      "oneOf": [
-        {
-          "const": "auto",
-          "description": "Only in terminals known to draw it (Ghostty, WezTerm, recent iTerm2, Windows Terminal, ConEmu, Ptyxis, Konsole), never inside tmux or screen.",
-          "examples": [
-            "auto"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "always",
-          "description": "In any terminal, also kitty 0.47 or later and inside tmux (needs `allow-passthrough on`).",
-          "examples": [
-            "always"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "never",
-          "description": "Never.",
-          "examples": [
-            "never"
-          ],
-          "type": "string"
-        }
-      ]
+      "markdownDescription": "When start progress goes to the terminal tab's progress bar.",
+      "markdownEnumDescriptions": [
+        "Only in terminals known to draw it (Ghostty, WezTerm, iTerm2 3.6.6+, Windows Terminal, ConEmu, Ptyxis 48+, Konsole 26.04+); never inside tmux, screen, CI or a dumb terminal.",
+        "In every terminal, for ones `auto` does not recognize such as kitty; a terminal without support may ignore it or show it as text or a notification. Inside tmux it is passed through, which needs `allow-passthrough on`.",
+        "Never draw the progress bar."
+      ],
+      "type": "string"
     },
     "TerminalSettings": {
       "additionalProperties": false,
-      "description": "How devlanes uses the terminal: its progress bar, tab title, links, notifications and\nmarks.",
+      "description": "How devlanes uses the terminal: its progress bar, tab title, links, notifications and marks.",
       "examples": [
         {
           "progress": "auto"
@@ -725,58 +709,64 @@
           "title": "never"
         }
       ],
+      "markdownDescription": "How devlanes uses the terminal: its progress bar, tab title, links, notifications and marks.",
       "properties": {
         "links": {
           "$ref": "#/$defs/TerminalFeature",
           "default": "auto",
-          "description": "Whether service URLs, config error locations and log or bundle paths are\nclickable links (the OSC 8 sequence); defaults to `auto`, which writes them in\niTerm2, kitty, WezTerm, Ghostty, Windows Terminal, VTE terminals, Konsole,\nAlacritty and foot. Elsewhere the same text prints without a link.\n`DEVLANES_TERM_LINKS=0` or `1` overrides this setting.",
+          "description": "Whether service URLs, config error locations and log or bundle paths are clickable links (the OSC 8 sequence); defaults to `auto`, which writes them in iTerm2, kitty, WezTerm, Ghostty, Windows Terminal, VTE terminals, Konsole, Alacritty and foot. Elsewhere the same text prints without a link. `DEVLANES_TERM_LINKS=0` or `1` overrides this setting.",
           "examples": [
             "auto",
             "never"
-          ]
+          ],
+          "markdownDescription": "Whether service URLs, config error locations and log or bundle paths are clickable links (the OSC 8 sequence); defaults to `auto`, which writes them in iTerm2, kitty, WezTerm, Ghostty, Windows Terminal, VTE terminals, Konsole, Alacritty and foot. Elsewhere the same text prints without a link. `DEVLANES_TERM_LINKS=0` or `1` overrides this setting."
         },
         "marks": {
           "$ref": "#/$defs/TerminalFeature",
           "default": "auto",
-          "description": "Whether long command output (logs of several services, failed starts) marks where\neach section starts, so the terminal's jump-to-mark or jump-to-prompt keys move\nbetween them; defaults to `auto`: marks in iTerm2, and prompt marks (OSC 133) in\nWezTerm, Ghostty, kitty, foot and Windows Terminal. `DEVLANES_TERM_MARKS=0` or\n`1` overrides this setting.",
+          "description": "Whether long command output (logs of several services, failed starts) marks where each section starts, so the terminal's jump-to-mark or jump-to-prompt keys move between them; defaults to `auto`: marks in iTerm2, and prompt marks (OSC 133) in WezTerm, Ghostty, kitty, foot and Windows Terminal. `DEVLANES_TERM_MARKS=0` or `1` overrides this setting.",
           "examples": [
             "auto",
             "never"
-          ]
+          ],
+          "markdownDescription": "Whether long command output (logs of several services, failed starts) marks where each section starts, so the terminal's jump-to-mark or jump-to-prompt keys move between them; defaults to `auto`: marks in iTerm2, and prompt marks (OSC 133) in WezTerm, Ghostty, kitty, foot and Windows Terminal. `DEVLANES_TERM_MARKS=0` or `1` overrides this setting."
         },
         "notifications": {
           "$ref": "#/$defs/TerminalFeature",
           "default": "auto",
-          "description": "Whether a start that took a while finishing or failing, and a running service\ncrashing, show a desktop notification while the terminal is not focused; defaults\nto `auto`. The TUI knows focus from the terminal; a command such as `devlanes\nstart` does not, so with `auto` it notifies only in kitty, which itself skips a\nfocused window. Terminals without notifications get the bell. At most one\nnotification per 10 seconds. `DEVLANES_TERM_NOTIFICATIONS=0` or `1` overrides\nthis setting.",
+          "description": "Whether a start that took a while finishing or failing, and a running service crashing, show a desktop notification while the terminal is not focused; defaults to `auto`. The TUI knows focus from the terminal; a command such as `devlanes start` does not, so with `auto` it notifies only in kitty, which itself skips a focused window. Terminals without notifications get the bell. At most one notification per 10 seconds. `DEVLANES_TERM_NOTIFICATIONS=0` or `1` overrides this setting.",
           "examples": [
             "auto",
             "never"
-          ]
+          ],
+          "markdownDescription": "Whether a start that took a while finishing or failing, and a running service crashing, show a desktop notification while the terminal is not focused; defaults to `auto`. The TUI knows focus from the terminal; a command such as `devlanes start` does not, so with `auto` it notifies only in kitty, which itself skips a focused window. Terminals without notifications get the bell. At most one notification per 10 seconds. `DEVLANES_TERM_NOTIFICATIONS=0` or `1` overrides this setting."
         },
         "progress": {
           "$ref": "#/$defs/TerminalProgress",
           "default": "auto",
-          "description": "Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto.",
+          "description": "Whether starts show their progress in the terminal tab's own progress bar (the OSC 9;4 sequence); defaults to `auto`. Only human output on a terminal gets it, and `DEVLANES_TERM_PROGRESS=0` or `1` overrides this setting.",
           "examples": [
             "auto",
             "never"
-          ]
+          ],
+          "markdownDescription": "Whether starts show their progress in the terminal tab's own progress bar (the OSC 9;4 sequence); defaults to `auto`. Only human output on a terminal gets it, and `DEVLANES_TERM_PROGRESS=0` or `1` overrides this setting."
         },
         "title": {
           "$ref": "#/$defs/TerminalFeature",
           "default": "auto",
-          "description": "Whether the terminal tab's title says what devlanes is doing (`devlanes · acme@0 ·\nstarting 3/8` in the TUI, `devlanes start acme@0 · 3/8` or `devlanes logs -f api`\nfor long commands); defaults to `auto`. The previous title is saved on the\nterminal's title stack and put back on exit, so `auto` sets it only where that\nstack exists: xterm, iTerm2, kitty, Ghostty and VTE terminals such as GNOME\nTerminal. Never inside tmux or screen, which manage titles themselves.\n`DEVLANES_TERM_TITLE=0` or `1` overrides this setting.",
+          "description": "Whether the terminal tab's title says what devlanes is doing (`devlanes · acme@0 · starting 3/8` in the TUI, `devlanes start acme@0 · 3/8` or `devlanes logs -f api` for long commands); defaults to `auto`. The previous title is saved on the terminal's title stack and put back on exit, so `auto` sets it only where that stack exists: xterm, iTerm2, kitty, Ghostty and VTE terminals such as GNOME Terminal. Never inside tmux or screen, which manage titles themselves. `DEVLANES_TERM_TITLE=0` or `1` overrides this setting.",
           "examples": [
             "auto",
             "never"
-          ]
+          ],
+          "markdownDescription": "Whether the terminal tab's title says what devlanes is doing (`devlanes · acme@0 · starting 3/8` in the TUI, `devlanes start acme@0 · 3/8` or `devlanes logs -f api` for long commands); defaults to `auto`. The previous title is saved on the terminal's title stack and put back on exit, so `auto` sets it only where that stack exists: xterm, iTerm2, kitty, Ghostty and VTE terminals such as GNOME Terminal. Never inside tmux or screen, which manage titles themselves. `DEVLANES_TERM_TITLE=0` or `1` overrides this setting."
         }
       },
       "type": "object"
     },
     "TlsConfig": {
       "additionalProperties": false,
-      "description": "Certificate authority selection and requested certificate trust targets.",
+      "description": "Certificate authority behind the proxy's HTTPS certificates, and the stores `devlanes certs trust` installs it into.",
       "examples": [
         {
           "ca": "devlanes",
@@ -786,19 +776,21 @@
           ]
         }
       ],
+      "markdownDescription": "Certificate authority behind the proxy's HTTPS certificates, and the stores `devlanes certs trust` installs it into.",
       "properties": {
         "ca": {
           "$ref": "#/$defs/CaKind",
           "default": "devlanes",
-          "description": "Use devlanes' own CA by default, or reuse mkcert's CA.",
+          "description": "Which CA signs the certificate for each lane hostname; defaults to `devlanes`. Choose `mkcert` when your browsers already trust mkcert's CA.",
           "examples": [
             "devlanes",
             "mkcert"
-          ]
+          ],
+          "markdownDescription": "Which CA signs the certificate for each lane hostname; defaults to `devlanes`. Choose `mkcert` when your browsers already trust mkcert's CA."
         },
         "trust": {
           "default": [],
-          "description": "Trust stores that should accept the local CA; mobile targets are ignored with a warning for now.",
+          "description": "Stores `devlanes certs trust` installs the CA into and `certs untrust` removes it from; an empty list means `[system]`. On Linux, browsers do not read the system store, so add `chrome` and `firefox` there; `devlanes doctor` shows each store's state.",
           "examples": [
             [
               "system",
@@ -810,22 +802,38 @@
           ],
           "items": {
             "$ref": "#/$defs/TrustTarget",
-            "description": "Store in which the local CA should be trusted; mobile stores are not supported yet.",
+            "description": "Certificate store that `devlanes certs trust` installs the CA into.",
             "examples": [
               "system",
               "firefox",
               "chrome",
               "ios-simulator",
               "android-emulator"
-            ]
+            ],
+            "markdownDescription": "Certificate store that `devlanes certs trust` installs the CA into."
           },
+          "markdownDescription": "Stores `devlanes certs trust` installs the CA into and `certs untrust` removes it from; an empty list means `[system]`. On Linux, browsers do not read the system store, so add `chrome` and `firefox` there; `devlanes doctor` shows each store's state.",
           "type": "array"
         }
       },
       "type": "object"
     },
     "TrustTarget": {
-      "description": "Store in which the local CA should be trusted; mobile stores are not supported yet.",
+      "description": "Certificate store that `devlanes certs trust` installs the CA into.",
+      "enum": [
+        "system",
+        "firefox",
+        "chrome",
+        "ios-simulator",
+        "android-emulator"
+      ],
+      "enumDescriptions": [
+        "The OS store: the login keychain on macOS, read by Safari, Chrome, Edge and `/usr/bin/curl`; on Linux, the distribution's CA anchors, updated through sudo.",
+        "Every Firefox profile's certificate database, through `certutil` from the NSS tools (`brew install nss`, or `libnss3-tools` / `nss-tools` on Linux).",
+        "The store Chrome and Chromium read: `~/.pki/nssdb` through `certutil` on Linux, the same login keychain as `system` on macOS.",
+        "Reserved for the iOS simulator; not supported yet, so it is dropped with a warning.",
+        "Reserved for the Android emulator; not supported yet, so it is dropped with a warning."
+      ],
       "examples": [
         "system",
         "firefox",
@@ -833,52 +841,19 @@
         "ios-simulator",
         "android-emulator"
       ],
-      "oneOf": [
-        {
-          "const": "system",
-          "description": "Trust the local CA in the operating system's certificate store.",
-          "examples": [
-            "system"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "firefox",
-          "description": "Trust the local CA in Firefox's certificate database.",
-          "examples": [
-            "firefox"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "chrome",
-          "description": "Trust the local CA in Chrome's certificate database where required.",
-          "examples": [
-            "chrome"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "ios-simulator",
-          "description": "Reserved iOS simulator trust target; not supported yet, so it is ignored with a warning.",
-          "examples": [
-            "ios-simulator"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "android-emulator",
-          "description": "Reserved Android emulator trust target; not supported yet, so it is ignored with a warning.",
-          "examples": [
-            "android-emulator"
-          ],
-          "type": "string"
-        }
-      ]
+      "markdownDescription": "Certificate store that `devlanes certs trust` installs the CA into.",
+      "markdownEnumDescriptions": [
+        "The OS store: the login keychain on macOS, read by Safari, Chrome, Edge and `/usr/bin/curl`; on Linux, the distribution's CA anchors, updated through sudo.",
+        "Every Firefox profile's certificate database, through `certutil` from the NSS tools (`brew install nss`, or `libnss3-tools` / `nss-tools` on Linux).",
+        "The store Chrome and Chromium read: `~/.pki/nssdb` through `certutil` on Linux, the same login keychain as `system` on macOS.",
+        "Reserved for the iOS simulator; not supported yet, so it is dropped with a warning.",
+        "Reserved for the Android emulator; not supported yet, so it is dropped with a warning."
+      ],
+      "type": "string"
     },
     "TuiConfig": {
       "additionalProperties": false,
-      "description": "Terminal UI behaviour of the CLI.",
+      "description": "Terminal UI settings: when it opens, its colors and symbols, and what quitting does with running lanes. Changes apply to the next command.",
       "examples": [
         {
           "open_on_start": false
@@ -891,178 +866,179 @@
           "on_quit": "keep"
         }
       ],
+      "markdownDescription": "Terminal UI settings: when it opens, its colors and symbols, and what quitting does with running lanes. Changes apply to the next command.",
       "properties": {
         "glyphs": {
           "$ref": "#/$defs/TuiGlyphs",
           "default": "auto",
-          "description": "Symbols the TUI draws states and markers with; defaults to auto.",
+          "description": "Characters the TUI draws states, markers and the spinner with; defaults to `auto`. Set `ascii` when your font shows boxes or misaligned symbols.",
           "examples": [
             "auto",
             "unicode",
             "ascii"
-          ]
+          ],
+          "markdownDescription": "Characters the TUI draws states, markers and the spinner with; defaults to `auto`. Set `ascii` when your font shows boxes or misaligned symbols."
         },
         "on_quit": {
           "$ref": "#/$defs/TuiOnQuit",
           "default": "ask",
-          "description": "What quitting the TUI does while lanes of the project on screen run; defaults to ask. The quit dialog's \"remember\" box writes it.",
+          "description": "What `q` or Ctrl+C does while lanes of the project on screen are running; defaults to `ask`. Ticking \"remember\" in the quit dialog writes the choice here.",
           "examples": [
             "ask",
             "keep",
             "stop"
-          ]
+          ],
+          "markdownDescription": "What `q` or Ctrl+C does while lanes of the project on screen are running; defaults to `ask`. Ticking \"remember\" in the quit dialog writes the choice here."
         },
         "open_on_start": {
           "default": true,
-          "description": "Run `start`, `restart`, `lane resume` and `lane new --start` inside the TUI when typed at a terminal; defaults to true. false prints them as text, like `--no-ui` or DEVLANES_NO_UI=1.",
+          "description": "Open the TUI for `start`, `restart`, `lane resume` and `lane new --start` when they run at a terminal; defaults to true. Set false to have them print text instead, as `--no-ui` or `DEVLANES_NO_UI=1` do.",
           "examples": [
             true,
             false
           ],
+          "markdownDescription": "Open the TUI for `start`, `restart`, `lane resume` and `lane new --start` when they run at a terminal; defaults to true. Set false to have them print text instead, as `--no-ui` or `DEVLANES_NO_UI=1` do.",
           "type": "boolean"
         },
         "theme": {
           "$ref": "#/$defs/TuiTheme",
           "default": "auto",
-          "description": "Colors of the TUI; defaults to auto. NO_COLOR always turns colors off.",
+          "description": "Color palette of the TUI; defaults to `auto`, which picks one from what the terminal reports. Choose `dark` or `light` when auto guesses wrong; `NO_COLOR` in the environment turns colors off whatever this says.",
           "examples": [
             "auto",
             "dark",
             "light",
             "ansi"
-          ]
+          ],
+          "markdownDescription": "Color palette of the TUI; defaults to `auto`, which picks one from what the terminal reports. Choose `dark` or `light` when auto guesses wrong; `NO_COLOR` in the environment turns colors off whatever this says."
         }
       },
       "type": "object"
     },
     "TuiGlyphs": {
-      "description": "Symbols the TUI draws with.",
+      "description": "Character set the TUI draws its symbols with.",
+      "enum": [
+        "auto",
+        "unicode",
+        "ascii"
+      ],
+      "enumDescriptions": [
+        "Unicode, or ASCII when the locale (the first of `LC_ALL`, `LC_CTYPE` and `LANG` that is set) is not UTF-8.",
+        "Always Unicode symbols, such as ● ✕ ▾ and a braille spinner.",
+        "Plain ASCII only, for fonts or terminals that draw Unicode symbols badly."
+      ],
       "examples": [
         "auto",
         "unicode",
         "ascii"
       ],
-      "oneOf": [
-        {
-          "const": "auto",
-          "description": "Unicode when the locale is UTF-8, else ASCII.",
-          "examples": [
-            "auto"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "unicode",
-          "description": "Unicode symbols such as ● ✕ ▾.",
-          "examples": [
-            "unicode"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "ascii",
-          "description": "Plain ASCII, for fonts or terminals that draw Unicode symbols badly.",
-          "examples": [
-            "ascii"
-          ],
-          "type": "string"
-        }
-      ]
+      "markdownDescription": "Character set the TUI draws its symbols with.",
+      "markdownEnumDescriptions": [
+        "Unicode, or ASCII when the locale (the first of `LC_ALL`, `LC_CTYPE` and `LANG` that is set) is not UTF-8.",
+        "Always Unicode symbols, such as ● ✕ ▾ and a braille spinner.",
+        "Plain ASCII only, for fonts or terminals that draw Unicode symbols badly."
+      ],
+      "type": "string"
     },
     "TuiOnQuit": {
-      "description": "What quitting the TUI does with running lanes.",
+      "description": "What quitting the TUI does with the running lanes of the project on screen.",
+      "enum": [
+        "ask",
+        "keep",
+        "stop"
+      ],
+      "enumDescriptions": [
+        "Show a dialog each time to choose between keeping the lanes running and stopping them.",
+        "Close the TUI at once; every lane keeps running in the daemon.",
+        "Stop the running lanes of the project on screen, then close the TUI. Lanes of other projects keep running."
+      ],
       "examples": [
         "ask",
         "keep",
         "stop"
       ],
-      "oneOf": [
-        {
-          "const": "ask",
-          "description": "Ask each time whether to keep the lanes running or stop them.",
-          "examples": [
-            "ask"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "keep",
-          "description": "Close the TUI and leave every lane running in the daemon.",
-          "examples": [
-            "keep"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "stop",
-          "description": "Stop the running lanes of the project on screen, then close the TUI.",
-          "examples": [
-            "stop"
-          ],
-          "type": "string"
-        }
-      ]
+      "markdownDescription": "What quitting the TUI does with the running lanes of the project on screen.",
+      "markdownEnumDescriptions": [
+        "Show a dialog each time to choose between keeping the lanes running and stopping them.",
+        "Close the TUI at once; every lane keeps running in the daemon.",
+        "Stop the running lanes of the project on screen, then close the TUI. Lanes of other projects keep running."
+      ],
+      "type": "string"
     },
     "TuiTheme": {
-      "description": "Colors of the TUI.",
+      "description": "Color palette of the TUI.",
+      "enum": [
+        "auto",
+        "dark",
+        "light",
+        "ansi"
+      ],
+      "enumDescriptions": [
+        "Use the true-color dark or light palette when the terminal reports true color (`COLORTERM`) and its background (`COLORFGBG`); otherwise the terminal's 16 colors.",
+        "Always use the true-color palette made for a dark background.",
+        "Always use the true-color palette made for a light background.",
+        "Use only the terminal's 16 named colors, so the TUI follows the terminal's color scheme."
+      ],
       "examples": [
         "auto",
         "dark",
         "light",
         "ansi"
       ],
-      "oneOf": [
-        {
-          "const": "auto",
-          "description": "The terminal's 16 colors, or the dark or light palette when the terminal reports true color and its background.",
-          "examples": [
-            "auto"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "dark",
-          "description": "The true-color palette for a dark background.",
-          "examples": [
-            "dark"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "light",
-          "description": "The true-color palette for a light background.",
-          "examples": [
-            "light"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "ansi",
-          "description": "The terminal's own 16 colors, which follow its theme.",
-          "examples": [
-            "ansi"
-          ],
-          "type": "string"
-        }
-      ]
+      "markdownDescription": "Color palette of the TUI.",
+      "markdownEnumDescriptions": [
+        "Use the true-color dark or light palette when the terminal reports true color (`COLORTERM`) and its background (`COLORFGBG`); otherwise the terminal's 16 colors.",
+        "Always use the true-color palette made for a dark background.",
+        "Always use the true-color palette made for a light background.",
+        "Use only the terminal's 16 named colors, so the TUI follows the terminal's color scheme."
+      ],
+      "type": "string"
     },
     "UpdatesConfig": {
       "additionalProperties": false,
-      "description": "Release checks: the daemon reads the latest release's version once a day and\ncommands print a one-line notice. Nothing is downloaded or installed.",
+      "description": "Release checks: the daemon reads the latest release's version once a day and commands print a one-line notice. Nothing is downloaded or installed.",
       "examples": [
         {
           "check": false
         }
       ],
+      "markdownDescription": "Release checks: the daemon reads the latest release's version once a day and commands print a one-line notice. Nothing is downloaded or installed.",
       "properties": {
         "check": {
           "default": true,
-          "description": "Check GitHub once a day for a newer devlanes release and show the upgrade command; defaults to true.",
+          "description": "Have the daemon read the latest release's version from GitHub once a day; when it is newer, commands print the upgrade command on one line, at most once a day. Defaults to true; `DEVLANES_NO_UPDATE_CHECK=1` or a CI environment also turns it off.",
           "examples": [
             true,
             false
           ],
+          "markdownDescription": "Have the daemon read the latest release's version from GitHub once a day; when it is newer, commands print the upgrade command on one line, at most once a day. Defaults to true; `DEVLANES_NO_UPDATE_CHECK=1` or a CI environment also turns it off.",
           "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "UserLanesConfig": {
+      "additionalProperties": false,
+      "description": "Machine settings for lanes. Each lane gets its own data folder at `<data_dir>/<project>/<lane id>`, available as `${{ lane.data_path }}` and `DEVLANES_LANE_DATA`. devlanes creates it when the lane is created and before each start, and `devlanes lane clean` deletes it.",
+      "examples": [
+        {
+          "data_dir": "~/.devlanes/data"
+        }
+      ],
+      "markdownDescription": "Machine settings for lanes. Each lane gets its own data folder at `<data_dir>/<project>/<lane id>`, available as `${{ lane.data_path }}` and `DEVLANES_LANE_DATA`. devlanes creates it when the lane is created and before each start, and `devlanes lane clean` deletes it.",
+      "properties": {
+        "data_dir": {
+          "default": null,
+          "description": "Folder that holds every lane's data folder, one subfolder per project; defaults to `data` in the devlanes home (`~/.devlanes/data`). Must be an absolute path or start with `~/`. The daemon reads it when it starts. After a change and a daemon restart, lanes use new, empty folders under the new root; move the old folders there by hand to keep their data.",
+          "examples": [
+            "~/.devlanes/data",
+            "/Volumes/fast/devlanes"
+          ],
+          "markdownDescription": "Folder that holds every lane's data folder, one subfolder per project; defaults to `data` in the devlanes home (`~/.devlanes/data`). Must be an absolute path or start with `~/`. The daemon reads it when it starts. After a change and a daemon restart, lanes use new, empty folders under the new root; move the old folders there by hand to keep their data.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -1071,7 +1047,7 @@
   "$id": "https://devlanes.run/v1/user-schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Per-user machine settings, separate from project configuration.",
+  "description": "devlanes v0.2.0 user config: per-user settings in ~/.devlanes/config.yaml. Run a dev environment per git worktree, side by side. https://devlanes.run",
   "examples": [
     {
       "hostnames": {
@@ -1085,6 +1061,7 @@
       }
     }
   ],
+  "markdownDescription": "devlanes v0.2.0 user config: per-user settings in ~/.devlanes/config.yaml. Run a dev environment per git worktree, side by side. https://devlanes.run",
   "properties": {
     "history": {
       "$ref": "#/$defs/HistoryConfig",
@@ -1092,13 +1069,14 @@
         "remote_hosts_retention": "7776000000ms",
         "retention": "604800000ms"
       },
-      "description": "Retention for finished unit/task history and disconnected remote hosts in the database.",
+      "description": "How long the database keeps records of finished service and task runs, and of remote boxes that no longer connect.",
       "examples": [
         {
           "remote_hosts_retention": "90d",
           "retention": "7d"
         }
-      ]
+      ],
+      "markdownDescription": "How long the database keeps records of finished service and task runs, and of remote boxes that no longer connect."
     },
     "hostnames": {
       "$ref": "#/$defs/HostnamesConfig",
@@ -1109,7 +1087,7 @@
         "resolver": "localhost",
         "tld": null
       },
-      "description": "Hostname resolution strategy and optional hosts-file policy.",
+      "description": "How lane hostnames such as `api.acme-2.localhost` resolve to this machine: the strategy (`resolver`), its `tld`, and whether names also go into `/etc/hosts` (`hosts_file`). The defaults need no setup for browsers that resolve `*.localhost`.",
       "examples": [
         {
           "hosts_file": "auto",
@@ -1119,7 +1097,21 @@
           "resolver": "resolver",
           "tld": "test"
         }
-      ]
+      ],
+      "markdownDescription": "How lane hostnames such as `api.acme-2.localhost` resolve to this machine: the strategy (`resolver`), its `tld`, and whether names also go into `/etc/hosts` (`hosts_file`). The defaults need no setup for browsers that resolve `*.localhost`."
+    },
+    "lanes": {
+      "$ref": "#/$defs/UserLanesConfig",
+      "default": {
+        "data_dir": null
+      },
+      "description": "Where lane data folders (`lane.data_path`) live on this machine.",
+      "examples": [
+        {
+          "data_dir": "~/.devlanes/data"
+        }
+      ],
+      "markdownDescription": "Where lane data folders (`lane.data_path`) live on this machine."
     },
     "logs": {
       "$ref": "#/$defs/LogsConfig",
@@ -1129,7 +1121,7 @@
           "max_size": "5368709120B"
         }
       },
-      "description": "Retention for service output files and their database metadata.",
+      "description": "How much service output devlanes keeps under `~/.devlanes/logs`, by age and total size.",
       "examples": [
         {
           "retention": {
@@ -1137,31 +1129,34 @@
             "max_size": "5GiB"
           }
         }
-      ]
+      ],
+      "markdownDescription": "How much service output devlanes keeps under `~/.devlanes/logs`, by age and total size."
     },
     "metrics": {
       "$ref": "#/$defs/MetricsConfig",
       "default": {
         "retention": "604800000ms"
       },
-      "description": "Retention for monitor history, including aggregates stored in the database.",
+      "description": "How long CPU and memory history stays in the daemon's database.",
       "examples": [
         {
           "retention": "7d"
         }
-      ]
+      ],
+      "markdownDescription": "How long CPU and memory history stays in the daemon's database."
     },
     "ports": {
       "$ref": "#/$defs/PortsConfig",
       "default": {
         "range": "20000-32767"
       },
-      "description": "Machine-wide pool shared by all project lane blocks.",
+      "description": "Port range that every lane of every project takes its block of ports from, so lanes never collide. Defaults to `20000-32767`.",
       "examples": [
         {
           "range": "20000-32767"
         }
-      ]
+      ],
+      "markdownDescription": "Port range that every lane of every project takes its block of ports from, so lanes never collide. Defaults to `20000-32767`."
     },
     "proxy": {
       "$ref": "#/$defs/ProxyConfig",
@@ -1170,14 +1165,15 @@
         "https_port": 443,
         "lan": false
       },
-      "description": "HTTP/HTTPS listening ports and LAN access policy.",
+      "description": "Ports of the daemon's HTTP/HTTPS proxy, which serves every `hosts` entry, and whether other devices on the network may connect to it.",
       "examples": [
         {
           "http_port": 80,
           "https_port": 443,
           "lan": false
         }
-      ]
+      ],
+      "markdownDescription": "Ports of the daemon's HTTP/HTTPS proxy, which serves every `hosts` entry, and whether other devices on the network may connect to it."
     },
     "startup": {
       "$ref": "#/$defs/StartupConfig",
@@ -1190,7 +1186,7 @@
         "slot_timeout": "20000ms",
         "target_cpu": "75%"
       },
-      "description": "How many services start at once, across all lanes and projects.",
+      "description": "How many services may be starting at the same time across all lanes and projects, so a large start does not overload the machine. Defaults to one start per CPU core.",
       "examples": [
         {
           "max": 4,
@@ -1205,36 +1201,42 @@
           "slot_timeout": "20s",
           "target_cpu": "75%"
         }
-      ]
+      ],
+      "markdownDescription": "How many services may be starting at the same time across all lanes and projects, so a large start does not overload the machine. Defaults to one start per CPU core."
     },
     "state": {
       "$ref": "#/$defs/StateConfig",
       "default": {
         "max_size": "536870912B"
       },
-      "description": "Soft disk budget for the state database and its SQLite sidecar files.",
+      "description": "Size budget for the daemon's database; past it, the oldest metrics and history are deleted before their retention ends.",
       "examples": [
         {
           "max_size": "512MiB"
         }
-      ]
+      ],
+      "markdownDescription": "Size budget for the daemon's database; past it, the oldest metrics and history are deleted before their retention ends."
     },
     "terminal": {
       "anyOf": [
         {
-          "$ref": "#/$defs/TerminalConfig"
+          "$ref": "#/$defs/TerminalConfig",
+          "description": "",
+          "examples": [],
+          "markdownDescription": ""
         },
         {
           "type": "null"
         }
       ],
       "default": null,
-      "description": "How devlanes uses the terminal tab's progress bar during starts.",
+      "description": "Terminal integration of the CLI, written as a mapping with `progress` (the tab's progress bar during starts). A plain string, the terminal app name older versions used, is still accepted but ignored with a warning.",
       "examples": [
         {
           "progress": "auto"
         }
-      ]
+      ],
+      "markdownDescription": "Terminal integration of the CLI, written as a mapping with `progress` (the tab's progress bar during starts). A plain string, the terminal app name older versions used, is still accepted but ignored with a warning."
     },
     "tls": {
       "$ref": "#/$defs/TlsConfig",
@@ -1242,7 +1244,7 @@
         "ca": "devlanes",
         "trust": []
       },
-      "description": "Certificate authority and explicitly requested trust targets.",
+      "description": "Which certificate authority signs the proxy's HTTPS certificates (`ca`), and which stores `devlanes certs trust` installs it into (`trust`).",
       "examples": [
         {
           "ca": "devlanes",
@@ -1251,7 +1253,8 @@
             "firefox"
           ]
         }
-      ]
+      ],
+      "markdownDescription": "Which certificate authority signs the proxy's HTTPS certificates (`ca`), and which stores `devlanes certs trust` installs it into (`trust`)."
     },
     "tui": {
       "$ref": "#/$defs/TuiConfig",
@@ -1261,7 +1264,7 @@
         "open_on_start": true,
         "theme": "auto"
       },
-      "description": "How commands use the terminal UI.",
+      "description": "Whether start commands open the terminal UI, how it looks, and what quitting it does with running lanes.",
       "examples": [
         {
           "open_on_start": false
@@ -1273,21 +1276,22 @@
         {
           "on_quit": "keep"
         }
-      ]
+      ],
+      "markdownDescription": "Whether start commands open the terminal UI, how it looks, and what quitting it does with running lanes."
     },
     "updates": {
       "$ref": "#/$defs/UpdatesConfig",
       "default": {
         "check": true
       },
-      "description": "Whether the daemon looks for new devlanes releases.",
+      "description": "Daily check for a newer devlanes release; nothing is downloaded or installed.",
       "examples": [
         {
           "check": false
         }
-      ]
+      ],
+      "markdownDescription": "Daily check for a newer devlanes release; nothing is downloaded or installed."
     }
   },
-  "title": "devlanes user config",
   "type": "object"
 }

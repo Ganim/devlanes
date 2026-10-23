@@ -51,9 +51,7 @@ expression: "parse_project(base, Some(LOCAL)).expect(\"local with matching base\
       "extends": "fastify-api",
       "run": "node scratch/server.mjs",
       "platform": "node",
-      "hosts": [
-        "scratch.${{ lane.domain }}"
-      ]
+      "hosts": "scratch.${{ lane.domain }}"
     }
   },
   "profiles": {

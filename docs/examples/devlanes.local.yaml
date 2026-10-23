@@ -13,6 +13,6 @@ services:
   scratch-api:
     extends: fastify-api
     run: node scratch/server.mjs
-    hosts: ["scratch.${{ lane.domain }}"]
+    hosts: "scratch.${{ lane.domain }}"
 profiles:
   default: [+essential, user-web]

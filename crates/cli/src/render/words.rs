@@ -85,6 +85,30 @@ pub(crate) fn spawn_hint(data: &Value) -> Option<Hint> {
     }
 }
 
+/// `; last answer 302` (`, expected 200` when a status was set) from an http
+/// check's timeout data `{last_status?, expected_status?}`; empty when nothing
+/// answered.
+fn last_answer(data: &Value) -> String {
+    let Some(code) = int(data, "last_status") else {
+        return String::new();
+    };
+    match int(data, "expected_status") {
+        Some(expected) => format!("; last answer {code}, expected {expected}"),
+        None => format!("; last answer {code}"),
+    }
+}
+
+/// The fix for an http check that timed out on a non-2xx answer without a
+/// configured `status`: accept that code or probe a path that answers 2xx.
+pub fn status_hint(data: &Value) -> Option<Hint> {
+    let code = int(data, "last_status").filter(|code| !(200..300).contains(code))?;
+    int(data, "expected_status").is_none().then(|| {
+        Hint(format!(
+            "set `ready.http.status: {code}` or use a path that answers 2xx"
+        ))
+    })
+}
+
 /// Candidate list for `not_found` and `ambiguous`.
 fn candidates(data: &Value) -> String {
     let names: Vec<String> = list(data, "candidates").iter().map(display_value).collect();
@@ -326,14 +350,14 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             ),
             spawn_hint(data).or_else(|| logs_hint(data)),
         ),
-        "unit_failed" | "ready_timeout" => (
-            match error.code.as_str() {
-                "unit_failed" => format!("{} failed", target(data)),
+        "unit_failed" => (format!("{} failed", target(data)), logs_hint(data)),
+        "ready_timeout" => (
+            match target(data) {
                 // Without a target it sits on the unit's own row.
-                "ready_timeout" if target(data).is_empty() => "wasn't ready in time".into(),
-                _ => format!("{} wasn't ready in time", target(data)),
+                found if found.is_empty() => format!("wasn't ready in time{}", last_answer(data)),
+                found => format!("{found} wasn't ready in time{}", last_answer(data)),
             },
-            logs_hint(data),
+            status_hint(data).or_else(|| logs_hint(data)),
         ),
         "queued" => (
             queued(data),
@@ -804,7 +828,15 @@ fn more_errors(code: &str, data: &Value) -> Option<(String, Option<Hint>)> {
         "launch_check_failed" => (with_message("the start was refused".into()), None),
         "prepared_file_outside_lane" => (
             format!(
-                "a prepared file would be written outside the lane's worktree: {}",
+                "a prepared file would be written outside the lane's worktree and data folder: {}",
+                field(data, "path")
+            ),
+            None,
+        ),
+        "lane_data_unavailable" => (
+            format!(
+                "{} ({}); check its permissions or set lanes.data_dir in config.yaml",
+                message.unwrap_or_else(|| "cannot create the lane data folder".into()),
                 field(data, "path")
             ),
             None,
@@ -839,17 +871,19 @@ fn more_errors(code: &str, data: &Value) -> Option<(String, Option<Hint>)> {
             Some(Hint::command(["url", "ls"])),
         ),
         "unsafe_home" => unsafe_home(data),
-        // `{container, check, timeout_ms}`: an infra container's ready check.
+        // `{container, check, timeout_ms, expected_status?, last_status?}`: an infra
+        // container's ready check.
         "container_not_ready" => (
             format!(
-                "container {} did not pass its {} check within {}",
+                "container {} did not pass its {} check within {}{}",
                 field(data, "container"),
                 field(data, "check"),
                 data.get("timeout_ms")
                     .and_then(Value::as_u64)
-                    .map_or_else(|| "its timeout".into(), super::duration)
+                    .map_or_else(|| "its timeout".into(), super::duration),
+                last_answer(data)
             ),
-            Some(Hint::command(["infra", "status"])),
+            status_hint(data).or_else(|| Some(Hint::command(["infra", "status"]))),
         ),
         // A unit a `stop` or `restart` (`by`) took out of a running start.
         "cancelled_by_stop" => (
@@ -1132,8 +1166,11 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
             Some(Hint::command(["wait", &format!("{lane}:{unit}")])),
         ),
         "ready_timeout" | "timed_out" => (
-            "did not become ready before the timeout".into(),
-            Some(Hint::logs(lane, unit, 200)),
+            format!(
+                "did not become ready before the timeout{}",
+                last_answer(data)
+            ),
+            status_hint(data).or_else(|| Some(Hint::logs(lane, unit, 200))),
         ),
         "exited" => (
             match int(data, "code") {

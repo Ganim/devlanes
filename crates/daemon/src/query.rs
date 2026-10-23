@@ -1094,8 +1094,8 @@ impl Inner {
     }
 
     /// `doctor`'s `user_config`: the file on disk checked now, since it may have
-    /// changed since the daemon loaded it. `errors` are located; `loaded_errors`
-    /// are the ones in effect since startup (a restart applies the file again).
+    /// changed since the daemon loaded it. `errors` are located; with any, the next
+    /// daemon start (or `daemon restart`) refuses to run until the file is fixed.
     async fn user_config_doctor(&self) -> Value {
         let path = self.opts.home.join("config.yaml");
         let file = path.clone();
@@ -1120,7 +1120,6 @@ impl Inner {
             "error": errors.first(),
             "errors": errors,
             "warnings": warnings,
-            "loaded_errors": self.opts.user_config_errors,
         })
     }
 }

@@ -2,7 +2,7 @@
 
 devlanes runs any process. What it adds per language is small: a `platform` contributor that detects the runtime from project files and sets a few variables, mostly so HTTPS calls to other lane hostnames trust the devlanes CA. Everything else is the usual dev command with the port taken from `PORT` or `${{ self.port }}`.
 
-Set `platform` only when detection is wrong. Detection looks at the `run_script` source file first, then the working directory.
+Set `platform` only when detection is wrong. Detection looks at the `run_script` file first, then the working directory.
 
 | Platform | Detected from | Variables set |
 | --- | --- | --- |
@@ -21,9 +21,13 @@ Every unit also gets `DEVLANES_CA_CERT` (the CA) and `DEVLANES_CA_BUNDLE` (syste
 ```yaml
 services:
   api:
-    run_script: apps/api/package.json#dev
-    hosts: ["api.${{ lane.domain }}"]
-    ready: { http: { path: /healthz } }
+    run_script:
+      file: apps/api/package.json
+      name: dev
+    hosts: "api.${{ lane.domain }}"
+    ready:
+      http:
+        path: /healthz
 ```
 
 The server must read `PORT` (and ideally `HOST`, which is `127.0.0.1`). With Fastify, Express, Hono or Koa that is `listen({ port: Number(process.env.PORT), host: process.env.HOST })`. If the script hardcodes a port, pass it: `run: node --watch server.mjs --port ${{ self.port }}`.
@@ -39,7 +43,9 @@ Dev servers under a watcher (`tsx watch`, `nodemon`, `node --watch`) keep runnin
 ```yaml
 services:
   api:
-    run_script: package.json#dev      # bun run dev, when bun.lock or packageManager says bun
+    run_script:  # bun run dev, when bun.lock or packageManager says bun
+      file: package.json
+      name: dev
 ```
 
 With `Bun.serve({ port: Number(process.env.PORT), hostname: process.env.HOST })` nothing else is needed. Bun honours `NODE_EXTRA_CA_CERTS`.
@@ -51,7 +57,9 @@ The package manager and the platform are detected separately. `bunfig.toml` alon
 ```yaml
 services:
   api:
-    run_script: deno.json#dev
+    run_script:
+      file: deno.json
+      name: dev
 ```
 
 with
@@ -72,13 +80,16 @@ services:
     platform: python
     cwd: services/api
     run: uv run uvicorn acme.main:app --host 127.0.0.1 --port ${{ self.port }} --reload --proxy-headers
-    hosts: ["api.${{ lane.domain }}"]
-    ready: { http: { path: /healthz, timeout: 60s } }
+    hosts: "api.${{ lane.domain }}"
+    ready:
+      http:
+        path: /healthz
+        timeout: 60s
   admin:
     platform: python
     cwd: services/admin
     run: uv run python manage.py runserver 127.0.0.1:${{ self.port }}
-    hosts: ["admin.${{ lane.domain }}"]
+    hosts: "admin.${{ lane.domain }}"
 ```
 
 `uv run` and `poetry run` take care of the virtualenv; devlanes never activates one. `PYTHONUNBUFFERED=1` makes logs arrive immediately.
@@ -98,9 +109,14 @@ Behind the proxy the app sees `http://127.0.0.1:<port>` with `X-Forwarded-Proto:
 ```yaml
 services:
   api:
-    run_script: Cargo.toml#server         # cargo run --bin server, -p <member> in a workspace
-    hosts: ["api.${{ lane.domain }}"]
-    ready: { http: { path: /healthz, timeout: 5m } }
+    run_script:  # cargo run --bin server, -p <member> in a workspace
+      file: Cargo.toml
+      name: server
+    hosts: "api.${{ lane.domain }}"
+    ready:
+      http:
+        path: /healthz
+        timeout: 5m
   api-watch:
     run: cargo watch -x 'run --bin server' # or bacon run; pass --port if the binary needs it
     autostart: false
@@ -122,10 +138,12 @@ Only the worktree root is checked, not the unit's `cwd`. Both tools are optional
 ## Secrets: fnox
 
 ```yaml
-fnox: { profile: dev }
+fnox:
+  profile: dev
 services:
   payments:
-    fnox: { profile: payments }    # a different profile for one service
+    fnox:  # a different profile for one service
+      profile: payments
 ```
 
 With a `fnox.toml` in the worktree (or a `fnox:` key in the config), devlanes runs `fnox env --json --non-interactive` and adds the result above mise, direnv and the platform variables, below `global_env`. fnox 1.39 or later is required. The daemon has no terminal, so a locked vault fails the start with `secrets are locked; run devlanes secrets unlock`; that command runs fnox in your terminal and hands the values to the daemon, which keeps them in memory only. Values from fnox are also visible to expressions as `${{ env.NAME }}`.

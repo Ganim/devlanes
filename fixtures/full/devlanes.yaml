@@ -36,9 +36,14 @@ services:
     env:
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/${{ lane.db_name }}
     hosts: ["api.${{ lane.domain }}"]
-    ready: { http: { path: /healthz } }
+    ready:
+      http:
+        path: /healthz
   web:
     run: [fixture-server, --log-line, web-ready]
-    env: { API_URL: "${{ svc.api.url }}" }
+    env:
+      API_URL: "${{ services.api.url }}"
     hosts: ["${{ lane.domain }}"]
-    ready: { http: { path: /healthz } }
+    ready:
+      http:
+        path: /healthz

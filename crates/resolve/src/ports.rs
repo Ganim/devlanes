@@ -137,22 +137,19 @@ pub(crate) fn port_override<E: Extensions>(
     }
 }
 
-/// Reads `replicas` without lane context; port allocation is lane-independent.
+/// Reads `replicas`, defaulting to 1. Config validation rejects 0 already; this
+/// check covers configs built without it.
 pub(crate) fn static_replicas<E: Extensions>(
     name: &str,
     service: &ServiceConfig<E>,
 ) -> Result<u16, ResolveError> {
-    match &service.replicas {
+    match service.replicas {
         None => Ok(1),
-        Some(Templated::Literal(count)) if *count > 0 => Ok(*count),
-        Some(Templated::Literal(_)) => Err(ResolveError::invalid(
+        Some(0) => Err(ResolveError::invalid(
             format!("services.{name}.replicas"),
             "must be positive",
         )),
-        Some(Templated::Expression(_)) => Err(ResolveError::invalid(
-            format!("services.{name}.replicas"),
-            "must be a literal number: every lane allocates the same ports",
-        )),
+        Some(count) => Ok(count),
     }
 }
 

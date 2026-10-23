@@ -84,18 +84,21 @@ expression: config
   "global_env": {
     "ACME_CHANNEL": "dev",
     "RUST_BACKTRACE": "1",
-    "PUBLIC_BUILD_CHAT_API_URL": "${{ svc.chat.url }}",
-    "PUBLIC_BUILD_MESSAGES_API_URL": "${{ svc.messages.url }}",
-    "DIRECTORY_API_URL": "${{ svc.directory.url }}",
-    "AUTHZ_API_URL": "${{ svc.authz.url }}",
-    "BILLING_API_URL": "${{ svc.billing.url }}",
-    "SKILLS_API_URL": "${{ svc.skills.url }}",
-    "ACME_WEBHOOKS_BASE_URL": "${{ svc.webhooks.url }}"
+    "PUBLIC_BUILD_CHAT_API_URL": "${{ services.chat.url }}",
+    "PUBLIC_BUILD_MESSAGES_API_URL": "${{ services.messages.url }}",
+    "DIRECTORY_API_URL": "${{ services.directory.url }}",
+    "AUTHZ_API_URL": "${{ services.authz.url }}",
+    "BILLING_API_URL": "${{ services.billing.url }}",
+    "SKILLS_API_URL": "${{ services.skills.url }}",
+    "ACME_WEBHOOKS_BASE_URL": "${{ services.webhooks.url }}"
   },
   "tasks": {
     "sync-env": {
       "run": null,
-      "run_script": "package.json#sync:env",
+      "run_script": {
+        "file": "package.json",
+        "name": "sync:env"
+      },
       "cwd": null,
       "env": {},
       "fnox": null,
@@ -110,7 +113,10 @@ expression: config
     },
     "sidecar-build": {
       "run": null,
-      "run_script": "package.json#sidecar:build",
+      "run_script": {
+        "file": "package.json",
+        "name": "sidecar:build"
+      },
       "cwd": null,
       "env": {},
       "fnox": null,
@@ -131,7 +137,10 @@ expression: config
     },
     "build-deps": {
       "run": null,
-      "run_script": "package.json#build:deps",
+      "run_script": {
+        "file": "package.json",
+        "name": "build:deps"
+      },
       "cwd": null,
       "env": {},
       "fnox": null,
@@ -206,7 +215,10 @@ expression: config
     },
     "seed": {
       "run": null,
-      "run_script": "package.json#db:seed",
+      "run_script": {
+        "file": "package.json",
+        "name": "db:seed"
+      },
       "cwd": null,
       "env": {},
       "fnox": null,
@@ -240,7 +252,10 @@ expression: config
   "services": {
     "chat": {
       "extends": "worker",
-      "run_script": "workers/chat/package.json#dev",
+      "run_script": {
+        "file": "workers/chat/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "tags": [
@@ -261,7 +276,10 @@ expression: config
     },
     "messages": {
       "extends": "worker",
-      "run_script": "workers/messages/package.json#dev",
+      "run_script": {
+        "file": "workers/messages/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "tags": [
@@ -276,13 +294,16 @@ expression: config
       },
       "wrangler": {
         "vars": {
-          "MEDIA_PUBLIC_ORIGIN": "${{ svc.media.url }}"
+          "MEDIA_PUBLIC_ORIGIN": "${{ services.media.url }}"
         }
       }
     },
     "billing": {
       "extends": "worker",
-      "run_script": "workers/billing/package.json#dev",
+      "run_script": {
+        "file": "workers/billing/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "tags": [
@@ -303,7 +324,10 @@ expression: config
     },
     "authz": {
       "extends": "worker",
-      "run_script": "platform/authz/worker/package.json#dev",
+      "run_script": {
+        "file": "platform/authz/worker/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "tags": [
@@ -325,7 +349,10 @@ expression: config
     },
     "directory": {
       "extends": "worker",
-      "run_script": "workers/directory/package.json#dev",
+      "run_script": {
+        "file": "workers/directory/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "tags": [
@@ -341,7 +368,10 @@ expression: config
     },
     "skills": {
       "extends": "worker",
-      "run_script": "workers/skills/package.json#dev",
+      "run_script": {
+        "file": "workers/skills/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "tags": [
@@ -363,7 +393,10 @@ expression: config
     },
     "webhooks": {
       "extends": "worker",
-      "run_script": "workers/webhooks/package.json#dev",
+      "run_script": {
+        "file": "workers/webhooks/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "tags": [
@@ -379,7 +412,10 @@ expression: config
     },
     "media": {
       "extends": "worker",
-      "run_script": "workers/media/package.json#dev",
+      "run_script": {
+        "file": "workers/media/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "wrangler",
       "tags": [
@@ -394,7 +430,7 @@ expression: config
       }
     },
     "payments-webhooks": {
-      "run": "pnpm --filter @acme/billing-worker dev:payments -- --port ${{ svc.billing.port }}",
+      "run": "pnpm --filter @acme/billing-worker dev:payments -- --port ${{ services.billing.port }}",
       "platform": "node",
       "tags": [
         "backend"
@@ -411,14 +447,20 @@ expression: config
     },
     "desktop-package": {
       "extends": "watcher",
-      "run_script": "apps/desktop/package.json#build:watch",
+      "run_script": {
+        "file": "apps/desktop/package.json",
+        "name": "build:watch"
+      },
       "platform": "node",
       "tags": [
         "watcher"
       ]
     },
     "docs": {
-      "run_script": "apps/docs/package.json#dev",
+      "run_script": {
+        "file": "apps/docs/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "tags": [
         "watcher"
@@ -427,7 +469,7 @@ expression: config
         "tcp": null,
         "http": {
           "path": "/",
-          "status": null,
+          "status": 302,
           "timeout": null
         },
         "log": null,
@@ -448,7 +490,7 @@ expression: config
         "tcp": null,
         "http": {
           "path": "/",
-          "status": null,
+          "status": 302,
           "timeout": "180000ms"
         },
         "log": null,
@@ -457,7 +499,10 @@ expression: config
       }
     },
     "desktop": {
-      "run_script": "apps/desktop/package.json#dev",
+      "run_script": {
+        "file": "apps/desktop/package.json",
+        "name": "dev"
+      },
       "platform": "node",
       "preset": "tauri",
       "tags": [
@@ -476,11 +521,11 @@ expression: config
         "CEF_REMOTE_DEBUGGING_PORT": "${{ self.ports.cdp }}",
         "DEEP_LINK_DEV_PORT": "${{ self.ports.deep_link }}",
         "ACME_DESKTOP_REUSE_SERVER": "1",
-        "ACME_DESKTOP_REUSE_SERVER_URL": "${{ svc.desktop_web.url }}"
+        "ACME_DESKTOP_REUSE_SERVER_URL": "${{ services.desktop_web.url }}"
       },
       "tauri": {
         "identifier": "invalid.example.desktop.dev${{ '' if lane.index == 0 else '.slot-' ~ lane.index }}.client-${{ replica.index }}",
-        "dev_url": "${{ svc.desktop_web.url }}",
+        "dev_url": "${{ services.desktop_web.url }}",
         "before_dev_command": ""
       }
     }
@@ -506,13 +551,13 @@ expression: config
       "exclude": null,
       "infra": false,
       "env": {
-        "PUBLIC_BUILD_CHAT_API_URL": "${{ lanes.main.svc.chat.url }}",
-        "PUBLIC_BUILD_MESSAGES_API_URL": "${{ lanes.main.svc.messages.url }}",
-        "DIRECTORY_API_URL": "${{ lanes.main.svc.directory.url }}",
-        "AUTHZ_API_URL": "${{ lanes.main.svc.authz.url }}",
-        "BILLING_API_URL": "${{ lanes.main.svc.billing.url }}",
-        "SKILLS_API_URL": "${{ lanes.main.svc.skills.url }}",
-        "ACME_WEBHOOKS_BASE_URL": "${{ lanes.main.svc.webhooks.url }}"
+        "PUBLIC_BUILD_CHAT_API_URL": "${{ lanes.main.services.chat.url }}",
+        "PUBLIC_BUILD_MESSAGES_API_URL": "${{ lanes.main.services.messages.url }}",
+        "DIRECTORY_API_URL": "${{ lanes.main.services.directory.url }}",
+        "AUTHZ_API_URL": "${{ lanes.main.services.authz.url }}",
+        "BILLING_API_URL": "${{ lanes.main.services.billing.url }}",
+        "SKILLS_API_URL": "${{ lanes.main.services.skills.url }}",
+        "ACME_WEBHOOKS_BASE_URL": "${{ lanes.main.services.webhooks.url }}"
       },
       "run_scripts": {}
     },

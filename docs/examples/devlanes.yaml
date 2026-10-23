@@ -1,14 +1,17 @@
 # Reference forms for a fictional application. Companion programs are not included.
 # Values may use ${{ ... }} expressions; a value that is one expression keeps its type.
-# Names with dashes are read as svc.crm_api or svc['crm-api'].
+# Names with dashes are read as services.crm_api or services['crm-api'].
 
 # Project name shared by every worktree of this repository.
 project: acme
 
-# Optional color overrides; a unit uses its first tag. Other tag names remain valid.
+# Optional color overrides; a unit uses the first of its tags listed here. Other tag names remain valid.
 tags:
-  api: { color: cyan, description: HTTP APIs }
-  worker: { color: bright-magenta }
+  api:
+    color: cyan
+    description: HTTP APIs
+  worker:
+    color: bright-magenta
 
 # Reusable service settings; a service inherits one with extends.
 templates:
@@ -17,7 +20,9 @@ templates:
     platform: node
     tags: [api]
     # Ready once GET /-/health on the service's port answers.
-    ready: { http: { path: /-/health } }
+    ready:
+      http:
+        path: /-/health
   wrangler-worker:
     platform: node
     # Adds the framework's port and host flags to the command.
@@ -53,8 +58,18 @@ lanes:
     # port: ${{ 40000 + lane.index * 100 }}
   # Alternative to vars; entry N is lane N:
   # matrix:
-  #   - { port: 10000, domain: acme.localhost, db_name: acme, redis_db: 0, vhost: acme, bucket: media }
-  #   - { port: 11000, domain: test1.localhost, db_name: test1, redis_db: 1, vhost: test1, bucket: media-test1 }
+  #   - port: 10000
+  #     domain: acme.localhost
+  #     db_name: acme
+  #     redis_db: 0
+  #     vhost: acme
+  #     bucket: media
+  #   - port: 11000
+  #     domain: test1.localhost
+  #     db_name: test1
+  #     redis_db: 1
+  #     vhost: test1
+  #     bucket: media-test1
 
 # Containers, and the commands that prepare and remove each lane's data in them.
 infra:
@@ -71,7 +86,7 @@ infra:
     ACME_DB_PORT: 15432
   # HTTPS hostnames the proxy routes to a container's published port.
   hosts:
-    s3mock: ["s3.${{ lane.domain }}"]
+    s3mock: "s3.${{ lane.domain }}"
   # Containers whose ports are not mirrored to machines connected with devlanes remote connect.
   hidden: [postgres]
   # Plain Docker containers, run without a Compose file.
@@ -81,7 +96,9 @@ infra:
       command: [server, --config=/policies/config.yaml]
       volumes: ["./infra/cerbos:/policies:ro"]
       # Container ports by name; the host side is read as infra.cerbos.ports.http.
-      ports: { http: 3592, grpc: 3593 }
+      ports:
+        http: 3592
+        grpc: 3593
       # One container per lane instead of one shared by all lanes.
       per_lane: true
   # Commands run once per lane after its containers are healthy.
@@ -125,10 +142,10 @@ global_env:
   ACME_AMQP_VHOST: ${{ lane.vhost }}
   ACME_MEDIA_BUCKET: ${{ lane.bucket }}
   # https:// URL of the service's first hostname in this lane.
-  ACME_CRM_BASE_URL: ${{ svc.crm_api.public_url }}
+  ACME_CRM_BASE_URL: ${{ services.crm_api.public_url }}
   CERBOS_URL: http://127.0.0.1:${{ infra.cerbos.ports.http }}
   # A service of another devlanes project, with a fallback when it is not running.
-  REFEREE_URL: ${{ projects.workflows.svc.referee.public_url | default('https://referee.staging.example.invalid') }}
+  REFEREE_URL: ${{ projects.workflows.services.referee.public_url | default('https://referee.staging.example.invalid') }}
   # env.X reads the environment of the shell that ran devlanes, then secrets, then .env.
   SENTRY_DSN: ${{ env.SENTRY_DSN | default('') }}
 
@@ -140,13 +157,17 @@ tasks:
     when: lane.create
   migrate:
     # Runs a script from package.json with the project's package manager.
-    run_script: package.json#db-deploy
+    run_script:
+      file: package.json
+      name: db-deploy
     # Run on every devlanes start.
     when: lane.start
     # Run automatically only when one of these profiles is active.
     profiles: [default, backend]
   seed:
-    run_script: packages/seed/package.json#start
+    run_script:
+      file: packages/seed/package.json
+      name: start
     when: lane.create
     # Wait until the selected services are ready.
     after: services
@@ -161,13 +182,17 @@ tasks:
     # Asked before running; noninteractive callers must pass --yes.
     confirm: Drops ${{ lane.db_name }} and re-seeds it
   typegen:
-    run_script: packages/api-types/package.json#generate
+    run_script:
+      file: packages/api-types/package.json
+      name: generate
     # Alternative: run: [pnpm, -F, "@acme/api-types", generate]
   certs:
-    run_script: Makefile#certs
+    run_script:
+      file: Makefile
+      name: certs
   fixtures:
     run_script:
-      source: justfile
+      file: justfile
       name: fixtures
   prisma-login:
     run: pnpm prisma login
@@ -180,7 +205,7 @@ services:
     extends: fastify-api
     run: pnpm --silent -F @acme/catalog dev
     # HTTPS hostnames the proxy routes to this service's port.
-    hosts: ["catalog.${{ lane.domain }}"]
+    hosts: "catalog.${{ lane.domain }}"
     # Labels that profiles select with +tag.
     tags: [api, essential]
   crm-api:
@@ -192,27 +217,32 @@ services:
     env:
       # The port devlanes allocated to this service in this lane.
       ACME_CRM_PORT: ${{ self.port }}
-    hosts: ["crm.${{ lane.domain }}"]
+    hosts: "crm.${{ lane.domain }}"
     tags: [api, essential]
   admin-api:
     extends: fastify-api
-    run_script: apps/admin-api/package.json#dev
+    run_script:
+      file: apps/admin-api/package.json
+      name: dev
     # This service's own fnox profile instead of the project's.
-    fnox: { profile: admin-api }
-    hosts: ["admin-api.${{ lane.domain }}"]
+    fnox:
+      profile: admin-api
+    hosts: "admin-api.${{ lane.domain }}"
     tags: [api, essential]
   payments-api:
     extends: fastify-api
     run: pnpm --silent -F @acme/payments-api dev
     # Setting PORT replaces the allocated port; here a fixed offset into the lane's block.
-    env: { PORT: "${{ lane.port + 5 }}" }
-    hosts: ["payments-api.${{ lane.domain }}"]
+    env:
+      PORT: "${{ lane.port + 5 }}"
+    hosts: "payments-api.${{ lane.domain }}"
     tags: [api]
   sms-stub:
     run: node infra/stubs/sms.mjs
     # A literal PORT is the same in every lane.
-    env: { PORT: 3998 }
-    hosts: ["sms-stub.${{ lane.domain }}"]
+    env:
+      PORT: 3998
+    hosts: "sms-stub.${{ lane.domain }}"
     # Not mirrored to machines connected with devlanes remote connect.
     hidden: true
     # Starts only when named explicitly.
@@ -220,8 +250,11 @@ services:
   user-web:
     platform: node
     preset: vite
-    run: pnpm --silent -F @acme/user-web dev
-    hosts: ["app.${{ lane.domain }}"]
+    # Presets need run_script: the preset's flags go after the script for the package manager.
+    run_script:
+      file: apps/user-web/package.json
+      name: dev
+    hosts: "app.${{ lane.domain }}"
     tags: [web, essential]
   docs:
     platform: node
@@ -229,11 +262,13 @@ services:
       pnpm --silent -F @acme/docs dev
       --port ${{ self.port }}
       --host 127.0.0.1
-    hosts: ["docs.${{ lane.domain }}"]
+    hosts: "docs.${{ lane.domain }}"
     tags: [web]
   api-gateway:
     extends: wrangler-worker
-    run: pnpm --silent -F @acme/api-gateway dev
+    run_script:
+      file: workers/api-gateway/package.json
+      name: dev
     # Options for the wrangler preset.
     wrangler:
       vars:
@@ -252,10 +287,12 @@ services:
         host_header: upstream
   pages-worker:
     extends: wrangler-worker
-    run: pnpm --silent -F @acme/pages-worker dev
+    run_script:
+      file: workers/pages/package.json
+      name: dev
     env:
       # http://127.0.0.1:<port> of another service in this lane.
-      ACME_PAGES_SERVER_URL: ${{ svc.pages_server.url }}
+      ACME_PAGES_SERVER_URL: ${{ services.pages_server.url }}
     hosts: ["pages.${{ lane.domain }}", "*.pages-${{ lane.index }}.localhost"]
   pages-server:
     platform: node
@@ -264,24 +301,35 @@ services:
     platform: node
     run: pnpm --silent -F @acme/queue-worker dev
     # Ready once this line appears in the output.
-    ready: { log: Connected to Redis }
+    ready:
+      log: Connected to Redis
     # Plain pipes instead of a terminal.
     pty: false
     # Signal sent on stop, and how long to wait before killing the process tree.
-    stop: { signal: SIGINT, timeout: 15s }
+    stop:
+      signal: SIGINT
+      timeout: 15s
     tags: [worker, essential]
   ai-gateway:
     platform: python
     run: uv run uvicorn app:main --port ${{ self.port }} --reload
     # Working directory, relative to the lane's worktree.
     cwd: services/ai-gateway
-    hosts: ["ai.${{ lane.domain }}"]
+    hosts: "ai.${{ lane.domain }}"
     # When devlanes considers the service started; without ready, a port check if it has hosts, else at once.
-    ready: { http: { path: /healthz, status: 200, timeout: 60s } }
-    # ready: { tcp: true }
-    # ready: { tcp: inspector }
-    # ready: { log: "Application startup complete" }
-    # ready: { cmd: "curl -fsS http://127.0.0.1:${{ self.port }}/healthz" }
+    ready:
+      http:
+        path: /healthz
+        status: 200
+        timeout: 60s
+    # ready:
+    #   tcp: true
+    # ready:
+    #   tcp: inspector
+    # ready:
+    #   log: "Application startup complete"
+    # ready:
+    #   cmd: "curl -fsS http://127.0.0.1:${{ self.port }}/healthz"
     # ready: started
   realtime:
     platform: node
@@ -289,10 +337,13 @@ services:
     env:
       # Naming a port under self.ports allocates one more port for the service.
       DEBUG_PORT: ${{ self.ports.debug }}
-    ready: { tcp: true }
+    ready:
+      tcp: true
   extension:
     platform: node
-    run_script: apps/extension/package.json#dev
+    run_script:
+      file: apps/extension/package.json
+      name: dev
     # Folders copied to a stable path, locally or on a connected machine.
     sync:
       - from: apps/extension/.output/chrome-mv3
@@ -301,7 +352,7 @@ services:
   # HTTP viewers are ordinary services; built-in window streaming is outside v1.
   ios-sim:
     run: npx serve-sim --port ${{ self.port }}
-    hosts: ["sim.${{ lane.domain }}"]
+    hosts: "sim.${{ lane.domain }}"
     autostart: false
     tags: [mobile]
   desktop:
@@ -310,8 +361,10 @@ services:
     tauri:
       # replica.index counts the service's instances from 1.
       identifier: io.example.app.dev${{ '' if lane.index == 0 else '.lane' ~ lane.index }}.client${{ replica.index }}
-      dev_url: ${{ svc.desktop_web.url }}
-    run: pnpm --filter @acme/desktop dev
+      dev_url: ${{ services.desktop_web.url }}
+    run_script:
+      file: apps/desktop/package.json
+      name: dev
     # Instances of this service per lane.
     replicas: 2
     autostart: false
@@ -319,7 +372,9 @@ services:
   desktop-web:
     platform: node
     preset: vite
-    run: pnpm --filter @acme/desktop-web dev
+    run_script:
+      file: apps/desktop-web/package.json
+      name: dev
     tags: [desktop]
 
 # Which services devlanes start --profile X starts; default applies when no profile is given.
@@ -342,7 +397,8 @@ profiles:
       ACME_USE_STAGE_APIS: "1"
   e2e:                                  # production-like run: devlanes with --profile e2e -- pnpm test:e2e
     include: [+api, +web]
-    run_scripts: { dev: start }         # services using run_script ...#dev run ...#start instead
+    run_scripts:                        # services whose run_script names dev run start instead
+      dev: start
     env:
       NODE_ENV: production
   attach:
@@ -350,4 +406,4 @@ profiles:
     infra: false
     env:
       # Services of this project's lane 0.
-      ACME_CRM_BASE_URL: ${{ lanes.main.svc.crm_api.public_url }}
+      ACME_CRM_BASE_URL: ${{ lanes.main.services.crm_api.public_url }}

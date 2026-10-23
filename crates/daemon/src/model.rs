@@ -113,7 +113,8 @@ pub(crate) struct LaneView {
     /// Routes to containers from `infra.hosts`.
     pub infra_routes: Vec<InfraRoute>,
     pub lane_env: EnvMap,
-    pub svc: Value,
+    /// The lane's `services` expression namespace.
+    pub services_namespace: Value,
 }
 
 /// A spawned unit and its static facts.

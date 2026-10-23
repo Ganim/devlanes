@@ -19,14 +19,17 @@ pub const NAME: &str = "next";
 /// Address the dev server binds.
 pub const HOST: &str = "127.0.0.1";
 
-/// Options under the service's `next:` key.
+/// Options for `preset: next`, which adds `--port <self.port> --hostname 127.0.0.1` to the
+/// `next dev` command. Without the hostname flag Next listens on `0.0.0.0` instead of loopback.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(extend("examples" = [{"args":["--turbo"]}]))]
+#[schemars(extend("examples" = [{"args":["--turbopack"]}]))]
 pub struct NextOptions {
-    /// Extra arguments appended after the preset's flags.
+    /// Extra arguments for `next dev`, added after the preset's port and hostname flags, for
+    /// example `[--turbopack]`. A local override or `extends` child that sets `args` replaces
+    /// the inherited list. Default: none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("examples" = [["--turbo"]]))]
+    #[schemars(extend("examples" = [["--turbopack"]]))]
     pub args: Option<Vec<String>>,
 }
 
@@ -106,7 +109,8 @@ impl Contributor for NextPreset {
             .port
             .ok_or_else(|| Error::InvalidInput(format!("preset {NAME} needs a service port")))?;
         let contribution = contribution(port, &options);
-        devlanes_run_script_npm::forward_args(draft, contribution.args);
+        // Presets require `run_script`; its runner places the arguments for the tool.
+        draft.args.extend(contribution.args);
         draft.env.extend(contribution.env);
         Ok(())
     }
@@ -136,6 +140,7 @@ mod tests {
             lane_index: 0,
             lane_name: "main",
             lane_path: Path::new("/lanes/acme"),
+            lane_data_path: Path::new("/data/acme/1"),
             primary_path: Path::new("/lanes/acme"),
             platform: Some("node"),
             preset,
@@ -179,10 +184,7 @@ mod tests {
         .await
         .expect("apply");
         assert_eq!(plain.args.join(" "), "--port 20013 --hostname 127.0.0.1");
-        let npm = apply(Some(NAME), None, argv(&["npm", "run", "dev"]))
-            .await
-            .expect("apply");
-        assert_eq!(npm.args.first().map(String::as_str), Some("--"));
+        // The script runner adds any separator its package manager needs.
         let script = apply(
             Some(NAME),
             None,

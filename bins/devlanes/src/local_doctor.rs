@@ -141,11 +141,13 @@ fn port_holders(ports: &[(&'static str, u16)]) -> Vec<Value> {
 }
 
 /// The CA the daemon will use, read without creating one, with its trust in
-/// each configured store.
+/// each configured store. The config is read as the daemon reads it; its
+/// problems are listed under `user_config`.
 async fn ca(paths: &Paths) -> Value {
-    let mkcert = crate::local::mkcert_selected(paths);
+    let config = crate::user_config::lenient(paths).await;
+    let mkcert = crate::local::mkcert_selected(&config);
     let path = paths.home.join("ca/ca.pem");
-    let mut ca = match crate::local::certificate(paths, false).await {
+    let mut ca = match crate::local::certificate(paths, &config, false).await {
         Ok(Some(certificate)) => {
             let recreate = !mkcert && !certificate.is_name_constrained();
             json!({

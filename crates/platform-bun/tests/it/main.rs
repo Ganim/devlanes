@@ -117,6 +117,7 @@ impl Fixture {
             lane_index: 1,
             lane_name: "lane1",
             lane_path: &self.lane,
+            lane_data_path: std::path::Path::new("/data/demo/1"),
             primary_path: &self.lane,
             platform: Some(platform),
             preset: None,

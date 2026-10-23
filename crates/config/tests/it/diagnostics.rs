@@ -180,9 +180,24 @@ fn alternative_forms_keep_struct_errors() {
             "unknown key `ignore_error`; did you mean `ignore_errors`?",
         ),
         (
-            "project: demo\nservices:\n  api:\n    run_script: { source: package.json, nmae: dev }\n",
+            "project: demo\nservices:\n  api:\n    run_script: { file: package.json, nmae: dev }\n",
             "nmae",
             "unknown key `nmae`; did you mean `name`?",
+        ),
+        (
+            "project: demo\nservices:\n  api:\n    run_script: { source: package.json, name: dev }\n",
+            "source",
+            "unknown key `source`; `source` is now `file`",
+        ),
+        (
+            "project: demo\ntasks:\n  migrate:\n    run_script:\n      source: package.json\n      name: migrate\n",
+            "source",
+            "unknown key `source`; `source` is now `file`",
+        ),
+        (
+            "project: demo\nservices:\n  api:\n    run_script: apps/api/package.json#dev\n",
+            "run_script",
+            "run_script takes a mapping with file and name, such as `{ file: apps/api/package.json, name: dev }`",
         ),
         (
             "project: demo\nglobal_env:\n  FOO: null\n",
@@ -229,6 +244,38 @@ fn wrong_type_messages_use_yaml_words() {
         .expect_err("string for a port");
     assert!(error.message.contains("whole number"), "{}", error.message);
     assert!(!error.message.contains("u16"), "{}", error.message);
+}
+
+/// `replicas` takes a plain number: an expression fails to load and says why, in YAML
+/// words, while a literal still loads.
+#[test]
+fn replicas_rejects_expressions() {
+    for value in ["'${{ lane.index + 1 }}'", "${{ 2 }}"] {
+        let source =
+            format!("project: demo\nservices:\n  api:\n    run: server\n    replicas: {value}\n");
+        let message = parse_project(&source, None)
+            .expect_err("expression replicas")
+            .message;
+        assert!(
+            message.contains("not a `${{ ... }}` expression"),
+            "{message}"
+        );
+        assert!(message.contains("whole number"), "{message}");
+        assert!(!message.contains("u16"), "{message}");
+    }
+    let config = parse_project(
+        "project: demo\nservices:\n  api:\n    run: server\n    replicas: 2\n",
+        None,
+    )
+    .expect("literal replicas");
+    assert_eq!(config.services["api"].replicas, Some(2));
+    assert!(
+        parse_project(
+            "project: demo\nservices:\n  api:\n    run: server\n    replicas: 0\n",
+            None
+        )
+        .is_err()
+    );
 }
 
 /// `gui` is reserved only on services; elsewhere it is a plain unknown key.
@@ -291,7 +338,7 @@ fn preset_hint_only_for_mappings() {
 /// Integration errors about a preset option point at that option's line.
 #[test]
 fn preset_option_errors_are_located() {
-    let source = "project: demo\nservices:\n  web:\n    preset: vite\n    run: server\n    vite:\n      argz: []\n";
+    let source = "project: demo\nservices:\n  web:\n    preset: vite\n    run_script: { file: package.json, name: dev }\n    vite:\n      argz: []\n";
     let config = parse_project(source, None).expect("options deferred");
     let error = validate_with_presets(&config, &super::registered_validator)
         .expect_err("unknown vite option");
@@ -353,7 +400,7 @@ fn deferred_trust_targets_warn() {
 /// Locations follow keys that themselves contain dots.
 #[test]
 fn dotted_keys_are_located() {
-    let source = "project: demo\nglobal_env:\n  OTHER: x\n  A.B: '${{ svc.missing.url }}'\n";
+    let source = "project: demo\nglobal_env:\n  OTHER: x\n  A.B: '${{ services.missing.url }}'\n";
     assert_project_error(source, "A.B", "unknown service reference `missing`");
 }
 
@@ -449,7 +496,7 @@ fn template_and_preset_names_suggest() {
         "unknown template `bsae`; did you mean `base`?",
     );
     let error = parse_project_with::<super::TestExtensions>(
-        "project: demo\nservices:\n  api:\n    run: server\n    preset: custm\n",
+        "project: demo\nservices:\n  api:\n    run_script: { file: package.json, name: dev }\n    preset: custm\n",
         None,
     )
     .expect_err("typed registry");
@@ -461,7 +508,7 @@ fn template_and_preset_names_suggest() {
         error.message
     );
     assert_eq!(error.location.line, 5);
-    let source = "project: demo\nservices:\n  api:\n    run: server\n    preset: vitee\n";
+    let source = "project: demo\nservices:\n  api:\n    run_script: { file: package.json, name: dev }\n    preset: vitee\n";
     let config = parse_project(source, None).expect("opaque presets load");
     let reject = |name: &str, _: Option<&serde_json::Value>| -> Result<(), String> {
         Err(format!("unknown preset `{name}`"))
@@ -512,4 +559,121 @@ fn missing_compose_file_is_an_error() {
     assert_eq!(error.location.line, 3);
     std::fs::write(dir.path().join("compose.dev.yaml"), "services: {}\n").expect("compose");
     assert!(check(dir.path()).expect("both present").warnings.is_empty());
+}
+
+/// A script runs in its file's directory, so `cwd` next to `run_script` is refused, also
+/// when one of them comes from a template.
+#[test]
+fn cwd_with_run_script_is_refused() {
+    let hint = "cwd cannot be combined with run_script, which runs in the script file's directory; remove cwd";
+    for (source, needle, path) in [
+        (
+            "project: demo\nservices:\n  api:\n    run_script: { file: apps/api/package.json, name: dev }\n    cwd: apps/api\n",
+            "cwd:",
+            "services.api.cwd",
+        ),
+        (
+            "project: demo\ntasks:\n  migrate:\n    run_script: { file: apps/api/package.json, name: migrate }\n    cwd: apps/api\n",
+            "cwd:",
+            "tasks.migrate.cwd",
+        ),
+        (
+            "project: demo\ntemplates:\n  base:\n    run_script: { file: apps/api/package.json, name: dev }\nservices:\n  api:\n    extends: base\n    cwd: apps/api\n",
+            "cwd: apps/api",
+            "services.api.cwd",
+        ),
+    ] {
+        assert_project_error(source, needle, &format!("{path}: {hint}"));
+    }
+    // The service has no `cwd` key of its own, so the error points at the service.
+    let inherited = "project: demo\ntemplates:\n  base:\n    cwd: apps/api\nservices:\n  api:\n    extends: base\n    run_script: { file: apps/api/package.json, name: dev }\n";
+    assert_project_error(
+        inherited,
+        "extends: base",
+        &format!("services.api.cwd: {hint} (it may come from template `base`)"),
+    );
+    // A local `run_script` replaces the base `run` but keeps its `cwd`.
+    let error = parse_project(
+        "project: demo\ntasks:\n  migrate: { run: ./migrate, cwd: apps/api }\n",
+        Some("tasks:\n  migrate: { run_script: { file: apps/api/package.json, name: migrate } }\n"),
+    )
+    .expect_err("merged task");
+    assert!(
+        error.message.starts_with("tasks.migrate.cwd: "),
+        "{}",
+        error.message
+    );
+}
+
+/// A preset only wraps `run_script`; with `run` the error points at `run`, also when a
+/// template brings the preset.
+#[test]
+fn preset_with_run_is_refused() {
+    let hint = "`preset: vite` needs run_script, such as `run_script: { file: apps/web/package.json, name: dev }`, so the preset can place its flags; to keep this command, remove `preset` and add the preset's flags to `run` yourself";
+    assert_project_error(
+        "project: demo\nservices:\n  web:\n    preset: vite\n    run: pnpm exec vite\n",
+        "run:",
+        &format!("services.web.run: {hint}"),
+    );
+    assert_project_error(
+        "project: demo\ntemplates:\n  web: { preset: vite }\nservices:\n  app:\n    extends: web\n    run: pnpm exec vite\n",
+        "run:",
+        "(`preset` or `run` may come from template `web`)",
+    );
+    // A local `run` replaces the inherited script and so trips the rule too.
+    let error = parse_project(
+        "project: demo\nservices:\n  web:\n    preset: vite\n    run_script: { file: web/package.json, name: dev }\n",
+        Some("services:\n  web:\n    run: pnpm exec vite\n"),
+    )
+    .expect_err("local run");
+    assert!(
+        error.message.starts_with("services.web.run: "),
+        "{}",
+        error.message
+    );
+}
+
+/// Infra commands take only `run`, written out in full.
+#[test]
+fn infra_commands_take_only_run() {
+    assert_project_error(
+        "project: demo\ninfra:\n  setup:\n    seed:\n      run_script: { file: Makefile, name: seed }\n",
+        "run_script",
+        "unknown key `run_script`; did you mean `run`?",
+    );
+    assert_project_error(
+        "project: demo\ninfra:\n  teardown:\n    drop:\n      ignore_errors: true\n",
+        "ignore_errors",
+        "infra.teardown.drop: infra command requires run",
+    );
+}
+
+/// The wrangler preset's own port flags in `args` fail the check at the preset block.
+#[test]
+fn wrangler_port_flags_in_args_are_refused() {
+    let source = "project: demo\nservices:\n  api:\n    preset: wrangler\n    run_script: { file: package.json, name: dev }\n    wrangler:\n      args: [--port, '8787']\n";
+    let config = parse_project(source, None).expect("options deferred");
+    let error = validate_with_presets(&config, &super::registered_validator)
+        .expect_err("port flag in args");
+    assert!(
+        error.message.starts_with("services.api.wrangler: ")
+            && error.message.contains("`args` passes `--port 8787`"),
+        "{}",
+        error.message
+    );
+    // A block mapping's position is its first key.
+    assert_eq!(error.location.line, line_of(source, "args:"));
+}
+
+/// `cwd` stays valid with `run`, including when `run` replaces an inherited `run_script`.
+#[test]
+fn cwd_with_run_is_accepted() {
+    let config = parse_project(
+        "project: demo\ntemplates:\n  base:\n    run_script: { file: apps/api/package.json, name: dev }\n    cwd: apps/api\nservices:\n  api:\n    extends: base\n    run: pnpm dev\n  web:\n    run_script: { file: apps/web/package.json, name: dev }\ntasks:\n  migrate: { run: ./migrate, cwd: apps/api }\ninfra:\n  setup:\n    seed: { run: make seed, cwd: infra }\n",
+        None,
+    )
+    .expect("cwd with run");
+    let api = &config.services["api"];
+    assert!(api.run_script.is_none());
+    assert_eq!(api.cwd, Some(Templated::Literal("apps/api".into())));
 }

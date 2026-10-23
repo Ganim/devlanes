@@ -404,9 +404,9 @@ history:
 
     #[test]
     fn strings_that_look_like_other_types_are_quoted() {
-        let text = set("", "hostnames.tld", json!("true"));
+        let text = set("", "terminal", json!("true"));
         let value: Value = crate::loader::parse_yaml("t", &text).expect("yaml");
-        assert_eq!(value["hostnames"]["tld"], json!("true"));
+        assert_eq!(value["terminal"], json!("true"));
     }
 
     #[test]

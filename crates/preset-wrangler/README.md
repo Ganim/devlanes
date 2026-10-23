@@ -25,7 +25,7 @@ assert_eq!(added.args, ["--port", "20010", "--inspector-port", "20011"]);
 - `WranglerPreset`: the contributor; only acts on services with `preset: wrangler`.
 - `WranglerOptions`: the `wrangler:` options; var values may be strings, numbers or booleans.
 - `parse_options` and `options_schema`: evaluated JSON to options, and the JSON Schema for config.
-- `contribution` and `check_script`: the flags and env without a launch draft, and the script check on its own.
+- `contribution`, `check_script` and `check_args`: the flags and env without a launch draft, and the script and `args` checks on their own.
 
 ## Config example
 
@@ -34,7 +34,9 @@ services:
   api:
     # Adds wrangler's port and inspector-port flags to the command.
     preset: wrangler
-    run_script: apps/api/package.json#dev
+    run_script:
+      file: apps/api/package.json
+      name: dev
     # Options for the wrangler preset.
     wrangler:
       # Passed as --var KEY:VALUE; self.public_url is this service's https:// address.
@@ -45,11 +47,11 @@ services:
       # isolate_registry: false    # default: true
 ```
 
-The preset adds `--port <self.port> --inspector-port <self.ports.inspector>`, then `--var KEY:VALUE` for each var in key order, then `args`. Vars go on the command line because `vars` in the Wrangler config override the process environment, while `--var` overrides the config. It also sets `WRANGLER_REGISTRY_PATH=<lane>/.devlanes/wrangler-registry`, so same-named workers in two lanes do not bind to each other. That variable is not in Wrangler's user docs; it is defined in cloudflare/workers-sdk.
+The preset adds `--port <self.port> --inspector-port <self.ports.inspector>`, then `--var KEY:VALUE` for each var in key order, then `args`. Vars go on the command line because `vars` in the Wrangler config override the process environment, while `--var` overrides the config. It also sets `WRANGLER_REGISTRY_PATH=<lane data>/wrangler-registry`, so same-named workers in two lanes do not bind to each other. The lane data folder (`ContribCx::lane_data_path`, `${{ lane.data_path }}`) is outside the worktree, so lanes that run from one folder get separate registries too. That variable is not in Wrangler's user docs; it is defined in cloudflare/workers-sdk.
 
 ## Behaviour
 
-With `run_script`, the script body is checked for `--port`, `--inspector-port` and `--inspectorPort` (with a value or `=value`). Any of them fails the launch, because the preset would pass the flag a second time. The error names the flag and the fix: remove it from the script, or drop the preset and pass `--port ${{ self.port }} --inspector-port ${{ self.ports.inspector }}` in `run`. Plain `run` commands are not checked.
+With `run_script`, the script body is checked for `--port`, `--inspector-port` and `--inspectorPort` (with a value or `=value`). Any of them fails the launch, because the preset would pass the flag a second time. The error names the flag and the fix: remove it from the script, or drop the preset and pass `--port ${{ self.port }} --inspector-port ${{ self.ports.inspector }}` in `run`. Plain `run` commands are not checked. The same flags in `args` are refused by `parse_options`, so `devlanes config check` reports them, and by `check_args` on its own.
 
 ## License
 

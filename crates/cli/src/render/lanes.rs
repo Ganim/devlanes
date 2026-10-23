@@ -342,7 +342,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
                 lines.extend(tail_lines(&tail));
             }
             lines.push(
-                match (refusal_hint(*failure, *unit), spawn_fix(*failure, *unit)) {
+                match (refusal_hint(*failure, *unit), unit_fix(*failure, *unit)) {
                     (Some(hint), _) => format!("  stop: {}", hint.0),
                     (None, Some(hint)) => format!("  hint: {}", hint.0),
                     (None, None) => format!("  more: {}", Hint::logs(&lane, name, 200).0),
@@ -494,7 +494,7 @@ fn start_result(result: &StartResult, cx: &Ctx<'_>) -> Vec<String> {
     if let Some((name, failure, unit)) = view.failed.first() {
         lines.push(String::new());
         lines.push(
-            match (refusal_hint(*failure, *unit), spawn_fix(*failure, *unit)) {
+            match (refusal_hint(*failure, *unit), unit_fix(*failure, *unit)) {
                 (Some(hint), _) => format!("stop: {}", hint.0),
                 (None, Some(hint)) => format!("hint: {}", hint.0),
                 (None, None) => format!("logs: {}", Hint::logs(&lane, name, 200).0),
@@ -520,11 +520,15 @@ fn own_lines(tail: &[String]) -> impl Iterator<Item = &String> {
     tail.iter().filter(|line| !line.starts_with("[devlanes] "))
 }
 
-/// The fix for a unit whose program could not be run (see [`words::spawn_hint`]).
-fn spawn_fix(failure: Option<&UnitFailureData>, unit: Option<&UnitSummary>) -> Option<Hint> {
-    failure_reason(failure, unit)
-        .filter(|reason| reason.code == "spawn_failed")
-        .and_then(|reason| words::spawn_hint(&reason.data))
+/// The fix for a unit whose program could not be run (see [`words::spawn_hint`])
+/// or whose http check got a non-2xx answer (see [`words::status_hint`]).
+fn unit_fix(failure: Option<&UnitFailureData>, unit: Option<&UnitSummary>) -> Option<Hint> {
+    let reason = failure_reason(failure, unit)?;
+    match reason.code.as_str() {
+        "spawn_failed" => words::spawn_hint(&reason.data),
+        "ready_timeout" => words::status_hint(&reason.data),
+        _ => None,
+    }
 }
 
 /// The command for a unit the start refused rather than ran: a previous

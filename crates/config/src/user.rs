@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU32, path::Path, time::Duration};
 
 /// Finished unit/task history lifetime, duplicated from the state crate to avoid a dependency.
-/// The binary's retention-default test keeps these independent definitions aligned.
+/// The binary's `config_and_state_retention_defaults_match` test keeps these independent
+/// definitions aligned.
 pub const DEFAULT_RUN_HISTORY_RETENTION: Duration = Duration::from_secs(7 * 86_400);
 /// Monitor history lifetime, duplicated from the state crate and checked by the binary test.
 pub const DEFAULT_METRICS_RETENTION: Duration = Duration::from_secs(7 * 86_400);
@@ -13,7 +14,11 @@ pub const DEFAULT_REMOTE_HOST_RETENTION: Duration = Duration::from_secs(90 * 86_
 /// Database and SQLite sidecar budget, duplicated from the state crate and checked by the binary test.
 pub const DEFAULT_MAX_SIZE_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Per-user machine settings, separate from project configuration.
+/// Settings for this machine, shared by every project, read from `config.yaml` in the
+/// devlanes home (`~/.devlanes`, or `$DEVLANES_HOME`). The daemon reads the file when it
+/// starts, so most changes need `devlanes daemon restart`; `tui` and `terminal` apply to
+/// the next command. An unknown key or invalid value stops the daemon from starting, with
+/// the file and line to fix; `devlanes doctor` checks the file without restarting.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 #[schemars(extend("examples" = [{"hostnames":{"resolver":"localhost"},"ports":{"range":"20000-32767"},"terminal":{"progress":"auto"}}]))]
@@ -22,45 +27,66 @@ pub struct UserConfig {
     #[serde(skip)]
     #[schemars(skip)]
     warnings: Vec<crate::ConfigWarning>,
-    /// Hostname resolution strategy and optional hosts-file policy.
+    /// How lane hostnames such as `api.acme-2.localhost` resolve to this machine: the
+    /// strategy (`resolver`), its `tld`, and whether names also go into `/etc/hosts`
+    /// (`hosts_file`). The defaults need no setup for browsers that resolve `*.localhost`.
     pub hostnames: HostnamesConfig,
-    /// Machine-wide pool shared by all project lane blocks.
+    /// Port range that every lane of every project takes its block of ports from, so
+    /// lanes never collide. Defaults to `20000-32767`.
     pub ports: PortsConfig,
-    /// Certificate authority and explicitly requested trust targets.
+    /// Where lane data folders (`lane.data_path`) live on this machine.
+    pub lanes: UserLanesConfig,
+    /// Which certificate authority signs the proxy's HTTPS certificates (`ca`), and which
+    /// stores `devlanes certs trust` installs it into (`trust`).
     pub tls: TlsConfig,
-    /// HTTP/HTTPS listening ports and LAN access policy.
+    /// Ports of the daemon's HTTP/HTTPS proxy, which serves every `hosts` entry, and
+    /// whether other devices on the network may connect to it.
     pub proxy: ProxyConfig,
-    /// Retention for service output files and their database metadata.
+    /// How much service output devlanes keeps under `~/.devlanes/logs`, by age and total size.
     pub logs: LogsConfig,
-    /// Retention for monitor history, including aggregates stored in the database.
+    /// How long CPU and memory history stays in the daemon's database.
     pub metrics: MetricsConfig,
-    /// Retention for finished unit/task history and disconnected remote hosts in the database.
+    /// How long the database keeps records of finished service and task runs, and of
+    /// remote boxes that no longer connect.
     pub history: HistoryConfig,
-    /// Soft disk budget for the state database and its SQLite sidecar files.
+    /// Size budget for the daemon's database; past it, the oldest metrics and history are
+    /// deleted before their retention ends.
     pub state: StateConfig,
-    /// How many services start at once, across all lanes and projects.
+    /// How many services may be starting at the same time across all lanes and
+    /// projects, so a large start does not overload the machine. Defaults to one start
+    /// per CPU core.
     pub startup: StartupConfig,
-    /// How devlanes uses the terminal tab's progress bar during starts.
+    /// Terminal integration of the CLI, written as a mapping with `progress` (the tab's
+    /// progress bar during starts). A plain string, the terminal app name older versions
+    /// used, is still accepted but ignored with a warning.
     pub terminal: Option<TerminalConfig>,
-    /// Whether the daemon looks for new devlanes releases.
+    /// Daily check for a newer devlanes release; nothing is downloaded or installed.
     pub updates: UpdatesConfig,
-    /// How commands use the terminal UI.
+    /// Whether start commands open the terminal UI, how it looks, and what quitting it
+    /// does with running lanes.
     pub tui: TuiConfig,
 }
 
-/// Terminal UI behaviour of the CLI.
+/// Terminal UI settings: when it opens, its colors and symbols, and what quitting does
+/// with running lanes. Changes apply to the next command.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 #[schemars(extend("examples" = [{"open_on_start":false},{"theme":"light","glyphs":"ascii"},{"on_quit":"keep"}]))]
 pub struct TuiConfig {
-    /// Run `start`, `restart`, `lane resume` and `lane new --start` inside the TUI when typed at a terminal; defaults to true. false prints them as text, like `--no-ui` or DEVLANES_NO_UI=1.
+    /// Open the TUI for `start`, `restart`, `lane resume` and `lane new --start` when they
+    /// run at a terminal; defaults to true. Set false to have them print text instead, as
+    /// `--no-ui` or `DEVLANES_NO_UI=1` do.
     #[schemars(extend("examples" = [true,false]))]
     pub open_on_start: bool,
-    /// Colors of the TUI; defaults to auto. NO_COLOR always turns colors off.
+    /// Color palette of the TUI; defaults to `auto`, which picks one from what the terminal
+    /// reports. Choose `dark` or `light` when auto guesses wrong; `NO_COLOR` in the
+    /// environment turns colors off whatever this says.
     pub theme: TuiTheme,
-    /// Symbols the TUI draws states and markers with; defaults to auto.
+    /// Characters the TUI draws states, markers and the spinner with; defaults to `auto`.
+    /// Set `ascii` when your font shows boxes or misaligned symbols.
     pub glyphs: TuiGlyphs,
-    /// What quitting the TUI does while lanes of the project on screen run; defaults to ask. The quit dialog's "remember" box writes it.
+    /// What `q` or Ctrl+C does while lanes of the project on screen are running; defaults
+    /// to `ask`. Ticking "remember" in the quit dialog writes the choice here.
     pub on_quit: TuiOnQuit,
 }
 
@@ -76,19 +102,20 @@ impl Default for TuiConfig {
     }
 }
 
-/// What quitting the TUI does with running lanes.
+/// What quitting the TUI does with the running lanes of the project on screen.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(extend("examples" = ["ask","keep","stop"]))]
 pub enum TuiOnQuit {
-    /// Ask each time whether to keep the lanes running or stop them.
+    /// Show a dialog each time to choose between keeping the lanes running and stopping them.
     #[default]
     #[schemars(extend("examples" = ["ask"]))]
     Ask,
-    /// Close the TUI and leave every lane running in the daemon.
+    /// Close the TUI at once; every lane keeps running in the daemon.
     #[schemars(extend("examples" = ["keep"]))]
     Keep,
-    /// Stop the running lanes of the project on screen, then close the TUI.
+    /// Stop the running lanes of the project on screen, then close the TUI. Lanes of other
+    /// projects keep running.
     #[schemars(extend("examples" = ["stop"]))]
     Stop,
 }
@@ -104,22 +131,23 @@ impl TuiOnQuit {
     }
 }
 
-/// Colors of the TUI.
+/// Color palette of the TUI.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(extend("examples" = ["auto","dark","light","ansi"]))]
 pub enum TuiTheme {
-    /// The terminal's 16 colors, or the dark or light palette when the terminal reports true color and its background.
+    /// Use the true-color dark or light palette when the terminal reports true color
+    /// (`COLORTERM`) and its background (`COLORFGBG`); otherwise the terminal's 16 colors.
     #[default]
     #[schemars(extend("examples" = ["auto"]))]
     Auto,
-    /// The true-color palette for a dark background.
+    /// Always use the true-color palette made for a dark background.
     #[schemars(extend("examples" = ["dark"]))]
     Dark,
-    /// The true-color palette for a light background.
+    /// Always use the true-color palette made for a light background.
     #[schemars(extend("examples" = ["light"]))]
     Light,
-    /// The terminal's own 16 colors, which follow its theme.
+    /// Use only the terminal's 16 named colors, so the TUI follows the terminal's color scheme.
     #[schemars(extend("examples" = ["ansi"]))]
     Ansi,
 }
@@ -136,19 +164,20 @@ impl TuiTheme {
     }
 }
 
-/// Symbols the TUI draws with.
+/// Character set the TUI draws its symbols with.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(extend("examples" = ["auto","unicode","ascii"]))]
 pub enum TuiGlyphs {
-    /// Unicode when the locale is UTF-8, else ASCII.
+    /// Unicode, or ASCII when the locale (the first of `LC_ALL`, `LC_CTYPE` and `LANG`
+    /// that is set) is not UTF-8.
     #[default]
     #[schemars(extend("examples" = ["auto"]))]
     Auto,
-    /// Unicode symbols such as ● ✕ ▾.
+    /// Always Unicode symbols, such as ● ✕ ▾ and a braille spinner.
     #[schemars(extend("examples" = ["unicode"]))]
     Unicode,
-    /// Plain ASCII, for fonts or terminals that draw Unicode symbols badly.
+    /// Plain ASCII only, for fonts or terminals that draw Unicode symbols badly.
     #[schemars(extend("examples" = ["ascii"]))]
     Ascii,
 }
@@ -164,13 +193,60 @@ impl TuiGlyphs {
     }
 }
 
+/// Machine settings for lanes. Each lane gets its own data folder at
+/// `<data_dir>/<project>/<lane id>`, available as `${{ lane.data_path }}` and
+/// `DEVLANES_LANE_DATA`. devlanes creates it when the lane is created and before each
+/// start, and `devlanes lane clean` deletes it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(extend("examples" = [{"data_dir":"~/.devlanes/data"}]))]
+pub struct UserLanesConfig {
+    /// Folder that holds every lane's data folder, one subfolder per project; defaults to
+    /// `data` in the devlanes home (`~/.devlanes/data`). Must be an absolute path or start
+    /// with `~/`. The daemon reads it when it starts. After a change and a daemon restart,
+    /// lanes use new, empty folders under the new root; move the old folders there by hand
+    /// to keep their data.
+    #[schemars(extend("examples" = ["~/.devlanes/data","/Volumes/fast/devlanes"]))]
+    pub data_dir: Option<String>,
+}
+
+/// Folder under the devlanes home that holds lane data folders by default.
+pub const DEFAULT_DATA_DIR: &str = "data";
+
+impl UserLanesConfig {
+    /// The folder holding lane data folders: `data_dir` with `~/` expanded from `HOME`,
+    /// or `<home>/data`, where `home` is the devlanes home.
+    pub fn data_root(&self, home: &Path) -> std::path::PathBuf {
+        let Some(dir) = self.data_dir.as_deref() else {
+            return home.join(DEFAULT_DATA_DIR);
+        };
+        match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(user_home)) => std::path::PathBuf::from(user_home).join(rest),
+            _ => std::path::PathBuf::from(dir),
+        }
+    }
+
+    /// Rejects relative folders, which would depend on the daemon's working directory.
+    fn validate(&self) -> Result<(), ConfigError> {
+        match self.data_dir.as_deref() {
+            None => Ok(()),
+            Some(dir) if dir.starts_with("~/") || Path::new(dir).is_absolute() => Ok(()),
+            Some(_) => Err(ConfigError::plain(
+                "lanes.data_dir: must be an absolute path or start with `~/`",
+            )),
+        }
+    }
+}
+
 /// Release checks: the daemon reads the latest release's version once a day and
 /// commands print a one-line notice. Nothing is downloaded or installed.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 #[schemars(extend("examples" = [{"check":false}]))]
 pub struct UpdatesConfig {
-    /// Check GitHub once a day for a newer devlanes release and show the upgrade command; defaults to true.
+    /// Have the daemon read the latest release's version from GitHub once a day; when it
+    /// is newer, commands print the upgrade command on one line, at most once a day.
+    /// Defaults to true; `DEVLANES_NO_UPDATE_CHECK=1` or a CI environment also turns it off.
     #[schemars(extend("examples" = [true,false]))]
     pub check: bool,
 }
@@ -182,15 +258,22 @@ impl Default for UpdatesConfig {
     }
 }
 
-/// Age limits for finished unit/task history and disconnected remote-host records.
+/// How long the daemon's database keeps records of finished runs and of remote boxes.
+/// An hourly cleanup deletes what is older.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 #[schemars(extend("examples" = [{"retention":"7d","remote_hosts_retention":"90d"}]))]
 pub struct HistoryConfig {
-    /// Maximum age since a unit or task finished; defaults to 7d. Disk pressure may prune it sooner.
+    /// How long records of finished service and task runs (start and end times, exit
+    /// status) are kept after the run ends; defaults to `7d` and must be longer than
+    /// `0s`. A run that still has log index entries or a metrics summary in the database
+    /// stays until those expire, and `state.max_size` can delete runs sooner.
     #[schemars(extend("examples" = ["7d","30d"]))]
     pub retention: ConfigDuration,
-    /// Maximum age since a remote host last connected successfully; defaults to 90d. Records without a timestamp are retained.
+    /// How long a remote box stays listed by `devlanes remote ls` after its last
+    /// successful connection; defaults to `90d` and must be longer than `0s`. A record
+    /// without a connection time is never deleted by age, and `state.max_size` can
+    /// delete records sooner.
     #[schemars(extend("examples" = ["90d","180d"]))]
     pub remote_hosts_retention: ConfigDuration,
 }
@@ -205,12 +288,16 @@ impl Default for HistoryConfig {
     }
 }
 
-/// Soft disk budget for the database; live registry and completion records are preserved.
+/// Size budget for the daemon's SQLite database, enforced by its hourly cleanup.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 #[schemars(extend("examples" = [{"max_size":"512MiB"}]))]
 pub struct StateConfig {
-    /// Budget for the database plus WAL and shared-memory files; defaults to 512MiB and must be nonzero. Old metrics and history are pruned first; protected live state may exceed it.
+    /// Size the database (`state.db` with its WAL and shared-memory files) should stay
+    /// under; defaults to `512MiB` and must be above zero. When it is larger, the cleanup
+    /// deletes the oldest metric samples first, then the oldest history (finished runs,
+    /// log index entries, remote boxes), even before their retention ends. Lanes, ports
+    /// and running units are never deleted, so the file can stay above the budget.
     #[schemars(extend("examples" = ["512MiB","1GiB"]))]
     pub max_size: ByteSize,
 }
@@ -229,7 +316,7 @@ impl Default for StateConfig {
 /// so on an idle machine it is as fast as `fixed`.
 pub const DEFAULT_STARTUP_MODE: StartupMode = StartupMode::Adaptive;
 
-/// How the start gate sizes its window.
+/// How the number of services allowed to start at once is chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(extend("examples" = ["adaptive","fixed","all"]))]
@@ -240,10 +327,11 @@ pub enum StartupMode {
     /// stays below `target_cpu`, up to `max`.
     #[schemars(extend("examples" = ["adaptive"]))]
     Adaptive,
-    /// Always `max` starts at a time.
+    /// Allow `max` starts at a time, never more or fewer. A start also waits while free
+    /// memory cannot fit what it needs.
     #[schemars(extend("examples" = ["fixed"]))]
     Fixed,
-    /// No pacing: every service starts at once.
+    /// Start every service immediately, with no limit and no memory check.
     #[schemars(extend("examples" = ["all"]))]
     All,
 }
@@ -255,7 +343,8 @@ impl Default for StartupMode {
     }
 }
 
-/// Startup pacing. Machine settings, so they live in user config only.
+/// Pacing of service starts, shared by every lane and project on this machine. Starts
+/// queue first come, first served; only spawning waits, running processes are never limited.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 #[schemars(extend("examples" = [{"mode":"fixed","max":4},{"mode":"adaptive","initial":2,"max":8,"target_cpu":"75%","settle_cpu":"10%","slot_timeout":"20s","reserve_memory":"2GiB"}]))]
@@ -270,10 +359,13 @@ pub struct StartupConfig {
     /// never above `max`.
     #[schemars(extend("examples" = [2]))]
     pub initial: Option<NonZeroU32>,
-    /// Largest window (the fixed window in `fixed` mode); default CPU cores.
+    /// Most services starting at once: the constant window in `fixed` mode and the
+    /// ceiling in `adaptive` mode. Defaults to the number of CPU cores; `all` ignores it.
     #[schemars(extend("examples" = [8]))]
     pub max: Option<NonZeroU32>,
-    /// Adaptive mode grows the window while system CPU stays below this; default 75%.
+    /// System CPU use below which `adaptive` mode adds slots; defaults to `75%`, and must
+    /// be above 0% and at most 100%. Lower it to keep the machine responsive during large
+    /// starts; other modes ignore it.
     #[schemars(extend("examples" = ["75%", "80%" ]))]
     pub target_cpu: Percent,
     /// Only for services without a ready check (`ready: started`, the default for a
@@ -283,8 +375,10 @@ pub struct StartupConfig {
     /// passes instead. Defaults to `10%`.
     #[schemars(extend("examples" = ["10%","12.5%" ]))]
     pub settle_cpu: Percent,
-    /// A start slot is given back after this even if the service is not ready,
-    /// so services waiting on each other cannot block the queue; default 20s.
+    /// Longest a starting service holds its slot; after it, the next queued service may
+    /// start even if this one is not ready, so services waiting on each other cannot
+    /// block the queue. Defaults to `20s` and must be above zero; the service itself keeps
+    /// starting.
     pub slot_timeout: ConfigDuration,
     /// Free memory every new start must leave, on top of the memory the services already
     /// starting are expected to still need (each one's past startup peak, or 512 MiB
@@ -346,68 +440,97 @@ impl StartupConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-/// Hostname resolution and optional system hosts-file entries.
+/// How lane hostnames resolve to this machine, and whether they are also written to
+/// `/etc/hosts` for programs that cannot resolve them otherwise.
 #[schemars(extend("examples" = [{"resolver":"localhost","hosts_file":"auto"},{"resolver":"resolver","tld":"test"}]))]
 pub struct HostnamesConfig {
-    /// localhost or resolver in v1; public parses but is not supported yet.
+    /// Which domain lanes get and what makes their hostnames resolve; defaults to
+    /// `localhost`. `resolver` also needs `tld` and a one-time
+    /// `devlanes certs trust --resolver`; `public` is not supported yet.
     pub resolver: Resolver,
-    /// Whether exact hostnames should also be written to the system hosts file.
+    /// Whether lane hostnames are also written to `/etc/hosts`, for programs that do not
+    /// resolve `*.localhost` themselves (workerd, musl or pure-Go binaries); defaults to
+    /// `auto`, which writes them only when a probe at daemon start shows the system
+    /// resolver fails `*.localhost`. `never` here wins over every project; otherwise a
+    /// project's `lanes.hosts_file` replaces this value for that project. Writing needs the
+    /// helper `devlanes certs trust --hosts` installs, only exact names are written (no
+    /// wildcards), and `resolver: hosts_file` ignores this key.
     pub hosts_file: Option<HostsFile>,
-    /// Custom top-level domain for the embedded DNS strategy.
+    /// Top-level domain for the `resolver` strategy, such as `test`; required there. It
+    /// must be `test`, `internal`, `home.arpa` or a domain under one of them (or under
+    /// `localhost`), made of valid DNS labels, because any other name could belong to a
+    /// real site; the file is rejected otherwise, whatever the strategy. A new devlanes
+    /// CA may sign names under the `tld` set when it is created, whatever the strategy,
+    /// so switching to another `tld` later needs a new CA.
     #[schemars(extend("examples" = ["test"]))]
     pub tld: Option<String>,
-    /// Reserved public-resolver base domain; not supported yet.
+    /// Reserved for the planned `public` resolver; any value is rejected for now.
     #[schemars(extend("examples" = ["dev.example.invalid"]))]
     pub base_domain: Option<String>,
-    /// Reserved DNS-01 provider settings; not supported yet.
+    /// Reserved for the planned `public` resolver's DNS-01 certificates; any value is
+    /// rejected for now.
     pub dns_provider: Option<DnsProvider>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-/// Strategy for resolving local project hostnames; defaults to localhost.
+/// Strategy that makes lane hostnames resolve to this machine.
 #[schemars(extend("examples" = ["localhost","hosts_file","resolver","public"]))]
 pub enum Resolver {
-    /// Use names under .localhost, resolved by browsers without a custom DNS service.
+    /// Lane domains end in `.localhost` (`acme.localhost`, `acme-2.localhost`), which
+    /// browsers and many system resolvers send to loopback by themselves. `hosts_file`
+    /// covers programs that do not.
     #[default]
     #[schemars(extend("examples" = ["localhost"]))]
     Localhost,
-    /// Resolve exact project names through system hosts-file entries.
+    /// Keep `.localhost` names and always write exact hostnames to `/etc/hosts`, as
+    /// `hosts_file: always` does, whatever `hosts_file` says; a project's
+    /// `lanes.hosts_file` still takes precedence. Needs the helper from
+    /// `devlanes certs trust --hosts`.
     #[schemars(extend("examples" = ["hosts_file"]))]
     HostsFile,
-    /// Use the daemon's DNS resolver for the configured custom top-level domain.
+    /// Lane domains become `<project>.<tld>` and `<project>-<N>.<tld>`, answered by a DNS
+    /// server the daemon runs on `127.0.0.1:15353`, so wildcard hostnames resolve too for
+    /// programs that use the system resolver. Needs `tld` and a one-time
+    /// `devlanes certs trust --resolver`; projects that set `lanes.vars.domain` or
+    /// `lanes.matrix` keep their own domains.
     #[schemars(extend("examples" = ["resolver"]))]
     Resolver,
-    /// Reserved public DNS and DNS-01 strategy; not supported yet.
+    /// Reserved for public DNS names with DNS-01 certificates; not supported yet, so the
+    /// config is rejected.
     #[schemars(extend("examples" = ["public"]))]
     Public,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Reserved DNS-01 provider configuration; not supported yet.
+/// Reserved DNS-01 provider settings for the planned `public` resolver; not supported yet.
 #[schemars(extend("examples" = [{"cloudflare":{"token":"${{ env.CF_API_TOKEN }}"}}]))]
 pub struct DnsProvider {
-    /// Cloudflare DNS API credentials supplied by an environment expression.
+    /// Reserved: Cloudflare credentials for DNS-01 certificates; not supported yet.
     pub cloudflare: CloudflareDns,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Cloudflare DNS credentials for the reserved public resolver.
+/// Reserved Cloudflare DNS credentials for the planned `public` resolver; not supported yet.
 #[schemars(extend("examples" = [{"token":"${{ env.CF_API_TOKEN }}"}]))]
 pub struct CloudflareDns {
-    /// API token with permission to edit the domain's DNS records; prefer an environment expression.
+    /// Reserved: Cloudflare API token allowed to edit the domain's DNS records. Write an
+    /// environment expression such as `${{ env.CF_API_TOKEN }}`, not the token itself.
     #[schemars(extend("examples" = ["${{ env.CF_API_TOKEN }}"]))]
     pub token: Templated<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-/// Machine-wide port pool shared by all projects and lanes.
+/// Machine-wide pool every lane's block of ports comes from.
 #[schemars(extend("examples" = [{"range":"20000-32767"}]))]
 pub struct PortsConfig {
-    /// Inclusive port range, written start-end; defaults to 20000-32767.
+    /// Ports devlanes may hand out, written `start-end` (both included, start above 0);
+    /// defaults to `20000-32767`, below Linux's usual ephemeral range so the OS does not
+    /// pick them for outgoing connections. Each lane of each project gets its own block of
+    /// consecutive ports from it, so a smaller range fits fewer lanes.
     #[schemars(extend("pattern" = "^[0-9]+-[0-9]+$", "examples" = ["20000-32767"]))]
     pub range: String,
 }
@@ -438,64 +561,82 @@ impl PortsConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-/// Certificate authority selection and requested certificate trust targets.
+/// Certificate authority behind the proxy's HTTPS certificates, and the stores
+/// `devlanes certs trust` installs it into.
 #[schemars(extend("examples" = [{"ca":"devlanes","trust":["system","firefox"]}]))]
 pub struct TlsConfig {
-    /// Use devlanes' own CA by default, or reuse mkcert's CA.
+    /// Which CA signs the certificate for each lane hostname; defaults to `devlanes`.
+    /// Choose `mkcert` when your browsers already trust mkcert's CA.
     pub ca: CaKind,
-    /// Trust stores that should accept the local CA; mobile targets are ignored with a warning for now.
+    /// Stores `devlanes certs trust` installs the CA into and `certs untrust` removes it
+    /// from; an empty list means `[system]`. On Linux, browsers do not read the system
+    /// store, so add `chrome` and `firefox` there; `devlanes doctor` shows each store's state.
     #[schemars(extend("examples" = [["system","firefox"],["chrome"]]))]
     pub trust: Vec<TrustTarget>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-/// Certificate authority used to issue certificates for local project hostnames.
+/// Certificate authority that signs HTTPS certificates for lane hostnames.
 #[schemars(extend("examples" = ["devlanes","mkcert"]))]
 pub enum CaKind {
-    /// Use the CA managed in the devlanes home directory.
+    /// devlanes creates its own CA in `~/.devlanes/ca` on first use, limited to names under
+    /// `localhost`, `test`, `internal`, `home.arpa` and `hostnames.tld`, so it cannot sign
+    /// for real sites. Trust it once with `devlanes certs trust`.
     #[default]
     #[schemars(extend("examples" = ["devlanes"]))]
     Devlanes,
-    /// Reuse the CA in mkcert's CAROOT directory.
+    /// Load mkcert's existing root CA (from `mkcert -CAROOT`) instead, so browsers that
+    /// already trust it need nothing new. HTTPS stays off when `mkcert` is not on `PATH`;
+    /// the mkcert CA has no name limits, and `certs untrust` leaves it trusted.
     #[schemars(extend("examples" = ["mkcert"]))]
     Mkcert,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
-/// Store in which the local CA should be trusted; mobile stores are not supported yet.
+/// Certificate store that `devlanes certs trust` installs the CA into.
 #[schemars(extend("examples" = ["system","firefox","chrome","ios-simulator","android-emulator"]))]
 pub enum TrustTarget {
-    /// Trust the local CA in the operating system's certificate store.
+    /// The OS store: the login keychain on macOS, read by Safari, Chrome, Edge and
+    /// `/usr/bin/curl`; on Linux, the distribution's CA anchors, updated through sudo.
     #[schemars(extend("examples" = ["system"]))]
     System,
-    /// Trust the local CA in Firefox's certificate database.
+    /// Every Firefox profile's certificate database, through `certutil` from the NSS tools
+    /// (`brew install nss`, or `libnss3-tools` / `nss-tools` on Linux).
     #[schemars(extend("examples" = ["firefox"]))]
     Firefox,
-    /// Trust the local CA in Chrome's certificate database where required.
+    /// The store Chrome and Chromium read: `~/.pki/nssdb` through `certutil` on Linux, the
+    /// same login keychain as `system` on macOS.
     #[schemars(extend("examples" = ["chrome"]))]
     Chrome,
-    /// Reserved iOS simulator trust target; not supported yet, so it is ignored with a warning.
+    /// Reserved for the iOS simulator; not supported yet, so it is dropped with a warning.
     #[schemars(extend("examples" = ["ios-simulator"]))]
     IosSimulator,
-    /// Reserved Android emulator trust target; not supported yet, so it is ignored with a warning.
+    /// Reserved for the Android emulator; not supported yet, so it is dropped with a warning.
     #[schemars(extend("examples" = ["android-emulator"]))]
     AndroidEmulator,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-/// Ports and network access policy for the local HTTP/HTTPS proxy.
+/// Ports and network exposure of the daemon's proxy, which routes each lane hostname to
+/// its service.
 #[schemars(extend("examples" = [{"https_port":443,"http_port":80,"lan":false}]))]
 pub struct ProxyConfig {
-    /// HTTPS listening port; defaults to 443.
+    /// Port the HTTPS proxy listens on; defaults to 443. When the port is taken or not
+    /// allowed (low ports on Linux need extra permission), the daemon falls back to 8443
+    /// and service URLs carry the port.
     #[schemars(extend("examples" = [443,8443]))]
     pub https_port: u16,
-    /// HTTP listening port; defaults to 80 and redirects to HTTPS when TLS is enabled.
+    /// Port for plain HTTP; defaults to 80, falling back to 8080 like `https_port`, and must
+    /// differ from it. While HTTPS runs it redirects known hostnames to HTTPS; without a
+    /// CA it serves them over plain HTTP.
     #[schemars(extend("examples" = [80,8080]))]
     pub http_port: u16,
-    /// Accept connections from other machines; defaults to loopback-only access.
+    /// Accept connections from other devices on the network; defaults to false, which
+    /// refuses every peer that is not this machine. Those devices must still resolve the
+    /// hostnames to this machine and trust the CA.
     #[schemars(extend("examples" = [false,true]))]
     pub lan: bool,
 }
@@ -513,22 +654,28 @@ impl Default for ProxyConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-/// Retention settings for stored service/task output and database log metadata.
+/// Retention of the service output stored under `~/.devlanes/logs`.
 #[schemars(extend("examples" = [{"retention":{"days":7,"max_size":"5GiB"}}]))]
 pub struct LogsConfig {
-    /// Age and total-size bounds for log files; the age limit also bounds database log-segment metadata.
+    /// Age and total-size limits for stored service output; a cleanup every 10 minutes
+    /// deletes the oldest output past either one. Defaults to 7 days and `5GiB`.
     pub retention: LogRetention,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-/// Disk retention bounded by both age and total log size.
+/// Limits for stored service output; reaching either one deletes the oldest output first.
 #[schemars(extend("examples" = [{"days":7,"max_size":"5GiB"}]))]
 pub struct LogRetention {
-    /// Number of days to retain logs and database log-segment metadata; defaults to 7.
-    #[schemars(extend("examples" = [7]))]
+    /// Delete output older than this many days, along with its index entries in the
+    /// database; defaults to 7 and must be at least 1. The newest log file of each
+    /// stopped service is kept.
+    #[schemars(range(min = 1), extend("examples" = [7]))]
     pub days: u32,
-    /// Maximum total size of retained logs; defaults to 5GiB.
+    /// Total size of stored output across all projects and lanes; defaults to `5GiB`
+    /// and must be above zero. Over it, the oldest output goes first wherever it is, but
+    /// each stopped service's newest file and up to 1 MiB of a running service's current
+    /// file are kept.
     pub max_size: ByteSize,
 }
 
@@ -544,10 +691,13 @@ impl Default for LogRetention {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-/// Retention for monitor history used by graphs and service baselines, including database aggregates.
+/// Retention of the CPU and memory history in the daemon's database.
 #[schemars(extend("examples" = [{"retention":"7d"}]))]
 pub struct MetricsConfig {
-    /// Maximum age of persisted monitor samples and database run summaries; defaults to 7d.
+    /// How long per-minute CPU and memory samples, per-run summaries and startup memory
+    /// peaks are kept; defaults to `7d` and must be longer than `0s`. Shorter keeps less
+    /// history for graphs and for the memory a start is expected to need;
+    /// `state.max_size` can delete samples sooner.
     #[schemars(extend("examples" = ["7d","30d"]))]
     pub retention: ConfigDuration,
 }
@@ -561,8 +711,8 @@ impl Default for MetricsConfig {
     }
 }
 
-/// How devlanes uses the terminal, or (from older configs) a terminal app
-/// name, which is ignored.
+/// Terminal integration of the CLI, or a terminal app name from older versions, which is
+/// ignored.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("examples" = [{"progress":"auto"}]))]
@@ -571,7 +721,7 @@ pub enum TerminalConfig {
     /// window; that feature is gone, so the name is ignored with a warning.
     #[schemars(extend("examples" = ["ghostty"]))]
     Legacy(String),
-    /// How devlanes uses the terminal's own progress bar.
+    /// Terminal settings written as a mapping.
     #[schemars(extend("examples" = [{"progress":"never"}]))]
     Settings(TerminalSettings),
 }
@@ -586,7 +736,9 @@ pub struct TerminalSettings {
     #[serde(skip_serializing)]
     #[schemars(skip)]
     pub app: Option<String>,
-    /// Show start progress in the terminal tab's progress bar (OSC 9;4); defaults to auto.
+    /// Whether starts show their progress in the terminal tab's own progress bar (the
+    /// OSC 9;4 sequence); defaults to `auto`. Only human output on a terminal gets it, and
+    /// `DEVLANES_TERM_PROGRESS=0` or `1` overrides this setting.
     #[schemars(extend("examples" = ["auto","never"]))]
     pub progress: TerminalProgress,
     /// Whether the terminal tab's title says what devlanes is doing (`devlanes · acme@0 ·
@@ -642,20 +794,23 @@ pub enum TerminalFeature {
     Never,
 }
 
-/// When start progress goes to the terminal tab's progress bar. Only a terminal
-/// session in human output ever gets it; `DEVLANES_TERM_PROGRESS=0` or `1` overrides this.
+/// When start progress goes to the terminal tab's progress bar.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(extend("examples" = ["auto","always","never"]))]
 pub enum TerminalProgress {
-    /// Only in terminals known to draw it (Ghostty, WezTerm, recent iTerm2, Windows Terminal, ConEmu, Ptyxis, Konsole), never inside tmux or screen.
+    /// Only in terminals known to draw it (Ghostty, WezTerm, iTerm2 3.6.6+, Windows
+    /// Terminal, ConEmu, Ptyxis 48+, Konsole 26.04+); never inside tmux, screen, CI or a
+    /// dumb terminal.
     #[default]
     #[schemars(extend("examples" = ["auto"]))]
     Auto,
-    /// In any terminal, also kitty 0.47 or later and inside tmux (needs `allow-passthrough on`).
+    /// In every terminal, for ones `auto` does not recognize such as kitty; a terminal
+    /// without support may ignore it or show it as text or a notification. Inside tmux it
+    /// is passed through, which needs `allow-passthrough on`.
     #[schemars(extend("examples" = ["always"]))]
     Always,
-    /// Never.
+    /// Never draw the progress bar.
     #[schemars(extend("examples" = ["never"]))]
     Never,
 }
@@ -687,14 +842,16 @@ impl TerminalConfig {
 }
 
 impl UserConfig {
-    /// Reject the deferred public resolver and invalid machine-wide resource ranges.
-    /// Messages start with the offending field path.
+    /// Reject the deferred public resolver, invalid machine-wide resource ranges, a
+    /// `hostnames.tld` that could name a real site and retention limits that would
+    /// delete everything. Messages start with the offending field path.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.state.max_size.0 == 0 {
             return Err(ConfigError::plain(
                 "state.max_size: must be greater than zero",
             ));
         }
+        self.validate_retention()?;
         for (path, deferred) in [
             (
                 "hostnames.resolver",
@@ -736,7 +893,45 @@ impl UserConfig {
                 "hostnames.tld: required for the resolver strategy",
             ));
         }
+        if let Some(tld) = &self.hostnames.tld
+            && let Err(reason) = check_tld(tld)
+        {
+            return Err(ConfigError::plain(format!(
+                "hostnames.tld: `{tld}` cannot be used: {reason}"
+            )));
+        }
         self.startup.validate()?;
+        self.lanes.validate()?;
+        Ok(())
+    }
+
+    /// Zero limits would delete all stored output or history at the next cleanup
+    /// instead of keeping some; the daemon gives zero no other meaning.
+    fn validate_retention(&self) -> Result<(), ConfigError> {
+        if self.logs.retention.days == 0 {
+            return Err(ConfigError::plain(
+                "logs.retention.days: must be at least 1; 0 would delete all stored output",
+            ));
+        }
+        if self.logs.retention.max_size.0 == 0 {
+            return Err(ConfigError::plain(
+                "logs.retention.max_size: must be greater than zero; 0B would delete all stored output",
+            ));
+        }
+        for (path, retention) in [
+            ("history.retention", &self.history.retention),
+            (
+                "history.remote_hosts_retention",
+                &self.history.remote_hosts_retention,
+            ),
+            ("metrics.retention", &self.metrics.retention),
+        ] {
+            if retention.0.is_zero() {
+                return Err(ConfigError::plain(format!(
+                    "{path}: must be longer than 0s; 0s would delete every record at the next cleanup"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -783,6 +978,59 @@ impl UserConfig {
                 TrustTarget::IosSimulator | TrustTarget::AndroidEmulator
             )
         });
+    }
+}
+
+/// Special-use zones `hostnames.tld` may equal or sit under, as in
+/// `devlanes_resolver_dns::RESERVED_ZONES`.
+const RESERVED_TLDS: &[&str] = &["test", "internal", "home.arpa"];
+
+/// Why `tld` cannot be used, by the rule of `devlanes_resolver_dns::Zone::new`
+/// (`crates/resolver-dns/src/zone.rs`). Duplicated because config must not depend on
+/// the DNS server crate and its runtime; a test in `bins/devlanes` keeps the two in step.
+fn check_tld(tld: &str) -> Result<(), &'static str> {
+    let name = tld.strip_suffix('.').unwrap_or(tld).to_ascii_lowercase();
+    if name.is_empty() {
+        return Err("it is empty");
+    }
+    if name.len() > 253 {
+        return Err("it is longer than 253 characters");
+    }
+    for label in name.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err("every label must be 1 to 63 characters");
+        }
+        if !label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            || label.starts_with('-')
+            || label.ends_with('-')
+        {
+            return Err("labels may only hold letters, digits and inner hyphens");
+        }
+    }
+    if name
+        .rsplit('.')
+        .next()
+        .is_some_and(|last| last.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err("the last label cannot be numeric");
+    }
+    let under = |suffix: &str| {
+        name.strip_suffix(suffix)
+            .is_some_and(|rest| rest.ends_with('.'))
+    };
+    if RESERVED_TLDS
+        .iter()
+        .any(|suffix| name == *suffix || under(suffix))
+        || under("localhost")
+    {
+        Ok(())
+    } else {
+        Err(
+            "the TLD must be test, internal or home.arpa, a domain under one of them, \
+             or a domain under localhost",
+        )
     }
 }
 

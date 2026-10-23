@@ -13,7 +13,7 @@ fn check(service: &ServiceConfig) -> &ReadyCheck {
 /// Partial `stop`, `ready` and `run_script` mappings keep the keys they leave out.
 #[test]
 fn service_mappings_merge_per_key() {
-    let base = "project: demo\ntemplates:\n  base:\n    stop: { signal: SIGINT, timeout: 10s }\n    ready: { http: { path: /health, status: 204 } }\nservices:\n  api:\n    extends: base\n    run_script: { source: apps/api/package.json, name: dev }\n    ready: { http: { status: 200 } }\n";
+    let base = "project: demo\ntemplates:\n  base:\n    stop: { signal: SIGINT, timeout: 10s }\n    ready: { http: { path: /health, status: 204 } }\nservices:\n  api:\n    extends: base\n    run_script: { file: apps/api/package.json, name: dev }\n    ready: { http: { status: 200 } }\n";
     let local = "services:\n  api:\n    stop: { timeout: 20s }\n    ready: { timeout: 5s }\n    run_script: { name: start }\n";
     for local in [None, Some(local)] {
         let config = parse_project(base, local).expect("merged");
@@ -26,7 +26,7 @@ fn service_mappings_merge_per_key() {
         let script = service.run_script.as_ref().expect("script");
         let expected_name = if local.is_some() { "start" } else { "dev" };
         assert_eq!(
-            script.source_and_name().expect("script"),
+            script.file_and_name().expect("script"),
             ("apps/api/package.json", expected_name)
         );
         if local.is_some() {
@@ -45,7 +45,7 @@ fn service_mappings_merge_per_key() {
 /// Setting one form of a command or readiness check drops the inherited alternatives.
 #[test]
 fn alternative_forms_clear_siblings() {
-    let source = "project: demo\ntemplates:\n  base:\n    run: server\n    ready: { http: { path: /-/health }, timeout: 30s }\n    env: { KEEP: base, VALUE: base }\nservices:\n  api:\n    extends: base\n    run_script: package.json#dev\n    ready: { tcp: true }\n    env: { VALUE: service }\n";
+    let source = "project: demo\ntemplates:\n  base:\n    run: server\n    ready: { http: { path: /-/health }, timeout: 30s }\n    env: { KEEP: base, VALUE: base }\nservices:\n  api:\n    extends: base\n    run_script: { file: package.json, name: dev }\n    ready: { tcp: true }\n    env: { VALUE: service }\n";
     let config = parse_project(source, None).expect("service replaces template forms");
     let service = &config.services["api"];
     assert!(service.run.is_none());
@@ -89,7 +89,7 @@ fn alternative_forms_clear_siblings() {
 #[test]
 fn other_mappings_merge_per_key() {
     let base = "project: demo\ninfra:\n  containers:\n    cache:\n      image: redis\n      ports: { main: 6379 }\n      ready: { tcp: true, timeout: 5s }\n  setup:\n    db: createdb demo\n    queue: { run: add-vhost, container: cache, ignore_errors: true }\ntasks:\n  seed:\n    run: seed\n    timeout: 1m\n    env: { A: base }\n  build:\n    steps: [seed]\nservices:\n  api: { run: server, tags: [api] }\nprofiles:\n  default: [api]\n";
-    let local = "infra:\n  containers:\n    cache:\n      ready: { timeout: 30s }\n  setup:\n    db: { ignore_errors: true }\n    queue: { run_script: Makefile#vhost }\ntasks:\n  seed:\n    env: { B: local }\n  build:\n    run: make\nprofiles:\n  default:\n    env: { MODE: local }\n";
+    let local = "infra:\n  containers:\n    cache:\n      ready: { timeout: 30s }\n  setup:\n    db: { ignore_errors: true }\n    queue: { run: make vhost }\ntasks:\n  seed:\n    env: { B: local }\n  build:\n    run: make\nprofiles:\n  default:\n    env: { MODE: local }\n";
     let config = parse_project(base, Some(local)).expect("merged");
 
     let cache = &config.infra.containers["cache"];
@@ -107,8 +107,12 @@ fn other_mappings_merge_per_key() {
     let InfraCommand::Object(queue) = &config.infra.setup["queue"] else {
         panic!("queue mapping")
     };
-    assert!(queue.run.is_none(), "run_script clears run");
+    assert!(
+        matches!(&queue.run, Some(Run::Shell(Templated::Literal(run))) if run == "make vhost"),
+        "local run replaces the base run"
+    );
     assert_eq!(queue.container.as_deref(), Some("cache"));
+    assert_eq!(queue.ignore_errors, Some(Templated::Literal(true)));
 
     let seed = &config.tasks["seed"];
     assert!(seed.run.is_some());
@@ -127,7 +131,7 @@ fn other_mappings_merge_per_key() {
 /// Preset option mappings merge per key through templates and local files; lists replace.
 #[test]
 fn preset_options_merge_per_key() {
-    let base = "project: demo\ntemplates:\n  base:\n    preset: custom\n    custom: { nested: { keep: true, replace: old }, args: [old] }\nservices:\n  api:\n    extends: base\n    run: server\n    custom: { nested: { replace: new }, args: [] }\n";
+    let base = "project: demo\ntemplates:\n  base:\n    preset: custom\n    custom: { nested: { keep: true, replace: old }, args: [old] }\nservices:\n  api:\n    extends: base\n    run_script: { file: package.json, name: dev }\n    custom: { nested: { replace: new }, args: [] }\n";
     let config = parse_project(base, Some("services:\n  api:\n    custom: { extra: 1 }\n"))
         .expect("merged options");
     assert_eq!(

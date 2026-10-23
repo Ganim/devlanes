@@ -19,12 +19,16 @@ pub const NAME: &str = "vite";
 /// Address the dev server binds; the proxy and `self.url` use loopback.
 pub const HOST: &str = "127.0.0.1";
 
-/// Options under the service's `vite:` key.
+/// Options for `preset: vite`, which adds `--port <self.port> --strictPort --host 127.0.0.1`
+/// to the dev server command. `--strictPort` makes Vite exit when the port is taken instead of
+/// moving to another port the proxy does not know about.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(extend("examples" = [{"args":["--open"]}]))]
 pub struct ViteOptions {
-    /// Extra arguments appended after the preset's flags.
+    /// Extra arguments for the Vite command, added after the preset's port and host flags,
+    /// for example `[--mode, staging]`. A local override or `extends` child that sets `args`
+    /// replaces the inherited list. Default: none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("examples" = [["--open"]]))]
     pub args: Option<Vec<String>>,
@@ -107,7 +111,8 @@ impl Contributor for VitePreset {
             .port
             .ok_or_else(|| Error::InvalidInput(format!("preset {NAME} needs a service port")))?;
         let contribution = contribution(port, &options);
-        devlanes_run_script_npm::forward_args(draft, contribution.args);
+        // Presets require `run_script`; its runner places the arguments for the tool.
+        draft.args.extend(contribution.args);
         draft.env.extend(contribution.env);
         Ok(())
     }
@@ -137,6 +142,7 @@ mod tests {
             lane_index: 1,
             lane_name: "lane1",
             lane_path: Path::new("/lanes/acme-1"),
+            lane_data_path: Path::new("/data/acme/2"),
             primary_path: Path::new("/lanes/acme"),
             platform: Some("node"),
             preset,
@@ -178,16 +184,20 @@ mod tests {
             plain.args.join(" "),
             "--port 20012 --strictPort --host 127.0.0.1"
         );
-        let npm = apply(
+        // The script runner adds any separator its package manager needs.
+        let script = apply(
             Some(NAME),
             Some(serde_json::json!({"args": ["--open"]})),
-            shell("npm run dev"),
+            DraftCommand::Script {
+                source: "package.json".into(),
+                name: "dev".into(),
+            },
         )
         .await
         .expect("apply");
         assert_eq!(
-            npm.args.join(" "),
-            "-- --port 20012 --strictPort --host 127.0.0.1 --open"
+            script.args.join(" "),
+            "--port 20012 --strictPort --host 127.0.0.1 --open"
         );
         let error = apply(
             Some(NAME),

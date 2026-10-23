@@ -62,7 +62,7 @@ impl Extensions for OpaqueExtensions {
                 if name.starts_with("ServiceConfig") {
                     definition["additionalProperties"] = serde_json::json!({
                         "type":"object",
-                        "description":"Options for the preset selected by this service; validated by the registered integration.",
+                        "description":"Options for the preset named in `preset`; the key must match it, for example `vite: { args: [--open] }` with `preset: vite`.",
                         "examples":[{"args":["--open"]}]
                     });
                 }

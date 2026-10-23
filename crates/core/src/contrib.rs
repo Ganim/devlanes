@@ -55,7 +55,9 @@ pub enum DraftCommand {
 }
 
 /// A file the daemon writes before spawning, such as a framework config overlay.
-/// Contents must not contain secrets: the daemon writes them to disk.
+/// Contents must not contain secrets: the daemon writes them to disk. The path must lie
+/// in the lane worktree or the lane data folder; prefer the data folder, since lanes
+/// that share a worktree would overwrite each other's files there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedFile {
     pub path: PathBuf,
@@ -104,6 +106,9 @@ pub struct ContribCx<'a> {
     pub lane_index: u32,
     pub lane_name: &'a str,
     pub lane_path: &'a Path,
+    /// The lane's data folder outside the worktree (`lane.data_path`), unique per lane even
+    /// when several lanes share one folder. Generated files and per-lane state go here.
+    pub lane_data_path: &'a Path,
     pub primary_path: &'a Path,
     /// Explicit or inferred platform (`node`, `python`, ...).
     pub platform: Option<&'a str>,

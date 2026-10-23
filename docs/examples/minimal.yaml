@@ -17,19 +17,26 @@ global_env:
 tasks:
   migrate:
     # Runs a script from package.json with the project's package manager.
-    run_script: api/package.json#migrate
+    run_script:
+      file: api/package.json
+      name: migrate
     # Run on every devlanes start, before services.
     when: lane.start
 # Long-running processes, started together after infra and setup.
 services:
   api:
-    run_script: api/package.json#dev
+    run_script:
+      file: api/package.json
+      name: dev
     # HTTPS hostnames routed by the proxy; lane.domain is acme.localhost or acme-<N>.localhost.
-    hosts: ["api.${{ lane.domain }}"]
+    hosts: "api.${{ lane.domain }}"
   web:
     # Adds Vite's port and host flags to the command.
     preset: vite
-    run_script: web/package.json#dev
+    run_script:
+      file: web/package.json
+      name: dev
     # Extra variables for this service; public_url is the API's https:// address in this lane.
-    env: { VITE_API_URL: "${{ svc.api.public_url }}" }
-    hosts: ["${{ lane.domain }}"]
+    env:
+      VITE_API_URL: "${{ services.api.public_url }}"
+    hosts: "${{ lane.domain }}"

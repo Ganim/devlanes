@@ -215,8 +215,7 @@ async fn finished_runs_record_log_segments() {
 
 #[tokio::test(flavor = "multi_thread")]
 /// `doctor` checks `config.yaml` on disk at every call: an edit after startup
-/// shows up located, without a restart; `daemon status` reports what startup
-/// applied.
+/// shows up located, without a restart, since the next start would refuse it.
 async fn doctor_checks_the_user_config_on_disk() {
     tokio::time::timeout(LIMIT, async {
         let tmp = temp();
@@ -243,11 +242,6 @@ async fn doctor_checks_the_user_config_on_disk() {
                 .is_some_and(|m| m.starts_with("proxy.http_prot")),
             "{user}"
         );
-        let status = h
-            .call(Method::DaemonStatus, json!({}), cx(&main))
-            .await
-            .expect("status");
-        assert_eq!(status["user_config"]["errors"], json!([]));
         h.close().await;
     })
     .await

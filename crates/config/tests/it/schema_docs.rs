@@ -92,17 +92,21 @@ fn walk(schema: &Value, path: &str, named: bool, root: &Value, failures: &mut Ve
     }
 }
 
-/// Every editor-visible field and definition has valid examples, descriptions, and no type title.
+/// Every editor-visible field and definition has valid examples and descriptions, and no
+/// schema has a title: yaml-language-server would print it as a heading on every hover.
 #[test]
 fn editor_schema_metadata_is_complete() {
-    for (title, schema) in [
-        ("devlanes", super::registered_schema()),
-        ("devlanes", devlanes_config::project_schema()),
-        ("devlanes user config", devlanes_config::user_schema()),
+    let version = format!("devlanes v{}", env!("CARGO_PKG_VERSION"));
+    for (name, schema) in [
+        ("registered", super::registered_schema()),
+        ("project", devlanes_config::project_schema()),
+        ("user", devlanes_config::user_schema()),
     ] {
-        assert_eq!(schema["title"], title);
+        assert!(schema.get("title").is_none(), "{name}: root title");
+        let description = schema["description"].as_str().unwrap_or_default();
+        assert!(description.starts_with(&version), "{name}: {description}");
         let mut failures = Vec::new();
         walk(&schema, "", true, &schema, &mut failures);
-        assert!(failures.is_empty(), "{title}:\n{}", failures.join("\n"));
+        assert!(failures.is_empty(), "{name}:\n{}", failures.join("\n"));
     }
 }

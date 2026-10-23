@@ -1,6 +1,6 @@
 # devlanes-run-script-deno
 
-Runs `run_script: deno.json#<task>` as `deno task <task>` in the config file's directory. Lane resolution calls it through `DenoTasks`, a `devlanes-core` `ScriptRunner`.
+Runs `run_script: { file: deno.json, name: <task> }` as `deno task <task>` in the config file's directory. Lane resolution calls it through `DenoTasks`, a `devlanes-core` `ScriptRunner`.
 
 ## Usage
 
@@ -32,7 +32,9 @@ The composition root registers `Arc::new(DenoTasks)` as a script runner. `plan` 
 services:
   api:
     # Runs the dev task of deno.json with deno task.
-    run_script: deno.json#dev
+    run_script:
+      file: deno.json
+      name: dev
 ```
 
 This runs `deno task dev` next to `deno.json`, with preset flags appended as `deno task dev --port <port>`.

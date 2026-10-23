@@ -56,15 +56,18 @@ services:
   api:
     hosts:
       - api.${{ lane.domain }}
-      - { host: "*.${{ lane.domain }}", fallback: true }          # used only when no other route matches
-      - { host: "inspect.${{ lane.domain }}", port: inspector }   # route to a named port
-      - { host: "legacy.${{ lane.domain }}", host_header: upstream } # send 127.0.0.1:<port> as Host
+      - host: "*.${{ lane.domain }}"
+        fallback: true               # used only when no other route matches
+      - host: "inspect.${{ lane.domain }}"
+        port: inspector              # route to a named port
+      - host: "legacy.${{ lane.domain }}"
+        host_header: upstream        # send 127.0.0.1:<port> as Host
 infra:
   hosts:
-    minio: ["s3.${{ lane.domain }}"]                              # a container's published port
+    minio: "s3.${{ lane.domain }}"   # a container's published port
 ```
 
-`lane.domain` is `acme.localhost` in lane 0 and `acme-<N>.localhost` elsewhere; keep every hostname under it or under a `lanes.vars` value built the same way, so lanes never share a name. Matching is exact first, then wildcards (longest first), then fallbacks. A wildcard covers any depth below its parent but not the parent itself; list the apex too when you need it. A name claimed by two lanes goes to the one with running units and both get a `host_conflict` warning.
+`lane.domain` is `acme.localhost` in lane 0 and `acme-<N>.localhost` elsewhere; keep every hostname under it or under a `lanes.vars` value built the same way, so lanes never share a name. That value must also end in `.localhost`, or in your `hostnames.tld` with the resolver strategy; anything else does not resolve to your machine. Matching is exact first, then wildcards (longest first), then fallbacks. A wildcard covers any depth below its parent but not the parent itself; list the apex too when you need it. A name claimed by two lanes goes to the one with running units and both get a `host_conflict` warning.
 
 `hosts` also change the default readiness check to `tcp` on the service's port.
 
@@ -72,24 +75,26 @@ Tenant-style subdomains (`*.pages-2.localhost`) are fine as long as the lane ind
 
 ## Programs that cannot resolve *.localhost
 
-workerd (Wrangler), musl binaries, pure-Go programs built without cgo, Safari before macOS 26 and anything inside a container send `*.localhost` to DNS. Two answers:
+workerd (Wrangler), musl binaries, pure-Go programs built without cgo, Safari before macOS 26 and anything inside a container send `*.localhost` to DNS. Programs on the host have two answers; containers have neither and should use `host.docker.internal:<port>` (see the table above):
 
 ```sh
 devlanes certs trust --hosts
 ```
 
-installs a small root-owned helper (`/usr/local/libexec/devlanes-hosts`) with a sudoers rule for it alone, and the daemon then keeps a `# devlanes begin` / `# devlanes end` block in `/etc/hosts` with the exact hostnames of projects that want it. Wildcards cannot be written there. The user setting `hostnames.hosts_file` is `auto` by default, which writes names only when a startup probe shows the system resolver fails `*.localhost`; `lanes.hosts_file: always` in a project forces it for that project (Wrangler repos want this), `never` in the user config wins over every project. `crates/hosts-helper/README.md` describes what the helper accepts and refuses.
+installs a small root-owned helper (`/usr/local/libexec/devlanes-hosts`) with a sudoers rule for it alone, and the daemon then keeps a `# devlanes begin` / `# devlanes end` block in `/etc/hosts` with the exact hostnames of projects that want it. Wildcards cannot be written there; programs on the host reach wildcard hostnames only with the resolver strategy below, and only under its TLD. The user setting `hostnames.hosts_file` is `auto` by default, which writes names only when a startup probe shows the system resolver fails `*.localhost`; `lanes.hosts_file: always` in a project forces it for that project (Wrangler repos want this), `never` in the user config wins over every project. `crates/hosts-helper/README.md` describes what the helper accepts and refuses.
 
 ```yaml
 # ~/.devlanes/config.yaml
-hostnames: { resolver: resolver, tld: test }
+hostnames:
+  resolver: resolver
+  tld: test
 ```
 
 ```sh
 devlanes certs trust --resolver
 ```
 
-switches lane domains to `acme.test` and `acme-2.test`, answered by a DNS server the daemon runs on `127.0.0.1:15353`. `--resolver` writes `/etc/resolver/test` on macOS, or a systemd-resolved delegate (systemd 258 or newer) on Linux, so the OS sends only that TLD there. The TLD must be `test`, `internal`, `home.arpa` or a name under one of them. The CA is constrained to the TLD it was created with; switching later needs the recreate command `doctor` prints. `.dev` is a real TLD with HSTS preloaded and `.local` is mDNS; neither is accepted.
+switches lane domains to `acme.test` and `acme-2.test`, answered by a DNS server the daemon runs on `127.0.0.1:15353`. `--resolver` writes `/etc/resolver/test` on macOS, or a systemd-resolved delegate on Linux (systemd 258 or newer; older versions could only add the server globally, so `--resolver` refuses them). The OS sends only that TLD there, and every other lookup keeps your existing DNS (VPN, corporate DNS, Pi-hole). The server answers every name under the TLD, so wildcard hostnames resolve for every program that uses the system resolver; on macOS `dig` and `nslookup` bypass it. The TLD must be `test`, `internal`, `home.arpa` or a name under one of them (or a name under `localhost`). The CA is constrained to the TLD it was created with; switching later needs the recreate command `doctor` prints. `.dev` is a real TLD with HSTS preloaded and `.local` is mDNS; neither is accepted.
 
 ## Ports 443 and 80
 

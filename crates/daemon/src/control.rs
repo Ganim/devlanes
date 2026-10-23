@@ -957,7 +957,7 @@ impl Inner {
         Ok(json!({"lane": reference, "items": items}))
     }
 
-    /// `task.list`: tasks plus the `run_script` sources the config references.
+    /// `task.list`: tasks plus the `run_script` files the config references.
     pub(crate) async fn task_list(self: &Arc<Self>, context: &Context) -> Result<Value, RpcError> {
         let (project, lane) = self.target_lane(context).await?;
         let (config, path) = {
@@ -978,9 +978,9 @@ impl Inner {
         let mut sources: BTreeSet<String> = BTreeSet::new();
         for (name, task) in &config.tasks {
             if let Some(script) = &task.run_script
-                && let Ok((source, _)) = script.source_and_name()
+                && let Ok((file, _)) = script.file_and_name()
             {
-                sources.insert(source.to_owned());
+                sources.insert(file.to_owned());
             }
             // Never-run tasks get `null`, so clients can say so.
             let last_run = runs.iter().find(|run| &run.task == name).map(|run| {
@@ -1007,27 +1007,26 @@ impl Inner {
                 "steps": task.steps,
                 "confirm": task.confirm.is_some(),
                 "interactive": matches!(task.interactive, Some(devlanes_config::Templated::Literal(true))),
-                "run_script": task.run_script.as_ref().and_then(|s| s.source_and_name().ok()).map(|(source, name)| json!({"source": source, "name": name})),
+                "run_script": task.run_script.as_ref().and_then(|s| s.file_and_name().ok()).map(|(file, name)| json!({"file": file, "name": name})),
             }));
         }
         for service in config.services.values() {
             if let Some(script) = &service.run_script
-                && let Ok((source, _)) = script.source_and_name()
+                && let Ok((file, _)) = script.file_and_name()
             {
-                sources.insert(source.to_owned());
+                sources.insert(file.to_owned());
             }
         }
         let sources: Vec<Value> = sources
             .into_iter()
-            .map(|source| {
-                let file = path.join(&source);
+            .map(|file| {
                 let runner = self
                     .integ
                     .script_runners
                     .iter()
-                    .find(|runner| runner.matches(&file))
+                    .find(|runner| runner.matches(&path.join(&file)))
                     .map(|runner| runner.id());
-                json!({"source": source, "runner": runner})
+                json!({"file": file, "runner": runner})
             })
             .collect();
         Ok(json!({"items": items, "sources": sources, "truncated": false, "next_cursor": null}))

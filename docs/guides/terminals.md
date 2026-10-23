@@ -53,4 +53,4 @@ The TUI wraps each frame in synchronized output (`CSI ?2026h`/`l`) so terminals 
 
 `tui.theme: auto` uses true colour only when the terminal advertises it (`COLORTERM=truecolor`) and reports its background (`COLORFGBG`), otherwise the 16 ANSI colours; `dark`, `light` or `ansi` force one. `NO_COLOR` turns colours off everywhere, `CLICOLOR_FORCE` keeps them in pipes. `tui.glyphs: ascii` replaces the Unicode state symbols for fonts or locales without them; `auto` picks by `LANG`.
 
-Unit colours come from tags (`api` blue, `web` green, `worker` magenta, …) or `tags.<name>.color` in `devlanes.yaml`; red is reserved for failures.
+A unit's colour is the first of its tags with a `tags.<name>.color` in `devlanes.yaml`, else the first category word in its tags, preset or name (`api` blue, `web` green, `worker` magenta, …), else a hash of its first tag or name; red is reserved for failures.

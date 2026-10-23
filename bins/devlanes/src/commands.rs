@@ -27,7 +27,8 @@ pub async fn dispatch(cli: &Cli, runtime: &Runtime, action: Action) -> u8 {
         Err(error) => {
             let hint = confirmation_hint(&error)
                 .or_else(|| legacy_state_hint(&error))
-                .or_else(|| fix_hint(&error));
+                .or_else(|| fix_hint(&error))
+                .or_else(|| crate::user_config::hint(&error));
             let rendered = runtime.reporter().error(&error, hint.as_ref());
             tracing::debug!(
                 code = %error.code,
@@ -233,91 +234,7 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
             });
             Ok(0)
         }
-        Action::DaemonRestart(context) => {
-            let paths = paths()?;
-            // What runs now comes back after the restart; `daemon stop` keeps it stopped.
-            let mut running = Vec::new();
-            let (env, actor) = (
-                context.env.clone().unwrap_or_default(),
-                context.actor.clone(),
-            );
-            // Any protocol: restarting is how an incompatible daemon gets replaced.
-            match Client::connect_any(&paths).await {
-                Ok(mut client) => {
-                    if client.compatible() {
-                        running = client.running_lanes().await.unwrap_or_else(|error| {
-                            tracing::warn!(%error, "could not read what runs; nothing is resumed");
-                            Vec::new()
-                        });
-                    }
-                    let processes = client.peer.managed_processes;
-                    if processes > 0
-                        && !context.yes
-                        && !confirm(
-                            runtime,
-                            &format!("restart the daemon and stop {processes} processes?"),
-                        )?
-                    {
-                        return Ok(devlanes_cli::exit::USAGE);
-                    }
-                    // The old daemon's own pid, so the wait below ends when exactly
-                    // that process is gone.
-                    let pid = client
-                        .request(
-                            Method::DaemonStatus,
-                            json!({}),
-                            devlanes_proto::Context::default(),
-                        )
-                        .await
-                        .ok()
-                        .and_then(|status| status.get("pid").and_then(Value::as_u64))
-                        .and_then(|pid| i32::try_from(pid).ok());
-                    let context = devlanes_proto::Context {
-                        yes: true,
-                        ..context
-                    };
-                    client
-                        .request(Method::DaemonShutdown, json!({}), context)
-                        .await
-                        .map_err(rpc_error)?;
-                    drop(client);
-                    wait_for_daemon_exit(&paths, pid).await?;
-                }
-                Err(error) if error.is_not_running() => {}
-                Err(error) => return Err(rpc_error(error)),
-            }
-            let mut client = connect(&paths).await?;
-            let mut data = client
-                .request(
-                    Method::DaemonStatus,
-                    json!({}),
-                    devlanes_proto::Context::default(),
-                )
-                .await
-                .map_err(rpc_error)?;
-            if data.is_object() {
-                data["running"] = json!(true);
-            }
-            let items = if running.is_empty() {
-                Vec::new()
-            } else {
-                client.resume_running(&running, &env, &actor).await
-            };
-            // JSON output stays one document; text prints the starts after the status.
-            if runtime.mode == devlanes_cli::OutputMode::Json {
-                if data.is_object() {
-                    data["resumed"] = json!(items);
-                }
-                return render_result(runtime, Method::DaemonStatus, &data, None);
-            }
-            let status = render_result(runtime, Method::DaemonStatus, &data, None)?;
-            if items.is_empty() {
-                return Ok(status);
-            }
-            let page = json!({"items": items, "truncated": false, "next_cursor": null});
-            let resumed = render_result(runtime, Method::Resume, &page, None)?;
-            Ok(status.max(resumed))
-        }
+        Action::DaemonRestart(context) => daemon_restart(runtime, &paths()?, context).await,
         Action::DaemonLogs { follow, tail } => daemon_logs(follow, tail.unwrap_or(100)).await,
         Action::DebugBundle {
             to,
@@ -370,6 +287,99 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
         }
         other => crate::daemon::local_action(runtime, other).await,
     }
+}
+
+/// `daemon restart`: stops the daemon (any protocol), starts a new one and starts
+/// again what ran. An invalid user config fails first: the new daemon would refuse
+/// to start, and the old one would already have stopped every lane.
+async fn daemon_restart(
+    runtime: &Runtime,
+    paths: &Paths,
+    context: devlanes_proto::Context,
+) -> Result<u8, RpcError> {
+    crate::user_config::load(paths).await?;
+    // What runs now comes back after the restart; `daemon stop` keeps it stopped.
+    let mut running = Vec::new();
+    let (env, actor) = (
+        context.env.clone().unwrap_or_default(),
+        context.actor.clone(),
+    );
+    // Any protocol: restarting is how an incompatible daemon gets replaced.
+    match Client::connect_any(paths).await {
+        Ok(mut client) => {
+            if client.compatible() {
+                running = client.running_lanes().await.unwrap_or_else(|error| {
+                    tracing::warn!(%error, "could not read what runs; nothing is resumed");
+                    Vec::new()
+                });
+            }
+            let processes = client.peer.managed_processes;
+            if processes > 0
+                && !context.yes
+                && !confirm(
+                    runtime,
+                    &format!("restart the daemon and stop {processes} processes?"),
+                )?
+            {
+                return Ok(devlanes_cli::exit::USAGE);
+            }
+            // The old daemon's own pid, so the wait below ends when exactly
+            // that process is gone.
+            let pid = client
+                .request(
+                    Method::DaemonStatus,
+                    json!({}),
+                    devlanes_proto::Context::default(),
+                )
+                .await
+                .ok()
+                .and_then(|status| status.get("pid").and_then(Value::as_u64))
+                .and_then(|pid| i32::try_from(pid).ok());
+            let context = devlanes_proto::Context {
+                yes: true,
+                ..context
+            };
+            client
+                .request(Method::DaemonShutdown, json!({}), context)
+                .await
+                .map_err(rpc_error)?;
+            drop(client);
+            wait_for_daemon_exit(paths, pid).await?;
+        }
+        Err(error) if error.is_not_running() => {}
+        Err(error) => return Err(rpc_error(error)),
+    }
+    let mut client = connect(paths).await?;
+    let mut data = client
+        .request(
+            Method::DaemonStatus,
+            json!({}),
+            devlanes_proto::Context::default(),
+        )
+        .await
+        .map_err(rpc_error)?;
+    if data.is_object() {
+        data["running"] = json!(true);
+    }
+    let items = if running.is_empty() {
+        Vec::new()
+    } else {
+        client.resume_running(&running, &env, &actor).await
+    };
+    // JSON output stays one document; text prints the starts after the status.
+    if runtime.mode == devlanes_cli::OutputMode::Json {
+        if data.is_object() {
+            data["resumed"] = json!(items);
+        }
+        return render_result(runtime, Method::DaemonStatus, &data, None);
+    }
+    let status = render_result(runtime, Method::DaemonStatus, &data, None)?;
+    if items.is_empty() {
+        return Ok(status);
+    }
+    let page = json!({"items": items, "truncated": false, "next_cursor": null});
+    let resumed = render_result(runtime, Method::Resume, &page, None)?;
+    Ok(status.max(resumed))
 }
 
 /// Longest `daemon restart` waits for the old daemon, which first stops every unit
@@ -711,7 +721,9 @@ fn version_note(peer: &devlanes_proto::Hello) -> Option<String> {
 
 /// `daemon reset-state` while no daemon answers: with `--yes` (like the online
 /// path; it never prompts), moves state.db and its sidecars aside under the daemon
-/// lock, never deleting them. The next command spawns a daemon with an empty database.
+/// lock, with the lane data folders, never deleting them. The next command spawns
+/// a daemon with an empty database. The data folder comes from the user config, so
+/// an invalid one is refused before anything moves.
 async fn reset_state_offline(runtime: &Runtime, paths: &Paths, yes: bool) -> Result<u8, RpcError> {
     let json = runtime.mode == devlanes_cli::OutputMode::Json;
     let db = paths.db.clone();
@@ -747,7 +759,12 @@ async fn reset_state_offline(runtime: &Runtime, paths: &Paths, yes: bool) -> Res
         .unwrap_or_default();
     let stamp = crate::daemon::utc_stamp(seconds);
     let home = paths.home.clone();
-    let moves = blocking(move || crate::daemon::move_state_aside(&home, &db, &stamp)).await?;
+    let data_root = crate::user_config::load(paths)
+        .await?
+        .lanes
+        .data_root(&home);
+    let moves =
+        blocking(move || crate::daemon::move_state_aside(&home, &db, &data_root, &stamp)).await?;
     // Without a daemon nothing stops processes a crashed daemon left behind, and
     // their records leave with the old database.
     let warning = "warning: processes started by a crashed daemon may still run; the new daemon has no record of them\n";
@@ -962,6 +979,10 @@ fn hint_for(error: &RpcError, request: &Request) -> Option<Hint> {
             .map(|project| Hint::command(["stop", "--project", project])),
         "secrets_locked" => Some(Hint::command(["secrets", "unlock"])),
         "unit_failed" | "ready_timeout" => {
+            // A non-2xx answer to an http check is fixed in the config, not found in logs.
+            if let Some(hint) = devlanes_cli::status_hint(&error.data) {
+                return Some(hint);
+            }
             let unit = error.data.get("unit").and_then(Value::as_str)?;
             // The daemon's canonical lane wins; otherwise the user's own selectors.
             Some(match error.data.get("lane").and_then(Value::as_str) {
@@ -1123,6 +1144,38 @@ mod tests {
         .expect("gone");
     }
 
+    /// A restart with an invalid user config fails with the strict load's
+    /// `config_error` before it reaches the running daemon, which keeps its lanes.
+    #[tokio::test]
+    async fn restart_refuses_an_invalid_user_config_first() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut paths = Paths::new(temp.path().join("h")).expect("paths");
+        paths.socket = paths.run.join("daemon.sock");
+        paths.prepare().expect("prepare");
+        let config = paths.home.join("config.yaml");
+        std::fs::write(&config, "tui:\n  theme: neon\n").expect("config");
+        let daemon = tokio::net::UnixListener::bind(&paths.socket).expect("socket");
+        let context = devlanes_proto::Context {
+            yes: true,
+            ..devlanes_proto::Context::default()
+        };
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            daemon_restart(&runtime(), &paths, context),
+        )
+        .await
+        .expect("in time")
+        .expect_err("invalid config");
+        assert_eq!(error.code, "config_error");
+        assert_eq!(error.data["file"], config.display().to_string());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), daemon.accept())
+                .await
+                .is_err(),
+            "the running daemon was never contacted"
+        );
+    }
+
     /// An older compatible daemon gets both versions named; another protocol also
     /// gets the restart command.
     #[test]
@@ -1140,7 +1193,9 @@ mod tests {
     }
 
     /// Offline reset never prompts: without --yes it refuses with the flag to add,
-    /// with --yes it moves the database aside.
+    /// with --yes it moves the database aside with the lane data folders, whose
+    /// lane ids a new database hands out again. An invalid user config, which
+    /// names the data folder, moves nothing.
     #[tokio::test]
     async fn offline_reset_needs_yes_and_moves_state() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1148,24 +1203,51 @@ mod tests {
         paths.socket = paths.run.join("daemon.sock");
         paths.prepare().expect("prepare");
         std::fs::write(&paths.db, "old").expect("db");
-        let refused = reset_state_offline(&runtime(), &paths, false)
-            .await
-            .expect_err("needs --yes");
+        let lane = paths.home.join("data/acme/1");
+        std::fs::create_dir_all(&lane).expect("lane data");
+        std::fs::write(lane.join("dump.sql"), "rows").expect("lane file");
+        // A process another test forks in the same moment shares the lock file's
+        // description until it execs, so the lock can look taken for that instant.
+        let reset = async |yes: bool| {
+            let mut result = reset_state_offline(&runtime(), &paths, yes).await;
+            for _ in 0..50 {
+                if !matches!(&result, Err(error) if error.code == "daemon_running") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                result = reset_state_offline(&runtime(), &paths, yes).await;
+            }
+            result
+        };
+        let config = paths.home.join("config.yaml");
+        std::fs::write(&config, "tui:\n  theme: neon\n").expect("config");
+        let invalid = reset(true).await.expect_err("invalid config");
+        assert_eq!(invalid.code, "config_error");
+        assert!(paths.db.exists() && lane.exists(), "nothing moved");
+        std::fs::remove_file(&config).expect("valid again");
+        let refused = reset(false).await.expect_err("needs --yes");
         assert_eq!(refused.code, "confirmation_required");
         assert_eq!(refused.data["flag"], "--yes");
         assert!(paths.db.exists(), "nothing moved without --yes");
-        // A process another test forks in the same moment shares the lock file's
-        // description until it execs, so the lock can look taken for that instant.
-        let mut moved = reset_state_offline(&runtime(), &paths, true).await;
-        for _ in 0..50 {
-            if !matches!(&moved, Err(error) if error.code == "daemon_running") {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            moved = reset_state_offline(&runtime(), &paths, true).await;
-        }
-        assert_eq!(moved, Ok(0));
+        assert_eq!(reset(true).await, Ok(0));
         assert!(!paths.db.exists(), "moved aside");
+        assert!(!lane.exists(), "lane data moved aside");
+        let aside: Vec<std::path::PathBuf> = std::fs::read_dir(paths.home.join("data"))
+            .expect("data root")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        assert!(
+            aside[0]
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".legacy-")),
+            "{aside:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(aside[0].join("acme/1/dump.sql")).expect("kept"),
+            "rows"
+        );
     }
 
     /// Hints keep the lane and project the user chose.
