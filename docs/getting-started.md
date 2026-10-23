@@ -8,7 +8,7 @@ devlanes runs a project's dev services once per Git worktree. Each worktree is a
 brew install devlanes-run/tap/devlanes
 ```
 
-The [README](../README.md#install) lists the npm, cargo and `install.sh` options and the source build. devlanes runs on macOS and Linux.
+The [README](../README.md#install) lists the npm, cargo and `install.sh` options and the source build. devlanes runs on macOS, Linux and Windows 11; on Windows, [Windows](guides/windows.md) covers install and setup.
 
 ## First config
 
@@ -124,7 +124,7 @@ For more detail in the daemon's log, restart it with a level: `DEVLANES_LOG=debu
 
 - [CLI reference](reference/cli.md): every command and option.
 - [Config reference](reference/config.md): every field of `devlanes.yaml` and the user `config.yaml`.
-- Guides: [run and run_script](guides/run-scripts.md), [languages](guides/languages.md), [framework presets](guides/presets.md), [ports and environment](guides/ports-and-env.md), [hostnames and HTTPS](guides/https.md), [infra](guides/infra.md), [service patterns](guides/services.md), [terminals](guides/terminals.md), [remote setup](guides/remote-setup.md).
+- Guides: [run and run_script](guides/run-scripts.md), [languages](guides/languages.md), [framework presets](guides/presets.md), [ports and environment](guides/ports-and-env.md), [hostnames and HTTPS](guides/https.md), [infra](guides/infra.md), [service patterns](guides/services.md), [terminals](guides/terminals.md), [remote setup](guides/remote-setup.md), [Windows](guides/windows.md), [Windows (WSL2)](guides/wsl.md).
 - [Remote boxes](remote.md): run lanes on another machine and use them locally.
 - [Design](design.md): lanes, ports, the daemon and startup order.
 - [Observability](observability.md): the daemon's spans and diagnostics, and plans for tracing and benchmarks.

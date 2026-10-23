@@ -59,6 +59,15 @@ pub enum Error {
 /// Default bound for one CLI invocation.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Extra curl flags for HTTPS through the proxy: none on Unix.
+#[cfg(unix)]
+pub const CURL_FLAGS: &str = "";
+/// Extra curl flags for HTTPS through the proxy. Windows' curl verifies through
+/// Schannel, which fails when it cannot check revocation, and the devlanes CA
+/// publishes no revocation list; best effort still verifies the chain.
+#[cfg(windows)]
+pub const CURL_FLAGS: &str = "--ssl-revoke-best-effort";
+
 /// First port of the e2e port slots; slots stay inside the default pool's range and
 /// below the Linux and macOS ephemeral ranges.
 const SLOT_BASE: u16 = 26000;

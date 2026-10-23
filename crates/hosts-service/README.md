@@ -71,7 +71,9 @@ services have none) and otherwise fails with `terminal_required`. It then runs
 with the `runas` verb, hidden, and waits for it. The elevated child:
 
 1. Refuses a SID that does not look like a person's account (`S-1-5-21-` or, for
-   Microsoft Entra ID, `S-1-12-1-`, then four numbers).
+   Microsoft Entra ID, `S-1-12-1-`, then four numbers), and the well-known groups
+   of the first shape (last number 512 to 527, such as Domain Admins and Domain
+   Users, which is also the local `None` group).
 2. Checks that `%ProgramFiles%` is admin-only, then creates
    `%ProgramFiles%\devlanes` with the access list above or checks an existing
    one the same way (see the install location check below).
@@ -98,7 +100,8 @@ another administrator approved the prompt, and makes the daemon retry.
 
 `devlanes certs untrust --hosts` clears the block over the pipe as the user, then
 runs `__uninstall-hosts-service` elevated, which stops and deletes the service and
-removes the binaries and the directory. The CLI warns if the directory is still
+removes the binaries, the directory and any `etc\.hosts.devlanes-<pid>.tmp`
+regular files a stopped write left behind. The CLI warns if the directory is still
 there afterwards. When the service was never installed, nothing is elevated.
 
 ## Security model
@@ -136,9 +139,11 @@ adds no check of its own:
   processes below medium integrity (the label). A restricted token gets in only
   when its restricting SIDs include the user.
 - `PIPE_REJECT_REMOTE_CLIENTS`: nothing reaches it over the network.
-- `FILE_FLAG_FIRST_PIPE_INSTANCE`: if any process created the name first, the
-  service fails to start (exit code 1) instead of sharing the name; the
-  recovery actions start it again three times.
+- `FILE_FLAG_FIRST_PIPE_INSTANCE`: if the name still exists when the service
+  starts, it waits up to 5 s (a client handle opened before a restart or
+  reinstall keeps the name alive until the client closes it), then fails to
+  start (exit code 1) instead of sharing the name; the recovery actions start
+  it again three times.
 
 What it will not do:
 
@@ -164,9 +169,9 @@ exclusively, then `FlushFileBuffers`. Just before the rename the service reads
 the hosts file again and starts over from the new content if another program
 changed it, up to three attempts. The temp file is then renamed over `hosts`.
 A program holding the hosts file open without delete sharing makes the rename
-fail with access denied, which is retried once after 10 ms; the update then
-fails, and the daemon tries again with its next change or
-`devlanes certs trust --hosts`. The temp file inherits
+fail with access denied or a sharing violation, which is retried for about 1.5
+seconds; the update then fails, and the daemon tries again with its next change
+or `devlanes certs trust --hosts`. The temp file inherits
 the `etc` directory's access list, which is exactly what a stock hosts file has
 (it has no entries of its own). A hosts file with the read-only attribute is
 refused at once with a message saying so. After a change the service runs
@@ -198,7 +203,8 @@ Limits of this model:
   runs the installer.
 - The rename gives the hosts file the `etc` directory's inherited access list
   and the service's default owner (SYSTEM or Administrators). Entries an
-  administrator added to the hosts file itself are lost on the first write.
+  administrator added to the hosts file itself are lost on the first write, and
+  so are its hidden and system attributes.
 - The service parses caller input as SYSTEM, with all of LocalSystem's
   privileges. It is written without `unsafe`; Win32 calls go through
   `devlanes-sys` and the service plumbing through the `windows-service` crate.

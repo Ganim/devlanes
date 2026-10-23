@@ -21,15 +21,6 @@ devlanes status --json > "$E2E_STATUS"
 docker compose -p devlanes-fixture-full exec -T postgres \
   psql -U postgres -d full_0 -tAc "SELECT count(*) FROM items" > "$E2E_ROWS""#;
 
-/// Extra curl flags for [`CHECK`]: none on Unix.
-#[cfg(unix)]
-const CURL_FLAGS: &str = "";
-/// Extra curl flags for [`CHECK`]. Windows' curl verifies through Schannel,
-/// which fails when it cannot check revocation, and the devlanes CA publishes
-/// no revocation list; best effort still verifies the chain.
-#[cfg(windows)]
-const CURL_FLAGS: &str = "--ssl-revoke-best-effort";
-
 /// Runs `devlanes with` with [`CHECK`] followed by `tail`.
 fn with(lab: &Lab, name: &str, tail: &str) -> Result<(Output, Value, String)> {
     let status = lab.home().join(format!("{name}-status.json"));
@@ -52,7 +43,7 @@ fn with(lab: &Lab, name: &str, tail: &str) -> Result<(Output, Value, String)> {
     )?;
     command
         .env("E2E_HTTPS_PORT", lab.https_port().to_string())
-        .env("E2E_CURL_FLAGS", CURL_FLAGS)
+        .env("E2E_CURL_FLAGS", devlanes_e2e::CURL_FLAGS)
         .env("E2E_STATUS", &status)
         .env("E2E_ROWS", &rows);
     let output = lab.run(command, Duration::from_secs(420))?;

@@ -71,9 +71,12 @@ async fn annotate_excluded_ports(_facts: &mut Value, _user: &devlanes_config::Us
 /// Adds `terminal: {elevated, elevation_allowed, job}` about the shell
 /// running this command: an elevated shell cannot start the daemon unless
 /// `DEVLANES_ALLOW_ELEVATED=1` allows it, and a job that kills its processes
-/// when the terminal closes takes a daemon started inside it along.
+/// when the terminal closes takes a daemon started inside it along. Also adds
+/// `windows: {build}`, since older builds than Windows 11 24H2 are not
+/// supported.
 #[cfg(windows)]
 pub fn annotate_terminal(data: &mut Value) {
+    data["windows"] = json!({"build": devlanes_sys::windows::os_build()});
     use devlanes_sys::windows::{
         process::job_of_self,
         token::{elevated, elevation_refused},

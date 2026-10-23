@@ -2,7 +2,7 @@
 
 End-to-end tests that run the real `devlanes` binary as separate processes against the projects in `fixtures/`. The library in `src/` is the harness; the tests are in `tests/it/`. The SSH tests under `e2e/ssh` are separate (see its README).
 
-On Windows, tests that need a later porting step (ConPTY, HTTPS, Docker) are ignored with the step in the reason.
+Every test runs on macOS, Linux and Windows except the few that exercise one OS's own mechanism (`SIGTERM`, Unix sockets), which are `cfg(unix)`; Windows-only checks are in `tests/it/windows.rs`. On Windows, curl gets `--ssl-revoke-best-effort` (`CURL_FLAGS`), because Schannel cannot check revocation for the local CA.
 
 ## Usage
 

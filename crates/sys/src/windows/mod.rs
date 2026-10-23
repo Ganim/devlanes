@@ -40,6 +40,23 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use crate::FileIdentity;
 
+/// The Windows build number (26100 for Windows 11 24H2). `RtlGetVersion`
+/// reports the real one, which `GetVersionEx` does not for a program without a
+/// compatibility manifest.
+pub fn os_build() -> u32 {
+    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
+        // SAFETY: an all-zero value is valid for the rest of this plain C struct.
+        ..unsafe { std::mem::zeroed() }
+    };
+    // SAFETY: `info` is writable and its size field is set; the call always
+    // succeeds for this structure.
+    unsafe { RtlGetVersion(&raw mut info) };
+    info.dwBuildNumber
+}
+
 /// Volume serial number and 128-bit file id of an open handle. File systems
 /// without `FILE_ID_INFO` (FAT) fall back to the 64-bit file index.
 pub(crate) fn file_identity(file: &File) -> io::Result<FileIdentity> {
@@ -75,4 +92,13 @@ pub(crate) fn file_identity(file: &File) -> io::Result<FileIdentity> {
         u64::from(info.dwVolumeSerialNumber),
         u128::from(index),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    /// A real build number, not the 9200 of a manifest-less `GetVersionEx`.
+    #[test]
+    fn os_build_is_the_real_one() {
+        assert!(super::os_build() >= 10240, "{}", super::os_build());
+    }
 }

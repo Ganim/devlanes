@@ -78,8 +78,9 @@ pub fn deny_output() -> String {
 /// A command is blocked when all of these hold: it is detached (a lone `&`,
 /// `setsid -f`, `tmux new -d`, `screen -dm`, `run_in_background`, and from
 /// PowerShell or on Windows `Start-Process`, `Start-Job` and `start`); it looks
-/// like a dev server and is not an editor; and the directory it runs in, after
-/// any `cd`, is inside a project with `devlanes.yaml`.
+/// like a dev server and, from PowerShell or on Windows, is not an editor; and
+/// the directory it runs in, after any `cd`, is inside a project with
+/// `devlanes.yaml`.
 pub fn decide(payload: &str, cwd: &Path, home: Option<&Path>) -> Verdict {
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(payload) else {
         return Verdict::Allow;
@@ -276,7 +277,7 @@ impl Check<'_> {
         // The backgrounded command is devlanes itself, such as devlanes logs -f.
         launch.detached
             && program != "devlanes"
-            && !EDITORS.contains(&program.as_str())
+            && !(self.windows && EDITORS.contains(&program.as_str()))
             && self.long_running(&launch.words)
             && in_project(&launch.dir)
     }
@@ -287,11 +288,15 @@ impl Check<'_> {
     /// drops the brackets around them (`@('run','dev')`), and on Windows the
     /// braces of script blocks go, so `Start-Job { pnpm dev }` reads as
     /// `Start-Job pnpm dev`.
+    ///
+    /// A Unix `Bash` call keeps only the first line of a simple command, as the
+    /// script read one line per command: the rest of a single-quoted string or
+    /// a `\` line continuation is not looked at.
     fn words<'s>(&self, segment: &'s str) -> Vec<&'s str> {
-        let separators: &[char] = match (self.powershell, self.windows) {
-            (true, _) => &[' ', '\t', '\n', '\r', ','],
-            (false, true) => &[' ', '\t', '\n', '\r'],
-            (false, false) => &[' ', '\t', '\n'],
+        let (separators, segment): (&[char], _) = match (self.powershell, self.windows) {
+            (true, _) => (&[' ', '\t', '\n', '\r', ','], segment),
+            (false, true) => (&[' ', '\t', '\n', '\r'], segment),
+            (false, false) => (&[' ', '\t'], segment.split('\n').next().unwrap_or("")),
         };
         segment
             .split(separators)
@@ -554,10 +559,11 @@ const SERVER_TOOLS: &[&str] = &[
 ];
 
 /// Editors, IDEs and file openers: started in the background they open a file
-/// such as `server.js` in a window, they don't serve it. Some names count only
-/// on the OS where they are editors: elsewhere `devenv` is Nix's (`devenv up`
-/// starts services), and Linux `open` may be Debian's `openvt`, which runs the
-/// command it is given.
+/// such as `server.js` in a window, they don't serve it. Only checked where the
+/// Windows rules apply; a Unix `Bash` call blocks `code server.js &` as the
+/// script this replaces did. Some names count only on the OS where they are
+/// editors: elsewhere `devenv` is Nix's (`devenv up` starts services), and
+/// Linux `open` may be Debian's `openvt`, which runs the command it is given.
 const EDITORS: &[&str] = &[
     "code",
     "code-insiders",

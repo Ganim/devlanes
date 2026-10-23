@@ -138,8 +138,10 @@ impl Job {
     ///
     /// The child is created suspended, added to the job, then resumed; a new
     /// job without UI limits always takes it. Creation flags set on `command`
-    /// before are replaced by `CREATE_NO_WINDOW` when this process has no
-    /// console, as `no_window` sets. A child that cannot be resumed is killed.
+    /// before are replaced by `CREATE_SUSPENDED` plus `CREATE_NO_WINDOW` when
+    /// this process has no console, as `no_window` sets, and stay set on
+    /// `command` afterwards: spawn it again only through this method. A child
+    /// that cannot be resumed is killed.
     pub fn spawn_helper(
         &self,
         command: &mut tokio::process::Command,

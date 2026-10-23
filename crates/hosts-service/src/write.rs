@@ -17,6 +17,12 @@ use std::time::Duration;
 /// Attempts when another writer changes the file between our read and our rename.
 const ATTEMPTS: usize = 3;
 
+/// `ERROR_SHARING_VIOLATION`.
+const SHARING_VIOLATION: i32 = 32;
+
+/// `ERROR_LOCK_VIOLATION`.
+const LOCK_VIOLATION: i32 = 33;
+
 /// `FILE_ATTRIBUTE_REPARSE_POINT`, set on symlinks and junctions.
 const REPARSE_POINT: u32 = 0x400;
 
@@ -122,11 +128,38 @@ pub fn read(path: &Path) -> Result<Vec<u8>, WriteError> {
 
 /// Temp file next to `path`, unique per process.
 fn temp_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!("{}{}.tmp", temp_prefix(path), std::process::id()))
+}
+
+/// `.<name>.devlanes-`, the start of every temp file name for `path`.
+fn temp_prefix(path: &Path) -> String {
     let name = path.file_name().map_or_else(
         || "hosts".into(),
         |name| name.to_string_lossy().into_owned(),
     );
-    path.with_file_name(format!(".{name}.devlanes-{}.tmp", std::process::id()))
+    format!(".{name}.devlanes-")
+}
+
+/// Removes the temp files that runs of a service which crashed or was stopped
+/// mid-write left next to `path`: regular files named
+/// `.<name>.devlanes-<pid>.tmp`, for any pid. Best effort.
+pub fn remove_leftover_temps(path: &Path) {
+    let prefix = temp_prefix(path);
+    let Some(Ok(entries)) = path.parent().map(fs::read_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let is_temp = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(&prefix))
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
+        // `file_type` does not follow links, so a link by that name stays.
+        if is_temp && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Creates the temp file exclusively; `create_new` also refuses to follow a link.
@@ -179,19 +212,28 @@ pub fn replace(path: &Path, original: &[u8], bytes: &[u8]) -> Result<(), WriteEr
 }
 
 /// Renames `temp` over `path`, waiting about 1.5 s in total while another
-/// program holds the hosts file without delete sharing. Defender and the DNS
-/// Client read it often, and a failed write is only retried when the names
-/// change again. The read-only case was refused before, so access denied here
-/// means a holder.
+/// program holds the hosts file without delete sharing (access denied) or
+/// holds it in a way that refuses the rename (a sharing or lock violation).
+/// Defender and the DNS Client read it often, and a failed write is only
+/// retried when the names change again. The read-only case was refused
+/// before, so access denied here means a holder.
 fn rename_over(temp: &Path, path: &Path) -> io::Result<()> {
     const HELD_MS: [u64; 6] = [50, 100, 200, 300, 400, 500];
     let mut delays = HELD_MS.iter();
     loop {
-        match devlanes_sys::rename_retrying(temp, path) {
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => match delays.next() {
-                Some(ms) => std::thread::sleep(Duration::from_millis(*ms)),
-                None => return Err(error),
-            },
+        match fs::rename(temp, path) {
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    || matches!(
+                        error.raw_os_error(),
+                        Some(SHARING_VIOLATION | LOCK_VIOLATION)
+                    ) =>
+            {
+                match delays.next() {
+                    Some(ms) => std::thread::sleep(Duration::from_millis(*ms)),
+                    None => return Err(error),
+                }
+            }
             result => return result,
         }
     }
@@ -365,6 +407,39 @@ mod tests {
         update(&hosts, append(b"b\n")).expect("update");
         assert_eq!(fs::read(&hosts).expect("read"), b"a\nb\n");
         assert_eq!(names(dir.path()), ["hosts"]);
+    }
+
+    /// Only regular files named like the service's temp files go; the hosts
+    /// file, other names and directories stay.
+    #[test]
+    fn leftover_temps_are_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hosts = dir.path().join("hosts");
+        fs::write(&hosts, b"a\n").expect("seed");
+        for name in [".hosts.devlanes-1.tmp", ".hosts.devlanes-4242.tmp"] {
+            fs::write(dir.path().join(name), b"stale").expect("leftover");
+        }
+        let kept = [
+            ".hosts.devlanes-.tmp",
+            ".hosts.devlanes-12a.tmp",
+            ".hosts.devlanes-1.tmp.bak",
+            ".lmhosts.devlanes-1.tmp",
+            "hosts.devlanes-1.tmp",
+        ];
+        for name in kept {
+            fs::write(dir.path().join(name), b"other").expect("other file");
+        }
+        fs::create_dir(dir.path().join(".hosts.devlanes-7.tmp")).expect("dir");
+        remove_leftover_temps(&hosts);
+        let mut left = names(dir.path());
+        left.sort();
+        let mut expected: Vec<std::ffi::OsString> = kept
+            .iter()
+            .chain(&[".hosts.devlanes-7.tmp", "hosts"])
+            .map(Into::into)
+            .collect();
+        expected.sort();
+        assert_eq!(left, expected);
     }
 
     /// A reader holding the file without delete sharing makes the rename fail

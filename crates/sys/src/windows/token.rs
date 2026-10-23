@@ -94,15 +94,22 @@ impl Sid {
     /// Whether the SID has the shape of a person's account rather than a
     /// built-in account or a well-known group: a local, Microsoft or domain
     /// account (`S-1-5-21-` and four numbers) or a Microsoft Entra ID account
-    /// (`S-1-12-1-` and four numbers). Domain groups share the first shape.
+    /// (`S-1-12-1-` and four numbers). The well-known groups of the first shape,
+    /// RIDs 512 to 527 (Domain Admins, Domain Users, which is the local `None`
+    /// group too, and so on), are refused; other domain groups share the shape.
     pub fn has_account_shape(&self) -> bool {
         let Ok(text) = self.to_sddl() else {
             return false;
         };
-        ["S-1-5-21-", "S-1-12-1-"].iter().any(|prefix| {
-            text.strip_prefix(prefix)
-                .is_some_and(|rest| rest.split('-').count() == 4)
-        })
+        if let Some(rest) = text.strip_prefix("S-1-5-21-") {
+            let numbers: Vec<&str> = rest.split('-').collect();
+            return numbers.len() == 4
+                && !numbers[3]
+                    .parse::<u32>()
+                    .is_ok_and(|rid| (512..=527).contains(&rid));
+        }
+        text.strip_prefix("S-1-12-1-")
+            .is_some_and(|rest| rest.split('-').count() == 4)
     }
 
     /// The string form, such as `S-1-5-21-...`, used in SDDL and for display.
@@ -397,8 +404,8 @@ mod tests {
         Ok(())
     }
 
-    /// The current user is an account; SYSTEM, Administrators, Everyone and
-    /// Authenticated Users are not.
+    /// The current user is an account; SYSTEM, Administrators, Everyone,
+    /// Authenticated Users and the well-known domain groups are not.
     #[test]
     fn accounts_are_told_from_groups_and_services() -> io::Result<()> {
         let me = current_user()?;
@@ -410,6 +417,13 @@ mod tests {
         assert!(Sid::parse("S-1-12-1-1-2-3-4")?.has_account_shape());
         assert!(!Sid::parse("S-1-5-21-1-2-3")?.has_account_shape());
         assert!(!Sid::parse("S-1-5-21-1-2-3-4-5")?.has_account_shape());
+        // Domain Admins, Domain Users (local None), Enterprise Key Admins.
+        for group in ["512", "513", "527"] {
+            let sid = format!("S-1-5-21-1-2-3-{group}");
+            assert!(!Sid::parse(&sid)?.has_account_shape(), "{sid}");
+        }
+        assert!(Sid::parse("S-1-5-21-1-2-3-500")?.has_account_shape());
+        assert!(Sid::parse("S-1-5-21-1-2-3-528")?.has_account_shape());
         Ok(())
     }
 }

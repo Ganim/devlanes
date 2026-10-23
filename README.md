@@ -1,6 +1,6 @@
 # devlanes
 
-devlanes runs a project's dev environment once per Git worktree on macOS and Linux. Each worktree is a lane with its own ports, hostnames and data; a per-user daemon owns the processes and the CLI and TUI are its clients. devlanes is pre-alpha.
+devlanes runs a project's dev environment once per Git worktree on macOS, Linux and Windows. Each worktree is a lane with its own ports, hostnames and data; a per-user daemon owns the processes and the CLI and TUI are its clients. devlanes is pre-alpha.
 
 ## Install
 
@@ -18,6 +18,14 @@ cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes d
 ```
 
 `install.sh` verifies the archive against the release's `SHA256SUMS`, installs to `~/.local/bin` (`DEVLANES_INSTALL_DIR` changes it; `DEVLANES_INSTALL_SUDO=1` allows sudo for a directory you can't write) and takes `DEVLANES_VERSION=X.Y.Z` to pin a release. [packaging](packaging/README.md) describes the release pipeline.
+
+On Windows 11 24H2 or later, x64 or arm64, install from PowerShell:
+
+```powershell
+irm https://github.com/devlanes-run/devlanes/releases/latest/download/install.ps1 | iex
+```
+
+`install.ps1` verifies the archive the same way, installs to `%LOCALAPPDATA%\Programs\devlanes` and adds it to your user `PATH`. `npm install -g devlanes` works too, and cargo binstall needs one run each for `devlanes`, `devlanes-logon-launcher` and `devlanes-hosts-service`. devlanes on Windows needs [Git for Windows](https://gitforwindows.org); [Windows](docs/guides/windows.md) covers setup, and [Windows (WSL2)](docs/guides/wsl.md) running the Linux build in WSL 2.
 
 ### Shorter name
 

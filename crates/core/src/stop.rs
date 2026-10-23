@@ -79,9 +79,8 @@ mod os {
 mod os {
     use super::StopSignal;
 
-    /// What a Windows stop will send for a configured signal once graceful
-    /// stops exist. Windows has no POSIX signals; console processes only see
-    /// Ctrl-C and Ctrl-Break.
+    /// What a Windows stop sends for a configured signal. Windows has no POSIX
+    /// signals; console processes only see Ctrl-C and Ctrl-Break.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum WindowsStop {
         /// Ctrl-C, the closest to SIGINT from a terminal.
@@ -94,11 +93,9 @@ mod os {
     }
 
     impl StopSignal {
-        /// The Windows stop this signal is planned to map to once graceful stops
-        /// exist; until then the runner terminates every stop (see
-        /// [`StopSignal::launch_note`]). SIGHUP, SIGQUIT, SIGUSR1 and SIGUSR2
-        /// have no equivalent and will get Ctrl-Break like SIGTERM, so a config
-        /// shared with Unix machines still starts here.
+        /// The Windows stop this signal maps to. SIGHUP, SIGQUIT, SIGUSR1 and
+        /// SIGUSR2 have no equivalent and get Ctrl-Break like SIGTERM, so a
+        /// config shared with Unix machines still starts here.
         pub fn windows_stop(self) -> WindowsStop {
             match self {
                 Self::Interrupt => WindowsStop::CtrlC,
@@ -110,13 +107,14 @@ mod os {
         }
     }
 
-    /// The Windows runner does not send Ctrl-C or Ctrl-Break yet: every stop
-    /// terminates the unit's processes at once, whatever the signal, so every
-    /// service gets this note until graceful stops land.
+    /// Only signals without a Windows counterpart get a note: SIGINT, SIGTERM
+    /// and SIGKILL map the way a reader expects.
     pub(super) fn launch_note(signal: StopSignal) -> Option<String> {
-        Some(format!(
-            "on Windows a stop ends the process tree immediately; stop.signal {signal} is not sent yet (graceful Ctrl-C and Ctrl-Break stops come later)"
-        ))
+        matches!(
+            signal,
+            StopSignal::Hangup | StopSignal::Quit | StopSignal::User1 | StopSignal::User2
+        )
+        .then(|| format!("on Windows stop.signal {signal} is sent as Ctrl-Break"))
     }
 }
 
@@ -161,10 +159,13 @@ mod tests {
         for signal in [Terminate, Hangup, Quit, User1, User2] {
             assert_eq!(signal.windows_stop(), WindowsStop::CtrlBreak, "{signal}");
         }
-        for signal in StopSignal::ALL {
+        for signal in [Interrupt, Terminate, Kill] {
+            assert_eq!(signal.launch_note(), None, "{signal}");
+        }
+        for signal in [Hangup, Quit, User1, User2] {
             let note = signal.launch_note().unwrap_or_default();
             assert!(note.contains(signal.config_name()), "{note}");
-            assert!(note.contains("immediately"), "{note}");
+            assert!(note.contains("Ctrl-Break"), "{note}");
         }
     }
 }

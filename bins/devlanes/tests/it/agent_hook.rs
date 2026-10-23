@@ -135,7 +135,7 @@ fn plugin_command() -> String {
 }
 
 /// A directory with a fake `devlanes` that answers `__agent-hook` the way
-/// 0.1.0 does: a usage error on stderr and exit 2.
+/// releases up to 0.2.0 do: a usage error on stderr and exit 2.
 fn old_devlanes() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
     #[cfg(unix)]

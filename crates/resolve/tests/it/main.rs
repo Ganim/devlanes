@@ -1049,24 +1049,19 @@ services:
     let (quit, int) = (&lane.services["quit"], &lane.services["int"]);
     assert_eq!(quit.stop.signal, StopSignal::Quit);
     assert_eq!(int.stop.signal, StopSignal::Interrupt);
-    for (service, signal) in [(quit, "SIGQUIT"), (int, "SIGINT")] {
-        #[cfg(unix)]
-        assert!(
-            service.launch.notes.is_empty(),
-            "{signal}: {:?}",
-            service.launch.notes
-        );
-        #[cfg(windows)]
-        assert!(
-            service
-                .launch
-                .notes
-                .iter()
-                .any(|note| note.contains(signal) && note.contains("immediately")),
-            "{:?}",
-            service.launch.notes
-        );
-    }
+    // SIGINT maps to Ctrl-C on Windows, so only SIGQUIT has no counterpart there.
+    assert!(int.launch.notes.is_empty(), "{:?}", int.launch.notes);
+    #[cfg(unix)]
+    assert!(quit.launch.notes.is_empty(), "{:?}", quit.launch.notes);
+    #[cfg(windows)]
+    assert!(
+        quit.launch
+            .notes
+            .iter()
+            .any(|note| note.contains("SIGQUIT") && note.contains("Ctrl-Break")),
+        "{:?}",
+        quit.launch.notes
+    );
 }
 
 #[tokio::test]

@@ -826,6 +826,38 @@ fn doctor_terminal_and_acl_checks() {
     }
 }
 
+/// The Windows build (`windows`): Windows 11 24H2 (build 26100) or later is a
+/// note, anything older fails doctor with the fix.
+#[test]
+fn doctor_windows_build_check() {
+    let data = |build: u64| {
+        json!({
+            "running": false, "version": "0.3.0", "home": r"C:\Users\u\.devlanes",
+            "socket": r"\\.\pipe\devlanes-0", "db_path": r"C:\Users\u\.devlanes\state.db",
+            "sandbox": {"codex_sandbox": false, "app_sandbox": false},
+            "windows": {"build": build},
+        })
+    };
+    let current = render_text(Method::Doctor, &data(26_100));
+    assert!(
+        current.contains("ok windows: Windows build 26100"),
+        "{current}"
+    );
+    assert!(current.contains("--- agent (exit 0)"), "{current}");
+    let old = render_text(Method::Doctor, &data(22_631));
+    assert!(
+        old.contains(
+            "fail windows: Windows build 22631 is older than Windows 11 24H2 (build 26100), the oldest devlanes supports"
+        ),
+        "{old}"
+    );
+    assert!(
+        old.contains("  fix: update Windows to Windows 11 24H2 or later"),
+        "{old}"
+    );
+    assert!(old.contains("--- agent (exit 1)"), "{old}");
+}
+
 /// WSL facts (`wsl`, from the CLI inside a distro, and the daemon's
 /// `windows_drive_worktrees`): interop on is a passing check; interop off, no
 /// systemd, a CA Windows browsers do not trust and worktrees on Windows drives

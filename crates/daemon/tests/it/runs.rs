@@ -100,15 +100,14 @@ fn real_runner() -> devlanes_runner_pty::PtyRunner {
     devlanes_runner_pty::PtyRunner::default()
 }
 
-/// The runner the daemon uses on this OS, with a console helper that always
-/// fails, so a stop terminates at once: these tests stop nothing gracefully.
+/// The runner the daemon uses on this OS, with a console helper that does not
+/// exist: no console event can be sent, so a stop terminates at once unless a
+/// window of the unit takes `WM_CLOSE`.
 #[cfg(windows)]
 fn real_runner() -> devlanes_runner_windows::WindowsRunner {
     devlanes_runner_windows::WindowsRunner::new(devlanes_runner_windows::ConsoleHelper {
-        program: std::env::var_os("ComSpec")
-            .unwrap_or_else(|| "cmd.exe".into())
-            .into(),
-        args: ["/d", "/c", "exit 1"].map(Into::into).into(),
+        program: std::env::temp_dir().join("devlanes-no-such-console-helper.exe"),
+        args: Vec::new(),
     })
 }
 

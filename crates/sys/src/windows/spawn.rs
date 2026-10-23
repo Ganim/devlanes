@@ -26,7 +26,7 @@ use windows_sys::Win32::System::Threading::PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE;
 
 use super::conpty::PseudoConsole;
 use super::job::Job;
-use super::proc::{Console, creation_time, exited};
+use super::proc::{Console, LostConsole, creation_time, exited};
 use super::security::wide;
 use super::token::{owned, raw};
 
@@ -98,6 +98,13 @@ impl Child {
     /// up.
     pub fn console(&self) -> io::Result<Option<Console>> {
         Console::of(&self.handle)
+    }
+
+    /// The console the process was last attached to, also once it exited:
+    /// known while its console host still runs and was started by this
+    /// process, as the host of a console it was created with is.
+    pub fn last_console(&self) -> Result<Console, LostConsole> {
+        Console::last_of(&self.handle, self.pid, self.start_time)
     }
 
     /// The exit code once the process has exited, `None` while it runs.

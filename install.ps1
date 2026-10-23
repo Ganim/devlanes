@@ -18,7 +18,8 @@ Run as a file, -Version, -InstallDir and -NoModifyPath do the same. A devlanes.e
 that is running (usually the daemon) is renamed to devlanes.exe.old-TIMESTAMP and
 keeps running; `devlanes daemon restart` switches to the new version and
 `devlanes doctor` deletes the old file afterwards. The script never stops the daemon.
-Works in Windows PowerShell 5.1 and PowerShell 7.
+Works in Windows PowerShell 5.1 and PowerShell 7, on Windows 11 24H2 (build 26100) or
+later; it refuses older builds.
 #>
 # `irm | iex` binds these parameters in the caller's session and overwrites variables
 # of the same names there, hence the long names; the aliases are the documented ones.
@@ -55,6 +56,15 @@ param(
             'AMD64' { return 'x86_64-pc-windows-msvc' }
             'ARM64' { return 'aarch64-pc-windows-msvc' }
             default { throw "devlanes install: no release build for Windows $Architecture" }
+        }
+    }
+
+    function Assert-DevlanesWindowsBuild {
+        <# Throws when Build is older than Windows 11 24H2 (build 26100), the oldest devlanes supports. #>
+        param([int]$Build)
+        $minimum = 26100
+        if ($Build -lt $minimum) {
+            throw "devlanes install: devlanes needs Windows 11 24H2 (build $minimum) or later, and this is build $Build; update Windows, then run the installer again"
         }
     }
 
@@ -207,6 +217,10 @@ param(
         # Windows PowerShell's progress bar slows Invoke-WebRequest down by an order of magnitude.
         $ProgressPreference = 'SilentlyContinue'
         Set-StrictMode -Version 3.0
+
+        # Both PowerShells report the real build here: Windows PowerShell's manifest
+        # declares Windows 10 and later, and PowerShell 7 asks RtlGetVersion.
+        Assert-DevlanesWindowsBuild ([Environment]::OSVersion.Version.Build)
 
         # Windows PowerShell 5.1 may still default to TLS 1.0 and 1.1, which GitHub refuses.
         if ($PSVersionTable.PSVersion.Major -lt 6) {

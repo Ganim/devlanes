@@ -18,7 +18,7 @@ A hostname whose lane is idle, whose service is starting or has failed gets a 50
 devlanes certs trust
 ```
 
-The CA is created on first use at `~/.devlanes/ca/ca.pem` (key `ca-key.pem`, mode 0600) and the daemon writes `~/.devlanes/ca/bundle.pem`, the system roots plus the CA. `certs trust` runs in your terminal, never in the daemon, because it needs your password.
+The CA is created on first use at `~/.devlanes/ca/ca.pem` (key `ca-key.pem`, mode 0600) and the daemon writes `~/.devlanes/ca/bundle.pem`, the system roots plus the CA. `certs trust` runs in your terminal, never in the daemon, because it needs your password (on Windows, a click in a dialog).
 
 What it does per OS, by the stores in `tls.trust` (default `[system]`):
 
@@ -26,6 +26,7 @@ What it does per OS, by the stores in `tls.trust` (default `[system]`):
 | --- | --- | --- | --- |
 | macOS | login keychain, trusted as root for your user (GUI password dialog, no sudo); Safari, Chrome, Edge and `/usr/bin/curl` read it; Firefox 120+ too | same store as `system` | `certutil` into every Firefox profile; needs `brew install nss` |
 | Linux | anchor directory of your distro (`/usr/local/share/ca-certificates`, `/etc/pki/ca-trust/source/anchors`, …) then `update-ca-certificates` or `update-ca-trust`, through sudo | `~/.pki/nssdb` with `certutil`; Chrome, Chromium and Playwright's browsers read it | every profile under `~/.mozilla/firefox` (snap and flatpak paths too); needs `libnss3-tools` or `nss-tools` |
+| Windows | your user root store, no administrator rights; Windows asks to confirm each change in a dialog; Chrome, Edge and `curl.exe` read it | same store as `system` | same store as `system` (Firefox reads it through `security.enterprise_roots.enabled`, on by default) |
 
 On Linux the system store does not reach browsers, so set `tls.trust: [system, chrome, firefox]` in `~/.devlanes/config.yaml` there. Inside WSL the default adds `windows`, the Windows user root store that browsers on Windows read; see [Windows (WSL2)](wsl.md). `devlanes certs untrust` removes the CA from the same stores; `--keep-ca` with `--hosts` or `--resolver` removes only those extras.
 
@@ -44,6 +45,8 @@ Other tools from your shell:
 | Java | its own `cacerts` | `keytool -importcert -file ~/.devlanes/ca/ca.pem` |
 | Docker containers | nothing from the host | mount `ca.pem` and run `update-ca-certificates`, or talk to services by `host.docker.internal:<port>` over http |
 | iOS simulator, Android emulator | own stores | not handled yet; `tls.trust` accepts the names and ignores them with a warning |
+
+On Windows, `curl.exe` needs `--ssl-revoke-best-effort` because the devlanes CA publishes no revocation list, and Python's `requests` reads `REQUESTS_CA_BUNDLE` rather than `SSL_CERT_FILE`; [Windows](windows.md#https) has the commands.
 
 ### mkcert
 
@@ -78,7 +81,7 @@ workerd (Wrangler), musl binaries, pure-Go programs built without cgo, Safari be
 devlanes certs trust --hosts
 ```
 
-installs a small root-owned helper (`/usr/local/libexec/devlanes-hosts`) with a sudoers rule for it alone, and the daemon then keeps a `# devlanes begin` / `# devlanes end` block in `/etc/hosts` with the exact hostnames of projects that want it. Wildcards cannot be written there. The user setting `hostnames.hosts_file` is `auto` by default, which writes names only when a startup probe shows the system resolver fails `*.localhost`; `lanes.hosts_file: always` in a project forces it for that project (Wrangler repos want this), `never` in the user config wins over every project. `crates/hosts-helper/README.md` describes what the helper accepts and refuses.
+installs a small root-owned helper (`/usr/local/libexec/devlanes-hosts`) with a sudoers rule for it alone, and the daemon then keeps a `# devlanes begin` / `# devlanes end` block in `/etc/hosts` with the exact hostnames of projects that want it. Wildcards cannot be written there. The user setting `hostnames.hosts_file` is `auto` by default, which writes names only when a startup probe shows the system resolver fails `*.localhost`; `lanes.hosts_file: always` in a project forces it for that project (Wrangler repos want this), `never` in the user config wins over every project. `crates/hosts-helper/README.md` describes what the helper accepts and refuses. On Windows, which resolves only `localhost` itself, `--hosts` installs the `devlanes-hosts` service instead, after an administrator prompt; see [Windows](windows.md#hostnames-for-programs-other-than-browsers).
 
 ```yaml
 # ~/.devlanes/config.yaml
@@ -91,7 +94,7 @@ devlanes certs trust --resolver
 
 switches lane domains to `acme.test` and `acme-2.test`, answered by a DNS server the daemon runs on `127.0.0.1:15353`. `--resolver` writes `/etc/resolver/test` on macOS, or a systemd-resolved delegate (systemd 258 or newer) on Linux, so the OS sends only that TLD there.
 
-On Windows the server listens on `127.53.0.1:53`, because a Name Resolution Policy Table (NRPT) rule names a server by address only, and `--resolver` adds an NRPT rule for `.test` after the administrator prompt. In their default automatic secure DNS mode, Chrome and Edge do not upgrade lookups to DNS over HTTPS while any NRPT rule exists, so `*.test` reaches the rule; with a secure DNS provider chosen explicitly those names fail, so pick the OS default provider or turn secure DNS off. Group Policy NRPT rules make Windows ignore local ones; `doctor --output json` reports that and VPN rules for names under the TLD. `crates/resolver-dns/README.md` has the details.
+On Windows the server listens on `127.53.0.1:53`, because a Name Resolution Policy Table (NRPT) rule names a server by address only, and `--resolver` adds an NRPT rule for `.test` after the administrator prompt. In their default automatic secure DNS mode, Chrome and Edge do not upgrade lookups to DNS over HTTPS while any NRPT rule exists, so `*.test` reaches the rule; with a secure DNS provider chosen explicitly those names fail, so pick the OS default provider or turn secure DNS off. Group Policy NRPT rules make Windows ignore local ones, and `doctor` says so. `crates/resolver-dns/README.md` has the details.
 
 The TLD must be `test`, `internal`, `home.arpa` or a name under one of them. The CA is constrained to the TLD it was created with; switching later needs the recreate command `doctor` prints. `.dev` is a real TLD with HSTS preloaded and `.local` is mDNS; neither is accepted.
 
@@ -105,11 +108,13 @@ sudo setcap cap_net_bind_service=+ep "$(command -v devlanes)"   # redo after upg
 sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80
 ```
 
+Windows needs no privilege for either port, but http.sys often holds port 80 there (`netsh http show servicestate`), and the daemon then uses 8080.
+
 A fallback is a `doctor` warning, and public URLs then carry the port: `https://api.acme-2.localhost:8443`. `proxy.https_port` and `proxy.http_port` set other ports on purpose.
 
 ## Access from other devices
 
-`proxy.lan: true` accepts connections from the network. Devices still have to resolve the hostnames to your machine (their own hosts file, or a DNS server pointing `*.test` at your IP with the resolver strategy) and trust the CA. Mirroring a box's lanes to a laptop does not need this; see [remote boxes](../remote.md).
+`proxy.lan: true` accepts connections from the network; on Windows, Defender Firewall asks the first time whether `devlanes.exe` may. Devices still have to resolve the hostnames to your machine (their own hosts file, or a DNS server pointing `*.test` at your IP with the resolver strategy) and trust the CA. Mirroring a box's lanes to a laptop does not need this; see [remote boxes](../remote.md).
 
 ## Checking
 

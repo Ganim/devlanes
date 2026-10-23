@@ -221,11 +221,14 @@ fn windows_bash_calls_also_check_windows_launchers() {
             (Block, p, "node_modules/.bin/vite.cmd &", false),
             (Allow, p, "devlanes.exe logs web -f &", false),
             (Allow, p, "start https://web.acme-2.localhost", false),
+            (Allow, p, "code server.js &", false),
         ],
     );
 }
 
-/// Unix `Bash` calls stay POSIX: Windows launcher names are ordinary commands.
+/// Unix `Bash` calls give the script's verdicts: Windows launcher names are
+/// ordinary commands, editors get no exemption, and only the first line of a
+/// simple command is read.
 #[cfg(unix)]
 #[test]
 fn unix_bash_calls_ignore_windows_launchers() {
@@ -236,6 +239,10 @@ fn unix_bash_calls_ignore_windows_launchers() {
         &[
             (Allow, &p, "Start-Process pnpm dev", false),
             (Allow, &p, "start pnpm dev", false),
+            (Block, &p, "code server.js &", false),
+            (Block, &p, "xdg-open server.js &", false),
+            (Allow, &p, "echo 'a\npnpm dev' &", false),
+            (Allow, &p, "pnpm \\\ndev &", false),
         ],
     );
 }

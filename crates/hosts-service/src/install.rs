@@ -430,7 +430,8 @@ fn rollback(layout: &Layout, service: Option<&Service>, previous: &Previous) {
     }
 }
 
-/// Removes the service and, best effort, its files. Clearing the block is the
+/// Removes the service and, best effort, its files, including leftover temp
+/// files next to the hosts file. Clearing the block is the
 /// caller's job (over the pipe, before this runs); so is noticing files left
 /// in place.
 pub fn uninstall() -> Result<(), InstallError> {
@@ -452,6 +453,10 @@ pub fn uninstall() -> Result<(), InstallError> {
         let _ = devlanes_sys::remove_file_retrying(path);
     }
     let _ = fs::remove_dir(&layout.directory);
+    // Temp files a service stopped mid-write left in `etc`.
+    if let Ok(hosts) = config::hosts_path() {
+        crate::write::remove_leftover_temps(&hosts);
+    }
     Ok(())
 }
 

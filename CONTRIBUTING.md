@@ -7,17 +7,20 @@ devlanes is a Cargo workspace: one binary (`bins/devlanes`) built from small cra
 - Rust comes from `rust-toolchain.toml`; rustup installs the pinned version on the first `cargo` call.
 - Install nextest: `cargo install cargo-nextest --locked`.
 - Install kache, the build cache every compile goes through (`.cargo/config.toml` sets it as rustc wrapper): `cargo install kache --locked`, then `kache init` once.
-- macOS (Apple Silicon and Intel) and Linux with glibc (x86_64 and arm64) are supported. Windows support is in progress.
+- macOS (Apple Silicon and Intel), Linux with glibc (x86_64 and arm64) and Windows 11 24H2 or later (x64 and arm64) are supported.
 
 On Windows you also need:
 
+- Rust's MSVC toolchain (`x86_64-pc-windows-msvc` or `aarch64-pc-windows-msvc`), the host rustup picks by default.
 - Visual Studio Build Tools with the C++ workload (`cl.exe`), for crates with C code such as `ring` and `libsqlite3-sys`.
-- Git for Windows; its `sh.exe` runs `run:` strings.
+- Git for Windows. Its `sh.exe` runs `run:` strings, and the shell snippets in this file work in Git Bash.
 - kache built from git. kache 1.2.2 can't pass `cl.exe` through, so those C crates fail to build; the fix ([kunobi-ninja/kache#1640](https://github.com/kunobi-ninja/kache/pull/1640)) is merged but not released yet. Build it without the wrapper, since the released kache would hit the same bug on kache's own C dependencies:
 
   ```sh
   env -u RUSTC_WRAPPER cargo install --locked --git https://github.com/kunobi-ninja/kache --rev a37fb5ff3bcc86adfded7f3ecb4f7c5100f744c2 kache
   ```
+
+- A terminal that is not elevated. The daemon refuses to run as administrator, so in an elevated shell the tests that start one fail with `daemon_elevated`. Where only elevated shells exist, set `DEVLANES_ALLOW_ELEVATED=1`, as the CI workflows do.
 
 Optional tools, needed only by the ignored tests that mention them: Docker (OrbStack or Docker Desktop on macOS), `node` with npm/pnpm/yarn/bun, `just`, `deno`, `uv`, `poetry`, `mise`, `direnv`, `fnox` 1.39+, `certutil` (NSS), `dig`, `tmux`.
 
@@ -94,7 +97,7 @@ dl stop && dl daemon stop --yes
 
 ## HTTPS and hostnames
 
-The daemon's proxy listens on 443 and 80, and falls back to 8443 and 8080 when it can't bind them. macOS lets unprivileged processes bind both; on Linux, run `sudo setcap cap_net_bind_service=+ep target/debug/devlanes` or use the fallback ports.
+The daemon's proxy listens on 443 and 80, and falls back to 8443 and 8080 when it can't bind them. macOS and Windows let unprivileged processes bind both; on Linux, run `sudo setcap cap_net_bind_service=+ep target/debug/devlanes` or use the fallback ports.
 
 ```sh
 dl url ls                                   # routed hostnames with their lane, unit and port
@@ -112,7 +115,15 @@ dl certs untrust --hosts             # removes both
 dl certs untrust --hosts --keep-ca   # removes only the helper
 ```
 
-`crates/hosts-helper/README.md` explains what that installs and why.
+`crates/hosts-helper/README.md` explains what that installs and why. On Windows the hosts file writer is a service, and `certs trust --hosts` installs the `devlanes-hosts-service.exe` it finds next to `devlanes.exe`, after a UAC prompt, so build both:
+
+```sh
+cargo build -p devlanes -p devlanes-hosts-service
+dl certs trust --hosts               # CA (a dialog) + the service from target\debug (a UAC prompt)
+dl certs untrust --hosts --keep-ca   # removes only the service (another UAC prompt)
+```
+
+`crates/hosts-service/README.md` covers the service.
 
 ## Docker and compose
 
@@ -171,9 +182,23 @@ Run a crate's ignored tests with `cargo nextest run -p <crate> --run-ignored onl
 | `devlanes-run-script-just`, `-cargo`, `-deno`, `-python` | just, cargo, deno, uv or poetry |
 | `devlanes-env-mise`, `devlanes-env-direnv`, `devlanes-secrets-fnox` | mise, direnv, fnox 1.39+ |
 | `devlanes-trust-macos` | someone to click the keychain password prompt |
-| `devlanes-trust-linux` | sudo and certutil |
+| `devlanes-trust-linux` | sudo and certutil; the `windows` store test needs WSL with interop |
 | `devlanes-resolver-dns` | dig |
 | `devlanes-daemon` | `DEVLANES_FIXTURE_SERVER=$PWD/target/debug/fixture-server` |
+| `devlanes-trust-windows` | a desktop session and a click on each Windows security dialog |
+
+The Windows tests that need administrator rights change the real machine, so run them one at a time:
+
+```sh
+# from a normal terminal; approve the UAC prompt (adds and removes a real NRPT rule, needs 127.53.0.1:53 free)
+cargo nextest run -p devlanes --run-ignored only -E 'test(nrpt_rule_sends_the_tld_to_the_server)'
+
+# from an elevated terminal, without DEVLANES_ALLOW_ELEVATED
+cargo nextest run -p devlanes-daemon --run-ignored only -E 'test(refuses_to_run_elevated)'
+cargo build --release -p devlanes-hosts-service
+DEVLANES_HOSTS_SERVICE="$PWD/target/release/devlanes-hosts-service.exe" \
+  cargo nextest run -p devlanes-resolver-hosts --run-ignored only -E 'test(installs_applies_and_uninstalls_the_service)'
+```
 
 ## Generated files
 

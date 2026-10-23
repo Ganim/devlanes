@@ -7,7 +7,7 @@ use std::{
     io::{self, Read},
     os::windows::io::AsHandle,
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -22,12 +22,12 @@ use devlanes_core::{
 use devlanes_sys::windows::{
     conpty::PseudoConsole,
     job::Job,
-    proc::{Console, terminate_verified},
+    proc::{Console, ConsoleHost, LostConsole, OnConsole, console_host_of, terminate_verified},
     spawn::{Child, Spawn, Stdio, spawn},
 };
 use devlanes_sys::{DescendantTracker, ListeningSocket, ProcessInfo};
 use tokio::{
-    sync::{OnceCell, broadcast, mpsc, oneshot, watch},
+    sync::{broadcast, mpsc, oneshot, watch},
     task,
     time::{self, Instant, MissedTickBehavior},
 };
@@ -46,8 +46,11 @@ const OUTPUT_PAUSE: Duration = Duration::from_millis(100);
 /// How long the same `cmd.exe` processes must be all that runs before they count
 /// as shims waiting at "Terminate batch job (Y/N)?".
 const SHIM_SETTLE: Duration = Duration::from_millis(500);
-/// The console host every console has; it ends with the console.
-const CONSOLE_HOST: &str = "conhost.exe";
+/// The console hosts a console can have (`OpenConsole.exe` in a Windows
+/// Terminal tab); a host ends with its console.
+const CONSOLE_HOSTS: [&str; 2] = ["conhost.exe", "OpenConsole.exe"];
+/// First and longest pause between looks at a starting leader's console.
+const CONSOLE_POLL: (Duration, Duration) = (Duration::from_millis(10), Duration::from_secs(1));
 /// Poll period while a stop waits for the unit to exit.
 const EXIT_POLL: Duration = Duration::from_millis(100);
 /// Ctrl-C as a key, which a console in processed-input mode turns into
@@ -66,8 +69,9 @@ pub struct ExitReport {
     /// Tracked processes still alive at the end, after the sweep gave up.
     pub escaped: Vec<ProcessInfo>,
     /// Descendants deliberately left running by [`ExitSweep::KeepDaemonized`]
-    /// after a natural exit: those not on the task's console, or every one when
-    /// the task's console is not known. Console hosts are not listed.
+    /// after a natural exit: those not on the task's console (a console of
+    /// their own or none, or one still not set up at the sweep's end), or every
+    /// one when the task's console is not known. Console hosts are not listed.
     pub left_running: Vec<ProcessInfo>,
 }
 
@@ -112,11 +116,11 @@ struct Inner {
     spawned_at: Instant,
     /// Sends console control events.
     helper: ConsoleHelper,
-    /// The leader's console, looked up once while it starts: what is still on
-    /// it after the leader exits is a leftover, what is not a daemon (decision
-    /// Q9). `None` inside when the leader exited (or never got a console)
-    /// before its console was seen.
-    console: OnceCell<Option<Console>>,
+    /// The leader's console, for [`ExitSweep::KeepDaemonized`] tasks: what is
+    /// still on it after the leader exits is a leftover, what is not a daemon
+    /// (decision Q9). Set while the leader runs, or by the sweep from the
+    /// exited leader; `None` inside when that failed.
+    console: OnceLock<Option<Console>>,
     /// `cmd.exe` processes seen alone at the last shim check, and since when.
     shims: Mutex<Option<SeenShims>>,
     leader_exited: AtomicBool,
@@ -142,6 +146,18 @@ struct Sweep {
     swept: Vec<ProcessInfo>,
     escaped: Vec<ProcessInfo>,
     left_running: Vec<ProcessInfo>,
+}
+
+/// One round's view of the processes still running, by what the sweep does
+/// with them.
+#[derive(Debug, Default)]
+struct Leftovers {
+    /// To end.
+    targets: Vec<ProcessInfo>,
+    /// To leave running; console hosts included.
+    kept: Vec<ProcessInfo>,
+    /// Console not set up yet: looked at again next round.
+    pending: Vec<ProcessInfo>,
 }
 
 /// Outcome when the status is unknown.
@@ -196,7 +212,8 @@ pub(crate) async fn spawn_unit(
     spec: LaunchSpec,
 ) -> Result<Arc<WindowsUnit>, Error> {
     let stderr = runner.stderr;
-    // Taken before the launch, so the console wait errs long.
+    // Taken before the launch, so a helper's wait for the leader's console
+    // errs long.
     let spawned_at = Instant::now();
     let launched = blocking(move || launch(&spec, stderr)).await??;
     let child = launched.child;
@@ -244,7 +261,7 @@ pub(crate) async fn spawn_unit(
         last_output,
         spawned_at,
         helper: runner.helper.clone(),
-        console: OnceCell::new(),
+        console: OnceLock::new(),
         shims: Mutex::new(None),
         leader_exited: AtomicBool::new(false),
         crashed: AtomicBool::new(false),
@@ -477,12 +494,10 @@ async fn supervise(
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut stopping: Option<Stopping> = None;
     let mut waiter_alive = true;
-    // In the background, while the leader sets its console up; stops and the
-    // exit must not wait for it.
-    let looking = Arc::clone(&inner);
-    tokio::spawn(async move {
-        looking.console().await;
-    });
+    if inner.keeps_daemons() {
+        // In the background: stops and the exit must not wait for it.
+        tokio::spawn(watch_console(Arc::clone(&inner)));
+    }
 
     let outcome = loop {
         let asking = stopping.filter(|s| !s.escalated);
@@ -584,26 +599,57 @@ struct Stopping {
     escalated: bool,
 }
 
-/// Waits up to `wait` for `leader` to set its console up, while it runs.
-/// Blocking.
-fn find_console(leader: &Child, wait: Duration) -> Option<Console> {
-    let deadline = std::time::Instant::now() + wait;
-    loop {
-        match leader.console() {
-            Ok(Some(console)) => return Some(console),
-            Ok(None)
-                if std::time::Instant::now() < deadline
-                    && matches!(leader.exit_code(), Ok(None)) =>
-            {
-                std::thread::sleep(Duration::from_millis(10));
+/// Looks for the leader's console while it runs, more and more rarely, until
+/// it is found or the leader exits; after that the sweep reads it from the
+/// exited leader ([`Inner::settled_console`]).
+async fn watch_console(inner: Arc<Inner>) {
+    let pid = inner.identity.pid;
+    let (mut pause, longest) = CONSOLE_POLL;
+    let mut told = false;
+    let mut failed = false;
+    while inner.console.get().is_none() {
+        let leader = Arc::clone(&inner.child);
+        let Ok((found, running)) = blocking(move || {
+            let found = leader.console();
+            (found, matches!(leader.exit_code(), Ok(None)))
+        })
+        .await
+        else {
+            return;
+        };
+        match found {
+            Ok(Some(console)) => {
+                let _ = inner.console.set(Some(console));
+                return;
             }
-            Ok(None) => return None,
-            Err(error) => {
-                tracing::warn!(%error, pid = leader.pid(), "cannot look up the unit's console");
-                return None;
+            Ok(None) => {}
+            Err(error) if !failed => {
+                failed = true;
+                tracing::debug!(%error, pid, "cannot look up the task's console yet");
             }
+            Err(_) => {}
         }
+        if !running {
+            return;
+        }
+        if !told && inner.spawned_at.elapsed() >= CONSOLE_SETUP {
+            told = true;
+            tracing::info!(
+                pid,
+                "the task has no console yet, as a GUI program never does; unless it gets one, everything it leaves running is kept"
+            );
+        }
+        time::sleep(pause).await;
+        pause = (pause * 2).min(longest);
     }
+}
+
+/// Whether `process` is a console host, which belongs to a console rather
+/// than to the task, and ends with the last process on it.
+fn is_console_host(process: &ProcessInfo) -> bool {
+    CONSOLE_HOSTS
+        .iter()
+        .any(|host| process.name.eq_ignore_ascii_case(host))
 }
 
 /// Sleeps until `deadline`, or forever when there is none.
@@ -730,35 +776,68 @@ impl Inner {
         }
     }
 
-    /// The leader's console, looked up on the first call (later ones wait for
-    /// it): what the leader is on once it set it up, `None` when it exited (or
-    /// [`CONSOLE_SETUP`] passed) first.
-    async fn console(self: &Arc<Self>) -> Option<&Console> {
+    /// Whether a natural exit keeps daemons the task started (decision Q9).
+    /// `pty: true` tasks keep nothing: their console closes after the sweep,
+    /// which ends every process still attached to it.
+    fn keeps_daemons(&self) -> bool {
+        !self.pty && self.timing.exit_sweep == ExitSweep::KeepDaemonized
+    }
+
+    /// The exited leader's console: the one seen while it ran, or else the
+    /// one it was last attached to. `None`, logged, when neither is known.
+    /// Blocking.
+    fn settled_console(&self) -> Option<&Console> {
         self.console
-            .get_or_init(|| async {
-                let leader = Arc::clone(&self.child);
-                let wait = self.console_wait();
-                blocking(move || find_console(&leader, wait))
-                    .await
-                    .ok()
-                    .flatten()
+            .get_or_init(|| match self.child.last_console() {
+                Ok(console) => Some(console),
+                // Nothing is on a console whose host has exited, so keeping
+                // everything ends nothing that was on it.
+                Err(reason @ LostConsole::HostGone(_)) => {
+                    tracing::debug!(%reason, pid = self.identity.pid, "the task's console is gone");
+                    None
+                }
+                Err(reason) => {
+                    tracing::warn!(
+                        %reason,
+                        pid = self.identity.pid,
+                        "the task's console is not known; everything it left running is kept"
+                    );
+                    None
+                }
             })
-            .await
             .as_ref()
     }
 
-    /// Whether `process` is on the leader's console now; `false` when that
-    /// console is not known (yet). Blocking.
-    fn on_console(&self, process: &ProcessInfo) -> bool {
-        let Some(Some(console)) = self.console.get() else {
-            return false;
-        };
-        console
-            .attached(&process.identity())
-            .unwrap_or_else(|error| {
-                tracing::debug!(%error, pid = process.pid, "cannot tell the process's console");
-                false
-            })
+    /// Sorts the processes still running after the leader: with
+    /// `keep_daemons`, those on the leader's console are ended, those on a
+    /// console of their own or none are kept, and those whose console is not
+    /// set up yet are decided later. Without, every one is ended. Blocking.
+    fn sort_leftovers(&self, live: Vec<ProcessInfo>, keep_daemons: bool) -> Leftovers {
+        let mut sorted = Leftovers::default();
+        if !keep_daemons {
+            sorted.targets = live;
+            return sorted;
+        }
+        let console = self.settled_console();
+        for process in live {
+            let on = match console {
+                // A console host reports its client, not a console it is on.
+                _ if is_console_host(&process) => OnConsole::No,
+                None => OnConsole::No,
+                Some(console) => console
+                    .attached(&process.identity())
+                    .unwrap_or_else(|error| {
+                        tracing::debug!(%error, pid = process.pid, "cannot tell the process's console");
+                        OnConsole::No
+                    }),
+            };
+            match on {
+                OnConsole::Yes => sorted.targets.push(process),
+                OnConsole::No => sorted.kept.push(process),
+                OnConsole::NotYet => sorted.pending.push(process),
+            }
+        }
+        sorted
     }
 
     /// Asks the unit to stop the way `signal` maps on Windows: Ctrl-C as a key
@@ -791,31 +870,47 @@ impl Inner {
                     .is_ok();
             }
         } else {
-            let leader_alive = matches!(self.child.exit_code(), Ok(None));
-            if !leader_alive {
-                // Known at once now that the leader is gone.
-                self.console().await;
-            }
             let inner = Arc::clone(self);
             asked = blocking(move || {
-                // The leader's console is the unit's. Only the leader can still
-                // be setting it up; any other member was seen in a snapshot a
-                // tick ago. Without a member left on it, the event goes to a
-                // member's own console.
-                let target = if leader_alive {
-                    Some((inner.identity, inner.console_wait()))
-                } else {
-                    live.iter()
-                        .find(|p| inner.on_console(p))
-                        .or(live.first())
-                        .map(|p| (p.identity(), Duration::ZERO))
-                };
-                target.is_some_and(|(target, wait)| inner.helper.send_held(&target, event, wait))
+                inner
+                    .event_targets(&live)
+                    .into_iter()
+                    .fold(false, |sent, (target, wait)| {
+                        inner.helper.send_held(&target, event, wait) | sent
+                    })
             })
             .await
             .unwrap_or(false);
         }
         asked || closed > 0
+    }
+
+    /// One process per console the unit's processes are on, each with how
+    /// long it may still be setting that console up, so a daemon on a console
+    /// of its own is asked too, as on Unix every tracked process is signalled.
+    /// The leader comes first while it runs: it may still be setting its
+    /// console up, while any other member was seen in a snapshot a tick ago.
+    /// Console hosts and processes without a console are skipped. Blocking.
+    fn event_targets(&self, live: &[ProcessInfo]) -> Vec<(ProcessIdentity, Duration)> {
+        let mut consoles = BTreeSet::new();
+        let mut targets = Vec::new();
+        if matches!(self.child.exit_code(), Ok(None)) {
+            if let Ok(Some(ConsoleHost::Host(host))) = console_host_of(&self.identity) {
+                consoles.insert(host);
+            }
+            targets.push((self.identity, self.console_wait()));
+        }
+        for process in live {
+            if process.pid == self.identity.pid || is_console_host(process) {
+                continue;
+            }
+            if let Ok(Some(ConsoleHost::Host(host))) = console_host_of(&process.identity())
+                && consoles.insert(host)
+            {
+                targets.push((process.identity(), Duration::ZERO));
+            }
+        }
+        targets
     }
 
     /// How long the leader may still be setting up its console: what is left of
@@ -875,9 +970,7 @@ impl Inner {
     /// Ends the job's members, then each target by verified identity, which
     /// also reaches a tracked process the job does not hold. Blocking.
     fn terminate_blocking(&self, targets: &[ProcessInfo]) {
-        if let Err(error) = self.job.terminate(TERMINATED) {
-            tracing::debug!(%error, pid = self.identity.pid, "terminating the unit's job failed");
-        }
+        self.terminate_job();
         for process in targets {
             // Gone or a mismatch is fine: the job already ended it, or the PID now
             // names someone else and was left alone.
@@ -887,53 +980,62 @@ impl Inner {
         }
     }
 
+    /// Ends every process still in the job. Blocking.
+    fn terminate_job(&self) {
+        if let Err(error) = self.job.terminate(TERMINATED) {
+            tracing::debug!(%error, pid = self.identity.pid, "terminating the unit's job failed");
+        }
+    }
+
     /// Ends live tracked processes until none remain or the sweep times out.
     ///
     /// After a natural exit in [`ExitSweep::KeepDaemonized`] mode (decision Q9),
     /// processes still on the task's console are leftovers and end, while those
     /// that made their own console or run without one are daemons the task
-    /// started and are reported as left running. When the task's console is not
-    /// known (the leader exited before it was seen), everything is kept and
-    /// reported, so nothing is ended on a guess.
+    /// started and are reported as left running. A process whose console is
+    /// not set up yet is looked at again in the next round, until the sweep
+    /// times out. When the task's console is not known (a GUI leader, or its
+    /// console host is gone), everything is kept and reported, so nothing is
+    /// ended on a guess.
     async fn sweep(self: &Arc<Self>, explicit_stop: bool) -> Sweep {
-        // `pty: true` tasks keep nothing: their console closes after the sweep,
-        // which ends every process still attached to it.
-        let keep_daemons =
-            !explicit_stop && !self.pty && self.timing.exit_sweep == ExitSweep::KeepDaemonized;
-        if keep_daemons && self.console().await.is_none() {
-            tracing::warn!(
-                pid = self.identity.pid,
-                "the task's console is not known; everything it left running is kept"
-            );
-        }
+        let keep_daemons = !explicit_stop && self.keeps_daemons();
         let deadline = Instant::now() + self.timing.sweep_timeout;
         let mut ended = BTreeMap::new();
         loop {
             let live = self.live_members().await;
             let inner = Arc::clone(self);
-            let (targets, kept): (Vec<_>, Vec<_>) = blocking(move || {
-                live.into_iter()
-                    .partition(|p| !keep_daemons || inner.on_console(p))
-            })
-            .await
-            .unwrap_or_default();
-            if targets.is_empty() || Instant::now() >= deadline {
+            let Leftovers {
+                targets,
+                kept,
+                pending,
+            } = blocking(move || inner.sort_leftovers(live, keep_daemons))
+                .await
+                .unwrap_or_default();
+            if (targets.is_empty() && pending.is_empty()) || Instant::now() >= deadline {
+                if !keep_daemons {
+                    // Also reaches members started after the last snapshot.
+                    let inner = Arc::clone(self);
+                    let _ = blocking(move || inner.terminate_job()).await;
+                }
                 for process in &targets {
                     ended.remove(&process.pid);
                 }
                 return Sweep {
                     swept: ended.into_values().collect(),
                     escaped: targets,
-                    // A console host belongs to a console, not to the task; it
-                    // ends with the last process on it.
+                    // Still not set up at the end: kept, as nothing is ended
+                    // on a guess.
                     left_running: kept
                         .into_iter()
-                        .filter(|p| !p.name.eq_ignore_ascii_case(CONSOLE_HOST))
+                        .chain(pending)
+                        .filter(|p| !is_console_host(p))
                         .collect(),
                 };
             }
             let inner = Arc::clone(self);
-            let nothing_kept = kept.is_empty();
+            // Console hosts end with their consoles; the processes not set up
+            // yet may still turn out to be daemons.
+            let nothing_kept = kept.iter().all(is_console_host) && pending.is_empty();
             // Survivors show up in the next round and end as escaped at the deadline.
             let ended_now = blocking(move || {
                 if nothing_kept {
@@ -975,8 +1077,9 @@ impl WindowsUnit {
     }
 
     /// Ends every process in the unit's job at once, without waiting or a report.
-    /// For cleanup where nothing can be awaited, such as a test's `Drop`; processes
-    /// that left the job are not reached.
+    /// For cleanup where nothing can be awaited, such as a test's `Drop`. The
+    /// job refuses breakaway, so this reaches every process the unit started,
+    /// kept daemons included.
     pub fn kill_job(&self) {
         let _ = self.inner.job.terminate(TERMINATED);
     }

@@ -13,7 +13,7 @@ const CURL_API: &str = r#"url="$DEVLANES_PUBLIC_URL_API"
 case "$url" in *":$E2E_HTTPS_PORT") ;; *) echo "public URL without the proxy port: $url" >&2; exit 90 ;; esac
 host="${url#https://}"
 host="${host%%:*}"
-curl -fsS --max-time 10 --cacert "$DEVLANES_CA_CERT" \
+curl -fsS --max-time 10 --cacert "$DEVLANES_CA_CERT" $E2E_CURL_FLAGS \
   --resolve "$host:$E2E_HTTPS_PORT:127.0.0.1" "$url/healthz""#;
 
 /// Runs `devlanes with --logs-dir <dir> -- sh -c <script>` in the primary worktree.
@@ -30,7 +30,9 @@ fn with(lab: &Lab, logs: &Path, script: &str) -> Result<Output> {
             script,
         ],
     )?;
-    command.env("E2E_HTTPS_PORT", lab.https_port().to_string());
+    command
+        .env("E2E_HTTPS_PORT", lab.https_port().to_string())
+        .env("E2E_CURL_FLAGS", devlanes_e2e::CURL_FLAGS);
     lab.run(command, Duration::from_secs(90))
 }
 
@@ -65,7 +67,6 @@ fn assert_logs(logs: &Path) -> Result<Vec<u16>> {
 /// Without a daemon: exit 0 from a command that curls the API, logs written, and the
 /// auto-spawned daemon stopped afterwards.
 #[test]
-#[cfg_attr(windows, ignore = "curls the API over HTTPS through the proxy, step 6")]
 fn with_runs_the_command_and_stops_the_daemon_it_spawned() -> Result<()> {
     let lab = Lab::new("two-services", BUDGET)?;
     let logs = lab.home().join("artifacts-ok");
@@ -133,7 +134,6 @@ fn with_never_ready_service_skips_the_command() -> Result<()> {
 /// With a running daemon: the command's exit code 3 is kept, logs are written, the lane
 /// is stopped and the daemon `with` did not spawn keeps running.
 #[test]
-#[cfg_attr(windows, ignore = "curls the API over HTTPS through the proxy, step 6")]
 fn with_keeps_the_exit_code_and_stops_the_lane() -> Result<()> {
     let lab = Lab::new("two-services", BUDGET)?;
     // Any command but `daemon status` starts the daemon.

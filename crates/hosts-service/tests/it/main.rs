@@ -14,9 +14,10 @@ use devlanes_hosts_helper::protocol::{
 };
 use devlanes_hosts_service::handler::Target;
 use devlanes_hosts_service::server::{FrameError, ServerConfig, read_frame, serve};
-use devlanes_sys::windows::pipe::{ERROR_PIPE_BUSY, open_client};
+use devlanes_sys::windows::pipe::{ERROR_PIPE_BUSY, create_server, open_client};
 use devlanes_sys::windows::token::{self, Sid};
 use tokio::io::AsyncWriteExt as _;
+use tokio::net::windows::named_pipe::NamedPipeClient;
 
 /// Bound on every exchange, so a hung server fails the test instead of the run.
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -25,17 +26,22 @@ fn pipe_name(tag: &str) -> String {
     format!(r"\\.\pipe\devlanes-hosts-test-{}-{tag}", std::process::id())
 }
 
-/// Sends `payload` as one frame and reads the response.
-async fn exchange(name: &str, payload: &[u8]) -> Response {
-    let mut client = loop {
+/// Opens the pipe, waiting while every instance is busy.
+async fn connect(name: &str) -> NamedPipeClient {
+    loop {
         match open_client(OsStr::new(name)) {
-            Ok(client) => break client,
+            Ok(client) => return client,
             Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             Err(error) => panic!("open {name}: {error}"),
         }
-    };
+    }
+}
+
+/// Sends `payload` as one frame and reads the response.
+async fn exchange(name: &str, payload: &[u8]) -> Response {
+    let mut client = connect(name).await;
     let framed = protocol::frame(payload, MAX_REQUEST_BYTES).expect("frame");
     client.write_all(&framed).await.expect("write");
     let response = match read_frame(&mut client, MAX_RESPONSE_BYTES).await {
@@ -149,7 +155,8 @@ async fn parallel_clients_are_all_answered() {
     server.stop().await;
 }
 
-/// The name is taken: a second server on it fails at its first instance.
+/// The name is taken: a second server on it fails at its first instance once
+/// its wait for the name runs out.
 #[tokio::test]
 async fn a_taken_pipe_name_is_refused() {
     let user = token::current_user().expect("user");
@@ -167,6 +174,35 @@ async fn a_taken_pipe_name_is_refused() {
         .await
         .expect("refused in time");
     assert!(result.is_err(), "{result:?}");
+    server.stop().await;
+}
+
+/// A client handle left over from a stopped server keeps the name alive, as
+/// after a service restart or reinstall; the next server waits for it to close
+/// instead of failing.
+#[tokio::test]
+async fn a_new_server_waits_for_a_leftover_client() {
+    let user = token::current_user().expect("user");
+    let server = Running::start("leftover", user.clone()).await;
+    let name = server.name.clone();
+    let client = tokio::time::timeout(TIMEOUT, connect(&name))
+        .await
+        .expect("connected in time");
+    server.stop().await;
+    assert!(
+        create_server(OsStr::new(&name), true).is_err(),
+        "the client keeps the name"
+    );
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        drop(client);
+    });
+    let server = Running::start("leftover", user).await;
+    release.await.expect("release");
+    let response = tokio::time::timeout(TIMEOUT, exchange(&server.name, b"version\n"))
+        .await
+        .expect("answered in time");
+    assert_eq!(response.code, exit::OK);
     server.stop().await;
 }
 

@@ -449,27 +449,22 @@ fn sync_destination(home: &Path, host: &str, entry: &SyncEntry) -> Result<PathBu
         if !valid {
             return Err(format!("the box sent an unusable {what} name {part:?}"));
         }
-        path.push(folder_name(what, part));
+        path.push(folder_name(part));
     }
     Ok(path)
 }
 
-/// The folder a destination name is stored under: the project under its disk
-/// name, as everywhere else, the other names as they are.
+/// The folder a destination name is stored under: the name as it is.
 #[cfg(unix)]
-fn folder_name(what: &str, part: &str) -> String {
-    if what == "project" {
-        devlanes_core::paths::disk_name(part)
-    } else {
-        part.to_owned()
-    }
+fn folder_name(part: &str) -> String {
+    part.to_owned()
 }
 
-/// The folder a destination name is stored under: every name under its disk
-/// name, because Windows refuses some names Unix allows. `ssh://box:2222` and
-/// `[::1]` are valid hosts, and the box chose its own folder names.
+/// The folder a destination name is stored under: its disk name, because
+/// Windows refuses some names Unix allows. `ssh://box:2222` and `[::1]` are
+/// valid hosts, and the box chose its own folder names.
 #[cfg(windows)]
-fn folder_name(_what: &str, part: &str) -> String {
+fn folder_name(part: &str) -> String {
     devlanes_core::paths::disk_name(part)
 }
 

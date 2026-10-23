@@ -218,7 +218,7 @@ impl Held {
 }
 
 /// The console a process is attached to, known by its console host
-/// (`conhost.exe`, or `OpenConsole.exe` for a pseudo console). The host is held
+/// (`conhost.exe`, or `OpenConsole.exe` in a Windows Terminal tab). The host is held
 /// open, so its PID cannot name another process while this lives, even after
 /// the host exited with its last client.
 ///
@@ -230,11 +230,47 @@ pub struct Console {
     _handle: OwnedHandle,
 }
 
+/// A process's console, as [`console_host`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleHost {
+    /// Attached to the console the host with this PID serves.
+    Host(u32),
+    /// Attached to none (`DETACHED_PROCESS`, `FreeConsole`).
+    Detached,
+    /// No console set up yet: the process is starting, or never gets one (a
+    /// GUI program). A console host reports this about itself too.
+    Pending,
+}
+
+/// Where a process stands with a [`Console`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnConsole {
+    /// Attached to it now.
+    Yes,
+    /// On another console or none, or gone.
+    No,
+    /// Its console is not set up yet (see [`ConsoleHost::Pending`]).
+    NotYet,
+}
+
+/// Why the console an exited process was on is not known.
+#[derive(Debug, thiserror::Error)]
+pub enum LostConsole {
+    #[error("it never had a console (a GUI program, or detached)")]
+    NeverHad,
+    #[error("its console host {0} has exited")]
+    HostGone(u32),
+    #[error("process {0} is not a console host it started")]
+    NotItsHost(u32),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
 impl Console {
     /// The console `process` is attached to now; `None` while it has none, as
     /// before its console is set up (it is created while the process starts).
     pub(crate) fn of(process: &OwnedHandle) -> io::Result<Option<Self>> {
-        let Some(host) = console_host(process)? else {
+        let ConsoleHost::Host(host) = console_host(process)? else {
             return Ok(None);
         };
         let Some(handle) = open(
@@ -246,7 +282,7 @@ impl Console {
         };
         // Opened by bare PID: it is the host only if `process` is still running
         // on it, which keeps the host alive and its PID from being reused.
-        if exited(process) || console_host(process)? != Some(host) {
+        if exited(process) || console_host(process)? != ConsoleHost::Host(host) {
             return Ok(None);
         }
         Ok(Some(Self {
@@ -255,19 +291,54 @@ impl Console {
         }))
     }
 
-    /// Whether `identity` is attached to this console now; `false` once it is
-    /// gone, exited or its PID names another process.
-    pub fn attached(&self, identity: &ProcessIdentity) -> io::Result<bool> {
-        let Some(handle) = open_verified(identity, 0)? else {
-            return Ok(false);
+    /// The console `process` (PID `pid`, started at `start_time`) was last
+    /// attached to, also after it exited: the query keeps its last value. The
+    /// host it names is accepted only while it runs, was started by `process`
+    /// (its parent PID) and not before it. `process` is held open, so no other
+    /// process has its PID, and a host it started is the one it set up.
+    pub(crate) fn last_of(
+        process: &OwnedHandle,
+        pid: u32,
+        start_time: u64,
+    ) -> Result<Self, LostConsole> {
+        let ConsoleHost::Host(host) = console_host(process)? else {
+            return Err(LostConsole::NeverHad);
         };
-        Ok(console_host(&handle)? == Some(self.host))
+        let access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
+        let Some(handle) = open(host, access)?.filter(|handle| !exited(handle)) else {
+            return Err(LostConsole::HostGone(host));
+        };
+        if parent_pid(&handle) != Some(pid) || creation_time(&handle)? < start_time {
+            return Err(LostConsole::NotItsHost(host));
+        }
+        Ok(Self {
+            host,
+            _handle: handle,
+        })
+    }
+
+    /// Whether `identity` is attached to this console now; [`OnConsole::No`]
+    /// once it is gone, exited or its PID names another process.
+    pub fn attached(&self, identity: &ProcessIdentity) -> io::Result<OnConsole> {
+        Ok(match console_host_of(identity)? {
+            Some(ConsoleHost::Host(host)) if host == self.host => OnConsole::Yes,
+            Some(ConsoleHost::Pending) => OnConsole::NotYet,
+            _ => OnConsole::No,
+        })
     }
 }
 
-/// The PID of the console host of the console an open process is attached to;
-/// `None` when it is attached to none (`DETACHED_PROCESS`, `FreeConsole`) or
-/// has not set its console up yet.
+/// The console `identity` is attached to now; `None` when it is gone, exited
+/// or its PID names another process.
+pub fn console_host_of(identity: &ProcessIdentity) -> io::Result<Option<ConsoleHost>> {
+    // `SYNCHRONIZE`, so an exited process is told from a running one.
+    let Some(handle) = open_verified(identity, PROCESS_SYNCHRONIZE)? else {
+        return Ok(None);
+    };
+    console_host(&handle).map(Some)
+}
+
+/// The console host of the console an open process is attached to.
 ///
 /// Undocumented: `NtQueryInformationProcess` class 49, `ProcessConsoleHostProcess`
 /// in System Informer's phnt headers (windows-sys names it
@@ -275,9 +346,10 @@ impl Console {
 /// and gives a `ULONG_PTR` with two flag bits. Bit 0 set: the rest is the host's
 /// PID, 0 without a console; the value follows `AttachConsole` and
 /// `FreeConsole`. Bit 1 set: the rest is another process (the creator of a
-/// process whose console is not set up yet, or the client a console host
-/// serves). It keeps its last value after the process exited.
-fn console_host(process: &OwnedHandle) -> io::Result<Option<u32>> {
+/// process whose console is not set up yet, which stays so for a GUI program,
+/// or the client a console host serves). It keeps its last value after the
+/// process exited.
+fn console_host(process: &OwnedHandle) -> io::Result<ConsoleHost> {
     const PROCESS_CONSOLE_HOST_PROCESS: PROCESSINFOCLASS = 49;
     let mut value = 0_usize;
     // SAFETY: `process` is open with query rights; `value` is the writable
@@ -291,13 +363,20 @@ fn console_host(process: &OwnedHandle) -> io::Result<Option<u32>> {
             ptr::null_mut(),
         )
     };
-    if status != 0 {
+    // NT_SUCCESS: success and informational statuses are not negative.
+    if status < 0 {
         return Err(io::Error::other(format!(
             "NtQueryInformationProcess(ProcessConsoleHostProcess) failed: {status:#x}"
         )));
     }
     let pid = u32::try_from(value & !3).unwrap_or(0);
-    Ok((value & 3 == 1 && pid != 0).then_some(pid))
+    Ok(if value & 2 != 0 {
+        ConsoleHost::Pending
+    } else if value & 1 != 0 && pid != 0 {
+        ConsoleHost::Host(pid)
+    } else {
+        ConsoleHost::Detached
+    })
 }
 
 /// Opens `identity` with `access` plus `PROCESS_QUERY_LIMITED_INFORMATION`;
@@ -548,11 +627,15 @@ mod tests {
 
     /// A child started without a window has a console of its own. A grandchild
     /// that inherited it is attached to it, still after the child exited, while
-    /// processes with a console of their own or none are not.
+    /// processes with a console of their own or none are not, and one whose
+    /// console is not set up yet is neither. The exited child's console stays
+    /// known.
     #[test]
     fn consoles_tell_who_shares_them() -> Result<(), Error> {
         use std::os::windows::process::CommandExt;
         use std::time::{Duration, Instant};
+
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 
         use crate::windows::process::{CREATE_NO_WINDOW, DETACHED_PROCESS};
         use crate::windows::spawn::{Spawn, spawn};
@@ -593,19 +676,38 @@ mod tests {
             sid: child.pid(),
             start_time: child.start_time(),
         };
-        assert!(console.attached(&leader)?);
+        assert_eq!(console.attached(&leader)?, OnConsole::Yes);
         child.wait()?;
         // The background ping outlives the child on the same console.
-        let attached: Vec<bool> = pings
+        let attached: Vec<OnConsole> = pings
             .iter()
             .map(|ping| console.attached(&ping.identity()))
             .collect::<io::Result<_>>()?;
-        assert!(attached.contains(&true), "{pings:?} {attached:?}");
-        assert!(
-            !console.attached(&leader)?,
+        assert!(attached.contains(&OnConsole::Yes), "{pings:?} {attached:?}");
+        assert_eq!(
+            console.attached(&leader)?,
+            OnConsole::No,
             "an exited process is on no console"
         );
-        for flags in [CREATE_NO_WINDOW, DETACHED_PROCESS] {
+        // The query keeps its value after the exit, so the console is still
+        // known from the exited child, whose handle `child` holds.
+        let exited_child = open(child.pid(), PROCESS_QUERY_LIMITED_INFORMATION)?
+            .ok_or(Error::Unsupported("held child missing"))?;
+        assert_eq!(
+            console_host(&exited_child)?,
+            ConsoleHost::Host(console.host)
+        );
+        let last = child.last_console().map_err(io::Error::other)?;
+        assert_eq!(last.host, console.host);
+        // A console host reports its client, not a console of its own.
+        let host = crate::identity(console.host)?.ok_or(Error::Unsupported("host missing"))?;
+        assert_eq!(console_host_of(&host)?, Some(ConsoleHost::Pending));
+        for (flags, expected) in [
+            (CREATE_NO_WINDOW, OnConsole::No),
+            (DETACHED_PROCESS, OnConsole::No),
+            // Not running yet, so its console is not set up.
+            (CREATE_SUSPENDED, OnConsole::NotYet),
+        ] {
             let mut other = Command::new("ping")
                 .args(["-n", "30", "127.0.0.1"])
                 .stdout(Stdio::null())
@@ -614,10 +716,18 @@ mod tests {
             // Time to set up its own console, which takes milliseconds.
             std::thread::sleep(Duration::from_millis(200));
             let identity = crate::identity(other.id())?;
-            let result = identity.map(|identity| console.attached(&identity));
+            let result = identity.map(|identity| {
+                Ok::<_, io::Error>((console.attached(&identity)?, console_host_of(&identity)?))
+            });
             let _ = other.kill();
             let _ = other.wait();
-            assert_eq!(result.transpose()?, Some(false), "flags {flags:#x}");
+            let (on, host) = result
+                .transpose()?
+                .ok_or(Error::Unsupported("ping missing"))?;
+            assert_eq!(on, expected, "flags {flags:#x}");
+            if flags == DETACHED_PROCESS {
+                assert_eq!(host, Some(ConsoleHost::Detached));
+            }
         }
         Ok(())
     }

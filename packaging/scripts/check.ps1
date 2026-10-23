@@ -148,6 +148,13 @@ $refused = $false
 try { Get-DevlanesTarget 'x86' | Out-Null } catch { $refused = $true }
 Assert-True $refused '32-bit Windows must be refused'
 Assert-True ((Get-DevlanesArchitecture) -in @('AMD64', 'ARM64', 'x86')) 'architecture name'
+Assert-DevlanesWindowsBuild 26100
+$refused = $null
+try { Assert-DevlanesWindowsBuild 22631 } catch { $refused = $_.Exception.Message }
+Assert-Equal $refused 'devlanes install: devlanes needs Windows 11 24H2 (build 26100) or later, and this is build 22631; update Windows, then run the installer again' 'Windows 11 23H2 must be refused'
+# The build install.ps1 checks is the real one in this PowerShell too.
+$registryBuild = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+Assert-Equal ([string][Environment]::OSVersion.Version.Build) $registryBuild 'Windows build'
 
 $sums = "$('a' * 64)  devlanes-1.2.3-x86_64-unknown-linux-gnu.tar.gz`n$('B' * 64)  devlanes-1.2.3-x86_64-pc-windows-msvc.zip`n"
 $found = Find-DevlanesArchive $sums 'x86_64-pc-windows-msvc' '' 'SHA256SUMS'

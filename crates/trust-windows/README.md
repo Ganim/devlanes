@@ -28,7 +28,7 @@ async fn trust_user_root(ca_pem: &str) -> Result<(), TrustError> {
 
 ## Behaviour
 
-Chrome, Edge and Firefox (through `security.enterprise_roots.enabled`, on by default) all read this store, so every browser target is the same store. Status counts a CA trusted in `Cert:\LocalMachine\Root` too, and reports one the `Disallowed` store holds as distrusted. Adds and deletes touch only the user's registry store, so an elevated run cannot change the machine's.
+Chrome, Edge and Firefox (through `security.enterprise_roots.enabled`, on by default) all read this store, so every browser target is the same store. A Firefox profile or policy that turns `security.enterprise_roots.enabled` off does not trust the devlanes CA, and `devlanes doctor` cannot see that. Status counts a CA trusted in `Cert:\LocalMachine\Root` too, and reports one the `Disallowed` store holds as distrusted. Adds and deletes touch only the user's registry store, so an elevated run cannot change the machine's.
 
 Windows shows a security warning for every root added to or deleted from `Root` and waits for Yes; no elevation is needed. A No is `TrustError::Cancelled`, and without a desktop (SSH, services) the change fails with `TrustError::InteractionRequired` before any dialog.
 

@@ -863,6 +863,7 @@ fn fact_checks(data: &Value) -> Vec<Check> {
         )
         .fix("devlanes daemon install, so the daemon starts outside the sandbox")
     });
+    checks.extend(windows_check(&data["windows"]));
     checks.extend(terminal_checks(&data["terminal"], running));
     checks.extend(wsl_checks(data));
     // Docker is the daemon's to ask; without one there is nothing to say.
@@ -1335,6 +1336,27 @@ fn home_checks(home: &Value) -> Vec<Check> {
         .fix("point DEVLANES_HOME at a directory you own, or fix that path by hand"),
     };
     vec![check]
+}
+
+/// The oldest Windows build devlanes supports: Windows 11 24H2.
+const MIN_WINDOWS_BUILD: u64 = 26_100;
+
+/// The Windows build (`windows: {build}`, reported on Windows), which fails
+/// below [`MIN_WINDOWS_BUILD`].
+fn windows_check(windows: &Value) -> Option<Check> {
+    let build = windows.get("build").and_then(Value::as_u64)?;
+    Some(if build >= MIN_WINDOWS_BUILD {
+        Check::new("windows", Outcome::Ok, format!("Windows build {build}"))
+    } else {
+        Check::new(
+            "windows",
+            Outcome::Fail,
+            format!(
+                "Windows build {build} is older than Windows 11 24H2 (build {MIN_WINDOWS_BUILD}), the oldest devlanes supports"
+            ),
+        )
+        .fix("update Windows to Windows 11 24H2 or later")
+    })
 }
 
 /// The shell running `doctor` (`terminal: {elevated, job}`, reported on

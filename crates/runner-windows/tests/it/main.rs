@@ -155,13 +155,30 @@ fn runner() -> Result<WindowsRunner, std::io::Error> {
 
 /// Not a test of its own: as a unit (role `graceful`), waits for Ctrl-C or
 /// Ctrl-Break, prints which arrived and exits 0, the way a server stops cleanly.
-/// Role `q9` starts one `ping` sharing its console and one with a console of its
-/// own (`CREATE_NO_WINDOW`), prints `shared <pid>` and `own <pid>`, then exits
-/// after a while. Without a role it does nothing.
+/// Role `parent` does the same after starting itself in role `graceful` with
+/// a console of its own (`CREATE_NO_WINDOW`) and printing `child <pid>`.
+/// Role `q9` starts one `ping` sharing its console, one with a console of its
+/// own (`CREATE_NO_WINDOW`) and one without a console (`DETACHED_PROCESS`),
+/// prints `shared <pid>`, `own <pid>` and `detached <pid>`, then exits after a
+/// while. Without a role it does nothing.
 #[test]
 fn graceful_leader() -> std::io::Result<()> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     match std::env::var(ROLE).as_deref() {
-        Ok("graceful") => {
+        Ok(role @ ("graceful" | "parent")) => {
+            if role == "parent" {
+                let child = std::process::Command::new(std::env::current_exe()?)
+                    .args([
+                        "--exact",
+                        "graceful_leader",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(ROLE, "graceful")
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()?;
+                println!("child {}", child.id());
+            }
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
@@ -180,7 +197,7 @@ fn graceful_leader() -> std::io::Result<()> {
             })
         }
         Ok("q9") => {
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
             let ping = || {
                 let mut command = std::process::Command::new("ping");
                 command
@@ -190,8 +207,10 @@ fn graceful_leader() -> std::io::Result<()> {
             };
             let shared = ping().spawn()?;
             let own = ping().creation_flags(CREATE_NO_WINDOW).spawn()?;
+            let detached = ping().creation_flags(DETACHED_PROCESS).spawn()?;
             println!("shared {}", shared.id());
             println!("own {}", own.id());
+            println!("detached {}", detached.id());
             std::io::stdout().flush()?;
             std::thread::sleep(Duration::from_millis(2500));
             Ok(())
@@ -208,21 +227,21 @@ fn kill() -> StopPolicy {
     }
 }
 
-/// The `shared` and `own` pings a `q9` leader reports, as processes.
+/// The `shared`, `own` and `detached` pings a `q9` leader reports, as processes.
 async fn q9_pings(
     unit: &Guard,
-) -> Result<[devlanes_sys::ProcessInfo; 2], Box<dyn std::error::Error>> {
+) -> Result<[devlanes_sys::ProcessInfo; 3], Box<dyn std::error::Error>> {
     let mut output = unit.output();
     let mut seen = String::new();
     let mut pings = Vec::new();
-    for name in ["shared ", "own "] {
+    for name in ["shared ", "own ", "detached "] {
         let pid: u32 = wait_for(&mut output, &mut seen, name)
             .await
             .and_then(|pid| pid.parse().ok())
             .ok_or_else(|| format!("no {name}line in {seen:?}"))?;
         pings.push(devlanes_sys::process(pid)?.ok_or_else(|| format!("{name}ping missing"))?);
     }
-    pings.try_into().map_err(|_| "two pings".into())
+    pings.try_into().map_err(|_| "three pings".into())
 }
 
 /// Reads output until a line containing `marker` and returns the text after it.
@@ -258,6 +277,36 @@ async fn pipe_units_stop_gracefully_on_ctrl_break() -> TestResult {
             .await
             .filter(|event| event == "break")
             .ok_or_else(|| format!("no graceful break in {seen:?}"))?;
+        Ok(())
+    })
+    .await?
+}
+
+/// A stop asks every console the unit's processes are on, so a child with a
+/// console of its own (`CREATE_NO_WINDOW`) gets Ctrl-Break too and stops on
+/// its own, as the leader does.
+#[tokio::test]
+async fn stops_ask_processes_on_their_own_console() -> TestResult {
+    timeout(Duration::from_secs(60), async {
+        let unit = spawn(runner()?, leader("parent")?).await?;
+        let mut output = unit.output();
+        let mut seen = String::new();
+        let child: u32 = wait_for(&mut output, &mut seen, "child ")
+            .await
+            .and_then(|pid| pid.parse().ok())
+            .ok_or_else(|| format!("no child line in {seen:?}"))?;
+        let child = devlanes_sys::process(child)?.ok_or("child missing")?;
+        let _ends = Ends(child.identity());
+        while seen.matches("handlers ready").count() < 2 {
+            let chunk = output.recv().await?;
+            seen.push_str(&String::from_utf8_lossy(&chunk.bytes));
+        }
+        let report = unit.stop_with_report(StopPolicy::default()).await?;
+        assert_eq!(report.stop.map(|s| s.escalated), Some(false), "{report:?}");
+        while let Ok(chunk) = output.recv().await {
+            seen.push_str(&String::from_utf8_lossy(&chunk.bytes));
+        }
+        assert_eq!(seen.matches("graceful break").count(), 2, "{seen:?}");
         Ok(())
     })
     .await?
@@ -328,8 +377,8 @@ async fn batch_shims_do_not_hold_a_stop() -> TestResult {
 }
 
 /// After a pipe task exits (Q9), a process still on its console is a leftover
-/// and ends, while one with a console of its own is a daemon it started and keeps
-/// running.
+/// and ends, while one with a console of its own or none (`DETACHED_PROCESS`)
+/// is a daemon it started and keeps running.
 #[tokio::test]
 async fn tasks_keep_processes_with_their_own_console() -> TestResult {
     timeout(Duration::from_secs(60), async {
@@ -337,18 +386,23 @@ async fn tasks_keep_processes_with_their_own_console() -> TestResult {
             .with_track_interval(Duration::from_millis(100))
             .with_exit_sweep(ExitSweep::KeepDaemonized);
         let unit = spawn(runner, leader("q9")?).await?;
-        let [shared, own] = q9_pings(&unit).await?;
-        let _ends = (Ends(shared.identity()), Ends(own.identity()));
+        let [shared, own, detached] = q9_pings(&unit).await?;
+        let _ends = [shared.identity(), own.identity(), detached.identity()].map(Ends);
         let report = unit.wait_report().await?;
         assert!(
             report.swept.iter().any(|p| p.pid == shared.pid),
             "{report:?}"
         );
-        assert!(
-            report.left_running.iter().any(|p| p.pid == own.pid),
-            "{report:?}"
-        );
-        assert!(devlanes_sys::matches(&own.identity())?, "kept daemon ended");
+        for daemon in [&own, &detached] {
+            assert!(
+                report.left_running.iter().any(|p| p.pid == daemon.pid),
+                "{daemon:?} not kept: {report:?}"
+            );
+            assert!(
+                devlanes_sys::matches(&daemon.identity())?,
+                "kept daemon {daemon:?} ended"
+            );
+        }
         assert!(
             !report
                 .left_running
@@ -637,27 +691,80 @@ async fn missing_program_is_not_found() -> TestResult {
 }
 
 /// After a task exits on its own, leftovers still on its console are ended,
-/// even in the mode that keeps daemons.
+/// even in the mode that keeps daemons, also when the leader exits right away
+/// and its console is only known from the exited leader.
 #[tokio::test]
-async fn task_leftovers_in_the_job_are_swept() -> TestResult {
+async fn task_leftovers_on_its_console_end_with_it() -> TestResult {
     timeout(Duration::from_secs(30), async {
         // `start /b` keeps the ping on the task's console; it is a leftover.
-        let unit = spawn(
-            runner()?.with_exit_sweep(ExitSweep::KeepDaemonized),
-            cmd("start /b ping -n 60 127.0.0.1 >NUL& ping -n 2 127.0.0.1 >NUL"),
-        )
-        .await?;
+        for text in [
+            "start /b ping -n 60 127.0.0.1 >NUL& ping -n 2 127.0.0.1 >NUL",
+            "start /b ping -n 60 127.0.0.1 >NUL& exit",
+        ] {
+            let unit = spawn(
+                runner()?.with_exit_sweep(ExitSweep::KeepDaemonized),
+                cmd(text),
+            )
+            .await?;
+            let report = unit.wait_report().await?;
+            assert_eq!(report.outcome.code, Some(0), "{text}");
+            assert!(report.left_running.is_empty(), "{text}: {report:?}");
+            assert!(report.escaped.is_empty(), "{text}: {report:?}");
+            assert!(
+                report
+                    .swept
+                    .iter()
+                    .any(|p| p.name.eq_ignore_ascii_case("PING.EXE")),
+                "{text}: {report:?}"
+            );
+        }
+        Ok(())
+    })
+    .await?
+}
+
+/// A task whose leader never gets a console (`wscript.exe`, a GUI program)
+/// leaves nothing to tell leftovers from daemons by, so after it exits
+/// everything it left running is kept and reported, here a hidden `ping` it
+/// started.
+#[tokio::test]
+async fn tasks_keep_everything_when_the_console_is_not_known() -> TestResult {
+    timeout(Duration::from_secs(60), async {
+        let dir = tempfile::tempdir()?;
+        let script = dir.path().join("start.js");
+        // Window style 0 (hidden), not waiting for it.
+        std::fs::write(
+            &script,
+            "new ActiveXObject(\"WScript.Shell\").Run(\"ping -n 30 127.0.0.1\", 0, false);\r\n",
+        )?;
+        let wscript =
+            std::path::PathBuf::from(std::env::var("SystemRoot")?).join(r"System32\wscript.exe");
+        let spec = LaunchSpec {
+            program: wscript.to_string_lossy().into_owned(),
+            // Batch mode: no dialog even if the script fails.
+            args: vec![
+                "//B".into(),
+                "//Nologo".into(),
+                script.to_string_lossy().into_owned(),
+            ],
+            ..cmd("")
+        };
+        let unit = spawn(runner()?.with_exit_sweep(ExitSweep::KeepDaemonized), spec).await?;
         let report = unit.wait_report().await?;
-        assert_eq!(report.outcome.code, Some(0));
-        assert!(report.left_running.is_empty(), "{report:?}");
-        assert!(report.escaped.is_empty(), "{report:?}");
+        let _ends: Vec<Ends> = report
+            .left_running
+            .iter()
+            .map(|p| Ends(p.identity()))
+            .collect();
+        assert_eq!(report.outcome.code, Some(0), "{report:?}");
         assert!(
             report
-                .swept
+                .left_running
                 .iter()
                 .any(|p| p.name.eq_ignore_ascii_case("PING.EXE")),
             "{report:?}"
         );
+        assert!(report.swept.is_empty(), "{report:?}");
         Ok(())
     })
     .await?

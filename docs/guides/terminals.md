@@ -19,10 +19,10 @@ The TUI draws the same bar while a start runs inside it.
 
 ## Clipboard
 
-In the TUI, `y` (and `c`, `v`) copies the selection with OSC 52, which writes to the clipboard through the terminal, so it works over ssh. Terminals that block OSC 52 (some by default, kitty asks on first use) drop the write silently; the TUI says `copied (OSC 52; some terminals block it)` because it cannot tell. Selections over 100 KiB are refused, since terminals truncate them.
+In the TUI, `y` (and `c`, `v`) copies the selection with OSC 52, which writes to the clipboard through the terminal, so it works over ssh. Terminals that block OSC 52 (some by default, kitty asks on first use) drop the write silently; the TUI says `copied (OSC 52; some terminals block it)` because it cannot tell. Selections over 100 KiB are refused, since terminals truncate them. On Windows the TUI writes to the Windows clipboard directly, because classic console windows ignore OSC 52; over ssh it still uses OSC 52.
 
 ## Colours and glyphs
 
-`tui.theme: auto` uses true colour only when the terminal advertises it (`COLORTERM=truecolor`) and reports its background (`COLORFGBG`), otherwise the 16 ANSI colours; `dark`, `light` or `ansi` force one. `NO_COLOR` turns colours off everywhere, `CLICOLOR_FORCE` keeps them in pipes. `tui.glyphs: ascii` replaces the Unicode state symbols for fonts or locales without them; `auto` picks by `LANG`.
+`tui.theme: auto` uses true colour only when the terminal advertises it (`COLORTERM=truecolor`) and reports its background (`COLORFGBG`), otherwise the 16 ANSI colours; `dark`, `light` or `ansi` force one. `NO_COLOR` turns colours off everywhere, `CLICOLOR_FORCE` keeps them in pipes. `tui.glyphs: ascii` replaces the Unicode state symbols for fonts or locales without them; `auto` picks by `LANG`, and picks ASCII in a classic Windows console window, whose default fonts lack some of the symbols.
 
 Unit colours come from tags (`api` blue, `web` green, `worker` magenta, …) or `tags.<name>.color` in `devlanes.yaml`; red is reserved for failures.

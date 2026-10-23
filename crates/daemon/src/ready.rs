@@ -230,8 +230,12 @@ async fn cmd_succeeds(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    let Ok(mut probe) = os::Probe::spawn(&mut process) else {
-        return false;
+    let mut probe = match os::Probe::spawn(&mut process) {
+        Ok(probe) => probe,
+        Err(error) => {
+            tracing::debug!(%error, "the ready probe could not start");
+            return false;
+        }
     };
     // Dropping the probe ends what is left of it on timeout (or when the check
     // itself is dropped).

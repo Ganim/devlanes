@@ -6,7 +6,7 @@ devlanes runs inside a WSL 2 distro the same way it runs on Linux: the daemon, i
 
 Install the Linux build inside a glibc distro such as Ubuntu or Debian, for example with `install.sh` from the [README](../../README.md#install); it refuses musl distros such as Alpine. Keep your repositories on the Linux filesystem (`~/src`), not under `/mnt/c` (see [worktrees](#worktrees-belong-on-the-linux-filesystem)).
 
-Run `devlanes doctor` once after installing. Inside WSL it adds a `wsl` group that checks the settings below.
+Run `devlanes doctor` once after installing. Inside WSL it adds a `wsl` group that checks interop, systemd, whether `tls.trust` includes `windows`, and worktrees on Windows drives.
 
 ## Keep the daemon running
 
@@ -79,5 +79,4 @@ The `/etc/hosts` fallback writes the distro's file, which WSL rewrites when the 
 ## Limitations
 
 - `certs trust` and `untrust` for `windows` need someone at the Windows desktop to answer the dialog. After 5 minutes without an answer the command stops and says a dialog may be waiting; `doctor` gives up on a Windows store lookup after 20 seconds and reports the store as unknown.
-- Older wslu releases fail on WSL versions that name the interop entry `WSLInterop-late`; devlanes then falls back to `rundll32.exe`.
 - With interop off (`[interop] enabled=false` in `/etc/wsl.conf`), the `windows` target and opening URLs in Windows are unavailable; `doctor` says so.

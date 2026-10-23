@@ -29,6 +29,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest a client may take to read its response.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Longest the first instance waits for the pipe name to be released.
+const FIRST_INSTANCE_WAIT: Duration = Duration::from_secs(5);
+
 /// What the server answers and for whom.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -70,8 +73,8 @@ pub fn pipe_sddl(user: &Sid) -> io::Result<String> {
 
 /// Serves until `shutdown` completes, one connection at a time, since each
 /// request rewrites the whole file. The first instance is created with
-/// `FILE_FLAG_FIRST_PIPE_INSTANCE`, so this fails at once if anything else
-/// holds the name.
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE`, so this fails if anything else still holds
+/// the name after about 5 s.
 pub async fn serve(
     config: ServerConfig,
     shutdown: impl std::future::Future<Output = ()>,
@@ -90,12 +93,31 @@ pub async fn serve_with(
         .and_then(|sddl| SecurityDescriptor::from_sddl(&sddl))
         .map_err(ServeError::Security)?;
     let mut factory = PipeFactory::with_descriptor(&config.pipe_name, descriptor);
-    let mut instance = factory.create(true).map_err(|source| ServeError::Create {
-        name: config.pipe_name.to_string_lossy().into_owned(),
-        source,
-    })?;
-    listening();
     tokio::pin!(shutdown);
+    let deadline = tokio::time::Instant::now() + FIRST_INSTANCE_WAIT;
+    let mut instance = loop {
+        match factory.create(true) {
+            Ok(instance) => break instance,
+            // The name still exists: a client handle from before a restart
+            // keeps it alive until that client closes it.
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::select! {
+                    () = &mut shutdown => return Ok(()),
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+            }
+            Err(source) => {
+                return Err(ServeError::Create {
+                    name: config.pipe_name.to_string_lossy().into_owned(),
+                    source,
+                });
+            }
+        }
+    };
+    listening();
     loop {
         let connected = tokio::select! {
             () = &mut shutdown => return Ok(()),

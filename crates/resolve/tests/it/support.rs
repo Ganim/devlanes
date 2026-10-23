@@ -332,7 +332,7 @@ pub fn launch_view(launch: &Launch) -> Value {
 }
 
 /// A service's launch notes without the one its stop signal adds on this OS
-/// (on Windows, that stops terminate at once), so one expectation holds on
+/// (on Windows, for signals sent as Ctrl-Break), so one expectation holds on
 /// every OS. The stop note has its own test.
 pub fn service_notes(service: &ResolvedService) -> Vec<String> {
     let stop = service.stop.signal.launch_note();

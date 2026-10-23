@@ -1,9 +1,9 @@
 //! Resource readings for `devlanes-metrics-windows`: CPU time and memory of one
 //! process, and the machine's CPU times, memory load and low-memory state.
 //!
-//! Processes are opened with `PROCESS_QUERY_LIMITED_INFORMATION` only, the
-//! least access these calls take, so every process of the daemon's user can be
-//! read, including elevated ones started by a unit.
+//! Processes are opened with `PROCESS_QUERY_LIMITED_INFORMATION`, the least
+//! access these calls take, plus `SYNCHRONIZE` where granted, so every process
+//! of the daemon's user can be read, including elevated ones started by a unit.
 
 use std::io;
 use std::os::windows::io::OwnedHandle;
@@ -19,7 +19,7 @@ use windows_sys::Win32::System::ProcessStatus::{
     GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
 };
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-use windows_sys::Win32::System::Threading::GetSystemTimes;
+use windows_sys::Win32::System::Threading::{GetSystemTimes, PROCESS_SYNCHRONIZE};
 
 use super::proc::{open_verified, times};
 use super::token::{owned, raw};
@@ -63,7 +63,15 @@ pub struct MemoryStatus {
 /// refuses access (protected or another user's) or its PID now names a process
 /// started at another time.
 pub fn process_usage(identity: &ProcessIdentity) -> io::Result<Option<ProcessUsage>> {
-    let handle = match open_verified(identity, 0) {
+    // `SYNCHRONIZE`, so an exited process is told from a running one; a process
+    // that refuses it (one at a higher integrity level may) is read without.
+    let opened = match open_verified(identity, PROCESS_SYNCHRONIZE) {
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            open_verified(identity, 0)
+        }
+        other => other,
+    };
+    let handle = match opened {
         Ok(Some(handle)) => handle,
         Ok(None) => return Ok(None),
         Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
