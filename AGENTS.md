@@ -10,6 +10,13 @@ Accepted exception: the daemon depends on `git`, `resolver-dns`, `resolver-hosts
 
 The daemon owns managed resources and SQLite. Clients own rendering and actor detection. Never persist client environments or secret-provider values. Reap managed processes by PID, never `waitpid(-1)`. Do not add auto-restart or resource enforcement.
 
+## Worktrees and delivery
+
+- Before changing files for a new pull request, fetch `origin/main` and create a fresh feature branch and Git worktree from the latest `origin/main`.
+- Put project worktrees under the repository's ignored `.worktrees/` directory, creating the directory when needed. Implement, test, commit, push, and ship the pull request from its feature
+  worktree.
+- After a pull request is merged, safely remove its clean worktrees and prune stale worktree metadata with `git worktree prune`. Never remove a dirty or unmerged worktree without confirming its work is preserved.
+
 ## Crate READMEs
 
 Every crate (and `bins/devlanes`) has a `README.md`. It is for a person deciding what the crate is for, not a replacement for the code or a changelog. Keep it short and in this order:

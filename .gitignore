@@ -5,3 +5,6 @@ devlanes.local.yaml
 # insta leftovers from failed or unreviewed snapshot runs
 *.pending-snap
 *.snap.new
+.tmp/
+.tmp-*/
+.worktrees/
