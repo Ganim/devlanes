@@ -17,6 +17,31 @@ The daemon owns managed resources and SQLite. Clients own rendering and actor de
   worktree.
 - After a pull request is merged, safely remove its clean worktrees and prune stale worktree metadata with `git worktree prune`. Never remove a dirty or unmerged worktree without confirming its work is preserved.
 
+## Engineering Rules
+
+- Prefer simple, maintainable solutions with minimal abstractions and changes.
+- Follow existing project conventions and avoid unnecessary refactoring.
+- Keep changes within the requested scope. Report concrete risks without speculating.
+- Write brief, high-signal comments where they add value.
+- Comments should explain **why**, **when**, or **where**, especially for non-obvious logic, constraints, or tradeoffs. Never comment **what** the code already makes obvious.
+
+## Commits, Branches and PRs
+
+- Name branches using `<type>/<short-kebab-case-description>` with types like `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, and `ci` (e.g., `feat/add-login`).
+- Never use Conventional Commits or PR titles; omit type prefixes (`feat:`, `fix:`, etc.) and use concise, imperative descriptions (e.g., `Add login page`, `Fix auth error`).
+- Every PR opened by an AI agent MUST explicitly disclose the agent and model used (e.g., `Claude Code / Claude Opus 4.1`, `Codex / GPT-6`) in the PR description. This is mandatory, even for minor changes. Never omit, guess, or misrepresent this information.
+
+## Writing style
+
+- Write naturally, directly, and concisely. Prioritize clarity, specificity, and substance over polished or dramatic prose.
+- Avoid common AI writing tropes: "It's not X, it's Y", rhetorical questions, forced metaphors, grandiose claims, false suspense, and manufactured one-liners.
+- Avoid excessive em dashes, short punchy fragments, repetitive sentence structures, rule-of-three patterns, and unnecessary adverbs.
+- Skip preambles, self-narration, filler transitions, redundant explanations, repeated summaries, and conclusions that restate previous points.
+- Prefer simple, precise vocabulary. Avoid corporate jargon, promotional language, invented terminology, vague attributions, and synonym cycling.
+- Use natural paragraph lengths and sentence structures. Avoid excessive lists, bold-first bullets, title-case headings, and decorative Unicode.
+- Preserve the author's voice. Don't force collective language ("we"), unnecessary enthusiasm, artificial humility, or exaggerated certainty.
+- Treat these as patterns to avoid overusing, not absolute bans. Favor context and natural writing over rigid rules.
+
 ## Crate READMEs
 
 Every crate (and `bins/devlanes`) has a `README.md`. It is for a person deciding what the crate is for, not a replacement for the code or a changelog. Keep it short and in this order:
@@ -40,7 +65,15 @@ cargo test --workspace --doc --all-features
 cargo build --workspace --all-targets --all-features
 ```
 
-`.cargo/config.toml` sets `build.warnings = "deny"`, so any rustc or clippy warning fails the build; fix warnings instead of allowing them. Agents build in the shared `target/` directory and never set `CARGO_TARGET_DIR`. Every compile goes through kache (`build.rustc-wrapper` in `.cargo/config.toml`), so it must be installed; see `CONTRIBUTING.md`. During parallel work, format and test only owned crates. Run one nextest at a time per machine and keep the profile defaults in `.config/nextest.toml` (thread counts and test groups); more parallel test binaries have overwhelmed macOS. Every process test needs a timeout and test-owned cleanup. Docker, SSH, trust-store and real framework tests use `#[ignore = "needs ..."]`; run them explicitly with their prerequisites. Prefix Docker-only external tests with `docker_` for the manual CI job. End-to-end tests live in `e2e/` (`devlanes-e2e`) and drive the real `devlanes` binary as separate processes, each with its own short `DEVLANES_HOME`, Git repository and locked port slot; the default nextest profile skips them, so run them with `cargo nextest run --profile e2e`, and the Docker ones by adding `--run-ignored only -E 'test(/^docker_/)'`.
+- `.cargo/config.toml` sets `build.warnings = "deny"`, so any rustc or clippy warning fails the build; fix warnings instead of allowing them.
+- Agents build in the shared `target/` directory and never set `CARGO_TARGET_DIR`.
+- Every compile goes through kache (`build.rustc-wrapper` in `.cargo/config.toml`), so it must be installed; see `CONTRIBUTING.md`.
+- During parallel work, format and test only owned crates.
+- Run one nextest at a time per machine and keep the profile defaults in `.config/nextest.toml` (thread counts and test groups); more parallel test binaries have overwhelmed macOS.
+- Every process test needs a timeout and test-owned cleanup.
+- Docker, SSH, trust-store and real framework tests use `#[ignore = "needs ..."]`; run them explicitly with their prerequisites.
+- Prefix Docker-only external tests with `docker_` for the manual CI job.
+- End-to-end tests live in `e2e/` (`devlanes-e2e`) and drive the real `devlanes` binary as separate processes, each with its own short `DEVLANES_HOME`, Git repository and locked port slot; the default nextest profile skips them, so run them with `cargo nextest run --profile e2e`, and the Docker ones by adding `--run-ignored only -E 'test(/^docker_/)'`.
 
 ## Public content
 
