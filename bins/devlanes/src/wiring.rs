@@ -305,6 +305,7 @@ fn start_gate(
     let options = GateOptions {
         slot_timeout: startup.slot_timeout.0,
         settle_cpu: startup.settle_cpu.0,
+        reserve_memory: startup.reserve_memory.map(|bytes| bytes.0),
         ..GateOptions::default()
     };
     let clock = Arc::new(devlanes_core::clock::TokioClock::new());

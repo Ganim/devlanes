@@ -24,6 +24,15 @@ use crate::controller::Controller;
 /// Reading interval of gates whose policy does not set one.
 const DEFAULT_SAMPLE_EVERY: Duration = Duration::from_secs(1);
 
+/// Largest default memory reserve: 2 GiB.
+const DEFAULT_RESERVE_CAP: u64 = 2 << 30;
+
+/// The default memory reserve for a machine with `total` bytes of RAM: 10%,
+/// at most 2 GiB.
+pub fn default_reserve(total: u64) -> u64 {
+    (total / 10).min(DEFAULT_RESERVE_CAP)
+}
+
 /// Slot rules shared by every gate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GateOptions {
@@ -33,15 +42,21 @@ pub struct GateOptions {
     pub settle_cpu: f64,
     /// How long the tree CPU must stay under `settle_cpu`.
     pub settle_for: Duration,
+    /// Bytes of available memory a new start must leave untouched, on top of
+    /// what the starts in flight still reserve. `None` is [`default_reserve`]
+    /// of the pressure source's total memory, or nothing while that is unknown.
+    pub reserve_memory: Option<u64>,
 }
 
 impl Default for GateOptions {
-    /// 20 s slot timeout; settled below 10% of a core for 2 s.
+    /// 20 s slot timeout; settled below 10% of a core for 2 s; the default
+    /// memory reserve.
     fn default() -> Self {
         Self {
             slot_timeout: Duration::from_secs(20),
             settle_cpu: 10.0,
             settle_for: Duration::from_secs(2),
+            reserve_memory: None,
         }
     }
 }
@@ -139,6 +154,9 @@ struct State {
     /// When the last memory read of this busy period completed (successful or
     /// not); `None` before the first one.
     memory_read_at: Option<Duration>,
+    /// Memory every start must leave free; `None` until the configured value
+    /// or the total memory is known. Kept across busy periods.
+    reserve: Option<u64>,
     next_sample: Duration,
     /// A grant pass needs a reading before it can decide; the driver should
     /// sample at once.
@@ -208,6 +226,7 @@ impl Engine {
                 pressure: None,
                 available_memory: None,
                 memory_read_at: None,
+                reserve: options.reserve_memory,
                 next_sample: Duration::ZERO,
                 sample_now: false,
                 hold: None,
@@ -305,7 +324,8 @@ impl Engine {
         }
     }
 
-    /// Whether the head's `need` fits. Gates without a pressure source and
+    /// Whether the head's `need` fits in the available memory minus the
+    /// reserve and the in-flight reservations. Gates without a pressure source and
     /// starts with nothing in flight always fit: the check delays, it never
     /// refuses, so the wait ends at the latest when the starts in flight finish
     /// or reach `slot_timeout`.
@@ -325,7 +345,9 @@ impl Engine {
         let reserved = state
             .held
             .values()
-            .fold(0_u64, |sum, held| sum.saturating_add(held.reserved()));
+            .fold(state.reserve.unwrap_or(0), |sum, held| {
+                sum.saturating_add(held.reserved())
+            });
         if need > available.saturating_sub(reserved) {
             MemoryCheck::Blocked
         } else {
@@ -566,15 +588,29 @@ impl Engine {
             if due {
                 state.sample_now = false;
             }
-            due.then_some(state.period)
+            due.then_some((state.period, state.reserve.is_none()))
         };
-        let Some(period) = due else {
+        let Some((period, needs_total)) = due else {
             return;
         };
         let sample = source.sample().await;
         let available = source.available_memory().await;
+        // Total memory never changes; read until known, then derive the reserve once.
+        let reserve = if needs_total {
+            source
+                .total_memory()
+                .await
+                .ok()
+                .flatten()
+                .map(default_reserve)
+        } else {
+            None
+        };
         let now = self.clock.now();
         let mut state = self.state();
+        if state.reserve.is_none() {
+            state.reserve = reserve;
+        }
         if !state.busy || state.period != period {
             return;
         }

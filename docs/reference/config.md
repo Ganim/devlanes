@@ -313,10 +313,11 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | Path | Type | Description | Example |
 | --- | --- | --- | --- |
 | `startup` | object | How many services start at once, across all lanes and projects. | `{"max":4,"mode":"fixed"}` |
-| `startup.initial` | integer | Adaptive starting window; default CPU cores / 4, at least 2, at most `max`. | `2` |
+| `startup.initial` | integer | Adaptive starting window; defaults to `max`, so starts run at full speed until the machine is under pressure. Set it lower to ramp up from a few slots instead; never above `max`. | `2` |
 | `startup.max` | integer | Largest window (the fixed window in `fixed` mode); default CPU cores. | `8` |
-| `startup.mode` | `adaptive` or `fixed` or `all` | `adaptive`, `fixed` or `all`; default `fixed`. | `adaptive` |
-| `startup.settle_cpu` | string | A `ready: started` service has finished starting once its process tree stays below this share of one core for 2 s; default 10%. | `10%` |
+| `startup.mode` | `adaptive` or `fixed` or `all` | `adaptive`, `fixed` or `all`; default `adaptive`. A starting service holds its slot until its ready check (`tcp`, `http`, `log` or `cmd`) passes, it fails, or `slot_timeout` passes; one without a check (`ready: started`) holds it until it settles (`settle_cpu`). | `adaptive` |
+| `startup.reserve_memory` | string | Free memory every new start must leave, on top of the memory the services already starting are expected to still need (each one's past startup peak, or 512 MiB without history). Defaults to 10% of RAM, at most `2GiB`; `0B` turns it off. A start with nothing else starting never waits for it. `all` ignores it. | `2GiB` |
+| `startup.settle_cpu` | string | Only for services without a ready check (`ready: started`, the default for a service without `hosts`): such a service gives its slot back once its process tree uses less than this share of one core for 2 s, meaning it has finished starting up. Services with a `tcp`, `http`, `log` or `cmd` check keep their slot until the check passes instead. Defaults to `10%`. | `10%` |
 | `startup.slot_timeout` | duration | A start slot is given back after this even if the service is not ready, so services waiting on each other cannot block the queue; default 20s. | `15s` |
 | `startup.target_cpu` | string | Adaptive mode grows the window while system CPU stays below this; default 75%. | `75%` |
 

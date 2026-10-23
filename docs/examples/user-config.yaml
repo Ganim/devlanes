@@ -25,19 +25,23 @@ proxy:
   lan: false
 # How many services start at once, across all lanes and projects.
 startup:
-  # adaptive: grow and shrink with CPU and memory pressure. fixed (default): always
-  # `max` at a time. all: everything at once.
+  # adaptive (default): start at `initial`, slow down under CPU or memory pressure.
+  # fixed: always `max` at a time. all: everything at once.
   mode: adaptive
-  # Default: CPU cores / 4, at least 2.
+  # Default: `max`. Lower it to ramp up from a few starts instead.
   initial: 2
   # Default: CPU cores.
   max: 8
   # Grow the window while system CPU stays below this.
   target_cpu: 75%
-  # A `ready: started` service is done starting once it stays below this share of one core for 2s.
+  # Services with a ready check keep their slot until it passes. One without
+  # (`ready: started`) is done starting once it stays below this share of one core for 2s.
   settle_cpu: 10%
   # Give the slot back after this even if the service isn't ready.
   slot_timeout: 20s
+  # Free memory a new start must leave, beyond what starting services still need.
+  # Default: 10% of RAM, at most 2GiB; 0B turns it off.
+  reserve_memory: 2GiB
 # Service output kept on disk, by age and total size; days also bounds database log metadata.
 logs:
   retention: { days: 7, max_size: 5GiB }

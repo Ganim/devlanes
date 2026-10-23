@@ -16,7 +16,7 @@ use devlanes_core::{
     },
 };
 use devlanes_start_gate::{
-    AdaptiveConfig, AdaptiveGate, AllAtOnce, Controller, FixedWindow, GateOptions,
+    AdaptiveConfig, AdaptiveGate, AllAtOnce, Controller, FixedWindow, GateOptions, default_reserve,
 };
 
 /// Upper bound for every test body.
@@ -835,6 +835,84 @@ async fn memory_hold_never_refuses() {
         assert_eq!(take_granted(&mut waiting).len(), 1);
     })
     .await;
+}
+
+/// 1000 bytes available out of `total`, with calm CPU.
+struct Machine {
+    total: Option<u64>,
+}
+
+#[async_trait]
+impl PressureSource for Machine {
+    fn name(&self) -> &'static str {
+        "machine"
+    }
+
+    async fn sample(&self) -> Result<PressureSample, devlanes_core::Error> {
+        Ok(reading(10.0, MemoryPressure::Normal))
+    }
+
+    async fn available_memory(&self) -> Result<Option<u64>, devlanes_core::Error> {
+        Ok(Some(1000))
+    }
+
+    async fn total_memory(&self) -> Result<Option<u64>, devlanes_core::Error> {
+        Ok(self.total)
+    }
+}
+
+/// Units granted from a batch of `needs` after one start is already in flight.
+async fn granted_next_to_reserve(
+    reserve_memory: Option<u64>,
+    total: Option<u64>,
+    needs: &[u64],
+) -> usize {
+    let clock = ManualClock::new();
+    let gate = FixedWindow::with_pressure(
+        8,
+        GateOptions {
+            reserve_memory,
+            ..options(60)
+        },
+        Arc::new(clock.clone()),
+        Arc::new(Machine { total }),
+    );
+    let _holder = gate.acquire(needing("acme@1", "holder", 0, 0)).await;
+    settle().await;
+    let mut tickets = gate.enqueue_batch(
+        needs
+            .iter()
+            .enumerate()
+            .map(|(order, need)| needing("acme@1", &format!("s{order}"), order, *need))
+            .collect(),
+    );
+    take_granted(&mut tickets).len()
+}
+
+#[tokio::test]
+async fn starts_leave_the_memory_reserve_free() {
+    bounded(async {
+        // 1000 free, 300 reserved: 600 fits, the next 200 does not.
+        assert_eq!(
+            granted_next_to_reserve(Some(300), None, &[600, 200]).await,
+            1
+        );
+        assert_eq!(granted_next_to_reserve(Some(0), None, &[600, 200]).await, 2);
+        // Default: 10% of 4000 total is 400, so 500 fits and 200 more does not.
+        assert_eq!(
+            granted_next_to_reserve(None, Some(4000), &[500, 200]).await,
+            1
+        );
+        // Unknown total: no reserve.
+        assert_eq!(granted_next_to_reserve(None, None, &[500, 200]).await, 2);
+    })
+    .await;
+}
+
+#[test]
+fn default_reserve_is_a_tenth_capped_at_two_gib() {
+    assert_eq!(default_reserve(8 << 30), (8 << 30) / 10);
+    assert_eq!(default_reserve(64 << 30), 2 << 30);
 }
 
 #[test]

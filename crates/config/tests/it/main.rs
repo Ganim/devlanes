@@ -435,14 +435,25 @@ fn startup_settings() {
     assert_eq!(defaults.target_cpu, Percent(75.0));
     assert_eq!(defaults.settle_cpu, Percent(10.0));
     assert_eq!(defaults.slot_timeout.0.as_secs(), 20);
-    assert_eq!(defaults.windows(16), (4, 16));
-    assert_eq!(defaults.windows(4), (2, 4));
+    assert_eq!(defaults.mode, StartupMode::Adaptive);
+    assert_eq!(defaults.reserve_memory, None);
+    assert_eq!(defaults.windows(16), (16, 16));
+    assert_eq!(defaults.windows(4), (4, 4));
     assert_eq!(defaults.windows(1), (1, 1));
 
     let user = parse_user(USER).expect("user example");
     assert_eq!(user.startup.mode, StartupMode::Adaptive);
     assert_eq!(user.startup.windows(32), (2, 8));
     assert_eq!(user.startup.settle_cpu, Percent(10.0));
+    assert_eq!(user.startup.reserve_memory, Some(ByteSize(2 << 30)));
+    assert_eq!(
+        parse_user("startup: { reserve_memory: 0B }")
+            .expect("reserve off")
+            .startup
+            .reserve_memory,
+        Some(ByteSize(0))
+    );
+    assert!(parse_user("startup: { reserve_memory: 10% }").is_err());
 
     let custom = parse_user("startup: { mode: all, target_cpu: 12.5%, max: 3, initial: 9 }");
     assert!(

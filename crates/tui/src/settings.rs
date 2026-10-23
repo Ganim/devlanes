@@ -1960,6 +1960,52 @@ mod tests {
     }
 
     #[test]
+    fn startup_settings_show_the_schema_docs() {
+        let schema = devlanes_config::user_schema();
+        let fields = resolve(&schema["properties"]["startup"], &schema)["properties"]
+            .as_object()
+            .expect("startup fields")
+            .clone();
+        let startup: Vec<Item> = catalog()
+            .into_iter()
+            .flat_map(|category| category.items)
+            .filter(|item| item.key.starts_with("startup."))
+            .collect();
+        let mut keys: Vec<&str> = startup.iter().map(|item| item.key.as_str()).collect();
+        keys.sort_unstable();
+        let mut expected: Vec<String> = fields
+            .keys()
+            .map(|name| format!("startup.{name}"))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "every startup field is editable");
+        for item in &startup {
+            let name = item.key.trim_start_matches("startup.");
+            assert_eq!(
+                item.about,
+                one_line(fields[name].get("description")),
+                "{}",
+                item.key
+            );
+        }
+        let mode = startup
+            .iter()
+            .find(|item| item.key == "startup.mode")
+            .expect("mode");
+        assert_eq!(mode.default, Some(json!("adaptive")));
+        let reserve = startup
+            .iter()
+            .find(|item| item.key == "startup.reserve_memory")
+            .expect("reserve_memory");
+        assert!(matches!(reserve.kind, Kind::Text), "{:?}", reserve.kind);
+        assert!(
+            reserve.about.contains("at most `2GiB`"),
+            "{}",
+            reserve.about
+        );
+    }
+
+    #[test]
     fn arrows_move_rows_and_tabs_and_enter_edits_in_place() {
         let mut theme = Theme::default();
         let mut settings = open("", "tui.open_on_start");

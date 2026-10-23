@@ -47,7 +47,8 @@ expression: user
     "max": 8,
     "target_cpu": "75%",
     "settle_cpu": "10%",
-    "slot_timeout": "20000ms"
+    "slot_timeout": "20000ms",
+    "reserve_memory": "2147483648B"
   },
   "terminal": {
     "progress": "auto"

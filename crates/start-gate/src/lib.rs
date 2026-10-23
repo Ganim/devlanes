@@ -6,9 +6,9 @@
 //! in declaration order. A slot is held until its holder releases it (ready,
 //! failed, settled) or `slot_timeout` passes, so services that wait on each
 //! other cannot block the queue. Gates that read a `PressureSource` also hold
-//! the head of the queue while its memory need does not fit, for at most
-//! `slot_timeout`. Gates only schedule starts; they never limit or signal
-//! running processes.
+//! the head of the queue while its memory need does not fit next to the
+//! memory reserve, for at most `slot_timeout`. Gates only schedule starts;
+//! they never limit or signal running processes.
 //!
 //! ```
 //! use std::{sync::Arc, time::Duration};
@@ -44,7 +44,7 @@ use devlanes_core::{
 };
 
 pub use controller::{AdaptiveConfig, Controller};
-pub use engine::GateOptions;
+pub use engine::{GateOptions, default_reserve};
 
 use engine::{Engine, Policy};
 

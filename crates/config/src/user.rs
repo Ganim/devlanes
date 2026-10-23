@@ -224,17 +224,20 @@ impl Default for StateConfig {
     }
 }
 
-/// The startup mode used when `startup.mode` is absent. `fixed` ships as the
-/// default until a measured comparison shows `adaptive` reaching ready sooner
-/// than `all`; switching the default is a change to this constant only.
-pub const DEFAULT_STARTUP_MODE: StartupMode = StartupMode::Fixed;
+/// The startup mode used when `startup.mode` is absent. `adaptive` starts each
+/// burst at `max` like `fixed` and only slows down under CPU or memory pressure,
+/// so on an idle machine it is as fast as `fixed`.
+pub const DEFAULT_STARTUP_MODE: StartupMode = StartupMode::Adaptive;
 
 /// How the start gate sizes its window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(extend("examples" = ["adaptive","fixed","all"]))]
 pub enum StartupMode {
-    /// Grow the window while CPU and memory allow, shrink it under pressure.
+    /// Begin each burst of starts at `initial` (by default `max`, full speed). Halve the
+    /// slots after 3 s above 90% CPU or when the system reports memory pressure, start
+    /// nothing while that pressure is critical, and add a slot every 2 s while system CPU
+    /// stays below `target_cpu`, up to `max`.
     #[schemars(extend("examples" = ["adaptive"]))]
     Adaptive,
     /// Always `max` starts at a time.
@@ -255,11 +258,16 @@ impl Default for StartupMode {
 /// Startup pacing. Machine settings, so they live in user config only.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-#[schemars(extend("examples" = [{"mode":"fixed","max":4},{"mode":"adaptive","initial":2,"max":8,"target_cpu":"75%","settle_cpu":"10%","slot_timeout":"20s"}]))]
+#[schemars(extend("examples" = [{"mode":"fixed","max":4},{"mode":"adaptive","initial":2,"max":8,"target_cpu":"75%","settle_cpu":"10%","slot_timeout":"20s","reserve_memory":"2GiB"}]))]
 pub struct StartupConfig {
-    /// `adaptive`, `fixed` or `all`; default `fixed`.
+    /// `adaptive`, `fixed` or `all`; default `adaptive`. A starting service holds its
+    /// slot until its ready check (`tcp`, `http`, `log` or `cmd`) passes, it fails, or
+    /// `slot_timeout` passes; one without a check (`ready: started`) holds it until it
+    /// settles (`settle_cpu`).
     pub mode: StartupMode,
-    /// Adaptive starting window; default CPU cores / 4, at least 2, at most `max`.
+    /// Adaptive starting window; defaults to `max`, so starts run at full speed until
+    /// the machine is under pressure. Set it lower to ramp up from a few slots instead;
+    /// never above `max`.
     #[schemars(extend("examples" = [2]))]
     pub initial: Option<NonZeroU32>,
     /// Largest window (the fixed window in `fixed` mode); default CPU cores.
@@ -268,13 +276,22 @@ pub struct StartupConfig {
     /// Adaptive mode grows the window while system CPU stays below this; default 75%.
     #[schemars(extend("examples" = ["75%", "80%" ]))]
     pub target_cpu: Percent,
-    /// A `ready: started` service has finished starting once its process tree
-    /// stays below this share of one core for 2 s; default 10%.
+    /// Only for services without a ready check (`ready: started`, the default for a
+    /// service without `hosts`): such a service gives its slot back once its process tree
+    /// uses less than this share of one core for 2 s, meaning it has finished starting up.
+    /// Services with a `tcp`, `http`, `log` or `cmd` check keep their slot until the check
+    /// passes instead. Defaults to `10%`.
     #[schemars(extend("examples" = ["10%","12.5%" ]))]
     pub settle_cpu: Percent,
     /// A start slot is given back after this even if the service is not ready,
     /// so services waiting on each other cannot block the queue; default 20s.
     pub slot_timeout: ConfigDuration,
+    /// Free memory every new start must leave, on top of the memory the services already
+    /// starting are expected to still need (each one's past startup peak, or 512 MiB
+    /// without history). Defaults to 10% of RAM, at most `2GiB`; `0B` turns it off. A
+    /// start with nothing else starting never waits for it. `all` ignores it.
+    #[schemars(extend("examples" = ["2GiB","0B"]))]
+    pub reserve_memory: Option<ByteSize>,
 }
 
 impl Default for StartupConfig {
@@ -287,19 +304,20 @@ impl Default for StartupConfig {
             target_cpu: Percent(75.0),
             settle_cpu: Percent(10.0),
             slot_timeout: ConfigDuration(std::time::Duration::from_secs(20)),
+            reserve_memory: None,
         }
     }
 }
 
 impl StartupConfig {
     /// Effective `(initial, max)` windows for a machine with `cores` CPUs: `max`
-    /// defaults to the core count, `initial` to a quarter of it (at least 2),
-    /// and `initial` never exceeds `max`.
+    /// defaults to the core count, `initial` to `max`, and `initial` never
+    /// exceeds `max`.
     pub fn windows(&self, cores: usize) -> (usize, usize) {
         let cores = cores.max(1);
         let to_usize = |value: NonZeroU32| usize::try_from(value.get()).unwrap_or(usize::MAX);
         let max = self.max.map_or(cores, to_usize);
-        let initial = self.initial.map_or((cores / 4).max(2), to_usize);
+        let initial = self.initial.map_or(max, to_usize);
         (initial.min(max), max)
     }
 
