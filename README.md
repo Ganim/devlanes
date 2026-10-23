@@ -11,7 +11,7 @@ cargo binstall --git https://github.com/devlanes-run/devlanes devlanes
 curl -fsSL https://devlanes.run/install.sh | sh
 ```
 
-These install release builds for macOS or Linux (glibc), arm64 or x86_64. Homebrew, npm and `install.sh` install both `devlanes` and the `devlanes-hosts` helper; cargo binstall installs `devlanes`, and `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-hosts-helper` adds the helper. To build from source instead:
+These install release builds for macOS or Linux (glibc), arm64 or x86_64; Windows is below. Homebrew, npm and `install.sh` install both `devlanes` and the `devlanes-hosts` helper; cargo binstall installs `devlanes`, and `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-hosts-helper` adds the helper. To build from source instead:
 
 ```sh
 cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes devlanes-hosts-helper

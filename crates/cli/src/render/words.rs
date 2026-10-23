@@ -1234,6 +1234,9 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
                 "service_untrusted" => {
                     "the hosts service's pipe is held by another program, not the devlanes service"
                 }
+                #[cfg(windows)]
+                _ => "the installed devlanes hosts service is outdated",
+                #[cfg(not(windows))]
                 _ => "the installed /etc/hosts helper is outdated",
             };
             (

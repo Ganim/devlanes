@@ -21,7 +21,7 @@ Every crate (and `bins/devlanes`) has a `README.md`. It is for a person deciding
 5. Optional short sections for behaviour a reader would not guess (for example "Requires `fnox` 1.39 or later"), each a few lines.
 6. `## License`: `Apache-2.0`.
 
-No badges, tables of contents, installation boilerplate, roadmaps, design essays or history. Sentence-case headings, no headings starting with what/why/where/how, no em dashes, no marketing words. Write plainly, the way you'd explain the crate to a colleague in two minutes. `crates/hosts-helper/README.md` is the one exception that documents a security model at length, because the owner asked for it.
+No badges, tables of contents, installation boilerplate, roadmaps, design essays or history. Sentence-case headings, no headings starting with what/why/where/how, no em dashes, no marketing words. Write plainly, the way you'd explain the crate to a colleague in two minutes. `crates/hosts-helper/README.md` and `crates/hosts-service/README.md` are the exceptions that document a security model at length, because the owner asked for it.
 
 ## Checks
 

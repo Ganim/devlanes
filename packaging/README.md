@@ -19,6 +19,7 @@ Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula an
 | npm | `npm install -g devlanes` |
 | cargo binstall | `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes` |
 | Script | `curl -fsSL https://devlanes.run/install.sh \| sh` |
+| Script (Windows) | `irm https://github.com/devlanes-run/devlanes/releases/latest/download/install.ps1 \| iex` |
 | Source | `cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes devlanes-hosts-helper` |
 
 Every channel except the source build installs the release archives.
@@ -32,7 +33,7 @@ The workflow then runs these jobs:
 
 | Job | Does |
 |---|---|
-| `test` | Runs the workspace tests on Linux and macOS, in parallel with `build` |
+| `test` | Runs the workspace tests on Linux, macOS and Windows, in parallel with `build` |
 | `build` | Builds `devlanes` and `devlanes-hosts` for each target (the three `.exe` files on Windows), fails if the committed config schemas differ from the generated ones, and packs the archive (on Windows it uploads the executables instead) |
 | `windows` | Signs the Windows executables when signing is configured and packs the two zip archives |
 | `release` | Writes `SHA256SUMS`, `release-manifest.json` and the formula, copies `schema.json`, `user-schema.json`, `install.sh` and `install.ps1`, attests the archives' build provenance, and uploads everything to a draft release. A rerun refills the draft and refuses to touch a published release |
@@ -149,7 +150,7 @@ The `windows` job signs all six executables (both targets) with Azure Artifact S
 irm https://github.com/devlanes-run/devlanes/releases/latest/download/install.ps1 | iex
 ```
 
-It picks the archive for the machine (an x64 PowerShell emulated on arm64 gets the arm64 build), reads `SHA256SUMS` from the latest release or from `DEVLANES_VERSION`, checks the archive's SHA-256 and its exact entries, and installs into `DEVLANES_INSTALL_DIR` (default `%LOCALAPPDATA%\Programs\devlanes`). It puts that directory first in the user `PATH` (kept as `REG_EXPAND_SZ`) unless `DEVLANES_NO_MODIFY_PATH=1` or `-NoModifyPath`, and names any other devlanes that new terminals would find first (they get the machine `PATH`, then the user one). Every file is copied next to its target before the first one is replaced, so a failed copy leaves the installed version as it was. Windows refuses to overwrite a running executable but lets it be renamed, so an executable in use (usually the daemon's `devlanes.exe`) becomes `devlanes.exe.old-TIMESTAMP` and keeps running; the script prints that `devlanes daemon restart` switches over, and `devlanes doctor` deletes the old file once nothing runs it. It never stops the daemon. It runs in Windows PowerShell 5.1 (with TLS 1.2 forced on) and PowerShell 7. `DEVLANES_INSTALL_BASE_URL` accepts `http://` and `file://` for tests. The update notice names this URL until the website serves `install.ps1` the way it serves `install.sh`.
+It picks the archive for the machine (an x64 PowerShell emulated on arm64 gets the arm64 build), reads `SHA256SUMS` from the latest release or from `DEVLANES_VERSION`, checks the archive's SHA-256 and its exact entries, and installs into `DEVLANES_INSTALL_DIR` (default `%LOCALAPPDATA%\Programs\devlanes`). It adds that directory to the front of the user `PATH` (kept as `REG_EXPAND_SZ`) unless it is already there, `DEVLANES_NO_MODIFY_PATH=1` is set or `-NoModifyPath` is given, and names any other devlanes that new terminals would find first (they get the machine `PATH`, then the user one). Every file is copied next to its target before the first one is replaced, so a failed copy leaves the installed version as it was. Windows refuses to overwrite a running executable but lets it be renamed, so an executable in use (usually the daemon's `devlanes.exe`) becomes `devlanes.exe.old-TIMESTAMP` and keeps running; the script prints that `devlanes daemon restart` switches over, and `devlanes doctor` deletes the old file once nothing runs it. It never stops the daemon. It runs in Windows PowerShell 5.1 (with TLS 1.2 forced on) and PowerShell 7. `DEVLANES_INSTALL_BASE_URL` accepts `http://` and `file://` for tests. The update notice names this URL until the website serves `install.ps1` the way it serves `install.sh`.
 
 `scripts/check.ps1` tests the script's helpers (`PATH` editing on fake values, architecture, `SHA256SUMS` parsing), packs twice and compares the hashes, and installs from a `file://` release with `DEVLANES_NO_MODIFY_PATH=1`, as a file and through `Invoke-Expression` (which must leave the session's variables and functions as they were). With `-BinDir` pointing at built binaries it also reinstalls while a daemon (with its own `DEVLANES_HOME` and ports) runs from the installed `devlanes.exe`, and checks the rename, that the daemon survived, and that `doctor` deletes the old file after `daemon stop`. The `packaging-windows` CI job runs it after PSScriptAnalyzer (settings in `PSScriptAnalyzerSettings.psd1`).
 

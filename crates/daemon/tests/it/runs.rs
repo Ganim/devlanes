@@ -96,17 +96,18 @@ async fn a_detached_run_over_a_running_one_is_refused() {
 
 /// The runner the daemon uses on this OS.
 #[cfg(unix)]
-fn real_runner() -> devlanes_runner_pty::PtyRunner {
+fn real_runner(_dir: &std::path::Path) -> devlanes_runner_pty::PtyRunner {
     devlanes_runner_pty::PtyRunner::default()
 }
 
 /// The runner the daemon uses on this OS, with a console helper that does not
-/// exist: no console event can be sent, so a stop terminates at once unless a
-/// window of the unit takes `WM_CLOSE`.
+/// exist (a path in the test's own `dir` that is never created): no console
+/// event can be sent, so a stop terminates at once unless a window of the unit
+/// takes `WM_CLOSE`.
 #[cfg(windows)]
-fn real_runner() -> devlanes_runner_windows::WindowsRunner {
+fn real_runner(dir: &std::path::Path) -> devlanes_runner_windows::WindowsRunner {
     devlanes_runner_windows::WindowsRunner::new(devlanes_runner_windows::ConsoleHelper {
-        program: std::env::temp_dir().join("devlanes-no-such-console-helper.exe"),
+        program: dir.join("no-such-console-helper.exe"),
         args: Vec::new(),
     })
 }
@@ -138,7 +139,7 @@ async fn a_pipe_task_shows_its_output_right_away() {
         let store = devlanes_state::Store::open(home.join("state.db"))
             .await
             .expect("store");
-        let mut integ = Integrations::with_runner(Arc::new(CoreRunner(real_runner())));
+        let mut integ = Integrations::with_runner(Arc::new(CoreRunner(real_runner(&tmp.path))));
         // The `run:` string is POSIX; on Windows that needs Git's `sh.exe`.
         integ.shell = detect_shell().await;
         let mut options = EngineOptions::new(&home, home.join("d.sock"));

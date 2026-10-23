@@ -265,7 +265,7 @@ fn private_directory(path: &Path) -> Result<()> {
 /// Creates a missing state directory with a DACL for this user, SYSTEM and
 /// Administrators, and refuses a symlink or junction, a non-directory or another
 /// account's directory. An own directory that others can read passes: the daemon
-/// tightens it when it starts and logs that once.
+/// tightens it when it starts if it is empty, and refuses it otherwise.
 #[cfg(windows)]
 fn private_directory(path: &Path) -> Result<()> {
     use devlanes_sys::windows::security::{DirProblem, ensure_private_dir};

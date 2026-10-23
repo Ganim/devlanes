@@ -509,7 +509,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
             Err(error) if error.is_not_running() => {
                 let mut data = crate::local_doctor::facts(&paths).await;
                 crate::notices::annotate_doctor(None, &mut data).await;
-                crate::local_doctor::annotate_terminal(&mut data);
+                crate::local_doctor::annotate_system(&mut data);
                 crate::wsl_doctor::annotate(&mut data).await;
                 if let Some(autostart) = crate::daemon::autostart(&paths).await {
                     data["autostart"] = autostart;
@@ -578,7 +578,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                         Outcome::Ok { mut data } => {
                             if method == Method::Doctor {
                                 crate::notices::annotate_doctor(Some(&mut client), &mut data).await;
-                                crate::local_doctor::annotate_terminal(&mut data);
+                                crate::local_doctor::annotate_system(&mut data);
                                 crate::wsl_doctor::annotate(&mut data).await;
                                 if let Some(autostart) = crate::daemon::autostart(&paths).await {
                                     data["autostart"] = autostart;

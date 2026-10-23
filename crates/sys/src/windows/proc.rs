@@ -238,7 +238,8 @@ pub enum ConsoleHost {
     /// Attached to none (`DETACHED_PROCESS`, `FreeConsole`).
     Detached,
     /// No console set up yet: the process is starting, or never gets one (a
-    /// GUI program). A console host reports this about itself too.
+    /// GUI program, which stays so for its whole life; [`age`] tells the two
+    /// apart). A console host reports this about itself too.
     Pending,
 }
 
@@ -379,6 +380,20 @@ fn console_host(process: &OwnedHandle) -> io::Result<ConsoleHost> {
     })
 }
 
+/// How long ago a process with this start time was created, by the system
+/// clock; zero for a start time ahead of it (the clock was set back).
+pub fn age(start_time: u64) -> std::time::Duration {
+    use std::time::{Duration, SystemTime};
+    /// 1970-01-01 in 100 ns ticks since 1601-01-01, the start time's epoch.
+    const UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+    let since_unix = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let now = u64::try_from(since_unix.as_nanos() / 100)
+        .map_or(u64::MAX, |ticks| ticks.saturating_add(UNIX_EPOCH_TICKS));
+    Duration::from_nanos(now.saturating_sub(start_time).saturating_mul(100))
+}
+
 /// Opens `identity` with `access` plus `PROCESS_QUERY_LIMITED_INFORMATION`;
 /// `None` when it is gone, exited, or its PID now names a process started at
 /// another time.
@@ -501,7 +516,8 @@ fn parent_pid(handle: &OwnedHandle) -> Option<u32> {
             ptr::null_mut(),
         )
     };
-    (status == 0).then(|| u32::try_from(info.InheritedFromUniqueProcessId).ok())?
+    // NT_SUCCESS, as in `console_host`.
+    (status >= 0).then(|| u32::try_from(info.InheritedFromUniqueProcessId).ok())?
 }
 
 /// The executable's file name, like the snapshot's `szExeFile`.
@@ -745,6 +761,13 @@ mod tests {
         assert_eq!(listed.ppid, looked_up.ppid);
         assert!(!looked_up.zombie);
         assert!(looked_up.name.to_ascii_lowercase().ends_with(".exe"));
+        // This process started before the test and well within a day of it.
+        let own = age(looked_up.start_time);
+        assert!(
+            own > std::time::Duration::ZERO && own < std::time::Duration::from_secs(86_400),
+            "{own:?}"
+        );
+        assert_eq!(age(u64::MAX), std::time::Duration::ZERO);
         assert!(!boot_id()?.is_empty());
         assert_eq!(boot_id()?, boot_id()?);
         Ok(())

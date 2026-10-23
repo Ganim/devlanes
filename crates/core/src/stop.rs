@@ -107,14 +107,11 @@ mod os {
         }
     }
 
-    /// Only signals without a Windows counterpart get a note: SIGINT, SIGTERM
-    /// and SIGKILL map the way a reader expects.
+    /// Only signals sent as Ctrl-Break without being SIGTERM get a note: SIGINT,
+    /// SIGTERM and SIGKILL map the way a reader expects.
     pub(super) fn launch_note(signal: StopSignal) -> Option<String> {
-        matches!(
-            signal,
-            StopSignal::Hangup | StopSignal::Quit | StopSignal::User1 | StopSignal::User2
-        )
-        .then(|| format!("on Windows stop.signal {signal} is sent as Ctrl-Break"))
+        (signal.windows_stop() == WindowsStop::CtrlBreak && signal != StopSignal::Terminate)
+            .then(|| format!("on Windows stop.signal {signal} is sent as Ctrl-Break"))
     }
 }
 
@@ -149,9 +146,8 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    /// SIGINT is planned as Ctrl-C and SIGKILL terminates; everything else is
-    /// planned as Ctrl-Break. Until then every signal notes that stops
-    /// terminate at once.
+    /// SIGINT is sent as Ctrl-C and SIGKILL terminates; everything else is sent
+    /// as Ctrl-Break, with a note unless it is SIGTERM.
     fn windows_mapping() {
         use StopSignal::*;
         assert_eq!(Interrupt.windows_stop(), WindowsStop::CtrlC);

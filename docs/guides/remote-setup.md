@@ -67,7 +67,7 @@ Hidden units stay on the box: their ports are not mirrored and the box refuses s
 
 - The OpenSSH Client (Settings, System, Optional features, or `Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0` in an administrator PowerShell). devlanes runs `%SystemRoot%\System32\OpenSSH\ssh.exe`, else the first `ssh.exe` on `PATH`. It reads `%USERPROFILE%\.ssh\config` and uses the Windows `ssh-agent` service (`Get-Service ssh-agent`, then `ssh-add`).
 - There is no ControlMaster: each connection and each reconnect is a new ssh login. With a key in the agent that costs nothing; with a passphrase typed at the prompt, every reconnect while `remote connect` is not attached fails as `Permission denied`.
-- Prompts work as on macOS and Linux: ssh runs `devlanes.exe` as its askpass program, and the question appears in the terminal running `remote connect`. mintty (Git Bash's own window) keeps typed keys from Windows programs, so there the prompt is cancelled with a message; run Git Bash inside Windows Terminal instead.
+- Prompts work as on macOS and Linux: ssh runs `devlanes.exe` as its askpass program, and the question appears in the terminal running `remote connect`. mintty (Git Bash's own window) keeps typed keys from Windows programs, so there the prompt is cancelled with a message; run `winpty devlanes remote connect <box>` there (winpty ships with Git for Windows).
 - Synced folders keep only the read-only attribute. Box files Windows cannot name, and files that differ from another only in letter case, are skipped and listed by `devlanes remote sync`.
 - Box ports inside the ranges Windows reserves (`netsh int ipv4 show excludedportrange protocol=tcp`) are not mirrored; set the box's `ports.range` clear of them.
 

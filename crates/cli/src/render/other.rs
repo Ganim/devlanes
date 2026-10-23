@@ -1308,12 +1308,12 @@ fn home_checks(home: &Value) -> Vec<Check> {
         )
         .fix(format!("chmod 700 {}", crate::shell_quote(&path))),
         Some("acl") => {
+            // The daemon tightens only an empty home, and a home doctor finds is
+            // rarely empty, so this fails like the daemon's refusal does.
             let check = Check::new(
                 "home",
-                Outcome::Skip,
-                format!(
-                    "{path} lets other accounts in; the daemon limits it to you, SYSTEM and Administrators when it starts"
-                ),
+                Outcome::Fail,
+                format!("{path} lets other accounts in; the daemon refuses it unless it is empty"),
             );
             match home.get("fix").and_then(Value::as_str) {
                 Some(fix) => check.fix(clean(fix)),

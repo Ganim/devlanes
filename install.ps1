@@ -6,13 +6,14 @@ against the release's SHA256SUMS.
 .DESCRIPTION
     irm https://github.com/devlanes-run/devlanes/releases/latest/download/install.ps1 | iex
 
-`irm | iex` passes no arguments, so every setting is also an environment variable:
+`irm | iex` passes no arguments, so every setting is also an environment variable,
+set before that command:
 
-    DEVLANES_VERSION=0.1.0       pins a release (default: the latest one)
-    DEVLANES_INSTALL_DIR=DIR     sets the target directory (default: %LOCALAPPDATA%\Programs\devlanes)
-    DEVLANES_NO_MODIFY_PATH=1    leaves the user PATH alone
-    DEVLANES_INSTALL_BASE_URL    replaces the release URL; it exists only so the script can be
-                                 tested against local releases, and accepts http:// and file:// URLs
+    $env:DEVLANES_VERSION = '0.1.0'       pins a release (default: the latest one)
+    $env:DEVLANES_INSTALL_DIR = 'DIR'     sets the target directory (default: %LOCALAPPDATA%\Programs\devlanes)
+    $env:DEVLANES_NO_MODIFY_PATH = '1'    leaves the user PATH alone
+    DEVLANES_INSTALL_BASE_URL             replaces the release URL; it exists only so the script can be
+                                          tested against local releases, and accepts http:// and file:// URLs
 
 Run as a file, -Version, -InstallDir and -NoModifyPath do the same. A devlanes.exe
 that is running (usually the daemon) is renamed to devlanes.exe.old-TIMESTAMP and
@@ -57,6 +58,14 @@ param(
             'ARM64' { return 'aarch64-pc-windows-msvc' }
             default { throw "devlanes install: no release build for Windows $Architecture" }
         }
+    }
+
+    function Get-DevlanesWindowsBuild {
+        <#
+        The Windows build from the registry. [Environment]::OSVersion comes from GetVersionEx,
+        whose answer depends on the host program's manifest.
+        #>
+        [int](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name CurrentBuildNumber).CurrentBuildNumber
     }
 
     function Assert-DevlanesWindowsBuild {
@@ -218,9 +227,7 @@ param(
         $ProgressPreference = 'SilentlyContinue'
         Set-StrictMode -Version 3.0
 
-        # Both PowerShells report the real build here: Windows PowerShell's manifest
-        # declares Windows 10 and later, and PowerShell 7 asks RtlGetVersion.
-        Assert-DevlanesWindowsBuild ([Environment]::OSVersion.Version.Build)
+        Assert-DevlanesWindowsBuild (Get-DevlanesWindowsBuild)
 
         # Windows PowerShell 5.1 may still default to TLS 1.0 and 1.1, which GitHub refuses.
         if ($PSVersionTable.PSVersion.Major -lt 6) {

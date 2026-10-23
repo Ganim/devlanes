@@ -14,7 +14,7 @@ On Windows you also need:
 - Rust's MSVC toolchain (`x86_64-pc-windows-msvc` or `aarch64-pc-windows-msvc`), the host rustup picks by default.
 - Visual Studio Build Tools with the C++ workload (`cl.exe`), for crates with C code such as `ring` and `libsqlite3-sys`.
 - Git for Windows. Its `sh.exe` runs `run:` strings, and the shell snippets in this file work in Git Bash.
-- kache built from git. kache 1.2.2 can't pass `cl.exe` through, so those C crates fail to build; the fix ([kunobi-ninja/kache#1640](https://github.com/kunobi-ninja/kache/pull/1640)) is merged but not released yet. Build it without the wrapper, since the released kache would hit the same bug on kache's own C dependencies:
+- kache built from the commit below, which passes `cl.exe` through ([kunobi-ninja/kache#1640](https://github.com/kunobi-ninja/kache/pull/1640)); a kache without that change fails on those C crates. Build it without the wrapper, so a kache already installed cannot hit the same bug on kache's own C dependencies:
 
   ```sh
   env -u RUSTC_WRAPPER cargo install --locked --git https://github.com/kunobi-ninja/kache --rev a37fb5ff3bcc86adfded7f3ecb4f7c5100f744c2 kache
@@ -48,7 +48,7 @@ actionlint
 sh packaging/scripts/check.sh    # release scripts and install.sh against fake binaries
 ```
 
-The agent plugin's hook is `devlanes __agent-hook`; its tests are in `crates/cli/tests/it/agent_hook.rs`.
+The agent plugin's hook is `devlanes __agent-hook`; its tests are in `crates/cli/tests/it/agent_hook.rs` and `bins/devlanes/tests/it/agent_hook.rs`.
 
 ## Running the CLI from a checkout
 

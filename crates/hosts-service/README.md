@@ -70,10 +70,13 @@ services have none) and otherwise fails with `terminal_required`. It then runs
 `devlanes.exe __install-hosts-service --user-sid <SID>` through `ShellExecuteExW`
 with the `runas` verb, hidden, and waits for it. The elevated child:
 
-1. Refuses a SID that does not look like a person's account (`S-1-5-21-` or, for
-   Microsoft Entra ID, `S-1-12-1-`, then four numbers), and the well-known groups
-   of the first shape (last number 512 to 527, such as Domain Admins and Domain
-   Users, which is also the local `None` group).
+1. Refuses a SID that `LookupAccountSidW` does not name a user (`SidTypeUser`),
+   such as a group or a built-in account. When the lookup fails (an unreachable
+   domain controller), the SID must look like a person's account instead
+   (`S-1-5-21-` or, for Microsoft Entra ID, `S-1-12-1-`, then four numbers) and
+   not be one of the well-known groups of the first shape (last number 512 to
+   527, such as Domain Admins and Domain Users, which is also the local `None`
+   group).
 2. Checks that `%ProgramFiles%` is admin-only, then creates
    `%ProgramFiles%\devlanes` with the access list above or checks an existing
    one the same way (see the install location check below).
@@ -243,11 +246,23 @@ To check that a name resolves through the file, use
 
 ## Development
 
-```text
-cargo test -p devlanes-hosts-service
+```sh
+cargo nextest run -p devlanes-hosts-service
 cargo build --release -p devlanes-hosts-service
-set DEVLANES_HOSTS_SERVICE=%CD%\target\release\devlanes-hosts-service.exe
-cargo test -p devlanes-resolver-hosts --test it -- --ignored   # elevated terminal; installs for real
+```
+
+The install test runs from an elevated terminal and installs the service for real. In Git Bash:
+
+```sh
+DEVLANES_HOSTS_SERVICE="$PWD/target/release/devlanes-hosts-service.exe" \
+  cargo nextest run -p devlanes-resolver-hosts --run-ignored only -E 'test(installs_applies_and_uninstalls_the_service)'
+```
+
+In PowerShell:
+
+```powershell
+$env:DEVLANES_HOSTS_SERVICE = "$PWD\target\release\devlanes-hosts-service.exe"
+cargo nextest run -p devlanes-resolver-hosts --run-ignored only -E 'test(installs_applies_and_uninstalls_the_service)'
 ```
 
 Bump `PIPE_PROTOCOL` in `crates/hosts-helper/src/protocol.rs` whenever requests or

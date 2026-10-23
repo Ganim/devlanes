@@ -8,8 +8,8 @@ use std::ptr;
 use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW};
 use windows_sys::Win32::Security::{
-    GetLengthSid, GetTokenInformation, IsValidSid, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
-    TokenElevation, TokenUser,
+    GetLengthSid, GetTokenInformation, IsValidSid, LookupAccountSidW, PSID, SID_NAME_USE,
+    SidTypeUser, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -91,13 +91,66 @@ impl Sid {
         Self(vec![1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 0x02, 0, 0])
     }
 
+    /// Whether the SID is a person's account rather than a built-in account or
+    /// a group: `LookupAccountSidW` must name a user (`SidTypeUser`). When the
+    /// lookup fails (an unreachable domain controller, a deleted account), the
+    /// SID's shape decides instead: that of a local, Microsoft, domain or
+    /// Microsoft Entra ID account, minus the well-known domain groups.
+    pub fn is_user_account(&self) -> bool {
+        match self.account_type() {
+            Ok(kind) => kind == SidTypeUser,
+            Err(_) => self.has_account_shape(),
+        }
+    }
+
+    /// What `LookupAccountSidW` says the SID names on this machine, such as
+    /// `SidTypeUser` or `SidTypeAlias`.
+    fn account_type(&self) -> io::Result<SID_NAME_USE> {
+        let (mut name_len, mut domain_len, mut kind) = (0_u32, 0_u32, 0);
+        // SAFETY: a size query with no buffers; it fails and stores both sizes.
+        unsafe {
+            LookupAccountSidW(
+                ptr::null(),
+                self.as_psid(),
+                ptr::null_mut(),
+                &raw mut name_len,
+                ptr::null_mut(),
+                &raw mut domain_len,
+                &raw mut kind,
+            )
+        };
+        if name_len == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut name = vec![0_u16; name_len as usize];
+        let mut domain = vec![0_u16; domain_len.max(1) as usize];
+        domain_len = domain.len() as u32;
+        // SAFETY: both buffers hold the number of writable units passed with them.
+        let ok = unsafe {
+            LookupAccountSidW(
+                ptr::null(),
+                self.as_psid(),
+                name.as_mut_ptr(),
+                &raw mut name_len,
+                domain.as_mut_ptr(),
+                &raw mut domain_len,
+                &raw mut kind,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(kind)
+    }
+
     /// Whether the SID has the shape of a person's account rather than a
     /// built-in account or a well-known group: a local, Microsoft or domain
     /// account (`S-1-5-21-` and four numbers) or a Microsoft Entra ID account
     /// (`S-1-12-1-` and four numbers). The well-known groups of the first shape,
     /// RIDs 512 to 527 (Domain Admins, Domain Users, which is the local `None`
     /// group too, and so on), are refused; other domain groups share the shape.
-    pub fn has_account_shape(&self) -> bool {
+    /// Only for when [`Sid::is_user_account`] cannot look the SID up.
+    fn has_account_shape(&self) -> bool {
         let Ok(text) = self.to_sddl() else {
             return false;
         };
@@ -404,8 +457,40 @@ mod tests {
         Ok(())
     }
 
-    /// The current user is an account; SYSTEM, Administrators, Everyone,
-    /// Authenticated Users and the well-known domain groups are not.
+    /// The lookup names the current user a user and Administrators, SYSTEM,
+    /// Everyone and Authenticated Users not. The `None` group of the user's
+    /// machine or domain (RID 513) is a group too, when the lookup resolves it.
+    #[test]
+    fn user_accounts_are_looked_up() -> io::Result<()> {
+        let me = current_user()?;
+        assert_eq!(me.account_type()?, SidTypeUser, "{me:?}");
+        assert!(me.is_user_account(), "{me:?}");
+        let administrators = Sid::administrators();
+        assert_eq!(
+            administrators.account_type()?,
+            windows_sys::Win32::Security::SidTypeAlias
+        );
+        for other in ["S-1-5-18", "S-1-5-32-544", "S-1-1-0", "S-1-5-11"] {
+            assert!(!Sid::parse(other)?.is_user_account(), "{other}");
+        }
+        let text = me.to_sddl()?;
+        let (prefix, _) = text
+            .rsplit_once('-')
+            .ok_or_else(|| io::Error::other(text.clone()))?;
+        let none = Sid::parse(&format!("{prefix}-513"))?;
+        if let Ok(kind) = none.account_type() {
+            assert_ne!(kind, SidTypeUser, "{none:?}");
+        }
+        assert!(!none.is_user_account(), "{none:?}");
+        // Unknown SIDs fall back to the shape.
+        assert!(Sid::parse("S-1-5-21-1-2-3-1001")?.account_type().is_err());
+        assert!(Sid::parse("S-1-5-21-1-2-3-1001")?.is_user_account());
+        assert!(!Sid::parse("S-1-5-21-1-2-3-512")?.is_user_account());
+        Ok(())
+    }
+
+    /// The current user has an account's shape; SYSTEM, Administrators,
+    /// Everyone, Authenticated Users and the well-known domain groups do not.
     #[test]
     fn accounts_are_told_from_groups_and_services() -> io::Result<()> {
         let me = current_user()?;

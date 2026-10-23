@@ -78,7 +78,7 @@ devlanes doctor                 # checks the daemon, Docker, proxy, CA and hosts
 
 Node and Python services get the CA through `NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE` without trusting it system-wide.
 
-On Windows only browsers resolve `*.localhost` on their own; Node, Python, Go and test runners need `devlanes certs trust --hosts`. There it installs a small Windows service, `devlanes-hosts`, which writes the lane hostnames to `C:\Windows\System32\drivers\etc\hosts` for you and nobody else. Windows asks for administrator approval once, so run it from a normal terminal, not from an agent or over SSH. `devlanes certs untrust --hosts` removes the names and the service.
+On Windows only browsers resolve `*.localhost` on their own; Node, Python, Go and test runners need `devlanes certs trust --hosts`. There it installs a small Windows service, `devlanes-hosts`, which writes the lane hostnames to `%SystemRoot%\System32\drivers\etc\hosts` on behalf of your daemon only. Windows asks for administrator approval once, so run it from a normal terminal, not from an agent or over SSH. `devlanes certs untrust --hosts` removes the names and the service.
 
 ## TUI
 

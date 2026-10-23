@@ -10,7 +10,7 @@ devlanes needs [Git for Windows](https://gitforwindows.org): its `sh.exe` runs `
 irm https://github.com/devlanes-run/devlanes/releases/latest/download/install.ps1 | iex
 ```
 
-`install.ps1` checks the archive against the release's `SHA256SUMS`, installs `devlanes.exe`, `devlanesw.exe` and `devlanes-hosts-service.exe` to `%LOCALAPPDATA%\Programs\devlanes` (`DEVLANES_INSTALL_DIR` changes it) and puts that directory first in your user `PATH`, so open a new terminal afterwards. `DEVLANES_VERSION=X.Y.Z` pins a release and `DEVLANES_NO_MODIFY_PATH=1` leaves `PATH` alone. npm and cargo binstall install the same executables:
+`install.ps1` checks the archive against the release's `SHA256SUMS`, installs `devlanes.exe`, `devlanesw.exe` and `devlanes-hosts-service.exe` to `%LOCALAPPDATA%\Programs\devlanes` (`DEVLANES_INSTALL_DIR` changes it) and adds that directory to the front of your user `PATH` unless it is already there, so open a new terminal afterwards. `$env:DEVLANES_VERSION = 'X.Y.Z'` before the command pins a release and `$env:DEVLANES_NO_MODIFY_PATH = '1'` leaves `PATH` alone. npm and cargo binstall install the same executables:
 
 ```powershell
 npm install -g devlanes
@@ -19,7 +19,7 @@ cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-logon-lau
 cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-hosts-service
 ```
 
-binstall takes one crate per run. `daemon install` and `certs trust --hosts` look for `devlanesw.exe` and `devlanes-hosts-service.exe` next to `devlanes.exe`, so install all three.
+binstall takes one crate per run and needs cargo-binstall 1.17 or later; older versions compile from source instead, which needs the Visual Studio Build Tools (MSVC). `daemon install` and `certs trust --hosts` look for `devlanesw.exe` and `devlanes-hosts-service.exe` next to `devlanes.exe`, so install all three.
 
 Run `devlanes doctor` once after installing. The home is `%USERPROFILE%\.devlanes`, and the daemon listens on a named pipe only your account can open.
 
@@ -57,8 +57,6 @@ Worktrees with deep `node_modules` trees can pass Windows' 260-character path li
 git config --global core.longpaths true
 ```
 
-Run `devlanes stop` in a worktree before `git worktree remove`; [getting started](../getting-started.md#start-and-inspect) explains why.
-
 ## Ports
 
 Windows reserves TCP port ranges for Hyper-V, WSL and Docker Desktop, and nothing can bind inside them:
@@ -79,7 +77,7 @@ With `proxy.lan: true` the proxy listens on every address, and Windows Defender 
 devlanes certs trust
 ```
 
-adds the CA to your user root store, which Chrome, Edge and Firefox read, so one store covers the `system`, `chrome` and `firefox` targets of `tls.trust`. It needs no administrator rights, but Windows shows a security warning that you confirm with Yes, once per change; `devlanes certs untrust` asks again. Over SSH, or anywhere without a desktop, the command fails before any change and says to run it from a desktop session.
+adds the CA to your user root store, which Chrome, Edge and Firefox read (Firefox 120 and later read it through `security.enterprise_roots.enabled`), so one store covers the `system`, `chrome` and `firefox` targets of `tls.trust`. It needs no administrator rights, but Windows shows a security warning that you confirm with Yes, once per change; `devlanes certs untrust` asks again. Over SSH, or anywhere without a desktop, the command fails before any change and says to run it from a desktop session.
 
 Units get the CA through `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and the other variables in [hostnames and HTTPS](https.md#programs-started-by-devlanes). `%USERPROFILE%\.devlanes\ca\bundle.pem` holds Mozilla's roots, the roots in your Windows store and the devlanes CA. For tools you run yourself:
 
@@ -123,6 +121,7 @@ npm and cargo binstall cannot replace a running `devlanes.exe`. Run `devlanes da
 
 - Windows has no POSIX signals. `stop.signal: SIGINT` sends Ctrl-C, `SIGKILL` terminates at once, and every other signal sends Ctrl-Break; visible windows also get `WM_CLOSE`. Whatever runs when `stop.timeout` ends is terminated. A unit ended by Ctrl-C or Ctrl-Break shows as `interrupted (Ctrl-C)`.
 - Each unit runs in a job object it cannot leave. A program that insists on starting a child outside its job (`CREATE_BREAKAWAY_FROM_JOB`) fails with access denied there.
+- Windows cannot delete a directory that a running process works in, so run `devlanes stop` in a worktree before `git worktree remove`; [getting started](../getting-started.md#start-and-inspect) has the details.
 - Units with `pty: true` stop about 5 seconds after the daemon dies, because their pseudo console closes with it. Units with `pty: false` keep running, and the next daemon finds them as orphans, as on macOS and Linux.
 - Trusting or untrusting the CA always shows a Windows dialog, and the hosts service and the NRPT rule need administrator approval once. None of them work from agents or over SSH.
 - The DNS server for `--resolver` always uses port 53 on `127.53.0.1`, because an NRPT rule cannot name a port.

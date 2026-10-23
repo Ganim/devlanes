@@ -114,7 +114,7 @@ devlanes stop --mine
 
 ## Windows
 
-- `run:` strings and `ready.cmd` use POSIX `sh` syntax on every OS. On Windows devlanes runs them with Git for Windows' `sh.exe`, and with `cmd.exe /d /s /c` when the daemon found no Git for Windows at startup. `devlanes config check` then warns (`shell_fallback`) and POSIX-only syntax fails; the fix is for the user to install Git for Windows and run `devlanes daemon restart`, which restarts every running service. Write `run:` strings for `sh`, not PowerShell.
+- `run:` strings and `ready.cmd` use POSIX `sh` syntax on every OS. On Windows devlanes runs them with Git for Windows' `sh.exe`, and with `cmd.exe /d /s /c` when the daemon found no Git for Windows at startup. `devlanes config check` then warns (`shell_fallback`) and POSIX-only syntax fails; the fix is for the user to install Git for Windows and run `devlanes daemon restart`, which stops every running service and then starts it again. Write `run:` strings for `sh`, not PowerShell.
 - Services run in a pseudo console by default (`pty: true`), which can rewrap long lines and add escape sequences to the log. Set `pty: false` on a unit when its logs must hold exactly the bytes it wrote.
 - Hints and `more:` lines are quoted for PowerShell. Words without quotes paste into any shell; in Git Bash, requote words that PowerShell wrapped in single quotes.
 - Environment of a unit in PowerShell: `devlanes env export api --shell pwsh | Out-String | Invoke-Expression`. In Git Bash, use `eval "$(devlanes env export api)"` as on Unix.

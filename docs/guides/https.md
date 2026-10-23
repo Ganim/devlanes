@@ -26,7 +26,7 @@ What it does per OS, by the stores in `tls.trust` (default `[system]`):
 | --- | --- | --- | --- |
 | macOS | login keychain, trusted as root for your user (GUI password dialog, no sudo); Safari, Chrome, Edge and `/usr/bin/curl` read it; Firefox 120+ too | same store as `system` | `certutil` into every Firefox profile; needs `brew install nss` |
 | Linux | anchor directory of your distro (`/usr/local/share/ca-certificates`, `/etc/pki/ca-trust/source/anchors`, …) then `update-ca-certificates` or `update-ca-trust`, through sudo | `~/.pki/nssdb` with `certutil`; Chrome, Chromium and Playwright's browsers read it | every profile under `~/.mozilla/firefox` (snap and flatpak paths too); needs `libnss3-tools` or `nss-tools` |
-| Windows | your user root store, no administrator rights; Windows asks to confirm each change in a dialog; Chrome, Edge and `curl.exe` read it | same store as `system` | same store as `system` (Firefox reads it through `security.enterprise_roots.enabled`, on by default) |
+| Windows | your user root store, no administrator rights; Windows asks to confirm each change in a dialog; Chrome, Edge and `curl.exe` read it | same store as `system` | same store as `system` (Firefox 120 and later read it through `security.enterprise_roots.enabled`) |
 
 On Linux the system store does not reach browsers, so set `tls.trust: [system, chrome, firefox]` in `~/.devlanes/config.yaml` there. Inside WSL the default adds `windows`, the Windows user root store that browsers on Windows read; see [Windows (WSL2)](wsl.md). `devlanes certs untrust` removes the CA from the same stores; `--keep-ca` with `--hosts` or `--resolver` removes only those extras.
 
@@ -42,11 +42,12 @@ Other tools from your shell:
 | --- | --- | --- |
 | Homebrew curl, OpenSSL CLI | `SSL_CERT_FILE`, `CURL_CA_BUNDLE` | `export SSL_CERT_FILE=~/.devlanes/ca/bundle.pem`, or `devlanes env shell` |
 | Go binaries | the OS store on macOS; `SSL_CERT_FILE` on Linux | nothing on macOS |
+| Python `requests` | `REQUESTS_CA_BUNDLE`, not `SSL_CERT_FILE` | `export REQUESTS_CA_BUNDLE=~/.devlanes/ca/bundle.pem` |
 | Java | its own `cacerts` | `keytool -importcert -file ~/.devlanes/ca/ca.pem` |
 | Docker containers | nothing from the host | mount `ca.pem` and run `update-ca-certificates`, or talk to services by `host.docker.internal:<port>` over http |
 | iOS simulator, Android emulator | own stores | not handled yet; `tls.trust` accepts the names and ignores them with a warning |
 
-On Windows, `curl.exe` needs `--ssl-revoke-best-effort` because the devlanes CA publishes no revocation list, and Python's `requests` reads `REQUESTS_CA_BUNDLE` rather than `SSL_CERT_FILE`; [Windows](windows.md#https) has the commands.
+On Windows, `curl.exe` needs `--ssl-revoke-best-effort` because the devlanes CA publishes no revocation list; [Windows](windows.md#https) has the commands.
 
 ### mkcert
 
@@ -94,7 +95,7 @@ devlanes certs trust --resolver
 
 switches lane domains to `acme.test` and `acme-2.test`, answered by a DNS server the daemon runs on `127.0.0.1:15353`. `--resolver` writes `/etc/resolver/test` on macOS, or a systemd-resolved delegate (systemd 258 or newer) on Linux, so the OS sends only that TLD there.
 
-On Windows the server listens on `127.53.0.1:53`, because a Name Resolution Policy Table (NRPT) rule names a server by address only, and `--resolver` adds an NRPT rule for `.test` after the administrator prompt. In their default automatic secure DNS mode, Chrome and Edge do not upgrade lookups to DNS over HTTPS while any NRPT rule exists, so `*.test` reaches the rule; with a secure DNS provider chosen explicitly those names fail, so pick the OS default provider or turn secure DNS off. Group Policy NRPT rules make Windows ignore local ones, and `doctor` says so. `crates/resolver-dns/README.md` has the details.
+On Windows the server listens on `127.53.0.1:53`, because a Name Resolution Policy Table (NRPT) rule names a server by address only, and `--resolver` adds an NRPT rule for `.test` after the administrator prompt. In their default automatic secure DNS mode, Chrome and Edge do not upgrade lookups to DNS over HTTPS while any NRPT rule exists (read from the Chromium source, not tried in a browser), so `*.test` reaches the rule; with a secure DNS provider chosen explicitly those names fail, so pick the OS default provider or turn secure DNS off. Group Policy NRPT rules make Windows ignore local ones, and `doctor` says so. `crates/resolver-dns/README.md` has the details.
 
 The TLD must be `test`, `internal`, `home.arpa` or a name under one of them. The CA is constrained to the TLD it was created with; switching later needs the recreate command `doctor` prints. `.dev` is a real TLD with HSTS preloaded and `.local` is mDNS; neither is accepted.
 

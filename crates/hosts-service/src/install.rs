@@ -284,7 +284,7 @@ pub fn install(source: &Path, user: &Sid) -> Result<Installed, InstallError> {
         .to_sddl()
         .map_err(|error| InstallError::io("formatting the user SID", error))?;
     // The service would open its pipe to that SID.
-    if !user.has_account_shape() {
+    if !user.is_user_account() {
         return Err(InstallError::NotAnAccount(sid));
     }
     let layout = Layout::new()?;

@@ -52,13 +52,13 @@ let report = unit.stop_with_report(StopPolicy::default()).await?;
 
 A unit's leader starts inside a new job object that refuses breakaway (see `Job::create` in `devlanes-sys`) and does not kill on close, so units outlive a daemon crash. A program that starts a child with `CREATE_BREAKAWAY_FROM_JOB` gets access denied. Descendants are tracked from the job's members and from snapshots by parent; terminating ends the job, then every tracked process by PID and start time.
 
-`pty: true` units run in a pseudo console (ConPTY), which is closed after the final sweep and ends what is still attached. It dies with the daemon, so these units stop about five seconds after it; pipe units outlive it.
+`pty: true` units run in a pseudo console (ConPTY), which is closed after the final sweep and ends what is still attached. It dies with the daemon, so these units stop about five seconds after it; pipe units outlive it. ConPTY also writes win32-input-mode and focus-event switches (`ESC[?9001h/l`, `ESC[?1004h/l`) into the output for itself; `devlanes attach` drops them, since they would stay on in the user's terminal after detaching.
 
 ## Stopping
 
-A stop asks first: `SIGINT` sends Ctrl-C (a key in a pseudo console), other signals Ctrl-Break, through a helper without a console (`devlanes __console-ctrl`) that attaches to each console the unit's processes are on; visible windows get `WM_CLOSE`. What runs at the timeout is terminated; `SIGKILL` terminates at once. `cmd.exe` shims left at "Terminate batch job (Y/N)?" in a pseudo console are ended without escalation.
+A stop asks first: `SIGINT` sends Ctrl-C (a key in a pseudo console), other signals Ctrl-Break, through a helper without a console (`devlanes __console-ctrl`) that attaches to each console the unit's processes are on (one helper per console, all started at once and given up on together after 10 s); visible windows get `WM_CLOSE`. What runs at the timeout is terminated; `SIGKILL` terminates at once. `cmd.exe` shims left at "Terminate batch job (Y/N)?" in a pseudo console are ended without escalation.
 
-After a task (`ExitSweep::KeepDaemonized`) exits on its own, processes still on its console end and the rest are daemons it started (`left_running`). The console is told by its console host, through an undocumented `NtQueryInformationProcess` class that `devlanes-sys` tests pin. The query keeps its value after the leader exits, so a short leader's console is still known; when it is not (a GUI leader never has one), everything is kept.
+After a task (`ExitSweep::KeepDaemonized`) exits on its own, processes still on its console end and the rest are daemons it started (`left_running`). The console is told by its console host, through an undocumented `NtQueryInformationProcess` class that `devlanes-sys` tests pin. The query keeps its value after the leader exits, so a short leader's console is still known; when it is not (a GUI leader never has one), everything is kept. A process with no console 2 s after it started is treated as one that never gets one (a GUI program), so it is kept rather than waited for.
 
 ## Program resolution
 

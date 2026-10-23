@@ -611,10 +611,10 @@ fn secure_directory(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Creates `path` private, or gives an existing directory of this user the
-/// private DACL (this user, SYSTEM, Administrators) when others have access. A
-/// symlink or junction, a non-directory or another account's directory is refused:
-/// it may not be ours to change.
+/// Creates `path` private (this user, SYSTEM, Administrators), or gives an
+/// existing empty directory of this user that others can open the private DACL.
+/// A non-empty one others can open is refused, as is a symlink or junction, a
+/// non-directory or another account's directory.
 #[cfg(windows)]
 fn secure_directory(path: &Path) -> Result<(), Error> {
     use devlanes_sys::windows::security::{PrivateDir, ensure_private_dir};

@@ -68,19 +68,18 @@ async fn annotate_excluded_ports(facts: &mut Value, user: &devlanes_config::User
 #[cfg(unix)]
 async fn annotate_excluded_ports(_facts: &mut Value, _user: &devlanes_config::UserConfig) {}
 
-/// Adds `terminal: {elevated, elevation_allowed, job}` about the shell
-/// running this command: an elevated shell cannot start the daemon unless
-/// `DEVLANES_ALLOW_ELEVATED=1` allows it, and a job that kills its processes
-/// when the terminal closes takes a daemon started inside it along. Also adds
-/// `windows: {build}`, since older builds than Windows 11 24H2 are not
-/// supported.
+/// Adds `windows: {build}`, since builds older than Windows 11 24H2 are not
+/// supported, and `terminal: {elevated, elevation_allowed, job}` about the
+/// shell running this command: an elevated shell cannot start the daemon
+/// unless `DEVLANES_ALLOW_ELEVATED=1` allows it, and a job that kills its
+/// processes when the terminal closes takes a daemon started inside it along.
 #[cfg(windows)]
-pub fn annotate_terminal(data: &mut Value) {
-    data["windows"] = json!({"build": devlanes_sys::windows::os_build()});
+pub fn annotate_system(data: &mut Value) {
     use devlanes_sys::windows::{
         process::job_of_self,
         token::{elevated, elevation_refused},
     };
+    data["windows"] = json!({"build": devlanes_sys::windows::os_build()});
     let job = job_of_self()
         .ok()
         .flatten()
@@ -97,12 +96,12 @@ pub fn annotate_terminal(data: &mut Value) {
 
 /// Nothing to add on Unix: the daemon leaves the terminal's session itself.
 #[cfg(unix)]
-pub fn annotate_terminal(_data: &mut Value) {}
+pub fn annotate_system(_data: &mut Value) {}
 
 /// `{path, exists, problem?}` for the devlanes home: the client refuses a symlink
-/// or junction and another account's home, and the daemon tightens an own home
-/// that other accounts can open (`problem: "acl"`, the Windows counterpart of
-/// `mode`).
+/// or junction and another account's home, and the daemon refuses an own home
+/// that other accounts can open unless it is empty (`problem: "acl"`, the
+/// Windows counterpart of `mode`).
 #[cfg(windows)]
 fn home_check(home: &Path) -> Value {
     use devlanes_sys::windows::security::{DirProblem, check_private_dir};

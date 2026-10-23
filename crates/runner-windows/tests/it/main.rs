@@ -50,6 +50,47 @@ impl Drop for Ends {
     }
 }
 
+/// The children of a process the test ends itself when it is done, also
+/// those it only learns about after they started.
+struct EndsChildren(ProcessIdentity);
+
+impl Drop for EndsChildren {
+    fn drop(&mut self) {
+        let Ok(processes) = devlanes_sys::processes() else {
+            return;
+        };
+        for child in processes
+            .iter()
+            .filter(|p| p.ppid == self.0.pid && p.start_time >= self.0.start_time)
+        {
+            let _ = devlanes_sys::windows::proc::terminate_verified(&child.identity(), 1);
+        }
+    }
+}
+
+/// Whether Windows Script Host is turned off for this user or machine
+/// (`Enabled` = 0 under `Software\Microsoft\Windows Script Host\Settings`),
+/// where `wscript.exe` runs no script.
+fn script_host_disabled() -> bool {
+    ["HKCU", "HKLM"].iter().any(|hive| {
+        std::process::Command::new("reg")
+            .args([
+                "query",
+                &format!(r"{hive}\Software\Microsoft\Windows Script Host\Settings"),
+                "/v",
+                "Enabled",
+            ])
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .split_whitespace()
+                    .skip_while(|word| !word.starts_with("REG_"))
+                    .nth(1)
+                    .is_some_and(|value| value == "0" || value == "0x0")
+            })
+    })
+}
+
 /// Spawns `spec` with `runner` under a cleanup guard.
 async fn spawn(runner: WindowsRunner, spec: LaunchSpec) -> Result<Guard, devlanes_core::Error> {
     // As the daemon does at startup: a test run from Git Bash inherits the
@@ -155,8 +196,9 @@ fn runner() -> Result<WindowsRunner, std::io::Error> {
 
 /// Not a test of its own: as a unit (role `graceful`), waits for Ctrl-C or
 /// Ctrl-Break, prints which arrived and exits 0, the way a server stops cleanly.
-/// Role `parent` does the same after starting itself in role `graceful` with
-/// a console of its own (`CREATE_NO_WINDOW`) and printing `child <pid>`.
+/// Role `parent` does the same after starting itself twice in role `graceful`,
+/// each with a console of its own (`CREATE_NO_WINDOW`), printing `child <pid>`
+/// for each.
 /// Role `q9` starts one `ping` sharing its console, one with a console of its
 /// own (`CREATE_NO_WINDOW`) and one without a console (`DETACHED_PROCESS`),
 /// prints `shared <pid>`, `own <pid>` and `detached <pid>`, then exits after a
@@ -166,7 +208,7 @@ fn graceful_leader() -> std::io::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     match std::env::var(ROLE).as_deref() {
         Ok(role @ ("graceful" | "parent")) => {
-            if role == "parent" {
+            for _ in 0..if role == "parent" { 2 } else { 0 } {
                 let child = std::process::Command::new(std::env::current_exe()?)
                     .args([
                         "--exact",
@@ -282,31 +324,43 @@ async fn pipe_units_stop_gracefully_on_ctrl_break() -> TestResult {
     .await?
 }
 
-/// A stop asks every console the unit's processes are on, so a child with a
-/// console of its own (`CREATE_NO_WINDOW`) gets Ctrl-Break too and stops on
-/// its own, as the leader does.
+/// A stop asks every console the unit's processes are on, so children with a
+/// console of their own (`CREATE_NO_WINDOW`) get Ctrl-Break too and stop on
+/// their own, as the leader does. The helpers run side by side, so the stop
+/// takes less than one helper timeout (10 s), not one per console.
 #[tokio::test]
 async fn stops_ask_processes_on_their_own_console() -> TestResult {
     timeout(Duration::from_secs(60), async {
         let unit = spawn(runner()?, leader("parent")?).await?;
         let mut output = unit.output();
         let mut seen = String::new();
-        let child: u32 = wait_for(&mut output, &mut seen, "child ")
-            .await
-            .and_then(|pid| pid.parse().ok())
-            .ok_or_else(|| format!("no child line in {seen:?}"))?;
-        let child = devlanes_sys::process(child)?.ok_or("child missing")?;
-        let _ends = Ends(child.identity());
-        while seen.matches("handlers ready").count() < 2 {
+        let mut ends = Vec::new();
+        while ends.len() < 2 {
+            let pids: Vec<u32> = seen
+                .lines()
+                .filter_map(|line| line.split_once("child ")?.1.trim().parse().ok())
+                .collect();
+            if let Some(&pid) = pids.get(ends.len()) {
+                let child = devlanes_sys::process(pid)?.ok_or("child missing")?;
+                ends.push(Ends(child.identity()));
+                continue;
+            }
             let chunk = output.recv().await?;
             seen.push_str(&String::from_utf8_lossy(&chunk.bytes));
         }
+        while seen.matches("handlers ready").count() < 3 {
+            let chunk = output.recv().await?;
+            seen.push_str(&String::from_utf8_lossy(&chunk.bytes));
+        }
+        let started = std::time::Instant::now();
         let report = unit.stop_with_report(StopPolicy::default()).await?;
+        let took = started.elapsed();
         assert_eq!(report.stop.map(|s| s.escalated), Some(false), "{report:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
         while let Ok(chunk) = output.recv().await {
             seen.push_str(&String::from_utf8_lossy(&chunk.bytes));
         }
-        assert_eq!(seen.matches("graceful break").count(), 2, "{seen:?}");
+        assert_eq!(seen.matches("graceful break").count(), 3, "{seen:?}");
         Ok(())
     })
     .await?
@@ -729,6 +783,12 @@ async fn task_leftovers_on_its_console_end_with_it() -> TestResult {
 /// started.
 #[tokio::test]
 async fn tasks_keep_everything_when_the_console_is_not_known() -> TestResult {
+    if script_host_disabled() {
+        eprintln!(
+            "skipped: Windows Script Host is disabled on this machine (Settings\\Enabled = 0)"
+        );
+        return Ok(());
+    }
     timeout(Duration::from_secs(60), async {
         let dir = tempfile::tempdir()?;
         let script = dir.path().join("start.js");
@@ -750,12 +810,8 @@ async fn tasks_keep_everything_when_the_console_is_not_known() -> TestResult {
             ..cmd("")
         };
         let unit = spawn(runner()?.with_exit_sweep(ExitSweep::KeepDaemonized), spec).await?;
+        let _children = EndsChildren(unit.identity());
         let report = unit.wait_report().await?;
-        let _ends: Vec<Ends> = report
-            .left_running
-            .iter()
-            .map(|p| Ends(p.identity()))
-            .collect();
         assert_eq!(report.outcome.code, Some(0), "{report:?}");
         assert!(
             report

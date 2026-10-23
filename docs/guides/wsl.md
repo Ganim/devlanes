@@ -24,7 +24,7 @@ WSL also stops a distro that has been idle for 15 seconds (`instanceIdleTimeout`
 instanceIdleTimeout=-1
 ```
 
-## Ports 80 and 443
+## Ports 443 and 80
 
 A normal user cannot bind ports below 1024 in the distro, so the proxy falls back to 8080 for HTTP and 8443 for HTTPS, and URLs carry the port (`https://web.acme-2.localhost:8443`). To get 80 and 443:
 
@@ -42,7 +42,7 @@ Windows programs that resolve names through Windows, such as Node or Python inst
 
 ## Trusting the CA in Windows
 
-The `windows` trust target puts the CA into your Windows user root store, the one Edge, Chrome and Firefox (with its default `security.enterprise_roots.enabled`) read. Inside WSL with interop on, an unset `tls.trust` means `[system, windows]`, so
+The `windows` trust target puts the CA into your Windows user root store, the one Edge, Chrome and Firefox read (Firefox 120 and later read it through `security.enterprise_roots.enabled`). Inside WSL with interop on, an unset `tls.trust` means `[system, windows]`, so
 
 ```sh
 devlanes certs trust
@@ -58,7 +58,7 @@ tls:
   trust: [system, chrome, windows]
 ```
 
-## Opening URLs and terminals
+## URLs and the tab progress bar
 
 `devlanes url open` and the TUI's `o` open the Windows default browser through Windows' `rundll32.exe url.dll,FileProtocolHandler`, so neither needs a Linux browser. Without interop, or when no mounted Windows drive holds `System32`, they run `xdg-open`.
 

@@ -646,7 +646,7 @@ devlanes daemon logs [OPTIONS]
 
 ### devlanes daemon install
 
-Start the daemon at login (launchd agent, systemd user unit, or a Windows logon entry)
+Install a login service (launchd agent, systemd user unit, or a Windows logon entry) so the daemon starts at login and outside agent sandboxes
 
 ```text
 devlanes daemon install [OPTIONS]
@@ -654,7 +654,7 @@ devlanes daemon install [OPTIONS]
 
 ### devlanes daemon uninstall
 
-Stop starting the daemon at login; a running daemon keeps running
+Remove the login service; a running daemon keeps running
 
 ```text
 devlanes daemon uninstall [OPTIONS]

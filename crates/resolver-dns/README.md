@@ -60,7 +60,7 @@ The rule is added and removed in Windows PowerShell started through the administ
 
 `nslookup` ignores NRPT. Check the system path with `Resolve-DnsName app.lane.test`, or query the server directly with `nslookup app.lane.test 127.53.0.1`.
 
-The elevated scripts pin `PSModulePath` to `$PSHOME\Modules` and import DnsClient by path, so a module planted in the user's Documents folder cannot run as administrator. A profiler named by `COR_PROFILER` in the user's environment still loads into the elevated PowerShell; closing that needs a native writer, which is future work.
+The elevated scripts pin `PSModulePath` to `$PSHOME\Modules` and import DnsClient by path, so a module planted in the user's Documents folder cannot run as administrator. A profiler named by `COR_PROFILER` in the user's environment still loads into the elevated PowerShell.
 
 Chrome and Edge in their default "automatic" secure DNS mode use the system resolver while any NRPT rule exists (read from the Chromium source, not tried in a browser). With a secure DNS provider chosen explicitly, `*.<tld>` names fail.
 

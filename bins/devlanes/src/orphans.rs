@@ -133,7 +133,7 @@ mod windows {
         tree.hold_root(true);
         tree.update(&snapshot);
         let pids: Vec<u32> = tree.live().map(|process| process.pid).collect();
-        let signalled = helper.send_held(identity, Request::CtrlBreak, Duration::ZERO);
+        let signalled = helper.send_held(&[(*identity, Duration::ZERO)], Request::CtrlBreak);
         drop(held);
         tree.hold_root(false);
         let closed = devlanes_sys::windows::window::close_windows(&pids);

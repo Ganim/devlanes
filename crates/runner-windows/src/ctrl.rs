@@ -137,33 +137,67 @@ impl ConsoleHelper {
         })
     }
 
-    /// Sends `request` to the console `target` is attached to, waiting up to
-    /// `wait` for a console still being set up; `true` when the event went out.
-    /// `target` is held open meanwhile, so the helper's attach by bare PID
-    /// cannot reach a stranger that got the PID in between. Blocking.
-    pub fn send_held(&self, target: &ProcessIdentity, request: Request, wait: Duration) -> bool {
-        let held = match Held::open(target) {
-            Ok(Some(held)) => held,
-            Ok(None) => return false,
-            Err(error) => {
-                tracing::debug!(%error, pid = target.pid, "console control event not sent");
-                return false;
-            }
+    /// Sends `request` to the console each target is attached to, waiting up
+    /// to its duration for a console still being set up; `true` when any event
+    /// went out. Every helper is started before any is waited for, and all
+    /// share one deadline, so this takes at most [`HELPER_TIMEOUT`] however
+    /// many consoles there are. Each target is held open meanwhile, so a
+    /// helper's attach by bare PID cannot reach a stranger that got the PID in
+    /// between. Blocking.
+    pub fn send_held(&self, targets: &[(ProcessIdentity, Duration)], request: Request) -> bool {
+        let deadline = Instant::now() + HELPER_TIMEOUT;
+        let not_sent = |pid: u32, error: &dyn std::fmt::Display| {
+            tracing::debug!(%error, pid, "console control event not sent");
         };
-        let sent = self.send(target.pid, request, wait);
-        drop(held);
-        sent.map_err(|error| {
-            tracing::debug!(%error, pid = target.pid, "console control event not sent");
-        })
-        .is_ok()
+        let mut running = Vec::new();
+        for (target, wait) in targets {
+            match Held::open(target) {
+                Ok(Some(held)) => match self.start(target.pid, request, *wait) {
+                    Ok(child) => running.push((target.pid, held, child)),
+                    Err(error) => not_sent(target.pid, &error),
+                },
+                Ok(None) => {}
+                Err(error) => not_sent(target.pid, &error),
+            }
+        }
+        let mut sent = false;
+        while !running.is_empty() {
+            let late = Instant::now() >= deadline;
+            running.retain_mut(|(pid, _held, child)| {
+                let result = match child.try_wait() {
+                    Ok(None) if !late => return true,
+                    Ok(None) => Err(HelperError::Timeout),
+                    Ok(Some(status)) => outcome(status),
+                    Err(error) => Err(HelperError::Spawn(error)),
+                };
+                if result.is_err() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                match result {
+                    Ok(()) => sent = true,
+                    Err(error) => not_sent(*pid, &error),
+                }
+                false
+            });
+            if !running.is_empty() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        sent
     }
 
-    /// Sends Ctrl-C or Ctrl-Break to `pid`'s console through a helper, waiting
-    /// up to `wait` for a console still being set up. Blocking.
-    fn send(&self, pid: u32, request: Request, wait: Duration) -> Result<(), HelperError> {
+    /// Starts a helper that sends Ctrl-C or Ctrl-Break to `pid`'s console,
+    /// waiting up to `wait` for a console still being set up.
+    fn start(
+        &self,
+        pid: u32,
+        request: Request,
+        wait: Duration,
+    ) -> Result<std::process::Child, HelperError> {
         use devlanes_sys::windows::process::DETACHED_PROCESS;
         use std::os::windows::process::CommandExt;
-        let mut child = std::process::Command::new(&self.program)
+        std::process::Command::new(&self.program)
             .args(&self.args)
             .env(
                 REQUEST_VAR,
@@ -175,30 +209,22 @@ impl ConsoleHelper {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(HelperError::Spawn)?;
-        let deadline = Instant::now() + HELPER_TIMEOUT;
-        let status = loop {
-            if let Some(status) = child.try_wait().map_err(HelperError::Spawn)? {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(HelperError::Timeout);
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        /// `STATUS_CONTROL_C_EXIT`: ended by a console control event.
-        const ENDED_BY_EVENT: i32 = 0xC000_013A_u32.cast_signed();
-        match status.code() {
-            // The helper is attached to the console it signals, and Windows
-            // delivers the event on a thread of its own that can race the
-            // helper's exit and end it. Being ended by an event this soon after
-            // sending one means it went out, so this is success.
-            Some(0 | ENDED_BY_EVENT) => Ok(()),
-            Some(code) => Err(HelperError::Exit(code)),
-            None => Err(HelperError::Exit(-1)),
-        }
+            .map_err(HelperError::Spawn)
+    }
+}
+
+/// Whether a helper that exited with `status` sent its event.
+fn outcome(status: std::process::ExitStatus) -> Result<(), HelperError> {
+    /// `STATUS_CONTROL_C_EXIT`: ended by a console control event.
+    const ENDED_BY_EVENT: i32 = 0xC000_013A_u32.cast_signed();
+    match status.code() {
+        // The helper is attached to the console it signals, and Windows
+        // delivers the event on a thread of its own that can race the
+        // helper's exit and end it. Being ended by an event this soon after
+        // sending one means it went out, so this is success.
+        Some(0 | ENDED_BY_EVENT) => Ok(()),
+        Some(code) => Err(HelperError::Exit(code)),
+        None => Err(HelperError::Exit(-1)),
     }
 }
 
@@ -247,38 +273,71 @@ mod tests {
         }
     }
 
-    /// A helper reaches a process's console right after it started, and the
-    /// event it sends there (which reaches the helper too, attached to the same
-    /// console) counts as sent. Errors are shown whole, since they differ
-    /// between machines (CI runners).
+    /// Kills the children when the test is done, passed or failed.
+    struct Children(Vec<std::process::Child>);
+
+    impl Drop for Children {
+        fn drop(&mut self) {
+            for child in &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    /// Helpers reach the consoles of processes right after they started, one
+    /// console each, and the events they send there (which reach the helpers
+    /// too, attached to the same consoles) count as sent.
     #[test]
-    fn helpers_signal_a_console() -> Result<(), Box<dyn std::error::Error>> {
+    fn helpers_signal_consoles() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::windows::process::CommandExt;
         // Ping inherits the "ignore Ctrl-C" flag from a Git Bash parent; the
         // daemon clears it the same way.
         devlanes_sys::windows::process::accept_ctrl_c()?;
-        let mut ping = std::process::Command::new("ping")
-            .args(["-n", "30", "127.0.0.1"])
-            .stdout(Stdio::null())
-            .creation_flags(devlanes_sys::windows::process::CREATE_NO_WINDOW)
-            .spawn()?;
+        let mut pings = Children(Vec::new());
+        let mut targets = Vec::new();
+        for _ in 0..2 {
+            let ping = std::process::Command::new("ping")
+                .args(["-n", "30", "127.0.0.1"])
+                .stdout(Stdio::null())
+                .creation_flags(devlanes_sys::windows::process::CREATE_NO_WINDOW)
+                .spawn()?;
+            let identity = devlanes_sys::identity(ping.id())?.ok_or("ping missing")?;
+            pings.0.push(ping);
+            // Started just now: its console may still be on its way.
+            targets.push((identity, CONSOLE_SETUP));
+        }
         let helper = ConsoleHelper {
             program: std::env::current_exe()?,
             args: ["--exact", "ctrl::tests::helper_entry", "--nocapture"]
                 .map(Into::into)
                 .into(),
         };
-        let result = (|| -> Result<(), HelperError> {
-            // Started just now: its console may still be on its way.
-            helper.send(ping.id(), Request::CtrlC, CONSOLE_SETUP)?;
-            let ended = devlanes_sys::windows::process::wait_exit(ping.id(), HELPER_TIMEOUT)
-                .map_err(HelperError::Spawn)?;
-            assert!(ended, "Ctrl-C did not end ping");
-            Ok(())
-        })();
-        let _ = ping.kill();
-        let _ = ping.wait();
-        result.map_err(|error| format!("{error:?}: {error}"))?;
+        assert!(helper.send_held(&targets, Request::CtrlC), "nothing sent");
+        for (ping, _) in &targets {
+            let ended = devlanes_sys::windows::process::wait_exit(ping.pid, HELPER_TIMEOUT)?;
+            assert!(ended, "Ctrl-C did not end ping {}", ping.pid);
+        }
+        Ok(())
+    }
+
+    /// Helpers that never answer are given up on together, after one
+    /// [`HELPER_TIMEOUT`] rather than one each.
+    #[test]
+    fn hung_helpers_share_one_deadline() -> Result<(), Box<dyn std::error::Error>> {
+        let me = devlanes_sys::identity(std::process::id())?.ok_or("own identity missing")?;
+        // Ignores the request and runs longer than the timeout.
+        let helper = ConsoleHelper {
+            program: "ping".into(),
+            args: ["-n", "60", "127.0.0.1"].map(Into::into).into(),
+        };
+        let started = Instant::now();
+        assert!(!helper.send_held(&[(me, Duration::ZERO); 3], Request::CtrlBreak));
+        let took = started.elapsed();
+        assert!(
+            took >= HELPER_TIMEOUT && took < HELPER_TIMEOUT + Duration::from_secs(5),
+            "{took:?}"
+        );
         Ok(())
     }
 }

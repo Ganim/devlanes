@@ -696,14 +696,14 @@ fn doctor_names_the_store_and_its_dialog() {
 /// Windows terminal facts. Without a daemon an elevated shell fails doctor and a
 /// job that kills on close without breakaway is a warning; with one running, the
 /// elevated shell is only a warning and the job is not mentioned. An ordinary
-/// shell adds nothing. An open home is a warning the daemon fixes, with the fix
-/// `home_check` carries, if any.
+/// shell adds nothing. An open home fails (the daemon refuses it unless it is
+/// empty), with the fix `home_check` carries, if any.
 #[test]
 fn doctor_terminal_and_acl_checks() {
     let base = json!({
         "running": false, "version": "0.3.0", "home": r"C:\Users\u\.devlanes",
         "socket": r"\\.\pipe\devlanes-0", "db_path": r"C:\Users\u\.devlanes\state.db",
-        "home_check": {"path": r"C:\Users\u\.devlanes", "exists": true, "problem": "acl"},
+        "home_check": {"path": r"C:\Users\u\.devlanes", "exists": true, "problem": null},
         "sandbox": {"codex_sandbox": false, "app_sandbox": false},
     });
     let data = |running: bool, terminal: Value| {
@@ -731,15 +731,21 @@ fn doctor_terminal_and_acl_checks() {
     let plain = with(false, json!({"elevated": false, "job": null}));
     assert!(!plain.contains("terminal"), "{plain}");
     assert!(plain.contains("--- plain (exit 0)"), "{plain}");
+    let mut open = data(false, json!({"elevated": false, "job": null}));
+    open["home_check"]["problem"] = json!("acl");
+    let open_text = render_text(Method::Doctor, &open);
+    assert!(open_text.contains("--- plain (exit 1)"), "{open_text}");
     assert!(
-        plain.contains("warn home: C:\\Users\\u\\.devlanes lets other accounts in"),
-        "{plain}"
+        open_text.contains(
+            "fail home: C:\\Users\\u\\.devlanes lets other accounts in; the daemon refuses it unless it is empty"
+        ),
+        "{open_text}"
     );
     assert!(
-        !after(&plain, "lets other accounts in").contains("fix:"),
-        "{plain}"
+        !after(&open_text, "lets other accounts in").contains("fix:"),
+        "{open_text}"
     );
-    let mut fixable = data(false, json!({"elevated": false, "job": null}));
+    let mut fixable = open;
     fixable["home_check"]["fix"] = json!(r"icacls C:\Users\u\.devlanes /inheritance:r");
     let fixable = render_text(Method::Doctor, &fixable);
     assert_eq!(

@@ -65,7 +65,8 @@ Lane discovery and port blocks are in `registry.rs`, the start pipeline and stop
 
 - The endpoint is a named pipe, `\\.\pipe\devlanes-<hash of the home>`, so each home gets its own daemon; the lock and peer check work as with the Unix socket.
 - The daemon refuses to run elevated (as administrator): every unit would inherit administrator rights, and an unelevated CLI could not inspect the daemon's process. `DEVLANES_ALLOW_ELEVATED=1` lifts this for CI runners that only run elevated.
-- State directories are created with an access list for the user, SYSTEM and Administrators only, the Windows counterpart of mode 0700. A directory the user owns whose access list lets other accounts in is tightened to that list at startup.
+- State directories are created with an access list for the user, SYSTEM and Administrators only, the Windows counterpart of mode 0700. An existing one that lets other accounts in is tightened only while it is empty; otherwise the daemon refuses it and `devlanes doctor` prints the `icacls` command that fixes it.
+- The daemon has no console, so the programs it runs for itself (`git`, Docker Compose, `mise`, `direnv`, `fnox`, `curl`, `mkcert`, ready probes) start with `CREATE_NO_WINDOW` through `devlanes-sys`'s `NoWindow`, which keeps a console window from flashing up for each.
 - `run:` strings and `ready.cmd` probes run with Git for Windows' `sh.exe`, found once at startup from the `git.exe` on the daemon's `PATH` (or `git --exec-path`), with MSYS path conversion off. Without it they fall back to `cmd.exe`: `config check` and each such launch say so, and multi-line text fails its unit. After installing Git for Windows, run `devlanes daemon restart`.
 
 ## License
