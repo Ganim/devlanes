@@ -363,52 +363,150 @@ async fn a_small_window_keeps_the_dialog_keys() -> TestResult {
     Ok(())
 }
 
+/// The copied text of the one `Copy` effect in `effects`.
+fn copied(effects: &[Effect]) -> Result<String, Box<dyn std::error::Error>> {
+    match effects {
+        [Effect::Copy(text)] => Ok(text.clone()),
+        other => Err(format!("unexpected {other:?}").into()),
+    }
+}
+
 #[tokio::test]
-async fn daemon_log_lines_can_be_selected_and_copied() -> TestResult {
+async fn daemon_log_text_is_selected_cell_by_cell_like_a_pane() -> TestResult {
     let mut app = daemon_app(100, 30).await?;
-    let entries = app.daemon.log.len();
+    render(&app)?;
+    let newest = app.daemon_shown().1.len() - 1;
     assert!(app.update(key(KeyCode::Char('c'))).is_empty());
+    let cursor = app.daemon.copy.map(|c| c.cursor).ok_or("no copy mode")?;
     assert_eq!(
-        app.daemon.copy.map(|c| c.cursor),
-        Some(entries - 1),
-        "starts on the newest entry"
+        (cursor.entry, cursor.line, cursor.column),
+        (newest, 0, 0),
+        "starts at the left of the bottom line"
     );
-    let text = screen(&render(&app)?);
-    assert!(text.contains("v mark"), "{text}");
+    let buffer = render(&app)?;
+    assert!(
+        screen(&buffer).contains("h j k l move"),
+        "{}",
+        screen(&buffer)
+    );
+    // Only the cursor's cell is marked until v; the line is not painted.
+    let (y, _) = (0..buffer.area.height)
+        .map(|y| (y, row(&buffer, y)))
+        .find(|(_, line)| line.contains("compose failed"))
+        .ok_or("no compose line")?;
+    let reversed = |x: u16| {
+        buffer[(x, y)]
+            .modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    };
+    let marks: Vec<bool> = (0..6).map(reversed).collect();
+    assert_eq!(marks, [false, true, false, false, false, false], "row {y}");
+
+    // y without a mark: the cursor's line as shown.
+    let line = copied(&app.update(key(KeyCode::Char('y'))))?;
+    assert!(
+        line.contains("ERROR daemon::lifecycle") && line.contains("compose failed"),
+        "{line}"
+    );
+    assert!(
+        !line.contains("2026-10-21T") && !line.contains('\n'),
+        "{line}"
+    );
+    assert!(app.daemon.copy.is_none());
+
+    // From the level of the line above to the tenth cell of the last one.
+    app.update(key(KeyCode::Char('c')));
+    app.update(key(KeyCode::Char('k')));
+    for _ in 0..9 {
+        app.update(key(KeyCode::Char('l')));
+    }
+    app.update(key(KeyCode::Char('v')));
+    app.update(key(KeyCode::Char('j')));
+    let text = copied(&app.update(key(KeyCode::Char('y'))))?;
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].starts_with("INFO  daemon::lifecycle"), "{text}");
+    assert!(lines[0].contains("lane started"), "{text}");
+    assert!(
+        lines[1].ends_with('E') && lines[1].chars().count() == 10,
+        "{text}"
+    );
+
+    // Y: the whole entries the selection touches, as in the file.
+    app.update(key(KeyCode::Char('c')));
     app.update(key(KeyCode::Char('k')));
     app.update(key(KeyCode::Char('v')));
-    app.update(key(KeyCode::Char('k')));
-    // y: the entries as they are in the file, timestamps and all.
-    let effects = app.update(key(KeyCode::Char('y')));
-    let [Effect::Copy(copied)] = effects.as_slice() else {
-        return Err(format!("unexpected {effects:?}").into());
-    };
-    let expected: Vec<String> = app
-        .daemon
-        .log
-        .range(entries - 3..entries - 1)
-        .cloned()
-        .collect();
-    assert_eq!(copied, &expected.join("\n"));
-    assert!(!copied.contains('\x1b'), "colors are not copied");
-    assert!(app.daemon.copy.is_none());
-    // Y: as shown, local time and the parsed columns. G first: the copy
-    // left the view where the selection was.
-    app.update(key(KeyCode::Char('G')));
-    app.update(key(KeyCode::Char('c')));
-    let effects = app.update(key(KeyCode::Char('Y')));
-    let [Effect::Copy(copied)] = effects.as_slice() else {
-        return Err(format!("unexpected {effects:?}").into());
-    };
-    assert!(
-        copied.contains("ERROR daemon::lifecycle") && copied.contains("compose failed"),
-        "{copied}"
-    );
-    assert!(!copied.contains("2026-10-21T"), "{copied}");
+    app.update(key(KeyCode::Char('j')));
+    let raw = copied(&app.update(key(KeyCode::Char('Y'))))?;
+    let log = app.daemon.log.len();
+    let expected: Vec<String> = app.daemon.log.range(log - 2..).cloned().collect();
+    assert_eq!(raw, expected.join("\n"));
+    assert!(!raw.contains('\x1b'), "colors are not copied");
+
     // Esc leaves without copying; q there does not quit.
     app.update(key(KeyCode::Char('c')));
     assert!(app.update(key(KeyCode::Char('q'))).is_empty());
     assert!(app.daemon.copy.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn copy_mode_jumps_scroll_the_long_log_to_the_cursor() -> TestResult {
+    let mut app = daemon_app(100, 30).await?;
+    let lines: Vec<String> = (0..300)
+        .map(|i| {
+            format!(
+                "2026-10-21T10:{:02}:{:02}.000Z  INFO devlanes_daemon: entry {i}",
+                i / 60,
+                i % 60
+            )
+        })
+        .collect();
+    app.update(Msg::DaemonLog(Ok(LogChunk {
+        lines,
+        position: LogPosition {
+            offset: 9000,
+            file: (1, 2),
+        },
+        reset: false,
+    })));
+    render(&app)?;
+    let max = app.daemon_log_view.get().max_scroll;
+    assert!(max > 200, "{max}");
+    app.update(key(KeyCode::Char('c')));
+    // g: the oldest line, with the oldest entries filling the box.
+    app.update(key(KeyCode::Char('g')));
+    assert_eq!(app.daemon.copy.map(|c| c.cursor.entry), Some(0));
+    assert_eq!(app.daemon.scroll, max);
+    app.update(key(KeyCode::Char('G')));
+    assert_eq!(app.daemon.scroll, 0);
+    // k past the top of the box scrolls by one entry, not more.
+    let text = screen(&render(&app)?);
+    let top = text
+        .lines()
+        .find_map(|line| line.split("entry ").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse::<usize>().ok())
+        .ok_or("no entry on screen")?;
+    let visible = 299 - top;
+    for _ in 0..=visible {
+        app.update(key(KeyCode::Char('k')));
+    }
+    assert_eq!(app.daemon.scroll, 1, "one entry above the old top");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_log_that_fits_does_not_scroll() -> TestResult {
+    let mut app = daemon_app(120, 40).await?;
+    let before = screen(&render(&app)?);
+    for _ in 0..3 {
+        app.update(key(KeyCode::Char('k')));
+    }
+    app.update(key(KeyCode::Char('g')));
+    assert_eq!(app.daemon.scroll, 0, "everything is in view already");
+    assert!(!app.daemon.paused);
+    assert_eq!(screen(&render(&app)?), before);
     Ok(())
 }
 
@@ -517,7 +615,7 @@ async fn help_lists_clean_and_the_daemon_page() -> TestResult {
     let text = screen(&render(&app)?);
     for expected in [
         "clean the lane (asks first)",
-        "copy mode: v select, y copy as in the file, Y as shown",
+        "copy mode: v select, y copy, Y whole entries as in the file",
         "restart, stop or start the daemon",
         "clean every lane whose worktree is gone",
         "hide the hint strip or version notice",

@@ -58,6 +58,12 @@ impl Readiness {
         }
     }
 
+    /// A client spawned this daemon on demand (it waits for the readiness line);
+    /// a service manager starts it without one.
+    pub fn spawned_by_client(&self) -> bool {
+        self.enabled
+    }
+
     /// Signals that the socket accepts requests, then releases the client's pipe.
     pub fn ready(self) -> std::io::Result<()> {
         self.finish(b"ready\n")

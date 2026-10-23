@@ -75,6 +75,8 @@ pub(crate) struct SystemReading {
     pub available_memory_bytes: Option<u64>,
     /// Linux PSI `cpu some avg10`.
     pub cpu_stall_percent: Option<f64>,
+    /// Busy share of each CPU, 0-100; empty when the platform cannot tell.
+    pub core_percents: Vec<f64>,
 }
 
 impl MetricsState {
@@ -430,6 +432,7 @@ impl Inner {
                 memory_pressure: sample.memory.map(|level| level.word()),
                 available_memory_bytes: available,
                 cpu_stall_percent: sample.cpu_stall_percent,
+                core_percents: source.core_percents(),
             },
             total,
         ))
@@ -591,6 +594,7 @@ impl Inner {
                 "cpu_percent": reading.cpu_percent,
                 "memory_pressure": reading.memory_pressure,
                 "cpu_stall_percent": reading.cpu_stall_percent,
+                "core_percents": reading.core_percents,
                 "history": history,
             })
         });

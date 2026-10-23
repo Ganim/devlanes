@@ -257,28 +257,29 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let rest = if wide || medium {
         let height = (area.height * 3 / 10).clamp(6, 17);
         let names = group_name_width(&page);
-        // Without its own graph the mem box takes what its rows need; the
-        // cpu box and its graph get the rest.
-        let mem_needs = u16::try_from(names + MEM_ROW_EXTRA + 3).unwrap_or(u16::MAX);
-        let cpu_width = if wide {
+        let memory_first = app.monitor.memory_first;
+        // Without its own graph the small box takes what its rows need; the
+        // big box and its graph get the rest.
+        let small_needs = if memory_first {
+            names + CPU_ROW_EXTRA + 3
+        } else {
+            names + MEM_ROW_EXTRA + 3
+        };
+        let small_needs = u16::try_from(small_needs).unwrap_or(u16::MAX);
+        let big_width = if wide {
             area.width * 3 / 5
         } else {
-            area.width.saturating_sub(mem_needs).max(area.width / 2)
+            area.width.saturating_sub(small_needs).max(area.width / 2)
         };
-        cpu_box(
-            &page,
-            frame,
-            Rect::new(area.x, area.y, cpu_width, height),
-            wide,
-            names,
-        );
-        mem_box(
-            &page,
-            frame,
-            Rect::new(area.x + cpu_width, area.y, area.width - cpu_width, height),
-            wide,
-            names,
-        );
+        let big = Rect::new(area.x, area.y, big_width, height);
+        let small = Rect::new(area.x + big_width, area.y, area.width - big_width, height);
+        if memory_first {
+            mem_box(&page, frame, big, wide, names, true);
+            cpu_box(&page, frame, small, wide, names, false);
+        } else {
+            cpu_box(&page, frame, big, wide, names, true);
+            mem_box(&page, frame, small, wide, names, wide);
+        }
         Rect::new(area.x, area.y + height, area.width, area.height - height)
     } else {
         summary_line(&page, frame, Rect::new(area.x, area.y, area.width, 1));
@@ -518,9 +519,39 @@ fn axes(page: &Page, frame: &mut Frame, area: Rect, labels: [&str; 3]) -> Rect {
     plot
 }
 
+/// Columns a cpu meter row takes besides the name: the meter and its percent.
+const CPU_ROW_EXTRA: usize = 9 + 7;
+
+/// One square per core colored by its load, as rows of `width` columns
+/// under ` cores`.
+fn core_lines(theme: &Theme, cores: &[f64], width: usize) -> Vec<Line<'static>> {
+    if cores.is_empty() {
+        return Vec::new();
+    }
+    let per_row = (width.saturating_sub(1) / 2).max(1);
+    let mut lines = vec![Line::styled(" cores", theme.quiet())];
+    for row in cores.chunks(per_row) {
+        let mut spans = vec![Span::raw(" ")];
+        for core in row {
+            let load = core / 100.0;
+            // Without color the square's height tells the load instead.
+            let glyph = match (load_color(theme, load), theme.glyphs) {
+                (Some(_), Glyphs::Unicode) => "■".to_owned(),
+                (Some(_), Glyphs::Ascii) => "#".to_owned(),
+                (None, glyphs) => graph::blocks(Some(load), glyphs).to_string(),
+            };
+            spans.push(Span::styled(glyph, loaded(theme, load)));
+            spans.push(Span::raw(" "));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 /// The cpu box: the devlanes total as a filled area with the system line
-/// over it, and a meter per lane beside it.
-fn cpu_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize) {
+/// over it, and a meter per lane beside it. Without `graph` (memory has the
+/// big box) the meters fill it, with a square per core under them.
+fn cpu_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize, graph: bool) {
     let theme = page.theme;
     let (total_cpu, _) = page.total_now();
     let cpus = page.cpus();
@@ -545,12 +576,13 @@ fn cpu_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize)
         false,
     );
     let inner = inside(area);
-    let cells = if wide { 16 } else { 9 };
+    let cells = if wide && graph { 16 } else { 9 };
     // Names shrink before the graph does, down to 8 columns.
-    let room_for_names = usize::from(inner.width).saturating_sub(cells + 7 + 20);
+    let graph_room = if graph { 20 } else { 0 };
+    let room_for_names = usize::from(inner.width).saturating_sub(cells + 7 + graph_room);
     let name_width = names.min(room_for_names).max(8);
     let meters_width = (name_width + cells + 7) as u16;
-    if inner.width < meters_width + 20 || inner.height < 3 {
+    if inner.width < meters_width + graph_room as u16 || inner.height < 3 {
         return;
     }
     // Meters: each lane and shared group, then devlanes and the machine,
@@ -580,6 +612,14 @@ fn cpu_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize)
         ));
         if let Some(cpu) = system.and_then(|s| s.cpu_percent) {
             lines.push(meter_row(theme, "system", name_width, cpu / 100.0, cells));
+        }
+    }
+    if !graph {
+        let cores = system.map_or(&[][..], |s| s.core_percents.as_slice());
+        let cores = core_lines(theme, cores, usize::from(meters_width));
+        if !cores.is_empty() && lines.len() + 1 + cores.len() <= usize::from(inner.height) {
+            lines.push(Line::from(""));
+            lines.extend(cores);
         }
     }
     // The busiest rows, so a spike's cause shows without scrolling.
@@ -616,6 +656,9 @@ fn cpu_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize)
         inner.height,
     );
     frame.render_widget(Paragraph::new(lines), meters);
+    if !graph {
+        return;
+    }
 
     let graph_area = Rect::new(
         inner.x,
@@ -660,8 +703,9 @@ fn cpu_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize)
 }
 
 /// The mem box: devlanes, used and available memory and the pressure, then
-/// each lane; on wide screens the devlanes total as a graph beside them.
-fn mem_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize) {
+/// each lane; with `graph` (wide screens, or memory in the big box) the
+/// devlanes total as a graph beside them.
+fn mem_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize, graph: bool) {
     let theme = page.theme;
     let total = page.memory_total();
     let system = page.metrics.and_then(|m| m.system.as_ref());
@@ -754,7 +798,7 @@ fn mem_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize)
     }
     // ` available  9.6G  pressure critical`
     let meters_width = (name_width + cells + 18) as u16;
-    if !wide || inner.width < meters_width + 24 {
+    if !graph || inner.width < meters_width + 24 {
         // Right-aligned: the figures line up with the box's right edge.
         let content = u16::try_from(name_width + MEM_ROW_EXTRA)
             .unwrap_or(u16::MAX)
@@ -1072,7 +1116,8 @@ fn table_box(page: &Page, frame: &mut Frame, area: Rect) {
         return;
     }
     let index = view.index.min(page.rows.len() - 1);
-    let offset = (index + 1).saturating_sub(height);
+    app.monitor_table_rows.set(height);
+    let offset = view.offset.min(page.rows.len().saturating_sub(height));
     // Memory bars are relative to the largest row in view.
     let largest = entries
         .iter()

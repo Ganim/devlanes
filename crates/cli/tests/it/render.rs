@@ -935,6 +935,8 @@ fn leftover_processes_get_a_one_line_note() {
     status["containers"] = json!([
         {"name": "postgres", "ports": {"default": 20150}, "cpu_percent": 1.5, "memory_bytes": 52_000_000},
         {"name": "redis", "ports": {}, "shared": true, "cpu_percent": 0.5, "memory_bytes": 8_000_000},
+        {"name": "s3mock", "ports": {"default": 19090}, "shared": true, "cpu_percent": 0.1,
+         "memory_bytes": 9_000_000, "urls": ["https://s3.acme-2.localhost"]},
         {"name": "mail", "ports": {}},
     ]);
     let text = render_text(Method::Status, &json!({"items": [status]}));
@@ -945,6 +947,12 @@ fn leftover_processes_get_a_one_line_note() {
     let human = text.split("--- plain").next().unwrap_or_default();
     assert!(human.contains("postgres  container"), "{human}");
     assert!(human.contains("redis     shared container"), "{human}");
+    // A container's `infra.hosts` URL fills the URL column like a service's.
+    let s3 = human
+        .lines()
+        .find(|line| line.contains("s3mock"))
+        .unwrap_or_default();
+    assert!(s3.contains("https://s3.acme-2.localhost"), "{human}");
     assert!(
         !human.contains("mail"),
         "unsampled containers stay out\n{human}"

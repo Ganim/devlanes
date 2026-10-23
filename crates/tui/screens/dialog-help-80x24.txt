@@ -9,8 +9,9 @@
 ││   g G               the lane, the last row                                 ││
 ││   h l               fold, unfold; h moves to the section                   ││
 ││   enter  space      fold a section, or type into a running unit            ││
-││   [ ]  1-9          previous, next lane; lane by number                    ││
+││   [ ]  0-9          previous, next lane; 2 is lane @2                      ││
 ││   n N               next, previous problem                                 ││
+││   t  i              jump to the tasks, the infra                           ││
 ││   s  x  r           start, stop, restart the selection; s runs a task      ││
 ││   s  S              on the lane: its default services; every service       ││
 ││   p                 start the lane with chosen profiles                    ││
@@ -18,7 +19,6 @@
 ││   o                 open the unit's address in a browser                   ││
 ││   /                 filter by name or +tag; enter keeps, esc clears        ││
 ││                                                                            ││
-││ pane                                                                       ││
 ││ …                                                                          ││
 └│ any key closes                                                             │┘
  └────────────────────────────────────────────────────────────────────────────┘
@@ -43,8 +43,8 @@
 16: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
 17: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
 18: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
-19: 0 darkgray, 1 bold, 78 bold, 79 darkgray
-20: 0 darkgray, 1 bold, 3-6 dim, 78 bold, 79 darkgray
+19: 0 darkgray, 1 bold, 3-22 bold, 78 bold, 79 darkgray
+20: 0 darkgray, 1 bold, 78 bold, 79 darkgray
 21: 0 darkgray, 1 bold, 3 dim, 78 bold, 79 darkgray
 22: 0 darkgray, 1 bold, 3-16 dim, 78 bold, 79 darkgray
 23: 1-78 bold, 79 dim

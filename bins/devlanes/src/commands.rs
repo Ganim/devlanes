@@ -111,6 +111,40 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
             }
             ui().await
         }
+        Action::RpcThenOfferStart(request) => {
+            let data = match call(request.clone()).await {
+                Ok(data) => data,
+                Err(error) => {
+                    let rendered = runtime
+                        .reporter()
+                        .error(&error, hint_for(&error, &request).as_ref());
+                    emit(&rendered);
+                    return Ok(rendered.exit_code);
+                }
+            };
+            let code = render_result(
+                runtime,
+                request.method,
+                &data,
+                more_hint(request.method, &request),
+            )?;
+            let Some(lane) = data.pointer("/lane/reference").and_then(Value::as_str) else {
+                return Ok(code);
+            };
+            if code != 0 || !confirm(runtime, &format!("start {lane} now?"))? {
+                return Ok(code);
+            }
+            // Exactly what the printed `next:` command does, TUI and all.
+            let usage = |error: &dyn std::fmt::Display| {
+                RpcError::new("usage", json!({"message": error.to_string()}), 2)
+            };
+            let cli = <Cli as devlanes_cli::clap::Parser>::try_parse_from([
+                "devlanes", "start", "--lane", lane,
+            ])
+            .map_err(|error| usage(&error))?;
+            let action = cli.action(runtime).map_err(|error| usage(&error))?;
+            Box::pin(run(&cli, runtime, action)).await
+        }
         Action::Ui => ui().await,
         Action::StartUi { request, forced } => {
             let paths = paths()?;

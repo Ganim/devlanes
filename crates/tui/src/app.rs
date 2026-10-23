@@ -166,22 +166,33 @@ pub struct DaemonView {
     background: u8,
 }
 
-/// The cursor and selection of copy mode on the daemon log, as indexes into
-/// the shown entries (0 is the oldest). The view ends at the selection's
-/// newest entry.
+/// The cursor and selection of copy mode on the daemon log, a cell of the
+/// log as drawn, like copy mode in a unit's pane. Entries index the shown
+/// entries (0 is the oldest).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogCopy {
-    pub cursor: usize,
+    pub cursor: crate::daemonlog::LogPos,
     /// Where `v` started the selection.
-    pub anchor: Option<usize>,
+    pub anchor: Option<crate::daemonlog::LogPos>,
 }
 
 impl LogCopy {
-    /// The selected lines, first to last inclusive; the cursor line alone
-    /// before `v`.
-    pub fn range(self) -> (usize, usize) {
+    /// The selection, first to last cell inclusive; the cursor alone before `v`.
+    pub fn range(self) -> (crate::daemonlog::LogPos, crate::daemonlog::LogPos) {
         let anchor = self.anchor.unwrap_or(self.cursor);
         (anchor.min(self.cursor), anchor.max(self.cursor))
+    }
+
+    /// What `y` copies: the selection, or the cursor's whole line before `v`.
+    pub fn copied(self) -> (crate::daemonlog::LogPos, crate::daemonlog::LogPos) {
+        if self.anchor.is_some() {
+            return self.range();
+        }
+        let line = |column| crate::daemonlog::LogPos {
+            column,
+            ..self.cursor
+        };
+        (line(0), line(usize::MAX))
     }
 }
 
@@ -754,6 +765,11 @@ pub struct App {
     /// Seconds the widest monitor graph showed in the last frame (one per
     /// column); the next `metrics` call asks for that much history.
     pub monitor_seconds: std::cell::Cell<usize>,
+    /// Rows the monitor table showed in the last frame, so keys keep the
+    /// selection in view and the wheel stops at the last row.
+    pub monitor_table_rows: std::cell::Cell<usize>,
+    /// Rows the daemon log box showed in the last frame, as drawn.
+    pub daemon_log_view: std::cell::Cell<crate::daemonlog::LogView>,
     pub list_offset: usize,
     pub notice: Option<Notice>,
     /// Recent errors, newest first.
@@ -849,6 +865,8 @@ impl App {
             monitor: MonitorView::default(),
             graphs: crate::graph::Columns::default(),
             monitor_seconds: std::cell::Cell::new(0),
+            monitor_table_rows: std::cell::Cell::new(0),
+            daemon_log_view: std::cell::Cell::default(),
             list_offset: 0,
             notice: None,
             errors: VecDeque::new(),
@@ -1474,11 +1492,15 @@ impl App {
                 // Copy mode stays on the same entries; a rotated log ends it.
                 self.daemon.copy = match self.daemon.copy {
                     Some(copy) if !chunk.reset && after > 0 => {
-                        let copy = LogCopy {
-                            cursor: moved(copy.cursor),
-                            anchor: copy.anchor.map(moved),
+                        let shift = |pos: crate::daemonlog::LogPos| crate::daemonlog::LogPos {
+                            entry: moved(pos.entry),
+                            ..pos
                         };
-                        self.daemon.scroll = (after - 1).saturating_sub(copy.range().1);
+                        let copy = LogCopy {
+                            cursor: shift(copy.cursor),
+                            anchor: copy.anchor.map(shift),
+                        };
+                        // Copy mode pauses, so the view already stays put.
                         Some(copy)
                     }
                     _ => None,
@@ -2242,6 +2264,16 @@ impl App {
         self.sync_attach(effects);
     }
 
+    /// `t` and `i`: the tasks or infra header of the shown lane.
+    fn select_section(&mut self, section: tree::Section, effects: &mut Vec<Effect>) {
+        let id = RowId::Section(section);
+        if self.rows().iter().any(|row| row.id == id) {
+            self.select_row(id, effects);
+        } else {
+            self.set_notice(format!("this lane has no {}", section.name()));
+        }
+    }
+
     /// Moves the selection by `delta` rows, over the blank rows between
     /// sections.
     fn move_selection(&mut self, delta: isize, effects: &mut Vec<Effect>) {
@@ -2804,13 +2836,21 @@ impl App {
                     self.select_project(&name, effects);
                 }
             }
-            // 1-9 picks a lane of the project: one project with many lanes
-            // is the common case.
-            KeyCode::Char(digit @ '1'..='9') if plain => {
-                let index = usize::from(digit as u8 - b'1');
-                if let Some(lane) = self.project_lanes().get(index).map(|l| l.reference.clone()) {
-                    self.view = View::Project;
-                    self.select_lane(&lane, effects);
+            // 0-9 picks the project's lane with that number, so `2` is `@2`:
+            // one project with many lanes is the common case.
+            KeyCode::Char(digit @ '0'..='9') if plain => {
+                let number = u32::from(digit as u8 - b'0');
+                let lane = self
+                    .project_lanes()
+                    .iter()
+                    .find(|lane| lane.index == Some(number))
+                    .map(|lane| lane.reference.clone());
+                match lane {
+                    Some(lane) => {
+                        self.view = View::Project;
+                        self.select_lane(&lane, effects);
+                    }
+                    None => self.set_notice(format!("no lane @{number} in this project")),
                 }
             }
             KeyCode::Char('M') => self.set_view(View::Monitor, effects),
@@ -2885,19 +2925,23 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let page = usize::from(self.size.1 / 2).max(1);
         let shown = self.daemon_shown().1.len();
-        let scroll = self.daemon.scroll;
-        // Scrolling up pauses following; G or F follows again.
+        let max = self.daemon_log_layout(shown).max_scroll;
+        let scroll = self.daemon.scroll.min(max);
+        // Scrolling up pauses following; G or F follows again. It stops once
+        // the oldest entries fill the box.
         let scroll_to = |view: &mut DaemonView, scroll: usize| {
-            view.scroll = scroll.min(shown);
+            view.scroll = scroll.min(max);
             if view.scroll > 0 {
                 view.paused = true;
             }
         };
         match key.code {
-            // The bottom visible entry; moving keeps the cursor on the last row.
+            // On the bottom line of the box, like copy mode in a unit's pane.
             KeyCode::Char('c') if !ctrl && shown > 0 => {
+                self.daemon.scroll = scroll;
+                let last = self.daemon_visible().last().copied().unwrap_or_default();
                 self.daemon.copy = Some(LogCopy {
-                    cursor: shown.saturating_sub(1 + self.daemon.scroll),
+                    cursor: last,
                     anchor: None,
                 });
                 self.daemon.paused = true;
@@ -3195,21 +3239,121 @@ impl App {
         self.daemon_filters_changed();
     }
 
-    /// Keys in copy mode on the daemon log: move, `v` selects, `y` copies the
-    /// selected entries as they are in the file, `Y` as shown, Esc leaves.
-    fn daemon_copy_key(&mut self, key: KeyEvent, page: usize, effects: &mut Vec<Effect>) {
+    /// The daemon log box as the last frame drew it; before the first frame,
+    /// the body's width and half its height, scrolling up to every entry.
+    fn daemon_log_layout(&self, shown: usize) -> crate::daemonlog::LogView {
+        let view = self.daemon_log_view.get();
+        if view.height > 0 {
+            return view;
+        }
+        crate::daemonlog::LogView {
+            width: usize::from(self.size.0.saturating_sub(2)).max(1),
+            height: usize::from(self.size.1 / 2).max(1),
+            max_scroll: shown,
+        }
+    }
+
+    /// The places of the daemon log's lines on screen, top to bottom.
+    fn daemon_visible(&self) -> Vec<crate::daemonlog::LogPos> {
         let (entries, shown) = self.daemon_shown();
-        let last = shown.len().saturating_sub(1);
+        if shown.is_empty() {
+            return Vec::new();
+        }
+        let layout = self.daemon_log_layout(shown.len());
+        crate::ui::daemon::visible_lines(
+            self,
+            &entries,
+            &shown,
+            self.daemon.scroll,
+            layout.width,
+            layout.height,
+        )
+        .into_iter()
+        .map(|(place, _)| place)
+        .collect()
+    }
+
+    /// Keys in copy mode on the daemon log, as in a unit's pane: `h j k l`
+    /// move a cell cursor, `v` marks, `y` copies the text as shown, `Y` the
+    /// whole entries it touches as they are in the file, Esc leaves.
+    fn daemon_copy_key(&mut self, key: KeyEvent, page: usize, effects: &mut Vec<Effect>) {
+        use crate::daemonlog::LogPos;
+        let (entries, shown) = self.daemon_shown();
         let Some(mut copy) = self.daemon.copy else {
             return;
         };
+        let layout = self.daemon_log_layout(shown.len());
+        let width = layout.width;
+        let lines = |index: usize| -> Vec<ratatui::text::Line<'static>> {
+            crate::ui::daemon::entry_lines(self, &entries, &shown, index, width)
+        };
+        // One drawn line down or up, across entries; `None` at either end.
+        let down = |pos: LogPos| -> Option<LogPos> {
+            if pos.line + 1 < lines(pos.entry).len() {
+                Some(LogPos {
+                    line: pos.line + 1,
+                    ..pos
+                })
+            } else {
+                (pos.entry + 1 < shown.len()).then_some(LogPos {
+                    entry: pos.entry + 1,
+                    line: 0,
+                    ..pos
+                })
+            }
+        };
+        let up = |pos: LogPos| -> Option<LogPos> {
+            if pos.line > 0 {
+                return Some(LogPos {
+                    line: pos.line - 1,
+                    ..pos
+                });
+            }
+            let entry = pos.entry.checked_sub(1)?;
+            Some(LogPos {
+                entry,
+                line: lines(entry).len().saturating_sub(1),
+                ..pos
+            })
+        };
+        let step = |pos: LogPos, times: usize, by: &dyn Fn(LogPos) -> Option<LogPos>| {
+            (0..times).try_fold(pos, |at, _| by(at)).unwrap_or_else(|| {
+                // Past an end: stop on the last line there is.
+                let mut at = pos;
+                while let Some(next) = by(at) {
+                    at = next;
+                }
+                at
+            })
+        };
+        let last_column = width.saturating_sub(1);
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => copy.cursor = (copy.cursor + 1).min(last),
-            KeyCode::Char('k') | KeyCode::Up => copy.cursor = copy.cursor.saturating_sub(1),
-            KeyCode::PageDown => copy.cursor = (copy.cursor + page).min(last),
-            KeyCode::PageUp => copy.cursor = copy.cursor.saturating_sub(page),
-            KeyCode::Char('g') | KeyCode::Home => copy.cursor = 0,
-            KeyCode::Char('G') | KeyCode::End => copy.cursor = last,
+            KeyCode::Char('j') | KeyCode::Down => copy.cursor = step(copy.cursor, 1, &down),
+            KeyCode::Char('k') | KeyCode::Up => copy.cursor = step(copy.cursor, 1, &up),
+            KeyCode::PageDown => copy.cursor = step(copy.cursor, page, &down),
+            KeyCode::PageUp => copy.cursor = step(copy.cursor, page, &up),
+            KeyCode::Char('h') | KeyCode::Left => {
+                copy.cursor.column = copy.cursor.column.saturating_sub(1);
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                copy.cursor.column = (copy.cursor.column + 1).min(last_column);
+            }
+            KeyCode::Char('0') | KeyCode::Home => copy.cursor.column = 0,
+            KeyCode::Char('$') | KeyCode::End => copy.cursor.column = last_column,
+            KeyCode::Char('g') => {
+                copy.cursor = LogPos {
+                    column: copy.cursor.column,
+                    ..LogPos::default()
+                };
+            }
+            KeyCode::Char('G') => {
+                let entry = shown.len().saturating_sub(1);
+                copy.cursor = LogPos {
+                    entry,
+                    line: lines(entry).len().saturating_sub(1),
+                    column: copy.cursor.column,
+                };
+            }
             KeyCode::Char('v') | KeyCode::Char(' ') => {
                 copy.anchor = match copy.anchor {
                     Some(_) => None,
@@ -3217,22 +3361,51 @@ impl App {
                 };
             }
             KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
-                let (first, last) = copy.range();
-                let raw = key.code != KeyCode::Char('Y');
+                let (first, last) = copy.copied();
                 let mut text: Vec<String> = Vec::new();
-                for row in shown.get(first..=last).unwrap_or_default() {
-                    let Some(entry) = entries.get(row.entry) else {
-                        continue;
-                    };
-                    if raw {
-                        text.extend(entry.raw.iter().map(|line| text::clean(line)));
-                    } else {
-                        text.push(crate::daemonlog::display(entry, row, &self.time_zone));
+                if key.code == KeyCode::Char('Y') {
+                    for row in shown.get(first.entry..=last.entry).unwrap_or_default() {
+                        if let Some(entry) = entries.get(row.entry) {
+                            text.extend(entry.raw.iter().map(|line| text::clean(line)));
+                        }
+                    }
+                } else {
+                    for index in first.entry..=last.entry.min(shown.len().saturating_sub(1)) {
+                        for (line, drawn) in lines(index).iter().enumerate() {
+                            let start = LogPos {
+                                entry: index,
+                                line,
+                                column: 0,
+                            };
+                            let end = LogPos {
+                                column: usize::MAX,
+                                ..start
+                            };
+                            if end < first || start > last {
+                                continue;
+                            }
+                            let from = if start < first { first.column } else { 0 };
+                            let to = if (LogPos { column: 0, ..last }) == start {
+                                last.column
+                            } else {
+                                usize::MAX
+                            };
+                            let plain = crate::ui::daemon::plain(drawn);
+                            let part: String = plain
+                                .chars()
+                                .skip(from)
+                                .take(to.saturating_sub(from).saturating_add(1))
+                                .collect();
+                            text.push(part.trim_end().to_owned());
+                        }
                     }
                 }
-                effects.push(Effect::Copy(text.join("\n")));
                 self.daemon.copy = None;
-                self.set_notice("copied (OSC 52; some terminals block it)".into());
+                let text = text.join("\n");
+                if !text.trim().is_empty() {
+                    effects.push(Effect::Copy(text));
+                    self.set_notice("copied (OSC 52; some terminals block it)".into());
+                }
                 return;
             }
             KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('q') => {
@@ -3241,10 +3414,37 @@ impl App {
             }
             _ => {}
         }
-        // The view ends at the selection's newest line, so both ends stay in sight
-        // while it fits.
-        self.daemon.scroll = last.saturating_sub(copy.range().1);
         self.daemon.copy = Some(copy);
+        self.daemon.scroll = self.daemon_reveal(copy.cursor, &entries, &shown, layout);
+    }
+
+    /// The least scroll that brings `cursor`'s line into view. The box is
+    /// anchored at its newest entry, so the line shows while it and the lines
+    /// below it fit: count down from it, one entry's lines at a time.
+    fn daemon_reveal(
+        &self,
+        cursor: crate::daemonlog::LogPos,
+        entries: &[crate::daemonlog::Entry],
+        shown: &[crate::daemonlog::Shown],
+        layout: crate::daemonlog::LogView,
+    ) -> usize {
+        let count = shown.len();
+        // Below the box: its entry becomes the newest shown.
+        let bottom = count.saturating_sub(1 + cursor.entry);
+        if self.daemon.scroll > bottom {
+            return bottom;
+        }
+        let lines = |index: usize| {
+            crate::ui::daemon::entry_lines(self, entries, shown, index, layout.width).len()
+        };
+        let mut used = lines(cursor.entry).saturating_sub(cursor.line);
+        let mut last = cursor.entry;
+        while last + 1 < count && used + lines(last + 1) <= layout.height {
+            last += 1;
+            used += lines(last);
+        }
+        let needed = (count - 1 - last).min(layout.max_scroll);
+        self.daemon.scroll.max(needed)
     }
 
     /// Records the start of an action on `lane`.
@@ -3283,6 +3483,8 @@ impl App {
             }
             KeyCode::Char('[') => self.step_lane(-1, effects),
             KeyCode::Char(']') => self.step_lane(1, effects),
+            KeyCode::Char('t') => self.select_section(tree::Section::Tasks, effects),
+            KeyCode::Char('i') => self.select_section(tree::Section::Infra, effects),
             KeyCode::Char('n') => self.next_problem(true, effects),
             KeyCode::Char('N') => self.next_problem(false, effects),
             KeyCode::Char('/') => {
@@ -3659,6 +3861,8 @@ impl App {
             KeyCode::Char('e') => self.monitor.flat = !self.monitor.flat,
             KeyCode::Char('/') => self.monitor.editing = true,
             KeyCode::Char('z') => self.monitor.zoom = !self.monitor.zoom,
+            KeyCode::Char('c') => self.monitor.memory_first = false,
+            KeyCode::Char('m') => self.monitor.memory_first = true,
             KeyCode::Char('h') | KeyCode::Left => match rows.get(index) {
                 Some(MonitorRow::Group(group)) => {
                     self.monitor.folded.insert(group.key.clone());
@@ -3688,6 +3892,19 @@ impl App {
             _ => {}
         }
         self.clamp_monitor();
+        // Keys bring the selection into view, wherever the wheel left it.
+        if self.monitor.index != index {
+            let height = self.monitor_height();
+            self.monitor.reveal(height);
+        }
+    }
+
+    /// Rows the monitor table shows; before its first frame, half the screen.
+    fn monitor_height(&self) -> usize {
+        match self.monitor_table_rows.get() {
+            0 => usize::from(self.size.1 / 2),
+            rows => rows,
+        }
     }
 
     /// Esc on the monitor steps back one thing at a time: the detail zoom,
@@ -4298,7 +4515,12 @@ impl App {
             View::Monitor => self.monitor_mouse(mouse, &layout, effects),
             View::Daemon => match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.daemon.scroll = (self.daemon.scroll + 3).min(self.daemon.log.len());
+                    let shown = self.daemon_shown().1.len();
+                    let max = self.daemon_log_layout(shown).max_scroll;
+                    self.daemon.scroll = (self.daemon.scroll + 3).min(max);
+                    if self.daemon.scroll > 0 {
+                        self.daemon.paused = true;
+                    }
                 }
                 MouseEventKind::ScrollDown => {
                     self.daemon.scroll = self.daemon.scroll.saturating_sub(3);
@@ -4343,15 +4565,15 @@ impl App {
         }
     }
 
-    /// The monitor: the wheel moves the selection three rows; clicks on rows
-    /// come through their hit areas.
+    /// The monitor: the wheel scrolls the table three rows and leaves the
+    /// selection where it is; clicks on rows come through their hit areas.
     fn monitor_mouse(&mut self, mouse: MouseEvent, layout: &Areas, effects: &mut Vec<Effect>) {
         let _ = (layout, effects);
-        let rows = self.monitor_rows();
-        let index = self.monitor.index;
+        let rows = self.monitor_rows().len();
+        let height = self.monitor_height();
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.monitor.select_index(&rows, index.saturating_sub(3)),
-            MouseEventKind::ScrollDown => self.monitor.select_index(&rows, index + 3),
+            MouseEventKind::ScrollUp => self.monitor.scroll(-3, rows, height),
+            MouseEventKind::ScrollDown => self.monitor.scroll(3, rows, height),
             _ => {}
         }
     }

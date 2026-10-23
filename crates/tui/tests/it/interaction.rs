@@ -179,7 +179,8 @@ async fn tabs_chips_and_footer_hints_are_clickable() -> TestResult {
     app.update(key(KeyCode::Char('!')));
     let text = draw(&app)?.backend().to_string();
     let bar = text.lines().nth(1).ok_or("no lane bar")?.trim_matches('"');
-    assert!(bar.contains("2 feat/login @1"), "{bar}");
+    assert!(bar.contains("feat/login @1"), "{bar}");
+    assert!(bar.contains("0-9 or [ ] switch lanes"), "{bar}");
     let chip = column(bar, "feat/login").ok_or("no chip")?;
     app.update(click(chip, 1));
     assert_eq!(

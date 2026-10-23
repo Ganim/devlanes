@@ -52,6 +52,7 @@ fn metrics(api_cpu: f64, web_cpu: f64) -> Metrics {
             cpu_percent: Some(60.0),
             memory_pressure: Some("normal".into()),
             cpu_stall_percent: None,
+            core_percents: vec![10.0, 95.0, 40.0, 60.0],
             history: history(NOW, 60.0, 8 << 30),
         }),
     }
@@ -176,6 +177,91 @@ async fn s_x_r_act_on_the_unit_or_the_lane_and_enter_opens_it() -> TestResult {
     app.update(key(KeyCode::Enter));
     assert_eq!(app.view, View::Project);
     assert_eq!(app.selected, Some(Selected::unit("acme@0", "api")));
+    Ok(())
+}
+
+/// A wheel step down (`down`) or up over the screen.
+fn wheel(down: bool) -> Msg {
+    use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+    Msg::Mouse(MouseEvent {
+        kind: if down {
+            MouseEventKind::ScrollDown
+        } else {
+            MouseEventKind::ScrollUp
+        },
+        column: 10,
+        row: 20,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+#[tokio::test]
+async fn the_wheel_scrolls_the_table_and_leaves_the_selection() -> TestResult {
+    let mut many = metrics(80.0, 5.0);
+    let template = many.units[0].clone();
+    many.units = (0..40)
+        .map(|i| UnitMetrics {
+            unit: format!("svc{i:02}"),
+            cpu_percent: Some(f64::from(40 - i)),
+            ..template.clone()
+        })
+        .collect();
+    let mut app = monitor(120, 40, many).await;
+    draw(&app)?;
+    let selected = app.monitor.selected.clone();
+    for _ in 0..3 {
+        app.update(wheel(true));
+    }
+    assert_eq!(
+        app.monitor.selected, selected,
+        "the wheel moves no selection"
+    );
+    assert_eq!(app.monitor.offset, 9);
+    let text = draw(&app)?.backend().to_string();
+    assert!(
+        !text.contains("● svc00") && text.contains("● svc08"),
+        "{text}"
+    );
+    // Past the last row it stops; up goes back.
+    for _ in 0..30 {
+        app.update(wheel(true));
+    }
+    let last = app.monitor_rows().len() - app.monitor_table_rows.get();
+    assert_eq!(app.monitor.offset, last);
+    app.update(wheel(false));
+    assert_eq!(app.monitor.offset, last - 3);
+    // A key brings the selection back into view.
+    app.update(key(KeyCode::Char('j')));
+    assert_eq!(app.monitor.index, 1);
+    assert_eq!(app.monitor.offset, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn m_puts_memory_in_the_big_box_and_cpu_shows_its_cores() -> TestResult {
+    let mut app = monitor(120, 40, metrics(80.0, 5.0)).await;
+    app.update(key(KeyCode::Char('m')));
+    assert!(app.monitor.memory_first);
+    let text = draw(&app)?.backend().to_string();
+    let top = text
+        .lines()
+        .find(|line| line.contains("┌ mem"))
+        .unwrap_or_default();
+    let (mem, cpu) = (top.find("┌ mem"), top.find("┌ cpu"));
+    assert!(mem.is_some() && cpu.is_some() && mem < cpu, "{text}");
+    assert!(text.contains("■ ■ ■ ■"), "{text}");
+    assert!(text.contains("c cpu graph"), "{text}");
+    // Four cores, four squares in the cpu box.
+    let squares: usize = text
+        .lines()
+        .filter(|line| line.contains('■') && !line.contains('%'))
+        .map(|line| line.matches('■').count())
+        .sum();
+    assert_eq!(squares, 4, "{text}");
+    app.update(key(KeyCode::Char('c')));
+    assert!(!app.monitor.memory_first);
+    let text = draw(&app)?.backend().to_string();
+    assert!(!text.contains("■ ■ ■ ■"), "{text}");
     Ok(())
 }
 

@@ -1,5 +1,5 @@
  devlanes  1 acme ✕   2 billing !   3 shop ●                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
- lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8     3 fix/cache @2 ·    +1 more              1-9 or [ ] switch lanes
+ lanes    main @0 ✕     feat/checkout @1 ⠋ 4/8     fix/cache @2 ·     spike/old-search @3 !     0-9 or [ ] switch lanes
 ┌ main @0 ─────────────────────────────────────┐┌ setup ───────────────────────────────────────────────────────────────┐
 │   ● api-catalog                              ││   name         state       cpu memory  url                           │
 │   ● api-inventory                            ││ ✓ setup.certs  done          -      -                                │
@@ -37,11 +37,11 @@
 │   ▸ shared                              3 up ││                                                                      │
 │   ▾ setup                             4 done ││                                                                      │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
- enter fold   s start all   x stop all   r restart all   / filter                                 ? all keys   q quit
+ enter fold   s start all   x stop all   r restart all   p profiles   / filter                    ? all keys   q quit
 
 --- styles (row: columns style) ---
 0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 99 bold, 100-107 dim, 111 bold, 112-118 dim
-1: 0-5 dim, 9-21 bold reversed, 26-27 dim, 41-44 dim, 55-56 dim, 66-70 dim, 72-81 dim, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
+1: 0-5 dim, 9-19 bold reversed, 37-40 dim, 60-64 dim, 86-89 dim, 90 yellow, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
 2: 0 darkgray, 2-5 bold, 10-48 darkgray, 50-54 bold, 56-119 darkgray
 3: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-91 dim, 119 darkgray
 4: 0 darkgray, 4-5 green, 6-18 blue, 47-48 darkgray, 50-51 green, 65-73 dim, 119 darkgray
@@ -79,4 +79,4 @@
 36: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 119 darkgray
 37: 0 darkgray, 1-46 reversed, 47-48 darkgray, 119 darkgray
 38: 0-119 darkgray
-39: 1-5 bold, 6-13 dim, 14 bold, 15-27 dim, 28 bold, 29-40 dim, 41 bold, 42-56 dim, 57 bold, 58-67 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim
+39: 1-5 bold, 6-13 dim, 14 bold, 15-27 dim, 28 bold, 29-40 dim, 41 bold, 42-56 dim, 57 bold, 58-69 dim, 70 bold, 71-80 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim

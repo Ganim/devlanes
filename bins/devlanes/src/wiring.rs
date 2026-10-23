@@ -76,12 +76,19 @@ pub async fn ui(paths: &Paths) -> Result<u8, RpcError> {
         .map_err(tui_error)
 }
 
+/// How long a daemon a client spawned stays up after the last TUI closed with
+/// nothing running: enough for quitting and reopening the TUI, or for a
+/// command typed right after, not to pay for a new daemon.
+const IDLE_EXIT_GRACE: Duration = Duration::from_secs(30);
+
 /// Builds the daemon engine with every concrete integration. Integrations that
 /// cannot start (no Docker, no CA, a busy proxy port) degrade to reported errors
-/// instead of failing the daemon; an invalid user config fails it.
+/// instead of failing the daemon; an invalid user config fails it. `spawned`:
+/// a client started this daemon, so it may exit when idle (`daemon.exit_when_idle`).
 pub async fn engine(
     paths: &Paths,
     shutdown: CancellationToken,
+    spawned: bool,
 ) -> anyhow::Result<Arc<dyn devlanes_daemon::Handler>> {
     match tokio::task::spawn_blocking(devlanes_sys::raise_nofile_limit).await? {
         Ok(limit) => tracing::info!(?limit, "raised the open-file limit"),
@@ -133,6 +140,8 @@ pub async fn engine(
     let mut options = EngineOptions::new(&paths.home, &paths.socket);
     options.db_path = paths.db.clone();
     options.logs = paths.logs.clone();
+    // A service manager would not start the daemon again, so only a spawned one exits.
+    options.idle_exit = (spawned && user.daemon.exit_when_idle).then_some(IDLE_EXIT_GRACE);
     options.user = user;
     let engine: Arc<dyn Handler> = Arc::new(Engine::new(options, store, integ, shutdown));
     Ok(engine)

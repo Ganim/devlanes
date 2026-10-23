@@ -261,6 +261,13 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 
 `config.yaml` in the devlanes home (`~/.devlanes`, or `$DEVLANES_HOME`), for settings of this machine. Schema: `https://devlanes.run/v1/user-schema.json`.
 
+### daemon
+
+| Path | Type | Description | Example |
+| --- | --- | --- | --- |
+| `daemon` | object | The daemon's lifetime: whether it stops on its own once the last TUI closes and nothing runs. | `{"exit_when_idle":false}` |
+| `daemon.exit_when_idle` | boolean | Stop the daemon about 30 seconds after the last TUI closes when no service, task or start is running; the next devlanes command starts it again. Containers keep running either way. Defaults to true. Only a daemon a command started on demand exits; one installed with `devlanes daemon install` keeps running. | `true` |
+
 ### history
 
 | Path | Type | Description | Example |

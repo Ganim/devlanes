@@ -26,8 +26,9 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
                 "enter  space",
                 "fold a section, or type into a running unit",
             ),
-            ("[ ]  1-9", "previous, next lane; lane by number"),
+            ("[ ]  0-9", "previous, next lane; 2 is lane @2"),
             ("n N", "next, previous problem"),
+            ("t  i", "jump to the tasks, the infra"),
             (
                 "s  x  r",
                 "start, stop, restart the selection; s runs a task",
@@ -64,6 +65,11 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
             ("/  e", "filter, grouped or flat"),
             ("h l", "fold, unfold a lane"),
             ("z", "detail graphs fill the page"),
+            (
+                "c  m",
+                "cpu or memory in the big box (memory: a square per core)",
+            ),
+            ("wheel", "scroll the table; the selection stays"),
             ("s  x  r", "start, stop, restart the unit or lane"),
             ("enter", "open the unit in its project"),
         ],
@@ -81,7 +87,7 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
             ("F  d", "pause or follow, fold or unfold repeats"),
             (
                 "c",
-                "copy mode: v select, y copy as in the file, Y as shown",
+                "copy mode: v select, y copy, Y whole entries as in the file",
             ),
             ("i", "every check, or problems only"),
         ],

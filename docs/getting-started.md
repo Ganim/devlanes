@@ -49,7 +49,7 @@ devlanes url open web    # open a service in the browser
 devlanes stop            # stop the lane
 ```
 
-The daemon starts on first use. `start` is safe to repeat: running services are left alone.
+The daemon starts on first use, and stops on its own about 30 seconds after the last TUI closes while nothing runs (`daemon.exit_when_idle`). `start` is safe to repeat: running services are left alone.
 
 On a terminal, `start` opens the TUI on the lane and runs the start inside it: the header shows the phase (infra, setup, tasks, services), the tree shows each service coming up, and a service that fails shows its reason and the end of its log in the details pane. When the start ends, the header keeps the result and the TUI stays open. Quitting keeps services running unless you choose otherwise: while lanes run, `q` asks whether to keep or stop them (`tui.on_quit` in `~/.devlanes/config.yaml` answers for you). The exit status is 0 when the start was ready, 1 when it failed, and 130 when you quit before it ended (the start keeps going in the daemon). A start the daemon refuses outright, such as a worktree without `devlanes.yaml` or an unknown unit, prints its error before any TUI opens. `restart`, `lane resume` and `lane new --start` work the same way.
 

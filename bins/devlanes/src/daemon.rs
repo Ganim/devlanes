@@ -78,7 +78,8 @@ pub fn run() -> ExitCode {
                 return 1;
             }
         };
-        let handler = match crate::wiring::engine(&paths, server.shutdown_token()).await {
+        let spawned = readiness.spawned_by_client();
+        let handler = match crate::wiring::engine(&paths, server.shutdown_token(), spawned).await {
             Ok(handler) => handler,
             Err(error) => {
                 tracing::error!(%error, "engine startup failed");

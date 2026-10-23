@@ -1,5 +1,5 @@
  devlanes  1 acme ✕   2 billing !   3 shop ●                                                       M monitor   D daemon
- lanes    1 main @0 ●     2 feat/gift-cards @1 ·                                                1-9 or [ ] switch lanes
+ lanes    main @0 ●     feat/gift-cards @1 ·                                                    0-9 or [ ] switch lanes
 ┌ main @0 ─────────────────────────────────────┐┌ storefront  ready ─────────────────────────── watching · enter types ┐
 │ ▾ services                                 3 ││ > @acme/api-gateway@2.4.0 dev                                        │
 │   ● storefront                               ││ > tsx watch src/server.ts                                            │
@@ -41,7 +41,7 @@
 
 --- styles (row: columns style) ---
 0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 18-19 red, 22-23 dim, 32-33 yellow, 35-44 bold black on yellow, 99 bold, 100-107 dim, 111 bold, 112-118 dim
-1: 0-5 dim, 9-21 bold reversed, 26-27 dim, 43-47 dim, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
+1: 0-5 dim, 9-19 bold reversed, 39-43 dim, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
 2: 0 darkgray, 2-5 bold, 10-48 darkgray, 50-59 bold, 60-61 dim, 62-66 green, 68-94 darkgray, 96-117 dim, 119 darkgray
 3: 0 darkgray, 2-3 dim, 45 dim, 47-48 darkgray, 50-78 dim, 119 darkgray
 4: 0 darkgray, 1-46 reversed, 47-48 darkgray, 50-74 dim, 119 darkgray

@@ -51,6 +51,34 @@ impl CpuTicks {
         }
         (total > 0).then(|| busy as f64 / total as f64 * 100.0)
     }
+
+    /// Busy share of each core between `earlier` and `self`, 0-100; a core
+    /// without new ticks reads 0. Empty when the CPU count changed or a
+    /// counter went backwards.
+    pub(crate) fn core_percents_since(&self, earlier: &Self) -> Vec<f64> {
+        if self.0.len() != earlier.0.len() {
+            return Vec::new();
+        }
+        let mut cores = Vec::with_capacity(self.0.len());
+        for (later, earlier) in self.0.iter().zip(&earlier.0) {
+            let (mut busy, mut total) = (0_u64, 0_u64);
+            for state in 0..4 {
+                let Some(delta) = tick_delta(earlier[state], later[state]) else {
+                    return Vec::new();
+                };
+                total += delta;
+                if state != libc::CPU_STATE_IDLE as usize {
+                    busy += delta;
+                }
+            }
+            cores.push(if total == 0 {
+                0.0
+            } else {
+                busy as f64 / total as f64 * 100.0
+            });
+        }
+        cores
+    }
 }
 
 /// Maps `kern.memorystatus_vm_pressure_level` (the `DISPATCH_MEMORYPRESSURE_*`
@@ -76,6 +104,8 @@ pub(crate) fn available_bytes(memsize: u64, level_percent: i32) -> Option<u64> {
 pub struct MacosPressure {
     host: HostPort,
     previous: Arc<Mutex<Option<CpuTicks>>>,
+    /// Each core's share over the last sample's interval.
+    cores: Arc<Mutex<Vec<f64>>>,
 }
 
 impl MacosPressure {
@@ -84,6 +114,7 @@ impl MacosPressure {
         Self {
             host: HostPort::new(),
             previous: Arc::new(Mutex::new(None)),
+            cores: Arc::default(),
         }
     }
 
@@ -95,6 +126,11 @@ impl MacosPressure {
             let percent = previous
                 .as_ref()
                 .and_then(|earlier| ticks.busy_percent_since(earlier));
+            let cores = previous
+                .as_ref()
+                .map(|earlier| ticks.core_percents_since(earlier))
+                .unwrap_or_default();
+            *self.cores.lock().unwrap_or_else(PoisonError::into_inner) = cores;
             *previous = Some(ticks);
             percent
         };
@@ -154,6 +190,14 @@ impl PressureSource for MacosPressure {
             .map(Some)
             .map_err(devlanes_core::Error::Io)
     }
+
+    /// Each core's share from the ticks the last sample read.
+    fn core_percents(&self) -> Vec<f64> {
+        self.cores
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +213,9 @@ mod tests {
         let busy = later.busy_percent_since(&earlier).expect("time passed");
         assert!((busy - 25.0).abs() < 1e-9, "{busy}");
         assert_eq!(later.busy_percent_since(&later), None);
+        // Per core: 40 of 100 and 10 of 100; no new ticks reads 0.
+        assert_eq!(later.core_percents_since(&earlier), [40.0, 10.0]);
+        assert_eq!(later.core_percents_since(&later), [0.0, 0.0]);
     }
 
     #[test]

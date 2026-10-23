@@ -15,7 +15,7 @@ use devlanes_metrics::Error;
 use devlanes_metrics_linux::{
     pressure::{
         CpuTimes, MEMORY_CRITICAL_FULL_AVG10, Psi, parse_meminfo_available, parse_meminfo_total,
-        parse_proc_stat_cpu, parse_psi,
+        parse_proc_stat_cores, parse_proc_stat_cpu, parse_psi,
     },
     procfs::{
         ProcStat, cpu_percent, lifetime_cpu_percent, parse_smaps_rollup_pss, parse_stat,
@@ -67,6 +67,38 @@ fn proc_stat_fixtures_give_system_cpu() {
             "accepted {text:?}"
         );
     }
+}
+
+#[test]
+fn proc_stat_cores_are_the_numbered_cpu_lines_in_order() {
+    let text = "cpu  30 0 0 70 0 0 0 0 0 0\n\
+                cpu0 10 0 0 40 0 0 0 0 0 0\n\
+                cpu1 20 0 0 30 0 0 0 0 0 0\n\
+                intr 1 2 3\n\
+                cpus 9 9 9 9 9 9 9 9\n";
+    let cores = parse_proc_stat_cores(text).expect("cores");
+    assert_eq!(
+        cores,
+        [
+            CpuTimes {
+                total: 50,
+                idle: 40
+            },
+            CpuTimes {
+                total: 50,
+                idle: 30
+            }
+        ]
+    );
+    assert!(
+        parse_proc_stat_cores(include_str!("../../fixtures/proc_stat_before.txt"))
+            .expect("none")
+            .is_empty()
+    );
+    assert!(matches!(
+        parse_proc_stat_cores("cpu0 1 2 3\n"),
+        Err(Error::Malformed { .. })
+    ));
 }
 
 #[test]

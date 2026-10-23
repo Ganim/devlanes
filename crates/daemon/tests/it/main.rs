@@ -155,6 +155,8 @@ pub struct Setup {
     pub ports: Option<Arc<dyn devlanes_daemon::integrations::PortInspector>>,
     /// Machine CPU and memory for `metrics.system`.
     pub system: Option<Arc<dyn devlanes_core::gate::PressureSource>>,
+    /// `EngineOptions::idle_exit`.
+    pub idle_exit: Option<Duration>,
 }
 
 /// Opens an engine over `home` (reusing its state.db when present).
@@ -182,6 +184,7 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
     let mut options = EngineOptions::new(home, home.join("d.sock"));
     options.watch = setup.watch;
     options.start_timeout = Duration::from_secs(10);
+    options.idle_exit = setup.idle_exit;
     if let Some(logs) = setup.logs {
         options.logs = logs;
     }

@@ -695,13 +695,13 @@ fn loopback(url: &str) -> bool {
     matches!(host, "127.0.0.1" | "::1" | "localhost" | "0.0.0.0")
 }
 
-/// The URL to show for a unit: its first proxied (hostname) URL, else its first.
 /// A URL as shown in a table, clickable where the terminal shows links.
 fn url_cell(url: &str, cx: &Ctx<'_>) -> String {
     let url = clean(url);
     cx.link(&url, &url)
 }
 
+/// The URL to show for a unit: its first proxied (hostname) URL, else its first.
 pub(crate) fn display_url(urls: &[String]) -> Option<&String> {
     urls.iter().find(|url| !loopback(url)).or(urls.first())
 }
@@ -997,7 +997,7 @@ fn unit_table(lane: &LaneSummary, cx: &Ctx<'_>) -> Vec<String> {
             },
             container.cpu_percent.map_or("–".into(), percent),
             container.memory_bytes.map_or("–".into(), bytes),
-            String::new(),
+            display_url(&container.urls).map_or_else(String::new, |url| url_cell(url, cx)),
         ]);
     }
     let mut lines = table(&rows, "  ");

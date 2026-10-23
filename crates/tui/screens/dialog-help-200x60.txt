@@ -1,74 +1,74 @@
- devlanes  1 acme ✕   2 billing !   3 shop ●                                                                                                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
- lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8     3 fix/cache @2 ·     4 spike/old-search @3 !                                                                             1-9 or [ ] switch lanes
-┌ main @0 ─────────────────────────────────────┐┌ wrk-e┌ keys ──────────────────────────────────────────────────────────────────────────────────┐──────────────────────────────────────────────────────┐
-│ ▾ services                                34 ││ faile│ glyphs                                                                                 │                                                      │
-│   ● Gateway API                              ││ next │   ● ready (check passed)      ◉ running (no ready check)  · stopped, not run           │                                                      │
-│   ● api-auth                                 ││      │   ⠸ starting, stopping        … queued                    ✕ failed                     │                                                      │
-│   ● api-users                                │├─ last│   ◆ orphaned                  ✓ task done                 ▍ the unit's color           │──────────────────────────────────────────────────────┤
-│   ● api-billing                              ││ 2026-│                                                                                        │                                                      │
-│   ● api-orders                               ││ 2026-│ list                                                                                   │                                                      │
-│   ● api-search                               ││ 2026-│   j k  up down      move; k from the top selects the lane                              │                                                      │
-│   ● api-catalog                              ││ 2026-│   g G               the lane, the last row                                             │                                                      │
-│   ● api-inventory                            ││ 2026-│   h l               fold, unfold; h moves to the section                               │                                                      │
-│   ● api-notify                               ││ 2026-│   enter  space      fold a section, or type into a running unit                        │                                                      │
-│   ● api-reports                              ││ 2026-│   [ ]  1-9          previous, next lane; lane by number                                │                                                      │
-│   ● web-app                                  ││ 2026-│   n N               next, previous problem                                             │                                                      │
-│   ● web-admin                                ││ 2026-│   s  x  r           start, stop, restart the selection; s runs a task                  │                                                      │
-│   ● web-docs                                 ││ 2026-│   s  S              on the lane: its default services; every service                   │                                                      │
-│   · web-storybook                            ││ 2026-│   p                 start the lane with chosen profiles                                │                                                      │
-│   ● web-landing                              ││ 2026-│   C                 clean the lane (asks first)                                        │                                                      │
-│   ◉ wrk-email                                ││ 2026-│   o                 open the unit's address in a browser                               │                                                      │
-│   ◉ wrk-billing                              ││ 2026-│   /                 filter by name or +tag; enter keeps, esc clears                    │                                                      │
-│   ◉ wrk-index                                ││      │                                                                                        │                                                      │
-│   ◉ wrk-thumbs                               ││      │ pane                                                                                   │                                                      │
-│   ✕ wrk-export               failed · exit 1 ││      │   enter, click      type into the unit                                                 │                                                      │
-│   ◉ wrk-cron                                 ││      │   esc  ctrl+]       stop typing (ctrl+] in full-screen programs)                       │                                                      │
-│   ◉ wrk-webhooks                             ││      │   z                 zoom the pane                                                      │                                                      │
-│   ◉ wrk-ledger                               ││      │   pgup pgdn  wheel  scroll; older lines come from stored logs                          │                                                      │
-│   ● stub-stripe                              ││      │   c  v  y           select text, mark, copy (OSC 52)                                   │                                                      │
-│   ● stub-s3                                  ││      │   drag              select text and copy it                                            │                                                      │
-│   ◆ stub-twilio         orphaned · pid 48211 ││      │                                                                                        │                                                      │
-│   ● stub-sendgrid                            ││      │ monitor (M)                                                                            │                                                      │
-│   ● stub-segment                             ││      │   < >               sort by the previous, next column                                  │                                                      │
-│   ● stub-auth0                               ││      │   i                 reverse the sort                                                   │                                                      │
-│   ● proxy-edge                               ││      │   /  e              filter, grouped or flat                                            │                                                      │
-│   ● docs-search                              ││      │   h l               fold, unfold a lane                                                │                                                      │
-│   ● ml-ranker                                ││      │   z                 detail graphs fill the page                                        │                                                      │
-│   ⠋ ml-embed                        starting ││      │   s  x  r           start, stop, restart the unit or lane                              │                                                      │
-│   ● cache-warm                               ││      │   enter             open the unit in its project                                       │                                                      │
-│                                              ││      │                                                                                        │                                                      │
-│ ▾ tasks                                    7 ││      │ daemon (D)                                                                             │                                                      │
-│   ✓ migrate             done · runs at start ││      │   R  S              restart, stop or start the daemon                                  │                                                      │
-│   ✓ seed                                done ││      │   X                 clean every lane whose worktree is gone                            │                                                      │
-│   · lint                             not run ││      │   j k  g G          scroll the log (pauses), oldest, newest and follow                 │                                                      │
-│   · typecheck                        not run ││      │   w  /  T           level floor, text filter, targets                                  │                                                      │
-│   · test-e2e                         not run ││      │   F  d              pause or follow, fold or unfold repeats                            │                                                      │
-│   ✓ codegen                             done ││      │   c                 copy mode: v select, y copy as in the file, Y as shown             │                                                      │
-│   · clean-cache                      not run ││      │   i                 every check, or problems only                                      │                                                      │
-│                                              ││      │                                                                                        │                                                      │
-│ ▾ infra                                      ││      │ everywhere                                                                             │                                                      │
-│   ▾ containers                          2 up ││      │   tab  shift+tab    next, previous project                                             │                                                      │
-│     ● localstack                             ││      │   shift+1-9         project by number                                                  │                                                      │
-│     ● rabbitmq                               ││      │   M  D              monitor, daemon; again or esc returns                              │                                                      │
-│   ▾ shared                              3 up ││      │   esc               one step back, then the menu: options, help, quit                  │                                                      │
-│     ● pgbouncer                              ││      │   u                 hide the hint strip or version notice                              │                                                      │
-│     ● postgres                               ││      │   q                 quit; asks first while lanes run (tui.on_quit)                     │                                                      │
-│     ● redis                                  ││      │                                                                                        │                                                      │
-│   ▸ setup                             4 done ││      │ any key closes                                                                         │                                                      │
-│                                              ││      └────────────────────────────────────────────────────────────────────────────────────────┘                                                      │
-└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ devlanes  1 acme ✕   2 billing !   3 shop ●           ┌ keys ──────────────────────────────────────────────────────────────────────────────────┐ting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ lanes    main @0 ✕     feat/checkout @1 ⠋ 4/8     fix/│ glyphs                                                                                 │                               0-9 or [ ] switch lanes
+┌ main @0 ─────────────────────────────────────┐┌ wrk-e│   ● ready (check passed)      ◉ running (no ready check)  · stopped, not run           │──────────────────────────────────────────────────────┐
+│ ▾ services                                34 ││ faile│   ⠸ starting, stopping        … queued                    ✕ failed                     │                                                      │
+│   ● Gateway API                              ││ next │   ◆ orphaned                  ✓ task done                 ▍ the unit's color           │                                                      │
+│   ● api-auth                                 ││      │                                                                                        │                                                      │
+│   ● api-users                                │├─ last│ list                                                                                   │──────────────────────────────────────────────────────┤
+│   ● api-billing                              ││ 2026-│   j k  up down      move; k from the top selects the lane                              │                                                      │
+│   ● api-orders                               ││ 2026-│   g G               the lane, the last row                                             │                                                      │
+│   ● api-search                               ││ 2026-│   h l               fold, unfold; h moves to the section                               │                                                      │
+│   ● api-catalog                              ││ 2026-│   enter  space      fold a section, or type into a running unit                        │                                                      │
+│   ● api-inventory                            ││ 2026-│   [ ]  0-9          previous, next lane; 2 is lane @2                                  │                                                      │
+│   ● api-notify                               ││ 2026-│   n N               next, previous problem                                             │                                                      │
+│   ● api-reports                              ││ 2026-│   t  i              jump to the tasks, the infra                                       │                                                      │
+│   ● web-app                                  ││ 2026-│   s  x  r           start, stop, restart the selection; s runs a task                  │                                                      │
+│   ● web-admin                                ││ 2026-│   s  S              on the lane: its default services; every service                   │                                                      │
+│   ● web-docs                                 ││ 2026-│   p                 start the lane with chosen profiles                                │                                                      │
+│   · web-storybook                            ││ 2026-│   C                 clean the lane (asks first)                                        │                                                      │
+│   ● web-landing                              ││ 2026-│   o                 open the unit's address in a browser                               │                                                      │
+│   ◉ wrk-email                                ││ 2026-│   /                 filter by name or +tag; enter keeps, esc clears                    │                                                      │
+│   ◉ wrk-billing                              ││ 2026-│                                                                                        │                                                      │
+│   ◉ wrk-index                                ││      │ pane                                                                                   │                                                      │
+│   ◉ wrk-thumbs                               ││      │   enter, click      type into the unit                                                 │                                                      │
+│   ✕ wrk-export               failed · exit 1 ││      │   esc  ctrl+]       stop typing (ctrl+] in full-screen programs)                       │                                                      │
+│   ◉ wrk-cron                                 ││      │   z                 zoom the pane                                                      │                                                      │
+│   ◉ wrk-webhooks                             ││      │   pgup pgdn  wheel  scroll; older lines come from stored logs                          │                                                      │
+│   ◉ wrk-ledger                               ││      │   c  v  y           select text, mark, copy (OSC 52)                                   │                                                      │
+│   ● stub-stripe                              ││      │   drag              select text and copy it                                            │                                                      │
+│   ● stub-s3                                  ││      │                                                                                        │                                                      │
+│   ◆ stub-twilio         orphaned · pid 48211 ││      │ monitor (M)                                                                            │                                                      │
+│   ● stub-sendgrid                            ││      │   < >               sort by the previous, next column                                  │                                                      │
+│   ● stub-segment                             ││      │   i                 reverse the sort                                                   │                                                      │
+│   ● stub-auth0                               ││      │   /  e              filter, grouped or flat                                            │                                                      │
+│   ● proxy-edge                               ││      │   h l               fold, unfold a lane                                                │                                                      │
+│   ● docs-search                              ││      │   z                 detail graphs fill the page                                        │                                                      │
+│   ● ml-ranker                                ││      │   c  m              cpu or memory in the big box (memory: a square per core)           │                                                      │
+│   ⠋ ml-embed                        starting ││      │   wheel             scroll the table; the selection stays                              │                                                      │
+│   ● cache-warm                               ││      │   s  x  r           start, stop, restart the unit or lane                              │                                                      │
+│                                              ││      │   enter             open the unit in its project                                       │                                                      │
+│ ▾ tasks                                    7 ││      │                                                                                        │                                                      │
+│   ✓ migrate             done · runs at start ││      │ daemon (D)                                                                             │                                                      │
+│   ✓ seed                                done ││      │   R  S              restart, stop or start the daemon                                  │                                                      │
+│   · lint                             not run ││      │   X                 clean every lane whose worktree is gone                            │                                                      │
+│   · typecheck                        not run ││      │   j k  g G          scroll the log (pauses), oldest, newest and follow                 │                                                      │
+│   · test-e2e                         not run ││      │   w  /  T           level floor, text filter, targets                                  │                                                      │
+│   ✓ codegen                             done ││      │   F  d              pause or follow, fold or unfold repeats                            │                                                      │
+│   · clean-cache                      not run ││      │   c                 copy mode: v select, y copy, Y whole entries as in the file        │                                                      │
+│                                              ││      │   i                 every check, or problems only                                      │                                                      │
+│ ▾ infra                                      ││      │                                                                                        │                                                      │
+│   ▾ containers                          2 up ││      │ everywhere                                                                             │                                                      │
+│     ● localstack                             ││      │   tab  shift+tab    next, previous project                                             │                                                      │
+│     ● rabbitmq                               ││      │   shift+1-9         project by number                                                  │                                                      │
+│   ▾ shared                              3 up ││      │   M  D              monitor, daemon; again or esc returns                              │                                                      │
+│     ● pgbouncer                              ││      │   esc               one step back, then the menu: options, help, quit                  │                                                      │
+│     ● postgres                               ││      │   u                 hide the hint strip or version notice                              │                                                      │
+│     ● redis                                  ││      │   q                 quit; asks first while lanes run (tui.on_quit)                     │                                                      │
+│   ▸ setup                             4 done ││      │                                                                                        │                                                      │
+│                                              ││      │ any key closes                                                                         │                                                      │
+└──────────────────────────────────────────────┘└──────└────────────────────────────────────────────────────────────────────────────────────────┘──────────────────────────────────────────────────────┘
  r restart   n next problem   pgup scroll back   c select text   / filter                                                                                                         ? all keys   q quit
 
 --- styles (row: columns style) ---
-0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 179 bold, 180-187 dim, 191 bold, 192-198 dim
-1: 0-5 dim, 9-21 bold reversed, 26-27 dim, 41-44 dim, 55-56 dim, 66-70 dim, 76-77 dim, 94-97 dim, 98 yellow, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
-2: 0 darkgray, 2-5 bold, 10-48 darkgray, 50-144 bold, 145-199 darkgray
-3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 50-54 dim, 55 bold, 57-62 dim, 144 bold, 199 darkgray
-4: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-54 dim, 55 bold, 59-60 green, 87-88 green, 115-116 dim, 144 bold, 199 darkgray
-5: 0 darkgray, 4-5 green, 6-13 blue, 47-48 darkgray, 50-54 dim, 55 bold, 87-88 dim, 115-116 red, 144 bold, 199 darkgray
-6: 0 darkgray, 4-5 green, 6-14 blue, 47-54 darkgray, 55 bold, 59-60 yellow, 87-88 green, 144 bold, 145-199 darkgray
-7: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-54 dim, 55 bold, 144 bold, 199 darkgray
-8: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-54 dim, 55 bold, 57-60 dim, 144 bold, 199 darkgray
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 55-144 bold, 179 bold, 180-187 dim, 191 bold, 192-198 dim
+1: 0-5 dim, 9-19 bold reversed, 37-40 dim, 55 bold, 57-62 dim, 144 bold, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
+2: 0 darkgray, 2-5 bold, 10-48 darkgray, 50-55 bold, 59-60 green, 87-88 green, 115-116 dim, 144 bold, 145-199 darkgray
+3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 50-54 dim, 55 bold, 87-88 dim, 115-116 red, 144 bold, 199 darkgray
+4: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-54 dim, 55 bold, 59-60 yellow, 87-88 green, 144 bold, 199 darkgray
+5: 0 darkgray, 4-5 green, 6-13 blue, 47-48 darkgray, 50-54 dim, 55 bold, 144 bold, 199 darkgray
+6: 0 darkgray, 4-5 green, 6-14 blue, 47-54 darkgray, 55 bold, 57-60 dim, 144 bold, 145-199 darkgray
+7: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-54 dim, 55 bold, 57-76 bold, 144 bold, 199 darkgray
+8: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-54 dim, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 9: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-54 dim, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 10: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-54 dim, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 11: 0 darkgray, 4-5 green, 6-18 blue, 47-48 darkgray, 50-54 dim, 55 bold, 57-76 bold, 144 bold, 199 darkgray
@@ -80,17 +80,17 @@
 17: 0 darkgray, 4-5 dim, 6-18 dim green, 47-48 darkgray, 50-54 dim, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 18: 0 darkgray, 4-16 green, 47-48 darkgray, 50-54 dim, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 19: 0 darkgray, 4-5 green, 6-14 magenta, 47-48 darkgray, 50-54 dim, 55 bold, 57-76 bold, 144 bold, 199 darkgray
-20: 0 darkgray, 4-5 green, 6-16 magenta, 47-48 darkgray, 50-54 dim, 55 bold, 57-76 bold, 144 bold, 199 darkgray
-21: 0 darkgray, 4-5 green, 6-14 magenta, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
-22: 0 darkgray, 4-5 green, 6-15 magenta, 47-48 darkgray, 55 bold, 57-60 dim, 144 bold, 199 darkgray
+20: 0 darkgray, 4-5 green, 6-16 magenta, 47-48 darkgray, 50-54 dim, 55 bold, 144 bold, 199 darkgray
+21: 0 darkgray, 4-5 green, 6-14 magenta, 47-48 darkgray, 55 bold, 57-60 dim, 144 bold, 199 darkgray
+22: 0 darkgray, 4-5 green, 6-15 magenta, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 23: 0 darkgray, 1-46 reversed, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 24: 0 darkgray, 4-5 green, 6-13 magenta, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 25: 0 darkgray, 4-5 green, 6-17 magenta, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 26: 0 darkgray, 4-5 green, 6-15 magenta, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 27: 0 darkgray, 4-5 green, 6-16 darkgray, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
-28: 0 darkgray, 4-5 green, 6-12 darkgray, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
-29: 0 darkgray, 4-5 yellow, 6-16 darkgray, 26-33 yellow, 34-45 dim, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
-30: 0 darkgray, 4-5 green, 6-18 darkgray, 47-48 darkgray, 55 bold, 57-67 dim, 144 bold, 199 darkgray
+28: 0 darkgray, 4-5 green, 6-12 darkgray, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
+29: 0 darkgray, 4-5 yellow, 6-16 darkgray, 26-33 yellow, 34-45 dim, 47-48 darkgray, 55 bold, 57-67 dim, 144 bold, 199 darkgray
+30: 0 darkgray, 4-5 green, 6-18 darkgray, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 31: 0 darkgray, 4-5 green, 6-17 darkgray, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 32: 0 darkgray, 4-5 green, 6-15 darkgray, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 33: 0 darkgray, 4-5 green, 6-15 cyan, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
@@ -98,25 +98,25 @@
 35: 0 darkgray, 4-14 green, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 36: 0 darkgray, 6-13 green, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 37: 0 darkgray, 4-5 green, 6-15 dim blue, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
-38: 0 darkgray, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
-39: 0 darkgray, 2-3 dim, 45 dim, 47-48 darkgray, 55 bold, 57-66 dim, 144 bold, 199 darkgray
-40: 0 darkgray, 4-5 green, 26-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
+38: 0 darkgray, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
+39: 0 darkgray, 2-3 dim, 45 dim, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
+40: 0 darkgray, 4-5 green, 26-45 dim, 47-48 darkgray, 55 bold, 57-66 dim, 144 bold, 199 darkgray
 41: 0 darkgray, 4-5 green, 42-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 42: 0 darkgray, 4-9 dim, 39-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 43: 0 darkgray, 4-14 dim, 39-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 44: 0 darkgray, 4-13 dim, 39-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 45: 0 darkgray, 4-5 green, 42-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 46: 0 darkgray, 4-16 dim, 39-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
-47: 0 darkgray, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
-48: 0 darkgray, 2-3 dim, 47-48 darkgray, 55 bold, 57-66 dim, 144 bold, 199 darkgray
-49: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
+47: 0 darkgray, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
+48: 0 darkgray, 2-3 dim, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
+49: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 55 bold, 57-66 dim, 144 bold, 199 darkgray
 50: 0 darkgray, 6-17 green, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 51: 0 darkgray, 6-7 green, 8-15 cyan, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 52: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 53: 0 darkgray, 6-7 green, 8-16 dim magenta, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
 54: 0 darkgray, 6-7 green, 8-15 cyan, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
-55: 0 darkgray, 6-7 green, 8-12 cyan, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
-56: 0 darkgray, 4-5 dim, 40-45 dim, 47-48 darkgray, 55 bold, 57-70 dim, 144 bold, 199 darkgray
-57: 0 darkgray, 47-48 darkgray, 55-144 bold, 199 darkgray
-58: 0-199 darkgray
+55: 0 darkgray, 6-7 green, 8-12 cyan, 47-48 darkgray, 55 bold, 57-76 bold, 144 bold, 199 darkgray
+56: 0 darkgray, 4-5 dim, 40-45 dim, 47-48 darkgray, 55 bold, 144 bold, 199 darkgray
+57: 0 darkgray, 47-48 darkgray, 55 bold, 57-70 dim, 144 bold, 199 darkgray
+58: 0-54 darkgray, 55-144 bold, 145-199 darkgray
 59: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 49 bold, 50-64 dim, 65 bold, 66-75 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim

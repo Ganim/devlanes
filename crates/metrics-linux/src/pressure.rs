@@ -44,11 +44,29 @@ impl CpuTimes {
 
 /// Parses the aggregate `cpu` line of `/proc/stat`.
 pub fn parse_proc_stat_cpu(text: &str) -> Result<CpuTimes, Error> {
-    let what = "/proc/stat";
     let line = text
         .lines()
         .find(|line| line.split_ascii_whitespace().next() == Some("cpu"))
-        .ok_or_else(|| malformed(what, "missing cpu line"))?;
+        .ok_or_else(|| malformed("/proc/stat", "missing cpu line"))?;
+    cpu_times(line)
+}
+
+/// Parses the per-CPU `cpu0`, `cpu1`, ... lines of `/proc/stat`, in order.
+pub fn parse_proc_stat_cores(text: &str) -> Result<Vec<CpuTimes>, Error> {
+    text.lines()
+        .filter(|line| {
+            line.split_ascii_whitespace()
+                .next()
+                .and_then(|word| word.strip_prefix("cpu"))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .map(cpu_times)
+        .collect()
+}
+
+/// The counters of one `cpu…` line.
+fn cpu_times(line: &str) -> Result<CpuTimes, Error> {
+    let what = "/proc/stat";
     let fields: Vec<u64> = line
         .split_ascii_whitespace()
         .skip(1)
@@ -187,7 +205,7 @@ mod source {
 
     use super::{
         CpuTimes, cgroup_available, parse_cgroup_v2_path, parse_meminfo_available,
-        parse_memory_max, parse_proc_stat_cpu, parse_psi,
+        parse_memory_max, parse_proc_stat_cores, parse_proc_stat_cpu, parse_psi,
     };
 
     /// Reads `/proc/stat`, PSI and available memory. When the daemon runs in a
@@ -198,6 +216,9 @@ mod source {
     #[derive(Debug, Clone, Default)]
     pub struct LinuxPressure {
         previous: Arc<Mutex<Option<CpuTimes>>>,
+        /// Per-CPU counters of the last sample, and each CPU's share since
+        /// the one before.
+        cores: Arc<Mutex<(Vec<CpuTimes>, Vec<f64>)>>,
         /// The daemon's cgroup directory, looked up once.
         cgroup: Option<PathBuf>,
         psi_missing_logged: Arc<AtomicBool>,
@@ -241,6 +262,19 @@ mod source {
                 *previous = Some(times);
                 percent
             };
+            if let Ok(times) = parse_proc_stat_cores(&stat) {
+                let mut cores = self.cores.lock().unwrap_or_else(PoisonError::into_inner);
+                cores.1 = if cores.0.len() == times.len() {
+                    times
+                        .iter()
+                        .zip(&cores.0)
+                        .map(|(later, earlier)| later.busy_percent_since(earlier).unwrap_or(0.0))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                cores.0 = times;
+            }
             let memory = self.memory_psi();
             if memory.is_none() && !self.psi_missing_logged.swap(true, Ordering::Relaxed) {
                 tracing::info!(
@@ -313,6 +347,15 @@ mod source {
                     .map_err(integration)
             })
             .await
+        }
+
+        /// Each CPU's share from the `/proc/stat` the last sample read.
+        fn core_percents(&self) -> Vec<f64> {
+            self.cores
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .1
+                .clone()
         }
     }
 }

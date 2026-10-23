@@ -208,6 +208,23 @@ services:
         );
         assert_eq!(wildcard.port, plain.port);
         assert_eq!(wildcard.unit, "db");
+        // Status lists the container's proxied URL; the wildcard has none.
+        let status = h
+            .call(Method::Status, json!({}), cx(&main))
+            .await
+            .expect("status");
+        let lanes: Page<LaneSummary> = serde_json::from_value(status).expect("page");
+        let db = lanes.items[0]
+            .containers
+            .iter()
+            .find(|container| container.name == "db")
+            .expect("db");
+        assert_eq!(db.urls.len(), 1, "{:?}", db.urls);
+        assert!(
+            db.urls[0].starts_with("https://db.demo.localhost"),
+            "{:?}",
+            db.urls
+        );
         h.call(Method::Stop, json!({}), cx(&main))
             .await
             .expect("stop");

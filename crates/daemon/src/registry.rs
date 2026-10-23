@@ -1544,7 +1544,15 @@ impl Inner {
                 display_name: service.display_name.clone(),
             })
             .collect();
-        let infra_routes = infra_routes(&config, &facts, &layout, &infra, &client_env, &dotenv);
+        let infra_routes = infra_routes(
+            &config,
+            &facts,
+            &layout,
+            &infra,
+            &client_env,
+            &dotenv,
+            self.integ.routes.https_port(),
+        );
         Ok(LaneView {
             domain: layout.domain.clone(),
             port: layout.port,
@@ -1959,7 +1967,8 @@ pub(crate) fn lane_context(
     }
 }
 
-/// Container routes from `infra.hosts`, using known host ports.
+/// Container routes from `infra.hosts`, using known host ports. `https_port`
+/// is the proxy's, for the URLs status shows.
 fn infra_routes(
     config: &ProjectConfig,
     facts: &LaneFacts,
@@ -1967,6 +1976,7 @@ fn infra_routes(
     infra: &Value,
     env: &EnvMap,
     dotenv: &EnvMap,
+    https_port: Option<u16>,
 ) -> Vec<crate::model::InfraRoute> {
     let context = lane_context(
         facts,
@@ -2022,12 +2032,15 @@ fn infra_routes(
                 None => false,
             };
             if let Ok(host) = template.evaluate(&context) {
+                let url =
+                    (!host.contains('*')).then(|| devlanes_resolve::https_url(&host, https_port));
                 routes.push(crate::model::InfraRoute {
                     host,
                     container: container.clone(),
                     port,
                     fallback,
                     host_header_upstream: upstream,
+                    url,
                 });
             }
         }

@@ -141,8 +141,9 @@ when --timeout passes first [default: 180s].")]
 Waits for ready first; when a unit fails it prints the failure and exits 1\n\
 without running the command. The command gets the lane's environment, including\n\
 DEVLANES_PUBLIC_URL_<SERVICE> for every service. Afterwards devlanes writes\n\
---logs-dir, prints peak CPU and memory, stops what it started (and the daemon,\n\
-if it started it) and exits with the command's exit code.",
+--logs-dir, prints peak CPU and memory when output is not a terminal (CI logs,\n\
+pipes), stops what it started (and the daemon, if it started it) and exits with\n\
+the command's exit code.",
         after_help = WITH_AFTER
     )]
     With(WithArgs),
@@ -547,7 +548,8 @@ pub enum LaneCommand {
         long_about = "Create a git worktree for a branch under lanes.worktree_dir and register its lane.\n\n\
 Without a branch, add another lane for the current folder: it has its own index, ports\n\
 and domain, and `--lane <name>` or `--lane <index>` addresses it. Commands run in the\n\
-folder keep using the folder's first lane."
+folder keep using the folder's first lane.\n\n\
+Without --start, a terminal asks whether to start the new lane right away."
     )]
     New {
         /// Branch to check out in the new worktree [default: another lane for this folder]
@@ -641,6 +643,9 @@ pub enum Action {
     },
     Rpc(Request),
     RpcThenUi(Request),
+    /// `lane new` without `--start` where a person can answer: the lane is
+    /// created, then they are asked whether to start it like `devlanes start`.
+    RpcThenOfferStart(Request),
     /// A start that runs inside the TUI: the request is sent first, and the TUI
     /// opens once the daemon accepted it. `forced` (`start --attach`) overrides
     /// `tui.open_on_start: false` in the user config.
@@ -1033,6 +1038,11 @@ impl Cli {
             // Agents get the start result only; the TUI needs a person at a terminal.
             Some(Command::Start(args)) if args.attach && runtime.mode != OutputMode::Agent => {
                 Action::RpcThenUi(request)
+            }
+            Some(Command::Lane {
+                command: LaneCommand::New { start: false, .. },
+            }) if runtime.can_prompt() && runtime.mode == OutputMode::Human && !runtime.quiet => {
+                Action::RpcThenOfferStart(request)
             }
             Some(Command::Attach { unit })
                 if runtime.mode == OutputMode::Agent && !runtime.stdin_tty =>

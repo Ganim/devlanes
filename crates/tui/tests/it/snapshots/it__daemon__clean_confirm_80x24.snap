@@ -3,7 +3,7 @@ source: crates/tui/tests/it/daemon.rs
 expression: screen(&render(&app)?)
 ---
 " devlanes  1 acme ●   2 shop ●                 ✕ 1 failed  M monitor   D daemon "
-" lanes    1 main @0 ●     2 feat/login @1 ·    +1 more  1-9 or [ ] switch lanes "
+" lanes    main @0 ●     feat/login @1 ·    +1 more      0-9 or [ ] switch lanes "
 "┌ main @0 ─────────────────────┐┌ worker  failed · exit 1 ─────────────────────┐"
 "│ ▾ services                 3 ││ failed    exited with code 1                 │"
 "│   ● api                      ││ next      r restarts it                      │"

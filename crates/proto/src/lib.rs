@@ -651,6 +651,10 @@ pub struct ContainerSummary {
     /// the worst. Absent when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// Proxied URLs from `infra.hosts`, evaluated for this lane; wildcard
+    /// hosts are left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub urls: Vec<String>,
 }
 
 /// Opens a terminal stream. The daemon answers with [`AttachResult`], then sends a

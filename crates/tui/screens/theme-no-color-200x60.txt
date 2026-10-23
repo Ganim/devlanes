@@ -1,5 +1,5 @@
  devlanes  1 acme ✕   2 billing !   3 shop ●                                                                                                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
- lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8     3 fix/cache @2 ·     4 spike/old-search @3 !                                                                             1-9 or [ ] switch lanes
+ lanes    main @0 ✕     feat/checkout @1 ⠋ 4/8     fix/cache @2 ·     spike/old-search @3 !                                                                                     0-9 or [ ] switch lanes
 ┌ main @0 ─────────────────────────────────────┐┌ Gateway API  api-gateway · ready · https://gateway.acme.localhost ─────────────────────────────────────────────────── watching · enter types into it ┐
 │ ▾ services                                34 ││ > @acme/api-gateway@2.4.0 dev                                                                                                                        │
 │   ● Gateway API                              ││ > tsx watch src/server.ts                                                                                                                            │
@@ -61,7 +61,7 @@
 
 --- styles (row: columns style) ---
 0: 1-8 bold, 10-19 bold reversed, 22-23 dim, 36-37 dim, 179 bold, 180-187 dim, 191 bold, 192-198 dim
-1: 0-5 dim, 9-21 bold reversed, 26-27 dim, 41-44 dim, 55-56 dim, 66-70 dim, 76-77 dim, 94-97 dim, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
+1: 0-5 dim, 9-19 bold reversed, 37-40 dim, 60-64 dim, 86-89 dim, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
 2: 0-1 dim, 2-5 bold dim, 6-49 dim, 50-60 bold dim, 61-199 dim
 3: 0 dim, 2-3 dim, 44-45 dim, 47-48 dim, 50-78 dim, 199 dim
 4: 0 dim, 1-46 reversed, 47-48 dim, 50-74 dim, 199 dim

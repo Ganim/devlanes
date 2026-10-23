@@ -741,6 +741,15 @@ fn container_lines(
             .collect();
         lines.extend(field(theme, "ports", &ports.join(", "), width, plain));
     }
+    if !container.urls.is_empty() {
+        lines.extend(field(
+            theme,
+            "url",
+            &container.urls.join(", "),
+            width,
+            plain,
+        ));
+    }
     lines.extend(field(
         theme,
         "scope",
@@ -1302,7 +1311,7 @@ fn lanes_table(app: &App, current: &LaneSummary, width: usize) -> Vec<Line<'stat
     }
     lines.push(Line::from(""));
     lines.extend(sentence(
-        "1-9, [ and ] or a click on a chip switch lanes. devlanes lane new <branch> adds one.",
+        "0-9 (the lane's number), [ and ] or a click on a chip switch lanes. devlanes lane new <branch> adds one.",
         width,
         Vec::new(),
         theme.quiet(),

@@ -67,6 +67,12 @@ pub(crate) struct Remotes {
 }
 
 impl Remotes {
+    /// No box is connected and no tunnel serves a client, so an idle exit
+    /// would cut nobody off.
+    pub(crate) fn is_idle(&self) -> bool {
+        lock(&self.hosts).is_empty() && lock(&self.clients).is_empty()
+    }
+
     /// Mirrored routes of every connected box, in host order.
     pub(crate) fn routes(&self) -> Vec<RouteEntry> {
         self.all()

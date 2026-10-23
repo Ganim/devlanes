@@ -68,5 +68,8 @@ expression: user
     "theme": "auto",
     "glyphs": "auto",
     "on_quit": "ask"
+  },
+  "daemon": {
+    "exit_when_idle": true
   }
 }

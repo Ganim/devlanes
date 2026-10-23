@@ -1,5 +1,5 @@
  devlanes  1 acme ✕   2 billing !   3 shop ●                                                                                                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
- lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8     3 fix/cache @2 ·     4 spike/old-search @3 !                                                                             1-9 or [ ] switch lanes
+ lanes    main @0 ✕     feat/checkout @1 ⠋ 4/8     fix/cache @2 ·     spike/old-search @3 !                                                                                     0-9 or [ ] switch lanes
 ┌ main @0 ─────────────────────────────────────┐┌ wrk-export  failed · exit 1 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ ▾ services                                34 ││ failed    exited with code 1                                                                                                                         │
 │   ● Gateway API                              ││ next      r restarts it                                                                                                                              │
@@ -61,7 +61,7 @@
 
 --- styles (row: columns style) ---
 0: 1 bold #9a6b00, 2 bold #9e6900, 3 bold #a16700, 4 bold #a56500, 5 bold #a86200, 6 bold #ac6000, 7 bold #af5e00, 8 bold #b35c00, 10-19 bold #1a1917 on #f5c542, 22-23 dim, 32-33 #a35a00, 36-37 dim, 43-44 #1d7a46, 179 bold, 180-187 dim, 191 bold, 192-198 dim
-1: 0-5 dim, 9 bold on #f7e7b4, 10-11 bold dim on #f7e7b4, 12-15 bold on #f7e7b4, 16-19 bold dim on #f7e7b4, 20 bold #c0392b on #f7e7b4, 21 bold on #f7e7b4, 26-27 dim, 41-44 dim, 55-56 dim, 66-70 dim, 76-77 dim, 94-97 dim, 98 #a35a00, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
+1: 0-5 dim, 9-13 bold on #f7e7b4, 14-17 bold dim on #f7e7b4, 18 bold #c0392b on #f7e7b4, 19 bold on #f7e7b4, 37-40 dim, 60-64 dim, 86-89 dim, 90 #a35a00, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
 2: 0 #8f8a7f, 2-5 bold, 10-48 #8f8a7f, 50-59 bold, 60-61 dim, 62-67 #c0392b, 68-70 dim, 71-76 #c0392b, 78-199 #8f8a7f
 3: 0 #8f8a7f, 2-3 dim, 44-45 dim, 47-48 #8f8a7f, 50-59 dim, 60-77 #c0392b, 199 #8f8a7f
 4: 0 #8f8a7f, 4-5 #1d7a46, 6-16 blue, 47-48 #8f8a7f, 50-59 dim, 199 #8f8a7f

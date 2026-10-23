@@ -22,6 +22,51 @@ fn spawned(journal: &[String], script: &str) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+/// With `idle_exit`, the engine goes idle only after a subscriber came and
+/// left, and only while nothing runs for the whole grace period.
+async fn the_engine_goes_idle_after_the_last_subscriber_with_nothing_running() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(
+            &tmp.path,
+            "r",
+            "project: quiet\nservices:\n  api: { run: sleep }\n",
+        );
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                idle_exit: Some(Duration::from_millis(200)),
+                ..Setup::default()
+            },
+        )
+        .await;
+        let wait = Duration::from_millis(800);
+        // Never watched: a daemon only commands used stays.
+        assert!(tokio::time::timeout(wait, h.engine.idle()).await.is_err());
+        h.call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("start");
+        // A TUI watches while a unit runs, then leaves: still not idle.
+        let tui = h.engine.subscribe();
+        assert!(tokio::time::timeout(wait, h.engine.idle()).await.is_err());
+        drop(tui);
+        assert!(tokio::time::timeout(wait, h.engine.idle()).await.is_err());
+        h.call(Method::Stop, json!({}), cx(&main))
+            .await
+            .expect("stop");
+        tokio::time::timeout(Duration::from_secs(5), h.engine.idle())
+            .await
+            .expect("idle once the lane stopped");
+        // A subscriber keeps it up again.
+        let _watching = h.engine.subscribe();
+        assert!(tokio::time::timeout(wait, h.engine.idle()).await.is_err());
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 /// Every stop task runs, a failing one included, and the report names the
 /// stopped units and each task's outcome.
 async fn explicit_shutdown_runs_lane_stop_tasks() {

@@ -50,6 +50,10 @@ pub struct EngineOptions {
     pub dns_listen: std::net::SocketAddr,
     /// Release checks (see `update`); never downloads or installs anything.
     pub update_check: crate::update::UpdateCheckOptions,
+    /// Exit this long after the last event subscriber (a TUI) left while
+    /// nothing runs; `None` keeps the daemon up. Only for a daemon a client
+    /// spawned: a service manager would not start it again.
+    pub idle_exit: Option<Duration>,
 }
 
 impl EngineOptions {
@@ -66,6 +70,7 @@ impl EngineOptions {
             start_timeout: Duration::from_secs(180),
             dns_listen: devlanes_resolver_dns::default_listen(),
             update_check: crate::update::UpdateCheckOptions::from_env(),
+            idle_exit: None,
         }
     }
 }
@@ -99,6 +104,9 @@ pub(crate) struct Inner {
     pub update: crate::update::UpdateState,
     /// Coalesces route snapshots for the proxy and `/etc/hosts`.
     pub route_publisher: crate::routes::RoutePublisher,
+    /// An event subscriber (a TUI) was seen; until then the daemon never
+    /// exits on its own.
+    pub watched: AtomicBool,
 }
 
 /// Cheap handle implementing [`Handler`].
@@ -139,6 +147,7 @@ impl Engine {
                 last_prune: Mutex::new(None),
                 update: crate::update::UpdateState::default(),
                 route_publisher: crate::routes::RoutePublisher::default(),
+                watched: AtomicBool::new(false),
             }),
         }
     }
@@ -209,6 +218,32 @@ impl Handler for Engine {
             "stopped": stopped,
             "tasks": tasks,
         }))
+    }
+
+    /// With `idle_exit`, resolves once a subscriber was seen, none is left,
+    /// and nothing ran or was in flight for the whole grace period.
+    async fn idle(&self) {
+        let Some(grace) = self.inner.opts.idle_exit else {
+            return std::future::pending().await;
+        };
+        let mut tick = tokio::time::interval(grace.min(Duration::from_secs(1)));
+        let mut quiet_since: Option<Instant> = None;
+        loop {
+            tick.tick().await;
+            if self.inner.bus.subscribers() > 0 {
+                self.inner.watched.store(true, Ordering::Relaxed);
+                quiet_since = None;
+                continue;
+            }
+            if !self.inner.watched.load(Ordering::Relaxed) || !self.inner.is_idle() {
+                quiet_since = None;
+                continue;
+            }
+            let since = *quiet_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= grace {
+                return;
+            }
+        }
     }
 }
 
@@ -304,6 +339,29 @@ pub(crate) fn confirmation(data: Value) -> RpcError {
 pub(crate) type LanePair = (Arc<ProjectRt>, Arc<LaneRt>);
 
 impl Inner {
+    /// Nothing runs and nothing is under way: no live unit or orphan, no
+    /// start, stop, clean, task or spawn in flight, no connected box or
+    /// tunnel. Infra containers do not count; they outlive the daemon.
+    pub(crate) fn is_idle(&self) -> bool {
+        self.remote.is_idle()
+            && self.all_lanes().iter().all(|(_, lane)| {
+                // `op` is held by starts, stops, cleans and infra changes.
+                let Ok(_op) = lane.op.try_lock() else {
+                    return false;
+                };
+                let st = lane.st();
+                let Ok(_adhoc) = st.adhoc_gate.try_write() else {
+                    return false;
+                };
+                !st.any_running()
+                    && st.start.is_none()
+                    && st.busy.is_none()
+                    && st.spawning == 0
+                    && !st.closing
+                    && !st.sweeping
+            })
+    }
+
     /// Every lane of every project.
     pub(crate) fn all_lanes(&self) -> Vec<LanePair> {
         let projects: Vec<_> = lock(&self.projects).values().cloned().collect();

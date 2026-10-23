@@ -184,6 +184,14 @@ pub trait Handler: Send + Sync + 'static {
     /// Stops owned processes but preserves adopted containers. Returns the
     /// report an explicit `daemon.shutdown` request answers with.
     async fn shutdown(&self, request: Shutdown) -> Result<Value, RpcError>;
+
+    /// Resolves when the daemon has nothing left to do and may exit on its
+    /// own ([`ShutdownReason::Idle`]); never, by default. The server exits
+    /// only when no client is connected at that moment, and asks again
+    /// otherwise, so an implementation must not resolve at once every time.
+    async fn idle(&self) {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Why the daemon shuts down. Only an explicit shutdown runs the lanes'
@@ -196,14 +204,17 @@ pub enum ShutdownReason {
     /// SIGTERM or SIGINT (launchd, systemd, logout, system shutdown), a failed
     /// reconcile, or an embedder cancelling [`Server::shutdown_token`].
     Signal,
+    /// [`Handler::idle`]: the last client left and nothing runs.
+    Idle,
 }
 
 impl ShutdownReason {
-    /// `explicit` or `signal`, as reports and logs show it.
+    /// `explicit`, `signal` or `idle`, as reports and logs show it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Explicit => "explicit",
             Self::Signal => "signal",
+            Self::Idle => "idle",
         }
     }
 }
@@ -242,6 +253,8 @@ struct Stops {
 
 struct StopState {
     explicit: bool,
+    /// The server left its loop because the handler went idle.
+    idle: bool,
     /// The run loop read the reason; later requests no longer change it.
     decided: bool,
     /// Cloned by each request waiting for the report and dropped once its
@@ -263,6 +276,7 @@ impl Stops {
         let stops = Self {
             state: std::sync::Mutex::new(StopState {
                 explicit: false,
+                idle: false,
                 decided: false,
                 answering: Some(answering),
             }),
@@ -281,12 +295,23 @@ impl Stops {
         (self.report.subscribe(), state.answering.clone())
     }
 
+    /// Records that the daemon stops because it is idle; an explicit request
+    /// that arrived first still wins.
+    fn idle(&self) {
+        let mut state = model::lock(&self.state);
+        if !state.decided {
+            state.idle = true;
+        }
+    }
+
     /// The reason, fixed from here on.
     fn decide(&self) -> ShutdownReason {
         let mut state = model::lock(&self.state);
         state.decided = true;
         if state.explicit {
             ShutdownReason::Explicit
+        } else if state.idle {
+            ShutdownReason::Idle
         } else {
             ShutdownReason::Signal
         }
@@ -396,9 +421,20 @@ impl Server {
             _lock,
         } = self;
         let mut clients = tokio::task::JoinSet::new();
+        let idler = handler.clone();
+        let mut idle = idler.idle();
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break,
+                () = &mut idle => {
+                    // A client that connected meanwhile may be about to start
+                    // something: ask again later rather than cut it off.
+                    if clients.is_empty() {
+                        stops.idle();
+                        break;
+                    }
+                    idle = idler.idle();
+                }
                 accepted = listener.accept() => {
                     // One client's failure must never end the daemon: a peer that closes
                     // before its credentials are read (macOS: ENOTCONN) used to exit here.
@@ -434,9 +470,11 @@ impl Server {
                 }
             }
         }
+        drop(idle);
         // No new connection from here on; connected clients get `daemon_stopping`
         // for anything that would start work.
         drop(listener);
+        shutdown.cancel();
         // Stop resources before closing subscribers so they can observe final state.
         let request = Shutdown {
             reason: stops.decide(),
@@ -828,6 +866,8 @@ mod tests {
         reply: Value,
         broken: bool,
         shut_down: std::sync::Mutex<Option<ShutdownReason>>,
+        /// Goes idle this long after each ask; never without.
+        idle_after: Option<Duration>,
     }
 
     #[async_trait]
@@ -854,6 +894,12 @@ mod tests {
         async fn shutdown(&self, request: Shutdown) -> Result<Value, RpcError> {
             *model::lock(&self.shut_down) = Some(request.reason);
             Ok(json!({"reason": request.reason.as_str(), "stopped": []}))
+        }
+        async fn idle(&self) {
+            match self.idle_after {
+                Some(after) => tokio::time::sleep(after).await,
+                None => std::future::pending().await,
+            }
         }
     }
 
@@ -905,6 +951,7 @@ mod tests {
                 reply: json!("x".repeat(devlanes_proto::MAX_FRAME_SIZE + 1)),
                 broken: false,
                 shut_down: Default::default(),
+                idle_after: None,
             });
             let running = tokio::spawn(server.run(handler, || Ok(())));
             let mut connection =
@@ -940,6 +987,7 @@ mod tests {
             reply: Value::Null,
             broken: true,
             shut_down: Default::default(),
+            idle_after: None,
         });
         let mut announced = false;
         let result = server
@@ -976,6 +1024,7 @@ mod tests {
             reply: Value::Null,
             broken: false,
             shut_down: Default::default(),
+            idle_after: None,
         });
         let running = tokio::spawn(server.run(handler.clone(), || Ok(())));
         let mut connection = Connection::new(UnixStream::connect(&socket).await.expect("connect"));
@@ -1005,6 +1054,43 @@ mod tests {
                 Some(ShutdownReason::Explicit)
             );
             running.await.expect("join").expect("clean shutdown");
+        })
+        .await
+        .expect("timeout");
+    }
+
+    #[tokio::test]
+    /// An idle handler ends the daemon only once no client is connected; the
+    /// shutdown says it was idle and the socket goes.
+    async fn an_idle_handler_waits_for_the_last_client() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (_dir, options) = short_options();
+            let socket = options.socket.clone();
+            let server = Server::bind(options).await.expect("bind");
+            let handler = Arc::new(Fixed {
+                reply: Value::Null,
+                broken: false,
+                shut_down: Default::default(),
+                idle_after: Some(Duration::from_millis(20)),
+            });
+            let running = tokio::spawn(server.run(handler.clone(), || Ok(())));
+            let mut connection =
+                Connection::new(UnixStream::connect(&socket).await.expect("connect"));
+            connection
+                .send(Frame::Control(Control::Hello(Hello::current(0))))
+                .await
+                .expect("hello");
+            connection.recv().await.expect("hello reply");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(!running.is_finished(), "a client is connected");
+            assert!(matches!(
+                ask(&mut connection, 1, Method::Status).await,
+                Outcome::Ok { .. }
+            ));
+            drop(connection);
+            running.await.expect("join").expect("clean shutdown");
+            assert_eq!(*model::lock(&handler.shut_down), Some(ShutdownReason::Idle));
+            assert!(!socket.exists());
         })
         .await
         .expect("timeout");

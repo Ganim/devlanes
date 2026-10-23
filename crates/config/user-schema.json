@@ -65,6 +65,29 @@
       "pattern": "^[0-9]+(ms|s|m|h|d)$",
       "type": "string"
     },
+    "DaemonConfig": {
+      "additionalProperties": false,
+      "description": "The daemon's own lifetime.",
+      "examples": [
+        {
+          "exit_when_idle": false
+        }
+      ],
+      "markdownDescription": "The daemon's own lifetime.",
+      "properties": {
+        "exit_when_idle": {
+          "default": true,
+          "description": "Stop the daemon about 30 seconds after the last TUI closes when no service, task or start is running; the next devlanes command starts it again. Containers keep running either way. Defaults to true. Only a daemon a command started on demand exits; one installed with `devlanes daemon install` keeps running.",
+          "examples": [
+            true,
+            false
+          ],
+          "markdownDescription": "Stop the daemon about 30 seconds after the last TUI closes when no service, task or start is running; the next devlanes command starts it again. Containers keep running either way. Defaults to true. Only a daemon a command started on demand exits; one installed with `devlanes daemon install` keeps running.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "DnsProvider": {
       "additionalProperties": false,
       "description": "Reserved DNS-01 provider settings for the planned `public` resolver; not supported yet.",
@@ -1063,6 +1086,19 @@
   ],
   "markdownDescription": "devlanes v0.3.0 user config: per-user settings in ~/.devlanes/config.yaml. Run a dev environment per git worktree, side by side. https://devlanes.run",
   "properties": {
+    "daemon": {
+      "$ref": "#/$defs/DaemonConfig",
+      "default": {
+        "exit_when_idle": true
+      },
+      "description": "The daemon's lifetime: whether it stops on its own once the last TUI closes and nothing runs.",
+      "examples": [
+        {
+          "exit_when_idle": false
+        }
+      ],
+      "markdownDescription": "The daemon's lifetime: whether it stops on its own once the last TUI closes and nothing runs."
+    },
     "history": {
       "$ref": "#/$defs/HistoryConfig",
       "default": {

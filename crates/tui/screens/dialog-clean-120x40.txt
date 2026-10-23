@@ -1,5 +1,5 @@
  devlanes  1 acme ✕   2 billing !   3 shop ●                 starting feat/checkout: 4 of 8 ready  M monitor   D daemon
- lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8     3 fix/cache @2 ·    +1 more              1-9 or [ ] switch lanes
+ lanes    main @0 ✕     feat/checkout @1 ⠋ 4/8     fix/cache @2 ·     spike/old-search @3 !     0-9 or [ ] switch lanes
 ┌ fix/cache @2 ────────────────────────────────┐┌ fix/cache @2 · not running · config changed ─────────────────────────┐
 │ ▾ services                                 2 ││ Not running. s starts the lane with its default profile, p picks     │
 │   · api-gateway                              ││ profiles.                                                            │
@@ -18,8 +18,8 @@
 │   ▾ shared                      │ It stops every unit in the lane, then:          │ing · config changed              │
 │     ● pgbouncer                 │   runs its lane.clean tasks and infra teardown  │ missing                          │
 │     ● postgres                  │   removes the lane's own containers and volumes │                                  │
-│     ● redis                     │   frees its ports and setup records             │witch lanes. devlanes lane new    │
-│                                 │ Files in /work/acme-cache stay as they are.     │                                  │
+│     ● redis                     │   frees its ports and setup records             │ a click on a chip switch lanes.  │
+│                                 │ Files in /work/acme-cache stay as they are.     │.                                 │
 │                                 │                                                 │                                  │
 │                                 │ enter clean   esc cancel                        │                                  │
 │                                 └─────────────────────────────────────────────────┘                                  │
@@ -41,7 +41,7 @@
 
 --- styles (row: columns style) ---
 0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 99 bold, 100-107 dim, 111 bold, 112-118 dim
-1: 0-5 dim, 10-11 dim, 16-19 dim, 20 red, 26-27 dim, 41-44 dim, 54-71 bold reversed, 72-81 dim, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
+1: 0-5 dim, 14-17 dim, 18 red, 37-40 dim, 50-65 bold reversed, 86-89 dim, 90 yellow, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
 2: 0 darkgray, 1-14 bold reversed, 15-48 darkgray, 50-58 bold, 62-92 dim, 94-119 darkgray
 3: 0 darkgray, 2-3 dim, 45 dim, 47-48 darkgray, 119 darkgray
 4: 0 darkgray, 4-5 dim, 6-16 dim blue, 47-48 darkgray, 119 darkgray
@@ -60,8 +60,8 @@
 17: 0 darkgray, 4-5 dim, 34 bold, 84 bold, 85-104 dim, 119 darkgray
 18: 0 darkgray, 6-7 green, 8-16 dim magenta, 34 bold, 84 bold, 85-92 yellow, 119 darkgray
 19: 0 darkgray, 6-7 green, 8-15 cyan, 34 bold, 84 bold, 119 darkgray
-20: 0 darkgray, 6-7 green, 8-12 cyan, 34 bold, 84 bold, 85-114 dim, 119 darkgray
-21: 0 darkgray, 34 bold, 84 bold, 119 darkgray
+20: 0 darkgray, 6-7 green, 8-12 cyan, 34 bold, 84 bold, 85-116 dim, 119 darkgray
+21: 0 darkgray, 34 bold, 84 bold, 85 dim, 119 darkgray
 22: 0 darkgray, 34 bold, 84 bold, 119 darkgray
 23: 0 darkgray, 34 bold, 36-40 bold, 41-46 dim, 50-52 bold, 53-59 dim, 84 bold, 119 darkgray
 24: 0 darkgray, 34-84 bold, 119 darkgray

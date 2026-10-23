@@ -167,8 +167,9 @@ Start the lane, run a command against it, then stop what was started.
 Waits for ready first; when a unit fails it prints the failure and exits 1
 without running the command. The command gets the lane's environment, including
 DEVLANES_PUBLIC_URL_<SERVICE> for every service. Afterwards devlanes writes
---logs-dir, prints peak CPU and memory, stops what it started (and the daemon,
-if it started it) and exits with the command's exit code.
+--logs-dir, prints peak CPU and memory when output is not a terminal (CI logs,
+pipes), stops what it started (and the daemon, if it started it) and exits with
+the command's exit code.
 
 ```text
 devlanes with [OPTIONS] [UNIT]... -- <COMMAND>...
@@ -260,6 +261,8 @@ Create a git worktree for a branch under lanes.worktree_dir and register its lan
 Without a branch, add another lane for the current folder: it has its own index, ports
 and domain, and `--lane <name>` or `--lane <index>` addresses it. Commands run in the
 folder keep using the folder's first lane.
+
+Without --start, a terminal asks whether to start the new lane right away.
 
 ```text
 devlanes lane new [OPTIONS] [BRANCH]

@@ -1,5 +1,5 @@
  devlanes  1 ac┌ keys ──────────────────────────────────────────────────────────────────────────────────┐tor   D daemon
- lanes    1 mai│ glyphs                                                                                 │] switch lanes
+ lanes    main │ glyphs                                                                                 │] switch lanes
 ┌ main @0 ─────│   ● ready (check passed)      ◉ running (no ready check)  · stopped, not run           │──────────────┐
 │ ▾ services   │   ⠸ starting, stopping        … queued                    ✕ failed                     │              │
 │   ● Gateway A│   ◆ orphaned                  ✓ task done                 ▍ the unit's color           │              │
@@ -9,32 +9,32 @@
 │   ● api-order│   g G               the lane, the last row                                             │              │
 │   ● api-searc│   h l               fold, unfold; h moves to the section                               │_8121 took=53m│
 │   ● api-catal│   enter  space      fold a section, or type into a running unit                        │              │
-│   ● api-inven│   [ ]  1-9          previous, next lane; lane by number                                │_8122 took=66m│
+│   ● api-inven│   [ ]  0-9          previous, next lane; 2 is lane @2                                  │_8122 took=66m│
 │   ● api-notif│   n N               next, previous problem                                             │              │
-│   ● api-repor│   s  x  r           start, stop, restart the selection; s runs a task                  │_8123 took=79m│
-│   ● web-app  │   s  S              on the lane: its default services; every service                   │              │
-│   ● web-admin│   p                 start the lane with chosen profiles                                │_8124 took=92m│
-│   ● web-docs │   C                 clean the lane (asks first)                                        │              │
-│   · web-story│   o                 open the unit's address in a browser                               │_8125 took=105│
-│   ● web-landi│   /                 filter by name or +tag; enter keeps, esc clears                    │              │
-│   ◉ wrk-email│                                                                                        │_8126 took=118│
-│   ◉ wrk-billi│ pane                                                                                   │              │
-│   ◉ wrk-index│   enter, click      type into the unit                                                 │_8127 took=131│
-│   ◉ wrk-thumb│   esc  ctrl+]       stop typing (ctrl+] in full-screen programs)                       │              │
-│   ✕ wrk-expor│   z                 zoom the pane                                                      │_8128 took=144│
-│   ◉ wrk-cron │   pgup pgdn  wheel  scroll; older lines come from stored logs                          │              │
-│   ◉ wrk-webho│   c  v  y           select text, mark, copy (OSC 52)                                   │_8129 took=157│
-│   ◉ wrk-ledge│   drag              select text and copy it                                            │              │
-│   ● stub-stri│                                                                                        │_8130 took=170│
-│   ● stub-s3  │ monitor (M)                                                                            │              │
-│   ◆ stub-twil│   < >               sort by the previous, next column                                  │_8131 took=183│
-│   ● stub-send│   i                 reverse the sort                                                   │              │
-│   ● stub-segm│   /  e              filter, grouped or flat                                            │_8132 took=196│
-│   ● stub-auth│   h l               fold, unfold a lane                                                │              │
-│   ● proxy-edg│   z                 detail graphs fill the page                                        │_8133 took=209│
-│   ● docs-sear│   s  x  r           start, stop, restart the unit or lane                              │              │
-│   ● ml-ranker│   enter             open the unit in its project                                       │              │
-│   ⠋ ml-embed │                                                                                        │              │
+│   ● api-repor│   t  i              jump to the tasks, the infra                                       │_8123 took=79m│
+│   ● web-app  │   s  x  r           start, stop, restart the selection; s runs a task                  │              │
+│   ● web-admin│   s  S              on the lane: its default services; every service                   │_8124 took=92m│
+│   ● web-docs │   p                 start the lane with chosen profiles                                │              │
+│   · web-story│   C                 clean the lane (asks first)                                        │_8125 took=105│
+│   ● web-landi│   o                 open the unit's address in a browser                               │              │
+│   ◉ wrk-email│   /                 filter by name or +tag; enter keeps, esc clears                    │_8126 took=118│
+│   ◉ wrk-billi│                                                                                        │              │
+│   ◉ wrk-index│ pane                                                                                   │_8127 took=131│
+│   ◉ wrk-thumb│   enter, click      type into the unit                                                 │              │
+│   ✕ wrk-expor│   esc  ctrl+]       stop typing (ctrl+] in full-screen programs)                       │_8128 took=144│
+│   ◉ wrk-cron │   z                 zoom the pane                                                      │              │
+│   ◉ wrk-webho│   pgup pgdn  wheel  scroll; older lines come from stored logs                          │_8129 took=157│
+│   ◉ wrk-ledge│   c  v  y           select text, mark, copy (OSC 52)                                   │              │
+│   ● stub-stri│   drag              select text and copy it                                            │_8130 took=170│
+│   ● stub-s3  │                                                                                        │              │
+│   ◆ stub-twil│ monitor (M)                                                                            │_8131 took=183│
+│   ● stub-send│   < >               sort by the previous, next column                                  │              │
+│   ● stub-segm│   i                 reverse the sort                                                   │_8132 took=196│
+│   ● stub-auth│   /  e              filter, grouped or flat                                            │              │
+│   ● proxy-edg│   h l               fold, unfold a lane                                                │_8133 took=209│
+│   ● docs-sear│   z                 detail graphs fill the page                                        │              │
+│   ● ml-ranker│   c  m              cpu or memory in the big box (memory: a square per core)           │              │
+│   ⠋ ml-embed │   wheel             scroll the table; the selection stays                              │              │
 │   ● cache-war│ …                                                                                      │              │
 └──────────────│ any key closes                                                                         │──────────────┘
  r restart   n └────────────────────────────────────────────────────────────────────────────────────────┘eys   q quit
@@ -59,24 +59,24 @@
 16: 0 darkgray, 4-13 green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 17: 0 darkgray, 4-5 dim, 6-14 dim green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 18: 0 darkgray, 4-14 green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-19: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 104 bold, 119 darkgray
-20: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-20 dim, 104 bold, 119 darkgray
-21: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-36 bold, 104 bold, 119 darkgray
+19: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-36 bold, 104 bold, 119 darkgray
+20: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 104 bold, 119 darkgray
+21: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-20 dim, 104 bold, 119 darkgray
 22: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 23: 0 darkgray, 1-14 reversed, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 24: 0 darkgray, 4-5 green, 6-13 magenta, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 25: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 26: 0 darkgray, 4-5 green, 6-14 magenta, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-27: 0 darkgray, 4-5 green, 6-14 darkgray, 15 bold, 104 bold, 119 darkgray
-28: 0 darkgray, 4-5 green, 6-12 darkgray, 15 bold, 17-27 dim, 104 bold, 119 darkgray
-29: 0 darkgray, 4-5 yellow, 6-14 darkgray, 15 bold, 17-36 bold, 104 bold, 119 darkgray
+27: 0 darkgray, 4-5 green, 6-14 darkgray, 15 bold, 17-36 bold, 104 bold, 119 darkgray
+28: 0 darkgray, 4-5 green, 6-12 darkgray, 15 bold, 104 bold, 119 darkgray
+29: 0 darkgray, 4-5 yellow, 6-14 darkgray, 15 bold, 17-27 dim, 104 bold, 119 darkgray
 30: 0 darkgray, 4-5 green, 6-14 darkgray, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 31: 0 darkgray, 4-5 green, 6-14 darkgray, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 32: 0 darkgray, 4-5 green, 6-14 darkgray, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 33: 0 darkgray, 4-5 green, 6-14 cyan, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 34: 0 darkgray, 4-5 green, 6-14 cyan, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 35: 0 darkgray, 4-14 green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
-36: 0 darkgray, 6-13 green, 15 bold, 104 bold, 119 darkgray
+36: 0 darkgray, 6-13 green, 15 bold, 17-36 bold, 104 bold, 119 darkgray
 37: 0 darkgray, 4-5 green, 6-14 dim blue, 15 bold, 17 dim, 104 bold, 119 darkgray
 38: 0-14 darkgray, 15 bold, 17-30 dim, 104 bold, 105-119 darkgray
 39: 1 bold, 2-12 dim, 13 bold, 14 dim, 15-104 bold, 105-110 dim, 111 bold, 112-119 dim

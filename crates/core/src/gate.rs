@@ -388,6 +388,13 @@ pub trait PressureSource: Send + Sync {
     async fn total_memory(&self) -> Result<Option<u64>, Error> {
         Ok(None)
     }
+
+    /// Busy share of each CPU, 0-100 in the system's CPU order, over the same
+    /// interval as the last [`PressureSource::sample`], for monitors. Empty when
+    /// the platform cannot tell or before a second sample.
+    fn core_percents(&self) -> Vec<f64> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

@@ -65,6 +65,9 @@ pub struct UserConfig {
     /// Whether start commands open the terminal UI, how it looks, and what quitting it
     /// does with running lanes.
     pub tui: TuiConfig,
+    /// The daemon's lifetime: whether it stops on its own once the last TUI closes and
+    /// nothing runs.
+    pub daemon: DaemonConfig,
 }
 
 /// Terminal UI settings: when it opens, its colors and symbols, and what quitting does
@@ -255,6 +258,28 @@ impl Default for UpdatesConfig {
     /// Checks are on unless turned off.
     fn default() -> Self {
         Self { check: true }
+    }
+}
+
+/// The daemon's own lifetime.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(extend("examples" = [{"exit_when_idle":false}]))]
+pub struct DaemonConfig {
+    /// Stop the daemon about 30 seconds after the last TUI closes when no service, task
+    /// or start is running; the next devlanes command starts it again. Containers keep
+    /// running either way. Defaults to true. Only a daemon a command started on demand
+    /// exits; one installed with `devlanes daemon install` keeps running.
+    #[schemars(extend("examples" = [true,false]))]
+    pub exit_when_idle: bool,
+}
+
+impl Default for DaemonConfig {
+    /// Exits when idle unless turned off.
+    fn default() -> Self {
+        Self {
+            exit_when_idle: true,
+        }
     }
 }
 

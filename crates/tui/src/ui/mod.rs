@@ -5,7 +5,7 @@
 //! reaches the buffer (see [`crate::text`]), so long or hostile text cannot
 //! spill into another widget or move the real terminal's cursor.
 
-mod daemon;
+pub(crate) mod daemon;
 mod dialog;
 mod list;
 mod monitor;
@@ -711,7 +711,7 @@ fn render_lane_bar(app: &App, frame: &mut Frame, area: Rect) {
     let current = app.selected.as_ref().map(|s| s.lane.clone());
     let hint = if lanes.len() > 1 {
         vec![
-            Span::styled("1-9", theme.key()),
+            Span::styled("0-9", theme.key()),
             Span::styled(" or ", theme.quiet()),
             Span::styled("[ ]", theme.key()),
             Span::styled(" switch lanes ", theme.quiet()),
@@ -727,15 +727,17 @@ fn render_lane_bar(app: &App, frame: &mut Frame, area: Rect) {
     let mut used = 6;
     let budget = width.saturating_sub(hint_width + 2);
     for (index, lane) in lanes.iter().enumerate() {
-        // `1 trunk @0 ●`: 1-9 jump to a lane.
-        let mut chip = Vec::new();
-        if index < 9 {
-            chip.push(Span::styled(format!("{} ", index + 1), theme.quiet()));
-        }
-        chip.extend(lane_chip(app, lane));
+        // `trunk @0 ●`: the digit of its number jumps to a lane.
+        let chip = lane_chip(app, lane);
         let w = spans_width(&chip) + 2;
         let more = lanes.len() - index;
-        if used + 3 + w > budget && more > 0 {
+        // A chip with lanes after it leaves room for `   +N more`.
+        let reserve = if more > 1 {
+            format!("   +{} more", more - 1).len()
+        } else {
+            0
+        };
+        if used + 3 + w + reserve > budget && more > 0 {
             let text = format!("   +{more} more");
             let x = area.x + used as u16 + 3;
             hit(
@@ -864,6 +866,11 @@ fn hints(app: &App) -> Vec<Hint> {
     let ch = KeyCode::Char;
     match app.view {
         View::Monitor => {
+            let swap = if app.monitor.memory_first {
+                ("c", "cpu graph", ch('c'))
+            } else {
+                ("m", "memory graph", ch('m'))
+            };
             return vec![
                 ("j k", "move", ch('j')),
                 ("enter", "open unit", KeyCode::Enter),
@@ -871,16 +878,17 @@ fn hints(app: &App) -> Vec<Hint> {
                 ("i", "reverse", ch('i')),
                 ("/", "filter", ch('/')),
                 ("e", "flat", ch('e')),
+                swap,
                 ("s x r", "start stop restart", ch('r')),
                 ("esc", "back", KeyCode::Esc),
             ];
         }
         View::Daemon if app.daemon.copy.is_some() => {
             return vec![
-                ("j k", "move", ch('j')),
+                ("h j k l", "move", KeyCode::Null),
                 ("v", "mark", ch('v')),
                 ("y", "copy", ch('y')),
-                ("Y", "copy as shown", ch('Y')),
+                ("Y", "copy whole entries", ch('Y')),
                 ("esc", "cancel", KeyCode::Esc),
             ];
         }
@@ -993,6 +1001,7 @@ fn hints(app: &App) -> Vec<Hint> {
             ("s", "start all", ch('s')),
             ("x", "stop all", ch('x')),
             ("r", "restart all", ch('r')),
+            ("p", "profiles", ch('p')),
             filter,
         ],
         Some(RowId::Container(_) | RowId::Gap(_)) => vec![filter, ("n", "next problem", ch('n'))],

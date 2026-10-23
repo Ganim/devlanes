@@ -573,6 +573,7 @@ pub fn metrics() -> Metrics {
         cpu_percent: Some(72.0),
         memory_pressure: Some("normal".into()),
         cpu_stall_percent: None,
+        core_percents: vec![88.0, 76.0, 64.0, 92.0, 41.0, 35.0, 18.0, 12.0, 7.0, 3.0],
         history: (0..POINTS)
             .map(|i| {
                 let ts = NOW_MS - (POINTS - 1 - i) * STEP_MS;

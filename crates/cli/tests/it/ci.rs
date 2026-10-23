@@ -186,6 +186,8 @@ async fn github_escaping_and_append_only_summary() {
     | api | 2.0 MiB | 125.5% |
     | worker | – | – |
     "#);
+    // Nothing measured: no table, not a header without rows.
+    assert_eq!(resource_summary(&[]), "");
 }
 
 #[test]

@@ -91,10 +91,14 @@ pub struct MonitorView {
     pub folded: BTreeSet<String>,
     /// The detail graphs fill the body.
     pub zoom: bool,
+    /// `m`: memory takes the big box with the graph and cpu the small one,
+    /// with a square per core; `c` puts cpu back.
+    pub memory_first: bool,
     pub selected: Option<MonitorId>,
     /// Where the selection is in the rows, for when its row goes away.
     pub index: usize,
-    /// First table row on screen.
+    /// First table row on screen. Keys keep the selection in view; the
+    /// wheel scrolls without moving it.
     pub offset: usize,
 }
 
@@ -130,6 +134,26 @@ impl MonitorView {
             self.index = index.min(last);
             self.selected = Some(rows[self.index].id());
         }
+    }
+
+    /// Scrolls the least that shows the selection in a table `height` rows
+    /// high.
+    pub fn reveal(&mut self, height: usize) {
+        if height == 0 {
+            return;
+        }
+        if self.index < self.offset {
+            self.offset = self.index;
+        } else if self.index >= self.offset + height {
+            self.offset = self.index + 1 - height;
+        }
+    }
+
+    /// Scrolls the table by `by` rows without moving the selection, within
+    /// `rows` rows shown `height` at a time.
+    pub fn scroll(&mut self, by: isize, rows: usize, height: usize) {
+        let last = rows.saturating_sub(height);
+        self.offset = self.offset.min(last).saturating_add_signed(by).min(last);
     }
 }
 

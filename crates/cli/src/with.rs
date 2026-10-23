@@ -319,7 +319,7 @@ pub async fn run_with<D: WithDriver + ?Sized>(
             "{}\n",
             json!({"event":"with.summary", "exit_code":result.exit_code,"items":peaks})
         )
-    } else if runtime.quiet {
+    } else if runtime.quiet || !shows_peaks(runtime) {
         String::new()
     } else {
         summary.clone()
@@ -328,12 +328,13 @@ pub async fn run_with<D: WithDriver + ?Sized>(
         stdout,
         ..Rendered::default()
     });
-    if let Err(error) = runtime
-        .append_ci_summary(&format!(
-            "## devlanes with\n\nExit code: {}\n\n{}",
-            result.exit_code, summary
-        ))
-        .await
+    if !summary.is_empty()
+        && let Err(error) = runtime
+            .append_ci_summary(&format!(
+                "## devlanes with\n\nExit code: {}\n\n{}",
+                result.exit_code, summary
+            ))
+            .await
     {
         record_io(&mut result, emit, error);
     }
@@ -484,14 +485,17 @@ pub async fn stop_with_logs<D: WithDriver + ?Sized>(
     emit(Rendered {
         stdout: if runtime.mode == crate::OutputMode::Json {
             format!("{}\n", json!({"event":"stop.summary", "items":peaks}))
+        } else if runtime.quiet || !shows_peaks(runtime) {
+            String::new()
         } else {
             summary.clone()
         },
         ..Rendered::default()
     });
-    if let Err(error) = runtime
-        .append_ci_summary(&format!("## devlanes stop\n\n{summary}"))
-        .await
+    if !summary.is_empty()
+        && let Err(error) = runtime
+            .append_ci_summary(&format!("## devlanes stop\n\n{summary}"))
+            .await
     {
         record_io(&mut outcome, emit, error);
     }
@@ -590,8 +594,18 @@ pub async fn write_log_artifacts(
     }
 }
 
-/// Markdown is readable as plain text and can be appended directly to CI step summaries.
+/// Whether the peak table goes to stdout: in CI and when output is captured
+/// (a pipe, a file), where it is read later. At a terminal it is noise.
+fn shows_peaks(runtime: &Runtime) -> bool {
+    runtime.ci.is_some() || !runtime.stdout_tty
+}
+
+/// Markdown is readable as plain text and can be appended directly to CI step
+/// summaries. Empty when nothing was measured, so no header without rows.
 pub fn resource_summary(peaks: &[ResourcePeak]) -> String {
+    if peaks.is_empty() {
+        return String::new();
+    }
     let mut result = String::from("| Unit | Peak memory | Peak CPU |\n| --- | ---: | ---: |\n");
     for peak in peaks {
         let name = strip_ansi_escapes::strip_str(&peak.unit)

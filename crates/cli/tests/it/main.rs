@@ -42,6 +42,7 @@ fn request(action: Action) -> devlanes_proto::Request {
     match action {
         Action::Rpc(r)
         | Action::RpcThenUi(r)
+        | Action::RpcThenOfferStart(r)
         | Action::Attach(r)
         | Action::Open(r)
         | Action::ExportEnv(r)

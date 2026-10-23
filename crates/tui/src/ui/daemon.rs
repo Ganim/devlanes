@@ -11,8 +11,8 @@ use ratatui::{
 };
 
 use super::{draw_box, fit};
-use crate::app::App;
-use crate::daemonlog::{self, Entry, Level, Shown};
+use crate::app::{App, LogCopy};
+use crate::daemonlog::{self, Entry, Level, LogPos, LogView, Shown};
 use crate::doctor::{self, Check, CheckState};
 use crate::text::{self, clean};
 use crate::theme::Tone;
@@ -408,11 +408,18 @@ fn entry_rows(app: &App, entry: &Entry, shown: &Shown, width: usize) -> Vec<Line
     } else {
         Style::new()
     };
+    // The terminal's own blue and magenta, so the tags follow its theme.
+    let ansi = |name: &str| {
+        theme
+            .identity(name)
+            .map_or_else(Style::new, |color| Style::new().fg(color))
+    };
     let level_style = match entry.level {
         Level::Error => theme.tone(Tone::Failure).add_modifier(Modifier::BOLD),
         Level::Warn => theme.tone(Tone::Attention),
-        Level::Info => Style::new(),
-        Level::Debug | Level::Trace => theme.quiet(),
+        Level::Info => ansi("blue"),
+        Level::Debug => ansi("magenta"),
+        Level::Trace => theme.quiet(),
     };
     let narrow = width < 60;
     let prefix = if narrow { NARROW_PREFIX } else { PREFIX };
@@ -596,7 +603,7 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
     // important go first when the title does not fit.
     let mut state: Vec<(u8, String)> = Vec::new();
     if view.copy.is_some() {
-        state.push((0, "selecting · v mark · y copy · Y as shown".into()));
+        state.push((0, "selecting · v mark · y copy · Y whole entries".into()));
     } else if view.paused {
         state.push((0, format!("paused · {} new · G follows", view.new_lines)));
     } else {
@@ -664,8 +671,61 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(text).style(theme.quiet()), inner);
         return;
     }
-    let end = shown.len().saturating_sub(view.scroll).max(1);
-    let selected = view.copy.map(|copy| copy.range());
+    let max_scroll = max_scroll(app, &entries, &shown, width, height);
+    app.daemon_log_view.set(LogView {
+        width,
+        height,
+        max_scroll,
+    });
+    // A scroll past the oldest entries would leave the box half empty.
+    let scroll = view.scroll.min(max_scroll);
+    let rows = visible_lines(app, &entries, &shown, scroll, width, height);
+    let places: Vec<LogPos> = rows.iter().map(|(place, _)| *place).collect();
+    let lines: Vec<Line> = rows.into_iter().map(|(_, line)| line).collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+    if let Some(copy) = view.copy {
+        highlight_copy(app, frame, inner, &places, copy);
+    }
+}
+
+/// Reverses the selected cells and marks the cursor, as copy mode does in a
+/// unit's pane.
+fn highlight_copy(app: &App, frame: &mut Frame, inner: Rect, places: &[LogPos], copy: LogCopy) {
+    let (first, last) = copy.range();
+    let buffer = frame.buffer_mut();
+    for (dy, place) in places.iter().enumerate() {
+        let y = inner.y + dy as u16;
+        for dx in 0..inner.width {
+            let cell = LogPos {
+                column: usize::from(dx),
+                ..*place
+            };
+            let at = &mut buffer[(inner.x + dx, y)];
+            if cell == copy.cursor {
+                at.set_style(
+                    app.theme
+                        .focus()
+                        .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+                );
+            } else if (first..=last).contains(&cell) {
+                at.set_style(at.style().add_modifier(Modifier::REVERSED));
+            }
+        }
+    }
+}
+
+/// The drawn lines of shown entry `index`: a day separator first where the
+/// day changes from the entry before, then the entry's rows.
+pub(crate) fn entry_lines(
+    app: &App,
+    entries: &[Entry],
+    shown: &[Shown],
+    index: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let Some(row) = shown.get(index) else {
+        return Vec::new();
+    };
     let date = |row: &Shown| {
         entries[row.entry]
             .time
@@ -673,37 +733,77 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
             .map(|t| daemonlog::local(t, &app.time_zone).0)
             .unwrap_or_default()
     };
+    let mut lines = entry_rows(app, &entries[row.entry], row, width);
+    let day = date(row);
+    let previous = index.checked_sub(1).map(|i| date(&shown[i]));
+    if !day.is_empty() && previous.as_deref() != Some(day.as_str()) {
+        let label = format!("── {day} ");
+        let rule = "─".repeat(width.saturating_sub(text::width(&label)));
+        lines.insert(0, Line::styled(format!("{label}{rule}"), app.theme.rule()));
+    }
+    lines
+}
+
+/// The lines a box `height` rows high shows while `scroll` shown entries
+/// hide below it, top to bottom, each with its place (column 0).
+pub(crate) fn visible_lines(
+    app: &App,
+    entries: &[Entry],
+    shown: &[Shown],
+    scroll: usize,
+    width: usize,
+    height: usize,
+) -> Vec<(LogPos, Line<'static>)> {
+    let end = shown.len().saturating_sub(scroll).max(1).min(shown.len());
     // From the newest shown entry up, until the box is full.
-    let mut rows: Vec<Line> = Vec::new();
+    let mut rows: Vec<(LogPos, Line<'static>)> = Vec::new();
     for index in (0..end).rev() {
-        let row = &shown[index];
-        let mut lines = entry_rows(app, &entries[row.entry], row, width);
-        if selected.is_some_and(|(first, last)| (first..=last).contains(&index)) {
-            lines = lines
+        let mut block: Vec<(LogPos, Line<'static>)> =
+            entry_lines(app, entries, shown, index, width)
                 .into_iter()
-                .map(|line| {
-                    let pad = width.saturating_sub(line.width());
-                    let mut line = line.patch_style(theme.selection());
-                    line.spans
-                        .push(Span::styled(" ".repeat(pad), theme.selection()));
-                    line
+                .enumerate()
+                .map(|(line, text)| {
+                    let place = LogPos {
+                        entry: index,
+                        line,
+                        column: 0,
+                    };
+                    (place, text)
                 })
                 .collect();
-        }
-        // A separator where the day changes from the entry before.
-        let day = date(row);
-        let previous = index.checked_sub(1).map(|i| date(&shown[i]));
-        if !day.is_empty() && previous.as_deref() != Some(day.as_str()) {
-            let label = format!("── {day} ");
-            let rule = "─".repeat(width.saturating_sub(text::width(&label)));
-            lines.insert(0, Line::styled(format!("{label}{rule}"), theme.rule()));
-        }
-        lines.extend(rows);
-        rows = lines;
+        block.extend(rows);
+        rows = block;
         if rows.len() >= height {
             break;
         }
     }
     let start = rows.len().saturating_sub(height);
-    frame.render_widget(Paragraph::new(rows.split_off(start)), inner);
+    rows.split_off(start)
+}
+
+/// The most shown entries that can hide below a box `height` rows high
+/// while the oldest ones still fill it; 0 when everything fits.
+pub(crate) fn max_scroll(
+    app: &App,
+    entries: &[Entry],
+    shown: &[Shown],
+    width: usize,
+    height: usize,
+) -> usize {
+    let mut used = 0;
+    for index in 0..shown.len() {
+        used += entry_lines(app, entries, shown, index, width).len();
+        if used >= height {
+            return shown.len() - (index + 1);
+        }
+    }
+    0
+}
+
+/// A drawn line as plain text.
+pub(crate) fn plain(line: &Line) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
 }

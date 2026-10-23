@@ -129,6 +129,8 @@ pub struct SystemMetrics {
     /// `normal`, `warn` or `critical`.
     pub memory_pressure: Option<String>,
     pub cpu_stall_percent: Option<f64>,
+    /// Each CPU now, 0 to 100; empty from daemons that do not send it.
+    pub core_percents: Vec<f64>,
     /// `(ts_ms, cpu_percent, available_memory_bytes)`, oldest first.
     pub history: Vec<(u64, f64, u64)>,
 }
@@ -267,6 +269,11 @@ impl Metrics {
                 cpu_percent: system.get("cpu_percent").and_then(Value::as_f64),
                 memory_pressure: text(system, "memory_pressure"),
                 cpu_stall_percent: system.get("cpu_stall_percent").and_then(Value::as_f64),
+                core_percents: system
+                    .get("core_percents")
+                    .and_then(Value::as_array)
+                    .map(|cores| cores.iter().filter_map(Value::as_f64).collect())
+                    .unwrap_or_default(),
                 history: points(system),
             });
         Self {
@@ -991,7 +998,8 @@ mod tests {
             "lanes": [{"lane": "acme@0", "cpu_percent": 395.0, "memory_bytes": 7000,
                        "peak_cpu_percent": 410.0, "history": [[1, 300.0, 6000]]}],
             "system": {"cpus": 10, "memory_total_bytes": 34359738368u64, "cpu_percent": 80.0,
-                       "memory_pressure": "normal", "history": [[1, 70.0, 9000]]}
+                       "memory_pressure": "normal", "history": [[1, 70.0, 9000]],
+                       "core_percents": [12.5, 90.0, "bad"]}
         }));
         assert_eq!(parsed.range_ms, Some(900_000));
         let postgres = &parsed.units[0];
@@ -1006,6 +1014,10 @@ mod tests {
             .as_ref()
             .map(|s| (s.cpus, s.memory_pressure.as_deref()));
         assert_eq!(system, Some((Some(10), Some("normal"))));
+        assert_eq!(
+            parsed.system.map(|s| s.core_percents),
+            Some(vec![12.5, 90.0])
+        );
     }
 
     #[test]

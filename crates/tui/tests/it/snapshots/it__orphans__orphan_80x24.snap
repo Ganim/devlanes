@@ -3,7 +3,7 @@ source: crates/tui/tests/it/orphans.rs
 expression: text
 ---
 " devlanes  1 acme ●                          ◆ 1 orphaned  M monitor   D daemon "
-" lanes    1 main @0 ●     2 feat @1 ·                   1-9 or [ ] switch lanes "
+" lanes    main @0 ●     feat @1 ·                       0-9 or [ ] switch lanes "
 "┌ main @0 ─────────────────────┐┌ api  orphaned · pid 4242 ────────────────────┐"
 "│ ▾ services                 2 ││ ◆ An earlier daemon started this process and │"
 "│   ◆ api  orphaned · pid 4242 ││   left it running.                           │"

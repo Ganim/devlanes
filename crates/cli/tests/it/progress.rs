@@ -102,7 +102,11 @@ fn built(args: &[&str], runtime: &Runtime) -> Request {
     let cli = Cli::parse_from(args);
     match cli.action_with(runtime, "/work/acme-1".into(), Default::default) {
         // On a terminal, starts run in the TUI with the same request.
-        Ok(Action::Rpc(request) | Action::StartUi { request, .. }) => request,
+        Ok(
+            Action::Rpc(request)
+            | Action::StartUi { request, .. }
+            | Action::RpcThenOfferStart(request),
+        ) => request,
         _ => panic!("{args:?} builds no request"),
     }
 }
@@ -128,6 +132,33 @@ fn starts_ask_for_their_lane_events() {
     // `wait` streams them only for the bar.
     assert!(events(&["devlanes", "wait", "api"], &human));
     assert!(!events(&["devlanes", "wait", "api"], &piped));
+}
+
+#[test]
+fn a_new_lane_offers_to_start_only_where_someone_can_answer() {
+    let offers = |args: &[&str], runtime: &Runtime| {
+        let cli = Cli::parse_from(args);
+        matches!(
+            cli.action_with(runtime, "/work/acme-1".into(), Default::default),
+            Ok(Action::RpcThenOfferStart(_))
+        )
+    };
+    let human = runtime(&["devlanes"], true, false);
+    assert!(offers(&["devlanes", "lane", "new", "feat"], &human));
+    assert!(offers(&["devlanes", "lane", "new"], &human));
+    // --start already starts; agents, pipes, CI and --quiet never get asked.
+    assert!(!offers(
+        &["devlanes", "lane", "new", "feat", "--start"],
+        &human
+    ));
+    for runtime in [
+        runtime(&["devlanes", "--output", "agent"], true, false),
+        runtime(&["devlanes"], false, false),
+        runtime(&["devlanes"], true, true),
+        runtime(&["devlanes", "--quiet"], true, false),
+    ] {
+        assert!(!offers(&["devlanes", "lane", "new", "feat"], &runtime));
+    }
 }
 
 /// What a human terminal shows for each of `events` while `method` runs.

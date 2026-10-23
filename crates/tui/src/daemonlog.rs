@@ -287,6 +287,27 @@ pub fn matches_in(text: &str, filter: &str) -> Vec<std::ops::Range<usize>> {
     merged
 }
 
+/// The log box as the last frame drew it: its inside and how far it can
+/// scroll while still full. Zero before the first frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LogView {
+    pub width: usize,
+    pub height: usize,
+    /// The most shown entries that can hide below the box while the oldest
+    /// ones still fill it.
+    pub max_scroll: usize,
+}
+
+/// A place in the log as drawn: the shown entry, the drawn line inside it
+/// (a day separator above the entry is its line 0) and the column. Orders
+/// top to bottom, left to right.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LogPos {
+    pub entry: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
 /// One shown entry: its index in the parsed entries (the newest occurrence
 /// when folded), how many times it repeats and when it first did.
 #[derive(Debug, Clone, PartialEq, Eq)]

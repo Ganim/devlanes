@@ -97,6 +97,8 @@ pub(crate) struct InfraRoute {
     pub port: u16,
     pub fallback: bool,
     pub host_header_upstream: bool,
+    /// `https://host` through the proxy; `None` for wildcard hosts.
+    pub url: Option<String>,
 }
 
 /// Synchronous layout of a lane, available while it is idle.
@@ -1091,6 +1093,13 @@ fn container_summaries(lane: &LaneSt) -> Vec<devlanes_proto::ContainerSummary> {
                     .filter(|container| &container.name == name)
                     .filter_map(|container| container.state.clone())
                     .max_by_key(|state| state_badness(state)),
+                urls: lane
+                    .view
+                    .iter()
+                    .flat_map(|view| &view.infra_routes)
+                    .filter(|route| &route.container == name)
+                    .filter_map(|route| route.url.clone())
+                    .collect(),
             }
         })
         .collect()
@@ -1110,7 +1119,9 @@ pub(crate) fn shared_containers(project: &ProjectRt) -> Vec<devlanes_proto::Cont
     shared
 }
 
-/// Adds the shared containers a lane summary does not list yet.
+/// Adds the shared containers a lane summary does not list yet. Their URLs
+/// are left out: they carry the other lane's hostnames, and this lane has no
+/// route of its own until its infra namespace is set.
 pub(crate) fn add_shared(summary: &mut LaneSummary, shared: &[devlanes_proto::ContainerSummary]) {
     for container in shared {
         if !summary
@@ -1118,7 +1129,10 @@ pub(crate) fn add_shared(summary: &mut LaneSummary, shared: &[devlanes_proto::Co
             .iter()
             .any(|known| known.name == container.name)
         {
-            summary.containers.push(container.clone());
+            summary.containers.push(devlanes_proto::ContainerSummary {
+                urls: Vec::new(),
+                ..container.clone()
+            });
         }
     }
 }

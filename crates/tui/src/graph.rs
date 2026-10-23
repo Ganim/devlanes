@@ -270,7 +270,7 @@ pub struct Columns {
 #[derive(Debug, Default)]
 struct ColumnsInner {
     /// Raw (not normalized) finished columns by series key and step.
-    series: std::collections::HashMap<(String, u64), std::collections::BTreeMap<u64, Option<f64>>>,
+    series: std::collections::HashMap<(String, u64), std::collections::BTreeMap<u64, f64>>,
     /// Scales that only grow, by key.
     sticky: std::collections::HashMap<String, f64>,
 }
@@ -306,7 +306,16 @@ impl Columns {
                 if column >= timeline.last {
                     return value;
                 }
-                *done.entry(column).or_insert(value)
+                if let Some(kept) = done.get(&column) {
+                    return Some(*kept);
+                }
+                // Only columns with data are kept: an empty one may be a frame
+                // drawn before the first reply, and the history the daemon
+                // sends later fills it.
+                if let Some(value) = value {
+                    done.insert(column, value);
+                }
+                value
             })
             .collect()
     }
@@ -496,6 +505,21 @@ mod tests {
         // A fresh cache sees the spike: only the cache kept the past fixed.
         let third = Columns::default().values("api", &later, &timeline, true);
         assert_eq!(third[3], Some(99.0));
+    }
+
+    #[test]
+    fn empty_columns_fill_from_a_later_reply() {
+        // A frame drawn before the first reply has no samples; the history
+        // the daemon sends next fills the past instead of staying blank.
+        let base = 1_000_000;
+        let cache = Columns::default();
+        let timeline = Timeline::new(base + 5_000, 5_000, 5);
+        assert_eq!(cache.values("cpu", &[], &timeline, true), [None; 5]);
+        let samples: Vec<(u64, f64)> = (1..=5).map(|s| (base + s * 1000, s as f64)).collect();
+        assert_eq!(
+            cache.values("cpu", &samples, &timeline, true),
+            [1.0, 2.0, 3.0, 4.0, 5.0].map(Some)
+        );
     }
 
     #[test]

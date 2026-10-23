@@ -1,5 +1,5 @@
  devlanes  1 acme ✕   2 billing !   3 shop ●   starting …  M monitor   D daemon
- lanes    1 main @0 ✕     2 feat/checkout @1 ⠋ 4/8    … 1-9 or [ ] switch lanes
+ lanes    main @0 ✕    +3 more                          0-9 or [ ] switch lanes
 ┌ ┌ options ● 2 unsaved changes ──────────────────── ~/.devlanes/config.yaml ┐─┐
 │ │ 1 general   2 network   3 startup   4 storage                            │ │
 │ │ ──────────────────────────────────────────────────────────────────────── │ │
@@ -25,7 +25,7 @@
 
 --- styles (row: columns style) ---
 0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-19 bold black on yellow, 22-23 dim, 32-33 yellow, 36-37 dim, 43-44 green, 59 bold, 60-67 dim, 71 bold, 72-78 dim
-1: 0-5 dim, 9-21 bold reversed, 26-27 dim, 41-44 dim, 51-54 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
+1: 0-5 dim, 9-19 bold reversed, 20-29 dim, 56-58 bold, 59-62 dim, 63-65 bold, 66-79 dim
 2: 0 darkgray, 2-11 bold, 12-31 bold yellow, 32-51 bold, 52-76 bold dim, 77 bold, 78-79 darkgray
 3: 0 darkgray, 2 bold, 4-5 dim, 16-17 dim, 28-29 dim, 40-41 dim, 42-48 bold underlined, 77 bold, 79 darkgray
 4: 0 darkgray, 2 bold, 4-75 darkgray, 77 bold, 79 darkgray
