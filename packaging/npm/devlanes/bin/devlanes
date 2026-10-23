@@ -2,7 +2,9 @@
 "use strict";
 
 // Runs the native binary from the @devlanes/<platform>-<arch> package that npm
-// installed as an optional dependency.
+// installed as an optional dependency. install.js replaces this file with that
+// binary, so it only runs when the postinstall script did not (--ignore-scripts,
+// Yarn) or could not swap it.
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 

@@ -40,7 +40,9 @@ yaml-language-server resolves the path from the YAML file's directory, so it fit
 
 ## Behaviour
 
-This package holds a small launcher. npm installs the native binary from one of the `@devlanes/<platform>-<arch>` packages, picked by `os`, `cpu` and `libc`. Builds exist for macOS arm64 and x64 and for Linux arm64 and x64 with glibc.
+npm installs the native binary from one of the `@devlanes/<platform>-<arch>` packages, picked by `os`, `cpu` and `libc`. Builds exist for macOS arm64 and x64 and for Linux arm64 and x64 with glibc.
+
+The postinstall script replaces this package's `bin/devlanes` with that binary, so `devlanes` runs without starting Node. When the script does not run (`--ignore-scripts`, Yarn) or fails, `bin/devlanes` stays a small Node launcher that starts the binary, and everything works the same. npm 12, pnpm and Bun skip install scripts of dependencies unless allowed: `npm install -g --allow-scripts=devlanes devlanes`, `pnpm approve-builds` or `bun pm trust devlanes`.
 
 ## License
 

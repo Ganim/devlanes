@@ -10,10 +10,14 @@
     "directory": "packaging/npm/devlanes"
   },
   "bin": {
-    "devlanes": "bin/devlanes.js"
+    "devlanes": "bin/devlanes"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
   },
   "files": [
     "bin",
+    "install.js",
     "schema.json",
     "user-schema.json"
   ],

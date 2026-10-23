@@ -69,8 +69,10 @@ done
 mkdir -p "$out/devlanes/bin"
 sed "s/\"0\.0\.0\"/\"$version\"/" "$here/devlanes/package.json" >"$out/devlanes/package.json"
 cp "$here/devlanes/README.md" "$out/devlanes/README.md"
-cp "$here/devlanes/bin/devlanes.js" "$out/devlanes/bin/devlanes.js"
-chmod 755 "$out/devlanes/bin/devlanes.js"
+cp "$here/devlanes/bin/devlanes" "$out/devlanes/bin/devlanes"
+chmod 755 "$out/devlanes/bin/devlanes"
+cp "$here/devlanes/install.js" "$out/devlanes/install.js"
+chmod 644 "$out/devlanes/install.js"
 cp "$root/LICENSE" "$out/devlanes/LICENSE"
 # The committed schemas, so editors can point yaml-language-server at node_modules.
 cp "$root/crates/config/schema.json" "$out/devlanes/schema.json"
