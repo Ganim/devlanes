@@ -494,6 +494,13 @@ async fn restart_replaces_a_unit_the_start_waits_for() {
             reported(&result, "slow"),
             Some(("stopped".into(), Some("cancelled_by_stop".into())))
         );
+        // A spawn still under way at the restart's 300 ms deadline counts as
+        // started and lands later, possibly after both answers.
+        let respawned = eventually(Duration::from_secs(5), || async {
+            (spawned(&h, "echo slow") >= 2).then_some(())
+        })
+        .await;
+        assert!(respawned.is_some(), "the restart spawns slow again");
         assert_eq!(spawned(&h, "echo slow"), 2);
         h.close().await;
     })
