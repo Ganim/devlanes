@@ -50,6 +50,13 @@ fn main() -> ExitCode {
     if let Some(code) = remote::askpass_from_env() {
         return ExitCode::from(code);
     }
+    // The agent plugin's hook, which only reads stdin and writes stdout.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == devlanes_agent_hooks::ARG)
+    {
+        return ExitCode::from(devlanes_agent_hooks::run(std::env::args_os().skip(2)));
+    }
     // CompleteEnv must run before any thread exists; it exits when completing.
     completion::install();
     let cli = match Cli::try_parse() {

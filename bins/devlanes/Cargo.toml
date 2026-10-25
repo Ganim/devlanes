@@ -64,6 +64,7 @@ devlanes-preset-tauri = { path = "../../crates/preset-tauri" }
 
 [dependencies]
 devlanes-version = { path = "../../crates/version" }
+devlanes-agent-hooks = { path = "../../crates/agent-hooks" }
 devlanes-cli = { path = "../../crates/cli" }
 devlanes-client = { path = "../../crates/client" }
 devlanes-config = { path = "../../crates/config" }

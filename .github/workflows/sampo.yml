@@ -56,12 +56,14 @@ jobs:
           git switch --force-create "$BRANCH" "origin/$BRANCH"
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("bins/devlanes/Cargo.toml", "rb"))["package"]["version"])')
           # sed keeps the file's formatting, which jq would rewrite.
-          plugin=agent-plugin/.claude-plugin/plugin.json
-          sed -i "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$version\"/" "$plugin"
-          jq -e --arg version "$version" '.version == $version' "$plugin" >/dev/null
+          for plugin in agent-plugin/.claude-plugin/plugin.json agent-plugin/.codex-plugin/plugin.json; do
+            sed -i "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$version\"/" "$plugin"
+            jq -e --arg version "$version" '.version == $version' "$plugin" >/dev/null
+          done
           # bins/devlanes/build.rs rewrites the schemas, which name the version.
           cargo check --locked -p devlanes
-          git add "$plugin" crates/config/schema.json crates/config/user-schema.json
+          git add agent-plugin/.claude-plugin/plugin.json agent-plugin/.codex-plugin/plugin.json \
+            crates/config/schema.json crates/config/user-schema.json
           if git diff --cached --quiet; then
             exit 0
           fi

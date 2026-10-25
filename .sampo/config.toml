@@ -20,6 +20,7 @@ fixed = [["cargo/devlanes", "cargo/devlanes-hosts-helper"]]
 # depends on it up to devlanes, takes the release's biggest bump; the rest stay put.
 # A new crate goes here.
 linked = [[
+  "cargo/devlanes-agent-hooks",
   "cargo/devlanes-cli",
   "cargo/devlanes-client",
   "cargo/devlanes-config",

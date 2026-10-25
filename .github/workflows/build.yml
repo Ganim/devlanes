@@ -80,15 +80,17 @@ jobs:
           SNAPSHOT: ${{ inputs.snapshot }}
         run: |
           crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "devlanes") | .version')
-          plugin=$(jq -r .version agent-plugin/.claude-plugin/plugin.json)
           if [ "$VERSION" != "$crate" ]; then
             echo "::error::version $VERSION and devlanes $crate must match"
             exit 1
           fi
-          if [ "$SNAPSHOT" != true ] && [ "$VERSION" != "$plugin" ]; then
-            echo "::error::version $VERSION and agent-plugin/.claude-plugin/plugin.json $plugin must match"
-            exit 1
-          fi
+          for manifest in agent-plugin/.claude-plugin/plugin.json agent-plugin/.codex-plugin/plugin.json; do
+            plugin=$(jq -r .version "$manifest")
+            if [ "$SNAPSHOT" != true ] && [ "$VERSION" != "$plugin" ]; then
+              echo "::error::version $VERSION and $manifest $plugin must match"
+              exit 1
+            fi
+          done
       - name: Build
         # The build ID marks official builds in the daemon handshake and doctor; others say local.
         env:

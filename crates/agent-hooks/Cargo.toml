@@ -1,0 +1,17 @@
+[package]
+name = "devlanes-agent-hooks"
+description = "The agent plugin's PreToolUse hook for Claude Code and Codex: rejects backgrounded dev servers"
+version = "0.3.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

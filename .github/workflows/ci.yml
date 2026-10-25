@@ -116,7 +116,6 @@ jobs:
       - run: actionlint
       - run: git ls-files -z '*.sh' | xargs -0 shellcheck
       - run: sh packaging/scripts/check.sh
-      - run: sh agent-plugin/scripts/test-block-background.sh
   # install.ps1, package.ps1 and the npm launcher on Windows, against a fake
   # devlanes.exe, so no Rust build is needed.
   packaging-windows:

@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+mod agent_hook;
+
 /// The config crate repeats the DNS zone's TLD rule to reject a bad `hostnames.tld`
 /// at load; both must accept and refuse the same names.
 #[test]

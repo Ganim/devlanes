@@ -31,11 +31,12 @@ While working on one crate, test just that crate: `cargo nextest run -p devlanes
 Changes to shell scripts or workflows also have a check, which CI runs in its `packaging` job:
 
 ```sh
-shellcheck install.sh packaging/scripts/*.sh packaging/homebrew/render.sh packaging/npm/build.sh agent-plugin/scripts/*.sh e2e/ssh/run.sh
+git ls-files -z '*.sh' | xargs -0 shellcheck
 actionlint
-sh packaging/scripts/check.sh                       # release scripts and install.sh against fake binaries
-sh agent-plugin/scripts/test-block-background.sh    # the Claude Code hook
+sh packaging/scripts/check.sh   # release scripts and install.sh against fake binaries
 ```
+
+The agent plugin's hooks run `devlanes __agent-hook`, which lives in `crates/agent-hooks`; `bins/devlanes/tests/it/agent_hook.rs` runs the plugin's hook command lines in the shells the agents use.
 
 `install.ps1`, `package.ps1` and the npm launcher have a Windows check against a fake `devlanes.exe`, which CI runs in its `packaging-windows` job. It needs PSScriptAnalyzer (CI pins 1.25.0), both `powershell.exe` and `pwsh`, and `node`. It changes your user `PATH` while it runs and writes the old value back at the end:
 

@@ -85,7 +85,7 @@ Run `devlanes` with no command (or `devlanes ui`) on a terminal. It lists every 
 
 ## Coding agents
 
-Agents should start services through devlanes instead of backgrounding `pnpm dev &` in their shell. The [agent plugin](../agent-plugin/README.md) packages a guide for them as a Claude Code plugin, a skill for the skills CLI and a Codex `AGENTS.md` to paste into a repository, plus an optional hook that rejects backgrounded dev servers. When devlanes detects an agent it switches to terse output with failures first; `devlanes exec --name NAME -- COMMAND` runs a one-off process as a unit, and `devlanes wait` and budgeted `devlanes logs` let the agent check on it.
+Agents should start services through devlanes instead of backgrounding `pnpm dev &` in their shell. The [agent plugin](../agent-plugin/README.md) packages a guide for them as a Claude Code and Codex plugin, a skill for the skills CLI and a Codex `AGENTS.md` to paste into a repository; the plugin also has a hook that rejects backgrounded dev servers. When devlanes detects an agent it switches to terse output with failures first; `devlanes exec --name NAME -- COMMAND` runs a one-off process as a unit, and `devlanes wait` and budgeted `devlanes logs` let the agent check on it.
 
 In CI, `devlanes with -- pnpm test:e2e` starts the lane, runs the command with the lane's URLs in its environment, stops what it started and exits with the command's code.
 
