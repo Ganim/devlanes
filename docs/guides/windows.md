@@ -15,7 +15,14 @@ In PowerShell:
 irm https://devlanes.run/install.ps1 | iex
 ```
 
-The script checks the archive against the release's `SHA256SUMS`, installs `devlanes.exe` to `%LOCALAPPDATA%\Programs\devlanes` and puts that directory first in your user `PATH`; terminals opened afterwards find `devlanes`. `irm | iex` takes no arguments, so settings are environment variables set before the command: `$env:DEVLANES_VERSION = 'X.Y.Z'` pins a release and `$env:DEVLANES_INSTALL_DIR = 'D:\tools\devlanes'` picks another directory. The script works in Windows PowerShell 5.1 and PowerShell 7.
+The script checks the archive against the release's `SHA256SUMS`, installs `devlanes.exe` to `%LOCALAPPDATA%\Programs\devlanes` and puts that directory first in your user `PATH`; terminals opened afterwards find `devlanes`. Options go after the script, inside the quotes:
+
+```powershell
+iex "& {$(irm https://devlanes.run/install.ps1)} -Version 0.4.0"
+iex "& {$(irm https://devlanes.run/install.ps1)} -Channel next -Dir D:\tools\devlanes"
+```
+
+`-Channel next` installs the latest build of `main`. The script works in Windows PowerShell 5.1 and PowerShell 7.
 
 cargo binstall downloads the same release build:
 

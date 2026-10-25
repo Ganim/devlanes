@@ -2,14 +2,15 @@
 # against the release's SHA256SUMS.
 #
 #   irm https://devlanes.run/install.ps1 | iex
+#   iex "& {$(irm https://devlanes.run/install.ps1)} -Channel next"
+#   iex "& {$(irm https://devlanes.run/install.ps1)} -Version 0.4.0"
 #
-# `irm | iex` passes no arguments, so the settings are environment variables, set
-# before that command, with the same names install.sh reads:
-#
-# $env:DEVLANES_VERSION = '0.1.0' pins a release (default: the latest one); 'next'
-# installs the latest build of main, from the rolling `next` prerelease.
-# $env:DEVLANES_INSTALL_DIR = 'DIR' sets the target directory
-# (default: %LOCALAPPDATA%\Programs\devlanes).
+# -Channel stable (the default) installs the latest release, -Channel next the latest
+# build of main from the rolling `next` prerelease, and -Version X.Y.Z one release.
+# -Dir DIR sets the target directory (default: %LOCALAPPDATA%\Programs\devlanes).
+# `irm | iex` passes no arguments, so $env:DEVLANES_VERSION (X.Y.Z or next) and
+# $env:DEVLANES_INSTALL_DIR, the names install.sh reads, do the same when the option
+# isn't given.
 # DEVLANES_INSTALL_BASE_URL replaces the release URL; it exists only so the script
 # can be tested against a local directory of fake releases (file:// URLs).
 #
@@ -22,8 +23,15 @@
 # `irm | iex` runs this text in the caller's session, so the body is a script block
 # called with `&`: its variables and functions end with it, and `exit` (which would
 # close the window) is never used. Failures throw, which ends a file run with exit
-# code 1 and leaves an iex session open.
+# code 1 and leaves an iex session open. The options are the block's parameters, so
+# they never reach the caller's session either. `@args` forwards them by name from the
+# `& { ... } -Channel next` wrapper above, and is empty under plain `irm | iex`.
 & {
+    param(
+        [ValidateSet('stable', 'next')][string]$Channel,
+        [string]$Version,
+        [string]$Dir
+    )
     $ErrorActionPreference = 'Stop'
     # Windows PowerShell's progress bar slows Invoke-WebRequest down by an order of magnitude.
     $ProgressPreference = 'SilentlyContinue'
@@ -230,7 +238,8 @@
     function Install-DevlanesRelease {
         <# Downloads, checks and installs a release; see the comment at the top for the settings. #>
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'An installer reports to the console, not to the pipeline.')]
-        param()
+        param([string]$Channel, [string]$Version, [string]$Dir)
+        if ($Channel -and $Version) { throw "devlanes install: -Channel and -Version can't be combined" }
         Assert-DevlanesWindowsBuild (Get-DevlanesWindowsBuild)
         $target = Get-DevlanesTarget (Get-DevlanesArchitecture)
 
@@ -240,7 +249,13 @@
             $base = $env:DEVLANES_INSTALL_BASE_URL.TrimEnd('/')
             $schemes = @('https', 'file')
         }
-        $version = [string]$env:DEVLANES_VERSION
+        if ($Channel -eq 'next') {
+            $version = 'next'
+        } elseif ($Channel -or $Version) {
+            $version = $Version
+        } else {
+            $version = [string]$env:DEVLANES_VERSION
+        }
         if ($version.StartsWith('v')) { $version = $version.Substring(1) }
         # `next` is the rolling prerelease with the latest build of main.
         $channel = ''
@@ -248,9 +263,10 @@
             $channel = 'next'
             $version = ''
         }
-        $dir = [string]$env:DEVLANES_INSTALL_DIR
+        # $dir is the -Dir parameter (PowerShell names are case-insensitive).
+        if (-not $dir) { $dir = [string]$env:DEVLANES_INSTALL_DIR }
         if (-not $dir) {
-            if (-not $env:LOCALAPPDATA) { throw 'devlanes install: LOCALAPPDATA is not set; set DEVLANES_INSTALL_DIR' }
+            if (-not $env:LOCALAPPDATA) { throw 'devlanes install: LOCALAPPDATA is not set; pass -Dir' }
             $dir = Join-Path $env:LOCALAPPDATA 'Programs\devlanes'
         }
         # Relative to PowerShell's location, which .NET's current directory does not follow.
@@ -338,8 +354,8 @@
         if ($PSVersionTable.PSVersion.Major -lt 6 -and $protocols -ne [Net.SecurityProtocolType]::SystemDefault) {
             [Net.ServicePointManager]::SecurityProtocol = $protocols -bor [Net.SecurityProtocolType]::Tls12
         }
-        Install-DevlanesRelease
+        Install-DevlanesRelease -Channel $Channel -Version $Version -Dir $Dir
     } finally {
         [Net.ServicePointManager]::SecurityProtocol = $protocols
     }
-}
+} @args

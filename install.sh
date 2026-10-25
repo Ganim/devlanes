@@ -3,10 +3,14 @@
 # archive against the release's SHA256SUMS.
 #
 #   curl -fsSL https://devlanes.run/install.sh | sh
+#   curl -fsSL https://devlanes.run/install.sh | sh -s -- --channel next
+#   curl -fsSL https://devlanes.run/install.sh | sh -s -- --version 0.4.0
 #
-# DEVLANES_VERSION=0.1.0 pins a release (default: the latest one). DEVLANES_VERSION=next
-# installs the latest build of main, from the rolling `next` prerelease.
-# DEVLANES_INSTALL_DIR sets the target directory (default: ~/.local/bin).
+# -c, --channel stable (the default) installs the latest release, --channel next the
+# latest build of main from the rolling `next` prerelease, and -v, --version X.Y.Z one
+# release. -d, --dir DIR sets the target directory (default: ~/.local/bin).
+# DEVLANES_VERSION (X.Y.Z or next) and DEVLANES_INSTALL_DIR do the same when the
+# option isn't given.
 # DEVLANES_INSTALL_SUDO=1 allows sudo when that directory is not writable.
 # DEVLANES_INSTALL_BASE_URL replaces the release URL; it exists only so the
 # script can be tested against a local directory of fake releases.
@@ -16,12 +20,6 @@ base=${DEVLANES_INSTALL_BASE_URL:-https://github.com/devlanes-run/devlanes/relea
 proto='=https'
 if [ -n "${DEVLANES_INSTALL_BASE_URL:-}" ]; then proto='=https,file'; fi
 version=${DEVLANES_VERSION:-}
-version=${version#v}
-channel=
-if [ "$version" = next ]; then
-	channel=next
-	version=
-fi
 dir=${DEVLANES_INSTALL_DIR:-$HOME/.local/bin}
 
 fail() {
@@ -29,9 +27,52 @@ fail() {
 	exit 1
 }
 
-if [ "$#" -gt 0 ]; then
-	printf 'usage: [DEVLANES_VERSION=X.Y.Z|next] [DEVLANES_INSTALL_DIR=DIR] [DEVLANES_INSTALL_SUDO=1] sh install.sh\n' >&2
+usage='usage: sh install.sh [-c, --channel stable|next | -v, --version X.Y.Z] [-d, --dir DIR]'
+usage() {
+	printf '%s\n' "$usage" >&2
 	exit 2
+}
+
+channel_set=
+version_set=
+while [ "$#" -gt 0 ]; do
+	case $1 in
+	-c | --channel | -v | --version | -d | --dir)
+		[ "$#" -ge 2 ] || usage
+		option=$1 value=$2
+		shift 2
+		;;
+	--channel=* | --version=* | --dir=*)
+		option=${1%%=*} value=${1#*=}
+		shift
+		;;
+	-h | --help)
+		printf '%s\n' "$usage"
+		exit 0
+		;;
+	*)
+		printf 'devlanes install: unknown option %s\n' "$1" >&2
+		usage
+		;;
+	esac
+	[ -n "$value" ] || usage
+	case $option:$value in
+	-c:stable | --channel:stable) version='' channel_set=1 ;;
+	-c:next | --channel:next) version=next channel_set=1 ;;
+	-c:* | --channel:*) fail "unknown channel $value; use stable or next" ;;
+	-v:* | --version:*) version=$value version_set=1 ;;
+	-d:* | --dir:*) dir=$value ;;
+	esac
+done
+if [ -n "$channel_set" ] && [ -n "$version_set" ]; then
+	fail "--channel and --version can't be combined"
+fi
+
+version=${version#v}
+channel=
+if [ "$version" = next ]; then
+	channel=next
+	version=
 fi
 
 for tool in curl tar uname mktemp awk; do
@@ -121,7 +162,7 @@ esac
 sudo=
 if ! mkdir -p "$dir" 2>/dev/null || [ ! -w "$dir" ]; then
 	if [ "${DEVLANES_INSTALL_SUDO:-}" != 1 ]; then
-		fail "$dir is not writable; set DEVLANES_INSTALL_DIR to a writable directory, or DEVLANES_INSTALL_SUDO=1 to install there with sudo"
+		fail "$dir is not writable; pass --dir with a writable directory, or DEVLANES_INSTALL_SUDO=1 to install there with sudo"
 	fi
 	command -v sudo >/dev/null 2>&1 || fail "$dir is not writable and sudo is not available"
 	printf 'devlanes install: %s is not writable; using sudo to install there\n' "$dir"

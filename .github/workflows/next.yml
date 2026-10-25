@@ -2,7 +2,7 @@ name: Next
 # Each commit on main that passes CI is built as `X.Y.(Z+1)-next.N`, where X.Y.Z is the
 # committed version and N counts the commits since the last stable tag, so it sorts after
 # the current release and before the next one. The build replaces the assets of the
-# rolling `next` prerelease, which `DEVLANES_VERSION=next sh install.sh` installs.
+# rolling `next` prerelease, which `install.sh --channel next` installs.
 # Nothing else is published: npm, Homebrew and the website only ever get stable
 # releases from release.yml.
 #
@@ -146,13 +146,13 @@ jobs:
           Not a release; it is replaced on every commit to main that passes CI. Install it with:
 
           \`\`\`sh
-          curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | DEVLANES_VERSION=next sh
+          curl -fsSL https://devlanes.run/install.sh | sh -s -- --channel next
           \`\`\`
 
           On Windows, in PowerShell:
 
           \`\`\`powershell
-          \$env:DEVLANES_VERSION = 'next'; irm https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.ps1 | iex
+          iex "& {\$(irm https://devlanes.run/install.ps1)} -Channel next"
           \`\`\`
           EOF
           # SHA256SUMS goes last and old archives are deleted after it, so the install

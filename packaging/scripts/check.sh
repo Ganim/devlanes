@@ -104,4 +104,29 @@ DEVLANES_VERSION=next DEVLANES_INSTALL_BASE_URL="file://$release" DEVLANES_INSTA
 	sh "$root/install.sh" >/dev/null
 [ "$("$work/installed-next/devlanes")" = "devlanes $version" ]
 
+# The same through options, as `curl | sh -s -- ...` passes them. Each source is the
+# only one present, so a run that reads the wrong one fails.
+install_with() {
+	DEVLANES_INSTALL_BASE_URL="file://$release" DEVLANES_INSTALL_DIR="$work/installed-opt" sh -s -- "$@" <"$root/install.sh"
+}
+mv "$release/download/v$version" "$work/versioned"
+install_with --channel next >/dev/null
+mv "$work/versioned" "$release/download/v$version"
+mv "$release/download/next" "$work/next"
+install_with --version "$version" >/dev/null
+install_with --version="v$version" >/dev/null
+DEVLANES_VERSION=next install_with --channel=stable >/dev/null
+[ "$("$work/installed-opt/devlanes")" = "devlanes $version" ]
+mv "$work/next" "$release/download/next"
+install_with -c next -d "$work/installed-short" >/dev/null
+[ "$("$work/installed-short/devlanes")" = "devlanes $version" ]
+[ "$(sh "$root/install.sh" --help)" = "$(sed -n "s/^usage='\(.*\)'$/\1/p" "$root/install.sh")" ]
+for wrong in '--channel dev' "--channel next --version $version" '--release 1' '--version'; do
+	# shellcheck disable=SC2086 # each case is several words
+	if install_with $wrong >/dev/null 2>&1; then
+		echo "install.sh accepted $wrong" >&2
+		exit 1
+	fi
+done
+
 echo "packaging scripts: dry run passed"

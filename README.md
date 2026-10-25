@@ -23,7 +23,20 @@ On Windows 11 24H2 or later, x64 or arm64, install from PowerShell; npm and carg
 irm https://devlanes.run/install.ps1 | iex
 ```
 
-`install.sh` verifies the archive against the release's `SHA256SUMS`, installs to `~/.local/bin` (`DEVLANES_INSTALL_DIR` changes it; `DEVLANES_INSTALL_SUDO=1` allows sudo for a directory you can't write) and takes `DEVLANES_VERSION=X.Y.Z` to pin a release. [packaging](packaging/README.md) describes the release pipeline.
+Both scripts verify the archive against the release's `SHA256SUMS`. `install.sh` installs to `~/.local/bin`; `DEVLANES_INSTALL_SUDO=1` allows sudo for a directory you can't write. They take a channel, a version and a directory:
+
+```sh
+curl -fsSL https://devlanes.run/install.sh | sh -s -- --channel next    # latest build of main
+curl -fsSL https://devlanes.run/install.sh | sh -s -- --version 0.4.0   # one release
+curl -fsSL https://devlanes.run/install.sh | sh -s -- --dir ~/bin
+```
+
+```powershell
+iex "& {$(irm https://devlanes.run/install.ps1)} -Channel next"
+iex "& {$(irm https://devlanes.run/install.ps1)} -Version 0.4.0"
+```
+
+[packaging](packaging/README.md) describes the release pipeline.
 
 ### Shorter name
 
