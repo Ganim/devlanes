@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use devlanes_proto::{Context, ExecParams, LogQuery, Method, Request, Selection};
 use serde_json::json;
 
@@ -443,10 +443,14 @@ pub enum EnvCommand {
         explain: bool,
     },
     /// Print export KEY=VALUE lines for eval in a shell
+    #[command(after_help = EXPORT_AFTER)]
     Export {
         /// Unit whose environment to export ([lane:]unit) [default: the lane's variables]
         #[arg(value_name = "UNIT")]
         unit: Option<String>,
+        /// Shell syntax of the printed lines
+        #[arg(long, value_enum, default_value_t = ExportShell::Posix)]
+        shell: ExportShell,
     },
     /// Open a subshell with the lane's or one unit's environment
     Shell {
@@ -454,6 +458,25 @@ pub enum EnvCommand {
         #[arg(value_name = "UNIT")]
         unit: Option<String>,
     },
+}
+
+const EXPORT_AFTER: &str = "\
+Examples:
+  eval \"$(devlanes env export api)\"
+  devlanes env export api --shell pwsh | Out-String | Invoke-Expression
+
+Windows PowerShell 5.1 and PowerShell before 7.5 remove a variable that is
+assigned an empty value, so variables with empty values end up unset there.";
+
+/// Syntax of the lines `env export` prints. POSIX stays the default on every
+/// OS, so scripts that run `eval` work unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum ExportShell {
+    /// `export NAME='value'`, for sh, bash, zsh and Git Bash
+    #[default]
+    Posix,
+    /// `$env:NAME = 'value'`, for Windows PowerShell 5.1 and PowerShell 7; the lines are ASCII and other text is decoded from Base64
+    Pwsh,
 }
 
 #[derive(Debug, Subcommand)]
@@ -644,7 +667,10 @@ pub enum Action {
     },
     Attach(Request),
     Open(Request),
-    ExportEnv(Request),
+    ExportEnv {
+        request: Request,
+        shell: ExportShell,
+    },
     Shell(Request),
     Ui,
     Trust {
@@ -916,7 +942,7 @@ impl Cli {
                 EnvCommand::Show { unit, explain } => {
                     (Method::Env, json!({"unit": unit, "explain": explain}))
                 }
-                EnvCommand::Export { unit } | EnvCommand::Shell { unit } => {
+                EnvCommand::Export { unit, .. } | EnvCommand::Shell { unit } => {
                     (Method::Env, json!({"unit": unit}))
                 }
             },
@@ -1055,8 +1081,11 @@ impl Cli {
                 command: UrlCommand::Open { .. },
             }) if runtime.mode != OutputMode::Agent => Action::Open(request),
             Some(Command::Env {
-                command: EnvCommand::Export { .. },
-            }) => Action::ExportEnv(request),
+                command: EnvCommand::Export { shell, .. },
+            }) => Action::ExportEnv {
+                request,
+                shell: *shell,
+            },
             Some(Command::Env {
                 command: EnvCommand::Shell { .. },
             }) => Action::Shell(request),

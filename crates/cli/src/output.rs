@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
+use base64::{Engine, prelude::BASE64_STANDARD};
 use devlanes_proto::{ActorKind, Event, LaneSummary, LogLine, Method, RpcError, UnitSummary};
 use serde_json::{Value, json};
 
 use crate::{
-    OutputMode, Runtime, exit,
+    ExportShell, OutputMode, Runtime, exit,
     render::{self, cap_line, clean, error_message},
 };
 
@@ -473,8 +474,9 @@ impl Render for LogLine {
     }
 }
 
-/// Shell assignments for `env export`, plus the names a POSIX shell cannot take
-/// (config allows names like `NEXT-PUBLIC` that `export` rejects) or values with NUL.
+/// Shell assignments for `env export`, plus the names the shell cannot take
+/// (config allows names like `NEXT-PUBLIC` that POSIX `export` rejects) or values
+/// with NUL.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Exported {
     pub script: String,
@@ -482,25 +484,70 @@ pub struct Exported {
 }
 
 /// Produces shell assignments without evaluating values received from the daemon;
-/// variables a POSIX shell cannot hold are skipped, so one name does not cost the rest.
-pub fn export_environment(values: &BTreeMap<String, String>) -> Exported {
+/// variables the shell cannot hold are skipped, so one name does not cost the rest.
+pub fn export_environment(values: &BTreeMap<String, String>, shell: ExportShell) -> Exported {
     let mut exported = Exported::default();
     for (key, value) in values {
-        let mut chars = key.chars();
-        if !chars
-            .next()
-            .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
-            || !chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
-            || value.contains('\0')
-        {
-            exported.skipped.push(key.clone());
-            continue;
+        let line = match shell {
+            ExportShell::Posix => (plain_name(key) && !value.contains('\0'))
+                .then(|| format!("export {key}={}\n", shell_quote(value))),
+            ExportShell::Pwsh => pwsh_assignment(key, value),
+        };
+        match line {
+            Some(line) => exported.script.push_str(&line),
+            None => exported.skipped.push(key.clone()),
         }
-        exported
-            .script
-            .push_str(&format!("export {key}={}\n", shell_quote(value)));
     }
     exported
+}
+
+/// Whether `key` is a name every shell takes as it is: a letter or `_`, then
+/// letters, digits and `_`.
+fn plain_name(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// One PowerShell assignment line, or `None` when Windows cannot hold the
+/// variable (an empty name, `=` in the name, NUL anywhere). Names `$env:` cannot
+/// spell, such as `NEXT-PUBLIC`, go through `Set-Item -LiteralPath` on the
+/// `Env:` drive, which takes the name as a plain string and, like `$env:`,
+/// keeps an empty value on PowerShell 7.5 and later
+/// (`[Environment]::SetEnvironmentVariable` would delete it).
+fn pwsh_assignment(key: &str, value: &str) -> Option<String> {
+    if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
+        return None;
+    }
+    let value = pwsh_string(value);
+    Some(if plain_name(key) {
+        format!("$env:{key} = {value}\n")
+    } else {
+        format!(
+            "Set-Item -LiteralPath ({}) -Value ({value})\n",
+            pwsh_string(&format!("Env:{key}"))
+        )
+    })
+}
+
+/// A PowerShell expression for `text` written in printable ASCII: a
+/// single-quoted literal (quotes doubled) when `text` is printable ASCII,
+/// otherwise its UTF-8 bytes decoded from Base64 at run time. PowerShell decodes
+/// a native command's output with the console code page, where other bytes can
+/// change meaning (in code page 1252, UTF-8 continuation bytes 0x91 and 0x92
+/// read as typographic quotes, which also end a single-quoted string), and
+/// `-Command -` reads its input line by line, so each assignment stays on one.
+fn pwsh_string(text: &str) -> String {
+    if text.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
+        format!("'{}'", text.replace('\'', "''"))
+    } else {
+        format!(
+            "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{}'))",
+            BASE64_STANDARD.encode(text)
+        )
+    }
 }
 
 /// Quotes POSIX shell metacharacters, including empty strings and embedded quotes.

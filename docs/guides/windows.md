@@ -49,7 +49,19 @@ The CLI runs in any shell. Git Bash rewrites arguments and variables that look l
 
 Git Bash's own window (mintty) gives Windows programs no console: prompts are cancelled with a message and `attach` fails. Use Windows Terminal or a console window for those.
 
-`devlanes env export` prints POSIX `export` lines for `eval` in Git Bash. `devlanes env shell` starts the program named by `SHELL` when that variable is set, otherwise `%ComSpec%` (normally `cmd.exe`).
+`devlanes env export` prints POSIX `export` lines for `eval` in Git Bash. In PowerShell, add `--shell pwsh`:
+
+```powershell
+devlanes env export api --shell pwsh | Out-String | Invoke-Expression
+```
+
+```sh
+eval "$(devlanes env export api)"   # Git Bash
+```
+
+The PowerShell lines are plain ASCII whatever the console code page: a value with anything other than printable ASCII (a line break, `é`, `日本`) is written as Base64 and decoded when the line runs, and a name that `$env:NAME` cannot spell, such as `NEXT-PUBLIC`, is set through `Set-Item -LiteralPath Env:NEXT-PUBLIC`. Windows PowerShell 5.1 and PowerShell before 7.5 remove a variable that is assigned an empty value, so variables with empty values end up unset there.
+
+`devlanes env shell` starts the program named by `SHELL` when that variable is set, otherwise `%ComSpec%` (normally `cmd.exe`).
 
 Environment variable names are uppercased where they enter devlanes, since Windows treats `Path` and `PATH` as one variable: `env show` lists `PATH`, and `${{ env.Path }}` and `${{ env.PATH }}` read the same value.
 

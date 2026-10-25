@@ -214,11 +214,11 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
             });
             Ok(0)
         }
-        Action::ExportEnv(request) => {
+        Action::ExportEnv { request, shell } => {
             let data = call(request).await?;
             let env = serde_json::from_value(data.get("env").cloned().unwrap_or_default())
                 .unwrap_or_default();
-            let exported = export_environment(&env);
+            let exported = export_environment(&env, shell);
             // On stderr, so `eval "$(devlanes env export)"` still works.
             let stderr = exported
                 .skipped
