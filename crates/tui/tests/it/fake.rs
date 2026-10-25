@@ -250,7 +250,7 @@ pub fn profiles() -> Vec<ProfileInfo> {
 
 /// The fake daemon's version: this build's, so no version-skew notice shows
 /// unless a test sets another version on purpose.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const VERSION: &str = devlanes_version::VERSION;
 
 /// `daemon.status` as the daemon sends it.
 pub fn daemon_status() -> Value {

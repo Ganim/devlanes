@@ -1,7 +1,7 @@
 [package]
 name = "devlanes-resolver-nrpt"
 description = "Windows NRPT rule that sends the devlanes TLD to the embedded DNS server"
-version.workspace = true
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

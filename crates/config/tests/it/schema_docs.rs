@@ -96,7 +96,7 @@ fn walk(schema: &Value, path: &str, named: bool, root: &Value, failures: &mut Ve
 /// schema has a title: yaml-language-server would print it as a heading on every hover.
 #[test]
 fn editor_schema_metadata_is_complete() {
-    let version = format!("devlanes v{}", env!("CARGO_PKG_VERSION"));
+    let version = format!("devlanes v{}", devlanes_version::VERSION);
     for (name, schema) in [
         ("registered", super::registered_schema()),
         ("project", devlanes_config::project_schema()),

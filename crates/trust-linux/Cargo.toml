@@ -1,7 +1,7 @@
 [package]
 name = "devlanes-trust-linux"
 description = "Linux system CA store and NSS trust stores for the devlanes CA."
-version.workspace = true
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

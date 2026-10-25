@@ -9,8 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-/// The repository that `cargo binstall --git` and `cargo install --git` build from.
-const REPOSITORY: &str = "https://github.com/devlanes-run/devlanes";
+use devlanes_version::REPOSITORY;
 /// The notice log under `$DEVLANES_HOME`.
 const NOTICES_FILE: &str = "notices.json";
 /// A notice repeats at most once per day.

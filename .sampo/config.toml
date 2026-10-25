@@ -1,0 +1,82 @@
+version = 1
+
+[git]
+# devlanes is tagged vX.Y.Z, which release.yml builds; the other crates keep the
+# default devlanes-<name>-vX.Y.Z.
+short_tags = "devlanes"
+
+[changelog]
+show_acknowledgments = false
+# Crates bumped only because a dependency changed get one "version bump only" section
+# instead of an "Updated dependencies" entry.
+automatic_entries = "collapse"
+
+[packages]
+# The two binaries users install carry the release version: devlanes and the
+# devlanes-hosts helper. Library crates report it through devlanes-version, which reads
+# it from bins/devlanes/Cargo.toml.
+fixed = [["cargo/devlanes", "cargo/devlanes-hosts-helper"]]
+# Every other crate keeps its own version. A crate that changes, and everything that
+# depends on it up to devlanes, takes the release's biggest bump; the rest stay put.
+# A new crate goes here.
+linked = [[
+  "cargo/devlanes-cli",
+  "cargo/devlanes-client",
+  "cargo/devlanes-config",
+  "cargo/devlanes-core",
+  "cargo/devlanes-daemon",
+  "cargo/devlanes-e2e",
+  "cargo/devlanes-env-direnv",
+  "cargo/devlanes-env-mise",
+  "cargo/devlanes-git",
+  "cargo/devlanes-infra-compose",
+  "cargo/devlanes-infra-docker",
+  "cargo/devlanes-ipc",
+  "cargo/devlanes-logs",
+  "cargo/devlanes-metrics",
+  "cargo/devlanes-metrics-docker",
+  "cargo/devlanes-metrics-linux",
+  "cargo/devlanes-metrics-macos",
+  "cargo/devlanes-metrics-windows",
+  "cargo/devlanes-pki",
+  "cargo/devlanes-platform-bun",
+  "cargo/devlanes-platform-deno",
+  "cargo/devlanes-platform-node",
+  "cargo/devlanes-platform-python",
+  "cargo/devlanes-platform-rust",
+  "cargo/devlanes-preset-next",
+  "cargo/devlanes-preset-tauri",
+  "cargo/devlanes-preset-vite",
+  "cargo/devlanes-preset-wrangler",
+  "cargo/devlanes-proto",
+  "cargo/devlanes-proxy",
+  "cargo/devlanes-resolve",
+  "cargo/devlanes-resolver-dns",
+  "cargo/devlanes-resolver-hosts",
+  "cargo/devlanes-resolver-nrpt",
+  "cargo/devlanes-run-script-cargo",
+  "cargo/devlanes-run-script-deno",
+  "cargo/devlanes-run-script-just",
+  "cargo/devlanes-run-script-make",
+  "cargo/devlanes-run-script-npm",
+  "cargo/devlanes-run-script-python",
+  "cargo/devlanes-runner-pty",
+  "cargo/devlanes-runner-windows",
+  "cargo/devlanes-shell-windows",
+  "cargo/devlanes-start-gate",
+  "cargo/devlanes-state",
+  "cargo/devlanes-sync",
+  "cargo/devlanes-sys",
+  "cargo/devlanes-sys-windows",
+  "cargo/devlanes-term",
+  "cargo/devlanes-testing",
+  "cargo/devlanes-transport",
+  "cargo/devlanes-transport-ssh",
+  "cargo/devlanes-trust",
+  "cargo/devlanes-trust-linux",
+  "cargo/devlanes-trust-macos",
+  "cargo/devlanes-trust-windows",
+  "cargo/devlanes-tui",
+  "cargo/devlanes-tunnel",
+  "cargo/devlanes-version",
+]]

@@ -399,7 +399,7 @@ impl Inner {
         }
         match method {
             Method::DaemonStatus => Ok(self.with_update(json!({
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": devlanes_version::VERSION,
                 "pid": std::process::id(),
                 "uptime_ms": self.started.elapsed().as_millis(),
                 "release_check": self.release_check(),

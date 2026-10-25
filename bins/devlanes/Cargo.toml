@@ -1,7 +1,7 @@
 [package]
 name = "devlanes"
 description = "Run a dev environment per git worktree, side by side: CLI, TUI and daemon in one binary"
-version.workspace = true
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -63,6 +63,7 @@ devlanes-preset-wrangler = { path = "../../crates/preset-wrangler" }
 devlanes-preset-tauri = { path = "../../crates/preset-tauri" }
 
 [dependencies]
+devlanes-version = { path = "../../crates/version" }
 devlanes-cli = { path = "../../crates/cli" }
 devlanes-client = { path = "../../crates/client" }
 devlanes-config = { path = "../../crates/config" }

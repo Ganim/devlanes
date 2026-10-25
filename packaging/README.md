@@ -1,6 +1,6 @@
 # Packaging
 
-Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula and the npm packages all come from `.github/workflows/release.yml` and the scripts here. `install.sh` and `install.ps1` at the repository root install from the same archives.
+Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula and the npm packages all come from `.github/workflows/release.yml` and the scripts here; `.github/workflows/build.yml` builds the archives for it and for the `next` builds of `main`. `install.sh` and `install.ps1` at the repository root install from the same archives.
 
 | Path | Purpose |
 |---|---|
@@ -22,21 +22,29 @@ Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula an
 | Script | `curl -fsSL https://devlanes.run/install.sh \| sh` |
 | Script (Windows, PowerShell) | `irm https://devlanes.run/install.ps1 \| iex` |
 | Source | `cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes devlanes-hosts-helper` (Windows: `devlanes` only) |
+| Latest build of `main` | `curl -fsSL https://raw.githubusercontent.com/devlanes-run/devlanes/main/install.sh \| DEVLANES_VERSION=next sh`, or `$env:DEVLANES_VERSION = 'next'` before `install.ps1` |
 
 Every channel except the source build installs the release archives. Homebrew has no Windows build.
 
+## Next builds
+
+`.github/workflows/next.yml` builds every commit on `main` after the CI workflow passes on it, with the same `build.yml` as releases. The version is the current one with the patch bumped and `-next.N` added, where N counts the commits since the last stable tag: after 0.3.0 that's `0.3.1-next.14`, which sorts after 0.3.0 and before any release that follows. That version is written into the build only, never committed. The archives, `SHA256SUMS`, `release-manifest.json`, the schemas and `install.sh` then replace the assets of the GitHub prerelease `next`, whose tag moves to that commit. Only `install.sh` reads it: npm, Homebrew, cargo binstall and the website stay on stable releases, and a prerelease is never GitHub's `latest`. Only the tip of `main` is built and published: CI runs can finish out of order, so a run for an older commit stops before building, a newer tip cancels a build still running, and a build that finishes after `main` moved isn't published. `remote connect --install` from a `next` build fetches the `next` manifest, which only matches while that build is still the latest. Repository settings must not enable immutable releases, which forbid replacing assets.
+
 ## Releasing
 
-1. Set `version` in `[workspace.package]` of the root `Cargo.toml` and in `agent-plugin/.claude-plugin/plugin.json`, and merge.
-2. Push a tag `vX.Y.Z` that matches both. The workflow fails if they differ. A version with a `-` suffix is a prerelease.
+Releases come from the change files in `.sampo/changesets` (`CONTRIBUTING.md` describes them). `.github/workflows/sampo.yml` runs [Sampo's GitHub Action](https://github.com/bruits/sampo/tree/main/crates/sampo-github-action) on every push to `main`:
 
-The workflow then runs these jobs:
+1. While change files are pending, it keeps the pull request "Release (main)" from the branch `release/main` up to date. That runs `sampo release`, which consumes the change files, bumps the changed crates' versions, refreshes `Cargo.lock` and writes each crate's `CHANGELOG.md`. The workflow then copies the version into `agent-plugin/.claude-plugin/plugin.json` and regenerates the schemas, which name the version, on that branch.
+2. Merging it leaves no change files, so the action runs `sampo publish`. The crates inherit `publish = false`, so that publishes nothing and only tags the new versions: `vX.Y.Z` for `devlanes` (`short_tags` in `.sampo/config.toml`) and `devlanes-<name>-vX.Y.Z` for the other crates. The workflow then dispatches `release.yml` on the new `vX.Y.Z` tag.
+
+The release version is `bins/devlanes/Cargo.toml`'s. `.sampo/config.toml` keeps `devlanes` and `devlanes-hosts-helper` in a `fixed` group, so the two shipped binaries always match; library crates report the same version through `devlanes_version::VERSION`, which reads it from `bins/devlanes/Cargo.toml`. Every other crate has its own version in a `linked` group: a change to a crate bumps it and everything that depends on it up to `devlanes`, all with the biggest bump in the release, and leaves the rest alone. A `minor` change in `devlanes-daemon` releases daemon and devlanes as 0.4.0 while `devlanes-sync` stays at 0.3.0. The helper being in the `fixed` group also bumps `devlanes-resolver-hosts`, which depends on it, on every release. Don't edit versions by hand. Sampo applies plain SemVer, so until 1.0 a breaking change is `minor` (0.3.x to 0.4.0) and everything else `patch`. Release notes are GitHub's generated notes; the changelogs have the details.
+
+`release.yml` also runs for a `v*` tag pushed by hand, and checks that the tag matches both versions. A version with a `-` suffix is a prerelease. It runs these jobs:
 
 | Job | Does |
 |---|---|
 | `test` | Runs the workspace tests on Linux, macOS and Windows, in parallel with `build` |
-| `build` | Builds `devlanes` and `devlanes-hosts` for each macOS and Linux target, fails if the committed config schemas differ from the generated ones, and packs the archive |
-| `build-windows` | Builds `devlanes.exe` for each Windows target, checks the schemas, runs `devlanes.exe --version`, fails if the executable imports the Visual C++ runtime (`dumpbin /dependents`), and packs the zip with `package.ps1` |
+| `build` | Runs `build.yml`. Its `build` job builds `devlanes` and `devlanes-hosts` for each macOS and Linux target, fails if the tag doesn't match the committed versions or if the committed config schemas differ from the generated ones, and packs the archive. Its `build-windows` job builds `devlanes.exe` for each Windows target, checks the schemas, runs `devlanes.exe --version`, fails if the executable imports the Visual C++ runtime (`dumpbin /dependents`), and packs the zip with `package.ps1` |
 | `npm-preflight` | Fails when the `devlanes` package or one of its `optionalDependencies` does not exist on the npm registry, before any draft release exists |
 | `release` | Writes `SHA256SUMS`, `release-manifest.json` and the formula, copies `schema.json`, `user-schema.json`, `install.sh` and `install.ps1`, attests the archives' build provenance, and uploads everything to a draft release. A rerun refills the draft and refuses to touch a published release |
 | `publish` | Publishes the draft |
@@ -72,6 +80,8 @@ gh attestation verify devlanes-0.1.0-x86_64-pc-windows-msvc.zip --repo devlanes-
 ```
 
 ## Credentials
+
+`sampo.yml` only uses the workflow's `GITHUB_TOKEN`. GitHub starts no workflows for what that token pushes, which is why the job dispatches `release.yml` itself and why CI on the release pull request waits for someone to approve the runs.
 
 `homebrew-publish` pushes to the tap with the repository secret `HOMEBREW_TAP_TOKEN`, a fine-grained token with Contents read and write on `devlanes-run/homebrew-tap` only. It expires on the date set when it was created; replace the secret before then. `website` sends its dispatch with `WEBSITE_DISPATCH_TOKEN`, a fine-grained token with Contents write on `devlanes-run/website` only.
 

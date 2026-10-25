@@ -980,6 +980,7 @@ dependencies = [
  "devlanes-trust-windows",
  "devlanes-tui",
  "devlanes-tunnel",
+ "devlanes-version",
  "futures-util",
  "rustix",
  "serde_json",
@@ -1002,6 +1003,7 @@ dependencies = [
  "devlanes-core",
  "devlanes-proto",
  "devlanes-term",
+ "devlanes-version",
  "insta",
  "is-ai-agent",
  "serde",
@@ -1021,6 +1023,7 @@ dependencies = [
  "devlanes-ipc",
  "devlanes-proto",
  "devlanes-sys-windows",
+ "devlanes-version",
  "dunce",
  "rustix",
  "serde",
@@ -1041,6 +1044,7 @@ dependencies = [
  "devlanes-preset-vite",
  "devlanes-preset-wrangler",
  "devlanes-sys-windows",
+ "devlanes-version",
  "globset",
  "indexmap",
  "insta",
@@ -1101,6 +1105,7 @@ dependencies = [
  "devlanes-transport",
  "devlanes-transport-ssh",
  "devlanes-tunnel",
+ "devlanes-version",
  "dunce",
  "fs2",
  "futures-util",
@@ -1439,6 +1444,7 @@ dependencies = [
 name = "devlanes-proto"
 version = "0.3.0"
 dependencies = [
+ "devlanes-version",
  "serde",
  "serde_json",
 ]
@@ -1766,6 +1772,7 @@ dependencies = [
  "devlanes-sys-windows",
  "devlanes-testing",
  "devlanes-transport",
+ "devlanes-version",
  "getrandom 0.3.4",
  "openssh",
  "serde",
@@ -1853,6 +1860,7 @@ dependencies = [
  "devlanes-sys",
  "devlanes-sys-windows",
  "devlanes-term",
+ "devlanes-version",
  "futures-util",
  "insta",
  "jiff",
@@ -1880,6 +1888,7 @@ dependencies = [
  "devlanes-proto",
  "devlanes-sync",
  "devlanes-transport",
+ "devlanes-version",
  "futures-util",
  "rustix",
  "serde",
@@ -1889,6 +1898,10 @@ dependencies = [
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "devlanes-version"
+version = "0.3.0"
 
 [[package]]
 name = "diesel"

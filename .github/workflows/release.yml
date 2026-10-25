@@ -2,10 +2,12 @@ name: Release
 # A `v*` tag tests the commit, builds the archives and uploads them to a draft
 # release. The release is published only after every asset is attached, so the
 # Homebrew formula, npm packages, cargo binstall and install.sh never see a
-# half-filled release.
+# half-filled release. sampo.yml dispatches it on the tag it creates, because tags
+# pushed with GITHUB_TOKEN start no workflows; a tag pushed by hand starts it directly.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -47,134 +49,29 @@ jobs:
           kache stats
           kache daemon stop
 
-  build:
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            native: true
-          # Cross-compiled on the arm64 runner, so it is built but not executed.
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            native: false
-          # 22.04 runners keep the glibc requirement at 2.35, so the binaries also
-          # run on Debian 12 and Ubuntu 22.04 hosts that SSH bootstrap installs onto.
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
-            native: true
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04-arm
-            native: true
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    env:
-      TARGET: ${{ matrix.target }}
-      # kache passes every compile straight to rustc here: shipped binaries are always
-      # compiled from source, and release targets share no cache entries with CI anyway.
-      KACHE_DISABLED: "1"
+  tag-version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install pinned toolchain
+      - id: version
         run: |
-          rustup toolchain install
-          rustup target add "$TARGET"
-      # .cargo/config.toml names kache as rustc wrapper, so it must exist even when disabled.
-      - uses: ./.github/actions/kache
-      - name: Check the tag against the workspace and plugin versions
-        run: |
-          version=${GITHUB_REF_NAME#v}
-          crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "devlanes") | .version')
-          plugin=$(jq -r .version agent-plugin/.claude-plugin/plugin.json)
-          if [ "$version" != "$crate" ] || [ "$version" != "$plugin" ]; then
-            echo "::error::tag $GITHUB_REF_NAME, devlanes $crate and agent-plugin/.claude-plugin/plugin.json $plugin must match"
+          case $GITHUB_REF in
+          refs/tags/v*) echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT" ;;
+          *)
+            echo "::error::run this workflow on a v* tag, not $GITHUB_REF"
             exit 1
-          fi
-          echo "VERSION=$version" >> "$GITHUB_ENV"
-      - name: Build
-        # The tag marks official builds in the daemon handshake and doctor; others say local.
-        env:
-          DEVLANES_BUILD_ID: ${{ github.ref_name }}
-        run: cargo build --release --locked --target "$TARGET" -p devlanes -p devlanes-hosts-helper
-      # build.rs regenerates the served schemas; a difference means they were committed stale.
-      - name: Check the committed schemas
-        run: git diff --exit-code crates/config/schema.json crates/config/user-schema.json
-      - name: Smoke test
-        if: matrix.native
-        run: |
-          "target/$TARGET/release/devlanes" --version | grep -Fx "devlanes $VERSION"
-          "target/$TARGET/release/devlanes-hosts" version | grep -F "build=release"
-      - name: Package
-        run: sh packaging/scripts/package.sh "$VERSION" "$TARGET" dist
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: dist-${{ matrix.target }}
-          path: dist/
-          if-no-files-found: error
+            ;;
+          esac
 
-  build-windows:
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-          # Native arm64 runner, so the binary is executed like the x64 one.
-          - target: aarch64-pc-windows-msvc
-            os: windows-11-arm
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: bash
-    env:
-      TARGET: ${{ matrix.target }}
-      # As in build: shipped binaries are always compiled from source.
-      KACHE_DISABLED: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install pinned toolchain
-        run: |
-          rustup toolchain install
-          rustup target add "$TARGET"
-      # .cargo/config.toml names kache as rustc wrapper, so it must exist even when disabled.
-      - uses: ./.github/actions/kache
-      # The build job checks the tag against the workspace and plugin versions; the
-      # smoke test below ties this binary to the tag.
-      - name: Version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-      # devlanes-hosts is Unix-only; .cargo/config.toml links the C runtime statically.
-      - name: Build
-        env:
-          DEVLANES_BUILD_ID: ${{ github.ref_name }}
-        run: cargo build --release --locked --target "$TARGET" -p devlanes
-      # .gitattributes checks the schemas out with LF on Windows too, as build.rs writes them.
-      - name: Check the committed schemas
-        run: git diff --exit-code crates/config/schema.json crates/config/user-schema.json
-      - name: Smoke test
-        run: |
-          "target/$TARGET/release/devlanes.exe" --version | tr -d '\r' | grep -Fx "devlanes $VERSION"
-      # The Visual C++ Redistributable is not part of Windows, so the executable must
-      # not import its DLLs.
-      - name: Check the C runtime is linked statically
-        shell: pwsh
-        run: |
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $dumpbin = @(& $vswhere -latest -products * -find 'VC\Tools\MSVC\*\bin\Host*\*\dumpbin.exe')[0]
-          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
-          $imports = & $dumpbin /nologo /dependents "target/$env:TARGET/release/devlanes.exe" | Out-String
-          if ($LASTEXITCODE -ne 0 -or $imports -notmatch '(?im)^\s+kernel32\.dll\s*$') { throw "unexpected dumpbin output:`n$imports" }
-          if ($imports -match '(?im)^\s+(vcruntime|msvcp)\S*\.dll\s*$') { throw "devlanes.exe imports the Visual C++ runtime:`n$imports" }
-          Write-Output $imports
-      - name: Package
-        shell: pwsh
-        run: ./packaging/scripts/package.ps1 -Version $env:VERSION -Target $env:TARGET -OutDir dist
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: dist-${{ matrix.target }}
-          path: dist/
-          if-no-files-found: error
+  # Builds every target, and fails when the tag doesn't match the committed Cargo.toml
+  # and plugin.json versions.
+  build:
+    needs: tag-version
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.tag-version.outputs.version }}
 
   # The npm job publishes every package in the launcher's optionalDependencies. A
   # package that does not exist yet can only be created by its owner (trusted
@@ -199,7 +96,7 @@ jobs:
           fi
 
   release:
-    needs: [test, build, build-windows, npm-preflight]
+    needs: [test, build, npm-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

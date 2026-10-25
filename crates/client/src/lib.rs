@@ -178,7 +178,7 @@ impl Client {
                 daemon_version = %client.peer.version,
                 daemon_build = %client.peer.build_id,
                 daemon_protocol = client.peer.protocol,
-                client_version = env!("CARGO_PKG_VERSION"),
+                client_version = devlanes_version::VERSION,
                 client_protocol = PROTOCOL_VERSION,
                 managed_processes = client.peer.managed_processes,
                 features = %client.peer.features.join(","),

@@ -964,7 +964,7 @@ impl Inner {
             "app_sandbox": std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some(),
         });
         let mut doctor = json!({
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": devlanes_version::VERSION,
             "pid": std::process::id(),
             "home": self.opts.home,
             "db_path": self.opts.db_path,

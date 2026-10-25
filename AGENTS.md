@@ -75,6 +75,20 @@ cargo build --workspace --all-targets --all-features
 - Prefix Docker-only external tests with `docker_` for the manual CI job.
 - End-to-end tests live in `e2e/` (`devlanes-e2e`) and drive the real `devlanes` binary as separate processes, each with its own short `DEVLANES_HOME`, Git repository and locked port slot; the default nextest profile skips them, so run them with `cargo nextest run --profile e2e`, and the Docker ones by adding `--run-ignored only -E 'test(/^docker_/)'`.
 
+## Change files
+
+Every change a devlanes user could notice gets a change file in `.sampo/changesets/`, in the same commit as the change. Write it yourself without asking; ask only when you can't tell whether users notice. "Change files" in `CONTRIBUTING.md` is the full guide. The rules that matter most:
+
+- Create it with `sampo add -p cargo/<crate> -b <bump> -m '<line>'` or by hand. List each changed crate as `cargo/<package name>`, plus `cargo/devlanes` whenever someone running devlanes notices.
+- Until 1.0: `minor` for anything that breaks what worked (removed or renamed commands, flags or config keys, configs that stop loading, protocol or state changes), `patch` for everything else. Never `major`.
+- The first line is the whole entry for most changes: one sentence starting with Added, Changed, Fixed, Deprecated or Removed, naming the command, flag or config key, and saying what changes for the user. No implementation details.
+- Add a body only for breaking changes, deprecations, removals and large features: what to do instead, or the smallest example to get started. A few lines at most.
+- The writing style above applies. Cut what a user wouldn't miss before committing.
+- No change file for refactors, tests, CI or documentation; say so in the pull request description.
+- One change file per change. Update it when the change grows instead of adding another.
+
+Never edit versions or `CHANGELOG.md` files by hand; the release pull request does. A new crate goes into `packages.linked` in `.sampo/config.toml`. Code that reports the devlanes version uses `devlanes_version::VERSION`, never its own crate's `CARGO_PKG_VERSION`.
+
 ## Public content
 
 Examples and fixtures use neutral names (`acme`, `example.invalid`) and never contain credentials, private paths or references to files outside this repository.

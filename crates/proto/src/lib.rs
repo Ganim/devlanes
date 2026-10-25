@@ -30,8 +30,8 @@ impl Hello {
     pub fn current(managed_processes: usize) -> Self {
         Self {
             protocol: PROTOCOL_VERSION,
-            version: env!("CARGO_PKG_VERSION").into(),
-            build_id: option_env!("DEVLANES_BUILD_ID").unwrap_or("local").into(),
+            version: devlanes_version::VERSION.into(),
+            build_id: devlanes_version::BUILD_ID.into(),
             features: Vec::new(),
             managed_processes,
         }

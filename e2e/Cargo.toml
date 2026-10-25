@@ -1,7 +1,7 @@
 [package]
 name = "devlanes-e2e"
 description = "End-to-end tests that drive the real devlanes binary against fixture projects."
-version.workspace = true
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

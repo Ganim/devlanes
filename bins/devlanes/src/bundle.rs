@@ -71,7 +71,7 @@ pub async fn run(
     let versions = json!({
         "client": {
             "version": env!("CARGO_PKG_VERSION"),
-            "build_id": option_env!("DEVLANES_BUILD_ID").unwrap_or("local"),
+            "build_id": devlanes_version::BUILD_ID,
             "protocol": devlanes_proto::PROTOCOL_VERSION,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,

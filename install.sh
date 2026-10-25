@@ -4,7 +4,8 @@
 #
 #   curl -fsSL https://devlanes.run/install.sh | sh
 #
-# DEVLANES_VERSION=0.1.0 pins a release (default: the latest one).
+# DEVLANES_VERSION=0.1.0 pins a release (default: the latest one). DEVLANES_VERSION=next
+# installs the latest build of main, from the rolling `next` prerelease.
 # DEVLANES_INSTALL_DIR sets the target directory (default: ~/.local/bin).
 # DEVLANES_INSTALL_SUDO=1 allows sudo when that directory is not writable.
 # DEVLANES_INSTALL_BASE_URL replaces the release URL; it exists only so the
@@ -16,6 +17,11 @@ proto='=https'
 if [ -n "${DEVLANES_INSTALL_BASE_URL:-}" ]; then proto='=https,file'; fi
 version=${DEVLANES_VERSION:-}
 version=${version#v}
+channel=
+if [ "$version" = next ]; then
+	channel=next
+	version=
+fi
 dir=${DEVLANES_INSTALL_DIR:-$HOME/.local/bin}
 
 fail() {
@@ -24,7 +30,7 @@ fail() {
 }
 
 if [ "$#" -gt 0 ]; then
-	printf 'usage: [DEVLANES_VERSION=X.Y.Z] [DEVLANES_INSTALL_DIR=DIR] [DEVLANES_INSTALL_SUDO=1] sh install.sh\n' >&2
+	printf 'usage: [DEVLANES_VERSION=X.Y.Z|next] [DEVLANES_INSTALL_DIR=DIR] [DEVLANES_INSTALL_SUDO=1] sh install.sh\n' >&2
 	exit 2
 fi
 
@@ -68,7 +74,9 @@ download() {
 	curl -fsSL --proto "$proto" --proto-redir "$proto" --tlsv1.2 "$1" -o "$2"
 }
 
-if [ -n "$version" ]; then
+if [ -n "$channel" ]; then
+	sums_url=$base/download/$channel/SHA256SUMS
+elif [ -n "$version" ]; then
 	sums_url=$base/download/v$version/SHA256SUMS
 else
 	sums_url=$base/latest/download/SHA256SUMS
@@ -76,7 +84,8 @@ fi
 download "$sums_url" "$tmp/SHA256SUMS" || fail "cannot download $sums_url"
 
 # The latest release is found through its SHA256SUMS, which names the archive and
-# so the version; the archive then comes from that version's own release.
+# so the version; the archive then comes from that version's own release, or from
+# the `next` release, which only ever holds its latest build.
 line=$(awk -v suffix="-$target.tar.gz" '
 	length($2) > length(suffix) && substr($2, length($2) - length(suffix) + 1) == suffix { print; exit }
 ' "$tmp/SHA256SUMS")
@@ -93,7 +102,7 @@ printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
 	fail "unexpected version $version in $sums_url"
 printf '%s\n' "$expected" | grep -Eq '^[0-9a-f]{64}$' || fail "malformed checksum for $archive"
 
-url=$base/download/v$version/$archive
+url=$base/download/${channel:-v$version}/$archive
 download "$url" "$tmp/$archive" || fail "cannot download $url"
 actual=$(sha256 "$tmp/$archive")
 [ "$actual" = "$expected" ] || fail "checksum mismatch for $archive: expected $expected, got $actual"

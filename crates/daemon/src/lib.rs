@@ -818,7 +818,7 @@ async fn serve_client(
                                 let result = async { match request.method {
                                     Method::DaemonStatus => {
                                         let mut status = json!({
-                                            "version": env!("CARGO_PKG_VERSION"),
+                                            "version": devlanes_version::VERSION,
                                             "pid": std::process::id(),
                                             "uptime_ms": started.elapsed().as_millis(),
                                             "managed_processes": handler.managed_processes(),

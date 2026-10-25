@@ -542,8 +542,7 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
 }
 
 /// Where to find a minimal `devlanes.yaml` to start from.
-pub(crate) const EXAMPLE_CONFIG: &str =
-    "https://github.com/devlanes-run/devlanes/blob/main/docs/examples/minimal.yaml";
+pub(crate) const EXAMPLE_CONFIG: &str = devlanes_version::MINIMAL_CONFIG_URL;
 
 /// `no_config` (`{path, searched_to}`; older daemons send `{lane}`): where the
 /// search looked, and an example to create the file from. Never `config check`,

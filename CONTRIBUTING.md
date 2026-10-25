@@ -179,9 +179,79 @@ Run a crate's ignored tests with `cargo nextest run -p <crate> --run-ignored onl
 
 `crates/tui/screens/*.txt` and its `index.md` are every TUI state drawn against a fake daemon, as text with the styles of each cell, so a pull request shows what changed on screen. Any change to what the TUI draws changes them, including changes outside `crates/tui`. Rewrite them with `DEVLANES_BLESS=1 cargo nextest run -p devlanes-tui -E 'test(screens_are_current)'`, check the diff and commit them with the change; the test fails in CI while they're stale. `cargo run -p devlanes-tui --example screens` writes the same files plus gitignored PNG and ANSI versions for looking at the screens.
 
+## Change files
+
+A pull request that changes something a devlanes user can notice adds a change file in `.sampo/changesets/`, in the same commit as the change. [Sampo](https://github.com/bruits/sampo) reads these files to choose the next versions and write each crate's `CHANGELOG.md` in the release pull request. Refactors, tests, CI and documentation need none. Sampo's bot comments on pull requests without one; ignore it when the change has no user-visible effect.
+
+Create a change file with `sampo add` (`cargo install --locked sampo`), without prompts:
+
+```sh
+sampo add -p cargo/devlanes -p cargo/devlanes-daemon -b patch -m 'Fixed `devlanes start` leaving services stopped after a config reload.'
+```
+
+or write it by hand under any name ending in `.md`:
+
+```markdown
+---
+cargo/devlanes: patch
+cargo/devlanes-daemon: patch
+---
+
+Fixed `devlanes start` leaving services stopped after a config reload.
+```
+
+One change file per change: a pull request with two unrelated changes adds two. If a change grows during review, edit its change file instead of adding another.
+
+### Crates
+
+List the crates whose code changed in a way their users notice, as `cargo/<package name>`. Add `cargo/devlanes` whenever someone running devlanes notices: its changelog is the one people read, and Sampo only writes an entry there when the change file names it. Don't list crates that only depend on a changed one; Sampo bumps them on its own.
+
+### Bump
+
+Until 1.0, use `minor` for a change that breaks something that worked: a removed or renamed command, flag or config key, a config that no longer loads, or a protocol or on-disk state change that needs a daemon restart or a migration. Use `patch` for everything else, new features included. Never use `major`: Sampo applies plain SemVer, so it would release 1.0.0.
+
+### Wording
+
+The first line is the changelog entry, read by someone deciding whether to upgrade. Write one sentence that:
+
+- starts with Added, Changed, Fixed, Deprecated or Removed;
+- names the command, flag or config key in backticks;
+- says what changes for the user, not how the code changed. Leave out crate, module and type names unless a crate's API is the change.
+
+Most change files are that one line. Add a body after a blank line only when the line can't carry what a user needs to act on:
+
+- a breaking change or removal: what stops working and what to use instead;
+- a deprecation: what replaces it and when the old form goes away;
+- a large feature: the smallest config or command that gets someone started, and a link to the guide in `docs/`.
+
+Keep a body to a few lines and at most one short example. Don't restate the documentation, explain the implementation, or list every option.
+
+```markdown
+---
+cargo/devlanes: minor
+cargo/devlanes-config: minor
+---
+
+Removed the `services.<name>.legacy_env` config key.
+
+Configs that still set it fail to load. Move its entries to `services.<name>.env`.
+```
+
+Lines that don't belong in a changelog:
+
+- `Improved the daemon's handling of edge cases.` says nothing a user can check.
+- `Refactored the lane registry to share state behind a lock.` describes the code, not the effect.
+- `Added a powerful new way to manage ports seamlessly across lanes.` is marketing; say what was added.
+
+The `Writing style` rules in `AGENTS.md` apply to change files too. Before committing one, cut every word a user wouldn't miss.
+
+### Versions
+
+Don't edit versions or `CHANGELOG.md` files by hand; the release pull request does. Crates have their own versions, and `devlanes` and `devlanes-hosts-helper` carry the release version (`packaging/README.md`). A new crate needs an entry in `packages.linked` of `.sampo/config.toml`, so its changes reach the `devlanes` version. Code that reports the devlanes version uses `devlanes_version::VERSION`, not its own crate's `CARGO_PKG_VERSION`.
+
 ## Releases
 
-`packaging/README.md` describes the tag-driven release workflow and the Homebrew and npm packages.
+Merging the release pull request that CI keeps up to date releases everything; `packaging/README.md` describes the workflow and the Homebrew and npm packages.
 
 ## License
 

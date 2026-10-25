@@ -1,0 +1,77 @@
+name: Sampo
+# Sampo's action keeps the release pull request (branch release/main) up to date while
+# change files are pending, and tags the new versions once it merges. The steps after it
+# cover what Sampo doesn't know about: the plugin manifest and the schemas name the
+# version, and its tags don't start release.yml. packaging/README.md has the details.
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+# A newer push must not cancel a run halfway through pushing tags.
+concurrency:
+  group: sampo
+  cancel-in-progress: false
+jobs:
+  sampo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      BRANCH: release/main
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Sampo reads the existing tags and links changelog entries to commits.
+          fetch-depth: 0
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - id: sampo
+        uses: bruits/sampo/crates/sampo-github-action@cbf64ba62bc12402634b872a0b0896cfde3584e7 # cargo-sampo-github-action-v0.21.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # kache is the rustc wrapper in .cargo/config.toml; the schema step below compiles.
+      - if: steps.sampo.outputs.released == 'true'
+        uses: ./.github/actions/kache
+        with:
+          store: rust
+          save: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key: ${{ secrets.KACHE_S3_ACCESS_KEY }}
+          s3-secret-key: ${{ secrets.KACHE_S3_SECRET_KEY }}
+      - name: Version the plugin manifest and schemas on the release branch
+        if: steps.sampo.outputs.released == 'true'
+        run: |
+          git fetch origin "$BRANCH"
+          git switch --force-create "$BRANCH" "origin/$BRANCH"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("bins/devlanes/Cargo.toml", "rb"))["package"]["version"])')
+          # sed keeps the file's formatting, which jq would rewrite.
+          plugin=agent-plugin/.claude-plugin/plugin.json
+          sed -i "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$version\"/" "$plugin"
+          jq -e --arg version "$version" '.version == $version' "$plugin" >/dev/null
+          # bins/devlanes/build.rs rewrites the schemas, which name the version.
+          cargo check --locked -p devlanes
+          git add "$plugin" crates/config/schema.json crates/config/user-schema.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit --quiet -m "Version the plugin manifest and schemas for $version"
+          git push origin "$BRANCH"
+
+      - name: Start the release
+        if: steps.sampo.outputs.published == 'true'
+        run: |
+          tag=$(git tag --points-at HEAD --list 'v[0-9]*' | head -n 1)
+          if [ -z "$tag" ]; then
+            echo "No new devlanes version tag on this commit"
+            exit 0
+          fi
+          gh workflow run release.yml --ref "$tag"
+          echo "::notice::Started release.yml for $tag"

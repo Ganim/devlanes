@@ -550,7 +550,7 @@ impl Inner {
             board: board.clone(),
         });
         let transport = self.integ.remote.transport(host, prompter, options)?;
-        let options = SessionOptions::new(format!("devlanes {}", env!("CARGO_PKG_VERSION")));
+        let options = SessionOptions::new(format!("devlanes {}", devlanes_version::VERSION));
         let link = Link::spawn(transport, options, self.integ.remote.backoff());
         let conn = Arc::new(HostConn {
             name: host.to_owned(),
@@ -799,7 +799,7 @@ impl Inner {
 /// Findings about the box behind a handshake label (`devlanes <version>`,
 /// optionally `(linger off)`), as warning code and message.
 fn label_warnings(label: &str) -> Vec<(&'static str, String)> {
-    let ours = env!("CARGO_PKG_VERSION");
+    let ours = devlanes_version::VERSION;
     let mut warnings = Vec::new();
     let theirs = label
         .strip_prefix("devlanes ")
@@ -938,7 +938,7 @@ mod tests {
 
     #[test]
     fn labels_report_version_skew_and_linger() {
-        let ours = format!("devlanes {}", env!("CARGO_PKG_VERSION"));
+        let ours = format!("devlanes {}", devlanes_version::VERSION);
         assert!(label_warnings(&ours).is_empty());
         let codes: Vec<_> = label_warnings("devlanes 0.0.0-other (linger off)")
             .into_iter()

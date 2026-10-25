@@ -97,4 +97,11 @@ DEVLANES_INSTALL_BASE_URL="file://$release" DEVLANES_INSTALL_DIR="$work/installe
 [ "$("$work/installed/devlanes")" = "devlanes $version" ]
 [ -x "$work/installed/devlanes-hosts" ]
 
+# The rolling `next` release keeps its archives under download/next, not download/vVERSION.
+mkdir -p "$release/download/next"
+cp "$work"/dist/*.tar.gz "$work/dist/SHA256SUMS" "$release/download/next/"
+DEVLANES_VERSION=next DEVLANES_INSTALL_BASE_URL="file://$release" DEVLANES_INSTALL_DIR="$work/installed-next" \
+	sh "$root/install.sh" >/dev/null
+[ "$("$work/installed-next/devlanes")" = "devlanes $version" ]
+
 echo "packaging scripts: dry run passed"

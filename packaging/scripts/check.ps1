@@ -274,6 +274,9 @@ try {
         [IO.File]::WriteAllText((Join-Path $versioned 'SHA256SUMS'), $lines[$version])
     }
     [IO.File]::WriteAllText((Join-Path $latest 'SHA256SUMS'), $lines[$versions[1]])
+    # `next` holds the older version, so installing from it is visible as a downgrade.
+    $next = Join-Path $release 'download/next'
+    Copy-Item -LiteralPath (Join-Path $release "download/v$($versions[0])") -Destination $next -Recurse
 
     foreach ($shell in $shells) {
         $label = [IO.Path]::GetFileNameWithoutExtension($shell)
@@ -349,6 +352,12 @@ if (@($version, $dir) -ne ''mine'') { throw ''the session lost its own $version 
         Assert-True ($run.Code -ne 0 -and $run.Output.Contains('checksum mismatch')) "$label, a wrong checksum must fail: $($run.Output)"
         Assert-Equal (Get-FakeVersion $exe) $versions[1] "$label, a failed install keeps the installed file"
         [IO.File]::WriteAllText($sumsFile, $lines[$versions[1]])
+
+        # The rolling `next` release keeps its archives under download/next.
+        $environment.DEVLANES_VERSION = 'next'
+        $run = Invoke-Child $shell "& '$installScript'" $environment
+        Assert-Equal $run.Code 0 "$label, install.ps1 from next: $($run.Output)"
+        Assert-Equal (Get-FakeVersion $exe) $versions[0] "$label, version from next"
 
         Restore-UserPath $pathBefore
     }

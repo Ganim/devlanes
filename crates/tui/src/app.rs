@@ -889,7 +889,7 @@ impl App {
             start_run: None,
             on_quit: OnQuit::Ask,
             time_zone: jiff::tz::TimeZone::UTC,
-            version: env!("CARGO_PKG_VERSION"),
+            version: devlanes_version::VERSION,
             service_report: None,
             user_home: None,
             quitting: false,

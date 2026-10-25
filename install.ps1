@@ -6,7 +6,8 @@
 # `irm | iex` passes no arguments, so the settings are environment variables, set
 # before that command, with the same names install.sh reads:
 #
-# $env:DEVLANES_VERSION = '0.1.0' pins a release (default: the latest one).
+# $env:DEVLANES_VERSION = '0.1.0' pins a release (default: the latest one); 'next'
+# installs the latest build of main, from the rolling `next` prerelease.
 # $env:DEVLANES_INSTALL_DIR = 'DIR' sets the target directory
 # (default: %LOCALAPPDATA%\Programs\devlanes).
 # DEVLANES_INSTALL_BASE_URL replaces the release URL; it exists only so the script
@@ -241,6 +242,12 @@
         }
         $version = [string]$env:DEVLANES_VERSION
         if ($version.StartsWith('v')) { $version = $version.Substring(1) }
+        # `next` is the rolling prerelease with the latest build of main.
+        $channel = ''
+        if ($version -eq 'next') {
+            $channel = 'next'
+            $version = ''
+        }
         $dir = [string]$env:DEVLANES_INSTALL_DIR
         if (-not $dir) {
             if (-not $env:LOCALAPPDATA) { throw 'devlanes install: LOCALAPPDATA is not set; set DEVLANES_INSTALL_DIR' }
@@ -253,7 +260,9 @@
         New-Item -ItemType Directory -Path $temporary | Out-Null
         $staged = Join-Path $dir ".devlanes.exe.new.$PID"
         try {
-            if ($version) {
+            if ($channel) {
+                $sumsUrl = "$base/download/$channel/SHA256SUMS"
+            } elseif ($version) {
                 $sumsUrl = "$base/download/v$version/SHA256SUMS"
             } else {
                 $sumsUrl = "$base/latest/download/SHA256SUMS"
@@ -263,8 +272,9 @@
             $release = Find-DevlanesArchive -Sums ([IO.File]::ReadAllText($sumsFile)) -Target $target -Version $version -Source $sumsUrl
             $version = $release.Version
 
-            # The archive comes from that version's own release.
-            $url = "$base/download/v$version/$($release.Archive)"
+            # The archive comes from that version's own release, or from `next`.
+            $folder = if ($channel) { $channel } else { "v$version" }
+            $url = "$base/download/$folder/$($release.Archive)"
             $archive = Join-Path $temporary $release.Archive
             Get-DevlanesDownload -Url $url -OutFile $archive -Schemes $schemes
             $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()

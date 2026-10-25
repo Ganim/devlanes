@@ -58,7 +58,7 @@ pub fn services(paths: Paths, client: RemoteClient) -> BoxServices {
 /// Version label sent to clients in the handshake: `devlanes <version>`, plus
 /// `(linger off)` on Linux boxes whose user services stop at logout.
 pub fn server_label() -> String {
-    let label = format!("devlanes {}", env!("CARGO_PKG_VERSION"));
+    let label = format!("devlanes {}", devlanes_version::VERSION);
     if linger_off() {
         format!("{label} (linger off)")
     } else {
@@ -104,7 +104,7 @@ pub async fn run_stdio(paths: Paths) -> Result<(), TunnelError> {
     // `loginctl` blocks briefly; it runs once, before serving starts.
     let label = tokio::task::spawn_blocking(server_label)
         .await
-        .unwrap_or_else(|_| format!("devlanes {}", env!("CARGO_PKG_VERSION")));
+        .unwrap_or_else(|_| format!("devlanes {}", devlanes_version::VERSION));
     devlanes_transport::serve(
         devlanes_transport::stdio(),
         services(paths, client),

@@ -106,7 +106,7 @@ impl SshOptions {
             askpass: None,
             manifest: None,
             manifest_url: None,
-            release_version: env!("CARGO_PKG_VERSION").to_owned(),
+            release_version: devlanes_version::VERSION.to_owned(),
             bootstrap: BootstrapPolicy::Report,
         }
     }

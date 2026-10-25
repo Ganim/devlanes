@@ -16,10 +16,6 @@ use serde_json::Value;
 
 use crate::engine::Inner;
 
-/// The latest published release's manifest; GitHub's `latest` skips drafts and prereleases.
-pub const MANIFEST_URL: &str =
-    "https://github.com/devlanes-run/devlanes/releases/latest/download/release-manifest.json";
-
 /// The cache file under `$DEVLANES_HOME`.
 const CACHE_FILE: &str = "update-check.json";
 
@@ -62,7 +58,7 @@ impl UpdateCheckOptions {
             None
         };
         Self {
-            url: MANIFEST_URL.into(),
+            url: devlanes_version::LATEST_RELEASE_MANIFEST_URL.into(),
             off,
             first_delay: Duration::from_secs(180),
             interval: Duration::from_secs(24 * 3600),
@@ -143,7 +139,7 @@ impl Inner {
         let cached = self.update.get()?;
         let min_age = u64::try_from(self.opts.update_check.min_age.as_millis()).unwrap_or(u64::MAX);
         let aged = crate::units::now_ms().saturating_sub(cached.first_seen_at) >= min_age;
-        (aged && is_newer(&cached.latest, env!("CARGO_PKG_VERSION"))).then_some(UpdateInfo {
+        (aged && is_newer(&cached.latest, devlanes_version::VERSION)).then_some(UpdateInfo {
             latest: cached.latest,
             checked_at: cached.checked_at,
         })

@@ -1,0 +1,187 @@
+name: Build
+# Builds devlanes (and devlanes-hosts on macOS and Linux) for every release target and
+# uploads one `dist-TARGET` artifact with the packed archive. release.yml calls it for a `v*` tag,
+# next.yml for each commit on main that passes CI.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version the binaries report and the archives are named after.
+        required: true
+        type: string
+      ref:
+        description: Commit to build; empty builds the caller's ref.
+        required: false
+        type: string
+        default: ""
+      snapshot:
+        description: >-
+          Write `version` into the crates that carry the release version before building,
+          instead of requiring the committed version to match it. For next.yml, whose
+          versions are never committed.
+        required: false
+        type: boolean
+        default: false
+permissions:
+  contents: read
+env:
+  # The `fixed` group in .sampo/config.toml, whose version is the release's;
+  # devlanes-version reads it from the first.
+  FIXED: bins/devlanes/Cargo.toml crates/hosts-helper/Cargo.toml
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            native: true
+          # Cross-compiled on the arm64 runner, so it is built but not executed.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            native: false
+          # 22.04 runners keep the glibc requirement at 2.35, so the binaries also
+          # run on Debian 12 and Ubuntu 22.04 hosts that SSH bootstrap installs onto.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            native: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            native: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ inputs.version }}
+      # kache passes every compile straight to rustc here: shipped binaries are always
+      # compiled from source, and release targets share no cache entries with CI anyway.
+      KACHE_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      # .cargo/config.toml names kache as rustc wrapper, so it must exist even when disabled.
+      - uses: ./.github/actions/kache
+      - name: Write the snapshot version
+        if: inputs.snapshot
+        run: |
+          for manifest in $FIXED; do
+            sed -i.orig "s/^version = \".*\"/version = \"$VERSION\"/" "$manifest"
+            rm "$manifest.orig"
+          done
+          cargo update --workspace --quiet
+      - name: Check the version against the workspace and plugin versions
+        env:
+          SNAPSHOT: ${{ inputs.snapshot }}
+        run: |
+          crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "devlanes") | .version')
+          plugin=$(jq -r .version agent-plugin/.claude-plugin/plugin.json)
+          if [ "$VERSION" != "$crate" ]; then
+            echo "::error::version $VERSION and devlanes $crate must match"
+            exit 1
+          fi
+          if [ "$SNAPSHOT" != true ] && [ "$VERSION" != "$plugin" ]; then
+            echo "::error::version $VERSION and agent-plugin/.claude-plugin/plugin.json $plugin must match"
+            exit 1
+          fi
+      - name: Build
+        # The build ID marks official builds in the daemon handshake and doctor; others say local.
+        env:
+          DEVLANES_BUILD_ID: v${{ inputs.version }}
+        run: cargo build --release --locked --target "$TARGET" -p devlanes -p devlanes-hosts-helper
+      # build.rs regenerates the served schemas; a difference means they were committed stale.
+      # Snapshots differ anyway, since the schemas name the version.
+      - name: Check the committed schemas
+        if: ${{ !inputs.snapshot }}
+        run: git diff --exit-code crates/config/schema.json crates/config/user-schema.json
+      - name: Smoke test
+        if: matrix.native
+        run: |
+          "target/$TARGET/release/devlanes" --version | grep -Fx "devlanes $VERSION"
+          "target/$TARGET/release/devlanes-hosts" version | grep -F "build=release"
+      - name: Package
+        run: sh packaging/scripts/package.sh "$VERSION" "$TARGET" dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  build-windows:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          # Native arm64 runner, so the binary is executed like the x64 one.
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ inputs.version }}
+      # As in build: shipped binaries are always compiled from source.
+      KACHE_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      # .cargo/config.toml names kache as rustc wrapper, so it must exist even when disabled.
+      - uses: ./.github/actions/kache
+      # The build job checks the version against the workspace and plugin versions; the
+      # smoke test below ties this binary to it.
+      - name: Write the snapshot version
+        if: inputs.snapshot
+        run: |
+          for manifest in $FIXED; do
+            sed -i.orig "s/^version = \".*\"/version = \"$VERSION\"/" "$manifest"
+            rm "$manifest.orig"
+          done
+          cargo update --workspace --quiet
+      # devlanes-hosts is Unix-only; .cargo/config.toml links the C runtime statically.
+      - name: Build
+        env:
+          DEVLANES_BUILD_ID: v${{ inputs.version }}
+        run: cargo build --release --locked --target "$TARGET" -p devlanes
+      # .gitattributes checks the schemas out with LF on Windows too, as build.rs writes them.
+      # Snapshots differ anyway, since the schemas name the version.
+      - name: Check the committed schemas
+        if: ${{ !inputs.snapshot }}
+        run: git diff --exit-code crates/config/schema.json crates/config/user-schema.json
+      - name: Smoke test
+        run: |
+          "target/$TARGET/release/devlanes.exe" --version | tr -d '\r' | grep -Fx "devlanes $VERSION"
+      # The Visual C++ Redistributable is not part of Windows, so the executable must
+      # not import its DLLs.
+      - name: Check the C runtime is linked statically
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $dumpbin = @(& $vswhere -latest -products * -find 'VC\Tools\MSVC\*\bin\Host*\*\dumpbin.exe')[0]
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          $imports = & $dumpbin /nologo /dependents "target/$env:TARGET/release/devlanes.exe" | Out-String
+          if ($LASTEXITCODE -ne 0 -or $imports -notmatch '(?im)^\s+kernel32\.dll\s*$') { throw "unexpected dumpbin output:`n$imports" }
+          if ($imports -match '(?im)^\s+(vcruntime|msvcp)\S*\.dll\s*$') { throw "devlanes.exe imports the Visual C++ runtime:`n$imports" }
+          Write-Output $imports
+      - name: Package
+        shell: pwsh
+        run: ./packaging/scripts/package.ps1 -Version $env:VERSION -Target $env:TARGET -OutDir dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error

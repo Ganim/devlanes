@@ -23,7 +23,7 @@ fn status(version: &str, latest: Option<&str>) -> serde_json::Value {
 async fn newer_release_shows_until_dismissed() -> TestResult {
     let api = FakeApi::with_lanes(mixed_lanes());
     let (mut app, _) = loaded(&api, 140, 24).await;
-    let own = env!("CARGO_PKG_VERSION");
+    let own = devlanes_version::VERSION;
     app.update(Msg::DaemonInfo {
         status: Ok(status(own, Some("99.0.0"))),
         doctor: Ok(json!({})),
@@ -95,7 +95,7 @@ async fn older_or_equal_release_and_matching_daemon_show_nothing() -> TestResult
         dismissed: vec![devlanes_tui::app::FIRST_RUN_KEY.into()],
     });
     app.update(Msg::DaemonInfo {
-        status: Ok(status(env!("CARGO_PKG_VERSION"), Some("0.0.1"))),
+        status: Ok(status(devlanes_version::VERSION, Some("0.0.1"))),
         doctor: Ok(json!({})),
     });
     assert_eq!(app.release_badge(), None);
@@ -142,7 +142,7 @@ async fn daemon_on_another_version_is_reported() -> TestResult {
         doctor: Ok(json!({})),
     });
     let (notice, text) = app.release_badge().ok_or("no notice")?;
-    assert_eq!(notice, format!("skew:0.0.9:{}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(notice, format!("skew:0.0.9:{}", devlanes_version::VERSION));
     assert!(text.starts_with("daemon 0.0.9, TUI"), "{text}");
     assert!(text.contains("(stops units)"), "{text}");
     Ok(())

@@ -62,7 +62,7 @@ pub fn schema_with<E: Extensions>() -> schemars::Schema {
     // yaml-language-server prints a root title as a heading on every field hover.
     schema.insert(
         "description".into(),
-        format!("{VERSION} project config. {HEADLINE} https://devlanes.run").into(),
+        format!("devlanes v{VERSION} project config. {HEADLINE} https://devlanes.run").into(),
     );
     // The same modeline supports partial local overrides; loading still requires a base project.
     schema.remove("required");
@@ -70,8 +70,8 @@ pub fn schema_with<E: Extensions>() -> schemars::Schema {
     schema
 }
 
-/// Product name and version, leading each schema's root description.
-const VERSION: &str = concat!("devlanes v", env!("CARGO_PKG_VERSION"));
+/// Product version, leading each schema's root description.
+const VERSION: &str = devlanes_version::VERSION;
 
 /// Product headline, matching the CLI's about text.
 const HEADLINE: &str = "Run a dev environment per git worktree, side by side.";
@@ -181,7 +181,7 @@ pub fn user_schema() -> serde_json::Value {
     schema.insert(
         "description".into(),
         format!(
-            "{VERSION} user config: per-user settings in ~/.devlanes/config.yaml. {HEADLINE} \
+            "devlanes v{VERSION} user config: per-user settings in ~/.devlanes/config.yaml. {HEADLINE} \
              https://devlanes.run"
         )
         .into(),

@@ -5,7 +5,7 @@
 /// snapshot. Versions a test sets on purpose must differ from it (`0.0.1`).
 macro_rules! assert_screen {
     ($($arg:tt)*) => {{
-        let version = format!(r"\b{}\b", env!("CARGO_PKG_VERSION").replace('.', r"\."));
+        let version = format!(r"\b{}\b", devlanes_version::VERSION.replace('.', r"\."));
         let mut settings = insta::Settings::clone_current();
         settings.add_filter(&version, "X.Y.Z");
         let _bound = settings.bind_to_scope();
