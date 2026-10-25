@@ -72,7 +72,7 @@ cargo build --workspace --all-targets --all-features
 - Run one nextest at a time per machine and keep the profile defaults in `.config/nextest.toml` (thread counts and test groups); more parallel test binaries have overwhelmed macOS.
 - Every process test needs a timeout and test-owned cleanup.
 - Docker, SSH, trust-store and real framework tests use `#[ignore = "needs ..."]`; run them explicitly with their prerequisites.
-- Prefix Docker-only external tests with `docker_` for the manual CI job.
+- Prefix Docker-only tests with `docker_`; the Linux CI jobs run them.
 - End-to-end tests live in `e2e/` (`devlanes-e2e`) and drive the real `devlanes` binary as separate processes, each with its own short `DEVLANES_HOME`, Git repository and locked port slot; the default nextest profile skips them, so run them with `cargo nextest run --profile e2e`, and the Docker ones by adding `--run-ignored only -E 'test(/^docker_/)'`.
 
 ## Change files

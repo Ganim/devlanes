@@ -35,6 +35,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           # The commit count since the last stable tag needs the history and tags.
           fetch-depth: 0
+          persist-credentials: false
       - name: Next version
         id: version
         run: |
@@ -82,6 +83,10 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The rolling `next` prerelease; release.yml deploys the other environments.
+    environment:
+      name: next
+      url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/next
     permissions:
       contents: write
       id-token: write
@@ -95,6 +100,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
       # A newer tip may have been pushed during the build; its own run publishes it.
       - name: Still the tip of main
         id: tip

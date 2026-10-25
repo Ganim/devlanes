@@ -26,14 +26,14 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install pinned toolchain
         run: rustup toolchain install
-      # Reads the store the CI rust job saved on the default branch; the same tests
+      # Reads what the CI rust job uploaded from the default branch; the same tests
       # with the same features, so most of the workspace restores instead of compiling.
       - uses: ./.github/actions/kache
         with:
-          store: rust
-          save: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
           s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
           s3-region: ${{ vars.KACHE_S3_REGION }}
@@ -82,6 +82,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Every npm package exists on the registry
         run: |
           missing=
@@ -111,6 +113,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: dist-*
@@ -168,6 +172,12 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Every job that publishes somewhere deploys to a GitHub environment named after
+    # that place, so the repository page shows what each one serves; next.yml deploys
+    # `next`.
+    environment:
+      name: github-release
+      url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}
     permissions:
       contents: write
     env:
@@ -181,6 +191,9 @@ jobs:
     if: needs.release.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment:
+      name: website
+      url: https://devlanes.run
     steps:
       # The website takes the docs, JSON Schemas and install.sh from this tag.
       - name: Publish this release on the website
@@ -221,6 +234,9 @@ jobs:
     needs: [release, homebrew-verify]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment:
+      name: homebrew
+      url: https://github.com/devlanes-run/homebrew-tap/blob/main/Formula/devlanes.rb
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -276,7 +292,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Trusted publishing: npm exchanges the job's OIDC token for a publish token, so
-    # no npm secret exists. Each package's trusted publisher names this file.
+    # no npm secret exists. Each package's trusted publisher names this file and the
+    # `npm` environment.
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/devlanes/v/${{ needs.release.outputs.version }}
     permissions:
       contents: read
       id-token: write
@@ -285,6 +305,8 @@ jobs:
       PRERELEASE: ${{ needs.release.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The archives keep the executable bits that an uploaded package directory would lose.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -296,11 +318,9 @@ jobs:
           node-version: "24"
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - name: npm with trusted publishing support
-        run: |
-          npm install -g npm@11
-          # Trusted publishing needs npm 11.5.1 or later.
-          printf '11.5.1\n%s\n' "$(npm --version)" | sort -V -C
+      # Trusted publishing needs npm 11.5.1 or later; Node 24 ships it.
+      - name: Check npm supports trusted publishing
+        run: printf '11.5.1\n%s\n' "$(npm --version)" | sort -V -C
       - name: Build the packages
         run: sh packaging/npm/build.sh "$VERSION" dist npm
       - name: Publish, platform packages first

@@ -30,6 +30,11 @@ jobs:
           fetch-depth: 0
       - name: Install pinned toolchain
         run: rustup toolchain install
+      # Sampo's action otherwise pipes cargo-binstall's install script from its main
+      # branch into bash; it skips that when cargo-binstall is already installed.
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-binstall@1.25.3
       - id: sampo
         uses: bruits/sampo/crates/sampo-github-action@cbf64ba62bc12402634b872a0b0896cfde3584e7 # cargo-sampo-github-action-v0.21.0
         env:
@@ -39,8 +44,6 @@ jobs:
       - if: steps.sampo.outputs.released == 'true'
         uses: ./.github/actions/kache
         with:
-          store: rust
-          save: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
           s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
           s3-region: ${{ vars.KACHE_S3_REGION }}

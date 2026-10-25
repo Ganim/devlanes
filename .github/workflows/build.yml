@@ -54,19 +54,19 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ inputs.version }}
-      # kache passes every compile straight to rustc here: shipped binaries are always
-      # compiled from source, and release targets share no cache entries with CI anyway.
-      KACHE_DISABLED: "1"
+      # An empty wrapper overrides the kache one in .cargo/config.toml: shipped binaries
+      # are always compiled from source, and release targets share no cache entries
+      # with CI anyway.
+      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          persist-credentials: false
       - name: Install pinned toolchain
         run: |
           rustup toolchain install
           rustup target add "$TARGET"
-      # .cargo/config.toml names kache as rustc wrapper, so it must exist even when disabled.
-      - uses: ./.github/actions/kache
       - name: Write the snapshot version
         if: inputs.snapshot
         run: |
@@ -131,17 +131,16 @@ jobs:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ inputs.version }}
       # As in build: shipped binaries are always compiled from source.
-      KACHE_DISABLED: "1"
+      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          persist-credentials: false
       - name: Install pinned toolchain
         run: |
           rustup toolchain install
           rustup target add "$TARGET"
-      # .cargo/config.toml names kache as rustc wrapper, so it must exist even when disabled.
-      - uses: ./.github/actions/kache
       # The build job checks the version against the workspace and plugin versions; the
       # smoke test below ties this binary to it.
       - name: Write the snapshot version
