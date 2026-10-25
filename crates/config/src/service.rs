@@ -1,6 +1,6 @@
 use crate::{
-    ConfigDuration, Env, Extensions, FnoxConfig, Hosts, OpaqueExtensions, ReadyConfig, Run,
-    RunScript, SyncConfig, Templated,
+    ConfigDuration, Env, Extensions, Hosts, OpaqueExtensions, ReadyConfig, Run, RunScript,
+    SyncConfig, Templated,
 };
 use indexmap::IndexMap;
 use schemars::JsonSchema;
@@ -77,7 +77,7 @@ macro_rules! service_fields {
         }
 
         impl<E: Extensions> PartialService<E> {
-            /// Apply a local override or an `extends` child. Mappings (`ready`, `stop`, `fnox`,
+            /// Apply a local override or an `extends` child. Mappings (`ready`, `stop`,
             /// `run_script`, `env`, preset options) merge per key; lists and
             /// scalars replace. `run` and `run_script` are alternatives, so setting one clears
             /// the other. Merged values keep the overlay's source position for diagnostics.
@@ -97,9 +97,6 @@ macro_rules! service_fields {
                 if let (Some(base), Some(local)) = (&self.stop, &mut overlay.stop) {
                     if local.value.signal.is_none() { local.value.signal = base.value.signal.clone(); }
                     if local.value.timeout.is_none() { local.value.timeout = base.value.timeout.clone(); }
-                }
-                if let (Some(base), Some(local)) = (&self.fnox, &mut overlay.fnox) {
-                    if local.value.profile.is_none() { local.value.profile = base.value.profile.clone(); }
                 }
                 $(if let Some(value) = overlay.$field { self.$field = Some(value); })*
                 if let Some(overlay) = overlay.env {
@@ -220,7 +217,7 @@ service_fields! {
     #[schemars(extend("examples" = ["Admin API","Storefront (web)"]))]
     name: String,
     /// Template under `templates` whose settings this service inherits; its own settings
-    /// apply on top. Mappings (`env`, `ready`, `stop`, `fnox`, preset options, `run_script`)
+    /// apply on top. Mappings (`env`, `ready`, `stop`, preset options, `run_script`)
     /// merge by key, lists (`tags`, `hosts`, `sync`) and single values replace. Setting `run`
     /// or `run_script` drops the inherited other one, and one `ready` probe (`tcp`, `http`,
     /// `log`, `cmd`) drops the inherited probe. Templates may extend other templates and are
@@ -306,10 +303,6 @@ service_fields! {
     /// service starts all its copies when any copy's expression gives true. Defaults to true.
     #[schemars(extend("examples" = [true,false]))]
     autostart: Templated<bool>,
-    /// Secrets profile for this service, replacing the project's `fnox.profile`. fnox puts
-    /// that profile's secrets into the service's environment and `${{ env.X }}`; use it when
-    /// one service needs different credentials.
-    fnox: FnoxConfig,
     /// Folders mirrored while the service runs, such as build output a browser loads
     /// unpacked from a fixed path. Each entry copies `from` to `to` (default
     /// `~/devlanes/sync/<project>/<lane>/<folder>`) and follows changes; machines connected

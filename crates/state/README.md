@@ -47,7 +47,7 @@ The daemon builds its `RetentionPolicy` from these settings, `metrics.retention`
 
 ## Behaviour
 
-Only the daemon opens the database. Client environments and secret-provider values stay in memory; log bodies are stored separately from their database metadata.
+Only the daemon opens the database. Client environments stay in memory; log bodies are stored separately from their database metadata.
 
 Paths are stored in their native form: raw bytes on Unix, UTF-16LE code units on Windows. A database file is not portable between operating systems. On Windows the database path must be valid Unicode, because SQLite opens URI filenames as UTF-8.
 

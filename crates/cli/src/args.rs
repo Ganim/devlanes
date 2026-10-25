@@ -205,11 +205,6 @@ The daemon owns the process: logs, stop, attach and status work on it by its\n\
         #[command(subcommand)]
         command: CertsCommand,
     },
-    /// Hand secrets from fnox to the daemon
-    Secrets {
-        #[command(subcommand)]
-        command: SecretsCommand,
-    },
     /// Connect to boxes over SSH and mirror their lanes here
     Remote {
         #[command(subcommand)]
@@ -507,12 +502,6 @@ pub enum CertsCommand {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum SecretsCommand {
-    /// Read secrets with fnox in this terminal and hand them to the daemon
-    Unlock,
-}
-
-#[derive(Debug, Subcommand)]
 pub enum RemoteCommand {
     /// Connect to a box over SSH and mirror its lanes, ports and hostnames here
     Connect {
@@ -667,7 +656,6 @@ pub enum Action {
         resolver: bool,
         keep_ca: bool,
     },
-    Unlock(Context),
     DaemonRestart(Context),
     DaemonLogs {
         follow: bool,
@@ -982,9 +970,6 @@ impl Cli {
                     });
                 }
             },
-            Some(Command::Secrets {
-                command: SecretsCommand::Unlock,
-            }) => return Ok(Action::Unlock(context)),
             Some(Command::Daemon { command }) => match command {
                 DaemonCommand::Status => (Method::DaemonStatus, json!({})),
                 DaemonCommand::Stop => (Method::DaemonShutdown, json!({})),

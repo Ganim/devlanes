@@ -134,16 +134,3 @@ Both run before anything else and only when the lane's root has their file.
 - direnv: with an `.envrc` in the worktree root, `direnv export json` is applied, including variables it unsets. A blocked `.envrc` is skipped with the note `run direnv allow`.
 
 Only the worktree root is checked, not the unit's `cwd`. Both tools are optional; when the binary is missing the note says so and the start goes on. Their output sits below devlanes' own variables, so they cannot change `PORT` or `HOST`.
-
-## Secrets: fnox
-
-```yaml
-fnox:
-  profile: dev
-services:
-  payments:
-    fnox:  # a different profile for one service
-      profile: payments
-```
-
-With a `fnox.toml` in the worktree (or a `fnox:` key in the config), devlanes runs `fnox env --json --non-interactive` and adds the result above mise, direnv and the platform variables, below `global_env`. fnox 1.39 or later is required. The daemon has no terminal, so a locked vault fails the start with `secrets are locked; run devlanes secrets unlock`; that command runs fnox in your terminal and hands the values to the daemon, which keeps them in memory only. Values from fnox are also visible to expressions as `${{ env.NAME }}`.

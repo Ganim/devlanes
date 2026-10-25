@@ -23,7 +23,7 @@ Outputs:
 - `-v`/`-vv` on any command. The client prints its own events to stderr. Requests carry `verbose` in their `Context`; the daemon registers a tap for the request (`devlanes_daemon::diagnostics`), and a `tracing` layer sends every record and span close under that request's span back as `diagnostic` events before the response. The tap's filter passes nothing while no tap is active, so idle cost is one atomic load per debug call site.
 - The timing table at the end of a `-v` run, built from client `timing` events and the daemon's span closes.
 
-Rules that every new field follows: environment and secret-provider values are never recorded at any level, only variable names (`env_keys`); command lines are recorded for commands devlanes builds (Docker Compose), and only the argument count for a unit's own command, whose arguments can be interpolated secrets. The diagnostics layer also replaces fields named like `secret`, `password`, `token` or `value`.
+Rules that every new field follows: environment values are never recorded at any level, only variable names (`env_keys`); command lines are recorded for commands devlanes builds (Docker Compose), and only the argument count for a unit's own command, whose arguments can be interpolated secrets. The diagnostics layer also replaces fields named like `secret`, `password`, `token` or `value`.
 
 Spans only follow work across `tokio::spawn` when the spawned future is instrumented. New background work that belongs to a request (a probe, a spawned step) should use `Instrument::instrument(span)` or `.in_current_span()`.
 

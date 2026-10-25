@@ -33,17 +33,6 @@ pub enum ResolveError {
         id: String,
         message: String,
     },
-    /// The secrets provider needs an interactive unlock.
-    #[error("secrets{} are locked ({message}); run `devlanes secrets unlock`", profile_suffix(.profile))]
-    SecretsLocked {
-        profile: Option<String>,
-        message: String,
-    },
-    #[error("secrets{}: {message}", profile_suffix(.profile))]
-    Secrets {
-        profile: Option<String>,
-        message: String,
-    },
     #[error("{path}: {message}")]
     Invalid { path: String, message: String },
 }
@@ -104,12 +93,4 @@ fn list(values: &[String]) -> String {
     } else {
         values.join(", ")
     }
-}
-
-/// Formats ` for profile `x`` when a profile is named.
-fn profile_suffix(profile: &Option<String>) -> String {
-    profile
-        .as_ref()
-        .map(|p| format!(" for fnox profile `{p}`"))
-        .unwrap_or_default()
 }

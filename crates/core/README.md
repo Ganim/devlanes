@@ -33,7 +33,7 @@ fn main() -> Result<(), AllocationError> {
 - `env::assemble`: environment precedence with source-layer attribution.
 - `env::fold_name`, `env::fold_names`: variable names as devlanes keeps them; unchanged on Unix, uppercased on Windows, where `Path` and `PATH` are one variable.
 - `Runner` and `Unit`: process launch, terminal I/O, stopping, exit waiting, and tracked process identities.
-- `contrib::{Contributor, SecretsProvider, ScriptRunner}`: launch customization, secret lookup, and script command rendering.
+- `contrib::{Contributor, ScriptRunner}`: launch customization and script command rendering.
 - `gate::{StartGate, PressureSource}`: startup pacing slots and queue snapshots, and system CPU and memory pressure readings.
 - `clock::{Clock, TokioClock, ManualClock}`: monotonic time for schedulers, with a manual clock for tests.
 

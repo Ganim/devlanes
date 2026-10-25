@@ -1,6 +1,5 @@
 //! Actions that must run in the user's terminal, never in the daemon: CA trust, the
-//! hosts helper and the OS resolver file (they prompt for a password) and
-//! `secrets unlock` (fnox asks for the vault there).
+//! hosts helper and the OS resolver file (they prompt for a password).
 
 #[cfg(unix)]
 use std::net::SocketAddr;
@@ -12,8 +11,8 @@ use std::{
 };
 
 use devlanes_cli::{Action, Rendered, Runtime};
-use devlanes_client::{Client, Paths};
-use devlanes_proto::{Context, Method, RpcError};
+use devlanes_client::Paths;
+use devlanes_proto::RpcError;
 #[cfg(unix)]
 use devlanes_resolver_dns::ResolverFile;
 #[cfg(unix)]
@@ -21,7 +20,7 @@ use devlanes_resolver_hosts::CommandSpec;
 use devlanes_trust::{CaCertificate, TrustStatus, TrustStore, TrustTarget};
 use serde_json::{Value, json};
 
-use crate::{driver::rpc_error, output::emit};
+use crate::output::emit;
 
 /// `certs trust --resolver` through an NRPT rule, Windows' counterpart of the
 /// resolver file.
@@ -75,7 +74,6 @@ pub async fn run(runtime: &Runtime, action: Action) -> Result<u8, RpcError> {
             }
             Ok(code)
         }
-        Action::Unlock(context) => unlock(runtime, context).await,
         action @ (Action::Tunnel | Action::Askpass(_)) => crate::remote::run(action).await,
         _ => Err(RpcError::new(
             "usage",
@@ -749,50 +747,6 @@ async fn resolver_install(runtime: &Runtime, paths: &Paths, install: bool) -> Re
         stderr,
         ..Rendered::default()
     });
-    Ok(0)
-}
-
-/// Runs fnox in this terminal so it can prompt, then hands the values to the daemon,
-/// which keeps them in memory only.
-async fn unlock(runtime: &Runtime, context: Context) -> Result<u8, RpcError> {
-    let output = tokio::process::Command::new("fnox")
-        .args(["env", "--json"])
-        .current_dir(&context.cwd)
-        .stdin(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(|error| {
-            RpcError::new("fnox_unavailable", json!({"message": error.to_string()}), 1)
-        })?;
-    if !output.status.success() {
-        return Err(RpcError::new(
-            "fnox_failed",
-            json!({"code": output.status.code()}),
-            1,
-        ));
-    }
-    let secrets = devlanes_secrets_fnox::parse_document(&output.stdout)
-        .map_err(|error| RpcError::new("fnox_output", json!({"message": error.to_string()}), 1))?;
-    let paths = Paths::discover()
-        .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
-    let mut client = Client::connect_or_spawn(&paths).await.map_err(rpc_error)?;
-    let count = secrets.set.len();
-    client
-        .request(
-            Method::Unlock,
-            json!({"env": secrets.set, "remove": secrets.remove, "profile": null}),
-            context,
-        )
-        .await
-        .map_err(rpc_error)?;
-    if !runtime.quiet {
-        emit(&Rendered {
-            stdout: format!("unlocked {count} secrets\n"),
-            ..Rendered::default()
-        });
-    }
     Ok(0)
 }
 

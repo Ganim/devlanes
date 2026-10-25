@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 pub enum EnvLayer {
     Client,
     Contributor,
-    Secrets,
     Devlanes,
     Global,
     Service,

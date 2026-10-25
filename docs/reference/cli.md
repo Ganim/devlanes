@@ -531,22 +531,6 @@ devlanes certs untrust [OPTIONS]
 - `--resolver`: Also remove the OS resolver file for hostnames.tld
 - `--keep-ca`: Keep the CA trusted; with --hosts or --resolver, remove only those
 
-### devlanes secrets
-
-Hand secrets from fnox to the daemon
-
-```text
-devlanes secrets [OPTIONS] <COMMAND>
-```
-
-### devlanes secrets unlock
-
-Read secrets with fnox in this terminal and hand them to the daemon
-
-```text
-devlanes secrets unlock [OPTIONS]
-```
-
 ### devlanes remote
 
 Connect to boxes over SSH and mirror their lanes here

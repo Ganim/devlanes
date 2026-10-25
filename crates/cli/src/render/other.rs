@@ -320,20 +320,16 @@ fn one_line(value: &str) -> String {
     clean(&value.replace('\r', "\\r").replace('\n', "\\n"))
 }
 
-/// `env`: `KEY=VALUE` lines, or with `--explain` a `KEY VALUE LAYER` table where
-/// redacted secret values show as `<secret>`.
+/// `env`: `KEY=VALUE` lines, or with `--explain` a `KEY VALUE LAYER` table.
 pub(super) fn env(data: &Value) -> Vec<String> {
     if let Some(items) = data.get("items").and_then(Value::as_array) {
         let mut rows = vec![["KEY", "VALUE", "LAYER"].map(str::to_owned).to_vec()];
         for item in items {
-            let value = if item.get("redacted").and_then(Value::as_bool) == Some(true) {
-                "<secret>".into()
-            } else {
-                item.get("value")
-                    .and_then(Value::as_str)
-                    .map(one_line)
-                    .unwrap_or_default()
-            };
+            let value = item
+                .get("value")
+                .and_then(Value::as_str)
+                .map(one_line)
+                .unwrap_or_default();
             // The value sits between key and layer, so long values stay readable.
             rows.push(vec![
                 text(item, "key"),
@@ -1888,25 +1884,6 @@ pub(super) fn config_check(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         ));
     }
     lines
-}
-
-/// `unlock`: how many secrets the daemon now holds for the lane.
-pub(super) fn unlock(data: &Value) -> Vec<String> {
-    let keys = data
-        .get("keys")
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .or_else(|| {
-            data.get("keys")
-                .and_then(Value::as_u64)
-                .and_then(|n| usize::try_from(n).ok())
-        })
-        .unwrap_or(0);
-    let mut line = format!("unlocked {keys} secrets for {}", text(data, "lane"));
-    if let Some(profile) = data.get("profile").and_then(Value::as_str) {
-        line.push_str(&format!(" (fnox profile {})", clean(profile)));
-    }
-    vec![line]
 }
 
 /// `daemon status`.

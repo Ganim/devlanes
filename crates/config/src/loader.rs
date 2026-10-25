@@ -1,7 +1,7 @@
 use crate::{
-    CheckReport, ComposeFiles, ConfigError, Env, Extensions, FnoxConfig, InfraCommand,
-    InfraCommandOptions, InfraConfig, LanesConfig, OpaqueExtensions, ProfileConfig, ProfileOptions,
-    ProjectConfig, TaskConfig, service::PartialService,
+    CheckReport, ComposeFiles, ConfigError, Env, Extensions, InfraCommand, InfraCommandOptions,
+    InfraConfig, LanesConfig, OpaqueExtensions, ProfileConfig, ProfileOptions, ProjectConfig,
+    TaskConfig, service::PartialService,
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, de::DeserializeOwned};
@@ -68,7 +68,6 @@ struct PartialProject<E: Extensions> {
     tags: IndexMap<String, crate::TagConfig>,
     lanes: Option<Spanned<LanesConfig>>,
     infra: Option<Spanned<InfraConfig>>,
-    fnox: Option<Spanned<FnoxConfig>>,
     global_env: Option<Spanned<Env>>,
     #[serde(default)]
     templates: IndexMap<String, PartialService<E>>,
@@ -166,9 +165,6 @@ fn merge_task(base: &mut TaskConfig, mut overlay: TaskConfig) {
         pty
     );
     base.env.extend(overlay.env);
-    merge_option(&mut base.fnox, overlay.fnox, |base, overlay| {
-        replace!(base, overlay, profile);
-    });
 }
 
 /// Merge optional typed objects rather than replacing an entire object.
@@ -339,9 +335,6 @@ impl<E: Extensions> PartialProject<E> {
         replace!(self, overlay, project);
         merge_spanned(&mut self.lanes, overlay.lanes, merge_lanes);
         merge_spanned(&mut self.infra, overlay.infra, merge_infra);
-        merge_spanned(&mut self.fnox, overlay.fnox, |base, overlay| {
-            replace!(base, overlay, profile);
-        });
         merge_spanned(&mut self.global_env, overlay.global_env, |base, overlay| {
             base.extend(overlay)
         });
@@ -390,7 +383,6 @@ impl<E: Extensions> PartialProject<E> {
                 .value,
             lanes: self.lanes.map(|v| v.value).unwrap_or_default(),
             infra: self.infra.map(|v| v.value).unwrap_or_default(),
-            fnox: self.fnox.map(|v| v.value),
             global_env: self.global_env.map(|v| v.value).unwrap_or_default(),
             templates,
             services,

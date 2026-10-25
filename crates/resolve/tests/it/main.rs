@@ -12,7 +12,7 @@ use std::{
 use devlanes_config::{HostConfig, Hosts, Scalar, Templated};
 use devlanes_core::{
     StopSignal,
-    contrib::{Contributor, DetectCx, ScriptRunner, SecretsProvider, UnitKind},
+    contrib::{Contributor, DetectCx, ScriptRunner, UnitKind},
     env::EnvLayer,
     ports::{PortBlock, PortName},
 };
@@ -75,25 +75,17 @@ profiles:
     for key in ["A", "B", "C", "DEVLANES_LANE", "E", "F", "G", "H"] {
         client.insert(key.into(), "client".into());
     }
-    let secrets = FakeSecrets {
-        values: BTreeMap::from([(
-            None,
-            BTreeMap::from([("C".into(), "secret".into()), ("H".into(), "secret".into())]),
-        )]),
-        ..FakeSecrets::default()
-    };
     let overrides = BTreeMap::from([("H".to_owned(), "override".to_owned())]);
     let mut input = ResolveInput::new(&config, &facts, block, &offsets);
     input.client_env = &client;
     input.contributors = &contributors;
-    input.secrets = Some(&secrets as &dyn SecretsProvider);
     input.overrides = &overrides;
     let lane = resolve_lane(input).await.expect("resolves");
     let env = &lane.services["api"].launch.env;
     let expected = [
         ("A", "client", EnvLayer::Client),
         ("B", "contributor", EnvLayer::Contributor),
-        ("C", "secret", EnvLayer::Secrets),
+        ("C", "contributor", EnvLayer::Contributor),
         ("DEVLANES_LANE", "1", EnvLayer::Devlanes),
         ("E", "global", EnvLayer::Global),
         ("F", "service", EnvLayer::Service),
@@ -870,55 +862,6 @@ services:
 }
 
 #[tokio::test]
-/// A locked vault fails the units that need it and names the profile.
-async fn locked_secrets_fail_units() {
-    let config = parse(FULL);
-    let facts = facts("acme", 1, Some("x"));
-    let (block, offsets) = allocation(&config, 21_000, &[]);
-    let infra = infra();
-    let secrets = FakeSecrets {
-        locked: BTreeSet::from([Some("admin-api".to_owned())]),
-        values: BTreeMap::from([(
-            Some("dev".to_owned()),
-            BTreeMap::from([("STRIPE_KEY".into(), "sk_test".into())]),
-        )]),
-        remove: BTreeSet::from(["PATH".to_owned()]),
-        ..FakeSecrets::default()
-    };
-    let client = client_env();
-    let mut input = ResolveInput::new(&config, &facts, block, &offsets);
-    input.infra = &infra;
-    input.client_env = &client;
-    input.secrets = Some(&secrets as &dyn SecretsProvider);
-    let lane = resolve_lane(input).await.expect("resolves");
-    let error = lane
-        .check_services(["catalog", "admin-api"])
-        .expect_err("locked");
-    assert!(matches!(
-        &error,
-        ResolveError::SecretsLocked { profile: Some(p), .. } if p == "admin-api"
-    ));
-    assert!(error.to_string().contains("devlanes secrets unlock"));
-    let catalog = &lane.services["catalog"].launch.env;
-    assert_eq!(catalog.values["STRIPE_KEY"], "sk_test");
-    assert_eq!(catalog.sources["STRIPE_KEY"], EnvLayer::Secrets);
-    assert!(
-        !catalog.values.contains_key("PATH"),
-        "fnox remove drops client vars"
-    );
-    // One provider call per (profile, explicit) pair.
-    let calls = secrets.calls.lock().expect("lock");
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|(p, _)| p.as_deref() == Some("dev"))
-            .count(),
-        1
-    );
-    assert!(calls.iter().all(|(_, explicit)| *explicit));
-}
-
-#[tokio::test]
 /// Launch debug output never shows env values or arguments.
 async fn debug_output_hides_values() {
     let config =
@@ -1323,7 +1266,7 @@ async fn only_plans_the_named_units() {
 }
 
 #[tokio::test]
-/// Snapshot of examples/devlanes.yaml in lane 2 with fake integrations and secrets.
+/// Snapshot of examples/devlanes.yaml in lane 2 with fake integrations.
 async fn snapshot_reference() {
     let config = parse(FULL);
     let facts = facts("acme", 2, Some("feature/billing"));
@@ -1347,25 +1290,11 @@ async fn snapshot_reference() {
     let runners: [Arc<dyn ScriptRunner>; 1] = [Arc::new(FakeRunner::new())];
     let infra = infra();
     let client = client_env();
-    let secrets = FakeSecrets {
-        values: BTreeMap::from([
-            (
-                Some("dev".to_owned()),
-                BTreeMap::from([("ACME_STRIPE_KEY".into(), "sk_dev".into())]),
-            ),
-            (
-                Some("admin-api".to_owned()),
-                BTreeMap::from([("ADMIN_TOKEN".into(), "adm".into())]),
-            ),
-        ]),
-        ..FakeSecrets::default()
-    };
     let mut input = ResolveInput::new(&config, &facts, block, &offsets);
     input.contributors = &contributors;
     input.script_runners = &runners;
     input.infra = &infra;
     input.client_env = &client;
-    input.secrets = Some(&secrets as &dyn SecretsProvider);
     let lane = resolve_lane(input).await.expect("resolves");
     assert!(lane.errors.is_empty(), "{:?}", lane.errors);
     // The snapshot leaves Windows-only notes out; `queue-worker` stops on

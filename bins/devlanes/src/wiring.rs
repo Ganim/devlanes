@@ -130,7 +130,6 @@ pub async fn engine(
     }
     integ.contributors = contributors();
     integ.script_runners = script_runners();
-    integ.secrets = Some(Arc::new(devlanes_secrets_fnox::FnoxProvider::default()));
     integ.metrics = metrics_sources(infra.docker.as_ref());
     integ.infra = infra;
     integ.routes = routes;

@@ -282,13 +282,6 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             ),
             Some(Hint::command(["stop", &target(data)])),
         ),
-        "secrets_locked" => (
-            match data.get("profile").and_then(Value::as_str) {
-                Some(profile) => format!("secrets for fnox profile {profile} are locked"),
-                None => "secrets are locked".into(),
-            },
-            Some(Hint::command(["secrets", "unlock"])),
-        ),
         "needs_env" => (
             "the daemon restarted and lost this lane's shell environment".into(),
             Some(match data.get("lane").and_then(Value::as_str) {
@@ -804,13 +797,6 @@ fn more_errors(code: &str, data: &Value) -> Option<(String, Option<Hint>)> {
             with_message(format!("remote {}", field(data, "host"))),
             Some(Hint::command(["remote", "ls"])),
         ),
-        "secrets_failed" => (
-            with_message(match data.get("profile").and_then(Value::as_str) {
-                Some(profile) => format!("secrets for fnox profile {profile} could not be read"),
-                None => "secrets could not be read".into(),
-            }),
-            Some(Hint::command(["secrets", "unlock"])),
-        ),
         "script_error" => (
             match data.get("file").and_then(Value::as_str) {
                 Some(file) => format!(
@@ -1131,10 +1117,6 @@ pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (Strin
         "needs_env" => (
             "the daemon restarted and lost this lane's shell environment".into(),
             Some(Hint::command(["start", "--lane", lane])),
-        ),
-        "secrets_locked" => (
-            "its secrets are locked".into(),
-            Some(Hint::command(["secrets", "unlock"])),
         ),
         "config_error" => (
             config_invalid(data),

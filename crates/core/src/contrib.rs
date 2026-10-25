@@ -1,4 +1,4 @@
-//! Launch contributors, secrets providers and `run_script` runners.
+//! Launch contributors and `run_script` runners.
 //!
 //! Lane resolution calls these while it plans a process launch. They return data
 //! only; the daemon spawns processes and writes files. Integrations implement the
@@ -212,50 +212,6 @@ pub trait Contributor: Send + Sync {
     /// Edits the draft. Errors fail the unit's launch; use `draft.notes` for
     /// problems that should not.
     async fn apply(&self, draft: &mut LaunchDraft, cx: &ContribCx<'_>) -> Result<(), Error>;
-}
-
-/// One secrets lookup for a lane worktree.
-pub struct SecretsRequest<'a> {
-    pub worktree: &'a Path,
-    /// Provider profile (`fnox.profile`); `None` uses the provider's default.
-    pub profile: Option<&'a str>,
-    /// True when the config names the provider, so a missing provider config is an
-    /// error rather than "no secrets".
-    pub explicit: bool,
-    /// Client environment, for provider credentials and `PATH`.
-    pub base_env: &'a BTreeMap<String, String>,
-}
-
-/// Provider output. Values stay in memory: no `Debug`, no serialization.
-#[derive(Default)]
-pub struct SecretEnv {
-    pub set: BTreeMap<String, String>,
-    /// Variables to drop from the inherited (client) environment.
-    pub remove: BTreeSet<String>,
-    /// File-backed secrets: variable name to file contents. The caller decides
-    /// whether and where to write them.
-    pub files: BTreeMap<String, String>,
-}
-
-/// Secrets failures. Messages never include secret values.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum SecretsError {
-    /// The vault needs an interactive unlock (`devlanes secrets unlock`).
-    #[error("secrets are locked: {message}")]
-    Locked { message: String },
-    #[error("secrets provider failed: {0}")]
-    Other(String),
-}
-
-/// Resolves secrets for a lane, such as `fnox env --json`.
-#[async_trait]
-pub trait SecretsProvider: Send + Sync {
-    /// Stable identifier used in errors and `env --explain`.
-    fn id(&self) -> &'static str;
-
-    /// Returns the variables for `request`. Returns an empty set when the provider
-    /// has no config in the worktree and `request.explicit` is false.
-    async fn env(&self, request: &SecretsRequest<'_>) -> Result<SecretEnv, SecretsError>;
 }
 
 /// One `run_script` invocation to render.

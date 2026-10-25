@@ -364,11 +364,6 @@ pub fn rpc(error: &RpcError) -> Worded {
             Vec::new(),
             None,
         ),
-        "secrets_locked" => (
-            "secrets are locked".into(),
-            Vec::new(),
-            Some("devlanes secrets unlock".into()),
-        ),
         "needs_env" => (
             "the daemon restarted and lost this lane's shell environment".into(),
             Vec::new(),

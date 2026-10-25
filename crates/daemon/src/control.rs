@@ -1,4 +1,4 @@
-//! Mutating methods: start, stop, restart, resume, lanes, exec, run, unlock, infra
+//! Mutating methods: start, stop, restart, resume, lanes, exec, run, infra
 //! and reset. Each returns structured data only.
 
 use std::{
@@ -69,17 +69,6 @@ struct RunArgs {
     run: RunParams,
     #[serde(default)]
     timeout_ms: Option<u64>,
-}
-
-/// `unlock` parameters; values stay in memory only.
-#[derive(Default, Deserialize)]
-struct UnlockParams {
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    #[serde(default)]
-    remove: Vec<String>,
-    #[serde(default)]
-    profile: Option<String>,
 }
 
 impl Inner {
@@ -1033,42 +1022,6 @@ impl Inner {
         Ok(json!({"items": items, "sources": sources, "truncated": false, "next_cursor": null}))
     }
 
-    /// `unlock`: stores secret values for the lane's worktree (memory only).
-    pub(crate) async fn unlock_method(
-        self: &Arc<Self>,
-        value: Value,
-        context: &Context,
-    ) -> Result<Value, RpcError> {
-        let args: UnlockParams = params(value)?;
-        let (project, lane) = self.target_lane(context).await?;
-        let (path, project_profile) = {
-            let st = lane.st();
-            let profile = st
-                .config
-                .loaded()
-                .and_then(|config| config.fnox.as_ref())
-                .and_then(|fnox| fnox.profile.as_ref())
-                .and_then(|profile| profile.evaluate(&ExpressionContext::default()).ok());
-            (st.path.clone(), profile)
-        };
-        let remove: BTreeSet<String> = args.remove.into_iter().collect();
-        let keys = self.secrets.unlock(
-            path.clone(),
-            args.profile.clone(),
-            args.env.clone(),
-            remove.clone(),
-        );
-        // The CLI's default profile is the project's fnox profile.
-        if args.profile.is_none() && project_profile.is_some() {
-            self.secrets
-                .unlock(path, project_profile.clone(), args.env, remove);
-        }
-        let reference = lane.st().reference(&project.name());
-        lane.st().last_error = None;
-        self.emit_lane(&project, &lane);
-        Ok(json!({"lane": reference, "profile": args.profile.or(project_profile), "keys": keys}))
-    }
-
     /// `daemon.reset-state` (requires `yes`): stops everything and empties state.db.
     pub(crate) async fn reset_state(
         self: &Arc<Self>,
@@ -1106,7 +1059,6 @@ impl Inner {
             st.orphans.clear();
         }
         lock(&self.projects).clear();
-        self.secrets.forget(None);
         self.publish_routes();
         self.bus
             .emit(events::RESYNC, json!({"reason": "reset_state"}));

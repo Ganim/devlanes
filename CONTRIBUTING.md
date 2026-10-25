@@ -10,7 +10,7 @@ devlanes is a Cargo workspace: one binary (`bins/devlanes`) built from small cra
 - macOS (Apple Silicon and Intel), Linux with glibc (x86_64 and arm64) and Windows 11 24H2 or later (x64 and arm64) are supported.
 - On Windows, also install the Visual Studio Build Tools (the "Desktop development with C++" workload) and [Git for Windows](https://gitforwindows.org). kache 1.2.2 can't wrap the C compiler there, so build kache from a commit with the fix, outside the checkout and without the wrapper: `cargo install --locked --git https://github.com/kunobi-ninja/kache --rev a37fb5ff3bcc86adfded7f3ecb4f7c5100f744c2 kache` with `RUSTC_WRAPPER` unset. Switch to `cargo install kache` once a release includes it.
 
-Optional tools, needed only by the ignored tests that mention them: Docker (OrbStack or Docker Desktop on macOS, Docker Desktop on Windows), `node` with npm/pnpm/yarn/bun, `just`, `deno`, `uv`, `poetry`, `mise`, `direnv`, `fnox` 1.39+, `certutil` (NSS), `dig`, `tmux`.
+Optional tools, needed only by the ignored tests that mention them: Docker (OrbStack or Docker Desktop on macOS, Docker Desktop on Windows), `node` with npm/pnpm/yarn/bun, `just`, `deno`, `uv`, `poetry`, `mise`, `direnv`, `certutil` (NSS), `dig`, `tmux`.
 
 CI also shares kache's cache through a remote bucket when the repository has one configured, and falls back to the Actions cache when it hasn't. Contributors don't need the remote; kache's local cache is enough, and connecting to a remote is an optional setting in your own `~/.config/kache/config.toml`.
 
@@ -165,7 +165,7 @@ Run a crate's ignored tests with `cargo nextest run -p <crate> --run-ignored onl
 |---|---|
 | `devlanes-run-script-npm` | node with npm, pnpm, yarn and bun |
 | `devlanes-run-script-just`, `-cargo`, `-deno`, `-python` | just, cargo, deno, uv or poetry |
-| `devlanes-env-mise`, `devlanes-env-direnv`, `devlanes-secrets-fnox` | mise, direnv, fnox 1.39+ |
+| `devlanes-env-mise`, `devlanes-env-direnv` | mise, direnv |
 | `devlanes-trust-macos` | someone to click the keychain password prompt |
 | `devlanes-trust-linux` | sudo and certutil |
 | `devlanes-trust-windows` | a desktop session, to answer the two Windows security warnings for the real user root store |

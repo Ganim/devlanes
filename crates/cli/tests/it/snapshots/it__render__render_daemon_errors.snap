@@ -13,8 +13,6 @@ error: acme is already running from /work/other-acme
 hint: devlanes stop --project acme
 error: port 5173 is taken by shop@1:web
 hint: devlanes stop shop@1:web
-error: secrets for fnox profile dev are locked
-hint: devlanes secrets unlock
 error: Docker isn't running or can't be reached
 hint: devlanes doctor
 error: timed out waiting for acme@2:api

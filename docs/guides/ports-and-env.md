@@ -87,18 +87,17 @@ Layers, lowest first. A later layer wins on the same key.
 
 1. The environment of the shell that ran `devlanes start` (or `restart`, `run`, `exec`, `lane resume`). The daemon keeps it in memory for the lane and reuses it for restarts from the TUI; it is never written to disk. `devlanes daemon restart` starts what ran again with the environment of the shell that ran it; after a reboot or `daemon stop`, `devlanes lane resume` from a shell supplies it again.
 2. Contributors: mise, direnv, then the platform (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, …) and preset (`WRANGLER_REGISTRY_PATH`).
-3. Secrets from fnox.
-4. [devlanes' own variables](#devlanes-variables): `DEVLANES=1`, `DEVLANES_PROJECT`, `DEVLANES_LANE`, `DEVLANES_LANE_NAME`, `DEVLANES_LANE_DATA`, `DEVLANES_CA_CERT`, `DEVLANES_CA_BUNDLE`; for services also `PORT`, `HOST`, `DEVLANES_SERVICE` and `DEVLANES_ORIGINS`.
-5. `global_env`.
-6. The unit's own `env`.
-7. The profile's `env` (later `--profile` flags win).
-8. `--env KEY=VALUE` on the command line.
+3. [devlanes' own variables](#devlanes-variables): `DEVLANES=1`, `DEVLANES_PROJECT`, `DEVLANES_LANE`, `DEVLANES_LANE_NAME`, `DEVLANES_LANE_DATA`, `DEVLANES_CA_CERT`, `DEVLANES_CA_BUNDLE`; for services also `PORT`, `HOST`, `DEVLANES_SERVICE` and `DEVLANES_ORIGINS`.
+4. `global_env`.
+5. The unit's own `env`.
+6. The profile's `env` (later `--profile` flags win).
+7. `--env KEY=VALUE` on the command line.
 
 On Windows, variable names are uppercased in every layer, since Windows treats `Path` and `PATH` as one variable; `${{ env.Path }}` reads `PATH`.
 
 `devlanes env show api --explain` prints every variable with its layer; `devlanes env shell api` opens a shell with that environment; `devlanes env export | eval` loads the lane's variables into the current shell.
 
-Tasks and infra commands get layers 1 to 8 as well, minus the service-only variables, plus Compose variables (`COMPOSE_PROJECT_NAME`, `COMPOSE_FILE`, `COMPOSE_PROFILES`, `DEVLANES_COMPOSE_LANE_PROJECT`) that let `docker compose exec` reach the project's containers without flags.
+Tasks and infra commands get layers 1 to 7 as well, minus the service-only variables, plus Compose variables (`COMPOSE_PROJECT_NAME`, `COMPOSE_FILE`, `COMPOSE_PROFILES`, `DEVLANES_COMPOSE_LANE_PROJECT`) that let `docker compose exec` reach the project's containers without flags.
 
 ### devlanes variables
 
@@ -139,7 +138,7 @@ Values may contain `${{ ... }}` (MiniJinja), evaluated per lane. A value that is
 | `lane` | `index`, `name`, `label` (branch with `/` as `-`), `path`, `data_path` (the [lane data folder](#lane-data-folder)), `domain`, `port` (block start), every `lanes.vars` key |
 | `self`, `services.<name>`, `lanes.main.services.<name>` | `name`, `port`, `ports.<name>`, `url`, `public_url`, `hosts` |
 | `infra.<container>` | `port`, `ports` |
-| `env` | the shell that ran devlanes, then fnox secrets, then the lane's `.env` |
+| `env` | the shell that ran devlanes, then the lane's `.env` |
 | `replica` | `index` (from 1), `count` |
 | `projects.<project>.services.<name>` | a service of another running project |
 
@@ -158,25 +157,21 @@ global_env:
 
 A var named `domain` replaces the default lane domain and `port` fixes where the block starts. `lanes.matrix` is the explicit alternative: entry N describes lane N.
 
-Not every field sees every namespace. `lanes.vars` see `project`, `lane` and `env` (no secrets). `infra.*` fields see `project`, `lane`, `infra` and `env`, but not `services`. Tasks and infra commands have an empty `self` apart from `name`.
+Not every field sees every namespace. `lanes.vars` see `project`, `lane` and `env`. `infra.*` fields see `project`, `lane`, `infra` and `env`, but not `services`. Tasks and infra commands have an empty `self` apart from `name`.
 
 ### .env files
 
-`${{ env.X }}` reads your shell first, then fnox, then `<worktree>/.env`, falling back to the primary worktree's `.env` (new worktrees have no gitignored files). The `.env` file feeds expressions only; devlanes never injects it into processes. Name what a process needs:
+`${{ env.X }}` reads the shell that ran devlanes first, then `<worktree>/.env`, falling back to the primary worktree's `.env` (new worktrees have no gitignored files). The `.env` file feeds expressions only; devlanes never injects it into processes. Name what a process needs:
 
 ```yaml
 global_env:
   SENTRY_DSN: ${{ env.SENTRY_DSN | default('') }}
-  STRIPE_KEY: ${{ env.STRIPE_KEY }}          # from fnox or .env
+  STRIPE_KEY: ${{ env.STRIPE_KEY }}          # from the shell or .env
 ```
 
 or let the app load its own dotenv. Most dotenv loaders do not overwrite variables that are already set, so `global_env` wins over the file when both define a key.
 
 Compose interpolation is separate: `infra.env` and the worktree's `.env` (passed with `--env-file`) reach `docker compose`, the process environment does not.
-
-### Secrets
-
-`fnox: { profile: dev }` at the top level, or per service and task, runs fnox in the worktree and layers the result above mise and direnv. Locked vaults fail the start with `run devlanes secrets unlock`. Secret values are never logged or stored; `env show --explain` hides them. Details in [languages](languages.md#secrets-fnox).
 
 ### Per-machine overrides
 

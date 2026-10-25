@@ -9,7 +9,7 @@ use std::{
 use devlanes_config::{Extensions, OpaqueExtensions, ProjectConfig, Scalar, TaskWhen};
 use devlanes_core::{
     LaunchSpec, StopPolicy, TerminalSize,
-    contrib::{Contributor, PreparedFile, ScriptInfo, ScriptRunner, SecretsProvider},
+    contrib::{Contributor, PreparedFile, ScriptInfo, ScriptRunner},
     env::Environment,
     ports::{PortBlock, PortName},
 };
@@ -37,8 +37,6 @@ pub struct ResolveInput<'a, E: Extensions = OpaqueExtensions> {
     /// Environment of the client that started the lane: the lowest layer, and
     /// the first source of `${{ env.X }}`.
     pub client_env: &'a BTreeMap<String, String>,
-    /// fnox or another provider; called once per distinct profile.
-    pub secrets: Option<&'a dyn SecretsProvider>,
     /// The lane's `.env` (or the primary's). Feeds `${{ env.X }}` only; never injected.
     pub dotenv: &'a BTreeMap<String, String>,
     /// `infra` namespace: `{name: {port, ports: {...}}}`.
@@ -87,7 +85,6 @@ impl<'a, E: Extensions> ResolveInput<'a, E> {
             block,
             offsets,
             client_env: &EMPTY_ENV,
-            secrets: None,
             dotenv: &EMPTY_ENV,
             infra: &EMPTY_NAMESPACE,
             lanes_main: None,
@@ -105,7 +102,7 @@ impl<'a, E: Extensions> ResolveInput<'a, E> {
 }
 
 /// Ports, URLs and routes of a lane, without launch plans. Cheap and synchronous:
-/// no contributors, no secrets.
+/// no contributors.
 #[derive(Debug, Clone)]
 pub struct LaneLayout {
     pub domain: String,

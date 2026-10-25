@@ -144,9 +144,6 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       }
     }
   },
-  "fnox": {
-    "profile": "dev"
-  },
   "global_env": {
     "ACME_DOMAIN": "${{ lane.domain }}",
     "DOTENV_ROOT": "${{ project.primary_path }}",
@@ -165,7 +162,6 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       "run_script": null,
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": "lane.create",
       "after": null,
       "profiles": null,
@@ -183,7 +179,6 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       },
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": "lane.start",
       "after": null,
       "profiles": [
@@ -204,7 +199,6 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       },
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": "lane.create",
       "after": "services",
       "profiles": null,
@@ -219,7 +213,6 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       "run_script": null,
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": "lane.start",
       "after": null,
       "profiles": [
@@ -236,7 +229,6 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       "run_script": null,
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": null,
       "after": null,
       "profiles": null,
@@ -259,7 +251,6 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       },
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": null,
       "after": null,
       "profiles": null,
@@ -277,7 +268,6 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       },
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": null,
       "after": null,
       "profiles": null,
@@ -295,7 +285,6 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       },
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": null,
       "after": null,
       "profiles": null,
@@ -310,7 +299,6 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
       "run_script": null,
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": null,
       "after": null,
       "profiles": null,
@@ -390,9 +378,6 @@ expression: "parse_project(FULL, None).expect(\"full reference\")"
         "log": null,
         "cmd": null,
         "timeout": null
-      },
-      "fnox": {
-        "profile": "admin-api"
       }
     },
     "payments-api": {

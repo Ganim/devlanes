@@ -202,38 +202,6 @@
       },
       "type": "object"
     },
-    "FnoxConfig": {
-      "additionalProperties": false,
-      "description": "Which fnox profile secrets come from.",
-      "examples": [
-        {
-          "profile": "dev"
-        }
-      ],
-      "markdownDescription": "Which fnox profile secrets come from.",
-      "properties": {
-        "profile": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Templated_string",
-              "description": "",
-              "examples": [],
-              "markdownDescription": ""
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "fnox profile whose secrets are loaded; fnox's default profile when omitted. Locked secrets are unlocked with `devlanes secrets unlock`.",
-          "examples": [
-            "dev",
-            "admin-api"
-          ],
-          "markdownDescription": "fnox profile whose secrets are loaded; fnox's default profile when omitted. Locked secrets are unlocked with `devlanes secrets unlock`."
-        }
-      },
-      "type": "object"
-    },
     "HostConfig": {
       "anyOf": [
         {
@@ -1946,35 +1914,15 @@
           "type": "object"
         },
         "extends": {
-          "description": "Template under `templates` whose settings this service inherits; its own settings apply on top. Mappings (`env`, `ready`, `stop`, `fnox`, preset options, `run_script`) merge by key, lists (`tags`, `hosts`, `sync`) and single values replace. Setting `run` or `run_script` drops the inherited other one, and one `ready` probe (`tcp`, `http`, `log`, `cmd`) drops the inherited probe. Templates may extend other templates and are resolved after devlanes.local.yaml is merged.",
+          "description": "Template under `templates` whose settings this service inherits; its own settings apply on top. Mappings (`env`, `ready`, `stop`, preset options, `run_script`) merge by key, lists (`tags`, `hosts`, `sync`) and single values replace. Setting `run` or `run_script` drops the inherited other one, and one `ready` probe (`tcp`, `http`, `log`, `cmd`) drops the inherited probe. Templates may extend other templates and are resolved after devlanes.local.yaml is merged.",
           "examples": [
             "fastify-api"
           ],
-          "markdownDescription": "Template under `templates` whose settings this service inherits; its own settings apply on top. Mappings (`env`, `ready`, `stop`, `fnox`, preset options, `run_script`) merge by key, lists (`tags`, `hosts`, `sync`) and single values replace. Setting `run` or `run_script` drops the inherited other one, and one `ready` probe (`tcp`, `http`, `log`, `cmd`) drops the inherited probe. Templates may extend other templates and are resolved after devlanes.local.yaml is merged.",
+          "markdownDescription": "Template under `templates` whose settings this service inherits; its own settings apply on top. Mappings (`env`, `ready`, `stop`, preset options, `run_script`) merge by key, lists (`tags`, `hosts`, `sync`) and single values replace. Setting `run` or `run_script` drops the inherited other one, and one `ready` probe (`tcp`, `http`, `log`, `cmd`) drops the inherited probe. Templates may extend other templates and are resolved after devlanes.local.yaml is merged.",
           "type": [
             "string",
             "null"
           ]
-        },
-        "fnox": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FnoxConfig",
-              "description": "",
-              "examples": [],
-              "markdownDescription": ""
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Secrets profile for this service, replacing the project's `fnox.profile`. fnox puts that profile's secrets into the service's environment and `${{ env.X }}`; use it when one service needs different credentials.",
-          "examples": [
-            {
-              "profile": "dev"
-            }
-          ],
-          "markdownDescription": "Secrets profile for this service, replacing the project's `fnox.profile`. fnox puts that profile's secrets into the service's environment and `${{ env.X }}`; use it when one service needs different credentials."
         },
         "hidden": {
           "anyOf": [
@@ -2673,26 +2621,6 @@
           "markdownDescription": "Variables for this task only, above `global_env`.",
           "type": "object"
         },
-        "fnox": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FnoxConfig",
-              "description": "",
-              "examples": [],
-              "markdownDescription": ""
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "fnox profile for this task's secrets, instead of the project's `fnox.profile`.",
-          "examples": [
-            {
-              "profile": "dev"
-            }
-          ],
-          "markdownDescription": "fnox profile for this task's secrets, instead of the project's `fnox.profile`."
-        },
         "interactive": {
           "anyOf": [
             {
@@ -3045,26 +2973,6 @@
   ],
   "markdownDescription": "devlanes v0.3.0 project config. Run a dev environment per git worktree, side by side. https://devlanes.run",
   "properties": {
-    "fnox": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/FnoxConfig",
-          "description": "",
-          "examples": [],
-          "markdownDescription": ""
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "fnox profile that the secrets of every task and service come from. A task or service can name its own profile with its `fnox` key.",
-      "examples": [
-        {
-          "profile": "dev"
-        }
-      ],
-      "markdownDescription": "fnox profile that the secrets of every task and service come from. A task or service can name its own profile with its `fnox` key."
-    },
     "global_env": {
       "additionalProperties": {
         "$ref": "#/$defs/Templated_Scalar",
@@ -3291,7 +3199,7 @@
         "markdownDescription": "A long-running process started with the lane, such as a dev server or a worker. Each service gets its own port from the lane's block (`PORT`, `${{ self.port }}`); devlanes stops it with the lane and never restarts it when it exits. A service needs `run` or `run_script`, directly or through `extends`."
       },
       "default": {},
-      "description": "Named service settings that services reuse with `extends: <template>`. The service inherits every setting of the template and its own settings win: mappings (`env`, `ready`, `stop`, `fnox`, preset options, `run_script`) merge by key, lists (`tags`, `hosts`, `sync`) and single values replace. Setting `run` or `run_script` drops the inherited other one, and one `ready` probe (`tcp`, `http`, `log`, `cmd`) drops the inherited probe. Templates may extend other templates, are never started themselves, and are applied after `devlanes.local.yaml` is merged.",
+      "description": "Named service settings that services reuse with `extends: <template>`. The service inherits every setting of the template and its own settings win: mappings (`env`, `ready`, `stop`, preset options, `run_script`) merge by key, lists (`tags`, `hosts`, `sync`) and single values replace. Setting `run` or `run_script` drops the inherited other one, and one `ready` probe (`tcp`, `http`, `log`, `cmd`) drops the inherited probe. Templates may extend other templates, are never started themselves, and are applied after `devlanes.local.yaml` is merged.",
       "examples": [
         {
           "fastify-api": {
@@ -3307,7 +3215,7 @@
           }
         }
       ],
-      "markdownDescription": "Named service settings that services reuse with `extends: <template>`. The service inherits every setting of the template and its own settings win: mappings (`env`, `ready`, `stop`, `fnox`, preset options, `run_script`) merge by key, lists (`tags`, `hosts`, `sync`) and single values replace. Setting `run` or `run_script` drops the inherited other one, and one `ready` probe (`tcp`, `http`, `log`, `cmd`) drops the inherited probe. Templates may extend other templates, are never started themselves, and are applied after `devlanes.local.yaml` is merged.",
+      "markdownDescription": "Named service settings that services reuse with `extends: <template>`. The service inherits every setting of the template and its own settings win: mappings (`env`, `ready`, `stop`, preset options, `run_script`) merge by key, lists (`tags`, `hosts`, `sync`) and single values replace. Setting `run` or `run_script` drops the inherited other one, and one `ready` probe (`tcp`, `http`, `log`, `cmd`) drops the inherited probe. Templates may extend other templates, are never started themselves, and are applied after `devlanes.local.yaml` is merged.",
       "type": "object"
     }
   },

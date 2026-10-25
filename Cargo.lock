@@ -965,7 +965,6 @@ dependencies = [
  "devlanes-run-script-python",
  "devlanes-runner-pty",
  "devlanes-runner-windows",
- "devlanes-secrets-fnox",
  "devlanes-shell-windows",
  "devlanes-start-gate",
  "devlanes-state",
@@ -1632,19 +1631,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "devlanes-secrets-fnox"
-version = "0.3.0"
-dependencies = [
- "async-trait",
- "devlanes-core",
- "devlanes-testing",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

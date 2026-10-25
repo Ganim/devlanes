@@ -65,16 +65,6 @@ pub(crate) fn resolve_error(error: &ResolveError) -> RpcError {
             json!({"unit": unit, "contributor": id, "message": message}),
             1,
         ),
-        ResolveError::SecretsLocked { profile, message } => (
-            "secrets_locked",
-            json!({"profile": profile, "message": message}),
-            1,
-        ),
-        ResolveError::Secrets { profile, message } => (
-            "secrets_failed",
-            json!({"profile": profile, "message": message}),
-            1,
-        ),
     };
     RpcError::new(code, data, exit)
 }
@@ -228,7 +218,6 @@ impl Inner {
         let projects = self.projects_namespace(project, lane);
         let mut input = ResolveInput::new(&config, &facts, allocation.block, &allocation.offsets);
         input.client_env = &env;
-        input.secrets = Some(self.secrets.as_ref());
         input.dotenv = &dotenv;
         input.infra = &infra_ns;
         input.lanes_main = lanes_main.as_ref();

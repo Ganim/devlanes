@@ -1,5 +1,5 @@
 //! Installed copies of the `fake-tool` binary, which stand in for external programs
-//! (`mise`, `direnv`, `fnox`, `mkcert`) where `#!/bin/sh` scripts cannot run, that
+//! (`mise`, `direnv`, `mkcert`) where `#!/bin/sh` scripts cannot run, that
 //! is on Windows.
 //!
 //! [`install`] copies the binary into a directory under the tool's name and writes
@@ -117,7 +117,7 @@ pub fn install(dir: &Path, name: &str, behaviour: &Behaviour) -> Result<PathBuf,
 }
 
 /// The behaviour file a fake at `program` reads: its full file name plus
-/// `.json` (`mise.exe.json`, `fnox.old.json`), so names with dots of their own
+/// `.json` (`mise.exe.json`, `mise.old.json`), so names with dots of their own
 /// keep distinct files.
 pub fn sidecar(program: &Path) -> PathBuf {
     let mut name = program.as_os_str().to_owned();

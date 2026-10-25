@@ -80,7 +80,6 @@ expression: config
     "setup": {},
     "teardown": {}
   },
-  "fnox": null,
   "global_env": {
     "ACME_CHANNEL": "dev",
     "RUST_BACKTRACE": "1",
@@ -101,7 +100,6 @@ expression: config
       },
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": null,
       "after": null,
       "profiles": null,
@@ -119,7 +117,6 @@ expression: config
       },
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": "lane.start",
       "after": null,
       "profiles": [
@@ -143,7 +140,6 @@ expression: config
       },
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": "lane.start",
       "after": null,
       "profiles": [
@@ -164,7 +160,6 @@ expression: config
       "run_script": null,
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": "lane.start",
       "after": null,
       "profiles": [
@@ -182,7 +177,6 @@ expression: config
       "run_script": null,
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": "lane.start",
       "after": null,
       "profiles": [
@@ -200,7 +194,6 @@ expression: config
       "run_script": null,
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": "lane.start",
       "after": null,
       "profiles": [
@@ -221,7 +214,6 @@ expression: config
       },
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": "lane.create",
       "after": "services",
       "profiles": [
@@ -238,7 +230,6 @@ expression: config
       "run_script": null,
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": null,
       "after": null,
       "profiles": null,

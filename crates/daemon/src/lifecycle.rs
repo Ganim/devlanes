@@ -977,15 +977,6 @@ impl LanePhase for ServicesPhase {
         if cx.services.is_empty() {
             return PhaseResult::Skipped(reason("no_services", json!({})));
         }
-        // A locked vault fails the start as a whole: `devlanes secrets unlock` fixes it.
-        for name in &cx.services {
-            if let Some(error) = resolved.errors.get(&format!("services.{name}")) {
-                let error = crate::resolve::resolve_error(error);
-                if error.code == "secrets_locked" {
-                    return PhaseResult::Error(error);
-                }
-            }
-        }
         let mut to_spawn: Vec<&ResolvedService> = Vec::new();
         // A copy, because the paced spawn below needs `cx` mutably.
         let selected = cx.services.clone();
@@ -2856,8 +2847,6 @@ impl Inner {
             // Last, so a clean that fails earlier keeps the data its teardown may need.
             self.remove_lane_data(&project.name(), record.id).await;
         }
-        let path = lane.st().path.clone();
-        self.secrets.forget(Some(&path));
         let present = {
             let mut st = lane.st();
             st.record = None;
@@ -3074,10 +3063,10 @@ impl Inner {
 
     /// The lane's profiles and the services they select, for `why`. `autostart`
     /// expressions use the lane's precomputed layout.
-    // TODO: the layout is evaluated without secrets and with the infra values known when it
-    // was built, while a start evaluates `autostart` with both. An expression reading a
-    // secret or an infra value (a port, a container's state) can make `why` report a
-    // selection that differs from what a start picks. Evaluate it the way a start does.
+    // TODO: the layout is evaluated with the infra values known when it was built, while a
+    // start evaluates `autostart` with current ones. An expression reading an infra value
+    // (a port, a container's state) can make `why` report a selection that differs from
+    // what a start picks. Evaluate it the way a start does.
     pub(crate) fn profile_services(lane: &LaneRt) -> Option<(Vec<String>, BTreeSet<String>)> {
         let st = lane.st();
         let config = st.config.loaded()?;

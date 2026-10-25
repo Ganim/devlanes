@@ -72,9 +72,6 @@ struct EnvParams {
     explain: bool,
     #[serde(default)]
     lane_env: bool,
-    /// Show values of the secrets layer in `explain` output.
-    #[serde(default)]
-    reveal: bool,
 }
 
 /// `subscribe` parameters.
@@ -109,7 +106,6 @@ fn layer_word(layer: EnvLayer) -> &'static str {
     match layer {
         EnvLayer::Client => "client",
         EnvLayer::Contributor => "contributor",
-        EnvLayer::Secrets => "secrets",
         EnvLayer::Devlanes => "devlanes",
         EnvLayer::Global => "global",
         EnvLayer::Service => "service",
@@ -749,9 +745,7 @@ impl Inner {
             if needs_env {
                 push(&mut reasons, "needs_env", json!({"lane": reference}));
             }
-            if let Some(error) =
-                st_reason.filter(|e| e.code == "secrets_locked" || e.code == "config_error")
-            {
+            if let Some(error) = st_reason.filter(|e| e.code == "config_error") {
                 push(&mut reasons, &error.code, error.data);
             }
             if let Some((profiles, selected)) = Inner::profile_services(&lane)
@@ -809,7 +803,7 @@ impl Inner {
     }
 
     /// `env`: lane env (`lane_env: true` or no unit) or one unit's env, optionally
-    /// with provenance. Secret-layer values are redacted unless `reveal` is set.
+    /// with provenance.
     pub(crate) async fn env_method(
         self: &Arc<Self>,
         value: Value,
@@ -893,13 +887,7 @@ impl Inner {
                 .iter()
                 .map(|(key, value)| {
                     let layer = env.sources.get(key).copied().unwrap_or(EnvLayer::Client);
-                    let redacted = layer == EnvLayer::Secrets && !args.reveal;
-                    json!({
-                        "key": key,
-                        "value": if redacted { Value::Null } else { json!(value) },
-                        "layer": layer_word(layer),
-                        "redacted": redacted,
-                    })
+                    json!({"key": key, "value": value, "layer": layer_word(layer)})
                 })
                 .collect();
             return Ok(

@@ -13,7 +13,7 @@ After every edit run `devlanes config check`. It validates expressions, referenc
 project: acme
 ```
 
-`project` is lowercase letters, digits, dots, underscores and dashes, shared by every worktree. The other top-level keys are `lanes`, `infra`, `global_env`, `fnox`, `tags`, `templates`, `tasks`, `services` and `profiles`.
+`project` is lowercase letters, digits, dots, underscores and dashes, shared by every worktree. The other top-level keys are `lanes`, `infra`, `global_env`, `tags`, `templates`, `tasks`, `services` and `profiles`.
 
 ## Services
 
@@ -114,14 +114,14 @@ Values may contain `${{ ... }}` (MiniJinja), evaluated per lane. Undefined names
 | `lane` | `index`, `name`, `label`, `path`, `data_path` (the lane's own folder outside the worktree), `domain`, `port` (block start), plus `lanes.vars` |
 | `self`, `services.<name>` | `name`, `port`, `ports.<name>`, `url`, `public_url`, `hosts` |
 | `infra.<container>` | `port` (primary published host port), `ports.<name or container port>` |
-| `env` | the shell that ran devlanes, then fnox secrets, then the lane's `.env` |
+| `env` | the shell that ran devlanes, then the lane's `.env` |
 | `replica` | `index`, `count` |
 | `lanes.main.services.<name>` | services of lane 0 |
 | `projects.<project>.services.<name>` | services of another devlanes project |
 
-Layers, lowest first: the client's environment, contributors (mise, direnv, Node, Python), secrets, devlanes' variables (`DEVLANES=1`, `DEVLANES_PROJECT`, `DEVLANES_LANE`, `DEVLANES_LANE_NAME`, `DEVLANES_LANE_DATA`, `DEVLANES_CA_CERT`, `DEVLANES_CA_BUNDLE`, and for services `PORT`, `HOST`, `DEVLANES_SERVICE`, `DEVLANES_ORIGINS`), `global_env`, the service's `env`, the profile's `env`, `--env` on the command line.
+Layers, lowest first: the client's environment, contributors (mise, direnv, Node, Python), devlanes' variables (`DEVLANES=1`, `DEVLANES_PROJECT`, `DEVLANES_LANE`, `DEVLANES_LANE_NAME`, `DEVLANES_LANE_DATA`, `DEVLANES_CA_CERT`, `DEVLANES_CA_BUNDLE`, and for services `PORT`, `HOST`, `DEVLANES_SERVICE`, `DEVLANES_ORIGINS`), `global_env`, the service's `env`, the profile's `env`, `--env` on the command line.
 
-`.env` is never injected into processes; it only feeds `${{ env.X }}`. Name what a process needs (`DB_PASSWORD: ${{ env.DB_PASSWORD }}`) or let the app load its own dotenv. mise `[env]` and an allowed `.envrc` are applied automatically, so do not copy them. Secrets belong in fnox (`fnox: { profile: dev }`, unlocked with `devlanes secrets unlock`), never as literals.
+`.env` is never injected into processes; it only feeds `${{ env.X }}`. Name what a process needs (`DB_PASSWORD: ${{ env.DB_PASSWORD }}`) or let the app load its own dotenv. mise `[env]` and an allowed `.envrc` are applied automatically, so do not copy them.
 
 ## Lanes
 
@@ -181,7 +181,7 @@ infra:
 
 ## Tasks
 
-One-shot commands with `run`, `run_script` or `steps`, plus `cwd`, `env`, `timeout` and `fnox`.
+One-shot commands with `run`, `run_script` or `steps`, plus `cwd`, `env` and `timeout`.
 
 ```yaml
 tasks:

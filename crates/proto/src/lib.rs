@@ -171,8 +171,6 @@ pub enum Method {
     Disconnect,
     #[serde(rename = "host.list")]
     HostList,
-    #[serde(rename = "unlock")]
-    Unlock,
     /// Sent by `devlanes certs trust --hosts` and `certs untrust --hosts` after changing the
     /// helper: the daemon drops its sudo backoff and reapplies `/etc/hosts` now.
     #[serde(rename = "hosts.retry")]

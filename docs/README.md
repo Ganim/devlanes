@@ -11,9 +11,9 @@ Start with [getting started](getting-started.md). The two references are generat
 ## Guides
 
 - [Run and run_script](guides/run-scripts.md): the six script runners, which file picks which, and how presets pass their flags.
-- [Languages](guides/languages.md): Node, Bun, Deno, Python and Rust services, mise, direnv and fnox.
+- [Languages](guides/languages.md): Node, Bun, Deno, Python and Rust services, mise and direnv.
 - [Framework presets](guides/presets.md): Vite, Next, Wrangler and Tauri.
-- [Ports and environment](guides/ports-and-env.md): port blocks, named ports, `PORT`, expressions, env layers, `.env`, secrets.
+- [Ports and environment](guides/ports-and-env.md): port blocks, named ports, `PORT`, expressions, env layers, `.env`.
 - [Hostnames and HTTPS](guides/https.md): the proxy, the CA, trusting it per OS and runtime, resolver strategies, LAN access.
 - [Infra](guides/infra.md): Compose and plain containers, shared versus per-lane, recipes for Postgres, MySQL, Redis, RabbitMQ, MinIO and Mailpit.
 - [Service patterns](guides/services.md): APIs behind a frontend, workers, several ports, wildcards, replicas, lifecycle tasks, CI.

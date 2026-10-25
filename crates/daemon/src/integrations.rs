@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_core::{
     ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopPolicy, TerminalSize, Unit,
-    contrib::{Contributor, ScriptRunner, SecretsProvider},
+    contrib::{Contributor, ScriptRunner},
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -649,8 +649,6 @@ pub struct Integrations {
     pub runner: Arc<dyn UnitRunner>,
     pub contributors: Vec<Arc<dyn Contributor>>,
     pub script_runners: Vec<Arc<dyn ScriptRunner>>,
-    /// Wrapped by the daemon's per-lane cache, which `unlock` can fill.
-    pub secrets: Option<Arc<dyn SecretsProvider>>,
     pub infra: Arc<dyn InfraProvider>,
     pub routes: Arc<dyn RouteSink>,
     pub metrics: Vec<Arc<dyn devlanes_metrics::MetricsSource>>,
@@ -780,7 +778,6 @@ impl Integrations {
             runner,
             contributors: Vec::new(),
             script_runners: Vec::new(),
-            secrets: None,
             infra: Arc::new(NoInfra),
             routes: Arc::new(NoRoutes),
             metrics: Vec::new(),

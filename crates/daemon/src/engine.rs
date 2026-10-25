@@ -30,7 +30,6 @@ use crate::{
     bus::EventBus,
     integrations::Integrations,
     model::{LaneRt, ProjectRt, lock},
-    secrets::SecretsCache,
 };
 
 /// Paths and policy the engine needs; supplied by the composition root.
@@ -81,7 +80,6 @@ pub(crate) struct Inner {
     pub store: Store,
     pub integ: Integrations,
     pub bus: EventBus,
-    pub secrets: Arc<SecretsCache>,
     pub projects: Mutex<BTreeMap<ProjectId, Arc<ProjectRt>>>,
     pub shutdown: CancellationToken,
     pub started: Instant,
@@ -124,14 +122,12 @@ impl Engine {
         integ: Integrations,
         shutdown: CancellationToken,
     ) -> Self {
-        let secrets = Arc::new(SecretsCache::new(integ.secrets.clone()));
         Self {
             inner: Arc::new(Inner {
                 opts,
                 store,
                 integ,
                 bus: EventBus::default(),
-                secrets,
                 projects: Mutex::new(BTreeMap::new()),
                 shutdown,
                 started: Instant::now(),
@@ -315,7 +311,6 @@ fn mutating(method: &Method) -> bool {
             | Method::Run
             | Method::InfraUp
             | Method::InfraDown
-            | Method::Unlock
             | Method::Connect
             | Method::Disconnect
             | Method::HostsRetry
@@ -458,7 +453,6 @@ impl Inner {
             Method::Connect => self.connect_method(params, &session).await,
             Method::Disconnect => self.disconnect_method(params).await,
             Method::HostList => self.host_list().await,
-            Method::Unlock => self.unlock_method(params, &context).await,
             Method::HostsRetry => self.hosts_retry().await,
             // A newer client's method: answer instead of dropping the connection.
             Method::Unknown => Err(RpcError::new("unknown_method", json!({}), 2)),

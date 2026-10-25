@@ -731,7 +731,7 @@ fn xml_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Local-only actions: trust, unlock, tunnel, askpass.
+/// Local-only actions: trust, tunnel, askpass.
 pub async fn local_action(runtime: &Runtime, action: Action) -> Result<u8, RpcError> {
     crate::local::run(runtime, action).await
 }

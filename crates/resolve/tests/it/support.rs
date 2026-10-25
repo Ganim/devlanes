@@ -1,7 +1,7 @@
 //! Fakes and fixtures shared by the resolution tests.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -12,8 +12,7 @@ use devlanes_core::{
     Error, StopSignal,
     contrib::{
         ContribCx, Contributor, DETECT_MANIFEST, DETECT_SCRIPT_SOURCE, DetectCx, LaunchDraft,
-        ScriptPlan, ScriptRequest, ScriptRunner, SecretEnv, SecretsError, SecretsProvider,
-        SecretsRequest, ServiceView,
+        ScriptPlan, ScriptRequest, ScriptRunner, ServiceView,
     },
     ports::{PortBlock, PortName, allocate_offsets, block_size},
 };
@@ -240,40 +239,6 @@ impl ScriptRunner for FakeRunner {
             body: Some(format!("echo {}", request.name)),
             notes: Vec::new(),
             detail: None,
-        })
-    }
-}
-
-/// Secrets provider with fixed values per profile.
-#[derive(Default)]
-pub struct FakeSecrets {
-    pub values: BTreeMap<Option<String>, BTreeMap<String, String>>,
-    pub remove: BTreeSet<String>,
-    pub locked: BTreeSet<Option<String>>,
-    pub calls: Mutex<Vec<(Option<String>, bool)>>,
-}
-
-#[async_trait]
-impl SecretsProvider for FakeSecrets {
-    fn id(&self) -> &'static str {
-        "fake-secrets"
-    }
-
-    async fn env(&self, request: &SecretsRequest<'_>) -> Result<SecretEnv, SecretsError> {
-        let profile = request.profile.map(str::to_owned);
-        self.calls
-            .lock()
-            .expect("lock")
-            .push((profile.clone(), request.explicit));
-        if self.locked.contains(&profile) {
-            return Err(SecretsError::Locked {
-                message: "1password needs a sign-in".into(),
-            });
-        }
-        Ok(SecretEnv {
-            set: self.values.get(&profile).cloned().unwrap_or_default(),
-            remove: self.remove.clone(),
-            files: BTreeMap::new(),
         })
     }
 }

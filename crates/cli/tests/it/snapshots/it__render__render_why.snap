@@ -6,7 +6,6 @@ expression: text
 idle acme@2:admin
   not selected by profile e2e (devlanes start acme@2:admin)
   the daemon restarted and lost this lane's shell environment (devlanes start --lane acme@2)
-  its secrets are locked (devlanes secrets unlock)
   devlanes.yaml is invalid at line 4, column 3: unknown field (devlanes config check)
   port 20102 is taken by PID 911 (devlanes debug errors)
   waiting for the lane's services to be ready (after: services) (devlanes wait acme@2)
@@ -22,7 +21,6 @@ idle acme@2:admin
 idle acme@2:admin
   not selected by profile e2e (devlanes start acme@2:admin)
   the daemon restarted and lost this lane's shell environment (devlanes start --lane acme@2)
-  its secrets are locked (devlanes secrets unlock)
   devlanes.yaml is invalid at line 4, column 3: unknown field (devlanes config check)
   port 20102 is taken by PID 911 (devlanes debug errors)
   waiting for the lane's services to be ready (after: services) (devlanes wait acme@2)
@@ -38,7 +36,6 @@ idle acme@2:admin
 idle acme@2:admin
   not selected by profile e2e (devlanes start acme@2:admin)
   the daemon restarted and lost this lane's shell environment (devlanes start --lane acme@2)
-  its secrets are locked (devlanes secrets unlock)
   devlanes.yaml is invalid at line 4, column 3: unknown field (devlanes config check)
   port 20102 is taken by PID 911 (devlanes debug errors)
   waiting for the lane's services to be ready (after: services) (devlanes wait acme@2)

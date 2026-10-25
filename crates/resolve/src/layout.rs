@@ -49,16 +49,15 @@ impl Namespaces {
     }
 }
 
-/// `${{ env.X }}` lookup order is client env, then secrets, then `.env`, so the
-/// map is built lowest first. Names go through `fold_name`, so on Windows a
-/// `.env` file's `Path` and the client's `PATH` are one entry.
+/// `${{ env.X }}` lookup order is client env, then `.env`, so the map is built
+/// lowest first. Names go through `fold_name`, so on Windows a `.env` file's
+/// `Path` and the client's `PATH` are one entry.
 pub(crate) fn env_namespace(
     client: &BTreeMap<String, String>,
-    secrets: Option<&BTreeMap<String, String>>,
     dotenv: &BTreeMap<String, String>,
 ) -> Value {
     let mut map = serde_json::Map::new();
-    for source in [Some(dotenv), secrets, Some(client)].into_iter().flatten() {
+    for source in [dotenv, client] {
         for (key, value) in source {
             map.insert(
                 devlanes_core::env::fold_name(key.clone()),
@@ -131,7 +130,7 @@ pub fn fixed_block_start<E: Extensions>(
     let context = ExpressionContext {
         project,
         lane,
-        env: env_namespace(client_env, None, dotenv),
+        env: env_namespace(client_env, dotenv),
         ..ExpressionContext::default()
     };
     let vars = devlanes_config::resolve_lane_vars(&config.lanes, &context)
@@ -150,10 +149,10 @@ pub fn fixed_block_start<E: Extensions>(
     }
 }
 
-/// Computes ports, URLs and routes for a lane without contributors or secrets.
+/// Computes ports, URLs and routes for a lane without contributors.
 /// `${{ env.X }}` sees the client env and `.env` only.
 pub fn lane_layout<E: Extensions>(input: &ResolveInput<'_, E>) -> Result<LaneLayout, ResolveError> {
-    let env = env_namespace(input.client_env, None, input.dotenv);
+    let env = env_namespace(input.client_env, input.dotenv);
     build(input, &env)
         .map(|(layout, _)| layout)
         .map_err(|error| error.locate(input.config))

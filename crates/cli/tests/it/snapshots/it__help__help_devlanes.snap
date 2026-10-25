@@ -31,7 +31,6 @@ Commands:
   infra        Start, stop and inspect the project's containers
   config       Validate devlanes.yaml
   certs        Trust the devlanes CA and install the /etc/hosts helper
-  secrets      Hand secrets from fnox to the daemon
   remote       Connect to boxes over SSH and mirror their lanes here
   daemon       Run, stop and install the background daemon
   doctor       Check the daemon, Docker, proxy, CA, hosts file and output mode, each with a fix; never starts the daemon

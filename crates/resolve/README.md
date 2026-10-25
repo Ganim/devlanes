@@ -1,6 +1,6 @@
 # devlanes-resolve
 
-Turns a project config and one lane's facts into ports, hostnames, routes and launch plans for every service, task and infra command. The daemon calls it before starting a lane; it calls contributors, secrets providers and script runners through the `devlanes-core` traits and never spawns managed processes itself.
+Turns a project config and one lane's facts into ports, hostnames, routes and launch plans for every service, task and infra command. The daemon calls it before starting a lane; it calls contributors and script runners through the `devlanes-core` traits and never spawns managed processes itself.
 
 ## Usage
 
@@ -38,7 +38,7 @@ async fn start(
 }
 ```
 
-In the daemon the block and offsets come from `devlanes-state`, and `ResolveInput` also carries the secrets provider, contributors, script runners, infra endpoints, `lanes.main` and `--env` overrides.
+In the daemon the block and offsets come from `devlanes-state`, and `ResolveInput` also carries contributors, script runners, infra endpoints, `lanes.main` and `--env` overrides.
 
 ## API
 
@@ -46,16 +46,16 @@ In the daemon the block and offsets come from `devlanes-state`, and `ResolveInpu
 - `select_profiles`: services for one or more profiles and `start` selectors (names, globs, `+tag`); `select` is the single-profile form.
 - `profile_summaries`: profile names, include/exclude selectors and literal `infra: false`, for clients.
 - `tag_colors`: tag colors from the config's `tags:` map, for `devlanes_core::color::unit_color`.
-- `lane_layout`: ports, URLs, routes and `lane_env()` without contributors or secrets, for idle lanes and lane 0's `services_namespace()`.
+- `lane_layout`: ports, URLs, routes and `lane_env()` without contributors, for idle lanes and lane 0's `services_namespace()`.
 - `resolve_lane`: the full `ResolvedLane` with a `Launch` per unit.
 - `fixed_block_start`: block start from `lanes.vars.port` or a matrix row.
 - `detect_platform`: the platform for a unit without `platform:`, from contributor claims (highest confidence, then higher priority, then smaller id). resolve has no built-in file rules.
 
 ## Behaviour
 
-Environment layers, lowest first: client env, contributors, secrets, `DEVLANES_*`/`PORT`/`HOST` and CA variables, `global_env`, the unit's `env`, the profile's `env`, `--env`. Each value keeps its layer for `env --explain`. `.env` files only feed `${{ env.X }}`, which reads the client env, then secrets, then `.env`.
+Environment layers, lowest first: client env, contributors, `DEVLANES_*`/`PORT`/`HOST` and CA variables, `global_env`, the unit's `env`, the profile's `env`, `--env`. Each value keeps its layer for `env --explain`. `.env` files only feed `${{ env.X }}`, which reads the client env, then `.env`.
 
-A unit that fails to plan, including one whose fnox profile is locked, is recorded in `ResolvedLane::errors` and does not fail the lane. Call `check_services` for the selection before spawning. `Launch`'s `Debug` output lists env keys and layers only.
+A unit that fails to plan is recorded in `ResolvedLane::errors` and does not fail the lane. Call `check_services` for the selection before spawning. `Launch`'s `Debug` output lists env keys and layers only.
 
 ## License
 

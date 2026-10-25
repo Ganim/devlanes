@@ -1,6 +1,6 @@
 //! Lane resolution: turns a project config plus one lane's facts into launch
 //! plans, ports, hostnames and environments. Nothing here spawns processes;
-//! contributors, secrets providers and script runners are called through the
+//! contributors and script runners are called through the
 //! `devlanes-core` traits and may run helper commands of their own.
 //!
 //! Typical daemon flow for one lane start:

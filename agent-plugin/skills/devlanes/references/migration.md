@@ -8,7 +8,7 @@ Read this when the user asks to move an existing setup (mprocs, dekit, process-c
 2. Read each command to its end. Open the `package.json` scripts, Makefile targets and entrypoints the setup runs: they tell you which port a process listens on, whether it has a health route, what it logs once it is up, and whether it ends by itself.
 3. Write `devlanes.yaml` with the rules below. Keep the old files; delete them only when the user asks.
 4. Run `devlanes config check`, then `devlanes start`, and fix what fails (`devlanes debug errors`, `devlanes logs UNIT --tail 200`). Check `devlanes status` shows each service ready on its hostname.
-5. Tell the user what did not carry over (the "not mapped" rows that apply) and what they need to do: `devlanes certs trust` once, secrets into fnox, a ready log line to add to a worker.
+5. Tell the user what did not carry over (the "not mapped" rows that apply) and what they need to do: `devlanes certs trust` once, a ready log line to add to a worker.
 
 ## Rules for every source
 
@@ -24,7 +24,7 @@ Names. Unit keys are lowercase letters, digits, `-` and `_` (`API Server` become
 
 What is gone. devlanes never restarts a process, has no dependencies between services and stops everything with a signal. Drop autorestart, restart backoff, watch-and-restart and stop commands; mention them to the user. Drop CA and TLS workarounds (`NODE_OPTIONS=--use-system-ca`, `NODE_TLS_REJECT_UNAUTHORIZED`, a hand-set `NODE_EXTRA_CA_CERTS`) and `WRANGLER_REGISTRY_PATH`: devlanes sets the CA for Node and Python units and the registry path itself. Drop TUI settings (keymaps, scrollback, layouts) and log-file settings; devlanes keeps every unit's output.
 
-`.env`. Never copy `.env` values into `devlanes.yaml`; they are often secrets. Tools such as foreman, honcho and process-compose load `.env` into every process, while devlanes reads it only for `${{ env.NAME }}` expressions. Either the app loads its own dotenv (keep that), or name each variable it needs: `DB_PASSWORD: ${{ env.DB_PASSWORD }}`. Secrets the team shares belong in fnox. Variables from mise `[env]` and an allowed `.envrc` already reach every unit.
+`.env`. Never copy `.env` values into `devlanes.yaml`; they are often secrets. Tools such as foreman, honcho and process-compose load `.env` into every process, while devlanes reads it only for `${{ env.NAME }}` expressions. Either the app loads its own dotenv (keep that), or name each variable it needs: `DB_PASSWORD: ${{ env.DB_PASSWORD }}`. Variables from mise `[env]` and an allowed `.envrc` already reach every unit.
 
 Profiles. A source's "start these by default" set becomes `profiles.default` (usually `[+essential]` with an `essential` tag on those services). Named groups the user switched between become more profiles. Use either `default` or per-service `autostart: false`, not both.
 

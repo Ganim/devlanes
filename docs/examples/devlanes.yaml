@@ -128,10 +128,6 @@ infra:
       run: [aws, --endpoint-url, "http://127.0.0.1:${{ infra.s3mock.port }}", s3, rb, "s3://${{ lane.bucket }}", --force]
       ignore_errors: true
 
-# fnox profile whose secrets every task and service gets.
-fnox:
-  profile: dev
-
 # Variables for every task and service of the lane.
 global_env:
   ACME_DOMAIN: ${{ lane.domain }}
@@ -146,7 +142,7 @@ global_env:
   CERBOS_URL: http://127.0.0.1:${{ infra.cerbos.ports.http }}
   # A service of another devlanes project, with a fallback when it is not running.
   REFEREE_URL: ${{ projects.workflows.services.referee.public_url | default('https://referee.staging.example.invalid') }}
-  # env.X reads the environment of the shell that ran devlanes, then secrets, then .env.
+  # env.X reads the environment of the shell that ran devlanes, then .env.
   SENTRY_DSN: ${{ env.SENTRY_DSN | default('') }}
 
 # One-shot commands, run on demand with devlanes run or at a lane event.
@@ -224,9 +220,6 @@ services:
     run_script:
       file: apps/admin-api/package.json
       name: dev
-    # This service's own fnox profile instead of the project's.
-    fnox:
-      profile: admin-api
     hosts: "admin-api.${{ lane.domain }}"
     tags: [api, essential]
   payments-api:

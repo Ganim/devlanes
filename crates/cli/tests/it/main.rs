@@ -155,7 +155,6 @@ fn entire_command_inventory_builds_actions() {
         (&["certs", "trust", "--hosts"], None),
         (&["certs", "untrust"], None),
         (&["certs", "untrust", "--hosts", "--keep-ca"], None),
-        (&["secrets", "unlock"], None),
         (&["daemon", "restart"], None),
         (&["daemon", "logs", "-f", "--tail", "10"], None),
         (&["daemon", "install"], None),

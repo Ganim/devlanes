@@ -178,7 +178,7 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
                     "whole_lane": true, "ready": true, "timed_out": false, "failures": [],
                     "skipped_tasks": [], "units": [unit("api", "ready")],
                 }),
-                json!({"lane": "acme@3", "error": {"code": "secrets_locked", "data": {"profile": "dev"}, "exit_code": 1}}),
+                json!({"lane": "acme@3", "error": {"code": "docker_unavailable", "data": {"message": "no Docker engine is reachable"}, "exit_code": 1}}),
             ]),
         ),
         (
@@ -293,7 +293,6 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
                 "reasons": [
                     {"code": "not_in_profile", "data": {"profile": "e2e"}},
                     {"code": "needs_env", "data": {"lane": "acme@2"}},
-                    {"code": "secrets_locked", "data": {"profile": "dev"}},
                     {"code": "config_error", "data": {"message": "unknown field", "file": "devlanes.yaml", "line": 4, "column": 3}},
                     {"code": "port_in_use", "data": {"port": 20102, "pid": 911}},
                     {"code": "waiting_after_services", "data": {}},
@@ -317,9 +316,9 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
             "env_explain",
             Method::Env,
             json!({"lane": "acme@2", "unit": "api", "items": [
-            {"key": "PORT", "value": "20101", "layer": "devlanes", "redacted": false},
-            {"key": "API_TOKEN", "value": null, "layer": "secrets", "redacted": true},
-            {"key": "NODE_ENV", "value": "development", "layer": "service", "redacted": false},
+            {"key": "PORT", "value": "20101", "layer": "devlanes"},
+            {"key": "API_TOKEN", "value": "tok_test", "layer": "global"},
+            {"key": "NODE_ENV", "value": "development", "layer": "service"},
         ], "truncated": false, "next_cursor": null}),
         ),
         (
@@ -526,11 +525,6 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
                 {"code": "host_conflict", "path": "services.web.hosts", "host": "web.acme.localhost",
                  "lane": "shop@0", "other": "acme@0", "message": "web.acme.localhost is routed by shop@0 and acme@0"},
             ]}),
-        ),
-        (
-            "unlock",
-            Method::Unlock,
-            json!({"lane": "acme@2", "profile": "dev", "keys": ["API_TOKEN", "DB_PASSWORD"]}),
         ),
         (
             "daemon_status",
@@ -1606,11 +1600,6 @@ fn daemon_errors_are_worded_with_hints() {
         RpcError::new(
             "port_in_use_by_lane",
             json!({"port": 5173, "lane": "shop@1", "unit": "web"}),
-            1,
-        ),
-        RpcError::new(
-            "secrets_locked",
-            json!({"profile": "dev", "message": "vault locked"}),
             1,
         ),
         RpcError::new(

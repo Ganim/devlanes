@@ -6,16 +6,15 @@ use std::{
 };
 
 use devlanes_config::{
-    Env, ExpressionContext, Extensions, FnoxConfig, InfraCommand, ProfileConfig, ProfileOptions,
-    ReadyConfig, Run, ServiceConfig, StopConfig, SyncConfig, TaskAfter, TaskConfig, TcpReady,
-    Templated,
+    Env, ExpressionContext, Extensions, InfraCommand, ProfileConfig, ProfileOptions, ReadyConfig,
+    Run, ServiceConfig, StopConfig, SyncConfig, TaskAfter, TaskConfig, TcpReady, Templated,
 };
 use devlanes_core::{
     StopPolicy, StopSignal,
     color::unit_color,
     contrib::{
         ContribCx, ContribMemo, Contributor, DetectCx, DraftCommand, LaunchDraft, ScriptInfo,
-        ScriptPlan, ScriptRequest, ScriptRunner, SecretEnv, SecretsError, SecretsRequest, UnitKind,
+        ScriptPlan, ScriptRequest, ScriptRunner, UnitKind,
     },
     env::{EnvLayer, assemble},
 };
@@ -38,16 +37,15 @@ use crate::{
 /// task with `profiles:` runs when any profile in effect matches.
 ///
 /// Fails as a whole only for lane-level problems (an unknown profile, `lanes.vars`,
-/// ports, hostnames, `infra: false` or the project fnox profile). A failure in one
-/// unit, including a locked vault, lands in [`ResolvedLane::errors`]; check it with
-/// [`ResolvedLane::check_services`] before starting the selection.
+/// ports, hostnames or `infra: false`). A failure in one unit lands in
+/// [`ResolvedLane::errors`]; check it with [`ResolvedLane::check_services`] before
+/// starting the selection.
 ///
-/// Environment layers, lowest first: client env, contributors, secrets,
+/// Environment layers, lowest first: client env, contributors,
 /// `DEVLANES_*`/`PORT`/`HOST` and the CA variables, `global_env`, the unit's
 /// `env`, the profile's `env`, `--env` overrides. `.env` values only feed
-/// `${{ env.X }}`, which reads the client env, then secrets, then `.env`.
-/// Lane vars, ports and hostnames are evaluated first, as in [`crate::lane_layout`],
-/// so their `${{ env.X }}` sees no secrets.
+/// `${{ env.X }}`, which reads the client env, then `.env`.
+/// Lane vars, ports and hostnames are evaluated first, as in [`crate::lane_layout`].
 pub async fn resolve_lane<E: Extensions>(
     input: ResolveInput<'_, E>,
 ) -> Result<ResolvedLane, ResolveError> {
@@ -75,7 +73,7 @@ async fn plan_lane<E: Extensions>(
     // Only the merged `run_scripts` is used from this; env layers stay per profile
     // so error paths name the profile that failed.
     let remap = merge_options(config, &profiles);
-    let base_env = env_namespace(input.client_env, None, input.dotenv);
+    let base_env = env_namespace(input.client_env, input.dotenv);
     let (layout, ns) = layout::build(&input, &base_env)?;
     let lane_context = ns.lane_context(&base_env);
     let mut profile_envs = Vec::new();
@@ -101,14 +99,6 @@ async fn plan_lane<E: Extensions>(
         every_profile_skips_infra &= skips;
     }
     let infra_enabled = !(any_configured && every_profile_skips_infra);
-    let project_fnox = match config.fnox.as_ref().and_then(|f| f.profile.as_ref()) {
-        Some(value) => Some(
-            value
-                .evaluate(&lane_context)
-                .map_err(|e| ResolveError::expression("fnox.profile", e))?,
-        ),
-        None => None,
-    };
     let mut contributors = input.contributors.to_vec();
     // Stable sort: equal priorities keep registration order.
     contributors.sort_by_key(|c| c.priority());
@@ -127,13 +117,11 @@ async fn plan_lane<E: Extensions>(
     let mut planner = Planner {
         input: &input,
         ns: &ns,
-        lane_context,
+        env: base_env,
         remap: remap.as_ref(),
         profile_envs,
         contributors,
         memo: ContribMemo::default(),
-        secrets: BTreeMap::new(),
-        project_fnox,
         devlanes,
         origins: layout.origins.join(","),
     };
@@ -222,17 +210,14 @@ async fn plan_lane<E: Extensions>(
 struct Planner<'p, 'a, E: Extensions> {
     input: &'p ResolveInput<'a, E>,
     ns: &'p Namespaces,
-    /// Lane-level context without secrets, for fnox profile names.
-    lane_context: ExpressionContext,
+    /// `env` namespace shared by every unit.
+    env: Value,
     /// Merged profile options; only `run_scripts` is read.
     remap: Option<&'p ProfileOptions>,
     /// Each profile's `env` with its config path, in the order given.
     profile_envs: Vec<(String, &'a Env)>,
     contributors: Vec<Arc<dyn Contributor>>,
     memo: ContribMemo,
-    /// One provider call per (profile, explicit) per lane resolution.
-    secrets: BTreeMap<(Option<String>, bool), Arc<SecretEnv>>,
-    project_fnox: Option<String>,
     devlanes: BTreeMap<String, String>,
     origins: String,
 }
@@ -256,59 +241,9 @@ struct LaunchInput<'s> {
 }
 
 impl<E: Extensions> Planner<'_, '_, E> {
-    /// Fetches secrets for a unit's fnox setting, once per profile.
-    async fn unit_secrets(
-        &mut self,
-        fnox: Option<&FnoxConfig>,
-    ) -> Result<Arc<SecretEnv>, ResolveError> {
-        let (profile, explicit) = match fnox.and_then(|f| f.profile.as_ref()) {
-            Some(value) => (
-                Some(
-                    value
-                        .evaluate(&self.lane_context)
-                        .map_err(|e| ResolveError::expression("fnox.profile", e))?,
-                ),
-                true,
-            ),
-            None => (
-                self.project_fnox.clone(),
-                fnox.is_some() || self.input.config.fnox.is_some(),
-            ),
-        };
-        let key = (profile.clone(), explicit);
-        if let Some(cached) = self.secrets.get(&key) {
-            return Ok(cached.clone());
-        }
-        let resolved = match self.input.secrets {
-            None => SecretEnv::default(),
-            Some(provider) => {
-                let request = SecretsRequest {
-                    worktree: &self.input.facts.path,
-                    profile: profile.as_deref(),
-                    explicit,
-                    base_env: self.input.client_env,
-                };
-                provider.env(&request).await.map_err(|error| match error {
-                    SecretsError::Locked { message } => ResolveError::SecretsLocked {
-                        profile: profile.clone(),
-                        message,
-                    },
-                    SecretsError::Other(message) => ResolveError::Secrets {
-                        profile: profile.clone(),
-                        message,
-                    },
-                })?
-            }
-        };
-        let resolved = Arc::new(resolved);
-        self.secrets.insert(key, resolved.clone());
-        Ok(resolved)
-    }
-
-    /// Context for one unit with its secrets visible to `${{ env.X }}`.
-    fn context(&self, secrets: &SecretEnv, this: Value, replica: Value) -> ExpressionContext {
-        let env = env_namespace(self.input.client_env, Some(&secrets.set), self.input.dotenv);
-        self.ns.context(&env, this, replica)
+    /// Context for one unit.
+    fn context(&self, this: Value, replica: Value) -> ExpressionContext {
+        self.ns.context(&self.env, this, replica)
     }
 
     /// Plans one service replica.
@@ -319,8 +254,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
             .services
             .get(&layout.name)
             .ok_or_else(|| ResolveError::invalid(&path, "service disappeared from the config"))?;
-        let secrets = self.unit_secrets(service.fnox.as_ref()).await?;
-        let context = self.context(&secrets, layout.self_value(), replica_value(layout));
+        let context = self.context(layout.self_value(), replica_value(layout));
         let pty = flag(&service.pty, &context, &format!("{path}.pty"), true)?;
         let preset_options = match service
             .preset
@@ -369,7 +303,6 @@ impl<E: Extensions> Planner<'_, '_, E> {
                     pty,
                 },
                 &context,
-                &secrets,
             )
             .await?;
         let ready = ready(
@@ -416,8 +349,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
         profiles: &[String],
     ) -> Result<ResolvedTask, ResolveError> {
         let path = format!("tasks.{name}");
-        let secrets = self.unit_secrets(task.fnox.as_ref()).await?;
-        let context = self.context(&secrets, json!({"name": name}), json!({}));
+        let context = self.context(json!({"name": name}), json!({}));
         let interactive = flag(
             &task.interactive,
             &context,
@@ -456,7 +388,6 @@ impl<E: Extensions> Planner<'_, '_, E> {
                         pty,
                     },
                     &context,
-                    &secrets,
                 )
                 .await?,
             )
@@ -500,8 +431,7 @@ impl<E: Extensions> Planner<'_, '_, E> {
             InfraCommand::Command(run) => (Some(run), None),
             InfraCommand::Object(options) => (options.run.as_ref(), Some(options.as_ref())),
         };
-        let secrets = self.unit_secrets(None).await?;
-        let context = self.context(&secrets, json!({"name": name}), json!({}));
+        let context = self.context(json!({"name": name}), json!({}));
         let launch = self
             .launch(
                 LaunchInput {
@@ -520,7 +450,6 @@ impl<E: Extensions> Planner<'_, '_, E> {
                     pty: false,
                 },
                 &context,
-                &secrets,
             )
             .await?;
         let ignore_errors = flag(
@@ -547,7 +476,6 @@ impl<E: Extensions> Planner<'_, '_, E> {
         &self,
         spec: LaunchInput<'_>,
         context: &ExpressionContext,
-        secrets: &SecretEnv,
     ) -> Result<Launch, ResolveError> {
         let input = self.input;
         let facts = input.facts;
@@ -715,15 +643,8 @@ impl<E: Extensions> Planner<'_, '_, E> {
         // Folded here as `assemble` folds every layer, so a removal spelled
         // `PATH` also drops a client's `Path` on Windows.
         let mut client = devlanes_core::env::fold_names(input.client_env.clone());
-        for key in remove.iter().chain(&secrets.remove) {
+        for key in &remove {
             client.remove(&devlanes_core::env::fold_name(key.clone()));
-        }
-        if !secrets.files.is_empty() {
-            let keys: Vec<_> = secrets.files.keys().map(String::as_str).collect();
-            notes.push(format!(
-                "file-backed secrets are not supported yet; skipped {}",
-                keys.join(", ")
-            ));
         }
         let mut devlanes = self.devlanes.clone();
         if let (UnitKind::Service, Some(layout)) = (spec.kind, spec.layout) {
@@ -735,7 +656,6 @@ impl<E: Extensions> Planner<'_, '_, E> {
         let env = assemble([
             (EnvLayer::Client, client),
             (EnvLayer::Contributor, contributed),
-            (EnvLayer::Secrets, secrets.set.clone()),
             (EnvLayer::Devlanes, devlanes),
             (EnvLayer::Global, global),
             (EnvLayer::Service, own),
@@ -879,7 +799,7 @@ pub async fn detect_platform(
 
 /// Evaluates an env map and renders values as strings.
 ///
-/// `${{ env.X }}` reads only the client env, secrets and `.env`, never sibling
+/// `${{ env.X }}` reads only the client env and `.env`, never sibling
 /// keys, so `SENTRY_DSN: ${{ env.SENTRY_DSN | default('') }}` passes the shell's
 /// value through. `devlanes_config::evaluate_env` would treat that as a cycle.
 fn env_map(

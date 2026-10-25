@@ -4,11 +4,11 @@ Rust 2024, pinned stable toolchain, macOS, Linux and Windows 11 24H2 or later. P
 
 `core` owns domain types and traits; integrations implement them; only the binary registers concrete integrations. `testing` provides isolated homes, Git repositories and `fixture-server`, initially without a core dependency. Core unit tests must not depend on testing. Keep integration tests in one binary per crate at `tests/it/main.rs`.
 
-Use typed library errors and propagate expected failures. Add concise rustdoc to functions and methods. Inline comments explain why, when or where. Unsafe code is denied except in the approved OS-boundary crates (`sys`, `runner-pty`, `sys-windows`), where each block needs a safety explanation. A `-windows` crate exists only when it is a backend next to sibling OS crates behind a shared trait (trust, metrics, runner), the Windows FFI boundary (`sys-windows`, the Windows counterpart of rustix and libc; `sys` is the portable process facade over both), or code several crates need that cannot depend on each other (`shell-windows`); name a crate after its mechanism when that is the point (`resolver-nrpt`). Otherwise Windows code goes in a `cfg(windows)` module next to the Unix code for the same concern. Windows changes leave macOS and Linux behaviour unchanged. Keep blocking filesystem/process work off async executor threads.
+Use typed library errors and propagate expected failures. Add concise rustdoc to functions and methods. Inline comments explain why, when or where. Unsafe code is denied except in the approved OS-boundary crates (`sys`, `runner-pty`, `sys-windows`), where each block needs a safety explanation. A `-windows` crate exists only when it is a backend next to sibling OS crates behind a shared trait (trust, metrics, runner), the Windows FFI boundary (`sys-windows`, the Windows counterpart of rustix and libc; `sys` is the portable process facade over both), or code several crates need that cannot depend on each other (`shell-windows`); name a crate after its mechanism when that is the point (`resolver-nrpt`). Otherwise Windows code goes in a `cfg(windows)` module next to the Unix code for the same concern. Adding support for a feature on one OS must not break or change that feature on the others. Keep blocking filesystem/process work off async executor threads.
 
 Accepted exception: the daemon depends on `git`, `resolver-dns`, `resolver-hosts` and `sync` directly instead of through core traits. They are daemon-internal mechanisms with one implementation each, so a trait would add indirection without a second implementer; reviews should not flag it.
 
-The daemon owns managed resources and SQLite. Clients own rendering and actor detection. Never persist client environments or secret-provider values. Reap managed processes by PID, never `waitpid(-1)`. Do not add auto-restart or resource enforcement.
+The daemon owns managed resources and SQLite. Clients own rendering and actor detection. Never persist client environments. Reap managed processes by PID, never `waitpid(-1)`. Do not add auto-restart or resource enforcement.
 
 ## Worktrees and delivery
 
@@ -50,7 +50,7 @@ Every crate (and `bins/devlanes`) has a `README.md`. It is for a person deciding
 2. One or two sentences: what the crate is and where it sits in devlanes (who calls it, what it calls).
 3. `## Usage`: a small Rust example of the main entry points, or the command line for binaries. Examples must match the real API.
 4. `## API` (optional): the handful of public types and functions worth knowing, one line each. Not every item.
-5. Optional short sections for behaviour a reader would not guess (for example "Requires `fnox` 1.39 or later"), each a few lines.
+5. Optional short sections for behaviour a reader would not guess (for example "Requires Docker Compose v2"), each a few lines.
 6. `## License`: `Apache-2.0`.
 
 No badges, tables of contents, installation boilerplate, roadmaps, design essays or history. Sentence-case headings, no headings starting with what/why/where/how, no em dashes, no marketing words. Write plainly, the way you'd explain the crate to a colleague in two minutes. `crates/hosts-helper/README.md` is the one exception that documents a security model at length, because the owner asked for it.

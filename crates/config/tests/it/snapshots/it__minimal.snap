@@ -34,7 +34,6 @@ expression: "parse_project(MINIMAL, None).expect(\"minimal reference\")"
       "database": "docker compose exec -T postgres dropdb -U postgres --if-exists acme_${{ lane.name }}"
     }
   },
-  "fnox": null,
   "global_env": {
     "DATABASE_URL": "postgres://postgres:postgres@127.0.0.1:${{ infra.postgres.port }}/acme_${{ lane.name }}"
   },
@@ -47,7 +46,6 @@ expression: "parse_project(MINIMAL, None).expect(\"minimal reference\")"
       },
       "cwd": null,
       "env": {},
-      "fnox": null,
       "when": "lane.start",
       "after": null,
       "profiles": null,

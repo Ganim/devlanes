@@ -33,7 +33,7 @@ pub struct ProjectConfig<E: Extensions = OpaqueExtensions> {
     pub tags: IndexMap<String, crate::TagConfig>,
     /// Named service settings that services reuse with `extends: <template>`. The service
     /// inherits every setting of the template and its own settings win: mappings (`env`,
-    /// `ready`, `stop`, `fnox`, preset options, `run_script`) merge by key, lists (`tags`,
+    /// `ready`, `stop`, preset options, `run_script`) merge by key, lists (`tags`,
     /// `hosts`, `sync`) and single values replace. Setting `run` or `run_script` drops the
     /// inherited other one, and one `ready` probe (`tcp`, `http`, `log`, `cmd`) drops the
     /// inherited probe. Templates may extend other templates, are never started themselves,
@@ -50,9 +50,6 @@ pub struct ProjectConfig<E: Extensions = OpaqueExtensions> {
     /// each lane's data in them.
     #[serde(default)]
     pub infra: InfraConfig,
-    /// fnox profile that the secrets of every task and service come from. A task or service
-    /// can name its own profile with its `fnox` key.
-    pub fnox: Option<FnoxConfig>,
     /// Variables for every service and task of the lane, above devlanes' own variables
     /// (`PORT`, `DEVLANES_*`) and below each unit's `env` and the profile's `env`. Use it for
     /// values many units share, such as a database URL built from `${{ infra.postgres.port }}`.
@@ -252,17 +249,6 @@ impl RunScript {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(extend("examples" = [{"profile":"dev"}]))]
-/// Which fnox profile secrets come from.
-pub struct FnoxConfig {
-    /// fnox profile whose secrets are loaded; fnox's default profile when omitted. Locked
-    /// secrets are unlocked with `devlanes secrets unlock`.
-    #[schemars(extend("examples" = ["dev","admin-api"]))]
-    pub profile: Option<Templated<String>>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(extend("examples" = [{"run_script":{"file":"apps/api/package.json","name":"migrate"},"when":"lane.start"}]))]
 /// A one-shot command, run by hand with `devlanes run <name>` or automatically at a lane
 /// event set with `when`. Anything that ends by itself belongs here, not in `services`,
@@ -286,8 +272,6 @@ pub struct TaskConfig {
     #[serde(default)]
     #[schemars(extend("examples" = [{"API_URL":"${{ services.api.url }}"}]))]
     pub env: Env,
-    /// fnox profile for this task's secrets, instead of the project's `fnox.profile`.
-    pub fnox: Option<FnoxConfig>,
     /// Lane event that runs this task automatically. Without it the task runs only by hand
     /// with `devlanes run <name>` or as a step of another task.
     pub when: Option<TaskWhen>,

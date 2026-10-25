@@ -34,7 +34,6 @@ expression: "parse_project(base, Some(LOCAL)).expect(\"local with matching base\
     "setup": {},
     "teardown": {}
   },
-  "fnox": null,
   "global_env": {
     "LOG_LEVEL": "debug"
   },

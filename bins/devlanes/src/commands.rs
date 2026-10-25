@@ -1056,7 +1056,6 @@ fn hint_for(error: &RpcError, request: &Request) -> Option<Hint> {
             .get("project")
             .and_then(Value::as_str)
             .map(|project| Hint::command(["stop", "--project", project])),
-        "secrets_locked" => Some(Hint::command(["secrets", "unlock"])),
         "unit_failed" | "ready_timeout" => {
             // A non-2xx answer to an http check is fixed in the config, not found in logs.
             if let Some(hint) = devlanes_cli::status_hint(&error.data) {

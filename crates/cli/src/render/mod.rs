@@ -198,7 +198,6 @@ pub(crate) fn result(method: Method, data: &Value, cx: &Ctx<'_>) -> Vec<String> 
         Method::InfraUp | Method::InfraStatus | Method::InfraDown => other::infra(method, data),
         Method::Doctor => other::doctor(data, cx),
         Method::ConfigCheck => other::config_check(data, cx),
-        Method::Unlock => other::unlock(data),
         Method::DaemonStatus => other::daemon_status(data),
         Method::DaemonShutdown => other::daemon_shutdown(data),
         Method::DaemonResetState => other::reset_state(data),
