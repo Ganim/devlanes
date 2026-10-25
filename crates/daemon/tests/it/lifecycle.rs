@@ -65,6 +65,11 @@ async fn next_event(frames: &mut mpsc::Receiver<Frame>) -> Event {
     }
 }
 
+/// How long a test waits for something the daemon does on its own (a task
+/// coming up, a late spawn). Only a failing test waits this long; a loaded
+/// Windows runner has taken more than 5 s for a task to show up.
+const SETTLE: Duration = Duration::from_secs(20);
+
 /// The lane visible at `cwd`.
 async fn lane(h: &Harness, cwd: &Path) -> LaneSummary {
     let value = h
@@ -139,7 +144,7 @@ async fn stop_interrupts_a_hung_start() {
         );
         // What the daemon reports, not the runner's journal: the journal shows a
         // spawn before the lane records the unit.
-        let hung = eventually(Duration::from_secs(5), || async {
+        let hung = eventually(SETTLE, || async {
             alive(&lane(&h, &main).await)
                 .contains(&"hang".to_owned())
                 .then_some(())
@@ -169,7 +174,7 @@ async fn stop_interrupts_a_hung_start() {
         .expect("result");
         assert!(started.ready, "{started:?}");
         // The interrupted start's token must not reach this one: web stays up.
-        let settled = eventually(Duration::from_secs(5), || async {
+        let settled = eventually(SETTLE, || async {
             let summary = lane(&h, &main).await;
             (summary.state == "running").then(|| alive(&summary))
         })
@@ -247,7 +252,7 @@ async fn clean_closes_the_lane_to_exec_and_run() {
             json!({"task": "slow", "timeout_ms": 60_000}),
             cx(&main),
         );
-        let slow = eventually(Duration::from_secs(5), || async {
+        let slow = eventually(SETTLE, || async {
             alive(&lane(&h, &main).await)
                 .contains(&"slow".to_owned())
                 .then_some(())
@@ -260,7 +265,7 @@ async fn clean_closes_the_lane_to_exec_and_run() {
             ..cx(&main)
         };
         let (_session, _frames, cleaning) = spawn_call(&h, Method::LaneClean, json!({}), yes);
-        let hook = eventually(Duration::from_secs(5), || async {
+        let hook = eventually(SETTLE, || async {
             h.runner
                 .journal
                 .entries()
@@ -427,7 +432,7 @@ async fn clean_stops_units_a_timed_out_start_left_queued() {
         )
         .expect("result");
         assert!(started.timed_out, "{started:?}");
-        let late = eventually(Duration::from_secs(5), || async {
+        let late = eventually(SETTLE, || async {
             (h.runner.journal.entries().len() == 2).then_some(())
         })
         .await;
@@ -709,7 +714,7 @@ async fn the_gate_serves_starts_by_arrival() {
         );
         // The first start took its arrival before its tasks; once its task runs,
         // the second one arrives after it.
-        let pausing = eventually(Duration::from_secs(5), || async {
+        let pausing = eventually(SETTLE, || async {
             h.runner
                 .journal
                 .entries()
@@ -720,7 +725,7 @@ async fn the_gate_serves_starts_by_arrival() {
         assert!(pausing.is_some(), "the first start runs its task");
         let (_s2, _f2, second) =
             spawn_call(&h, Method::Start, json!({"timeout_ms": 10_000}), cx(&other));
-        let both = eventually(Duration::from_secs(5), || async {
+        let both = eventually(SETTLE, || async {
             (gate.snapshot().queued.len() == 2).then_some(())
         })
         .await;
@@ -947,6 +952,15 @@ async fn wait_ends_when_its_client_leaves() {
         h.call(Method::Start, json!({"timeout_ms": 200}), cx(&main))
             .await
             .expect("start");
+        // A start that times out still spawns `web`, maybe after answering; a
+        // `wait` on a unit that is not up yet answers at once instead of waiting.
+        let up = eventually(SETTLE, || async {
+            alive(&lane(&h, &main).await)
+                .contains(&"web".to_owned())
+                .then_some(())
+        })
+        .await;
+        assert!(up.is_some(), "web is starting");
         let (session, _frames, waiting) = spawn_call(
             &h,
             Method::Wait,
@@ -982,7 +996,7 @@ async fn logs_of_several_units_share_the_budget() {
             .await
             .expect("start");
         let budget = 1500;
-        let all = eventually(Duration::from_secs(5), || async {
+        let all = eventually(SETTLE, || async {
             let all = h
                 .call(Method::Logs, json!({"all": true, "max_bytes": budget}), cx(&main))
                 .await
