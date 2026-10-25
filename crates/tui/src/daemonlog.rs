@@ -291,6 +291,9 @@ pub fn matches_in(text: &str, filter: &str) -> Vec<std::ops::Range<usize>> {
 /// scroll while still full. Zero before the first frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LogView {
+    /// Screen column and row of the box's top-left inside cell, for the mouse.
+    pub x: u16,
+    pub y: u16,
     pub width: usize,
     pub height: usize,
     /// The most shown entries that can hide below the box while the oldest

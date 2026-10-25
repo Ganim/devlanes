@@ -235,6 +235,80 @@ async fn failures_show_inline_without_an_overlay() -> TestResult {
     Ok(())
 }
 
+/// A start answer that lists `units` of acme@1 as unable to spawn.
+fn spawn_failures(units: &[&str]) -> Result<serde_json::Value, serde_json::Error> {
+    let failures: Vec<serde_json::Value> = units
+        .iter()
+        .map(|unit| {
+            let reason = RpcError::new(
+                "spawn_failed",
+                json!({
+                    "lane": "acme@1",
+                    "unit": unit,
+                    "program": "fixture-server",
+                    "reason": "not_found",
+                    "message": "fixture-server: command not found on PATH",
+                }),
+                1,
+            );
+            Ok(json!({
+                "lane": "acme@1",
+                "unit": unit,
+                "log_tail": ["[devlanes] could not start: fixture-server: command not found on PATH (/usr/bin)"],
+                "reason": serde_json::to_value(reason)?,
+            }))
+        })
+        .collect::<Result<_, serde_json::Error>>()?;
+    Ok(json!({
+        "lane": "acme@1",
+        "started": [],
+        "ready": false,
+        "failures": failures,
+    }))
+}
+
+#[tokio::test]
+async fn a_start_whose_unit_cannot_spawn_reports_it() -> TestResult {
+    let mut app = portal_app(120, 40).await?;
+    let portal = Target::Unit {
+        lane: "acme@1".into(),
+        unit: "portal".into(),
+    };
+    // The daemon answers without an error, but lists the unit under `failures`.
+    app.update(Msg::ActionDone {
+        label: "start acme@1:portal".into(),
+        target: portal.clone(),
+        result: Ok(spawn_failures(&["portal"])?),
+    });
+    let notice = app.notice.clone().ok_or("no notice")?;
+    assert!(notice.error, "{notice:?}");
+    assert!(
+        notice.text.starts_with("start acme@1:portal failed")
+            && notice.text.contains("command not found on PATH"),
+        "{notice:?}"
+    );
+    assert!(app.target_error(&portal).is_some());
+    let text = screen(&render(&app)?);
+    assert!(text.contains("start failed"), "row badge: {text}");
+    assert!(text.contains("couldn't start"), "{text}");
+
+    // Many at once: the header counts them instead of naming the last one.
+    app.update(Msg::ActionDone {
+        label: "start acme@1".into(),
+        target: Target::Lane("acme@1".into()),
+        result: Ok(spawn_failures(&["portal", "web"])?),
+    });
+    let notice = app.notice.clone().ok_or("no notice")?;
+    assert!(
+        notice.error
+            && notice
+                .text
+                .starts_with("start acme@1: 2 units failed; acme@1:portal"),
+        "{notice:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn badge_stays_until_the_target_recovers_and_the_list_keeps_it() -> TestResult {
     let mut app = portal_app(100, 24).await?;

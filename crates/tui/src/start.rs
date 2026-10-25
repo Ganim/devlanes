@@ -358,6 +358,15 @@ fn result_line(start: &StartResult) -> String {
     }
 }
 
+/// The services that failed in a `start` or `restart` response.
+pub(crate) fn start_failures(value: &Value) -> Vec<UnitFailureData> {
+    start_results(value)
+        .into_iter()
+        .flatten()
+        .flat_map(|start| start.failures)
+        .collect()
+}
+
 /// The start results in a response: `start` and `restart` answer one,
 /// `lane.new` nests it under `start`, `resume` lists one per lane (or its error).
 fn start_results(value: &Value) -> Vec<Result<StartResult, (String, RpcError)>> {

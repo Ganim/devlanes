@@ -451,6 +451,46 @@ async fn daemon_log_text_is_selected_cell_by_cell_like_a_pane() -> TestResult {
 }
 
 #[tokio::test]
+async fn dragging_over_the_daemon_log_copies_the_text() -> TestResult {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mouse = |kind, column, row| {
+        Msg::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let mut app = daemon_app(100, 30).await?;
+    let buffer = render(&app)?;
+    let find = |text: &str| {
+        (0..buffer.area.height)
+            .find(|y| row(&buffer, *y).contains(text))
+            .ok_or(format!("no {text} row"))
+    };
+    let (started, failed) = (find("lane started")?, find("compose failed")?);
+    let left = app.daemon_log_view.get().x;
+    let left_button = MouseButton::Left;
+
+    app.update(mouse(MouseEventKind::Down(left_button), left, started));
+    assert!(app.daemon.copy.is_none(), "a press alone selects nothing");
+    app.update(mouse(MouseEventKind::Drag(left_button), left + 9, failed));
+    assert!(app.daemon.copy.is_some_and(|copy| copy.anchor.is_some()));
+    let text = copied(&app.update(mouse(MouseEventKind::Up(left_button), left + 9, failed)))?;
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].contains("lane started"), "{text}");
+    assert_eq!(lines[1].chars().count(), 10, "{text}");
+    assert!(app.daemon.copy.is_none());
+
+    // A click without a drag copies nothing.
+    app.update(mouse(MouseEventKind::Down(left_button), left, started));
+    let effects = app.update(mouse(MouseEventKind::Up(left_button), left, started));
+    assert!(effects.is_empty(), "{effects:?}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn copy_mode_jumps_scroll_the_long_log_to_the_cursor() -> TestResult {
     let mut app = daemon_app(100, 30).await?;
     let lines: Vec<String> = (0..300)

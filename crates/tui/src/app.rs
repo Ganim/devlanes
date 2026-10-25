@@ -155,6 +155,8 @@ pub struct DaemonView {
     pub all_checks: bool,
     /// Copy mode on the log, over the shown entries.
     pub copy: Option<LogCopy>,
+    /// Where a left button press in the log was, until its release.
+    press: Option<crate::daemonlog::LogPos>,
     /// The restart, stop, start or gc in flight.
     pub busy: Option<&'static str>,
     /// Set after this TUI stopped the daemon, until one is reachable again.
@@ -1352,7 +1354,32 @@ impl App {
                 match result {
                     Ok(value) => {
                         self.target_errors.remove(&target);
-                        self.set_notice(done_notice(&label, &value));
+                        // A unit that could not spawn comes back in `failures` of an
+                        // answer that succeeded; it never ran, so status says `stopped`.
+                        let failures = crate::start::start_failures(&value);
+                        if failures.is_empty() {
+                            self.set_notice(done_notice(&label, &value));
+                        }
+                        let verb = label.split(' ').next().unwrap_or("start");
+                        for failure in &failures {
+                            let target = Target::Unit {
+                                lane: failure.lane.clone(),
+                                unit: failure.unit.clone(),
+                            };
+                            let what = format!("{verb} {}", unit_ref(&failure.lane, &failure.unit));
+                            self.report(&what, Some(target), failure_words(failure));
+                        }
+                        // A whole-lane start can fail dozens of units the same way.
+                        if let [first, _, ..] = failures.as_slice() {
+                            self.notice = Some(Notice {
+                                text: text::clean(&format!(
+                                    "{label}: {} units failed; {}",
+                                    failures.len(),
+                                    failure_words(first).summary
+                                )),
+                                error: true,
+                            });
+                        }
                     }
                     Err(error) => self.api_error(&label, Some(target), error, &mut effects),
                 }
@@ -3247,6 +3274,8 @@ impl App {
             return view;
         }
         crate::daemonlog::LogView {
+            x: 0,
+            y: 0,
             width: usize::from(self.size.0.saturating_sub(2)).max(1),
             height: usize::from(self.size.1 / 2).max(1),
             max_scroll: shown,
@@ -4513,21 +4542,85 @@ impl App {
         match self.view {
             View::Project => self.project_mouse(mouse, &layout, effects),
             View::Monitor => self.monitor_mouse(mouse, &layout, effects),
-            View::Daemon => match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    let shown = self.daemon_shown().1.len();
-                    let max = self.daemon_log_layout(shown).max_scroll;
-                    self.daemon.scroll = (self.daemon.scroll + 3).min(max);
-                    if self.daemon.scroll > 0 {
-                        self.daemon.paused = true;
-                    }
-                }
-                MouseEventKind::ScrollDown => {
-                    self.daemon.scroll = self.daemon.scroll.saturating_sub(3);
-                }
-                _ => {}
-            },
+            View::Daemon => self.daemon_mouse(mouse, effects),
         }
+    }
+
+    /// The daemon tab: the wheel scrolls the log, a drag over it selects
+    /// text as copy mode does and the release copies it.
+    fn daemon_mouse(&mut self, mouse: MouseEvent, effects: &mut Vec<Effect>) {
+        let shown = self.daemon_shown().1.len();
+        let max = self.daemon_log_layout(shown).max_scroll;
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.daemon.scroll = (self.daemon.scroll + 3).min(max);
+                if self.daemon.scroll > 0 {
+                    self.daemon.paused = true;
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                self.daemon.scroll = self.daemon.scroll.saturating_sub(3);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                // The cells are mapped through the lines as drawn, which use the clamped scroll.
+                self.daemon.scroll = self.daemon.scroll.min(max);
+                self.daemon.press = self.daemon_cell(mouse.column, mouse.row, false);
+                if self.daemon.press.is_some() {
+                    self.daemon.copy = None;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(anchor) = self.daemon.press
+                    && let Some(cursor) = self.daemon_cell(mouse.column, mouse.row, true)
+                {
+                    self.daemon.copy = Some(LogCopy {
+                        cursor,
+                        anchor: Some(anchor),
+                    });
+                    // Arriving lines would move the text under the selection.
+                    self.daemon.paused = true;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let press = self.daemon.press.take();
+                let dragged = self.daemon.copy.is_some_and(|copy| {
+                    copy.anchor.is_some()
+                        && copy.anchor == press
+                        && copy.anchor != Some(copy.cursor)
+                });
+                if dragged {
+                    let page = usize::from(self.size.1 / 2).max(1);
+                    let copy = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+                    self.daemon_copy_key(copy, page, effects);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The daemon log cell at screen `(column, row)`. Outside the lines shown
+    /// it is `None`, or with `clamp` the nearest cell, so a drag past the
+    /// box's edge selects up to its first or last line.
+    fn daemon_cell(&self, column: u16, row: u16, clamp: bool) -> Option<crate::daemonlog::LogPos> {
+        let view = self.daemon_log_view.get();
+        if view.height == 0 {
+            return None;
+        }
+        let visible = self.daemon_visible();
+        let last = visible.len().checked_sub(1)?;
+        let dy = i32::from(row) - i32::from(view.y);
+        let dx = i32::from(column) - i32::from(view.x);
+        let line = usize::try_from(dy).ok().filter(|line| *line <= last);
+        let cell = usize::try_from(dx).ok().filter(|cell| *cell < view.width);
+        if !clamp && (line.is_none() || cell.is_none()) {
+            return None;
+        }
+        let line = line.unwrap_or(if dy < 0 { 0 } else { last });
+        let cell = cell.unwrap_or(if dx < 0 { 0 } else { view.width - 1 });
+        Some(crate::daemonlog::LogPos {
+            column: cell,
+            ..visible[line]
+        })
     }
 
     /// What a click on a chrome item does.

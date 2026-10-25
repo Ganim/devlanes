@@ -123,7 +123,15 @@ impl crate::engine::Inner {
             .unwrap_or_else(|error| crate::units::internal("spawn_failed", error));
         failure.data["lane"] = json!(lane);
         let line = log_line(&failure);
-        tracing::info!(unit = %unit, lane, reason = ?failure.data.get("reason"), "{line}");
+        // The unit's log gets the searched PATH; the daemon log names the cause only.
+        let reason = failure.data.get("reason").and_then(Value::as_str);
+        tracing::warn!(
+            unit = %unit,
+            lane,
+            reason = reason.unwrap_or("other"),
+            "could not start: {}",
+            describe(&failure.data, false)
+        );
         let retention = crate::units::LogRetention::from_config(&self.opts.user.logs.retention);
         if let Err(error) = crate::units::append_note(log_dir, &unit, &line, retention).await {
             tracing::warn!(
@@ -145,15 +153,20 @@ fn first_match(dirs: &[String], program: &str, cwd: &Path) -> Option<PathBuf> {
 
 /// The `[devlanes] could not start: ...` line for a `spawn_failed` error.
 pub(crate) fn log_line(error: &RpcError) -> String {
-    format!("{LOG_PREFIX} could not start: {}", describe(&error.data))
+    format!(
+        "{LOG_PREFIX} could not start: {}",
+        describe(&error.data, true)
+    )
 }
 
-/// One sentence for the unit's log; clients word the same data themselves.
-fn describe(data: &Value) -> String {
+/// One sentence for the unit's log, with the PATH searched when `path` is
+/// set; clients word the same data themselves.
+fn describe(data: &Value, path: bool) -> String {
     let text = |key: &str| data.get(key).and_then(Value::as_str).unwrap_or_default();
     let program = text("program");
     match text("reason") {
         "not_found" if names_a_path(program) => format!("{program}: no such file"),
+        "not_found" if !path => format!("{program}: command not found on PATH"),
         "not_found" => {
             let dirs: Vec<&str> = data
                 .get("path_searched")
@@ -295,6 +308,11 @@ mod windows_tests {
         assert_eq!(
             log_line(&error),
             r"[devlanes] could not start: fixture-server: command not found on PATH (C:\a;C:\b)"
+        );
+        // The daemon log leaves the directories to the unit's log.
+        assert_eq!(
+            describe(&error.data, false),
+            "fixture-server: command not found on PATH"
         );
     }
 
@@ -442,6 +460,11 @@ mod tests {
         assert_eq!(
             log_line(&error),
             "[devlanes] could not start: fixture-server: command not found on PATH (/nonexistent/a:/nonexistent/b)"
+        );
+        // The daemon log leaves the directories to the unit's log.
+        assert_eq!(
+            describe(&error.data, false),
+            "fixture-server: command not found on PATH"
         );
     }
 

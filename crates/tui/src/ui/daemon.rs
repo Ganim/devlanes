@@ -684,6 +684,8 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
     }
     let max_scroll = max_scroll(app, &entries, &shown, width, height);
     app.daemon_log_view.set(LogView {
+        x: inner.x,
+        y: inner.y,
         width,
         height,
         max_scroll,
