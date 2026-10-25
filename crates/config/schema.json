@@ -2957,7 +2957,7 @@
   "$id": "https://devlanes.run/v1/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "devlanes v0.3.0 project config. Run a dev environment per git worktree, side by side. https://devlanes.run",
+  "description": "devlanes v0.4.0 project config. Run a dev environment per git worktree, side by side. https://devlanes.run",
   "examples": [
     {
       "project": "acme",
@@ -2971,7 +2971,7 @@
       }
     }
   ],
-  "markdownDescription": "devlanes v0.3.0 project config. Run a dev environment per git worktree, side by side. https://devlanes.run",
+  "markdownDescription": "devlanes v0.4.0 project config. Run a dev environment per git worktree, side by side. https://devlanes.run",
   "properties": {
     "global_env": {
       "additionalProperties": {
