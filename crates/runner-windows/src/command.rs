@@ -291,35 +291,8 @@ fn is_batch_file(path: &Path) -> bool {
     extension.eq_ignore_ascii_case(".bat") || extension.eq_ignore_ascii_case(".cmd")
 }
 
-/// `arg` quoted for `CommandLineToArgvW`, exactly as std's `append_arg` does
-/// without forced quotes: quotes only around empty arguments and ones with a
-/// space or tab; backslashes doubled before a quote, and inner quotes escaped.
-pub(crate) fn quote(arg: &str) -> String {
-    let quoted = arg.is_empty() || arg.contains([' ', '\t']);
-    let mut out = String::with_capacity(arg.len() + 2);
-    if quoted {
-        out.push('"');
-    }
-    let mut backslashes = 0;
-    for character in arg.chars() {
-        if character == '\\' {
-            backslashes += 1;
-        } else {
-            if character == '"' {
-                // n backslashes before a quote become 2n + 1.
-                out.extend(std::iter::repeat_n('\\', backslashes + 1));
-            }
-            backslashes = 0;
-        }
-        out.push(character);
-    }
-    if quoted {
-        // n backslashes before the closing quote become 2n.
-        out.extend(std::iter::repeat_n('\\', backslashes));
-        out.push('"');
-    }
-    out
-}
+/// `arg` quoted for `CommandLineToArgvW`, as std's `append_arg` does.
+pub(crate) use devlanes_sys_windows::spawn::quote_arg as quote;
 
 /// The `cmd.exe` arguments that run batch file `script` with `args`, ported from
 /// std's `make_bat_command_line` (the CVE-2024-24576 fix): `/e:ON` enables the

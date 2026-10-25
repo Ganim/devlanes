@@ -1,7 +1,6 @@
 //! Remote entry points that run in a terminal or over SSH: `devlanes tunnel --stdio`
 //! (started on the box by the client's SSH transport) and `devlanes askpass` (run by ssh).
 
-#[cfg(unix)]
 use std::io::Write;
 
 use devlanes_cli::Action;
@@ -48,7 +47,6 @@ async fn tunnel() -> Result<u8, RpcError> {
 /// Asks the daemon that launched ssh, which relays to the CLI running `connect`.
 ///
 /// ssh reads the answer from stdout; exit status 1 tells it the prompt was cancelled.
-#[cfg(unix)]
 async fn askpass(prompt: &str) -> u8 {
     match devlanes_transport_ssh::run_askpass(prompt).await {
         Ok(answer) => {
@@ -69,17 +67,97 @@ async fn askpass(prompt: &str) -> u8 {
     }
 }
 
-/// Refuses on stderr with exit 2: a Windows box cannot serve remote clients
-/// yet, since the SSH transport is Unix only.
+/// Refuses on stderr with exit 2: a Windows machine is never a box.
 #[cfg(windows)]
 async fn tunnel() -> Result<u8, RpcError> {
-    eprintln!("devlanes tunnel: not supported on Windows yet");
+    eprintln!("devlanes tunnel: not supported on Windows");
     Ok(2)
 }
 
-/// Cancels the prompt (exit 1), since the SSH transport is Unix only.
+/// Answers ssh's prompt when ssh started this process as `SSH_ASKPASS`:
+/// Win32-OpenSSH runs `<program> <prompt>`, and Windows has no wrapper script
+/// to add the subcommand. That is the case when the relay variable holds a
+/// pipe name of the shape the daemon creates and there is exactly one
+/// argument. `None` means a normal command line, run as usual.
+///
+/// The argument is the prompt even when it starts with `-`, since nothing
+/// limits what ssh may ask. ssh's other children (a `ProxyCommand`) inherit
+/// the same environment, so a one-argument `devlanes` call from one of them
+/// is answered as a prompt too.
 #[cfg(windows)]
-async fn askpass(_prompt: &str) -> u8 {
-    eprintln!("devlanes askpass: not supported on Windows yet");
-    1
+pub fn askpass_from_env() -> Option<u8> {
+    let relay = std::env::var_os(devlanes_transport_ssh::askpass::SOCKET_ENV);
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let prompt = askpass_prompt(relay.as_deref(), &args)?;
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => Some(runtime.block_on(askpass(&prompt))),
+        Err(error) => {
+            eprintln!("devlanes askpass: {error}");
+            Some(1)
+        }
+    }
+}
+
+/// The prompt when `relay` and the arguments after the program name say ssh
+/// started this process as askpass; see [`askpass_from_env`].
+#[cfg(windows)]
+fn askpass_prompt(relay: Option<&std::ffi::OsStr>, args: &[std::ffi::OsString]) -> Option<String> {
+    if !relay.is_some_and(devlanes_transport_ssh::askpass::is_relay_name) {
+        return None;
+    }
+    let [prompt] = args else {
+        return None;
+    };
+    Some(prompt.to_string_lossy().into_owned())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::ffi::{OsStr, OsString};
+
+    use super::askpass_prompt;
+
+    /// A relay name of the daemon's shape and a single argument together mean
+    /// ssh's askpass, whatever the argument looks like; anything else (no
+    /// relay, a foreign or UNC name, other argument counts) is an ordinary
+    /// command line.
+    #[test]
+    fn askpass_needs_a_relay_and_one_prompt() {
+        let prompt = [OsString::from(r"Enter passphrase for key 'C:\k': ")];
+        let relay = Some(OsStr::new(
+            r"\\.\pipe\devlanes-askpass-42-0123456789abcdef0123456789abcdef",
+        ));
+        let unc = Some(OsStr::new(
+            r"\\example.invalid\pipe\devlanes-askpass-42-0123456789abcdef0123456789abcdef",
+        ));
+        assert_eq!(
+            askpass_prompt(relay, &prompt).as_deref(),
+            Some(r"Enter passphrase for key 'C:\k': ")
+        );
+        assert_eq!(
+            askpass_prompt(relay, &[OsString::from("-x")]).as_deref(),
+            Some("-x")
+        );
+        assert_eq!(askpass_prompt(None, &prompt), None);
+        assert_eq!(askpass_prompt(unc, &prompt), None);
+        assert_eq!(askpass_prompt(Some(OsStr::new("1")), &prompt), None);
+        assert_eq!(
+            askpass_prompt(relay, &[OsString::from("remote"), OsString::from("ls")]),
+            None
+        );
+        assert_eq!(askpass_prompt(relay, &[]), None);
+    }
+
+    /// The daemon and the client strip the relay variable under the name the
+    /// transport sets.
+    #[test]
+    fn the_stripped_name_is_the_relay_variable() {
+        assert_eq!(
+            devlanes_proto::remote::ASKPASS_ENV,
+            devlanes_transport_ssh::askpass::SOCKET_ENV
+        );
+    }
 }

@@ -9,6 +9,50 @@ pub(crate) use unix::{mode_of, persist_with_mode};
 #[cfg(windows)]
 pub(crate) use windows::{mode_of, persist_with_mode};
 
+/// Whether a [`LocalTarget`](crate::LocalTarget) on this OS keeps only the
+/// read-only attribute instead of permission bits, so a remote source should
+/// compare modes as [`SyncOptions::read_only_modes`](crate::SyncOptions)
+/// describes.
+#[cfg(unix)]
+pub const READ_ONLY_MODES: bool = false;
+/// Whether a [`LocalTarget`](crate::LocalTarget) on this OS keeps only the
+/// read-only attribute instead of permission bits, so a remote source should
+/// compare modes as [`SyncOptions::read_only_modes`](crate::SyncOptions)
+/// describes.
+#[cfg(windows)]
+pub const READ_ONLY_MODES: bool = true;
+
+/// Whether a source file's `mode` matches the `held` mode a target reported:
+/// exactly, unless the target keeps only a read-only attribute (`read_only`),
+/// when only "has some write bit" has to agree.
+pub(crate) fn modes_match(mode: u32, held: u32, read_only: bool) -> bool {
+    /// Any write bit in a mode.
+    const WRITE_BITS: u32 = 0o222;
+    if read_only {
+        (mode & WRITE_BITS == 0) == (held & WRITE_BITS == 0)
+    } else {
+        mode == held
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::modes_match;
+
+    /// Exact unless the target keeps only a read-only attribute; then only
+    /// write access has to agree.
+    #[test]
+    fn read_only_targets_compare_write_access() {
+        assert!(modes_match(0o644, 0o644, false));
+        assert!(!modes_match(0o755, 0o644, false));
+        assert!(modes_match(0o755, 0o644, true));
+        assert!(modes_match(0o664, 0o644, true));
+        assert!(modes_match(0o555, 0o444, true));
+        assert!(!modes_match(0o444, 0o644, true));
+        assert!(!modes_match(0o755, 0o444, true));
+    }
+}
+
 #[cfg(unix)]
 mod unix {
     use std::fs::{Metadata, Permissions};

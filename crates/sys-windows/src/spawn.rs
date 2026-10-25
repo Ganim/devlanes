@@ -398,6 +398,38 @@ pub fn pipe() -> io::Result<(PipeReader, PipeWriter)> {
     Ok((PipeReader::from(read), PipeWriter::from(write)))
 }
 
+/// `arg` quoted for `CommandLineToArgvW` and the C runtime's parser, exactly
+/// as std's `append_arg` does without forced quotes: quotes only around empty
+/// arguments and ones with a space or tab; backslashes doubled before a
+/// quote, and inner quotes escaped. Join the quoted arguments with spaces for
+/// [`Spawn::command_line`].
+pub fn quote_arg(arg: &str) -> String {
+    let quoted = arg.is_empty() || arg.contains([' ', '\t']);
+    let mut out = String::with_capacity(arg.len() + 2);
+    if quoted {
+        out.push('"');
+    }
+    let mut backslashes = 0;
+    for character in arg.chars() {
+        if character == '\\' {
+            backslashes += 1;
+        } else {
+            if character == '"' {
+                // n backslashes before a quote become 2n + 1.
+                out.extend(std::iter::repeat_n('\\', backslashes + 1));
+            }
+            backslashes = 0;
+        }
+        out.push(character);
+    }
+    if quoted {
+        // n backslashes before the closing quote become 2n.
+        out.extend(std::iter::repeat_n('\\', backslashes));
+        out.push('"');
+    }
+    out
+}
+
 /// An environment block for [`Spawn::environment`]: `NAME=VALUE` entries
 /// sorted by name as Windows orders them, each NUL-terminated, then a NUL.
 #[derive(Debug, Clone, PartialEq, Eq)]

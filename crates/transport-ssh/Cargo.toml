@@ -1,6 +1,6 @@
 [package]
 name = "devlanes-transport-ssh"
-description = "SSH transport for devlanes remote connect over system OpenSSH with ControlMaster and askpass"
+description = "SSH transport for devlanes remote connect over system OpenSSH with askpass"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,11 +19,22 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
-# openssh does not build on Windows, and the crate body is Unix only: there is
-# no Windows transport yet.
+# openssh does not build on Windows: ControlMaster needs Unix sockets.
 [target.'cfg(unix)'.dependencies]
 openssh = { version = "0.11", default-features = false, features = ["process-mux"] }
+
+# Windows runs ssh.exe itself, one process per session in a kill-on-close job,
+# and relays askpass prompts over a user-only named pipe.
+[target.'cfg(windows)'.dependencies]
+devlanes-ipc = { path = "../ipc" }
+devlanes-sys-windows = { path = "../sys-windows" }
+getrandom = "0.3"
+tokio-util.workspace = true
 
 [dev-dependencies]
 sha2 = "0.10"
 tempfile.workspace = true
+
+# A fake ssh.exe where `#!/bin/sh` fakes cannot run.
+[target.'cfg(windows)'.dev-dependencies]
+devlanes-testing = { path = "../testing" }

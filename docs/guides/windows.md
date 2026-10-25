@@ -168,4 +168,4 @@ cargo binstall, `cargo install` and npm cannot replace a running `devlanes.exe`.
 - `pty: true` units stop with the daemon (see [terminals in units](#terminals-in-units)).
 - The DNS server for `--resolver` always listens on `127.53.0.1:53`, because an NRPT rule cannot name a port.
 - Unit names that differ only in case (`web` and `Web`) would share a log folder, so `devlanes config check` rejects them on Windows.
-- Windows cannot be a client of a remote box yet: `devlanes remote connect` fails with `not_supported_yet`. It cannot be a box either; boxes are Linux or macOS.
+- Windows cannot be a remote box; boxes are Linux or macOS. Connecting to one from Windows works, with the differences in [Windows clients](remote-setup.md#windows-clients).

@@ -853,6 +853,13 @@ pub mod remote {
     /// `{host, code, ...}` for mirroring problems such as a skipped lane or a busy port.
     pub const WARNING_EVENT: &str = "remote.warning";
 
+    /// The relay variable devlanes' ssh sets for askpass runs on Windows
+    /// (devlanes-transport-ssh's `SOCKET_ENV`). A `devlanes.exe` started under
+    /// it with one argument answers as askpass, so neither an auto-spawned
+    /// daemon nor a unit takes it from a client's environment.
+    #[cfg(windows)]
+    pub const ASKPASS_ENV: &str = "DEVLANES_ASKPASS_SOCKET";
+
     /// Largest synced file. The box skips (and reports) bigger ones before reading
     /// them, and the client refuses bigger file headers.
     pub const MAX_SYNC_FILE: u64 = 256 * 1024 * 1024;
@@ -917,6 +924,13 @@ pub mod remote {
             lane: String,
             unit: String,
             index: usize,
+            /// The client keeps only a read-only attribute (Windows): the box
+            /// compares modes by write access alone, so an executable it
+            /// holds as `0o644` is not sent again on every connection. Left
+            /// out when false, so the request reads as before, and older
+            /// boxes ignore it.
+            #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+            read_only_modes: bool,
         },
     }
 

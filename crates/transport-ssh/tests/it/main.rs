@@ -7,17 +7,22 @@
 //! - `DEVLANES_TEST_SSH_ALLOW_MISSING=1`: the box has no devlanes; the tunnel test skips.
 //! - `DEVLANES_TEST_SSH_LANE=1`: `run.sh` started a lane with an echo service and a
 //!   synced folder on the box; the mirroring test needs it.
+//! - `DEVLANES_TEST_SSH_PASSPHRASE_KEY`, `DEVLANES_TEST_SSH_PASSPHRASE` and
+//!   `DEVLANES_TEST_SSH_ASKPASS_EXE` (a built `devlanes` binary): a key the box
+//!   accepts whose passphrase the askpass test answers through the relay; the
+//!   test skips without them.
 
-// The transport is Unix only; the crate is empty on Windows.
-#![cfg(unix)]
-
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use devlanes_transport::{
     DialTarget, RpcCallError, Session, SessionOptions, SyncMessage, Transport,
 };
-use devlanes_transport_ssh::{SshOptions, SshTransport};
+use devlanes_transport_ssh::{
+    AskpassConfig, AskpassPrompt, PromptKind, PromptRelay, SshOptions, SshTransport,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -30,13 +35,29 @@ fn allow_missing() -> bool {
     env("DEVLANES_TEST_SSH_ALLOW_MISSING").as_deref() == Some("1")
 }
 
+/// The file that discards known hosts.
+#[cfg(unix)]
+const NO_FILE: &str = "/dev/null";
+#[cfg(windows)]
+const NO_FILE: &str = "NUL";
+
 /// Builds a transport from the test environment; paths are quoted for ssh's option parser.
 fn transport(home: &Path) -> SshTransport {
+    SshTransport::new(destination(), options(home, env("DEVLANES_TEST_SSH_KEY")))
+}
+
+/// The box from the test environment.
+fn destination() -> String {
+    env("DEVLANES_TEST_SSH_DEST").unwrap_or_else(|| "localhost".to_owned())
+}
+
+/// Options from the test environment, offering only `key` when given.
+fn options(home: &Path, key: Option<String>) -> SshOptions {
     let mut options = SshOptions::new(home);
     if let Some(port) = env("DEVLANES_TEST_SSH_PORT") {
         options.ssh_options.push(format!("Port={port}"));
     }
-    if let Some(key) = env("DEVLANES_TEST_SSH_KEY") {
+    if let Some(key) = key {
         options.ssh_options.extend([
             format!("IdentityFile=\"{key}\""),
             "IdentitiesOnly=yes".to_owned(),
@@ -47,17 +68,23 @@ fn transport(home: &Path) -> SshTransport {
     if let Some(known_hosts) = env("DEVLANES_TEST_SSH_KNOWN_HOSTS") {
         options.ssh_options.extend([
             format!("UserKnownHostsFile=\"{known_hosts}\""),
-            "GlobalKnownHostsFile=/dev/null".to_owned(),
+            format!("GlobalKnownHostsFile={NO_FILE}"),
             "StrictHostKeyChecking=yes".to_owned(),
         ]);
     }
-    let destination = env("DEVLANES_TEST_SSH_DEST").unwrap_or_else(|| "localhost".to_owned());
-    SshTransport::new(destination, options)
+    options
 }
 
 /// Short home so the control socket fits in `sun_path`.
+#[cfg(unix)]
 fn short_home() -> std::io::Result<tempfile::TempDir> {
     tempfile::Builder::new().prefix("dl").tempdir_in("/tmp")
+}
+
+/// A home; Windows keeps no control socket in it.
+#[cfg(windows)]
+fn short_home() -> std::io::Result<tempfile::TempDir> {
+    tempfile::tempdir()
 }
 
 #[tokio::test]
@@ -77,11 +104,77 @@ async fn ssh_master_and_probe() -> TestResult {
         }
         // The cached probe and the live master are reused rather than relaunched.
         assert_eq!(transport.probe().await?, probe);
-        let masters = std::fs::read_dir(home.path().join("run/ssh"))?
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".log"))
-            .count();
-        assert_eq!(masters, 1);
+        // Windows has no master; the second probe is the remembered answer.
+        #[cfg(unix)]
+        {
+            let masters = std::fs::read_dir(home.path().join("run/ssh"))?
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".log"))
+                .count();
+            assert_eq!(masters, 1);
+        }
+        transport.close().await;
+        Ok(())
+    })
+    .await?
+}
+
+/// Answers passphrase prompts with `passphrase` and records every prompt.
+struct Passphrase {
+    passphrase: String,
+    asked: Mutex<Vec<AskpassPrompt>>,
+}
+
+#[async_trait]
+impl PromptRelay for Passphrase {
+    async fn prompt(&self, prompt: AskpassPrompt) -> Option<String> {
+        let answer = (prompt.kind == PromptKind::Secret
+            && prompt.prompt.to_lowercase().contains("passphrase"))
+        .then(|| self.passphrase.clone());
+        self.asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(prompt);
+        answer
+    }
+}
+
+/// A passphrase-protected key: ssh asks through `SSH_ASKPASS`, which runs the
+/// built `devlanes` binary, which asks this relay; the scripted answer gets
+/// the connection through.
+#[tokio::test]
+#[ignore = "needs ssh"]
+async fn ssh_askpass_answers_a_passphrase() -> TestResult {
+    let (Some(key), Some(passphrase), Some(exe)) = (
+        env("DEVLANES_TEST_SSH_PASSPHRASE_KEY"),
+        env("DEVLANES_TEST_SSH_PASSPHRASE"),
+        env("DEVLANES_TEST_SSH_ASKPASS_EXE"),
+    ) else {
+        eprintln!("skipping ssh_askpass_answers_a_passphrase: no passphrase key set up");
+        return Ok(());
+    };
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let home = short_home()?;
+        let relay = Arc::new(Passphrase {
+            passphrase,
+            asked: Mutex::new(Vec::new()),
+        });
+        let mut options = options(home.path(), Some(key));
+        options.askpass = Some(AskpassConfig {
+            exe: PathBuf::from(exe),
+            relay: relay.clone(),
+        });
+        let transport = SshTransport::new(destination(), options);
+        let probe = transport.probe().await?;
+        assert!(!probe.platform.os.is_empty(), "{probe:?}");
+        let asked = relay
+            .asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0].destination, destination());
+        assert!(asked[0].prompt.contains("passphrase"), "{asked:?}");
         transport.close().await;
         Ok(())
     })

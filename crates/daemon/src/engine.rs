@@ -797,8 +797,48 @@ impl Engine {
 }
 
 /// Requests counted as attempts to use the client environment (decision 7).
+#[cfg(unix)]
 pub(crate) fn carries_env(context: &Context) -> Option<Arc<crate::model::EnvMap>> {
     context.env.as_ref().map(|env| Arc::new(env.clone()))
+}
+
+/// Requests counted as attempts to use the client environment (decision 7).
+/// The askpass relay variable of an ssh run stays out, so no unit inherits it
+/// from a client started under that run, in any spelling.
+#[cfg(windows)]
+pub(crate) fn carries_env(context: &Context) -> Option<Arc<crate::model::EnvMap>> {
+    context.env.as_ref().map(|env| {
+        let mut env = env.clone();
+        env.retain(|name, _| !name.eq_ignore_ascii_case(devlanes_proto::remote::ASKPASS_ENV));
+        Arc::new(env)
+    })
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// A client environment reaches units without the askpass relay variable.
+    #[test]
+    fn client_environments_lose_the_askpass_relay() {
+        let context = Context {
+            env: Some(
+                [
+                    ("PATH", r"C:\Windows"),
+                    ("DEVLANES_ASKPASS_SOCKET", r"\\.\pipe\devlanes-askpass-1-x"),
+                    ("devlanes_askpass_socket", r"\\.\pipe\devlanes-askpass-2-x"),
+                    ("DEVLANES_HOME", r"C:\dl"),
+                ]
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .into(),
+            ),
+            ..Context::default()
+        };
+        let env = carries_env(&context).unwrap_or_default();
+        let names: Vec<&str> = env.keys().map(String::as_str).collect();
+        assert_eq!(names, ["DEVLANES_HOME", "PATH"]);
+        assert!(carries_env(&Context::default()).is_none());
+    }
 }
 
 /// Sets the daemon-wide flag once; true for the first caller.

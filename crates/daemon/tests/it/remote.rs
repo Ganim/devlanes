@@ -9,6 +9,8 @@
 
 #[path = "remote_sync.rs"]
 mod large_sync;
+#[path = "remote_ssh.rs"]
+mod real_ssh;
 
 use std::{
     net::{IpAddr, Ipv6Addr},

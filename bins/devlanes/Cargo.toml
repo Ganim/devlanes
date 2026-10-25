@@ -38,7 +38,6 @@ devlanes-trust-linux = { path = "../../crates/trust-linux" }
 
 [target.'cfg(unix)'.dependencies]
 devlanes-runner-pty = { path = "../../crates/runner-pty" }
-devlanes-transport-ssh = { path = "../../crates/transport-ssh" }
 devlanes-tunnel = { path = "../../crates/tunnel" }
 rustix = { version = "1", features = ["process", "termios"] }
 
@@ -108,6 +107,7 @@ devlanes-start-gate = { path = "../../crates/start-gate" }
 devlanes-state = { path = "../../crates/state" }
 devlanes-sys = { path = "../../crates/sys" }
 devlanes-transport = { path = "../../crates/transport" }
+devlanes-transport-ssh = { path = "../../crates/transport-ssh" }
 futures-util.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true

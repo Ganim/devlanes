@@ -14,7 +14,6 @@ use devlanes_core::{
     contrib::{CA_BUNDLE_ENV, CA_CERT_ENV, Contributor, ScriptRunner},
 };
 use devlanes_daemon::integrations::ExitDetails;
-#[cfg(unix)]
 use devlanes_daemon::integrations::{
     ConnectOptions, RemoteConnector, RemotePrompt, RemotePrompter,
 };
@@ -149,15 +148,10 @@ pub async fn engine(
     integ.ca_permitted = ca_permitted;
     integ.presets = presets();
     integ.launch_checks = vec![Arc::new(DistinctTauriIdentifiers)];
-    // Windows keeps the default `NoRemote`, which refuses `remote connect`
-    // with `not_supported_yet`: the SSH transport is Unix only.
-    #[cfg(unix)]
-    {
-        integ.remote = Arc::new(SshConnector {
-            home: paths.home.clone(),
-            exe: std::env::current_exe().ok(),
-        });
-    }
+    integ.remote = Arc::new(SshConnector {
+        home: paths.home.clone(),
+        exe: std::env::current_exe().ok(),
+    });
     #[cfg(unix)]
     {
         integ.hosts = hosts_file(hosts_policy, hosts_tld, hosts_probe)
@@ -831,7 +825,6 @@ fn listener_status(bound: &Value, health: &[devlanes_proxy::ListenerHealth]) -> 
 }
 
 /// `connect` over system OpenSSH, with ssh's prompts relayed to the attached CLI.
-#[cfg(unix)]
 struct SshConnector {
     /// `$DEVLANES_HOME`; control sockets live in its `run/ssh`.
     home: PathBuf,
@@ -839,9 +832,9 @@ struct SshConnector {
     exe: Option<PathBuf>,
 }
 
-#[cfg(unix)]
 impl RemoteConnector for SshConnector {
-    /// One SSH transport (and ControlMaster) per box.
+    /// One SSH transport (and ControlMaster) per box; Windows has no
+    /// ControlMaster and runs one `ssh.exe` per session.
     fn transport(
         &self,
         host: &str,
@@ -875,10 +868,8 @@ impl RemoteConnector for SshConnector {
 }
 
 /// Adapts the daemon's prompt relay to the SSH transport's.
-#[cfg(unix)]
 struct PromptBridge(Arc<dyn RemotePrompter>);
 
-#[cfg(unix)]
 #[async_trait]
 impl devlanes_transport_ssh::PromptRelay for PromptBridge {
     /// Forwards with the CLI's prompt kind words.

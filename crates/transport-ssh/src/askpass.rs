@@ -4,26 +4,43 @@
 //! argument, so `SSH_ASKPASS` points at a generated wrapper script that execs
 //! `<devlanes exe> askpass <prompt>`. That subcommand calls [`run_askpass`],
 //! which asks the daemon over a private Unix socket; the daemon hands the
-//! prompt to a [`PromptRelay`].
+//! prompt to a [`PromptRelay`]. Windows has no wrapper script and a named pipe
+//! in place of the socket; see the `windows` module.
 
+#[cfg(unix)]
 use std::ffi::OsString;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use tokio::task::{JoinHandle, JoinSet};
 
+#[cfg(unix)]
 use crate::sh_quote;
 
-/// Environment variable carrying the relay socket to the askpass process.
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub(crate) use windows::AskpassServer;
+#[cfg(windows)]
+pub use windows::{is_relay_name, request};
+
+/// Environment variable carrying the relay socket to the askpass process. On
+/// Windows it holds the relay pipe's name and also tells `devlanes.exe` that
+/// ssh started it as askpass.
 pub const SOCKET_ENV: &str = "DEVLANES_ASKPASS_SOCKET";
 
 /// Longest Unix socket path (`sun_path` is 104 bytes on macOS, with the NUL).
+#[cfg(unix)]
 const MAX_SOCKET_PATH: usize = 103;
 
 /// Upper bound for one request or reply line.
@@ -132,6 +149,7 @@ pub async fn run_askpass(prompt: &str) -> Result<String, AskpassError> {
 }
 
 /// Sends one prompt to the relay socket and waits for the answer.
+#[cfg(unix)]
 pub async fn request(
     socket: &Path,
     prompt: &str,
@@ -156,12 +174,14 @@ pub async fn request(
 }
 
 /// A relay socket and wrapper script that live for one master launch.
+#[cfg(unix)]
 pub(crate) struct AskpassServer {
     socket: PathBuf,
     script: PathBuf,
     task: JoinHandle<()>,
 }
 
+#[cfg(unix)]
 impl AskpassServer {
     /// Binds the socket and writes the wrapper next to it in `dir` (mode 0700).
     pub(crate) async fn start(
@@ -236,6 +256,7 @@ impl AskpassServer {
     }
 }
 
+#[cfg(unix)]
 impl Drop for AskpassServer {
     fn drop(&mut self) {
         self.task.abort();
@@ -246,6 +267,7 @@ impl Drop for AskpassServer {
 }
 
 /// Writes the wrapper as 0700 and clears a stale socket left by a crash.
+#[cfg(unix)]
 fn write_script(path: &Path, content: &str, socket: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::remove_file(socket) {
@@ -257,6 +279,7 @@ fn write_script(path: &Path, content: &str, socket: &Path) -> io::Result<()> {
 }
 
 /// Answers one askpass connection through the relay.
+#[cfg(unix)]
 async fn answer(
     stream: UnixStream,
     relay: Arc<dyn PromptRelay>,
@@ -283,7 +306,7 @@ async fn answer(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::time::Duration;

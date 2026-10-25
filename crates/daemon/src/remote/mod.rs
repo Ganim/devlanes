@@ -441,6 +441,14 @@ fn valid_host(host: &str) -> bool {
 /// point the destination elsewhere; the box's own `to` is never used.
 fn sync_destination(home: &Path, host: &str, entry: &SyncEntry) -> Result<PathBuf, String> {
     let host = host.replace('/', "_");
+    // Windows stores the host, which is what the user typed (`ssh://box:2222`
+    // suits ssh), under its encoded file name; Unix keeps it as it is. The
+    // encoding would turn `..` into a plain name, so that is refused first.
+    #[cfg(windows)]
+    let host = match host.as_str() {
+        "." | ".." => return Err(format!("the box sent an unusable host name {host:?}")),
+        _ => devlanes_core::paths::name_on_disk(&host).into_owned(),
+    };
     let mut path = home.join("sync");
     for (what, part) in [
         ("host", host.as_str()),
@@ -905,6 +913,27 @@ mod tests {
                 "/home/u/.devlanes/sync/user@box_x/app/app@1/ext"
             ))
         );
+    }
+
+    /// Windows encodes what the user typed as the host, and refuses box names
+    /// it cannot store.
+    #[cfg(windows)]
+    #[test]
+    fn windows_sync_destinations_hold_only_windows_names() {
+        let home = Path::new(r"C:\Users\acme\.devlanes");
+        assert_eq!(
+            sync_destination(home, "ssh://box:2222", &entry("app", "app@1", "ext")),
+            Ok(home.join(r"sync\ssh%3A__box%3A2222\app\app@1\ext"))
+        );
+        for bad in [
+            entry("con", "app@1", "ext"),
+            entry("app", "app@1", "a:b"),
+            entry("app", "app@1", r"a\..\..\x"),
+            entry("app", "app@1", "dist."),
+        ] {
+            assert!(sync_destination(home, "box", &bad).is_err(), "{bad:?}");
+        }
+        assert!(sync_destination(home, ".", &entry("app", "app@1", "ext")).is_err());
     }
 
     #[test]

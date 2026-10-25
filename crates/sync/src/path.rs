@@ -38,6 +38,12 @@ impl RelPath {
         {
             return Err(invalid("it has an empty, `.` or `..` component"));
         }
+        #[cfg(windows)]
+        if !path.split('/').all(windows_name) {
+            return Err(invalid(
+                "Windows cannot hold one of its names (a device name such as `con`, a trailing dot or space, or one of `< > : \" \\ | ? *`)",
+            ));
+        }
         Ok(Self(path))
     }
 
@@ -91,6 +97,39 @@ impl RelPath {
     pub fn ancestors(&self) -> impl Iterator<Item = &str> {
         self.0.match_indices('/').map(|(index, _)| &self.0[..index])
     }
+}
+
+/// Whether Windows can store a file or folder named `name` under that exact
+/// name. Paths come from boxes, where any of these is a valid name, while on
+/// Windows `con.txt` opens the console, `a:b` writes the stream `b` of the
+/// file `a`, `a\b` nests folders and `a.` writes `a`.
+#[cfg(windows)]
+fn windows_name(name: &str) -> bool {
+    const RESERVED: &[char] = &['<', '>', ':', '"', '\\', '|', '?', '*'];
+    if name.chars().any(|c| c < ' ' || RESERVED.contains(&c)) || name.ends_with(['.', ' ']) {
+        return false;
+    }
+    // The part before the first dot, without trailing spaces, names the device.
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ');
+    let upper = stem.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return false;
+    }
+    let number = upper
+        .strip_prefix("COM")
+        .or_else(|| upper.strip_prefix("LPT"));
+    let mut digits = number.into_iter().flat_map(str::chars);
+    !matches!(
+        (digits.next(), digits.next()),
+        (Some('0'..='9' | '¹' | '²' | '³'), None)
+    )
 }
 
 impl fmt::Debug for RelPath {
@@ -151,6 +190,48 @@ mod tests {
         );
         // Deserialization goes through `TryFrom<String>`, so it validates too.
         assert!(RelPath::try_from("../x".to_owned()).is_err());
+    }
+
+    /// Names a box may send that Windows cannot store as they are; names
+    /// close to them still pass.
+    #[cfg(windows)]
+    #[test]
+    fn rejects_names_windows_cannot_hold() {
+        for bad in [
+            "con",
+            "src/CON.txt",
+            "aux.tar.gz",
+            "nul /x",
+            "com1",
+            "Lpt9.log",
+            "com\u{b9}",
+            "conin$",
+            "a:b",
+            r"a\b",
+            "what?",
+            "x*y",
+            "pipe|d",
+            "quote\"d",
+            "<tag>",
+            "tab\there",
+            "dir./x",
+            "trailing ",
+        ] {
+            assert!(RelPath::new(bad).is_err(), "{bad:?} must be rejected");
+        }
+        for good in [
+            "console.log",
+            "com",
+            "com10",
+            "lpt",
+            "auxiliary/nul-ish",
+            ".bashrc",
+            "a b/c d.txt",
+            "100%.txt",
+            "ünïcode",
+        ] {
+            assert!(RelPath::new(good).is_ok(), "{good:?} must pass");
+        }
     }
 
     #[test]

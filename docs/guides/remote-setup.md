@@ -60,7 +60,7 @@ Hidden units stay on the box: their ports are not mirrored and the box refuses s
 
 ## On the client
 
-The client runs macOS or Linux. On Windows, `devlanes remote connect` fails with `not_supported_yet`, because the SSH transport has no Windows version yet.
+The client runs macOS, Linux or Windows (see [Windows clients](#windows-clients)).
 
 - A `Host` entry in `~/.ssh/config`. devlanes runs the system `ssh`, so `ProxyJump`, certificates, `IdentityFile` and `User` apply. The name you give `remote connect` is that `Host`.
 - Your key in an agent. The ssh master is a child of the local daemon and uses the agent the daemon was started with; a daemon spawned from your shell inherits that shell's `SSH_AUTH_SOCK`. If the agent socket changes (new login, 1Password restart), `devlanes daemon restart` picks up the new one.
@@ -77,6 +77,21 @@ devlanes remote disconnect hetzner
 Passphrase, one-time-password and host-key prompts appear in the terminal running `remote connect`, prefixed with the box name; type `yes` to a host-key question even though the input is hidden. A reconnect that needs a prompt while no `remote connect` is attached fails as `Permission denied`, so keys in an agent are what make unattended reconnects work.
 
 The connection belongs to your local daemon, not to the terminal: Ctrl-C detaches, the daemon reconnects with backoff after sleep or network loss and keeps the mirrored ports bound meanwhile. A daemon restart drops connections; run `remote connect` again afterwards.
+
+### Windows clients
+
+devlanes uses Windows' own OpenSSH client (`C:\Windows\System32\OpenSSH\ssh.exe`, the "OpenSSH Client" optional feature), or the first `ssh.exe` on `PATH` when that is not installed. It reads `%USERPROFILE%\.ssh\config` and `known_hosts` like any `ssh` you run yourself.
+
+Windows' OpenSSH has no ControlMaster, so every connection and every reconnect authenticates again. Keep the key in the ssh-agent service so reconnects need no prompt. Once, in an elevated PowerShell:
+
+```powershell
+Get-Service ssh-agent | Set-Service -StartupType Automatic
+Start-Service ssh-agent
+```
+
+Then, as yourself, `ssh-add $env:USERPROFILE\.ssh\id_ed25519`. The agent keeps the key across logins, and the daemon finds it without `SSH_AUTH_SOCK`. Passphrase and host-key prompts still appear in the terminal running `remote connect` (PowerShell, cmd or Windows Terminal; Git Bash's mintty has no console to prompt in).
+
+Synced folders land under `%USERPROFILE%\.devlanes\sync`. Windows keeps only a read-only attribute, so exec bits are not synced. Files whose names Windows cannot hold (`con.txt`, `a:b`, a name ending in a dot or space) and the second of two names that differ only in case (`README.md` and `Readme.md`) are skipped and listed in `remote sync`. A box port inside a Windows reserved port range (`netsh int ipv4 show excludedportrange protocol=tcp`) cannot be mirrored and is reported with that hint.
 
 ## Checking
 
@@ -96,6 +111,7 @@ curl -sS https://api.acme.localhost/healthz          # from the client, once the
 | `lane acme@1 is not mirrored; this machine already serves acme-1.localhost` | a local lane of the same project uses that hostname | stop the local lane, or give one side another `project` name |
 | `linger off` | Linux box without `loginctl enable-linger` | run it on the box |
 | `ssh to hetzner failed (255): Permission denied` | no agent or key for the daemon's ssh | load the key, `devlanes daemon restart`, connect again |
+| `no ssh client found` | Windows without OpenSSH Client | add the optional feature, or put `ssh.exe` on `PATH` |
 
 ## Limits
 

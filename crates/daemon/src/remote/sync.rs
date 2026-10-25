@@ -322,6 +322,8 @@ async fn follow(conn: Arc<HostConn>, session: BoxSession, entry: SyncEntry, home
         lane: entry.lane.clone(),
         unit: entry.unit.clone(),
         index: entry.index,
+        // False on Unix, which leaves the request as it was.
+        read_only_modes: devlanes_sync::READ_ONLY_MODES,
     };
     let subscription = match serde_json::to_value(&request) {
         Ok(request) => session.subscribe_sync(request).await,

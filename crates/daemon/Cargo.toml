@@ -57,6 +57,8 @@ devlanes-proxy = { path = "../proxy" }
 devlanes-resolver-hosts = { path = "../resolver-hosts", features = ["fake"] }
 devlanes-runner-pty = { path = "../runner-pty" }
 devlanes-start-gate = { path = "../start-gate" }
+# Only for the `needs ssh` test against a real box.
+devlanes-transport-ssh = { path = "../transport-ssh" }
 devlanes-tunnel = { path = "../tunnel" }
 dunce.workspace = true
 tempfile.workspace = true

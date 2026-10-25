@@ -44,6 +44,12 @@ fn main() -> ExitCode {
             std::env::args_os().skip(2),
         ));
     }
+    // ssh runs `devlanes.exe <prompt>` as askpass: there is no subcommand to
+    // parse, and the console belongs to the daemon that started ssh.
+    #[cfg(windows)]
+    if let Some(code) = remote::askpass_from_env() {
+        return ExitCode::from(code);
+    }
     // CompleteEnv must run before any thread exists; it exits when completing.
     completion::install();
     let cli = match Cli::try_parse() {

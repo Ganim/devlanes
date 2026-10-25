@@ -679,8 +679,13 @@ async fn start_daemon(
 
     let exe = std::env::current_exe()?;
     // The daemon's own variables replace inherited ones; Windows would refuse
-    // two spellings of one name.
-    let own = ["DEVLANES_HOME", "DEVLANES_READY_FD"];
+    // two spellings of one name. The askpass relay of an ssh run never reaches
+    // a daemon, which would hand it to every unit.
+    let own = [
+        "DEVLANES_HOME",
+        "DEVLANES_READY_FD",
+        devlanes_proto::remote::ASKPASS_ENV,
+    ];
     let mut variables: Vec<(OsString, OsString)> = daemon_env(std::env::vars_os(), remove_env)
         .into_iter()
         .filter(|(name, _)| {

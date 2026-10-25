@@ -21,6 +21,7 @@ mod target;
 pub use case::CaseNames;
 pub use held::{HeldFile, HeldWalk};
 pub use ignore::IgnoreRules;
+pub use mode::READ_ONLY_MODES;
 pub use path::RelPath;
 pub use syncer::{SyncHandle, SyncIssue, SyncOptions, SyncState, SyncStatus, Syncer};
 pub use target::{
