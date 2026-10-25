@@ -730,9 +730,6 @@ impl<E: Extensions> Planner<'_, '_, E> {
             devlanes.insert("PORT".into(), layout.port.to_string());
             devlanes.insert("HOST".into(), "127.0.0.1".into());
             devlanes.insert("DEVLANES_SERVICE".into(), layout.name.clone());
-            if let Some(url) = &layout.public_url {
-                devlanes.insert("DEVLANES_PUBLIC_URL".into(), url.clone());
-            }
             devlanes.insert("DEVLANES_ORIGINS".into(), self.origins.clone());
         }
         let env = assemble([

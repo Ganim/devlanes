@@ -207,7 +207,8 @@ async fn injected_variables() {
     assert_eq!(env["HOST"], "127.0.0.1");
     assert_eq!(env["PORT"], lane.services["crm-api"].port.to_string());
     assert_eq!(env["ACME_CRM_PORT"], env["PORT"]);
-    assert_eq!(env["DEVLANES_PUBLIC_URL"], "https://crm.acme-2.localhost");
+    // Services set their own public URL through `${{ self.public_url }}` when they need it.
+    assert!(!env.contains_key("DEVLANES_PUBLIC_URL"));
     let origins = &env["DEVLANES_ORIGINS"];
     assert!(origins.contains("https://crm.acme-2.localhost"));
     assert!(origins.contains(&format!("http://localhost:{}", env["PORT"])));
@@ -566,7 +567,6 @@ async fn public_https_port() {
         );
         let api = &lane.services["api"];
         assert_eq!(api.public_url.as_deref(), Some(api_url.as_str()));
-        assert_eq!(api.launch.env.values["DEVLANES_PUBLIC_URL"], api_url);
         // services.api.public_url feeds web's env through an expression.
         assert_eq!(
             lane.services["web"].launch.env.values["VITE_API_URL"],

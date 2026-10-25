@@ -265,9 +265,9 @@ service_fields! {
     /// it. One entry or a list; an entry is a hostname or a mapping with `host` and optional
     /// `port` (a named port), `fallback` and `host_header`. A `*.` wildcard matches
     /// subdomains, and an exact host wins over it. The first non-wildcard host becomes
-    /// `public_url` and `DEVLANES_PUBLIC_URL`, non-wildcard hosts join the lane's
-    /// `DEVLANES_ORIGINS`, and having hosts makes the default `ready` a TCP check. Keep them
-    /// under `${{ lane.domain }}` so lanes do not collide.
+    /// `public_url`, non-wildcard hosts join the lane's `DEVLANES_ORIGINS`, and having hosts
+    /// makes the default `ready` a TCP check. Keep them under `${{ lane.domain }}` so lanes
+    /// do not collide.
     #[schemars(extend("examples" = ["api.${{ lane.domain }}",["api.${{ lane.domain }}"],[{"host":"inspect.${{ lane.domain }}","port":"inspector"}]]))]
     hosts: Hosts,
     /// Labels for selecting and grouping services. `+tag` selects every service with the

@@ -119,7 +119,7 @@ Values may contain `${{ ... }}` (MiniJinja), evaluated per lane. Undefined names
 | `lanes.main.services.<name>` | services of lane 0 |
 | `projects.<project>.services.<name>` | services of another devlanes project |
 
-Layers, lowest first: the client's environment, contributors (mise, direnv, Node, Python), secrets, devlanes' variables (`PORT`, `HOST`, `DEVLANES_PROJECT`, `DEVLANES_LANE`, `DEVLANES_LANE_DATA`, `DEVLANES_SERVICE`, `DEVLANES_PUBLIC_URL`), `global_env`, the service's `env`, the profile's `env`, `--env` on the command line.
+Layers, lowest first: the client's environment, contributors (mise, direnv, Node, Python), secrets, devlanes' variables (`DEVLANES=1`, `DEVLANES_PROJECT`, `DEVLANES_LANE`, `DEVLANES_LANE_NAME`, `DEVLANES_LANE_DATA`, `DEVLANES_CA_CERT`, `DEVLANES_CA_BUNDLE`, and for services `PORT`, `HOST`, `DEVLANES_SERVICE`, `DEVLANES_ORIGINS`), `global_env`, the service's `env`, the profile's `env`, `--env` on the command line.
 
 `.env` is never injected into processes; it only feeds `${{ env.X }}`. Name what a process needs (`DB_PASSWORD: ${{ env.DB_PASSWORD }}`) or let the app load its own dotenv. mise `[env]` and an allowed `.envrc` are applied automatically, so do not copy them. Secrets belong in fnox (`fnox: { profile: dev }`, unlocked with `devlanes secrets unlock`), never as literals.
 

@@ -88,7 +88,7 @@ Layers, lowest first. A later layer wins on the same key.
 1. The environment of the shell that ran `devlanes start` (or `restart`, `run`, `exec`, `lane resume`). The daemon keeps it in memory for the lane and reuses it for restarts from the TUI; it is never written to disk. `devlanes daemon restart` starts what ran again with the environment of the shell that ran it; after a reboot or `daemon stop`, `devlanes lane resume` from a shell supplies it again.
 2. Contributors: mise, direnv, then the platform (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, …) and preset (`WRANGLER_REGISTRY_PATH`).
 3. Secrets from fnox.
-4. devlanes' own variables: `DEVLANES=1`, `DEVLANES_PROJECT`, `DEVLANES_LANE` (the index), `DEVLANES_LANE_NAME` (`main` or `lane<N>`), `DEVLANES_LANE_DATA` (the [lane data folder](#lane-data-folder)), `DEVLANES_CA_CERT`, `DEVLANES_CA_BUNDLE`; for services also `PORT`, `HOST=127.0.0.1`, `DEVLANES_SERVICE`, `DEVLANES_PUBLIC_URL` (when the service has hosts) and `DEVLANES_ORIGINS`.
+4. [devlanes' own variables](#devlanes-variables): `DEVLANES=1`, `DEVLANES_PROJECT`, `DEVLANES_LANE`, `DEVLANES_LANE_NAME`, `DEVLANES_LANE_DATA`, `DEVLANES_CA_CERT`, `DEVLANES_CA_BUNDLE`; for services also `PORT`, `HOST`, `DEVLANES_SERVICE` and `DEVLANES_ORIGINS`.
 5. `global_env`.
 6. The unit's own `env`.
 7. The profile's `env` (later `--profile` flags win).
@@ -98,11 +98,36 @@ On Windows, variable names are uppercased in every layer, since Windows treats `
 
 `devlanes env show api --explain` prints every variable with its layer; `devlanes env shell api` opens a shell with that environment; `devlanes env export | eval` loads the lane's variables into the current shell.
 
-`DEVLANES_ORIGINS` is the comma-separated list of every https origin in the lane plus `http://localhost:<port>` and `http://127.0.0.1:<port>` for each service. Feed it to the CORS and CSRF allow-lists of your APIs so lane 3's frontend may call lane 3's API.
-
-`DEVLANES_PUBLIC_URL_<SERVICE>` (uppercase, non-alphanumerics replaced by `_`) exists in the lane-level environment: `devlanes with`, `devlanes exec`, `env show` without a unit. Tests and scripts read their base URLs from it. Services themselves get only their own `DEVLANES_PUBLIC_URL`; use `${{ services.x.public_url }}` in `env` for the others.
-
 Tasks and infra commands get layers 1 to 8 as well, minus the service-only variables, plus Compose variables (`COMPOSE_PROJECT_NAME`, `COMPOSE_FILE`, `COMPOSE_PROFILES`, `DEVLANES_COMPOSE_LANE_PROJECT`) that let `docker compose exec` reach the project's containers without flags.
+
+### devlanes variables
+
+Every process devlanes starts (services, tasks, infra commands) and every command run with `devlanes with`, `devlanes exec` or `devlanes env shell` gets these. A program or script that wants to know whether it runs under devlanes checks `DEVLANES=1`, for example to skip its own port selection or to read its lane's data folder.
+
+| Variable | Value |
+| --- | --- |
+| `DEVLANES` | `1` |
+| `DEVLANES_PROJECT` | `project` from `devlanes.yaml`, such as `acme` |
+| `DEVLANES_LANE` | the lane index: `0` for the primary worktree, then `1`, `2`, … A lane whose branch becomes the primary one takes index 0, so key lasting state on `DEVLANES_LANE_DATA` instead |
+| `DEVLANES_LANE_NAME` | `main` for lane 0, `lane<N>` for the others |
+| `DEVLANES_LANE_DATA` | the [lane data folder](#lane-data-folder), `~/.devlanes/data/<project>/<lane id>`. The lane id is not the index |
+| `DEVLANES_CA_CERT` | the root certificate (PEM) the HTTPS proxy signs with: `~/.devlanes/ca/ca.pem`, or mkcert's `rootCA.pem` with `tls.ca: mkcert` |
+| `DEVLANES_CA_BUNDLE` | `~/.devlanes/ca/bundle.pem`, the system roots plus that certificate, for tools that replace their trust store instead of adding to it |
+
+The CA variables are missing when the CA could not be loaded and HTTPS is off; `devlanes doctor` says why. For Node, Bun, Deno, Python and Rust units the platform contributors already point `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` and similar variables at them, so those runtimes trust the proxy's certificates without setup.
+
+Services also get:
+
+| Variable | Value |
+| --- | --- |
+| `PORT` | the service's port, see [the service's port](#the-services-port) |
+| `HOST` | `127.0.0.1` |
+| `DEVLANES_SERVICE` | the service's name, the same for every replica |
+| `DEVLANES_ORIGINS` | the comma-separated list of every https origin in the lane plus `http://localhost:<port>` and `http://127.0.0.1:<port>` for each service. Feed it to the CORS and CSRF allow-lists of your APIs so lane 3's frontend may call lane 3's API |
+
+A service that needs its own public URL, for OAuth callbacks or absolute links, sets it in `env` with `${{ self.public_url }}`, and another service's with `${{ services.x.public_url }}`.
+
+`DEVLANES_PUBLIC_URL_<SERVICE>` (uppercase, non-alphanumerics replaced by `_`) exists only in the lane-level environment: `devlanes with`, `devlanes exec`, `env show` without a unit. Tests and scripts read their base URLs from it; for a service without hosts the value is its `http://127.0.0.1:<port>` URL. Services do not get these variables.
 
 ### Expressions
 
