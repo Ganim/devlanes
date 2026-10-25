@@ -621,6 +621,8 @@ pub enum ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum DaemonCommand {
+    /// Start the daemon in the background unless it already runs, then show its status
+    Start,
     /// Show the daemon's version, pid, uptime and managed process count; never starts it
     Status,
     /// Stop the daemon and every process it manages
@@ -683,6 +685,7 @@ pub enum Action {
         resolver: bool,
         keep_ca: bool,
     },
+    DaemonStart,
     DaemonRestart(Context),
     DaemonLogs {
         follow: bool,
@@ -998,6 +1001,7 @@ impl Cli {
                 }
             },
             Some(Command::Daemon { command }) => match command {
+                DaemonCommand::Start => return Ok(Action::DaemonStart),
                 DaemonCommand::Status => (Method::DaemonStatus, json!({})),
                 DaemonCommand::Stop => (Method::DaemonShutdown, json!({})),
                 DaemonCommand::ResetState => (Method::DaemonResetState, json!({})),

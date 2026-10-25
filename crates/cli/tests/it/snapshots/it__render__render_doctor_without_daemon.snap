@@ -5,7 +5,7 @@ expression: text
 --- human (exit 0)
 daemon
   ! not running (socket /home/u/.devlanes/run/daemon.sock)
-    fix: devlanes start, or devlanes daemon restart
+    fix: devlanes daemon start
 home
   ✓ /home/u/.devlanes is private
 sandbox
@@ -28,7 +28,7 @@ output
 --- plain (exit 0)
 daemon
   warn not running (socket /home/u/.devlanes/run/daemon.sock)
-    fix: devlanes start, or devlanes daemon restart
+    fix: devlanes daemon start
 home
   ok /home/u/.devlanes is private
 sandbox
@@ -50,7 +50,7 @@ output
   ok mode plain (DEVLANES_OUTPUT)
 --- agent (exit 0)
 warn daemon: not running (socket /home/u/.devlanes/run/daemon.sock)
-  fix: devlanes start, or devlanes daemon restart
+  fix: devlanes daemon start
 warn proxy: port 443 is held by nginx (pid 812); the https proxy will fall back to another port
   fix: stop that process, or set proxy ports in ~/.devlanes/config.yaml
 ok home: /home/u/.devlanes is private

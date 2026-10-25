@@ -5,7 +5,7 @@ expression: text
 --- human (exit 0)
 daemon
   ! not running (socket null)
-    fix: devlanes start, or devlanes daemon restart
+    fix: devlanes daemon start
 sandbox
   ✓ not sandboxed
 wsl
@@ -24,7 +24,7 @@ output
 --- plain (exit 0)
 daemon
   warn not running (socket null)
-    fix: devlanes start, or devlanes daemon restart
+    fix: devlanes daemon start
 sandbox
   ok not sandboxed
 wsl
@@ -42,7 +42,7 @@ output
   ok mode plain (DEVLANES_OUTPUT)
 --- agent (exit 0)
 warn daemon: not running (socket null)
-  fix: devlanes start, or devlanes daemon restart
+  fix: devlanes daemon start
 warn wsl: systemd is not running in this distro, so devlanes daemon install cannot start the daemon with it
   fix: set systemd=true under [boot] in /etc/wsl.conf, then run wsl.exe --shutdown from Windows and reopen the distro
 warn wsl: browsers on Windows do not trust the CA: tls.trust leaves out windows

@@ -7,6 +7,7 @@ Run, stop and install the background daemon
 Usage: devlanes daemon [OPTIONS] <COMMAND>
 
 Commands:
+  start        Start the daemon in the background unless it already runs, then show its status
   status       Show the daemon's version, pid, uptime and managed process count; never starts it
   stop         Stop the daemon and every process it manages
   restart      Restart the daemon and start again, with this shell's environment, the services that ran; asks first when processes are running

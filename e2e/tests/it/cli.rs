@@ -167,7 +167,12 @@ fn daemon_status_never_spawns() -> Result<()> {
     let plain = lab.run(plain, devlanes_e2e::COMMAND_TIMEOUT)?;
     plain.expect_code(1)?;
     assert!(
-        plain.stdout.contains("daemon is not running (socket"),
+        plain
+            .stdout
+            .contains(&format!("daemon is not running (socket {socket})"))
+            || plain
+                .stdout
+                .contains(&format!("daemon is not running (pipe {socket})")),
         "{plain}"
     );
     assert!(!lab.daemon_running(), "daemon status started a daemon");
@@ -180,6 +185,31 @@ fn daemon_status_never_spawns() -> Result<()> {
     let running = lab.json(lab.repo(), &["daemon", "status", "--json"])?;
     assert_eq!(running["running"], true, "{running}");
     assert!(running["pid"].is_u64(), "{running}");
+    Ok(())
+}
+
+/// `daemon start` spawns a daemon when none runs and leaves a running one alone.
+#[test]
+fn daemon_start_spawns_only_when_stopped() -> Result<()> {
+    let lab = Lab::new("two-services", BUDGET)?;
+    let started = lab.json(lab.repo(), &["daemon", "start", "--json"])?;
+    assert_eq!(started["running"], true, "{started}");
+    assert_eq!(started["started"], true, "{started}");
+    assert!(lab.daemon_running(), "daemon start did not start a daemon");
+    let pid = need(started["pid"].as_u64(), "pid")?;
+
+    let again = lab.devlanes(lab.repo(), &["daemon", "start", "--json"])?;
+    again.expect_code(0)?;
+    let report = again.json()?;
+    assert_eq!(report["started"], false, "{again}");
+    assert_eq!(
+        report["pid"], pid,
+        "a second start replaced the daemon: {again}"
+    );
+    assert!(
+        again.stderr.contains("daemon is already running"),
+        "{again}"
+    );
     Ok(())
 }
 
@@ -197,8 +227,11 @@ fn doctor_without_a_daemon_checks_locally() -> Result<()> {
     let mut plain = lab.command(lab.repo(), &["doctor"])?;
     plain.env("DEVLANES_OUTPUT", "plain");
     let plain = lab.run(plain, devlanes_e2e::COMMAND_TIMEOUT)?;
-    assert!(plain.stdout.contains("warn not running (socket"), "{plain}");
-    assert!(plain.stdout.contains("fix: devlanes start"), "{plain}");
+    assert!(plain.stdout.contains("warn not running ("), "{plain}");
+    assert!(
+        plain.stdout.contains("fix: devlanes daemon start"),
+        "{plain}"
+    );
     assert!(!lab.daemon_running(), "doctor started a daemon");
     Ok(())
 }

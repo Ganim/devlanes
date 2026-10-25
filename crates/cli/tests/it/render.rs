@@ -532,6 +532,11 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
             json!({"version": "0.1.0", "pid": 4242, "uptime_ms": 7_380_000, "managed_processes": 6, "socket": "/home/u/.devlanes/run/daemon.sock"}),
         ),
         (
+            "daemon_status_pipe",
+            Method::DaemonStatus,
+            json!({"version": "0.1.0", "pid": 4242, "uptime_ms": 0, "managed_processes": 0, "socket": r"\\.\pipe\devlanes-723741743a863791"}),
+        ),
+        (
             "daemon_stop",
             Method::DaemonShutdown,
             json!({"stopping": true, "processes": 6}),

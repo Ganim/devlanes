@@ -272,6 +272,16 @@ pub(crate) fn display_value(value: &Value) -> String {
         .unwrap_or_else(|| clean(&value.to_string()))
 }
 
+/// The word for the daemon's endpoint in text output: a Windows daemon listens
+/// on a named pipe (`\\.\pipe\...`), which is not a socket file.
+pub fn endpoint_label(endpoint: &str) -> &'static str {
+    if endpoint.starts_with(r"\\.\pipe\") {
+        "pipe"
+    } else {
+        "socket"
+    }
+}
+
 /// `key=value` pairs, so unknown additive fields stay visible.
 pub(crate) fn compact_fields(value: &Value) -> String {
     if let Some(fields) = value.as_object() {

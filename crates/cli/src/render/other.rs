@@ -6,8 +6,8 @@ use devlanes_proto::{Event, LogLine, Method, RpcError, events};
 use serde_json::Value;
 
 use super::{
-    Ctx, Outcome, bytes, cap_line, clean, compact_fields, display_value, duration, int,
-    leftover_notes_of, list, percent, plural, table, tail_lines, text, tree, words,
+    Ctx, Outcome, bytes, cap_line, clean, compact_fields, display_value, duration, endpoint_label,
+    int, leftover_notes_of, list, percent, plural, table, tail_lines, text, tree, words,
 };
 use crate::Hint;
 
@@ -788,24 +788,25 @@ pub fn doctor_checks_of(data: &Value) -> Vec<DoctorCheck> {
 fn fact_checks(data: &Value) -> Vec<Check> {
     // `running: false` comes from the CLI's own checks when no daemon answered.
     let running = data.get("running").and_then(Value::as_bool) != Some(false);
+    let socket = display_value(&data["socket"]);
+    let endpoint = endpoint_label(&socket);
     let mut checks = vec![if running {
         Check::new(
             "daemon",
             Outcome::Ok,
             format!(
-                "devlanes {}, pid {}, socket {}",
+                "devlanes {}, pid {}, {endpoint} {socket}",
                 text(data, "version"),
                 display_value(&data["pid"]),
-                display_value(&data["socket"])
             ),
         )
     } else {
         Check::new(
             "daemon",
             Outcome::Skip,
-            format!("not running (socket {})", display_value(&data["socket"])),
+            format!("not running ({endpoint} {socket})"),
         )
-        .fix("devlanes start, or devlanes daemon restart")
+        .fix("devlanes daemon start")
     }];
     checks.extend(home_checks(&data["home_check"]));
     match (
@@ -1980,7 +1981,8 @@ pub(super) fn daemon_status(data: &Value) -> Vec<String> {
     }
     let mut lines = vec![line];
     if data.get("socket").is_some() {
-        lines.push(format!("socket: {}", display_value(&data["socket"])));
+        let socket = display_value(&data["socket"]);
+        lines.push(format!("{}: {socket}", endpoint_label(&socket)));
     }
     lines
 }

@@ -272,6 +272,7 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
             });
             Ok(0)
         }
+        Action::DaemonStart => daemon_start(runtime, &paths()?).await,
         Action::DaemonRestart(context) => daemon_restart(runtime, &paths()?, context).await,
         Action::DaemonLogs { follow, tail } => daemon_logs(follow, tail.unwrap_or(100)).await,
         Action::DebugBundle {
@@ -325,6 +326,31 @@ async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcErro
         }
         other => crate::daemon::local_action(runtime, other).await,
     }
+}
+
+/// `daemon start`: spawns the daemon when none runs and prints its status. A
+/// running daemon is left alone, so this never stops managed processes.
+async fn daemon_start(runtime: &Runtime, paths: &Paths) -> Result<u8, RpcError> {
+    let mut client = connect(paths).await?;
+    if !client.spawned && !runtime.quiet {
+        emit(&Rendered {
+            stderr: "daemon is already running\n".into(),
+            ..Rendered::default()
+        });
+    }
+    let mut data = client
+        .request(
+            Method::DaemonStatus,
+            json!({}),
+            devlanes_proto::Context::default(),
+        )
+        .await
+        .map_err(rpc_error)?;
+    if data.is_object() {
+        data["running"] = json!(true);
+        data["started"] = json!(client.spawned);
+    }
+    render_result(runtime, Method::DaemonStatus, &data, None)
 }
 
 /// `daemon restart`: stops the daemon (any protocol), starts a new one and starts
@@ -770,7 +796,8 @@ fn daemon_not_running(runtime: &Runtime, paths: &Paths) -> Rendered {
         ),
         devlanes_cli::OutputMode::Agent => format!("stopped daemon socket={socket}\n"),
         _ => format!(
-            "daemon is not running (socket {socket}); devlanes start or devlanes daemon restart starts it\n"
+            "daemon is not running ({} {socket}); devlanes daemon start starts it\n",
+            devlanes_cli::endpoint_label(&socket)
         ),
     };
     Rendered {
@@ -1251,10 +1278,14 @@ mod tests {
         assert_eq!(value["running"], false);
         assert_eq!(value["socket"], socket);
         assert_eq!(value["home"], HOME);
+        #[cfg(unix)]
+        let endpoint = "socket";
+        #[cfg(windows)]
+        let endpoint = "pipe";
         assert_eq!(
             daemon_not_running(&mode("plain"), &paths).stdout,
             format!(
-                "daemon is not running (socket {socket}); devlanes start or devlanes daemon restart starts it\n"
+                "daemon is not running ({endpoint} {socket}); devlanes daemon start starts it\n"
             )
         );
         assert_eq!(

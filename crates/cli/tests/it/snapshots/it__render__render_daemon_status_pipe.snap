@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/it/render.rs
+expression: text
+---
+--- human (exit 0)
+running devlanes 0.1.0 pid 4242, up 0s, 0 managed processes
+pipe: \\.\pipe\devlanes-723741743a863791
+--- plain (exit 0)
+running devlanes 0.1.0 pid 4242, up 0s, 0 managed processes
+pipe: \\.\pipe\devlanes-723741743a863791
+--- agent (exit 0)
+running devlanes 0.1.0 pid 4242, up 0s, 0 managed processes
+pipe: \\.\pipe\devlanes-723741743a863791

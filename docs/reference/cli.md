@@ -597,6 +597,14 @@ Run, stop and install the background daemon
 devlanes daemon [OPTIONS] <COMMAND>
 ```
 
+### devlanes daemon start
+
+Start the daemon in the background unless it already runs, then show its status
+
+```text
+devlanes daemon start [OPTIONS]
+```
+
 ### devlanes daemon status
 
 Show the daemon's version, pid, uptime and managed process count; never starts it

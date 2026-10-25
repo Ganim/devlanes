@@ -171,7 +171,7 @@ Signing out or shutting down stops the daemon and its units. Windows waits about
 
 devlanes runs in an elevated (administrator) terminal, but a daemon started from one runs every unit with administrator rights. `doctor` warns when the daemon or the current terminal is elevated; `devlanes daemon restart` from a terminal that is not elevated fixes it. The CLI in an unelevated terminal can still talk to an elevated daemon of the same user.
 
-Some terminals end every process they started when they close. `doctor` warns when the current one does, since a daemon started there stops with it; start the daemon from another terminal, such as Windows Terminal.
+Some terminals end every process they started when they close. `doctor` warns when the current one does, since a daemon started there stops with it; run `devlanes daemon start` from another terminal, such as Windows Terminal.
 
 ## Upgrading
 
