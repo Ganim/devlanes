@@ -1053,7 +1053,6 @@ dependencies = [
  "devlanes-preset-vite",
  "devlanes-preset-wrangler",
  "devlanes-sys-windows",
- "devlanes-version",
  "globset",
  "indexmap",
  "insta",

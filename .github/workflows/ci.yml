@@ -210,3 +210,17 @@ jobs:
           kache stats --full
           # Lets the daemon finish its queued uploads before the runner goes away.
           kache daemon stop
+
+  # A push to main that passed every job above builds the rolling `next` prerelease in
+  # this same run, so its build and publish jobs show in the commit's checks.
+  next:
+    if: github.event_name == 'push'
+    needs: [lint, rust, packaging, packaging-windows, e2e, ssh]
+    uses: ./.github/workflows/next.yml
+    secrets: inherit
+    # The most next.yml's jobs may use: publish replaces release assets and attests them.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write

@@ -1,17 +1,19 @@
 name: Sampo
 # Sampo's action keeps the release pull request (branch release/main) up to date while
 # change files are pending, and tags the new versions once it merges. The steps after it
-# cover what Sampo doesn't know about: the plugin manifest and the schemas name the
-# version, and its tags don't start release.yml. packaging/README.md has the details.
+# cover what Sampo doesn't know about: the plugin manifests carry the version, and its
+# tags don't start release.yml. packaging/README.md has the details.
 on:
   push:
     branches: [main]
 permissions:
   contents: read
-# A newer push must not cancel a run halfway through pushing tags.
+# A newer push must not cancel a run halfway through pushing tags, nor one still waiting:
+# the run for a release PR's merge is the one that tags it.
 concurrency:
   group: sampo
   cancel-in-progress: false
+  queue: max
 jobs:
   sampo:
     runs-on: ubuntu-latest
@@ -40,16 +42,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-      # kache is the rustc wrapper in .cargo/config.toml; the schema step below compiles.
-      - if: steps.sampo.outputs.released == 'true'
-        uses: ./.github/actions/kache
-        with:
-          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
-          s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
-          s3-region: ${{ vars.KACHE_S3_REGION }}
-          s3-access-key: ${{ secrets.KACHE_S3_ACCESS_KEY }}
-          s3-secret-key: ${{ secrets.KACHE_S3_SECRET_KEY }}
-      - name: Version the plugin manifest and schemas on the release branch
+      - name: Version the plugin manifests on the release branch
         if: steps.sampo.outputs.released == 'true'
         run: |
           git fetch origin "$BRANCH"
@@ -60,14 +53,11 @@ jobs:
             sed -i "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$version\"/" "$plugin"
             jq -e --arg version "$version" '.version == $version' "$plugin" >/dev/null
           done
-          # bins/devlanes/build.rs rewrites the schemas, which name the version.
-          cargo check --locked -p devlanes
-          git add agent-plugin/.claude-plugin/plugin.json agent-plugin/.codex-plugin/plugin.json \
-            crates/config/schema.json crates/config/user-schema.json
+          git add agent-plugin/.claude-plugin/plugin.json agent-plugin/.codex-plugin/plugin.json
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit --quiet -m "Version the plugin manifest and schemas for $version"
+          git commit --quiet -m "Version the plugin manifests for $version"
           git push origin "$BRANCH"
 
       - name: Start the release

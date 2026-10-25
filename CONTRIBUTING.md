@@ -182,7 +182,7 @@ Run a crate's ignored tests with `cargo nextest run -p <crate> --run-ignored onl
 
 ## Change files
 
-A pull request that changes something a devlanes user can notice adds a change file in `.sampo/changesets/`, in the same commit as the change. [Sampo](https://github.com/bruits/sampo) reads these files to choose the next versions and write each crate's `CHANGELOG.md` in the release pull request. Refactors, tests, CI and documentation need none. Sampo's bot comments on pull requests without one; ignore it when the change has no user-visible effect.
+A pull request that changes something a devlanes user can notice adds a change file in `.sampo/changesets/`, in the same commit as the change. [Sampo](https://github.com/bruits/sampo) reads these files to choose the next versions and write each crate's `CHANGELOG.md` in the release pull request. Refactors, tests, CI and documentation need none; say so in the pull request description. No check enforces it, so reviewers look for one.
 
 Create a change file with `sampo add` (`cargo install --locked sampo`), without prompts:
 
@@ -252,7 +252,7 @@ Don't edit versions or `CHANGELOG.md` files by hand; the release pull request do
 
 ## Releases
 
-Merging the release pull request that CI keeps up to date releases everything; `packaging/README.md` describes the workflow and the Homebrew and npm packages.
+Merging the release pull request, which `.github/workflows/sampo.yml` keeps up to date on every push to `main`, releases everything; `packaging/README.md` describes the workflow and the Homebrew and npm packages.
 
 ## License
 

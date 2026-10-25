@@ -1,6 +1,6 @@
 # devlanes-version
 
-What identifies a devlanes release: the version, the build ID and the repository URLs. Crates that report the product version (the client/daemon handshake, update checks, remote bootstrap, the schemas, the TUI) use it instead of their own `CARGO_PKG_VERSION`, because each crate keeps its own version.
+What identifies a devlanes release: the version, the build ID and the repository URLs. Crates that report the product version (the client/daemon handshake, update checks, remote bootstrap, the TUI) use it instead of their own `CARGO_PKG_VERSION`, because each crate keeps its own version.
 
 ## Usage
 

@@ -96,7 +96,6 @@ fn walk(schema: &Value, path: &str, named: bool, root: &Value, failures: &mut Ve
 /// schema has a title: yaml-language-server would print it as a heading on every hover.
 #[test]
 fn editor_schema_metadata_is_complete() {
-    let version = format!("devlanes v{}", devlanes_version::VERSION);
     for (name, schema) in [
         ("registered", super::registered_schema()),
         ("project", devlanes_config::project_schema()),
@@ -104,7 +103,11 @@ fn editor_schema_metadata_is_complete() {
     ] {
         assert!(schema.get("title").is_none(), "{name}: root title");
         let description = schema["description"].as_str().unwrap_or_default();
-        assert!(description.starts_with(&version), "{name}: {description}");
+        // No version: a release must not change the committed schema files.
+        assert!(
+            description.starts_with("devlanes ") && !description.contains(" v0."),
+            "{name}: {description}"
+        );
         let mut failures = Vec::new();
         walk(&schema, "", true, &schema, &mut failures);
         assert!(failures.is_empty(), "{name}:\n{}", failures.join("\n"));

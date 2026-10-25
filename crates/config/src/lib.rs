@@ -58,20 +58,17 @@ pub fn schema_with<E: Extensions>() -> schemars::Schema {
     let mut schema = schemars::schema_for!(ProjectConfig<E>);
     E::extend_schema(&mut schema);
     schema.insert("$id".into(), "https://devlanes.run/v1/schema.json".into());
-    // The version tells which release a cached copy came from. It lives in the description:
-    // yaml-language-server prints a root title as a heading on every field hover.
+    // A description, not a title: yaml-language-server prints a root title as a heading on
+    // every field hover. It names no version, so a release changes no schema file.
     schema.insert(
         "description".into(),
-        format!("devlanes v{VERSION} project config. {HEADLINE} https://devlanes.run").into(),
+        format!("devlanes project config. {HEADLINE} https://devlanes.run").into(),
     );
     // The same modeline supports partial local overrides; loading still requires a base project.
     schema.remove("required");
     schema_docs::prepare(&mut schema);
     schema
 }
-
-/// Product version, leading each schema's root description.
-const VERSION: &str = devlanes_version::VERSION;
 
 /// Product headline, matching the CLI's about text.
 const HEADLINE: &str = "Run a dev environment per git worktree, side by side.";
@@ -181,7 +178,7 @@ pub fn user_schema() -> serde_json::Value {
     schema.insert(
         "description".into(),
         format!(
-            "devlanes v{VERSION} user config: per-user settings in ~/.devlanes/config.yaml. {HEADLINE} \
+            "devlanes user config: per-user settings in ~/.devlanes/config.yaml. {HEADLINE} \
              https://devlanes.run"
         )
         .into(),

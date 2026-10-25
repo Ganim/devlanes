@@ -52,6 +52,8 @@ jobs:
   tag-version:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      statuses: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -64,12 +66,23 @@ jobs:
             exit 1
             ;;
           esac
+      # sampo.yml dispatches this workflow, so its run doesn't show in the tagged commit's
+      # checks; this status does, and the `status` job settles it.
+      - name: Mark the release as started on the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state=pending -f context=release \
+            -f "description=Releasing $GITHUB_REF_NAME" \
+            -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   # Builds every target, and fails when the tag doesn't match the committed Cargo.toml
-  # and plugin.json versions.
+  # and plugin.json versions. kache downloads what the next builds of main compiled.
   build:
     needs: tag-version
     uses: ./.github/workflows/build.yml
+    secrets: inherit
     with:
       version: ${{ needs.tag-version.outputs.version }}
 
@@ -136,6 +149,18 @@ jobs:
           jq -e '.artifacts | length == 4' dist/release-manifest.json
           cp crates/config/schema.json crates/config/user-schema.json dist/
           cp install.sh install.ps1 dist/
+      # The notes are this version's section of the devlanes changelog, the one users
+      # read; GitHub's generated notes only list pull request titles.
+      - name: Release notes
+        run: |
+          awk -v heading="## $VERSION" '
+            /^## / { if (found) exit; found = ($0 == heading || index($0, heading " ") == 1); next }
+            found
+          ' bins/devlanes/CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::warning::bins/devlanes/CHANGELOG.md has no $VERSION section; using generated notes"
+            rm notes.md
+          fi
       # Verify with: gh attestation verify devlanes-VERSION-TARGET.tar.gz --repo devlanes-run/devlanes
       # (or the .zip for Windows).
       - name: Attest build provenance
@@ -164,8 +189,10 @@ jobs:
           else
             prerelease=
             if [ "$PRERELEASE" = true ]; then prerelease=--prerelease; fi
+            notes=--generate-notes
+            if [ -f notes.md ]; then notes=--notes-file=notes.md; fi
             gh release create "$GITHUB_REF_NAME" --draft --verify-tag ${prerelease:+"$prerelease"} \
-              --title "devlanes $VERSION" --generate-notes "$@"
+              --title "devlanes $VERSION" "$notes" "$@"
           fi
 
   publish:
@@ -336,3 +363,28 @@ jobs:
             fi
             npm publish "$dir" --provenance --access public --tag "$tag"
           done
+
+  # Settles the `release` status that tag-version posted. Jobs skipped for a prerelease
+  # count as passed; rerunning failed jobs runs this one again.
+  status:
+    needs: [tag-version, test, build, npm-preflight, release, publish, website, homebrew-verify, homebrew-publish, npm]
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Mark the release as finished on the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          state=success
+          description="Released $GITHUB_REF_NAME"
+          if [ "$FAILED" = true ]; then
+            state=failure
+            description="Release of $GITHUB_REF_NAME failed"
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f "state=$state" -f context=release -f "description=$description" \
+            -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

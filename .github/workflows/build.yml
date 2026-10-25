@@ -1,7 +1,10 @@
 name: Build
 # Builds devlanes (and devlanes-hosts on macOS and Linux) for every release target and
-# uploads one `dist-TARGET` artifact with the packed archive. release.yml calls it for a `v*` tag,
-# next.yml for each commit on main that passes CI.
+# uploads one `dist-TARGET` artifact with the packed archive. release.yml calls it for a
+# `v*` tag, next.yml for each commit on main that passes CI. Callers pass `secrets: inherit`
+# for the kache bucket: next builds run in CI's push run on main, so they upload, and a
+# release build downloads what they compiled with the same profile and targets (the kache
+# action makes every event but a push to main read-only).
 on:
   workflow_call:
     inputs:
@@ -54,10 +57,6 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ inputs.version }}
-      # An empty wrapper overrides the kache one in .cargo/config.toml: shipped binaries
-      # are always compiled from source, and release targets share no cache entries
-      # with CI anyway.
-      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -67,6 +66,13 @@ jobs:
         run: |
           rustup toolchain install
           rustup target add "$TARGET"
+      - uses: ./.github/actions/kache
+        with:
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key: ${{ secrets.KACHE_S3_ACCESS_KEY }}
+          s3-secret-key: ${{ secrets.KACHE_S3_SECRET_KEY }}
       - name: Write the snapshot version
         if: inputs.snapshot
         run: |
@@ -97,9 +103,7 @@ jobs:
           DEVLANES_BUILD_ID: v${{ inputs.version }}
         run: cargo build --release --locked --target "$TARGET" -p devlanes -p devlanes-hosts-helper
       # build.rs regenerates the served schemas; a difference means they were committed stale.
-      # Snapshots differ anyway, since the schemas name the version.
       - name: Check the committed schemas
-        if: ${{ !inputs.snapshot }}
         run: git diff --exit-code crates/config/schema.json crates/config/user-schema.json
       - name: Smoke test
         if: matrix.native
@@ -108,6 +112,12 @@ jobs:
           "target/$TARGET/release/devlanes-hosts" version | grep -F "build=release"
       - name: Package
         run: sh packaging/scripts/package.sh "$VERSION" "$TARGET" dist
+      - name: kache stats
+        if: ${{ !cancelled() }}
+        run: |
+          kache stats
+          # Lets the daemon finish its queued uploads before the runner goes away.
+          kache daemon stop
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.target }}
@@ -132,8 +142,6 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ inputs.version }}
-      # As in build: shipped binaries are always compiled from source.
-      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -143,6 +151,13 @@ jobs:
         run: |
           rustup toolchain install
           rustup target add "$TARGET"
+      - uses: ./.github/actions/kache
+        with:
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-endpoint: ${{ vars.KACHE_S3_ENDPOINT }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key: ${{ secrets.KACHE_S3_ACCESS_KEY }}
+          s3-secret-key: ${{ secrets.KACHE_S3_SECRET_KEY }}
       # The build job checks the version against the workspace and plugin versions; the
       # smoke test below ties this binary to it.
       - name: Write the snapshot version
@@ -159,9 +174,7 @@ jobs:
           DEVLANES_BUILD_ID: v${{ inputs.version }}
         run: cargo build --release --locked --target "$TARGET" -p devlanes
       # .gitattributes checks the schemas out with LF on Windows too, as build.rs writes them.
-      # Snapshots differ anyway, since the schemas name the version.
       - name: Check the committed schemas
-        if: ${{ !inputs.snapshot }}
         run: git diff --exit-code crates/config/schema.json crates/config/user-schema.json
       - name: Smoke test
         run: |
@@ -181,6 +194,12 @@ jobs:
       - name: Package
         shell: pwsh
         run: ./packaging/scripts/package.ps1 -Version $env:VERSION -Target $env:TARGET -OutDir dist
+      - name: kache stats
+        if: ${{ !cancelled() }}
+        run: |
+          kache stats
+          # Lets the daemon finish its queued uploads before the runner goes away.
+          kache daemon stop
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.target }}

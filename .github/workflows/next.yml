@@ -6,23 +6,20 @@ name: Next
 # Nothing else is published: npm, Homebrew and the website only ever get stable
 # releases from release.yml.
 #
-# CI runs finish in any order, and every one starts this workflow, so only the tip of
-# main is built. A run for an older commit, a failed CI run or a pull request stops in
-# `version` without touching a running build; that's why the concurrency groups sit on
-# `build` and `publish` instead of the whole workflow.
+# The last job of ci.yml calls it on pushes to main once every check passed, so its jobs
+# show in that commit's checks as `CI / next / ...`; it can also be run by hand on main,
+# which builds the tip. Only the tip of main is published: `version` skips a commit main
+# has already moved past, and `tip` checks again after the build, before `publish`, so a
+# superseded build records no deployment. The caller passes `secrets: inherit` for the
+# kache bucket that build.yml uses.
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   version:
-    if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -32,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
           # The commit count since the last stable tag needs the history and tags.
           fetch-depth: 0
           persist-credentials: false
@@ -61,26 +58,48 @@ jobs:
             echo "sha=$sha"
           } >> "$GITHUB_OUTPUT"
 
+  # Builds of different commits run side by side: cancelling one would mark that commit's
+  # CI run as cancelled, and `tip` keeps a superseded build from being published.
   build:
     needs: version
     if: needs.version.outputs.current == 'true'
-    # A newer tip replaces a build still running.
-    concurrency:
-      group: next-build
-      cancel-in-progress: true
     uses: ./.github/workflows/build.yml
+    secrets: inherit
     with:
       version: ${{ needs.version.outputs.version }}
       ref: ${{ needs.version.outputs.sha }}
       snapshot: true
 
-  publish:
+  # Its own job, so `publish`, which deploys to the `next` environment, is skipped and
+  # records no deployment when main moved on during the build.
+  tip:
     needs: [version, build]
-    # Publishes one at a time and never cancels: a half-replaced release would leave
-    # SHA256SUMS listing archives that aren't there.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      current: ${{ steps.tip.outputs.current }}
+    steps:
+      - id: tip
+        env:
+          SHA: ${{ needs.version.outputs.sha }}
+        run: |
+          tip=$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)
+          if [ "$SHA" = "$tip" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::main moved to $tip while $SHA was building; not publishing it"
+          fi
+
+  publish:
+    needs: [version, tip]
+    if: needs.tip.outputs.current == 'true'
+    # One at a time and never cancelled, since a half-replaced release would leave
+    # SHA256SUMS listing archives that aren't there; queued runs wait instead of replacing
+    # each other.
     concurrency:
       group: next-publish
       cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The rolling `next` prerelease; release.yml deploys the other environments.
@@ -101,24 +120,12 @@ jobs:
         with:
           ref: ${{ needs.version.outputs.sha }}
           persist-credentials: false
-      # A newer tip may have been pushed during the build; its own run publishes it.
-      - name: Still the tip of main
-        id: tip
-        run: |
-          tip=$(git ls-remote origin refs/heads/main | cut -f1)
-          if [ "$SHA" = "$tip" ]; then
-            echo "current=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::main moved to $tip while $SHA was building; not publishing it"
-          fi
-      - if: steps.tip.outputs.current
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
       - name: Checksums, release manifest and schemas
-        if: steps.tip.outputs.current
         run: |
           sh packaging/scripts/manifest.sh "$VERSION" dist \
             "https://github.com/$GITHUB_REPOSITORY/releases/download/next"
@@ -126,12 +133,10 @@ jobs:
           cp crates/config/schema.json crates/config/user-schema.json dist/
           cp install.sh install.ps1 dist/
       - name: Attest build provenance
-        if: steps.tip.outputs.current
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: dist/SHA256SUMS
       - name: Replace the next release
-        if: steps.tip.outputs.current
         run: |
           repo=repos/$GITHUB_REPOSITORY
           if gh api "$repo/git/refs/tags/next" >/dev/null 2>&1; then
