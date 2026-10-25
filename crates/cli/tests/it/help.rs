@@ -23,6 +23,14 @@ fn long_help(path: &[&str]) -> String {
 }
 
 #[test]
+fn version_is_the_release_version() {
+    assert_eq!(
+        Cli::command().render_version(),
+        format!("devlanes {}\n", devlanes_version::VERSION)
+    );
+}
+
+#[test]
 fn main_help_pages() {
     for path in [
         &[][..],

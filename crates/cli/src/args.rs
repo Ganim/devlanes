@@ -57,7 +57,8 @@ Examples:
 #[derive(Debug, Parser)]
 #[command(
     name = "devlanes",
-    version,
+    // A bare `version` would print this crate's own version, which Sampo bumps separately.
+    version = devlanes_version::VERSION,
     about = "Run a dev environment per git worktree, side by side",
     long_about = LONG_ABOUT,
     after_help = AFTER_HELP
