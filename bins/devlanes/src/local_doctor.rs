@@ -60,22 +60,7 @@ pub async fn facts(paths: &Paths) -> Value {
 #[cfg(windows)]
 async fn reserved_ports(config: &Path) -> Value {
     let path = config.to_owned();
-    let configured = tokio::task::spawn_blocking(move || {
-        let config = if path.exists() {
-            devlanes_config::load_user_lenient(&path).0
-        } else {
-            devlanes_config::UserConfig::default()
-        };
-        (
-            config.ports.bounds().ok(),
-            [
-                ("http", config.proxy.http_port),
-                ("https", config.proxy.https_port),
-            ],
-        )
-    })
-    .await;
-    let Ok((pool, proxy)) = configured else {
+    let Ok((pool, proxy)) = tokio::task::spawn_blocking(move || checked_ports(&path)).await else {
         return Value::Null;
     };
     let reading = devlanes_daemon::reserved_ports::RESERVED.get().await;
@@ -101,6 +86,28 @@ pub async fn add_wsl(data: &mut Value) {
             }),
         );
     }
+}
+
+/// `ports.range` (inclusive, `None` when invalid) and the proxy listeners.
+#[cfg(windows)]
+type CheckedPorts = (Option<(u16, u16)>, [(&'static str, u16); 2]);
+
+/// `ports.range` and the proxy ports of the user config at `path`; a missing
+/// file means the defaults. Blocking.
+#[cfg(windows)]
+fn checked_ports(path: &Path) -> CheckedPorts {
+    let config = if path.exists() {
+        devlanes_config::load_user_lenient(path).0
+    } else {
+        devlanes_config::UserConfig::default()
+    };
+    (
+        config.ports.bounds().ok(),
+        [
+            ("http", config.proxy.http_port),
+            ("https", config.proxy.https_port),
+        ],
+    )
 }
 
 /// `{path, private, mode?}` for the devlanes home: the client refuses another
@@ -300,26 +307,26 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     /// The reserved ranges are checked against the configured pool and proxy
-    /// ports; a missing config means the defaults.
+    /// ports; a missing config means the defaults. `netsh` itself is the
+    /// daemon's test: a loaded runner has kept it past its 10 s limit.
     #[cfg(windows)]
-    #[tokio::test]
-    async fn reserved_ports_use_the_user_config() {
+    #[test]
+    fn reserved_ports_use_the_user_config() {
         let temp = tempfile::tempdir().expect("tempdir");
         let config = temp.path().join("config.yaml");
-        let report = reserved_ports(&config).await;
         assert_eq!(
-            report["pool"],
-            json!({"start": 20000, "end": 32767}),
-            "{report}"
+            checked_ports(&config),
+            (Some((20000, 32767)), [("http", 80), ("https", 443)])
         );
-        std::fs::write(&config, "ports:\n  range: 40000-40100\n").expect("config");
-        let report = reserved_ports(&config).await;
+        std::fs::write(
+            &config,
+            "ports:\n  range: 40000-40100\nproxy:\n  http_port: 18080\n",
+        )
+        .expect("config");
         assert_eq!(
-            report["pool"],
-            json!({"start": 40000, "end": 40100}),
-            "{report}"
+            checked_ports(&config),
+            (Some((40000, 40100)), [("http", 18080), ("https", 443)])
         );
-        assert!(report["ranges"].is_array(), "{report}");
     }
 
     /// A home other accounts can reach is a finding, with the `icacls` fix once

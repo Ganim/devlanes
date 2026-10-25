@@ -884,9 +884,12 @@ mod tests {
                 }
             })
         };
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // `sh.exe` on a loaded runner has taken more than 5 s to start the
+        // background sleep and write the marker; the attempt must outlast that,
+        // or nothing is left to check.
+        let deadline = Instant::now() + Duration::from_secs(15);
         let passed = timeout(
-            Duration::from_secs(30),
+            Duration::from_secs(40),
             windows::cmd_succeeds(&shell, script, dir.path(), &env, deadline),
         )
         .await

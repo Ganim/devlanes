@@ -224,6 +224,27 @@ async fn migrations_upgrade_v1_and_refuse_future_without_mutation() {
     );
 }
 
+/// Allocates four ports for `owner`, trying again while the other handle holds
+/// the write lock. Each handle queues its jobs on one connection, so one can
+/// commit a dozen in a row while the other's busy handler, which SQLite does
+/// not run in turn, sleeps through each gap; on a loaded runner that passed
+/// the 5 s `busy_timeout`. Only this test writes through two handles; the
+/// daemon is the one writer of its database.
+async fn allocate_when_free(
+    store: &Store,
+    owner: BlockOwner,
+) -> Result<devlanes_state::Allocation, Error> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match store.allocate(request(owner, 4)).await {
+            Err(error)
+                if error.to_string().contains("database is locked")
+                    && tokio::time::Instant::now() < deadline => {}
+            result => return result,
+        }
+    }
+}
+
 #[tokio::test]
 /// Requests across projects and independent actors share one non-overlapping pool.
 async fn concurrent_allocations_are_machine_wide_and_serialized() {
@@ -250,7 +271,7 @@ async fn concurrent_allocations_are_machine_wide_and_serialized() {
         } else {
             other_handle.clone()
         };
-        jobs.spawn(async move { store.allocate(request(BlockOwner::Lane(lane.id), 4)).await });
+        jobs.spawn(async move { allocate_when_free(&store, BlockOwner::Lane(lane.id)).await });
     }
     let mut allocations = Vec::new();
     while let Some(result) = jobs.join_next().await {

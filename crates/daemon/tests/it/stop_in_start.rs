@@ -13,7 +13,7 @@ use devlanes_ipc::Frame;
 use devlanes_proto::{Context, LaneSummary, Method, Page, Request, RpcError, StartResult};
 use devlanes_start_gate::{FixedWindow, GateOptions};
 use serde_json::{Value, json};
-use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
+use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{Harness, LIMIT, Setup, cx, eventually, harness, repo, temp};
 
@@ -43,9 +43,11 @@ fn spawn_call(
     (session, frames, task)
 }
 
-/// The start result of a background start.
+/// The start result of a background start. The limits here and in
+/// [`until_running`] only bound a failing test: a loaded Windows runner has
+/// taken more than 5 s for a task to come up after a 1.5 s `nap`.
 async fn start_result(task: JoinHandle<Result<Value, RpcError>>) -> StartResult {
-    let value = tokio::time::timeout(Duration::from_secs(10), task)
+    let value = tokio::time::timeout(Duration::from_secs(30), task)
         .await
         .expect("the start answers")
         .expect("join")
@@ -81,7 +83,7 @@ async fn lane(h: &Harness, cwd: &std::path::Path) -> LaneSummary {
 /// runner's journal is no substitute: it records a spawn before the daemon
 /// registers the unit on its lane.
 async fn until_running(h: &Harness, cwd: &std::path::Path, unit: &str) {
-    let up = eventually(Duration::from_secs(5), || async {
+    let up = eventually(Duration::from_secs(20), || async {
         lane(h, cwd)
             .await
             .units
@@ -287,7 +289,7 @@ async fn stopping_the_running_task_interrupts_the_start() {
         until_running(&h, &main, "hang").await;
 
         quick_stop(&h, &["hang"], cx(&main)).await;
-        let error = tokio::time::timeout(Duration::from_secs(5), starting)
+        let error = tokio::time::timeout(Duration::from_secs(30), starting)
             .await
             .expect("the start answers")
             .expect("join")
@@ -398,7 +400,7 @@ async fn a_task_between_spawn_and_record_is_stopped() {
 const AGAIN: &str = r#"project: again
 tasks:
   pause: { run: "nap 1000", when: lane.start }
-  seed: { run: "nap 3000", when: lane.start, after: services }
+  seed: { run: hold, when: lane.start, after: services }
 services:
   a: { run: "echo a; sleep", ready: started }
   slow: { run: "echo slow; sleep", ready: started }
@@ -407,20 +409,19 @@ services:
 #[tokio::test(flavor = "multi_thread")]
 /// `restart` of a unit in a running start takes it out of that start and starts
 /// it fresh once the start's services phase is over, while the start's later
-/// tasks still run.
+/// task (`seed`, held until the test releases it) still runs.
 async fn restart_takes_a_unit_out_of_a_running_start() {
     tokio::time::timeout(LIMIT, async {
         let tmp = temp();
         let main = repo(&tmp.path, "r", AGAIN);
         let h = harness(&tmp.path.join("home"), Setup::default()).await;
         let (_session, _frames, starting) =
-            spawn_call(&h, Method::Start, json!({"timeout_ms": 20_000}), cx(&main));
+            spawn_call(&h, Method::Start, json!({"timeout_ms": 40_000}), cx(&main));
         until_running(&h, &main, "pause").await;
 
-        let asked = Instant::now();
         let restarted: StartResult = serde_json::from_value(
             tokio::time::timeout(
-                Duration::from_secs(5),
+                Duration::from_secs(30),
                 h.call(
                     Method::Restart,
                     json!({"units": ["slow"], "timeout_ms": 2000}),
@@ -438,8 +439,8 @@ async fn restart_takes_a_unit_out_of_a_running_start() {
             !starting.is_finished(),
             "the restart answered while the start's after-services task ran"
         );
-        assert!(asked.elapsed() < Duration::from_secs(3));
 
+        h.runner.release();
         let result = start_result(starting).await;
         assert_eq!(result.started, ["again@0:a"], "{result:?}");
         assert_eq!(
