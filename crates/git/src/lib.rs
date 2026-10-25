@@ -182,35 +182,58 @@ pub async fn list(root: &Path, common_dir: &Path) -> Result<Vec<Worktree>, Error
 }
 
 /// The absolute administration directory of the worktree at `path`, or `None`
-/// when `path` no longer holds its `.git` entry.
+/// when `path` no longer holds its `.git` entry. Read from that entry rather
+/// than with `git -C <path>`: a process working in the worktree keeps Windows
+/// from renaming it, so a re-list during `git worktree move` would make the
+/// move fail. Reading the entry also never climbs to an enclosing checkout.
 async fn admin_dir(path: &Path) -> Result<Option<PathBuf>, Error> {
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--path-format=absolute", "--git-dir"])
-        .stdin(Stdio::null());
-    // Worktrees live inside the main checkout (`.worktrees/`), so without a
-    // ceiling Git would climb to the main `.git` and the worktree would take the
-    // identity `main`. `join_paths` refuses a parent containing the list
-    // separator (`:`, or `;` on Windows), which the variable cannot carry; then
-    // no ceiling is set.
-    if let Some(parent) = path.parent().filter(|parent| parent.is_absolute())
-        && let Ok(ceiling) = std::env::join_paths([parent])
-    {
-        command.env("GIT_CEILING_DIRECTORIES", ceiling);
+    let entry = path.join(".git");
+    let metadata = match tokio::fs::metadata(&entry).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    // The main checkout keeps its repository in `.git`; linked worktrees (and
+    // checkouts made with `--separate-git-dir`) have a `gitdir:` file.
+    if metadata.is_dir() {
+        return Ok(Some(entry));
     }
-    let output = command.output().await?;
-    if output.status.success() {
-        return Ok(Some(native(text(&output.stdout)?.trim_end_matches('\n'))));
+    let content = match tokio::fs::read(&entry).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    gitdir_target(path, text(&content)?).map(Some)
+}
+
+/// The directory a `.git` file of the worktree at `path` names: `gitdir:
+/// <path>`, absolute or (with `worktree.useRelativePaths`) relative to the
+/// worktree, with `.` and `..` resolved without touching the filesystem.
+fn gitdir_target(path: &Path, content: &str) -> Result<PathBuf, Error> {
+    let target = content
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| {
+            Error::Git(format!(
+                "{} is not a gitdir file",
+                path.join(".git").display()
+            ))
+        })?;
+    let joined = path.join(native(target));
+    let mut resolved = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
     }
-    // Checking the entry instead of matching stderr keeps this locale-independent.
-    if !tokio::fs::try_exists(path.join(".git")).await? {
-        return Ok(None);
-    }
-    Err(Error::Git(
-        String::from_utf8_lossy(&output.stderr).trim().into(),
-    ))
+    Ok(resolved)
 }
 
 /// NUL records preserve spaces and newlines in worktree paths.
@@ -497,7 +520,7 @@ mod tests {
             let admin = admin_dir(&lane).await?.ok_or("the worktree has its link")?;
             assert!(admin.starts_with(common.join("worktrees")), "{admin:?}");
             std::fs::remove_file(lane.join(".git"))?;
-            // Without the ceiling, Git answers for the main checkout.
+            // Git run there would answer for the main checkout.
             let outer = git(&lane, &["rev-parse", "--path-format=absolute", "--git-dir"]).await?;
             assert_eq!(native(text(&outer)?.trim_end_matches('\n')), common);
             assert_eq!(admin_dir(&lane).await?, None);
@@ -505,6 +528,45 @@ mod tests {
         })
         .await??;
         Ok(())
+    }
+
+    /// The main checkout's `.git` directory and a linked worktree's `gitdir:`
+    /// file, absolute or relative, name the same directories Git reports.
+    #[tokio::test]
+    async fn admin_dir_reads_the_git_entry() -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let dir = tempfile::tempdir()?;
+            let temp = TempPath(dunce::canonicalize(dir.path())?);
+            let lane = repository_with_nested_lane(temp.path()).await?;
+            let main = admin_dir(temp.path()).await?.ok_or("main has .git")?;
+            assert_eq!(main, temp.path().join(".git"));
+            let reported =
+                git(&lane, &["rev-parse", "--path-format=absolute", "--git-dir"]).await?;
+            let expected = native(text(&reported)?.trim_end_matches('\n'));
+            let linked = admin_dir(&lane).await?.ok_or("the lane has .git")?;
+            assert!(same_path(&linked, &expected), "{linked:?} != {expected:?}");
+            std::fs::write(lane.join(".git"), "gitdir: ../../.git/worktrees/lane\r\n")?;
+            let relative = admin_dir(&lane).await?.ok_or("the lane has .git")?;
+            assert!(
+                same_path(&relative, &expected),
+                "{relative:?} != {expected:?}"
+            );
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    #[test]
+    fn gitdir_files_resolve_or_fail() {
+        let worktree = Path::new("/src/acme/.worktrees/lane");
+        assert_eq!(
+            gitdir_target(worktree, "gitdir: ./../../.git/worktrees/lane\n").ok(),
+            Some(Path::new("/src/acme/.git/worktrees/lane").to_path_buf())
+        );
+        assert!(gitdir_target(worktree, "").is_err());
+        assert!(gitdir_target(worktree, "gitdir:   \n").is_err());
+        assert!(gitdir_target(worktree, "ref: refs/heads/main\n").is_err());
     }
 
     /// Discovery from inside a worktree without its `.git` entry is an error,
