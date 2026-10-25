@@ -658,7 +658,7 @@ async fn help_lists_clean_and_the_daemon_page() -> TestResult {
         "copy mode: v select, y copy, Y whole entries as in the file",
         "restart, stop or start the daemon",
         "clean every lane whose worktree is gone",
-        "hide the hint strip or version notice",
+        "hide the version notice",
         "monitor, daemon; again or esc returns",
     ] {
         assert!(text.contains(expected), "missing {expected:?}:\n{text}");

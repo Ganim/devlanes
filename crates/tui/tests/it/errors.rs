@@ -476,11 +476,9 @@ pub fn assert_clean(buffer: &Buffer, context: &str) {
 /// every row, so no text from either side spilled over them. The pane's
 /// `├─ last output ─┤` divider counts as a border.
 pub fn assert_boxes(buffer: &Buffer, width: u16, height: u16, context: &str) {
-    // The first-run strip, when it shows, moves the boxes up one row.
-    let strip = (0..height).any(|y| row(buffer, y).contains("enter types into a service"));
     // The lane bar shows only for projects with several lanes.
     let lane_bar = row(buffer, 1).starts_with(" lanes");
-    let Some(layout) = devlanes_tui::app::areas_with(width, height, false, strip, lane_bar) else {
+    let Some(layout) = devlanes_tui::app::areas_with(width, height, false, lane_bar) else {
         return;
     };
     for rect in layout.list_box.into_iter().chain([layout.pane_box]) {

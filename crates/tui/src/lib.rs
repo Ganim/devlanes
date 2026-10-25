@@ -25,6 +25,7 @@ pub mod text;
 pub mod theme;
 pub mod tree;
 pub mod ui;
+pub mod welcome;
 pub mod words;
 
 use std::{io::IsTerminal, sync::Arc};

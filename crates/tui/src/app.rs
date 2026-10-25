@@ -49,8 +49,6 @@ const MAX_BACKOFF_MS: u64 = 5000;
 
 /// Two presses on the same row this close together are a double click.
 const DOUBLE_CLICK_MS: u128 = 400;
-/// The dismissal key of the first-run hint strip, stored with release notices.
-pub const FIRST_RUN_KEY: &str = "tui-first-run";
 
 /// Where keys go: watching (keys drive devlanes) or typing (keys go to the
 /// unit in the pane).
@@ -305,6 +303,8 @@ pub enum Dialog {
     Quit(QuitDialog),
     /// `T` on the daemon page: the log's targets to show.
     Targets(TargetPicker),
+    /// The first launch in a home (`crate::welcome`).
+    Welcome(crate::welcome::Welcome),
 }
 
 /// The `T` picker: every target of the kept log lines with its count and
@@ -661,31 +661,22 @@ pub struct Areas {
     pub pane_inner: Rect,
     /// Everything between the header and the footer, for the monitor and daemon views.
     pub body: Rect,
-    /// The first-run hint strip above the footer.
-    pub strip: Option<Rect>,
     pub footer: Rect,
 }
 
 /// Splits the screen, or `None` when it is below the minimum size.
 pub fn areas(width: u16, height: u16, zoom: bool) -> Option<Areas> {
-    areas_with(width, height, zoom, false, true)
+    areas_with(width, height, zoom, true)
 }
 
-/// [`areas`] with the first-run hint strip above the footer when `strip`.
-pub fn areas_with(
-    width: u16,
-    height: u16,
-    zoom: bool,
-    strip: bool,
-    lane_bar: bool,
-) -> Option<Areas> {
+/// [`areas`] with the lane bar only when `lane_bar`.
+pub fn areas_with(width: u16, height: u16, zoom: bool, lane_bar: bool) -> Option<Areas> {
     if width < MIN_WIDTH || height < MIN_HEIGHT {
         return None;
     }
-    let strip = strip && height > MIN_HEIGHT;
     let header = Rect::new(0, 0, width, 1);
     let footer = Rect::new(0, height - 1, width, 1);
-    let bottom = height - 1 - u16::from(strip);
+    let bottom = height - 1;
     let body = Rect::new(0, 1, width, bottom - 1);
     // A project with one lane has nothing to switch to: no lane bar.
     let lane_bar = lane_bar.then(|| Rect::new(0, 1, width, 1));
@@ -714,7 +705,6 @@ pub fn areas_with(
         // One column of margin inside the border, as a terminal window has.
         pane_inner: Rect::new(pane.x + 1, pane.y, pane.width - 1, pane.height),
         body,
-        strip: strip.then(|| Rect::new(0, bottom, width, 1)),
         footer,
     })
 }
@@ -754,8 +744,6 @@ pub struct App {
     pub dialog_area: RefCell<Option<Rect>>,
     /// The working directory, to open on its lane first.
     cwd: Option<PathBuf>,
-    /// Tab and Enter were used, so the first-run strip has done its job.
-    learned: (bool, bool),
     pub connection: Connection,
     pub dialog: Option<Dialog>,
     pub attached: Option<Attached>,
@@ -859,7 +847,6 @@ impl App {
             pane_press: None,
             dialog_area: RefCell::new(None),
             cwd: None,
-            learned: (false, false),
             connection: Connection::Connecting,
             dialog: None,
             attached: None,
@@ -905,6 +892,9 @@ impl App {
     /// The URLs worth a click on screen: the first of each unit of the lane
     /// shown, as the pane header, its details and section lists print them.
     pub fn link_targets(&self) -> Vec<String> {
+        if matches!(self.dialog, Some(Dialog::Welcome(_))) {
+            return vec![crate::welcome::DOCS_URL.into()];
+        }
         self.selected_lane()
             .map(|lane| {
                 lane.units
@@ -1198,6 +1188,7 @@ impl App {
                 sort_lanes(&mut self.lanes);
                 self.after_change(&mut effects);
                 self.focus_start(&mut effects);
+                self.show_welcome();
             }
             Msg::Status(Err(error)) => self.api_error("daemon status", None, error, &mut effects),
             Msg::Start(frame) => self.start_frame(frame, &mut effects),
@@ -1458,7 +1449,10 @@ impl App {
                     Err(error) => self.api_error("clean gone lanes", None, error, &mut effects),
                 }
             }
-            Msg::Notices { method, dismissed } => self.release = (Some(method), dismissed),
+            Msg::Notices { method, dismissed } => {
+                self.release = (Some(method), dismissed);
+                self.show_welcome();
+            }
             Msg::DaemonInfo { status, doctor } => {
                 let mut failure = None;
                 match status {
@@ -2537,7 +2531,7 @@ impl App {
             .min(len.saturating_sub(height));
     }
 
-    /// The screen's regions, with the first-run strip when it shows.
+    /// The screen's regions.
     pub fn areas(&self) -> Option<Areas> {
         self.areas_sized(self.size.0, self.size.1)
     }
@@ -2550,18 +2544,8 @@ impl App {
             width,
             height,
             self.zoom,
-            self.first_run_strip(),
             self.project_lanes().len() > 1 && self.projects().len() > 1,
         )
-    }
-
-    /// Whether the first-run strip shows: once the dismissals loaded, until
-    /// the user typed into a unit and switched projects, or pressed `u`.
-    pub fn first_run_strip(&self) -> bool {
-        self.release.0.is_some()
-            && !self.release.1.iter().any(|key| key == FIRST_RUN_KEY)
-            && !(self.learned.0 && self.learned.1)
-            && !self.lanes.is_empty()
     }
 
     /// Rows that fit in the list.
@@ -2848,17 +2832,8 @@ impl App {
         match key.code {
             KeyCode::Char('c') if ctrl => self.quit(effects),
             KeyCode::Char('q') if plain => self.quit(effects),
-            KeyCode::Char('u') if plain => {
-                if !self.dismiss_release(effects) && self.first_run_strip() {
-                    self.release.1.push(FIRST_RUN_KEY.into());
-                    effects.push(Effect::DismissNotice(FIRST_RUN_KEY.into()));
-                    self.resize_pane(effects);
-                }
-            }
-            KeyCode::Tab => {
-                self.learned.1 = true;
-                self.step_project(1, effects);
-            }
+            KeyCode::Char('u') if plain => self.dismiss_release(effects),
+            KeyCode::Tab => self.step_project(1, effects),
             KeyCode::BackTab => self.step_project(-1, effects),
             // Shift+1-9 picks a project. Without the kitty keyboard protocol
             // the terminal sends the shifted symbol instead; these are the
@@ -2866,7 +2841,6 @@ impl App {
             KeyCode::Char(c) if !ctrl && project_digit(c, key.modifiers).is_some() => {
                 let index = project_digit(c, key.modifiers).unwrap_or_default();
                 if let Some(name) = self.projects().get(index).cloned() {
-                    self.learned.1 = true;
                     self.select_project(&name, effects);
                 }
             }
@@ -3159,7 +3133,6 @@ impl App {
             self.set_notice("the terminal is in the project view".into());
             return;
         }
-        self.learned.0 = true;
         let Some(attached) = self.attached.as_ref() else {
             let notice = match self.selected_unit() {
                 Some(unit) if is_orphaned(unit) => {
@@ -3673,6 +3646,47 @@ impl App {
                 self.quit_dialog_key(key, effects);
             }
             Dialog::Targets(picker) => self.targets_key(key, picker),
+            Dialog::Welcome(welcome) => {
+                let action = welcome.key(key);
+                self.welcome_action(action, welcome, effects);
+            }
+        }
+    }
+
+    /// Opens the welcome once the first status and the dismissed notices are
+    /// both in, unless it was closed before in this home.
+    fn show_welcome(&mut self) {
+        let dismissed = self.release.1.iter().any(|key| key == crate::welcome::KEY);
+        if self.loaded && self.release.0.is_some() && !dismissed && self.dialog.is_none() {
+            self.dialog = Some(Dialog::Welcome(crate::welcome::Welcome::default()));
+        }
+    }
+
+    /// What a key or click in the welcome asked for. Leaving it in any way
+    /// hides it for good.
+    fn welcome_action(
+        &mut self,
+        action: crate::welcome::Action,
+        welcome: crate::welcome::Welcome,
+        effects: &mut Vec<Effect>,
+    ) {
+        use crate::welcome::{Action, DOCS_URL, KEY};
+        match action {
+            Action::Stay => self.dialog = Some(Dialog::Welcome(welcome)),
+            Action::OpenDocs => {
+                effects.push(Effect::OpenUrl(DOCS_URL.into()));
+                self.dialog = Some(Dialog::Welcome(welcome));
+            }
+            Action::Close | Action::Quit => {
+                self.release.1.push(KEY.into());
+                effects.push(Effect::DismissNotice(KEY.into()));
+                if action == Action::Quit {
+                    self.global_key(
+                        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                        effects,
+                    );
+                }
+            }
         }
     }
 
@@ -4510,6 +4524,11 @@ impl App {
                 self.settings_outcome(outcome, settings, effects);
                 return;
             }
+            Some(Dialog::Welcome(welcome)) => {
+                let action = welcome.mouse(mouse);
+                self.welcome_action(action, welcome, effects);
+                return;
+            }
             other => self.dialog = other,
         }
         if self.dialog.is_some() {
@@ -4626,10 +4645,7 @@ impl App {
     /// What a click on a chrome item does.
     fn click(&mut self, click: Click, effects: &mut Vec<Effect>) {
         match click {
-            Click::Project(name) => {
-                self.learned.1 = true;
-                self.select_project(&name, effects);
-            }
+            Click::Project(name) => self.select_project(&name, effects),
             // A chip, like the list's title, shows the lane's status.
             Click::Lane(lane) => {
                 self.view = View::Project;
@@ -4865,13 +4881,12 @@ impl App {
     }
 
     /// Hides the release notice for good; a newer version shows again.
-    fn dismiss_release(&mut self, effects: &mut Vec<Effect>) -> bool {
+    fn dismiss_release(&mut self, effects: &mut Vec<Effect>) {
         let Some((key, _)) = self.release_badge() else {
-            return false;
+            return;
         };
         self.release.1.push(key.clone());
         effects.push(Effect::DismissNotice(key));
-        true
     }
 
     /// q, Ctrl+C or the menu's quit: closes at once unless lanes of the

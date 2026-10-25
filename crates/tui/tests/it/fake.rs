@@ -225,10 +225,13 @@ impl DaemonApi for FakeApi {
         self.home.clone()
     }
 
-    /// Fixed: a source build with nothing dismissed, whatever binary runs
-    /// the tests and whatever its home holds.
+    /// Fixed: a source build with only the welcome dismissed, whatever
+    /// binary runs the tests and whatever its home holds.
     fn notices(&self) -> (devlanes_client::update::InstallMethod, Vec<String>) {
-        (devlanes_client::update::InstallMethod::Source, Vec::new())
+        (
+            devlanes_client::update::InstallMethod::Source,
+            vec![devlanes_tui::welcome::KEY.into()],
+        )
     }
 }
 

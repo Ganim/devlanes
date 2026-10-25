@@ -475,14 +475,13 @@ fn scenes() -> Vec<Scene> {
             setup: |f| f.key(KeyCode::Char('?')),
         },
         Scene {
-            name: "first-run",
-            what: "the first-run hint strip above the footer",
+            name: "welcome",
+            what: "the first launch in a home: banner, features, first keys and the docs link",
             setup: |f| {
                 f.send(Msg::Notices {
                     method: InstallMethod::Homebrew,
                     dismissed: Vec::new(),
                 });
-                f.unit("acme@0", "api-gateway");
             },
         },
         Scene {
@@ -614,7 +613,7 @@ fn scenes() -> Vec<Scene> {
                 });
                 f.send(Msg::Notices {
                     method: InstallMethod::Homebrew,
-                    dismissed: Vec::new(),
+                    dismissed: vec![devlanes_tui::welcome::KEY.into()],
                 });
                 f.unit("acme@0", "web-app");
             },

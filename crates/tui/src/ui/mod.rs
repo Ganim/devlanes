@@ -58,9 +58,6 @@ pub fn render(app: &App, frame: &mut Frame) {
         View::Monitor => monitor::render(app, frame, layout.body),
         View::Daemon => daemon::render(app, frame, layout.body),
     }
-    if let Some(strip) = layout.strip {
-        render_strip(app, frame, strip);
-    }
     render_footer(app, frame, layout.footer);
     if let Some(dialog) = &app.dialog {
         dialog::render(app, dialog, frame, size);
@@ -940,24 +937,6 @@ fn render_welcome(app: &App, frame: &mut Frame, area: Rect) {
         theme.quiet(),
     );
     frame.render_widget(Paragraph::new(lines), area);
-}
-
-/// The first-run strip above the footer.
-fn render_strip(app: &App, frame: &mut Frame, area: Rect) {
-    let theme = &app.theme;
-    let pairs = [
-        ("j k", "move"),
-        ("enter", "types into a service"),
-        ("tab", "next project"),
-        ("?", "all keys"),
-        ("u", "hides this"),
-    ];
-    let mut spans = vec![Span::raw(" ")];
-    for (key, label) in pairs {
-        spans.push(Span::styled(key, theme.key()));
-        spans.push(Span::styled(format!(" {label}  "), theme.quiet()));
-    }
-    frame.render_widget(Paragraph::new(fit(spans, usize::from(area.width))), area);
 }
 
 /// A footer hint: the key as shown, its label, and the key a click presses.

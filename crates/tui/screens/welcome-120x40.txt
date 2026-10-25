@@ -1,0 +1,82 @@
+ devlanes  1 acme   2 billing   3 shop                       starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ lanes  1 main  2 feat/checkout 4/8  3 fix/cache  4 spike/old-search                            1-9 or [ ] switch lanes
+┌ @0 · 34/38 up ───────────────────────────────┐┌ wrk-export  failed · exit 1 ─────────────────────────────────────────┐
+│ ▾ services                                34 ││ failed    exited with code 1                                         │
+│   ● Gateway API                              ││ next      r restarts it                                              │
+│   ● api-auth                                 ││           devlanes logs acme@0:wrk-export prints the whole log       │
+│   ● ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐─────┤
+│   ● │     ╎       ╎       ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎       ╎       ╎    │k=40m│
+│   ● │                                 █████                      ████                                          │     │
+│   ● │                                ░░███                      ░░███                                          │k=53m│
+│   ● │   ██████████████             ███████   ██████  █████ █████ ░███   ██████   ████████    ██████   █████    │     │
+│   ● │                             ███░░███  ███░░███░░███ ░░███  ░███  ░░░░░███ ░░███░░███  ███░░███ ███░░     │k=66m│
+│   ● │       ██████████████       ░███ ░███ ░███████  ░███  ░███  ░███   ███████  ░███ ░███ ░███████ ░░█████    │     │
+│   ● │                            ░███ ░███ ░███░░░   ░░███ ███   ░███  ███░░███  ░███ ░███ ░███░░░   ░░░░███   │k=79m│
+│   ● │           ██████████████   ░░████████░░██████   ░░█████    █████░░████████ ████ █████░░██████  ██████    │     │
+│   ● │                             ░░░░░░░░  ░░░░░░     ░░░░░    ░░░░░  ░░░░░░░░ ░░░░ ░░░░░  ░░░░░░  ░░░░░░     │k=92m│
+│   ● │     ╎       ╎       ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎       ╎       ╎    │     │
+│   · │                    Run a dev environment per git worktree, side by side.                                 │k=105│
+│   ● │                                                                                                          │     │
+│   ◉ │                    ▸ a lane per git worktree, with its own ports, hostnames and data                     │k=118│
+│   ◉ │                    ▸ services, tasks and containers from devlanes.yaml                                   │     │
+│   ◉ │                    ▸ a live terminal and stored logs for every service                                   │k=131│
+│   ◉ │                    ▸ everything keeps running after this window closes                                   │     │
+│   ✕ │                                                                                                          │k=144│
+│   ◉ │                    j k     move through lanes and units                                                  │     │
+│   ◉ │                    enter   type into a service; esc leaves                                               │k=157│
+│   ◉ │                    tab     next project                                                                  │     │
+│   ● │                    M  D    monitor, daemon log                                                           │k=170│
+│   ● │                    ?       every key, any time                                                           │     │
+│   ◆ │                                                                                                          │k=183│
+│   ● │                    docs    https://devlanes.run/docs  o opens it                                         │     │
+│   ● │                                                                                                          │k=196│
+│   ● └─────────────────────────────────────────────────────────────────────────────────── enter or esc to start ┘     │
+│   ● proxy-edge                               ││ 2026-10-21T10:42:31Z INFO job done queue=default id=job_8133 took=209│
+│   ● docs-search                              ││ ms                                                                   │
+│   ● ml-ranker                                ││                                                                      │
+│   ⠋ ml-embed                        starting ││                                                                      │
+│   ● cache-warm                               ││                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+ r restart   n next problem   pgup scroll back   c select text   / filter                         ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 99 bold, 100-107 dim, 111 bold, 112-118 dim
+1: 0-6 dim, 7-14 bold reversed, 16-17 dim, 18-34 yellow, 37-47 dim, 50-51 dim, 52-67 yellow, 96-98 bold, 99-102 dim, 103-105 bold, 106-119 dim
+2: 0 darkgray, 2-3 bold, 4-14 dim, 16-48 darkgray, 50-59 bold, 60-61 dim, 62-67 red, 68-70 dim, 71-76 red, 78-119 darkgray
+3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 50-59 dim, 60-77 red, 119 darkgray
+4: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-59 dim, 119 darkgray
+5: 0 darkgray, 4-5 green, 6-13 blue, 47-48 darkgray, 50-111 dim, 119 darkgray
+6: 0 darkgray, 4-5 green, 6-113 bold, 114-119 darkgray
+7: 0 darkgray, 4-5 green, 6 bold, 12 darkgray, 20 darkgray, 28 darkgray, 36 darkgray, 44 darkgray, 52 darkgray, 60 dim yellow, 68 darkgray, 76 darkgray, 84 darkgray, 92 darkgray, 100 darkgray, 108 darkgray, 113 bold, 119 darkgray
+8: 0 darkgray, 4-5 green, 6 bold, 40-44 lightyellow, 67-70 lightyellow, 113 bold, 119 darkgray
+9: 0 darkgray, 4-5 green, 6 bold, 39-40 yellow, 41-43 lightyellow, 66-67 yellow, 68-70 lightyellow, 113 bold, 119 darkgray
+10: 0 darkgray, 4-5 green, 6 bold, 10-23 yellow, 37-43 lightyellow, 47-52 lightyellow, 55-59 lightyellow, 61-65 lightyellow, 67 yellow, 68-70 lightyellow, 74-79 lightyellow, 83-90 lightyellow, 95-100 lightyellow, 104-108 lightyellow, 113 bold, 119 darkgray
+11: 0 darkgray, 4-5 green, 6 bold, 36-38 lightyellow, 39-40 yellow, 41-43 lightyellow, 46-48 lightyellow, 49-50 yellow, 51-53 lightyellow, 54-55 yellow, 56-58 lightyellow, 60-61 yellow, 62-64 lightyellow, 67 yellow, 68-70 lightyellow, 73-77 yellow, 78-80 lightyellow, 82-83 yellow, 84-86 lightyellow, 87-88 yellow, 89-91 lightyellow, 94-96 lightyellow, 97-98 yellow, 99-101 lightyellow, 103-105 lightyellow, 106-107 yellow, 113 bold, 119 darkgray
+12: 0 darkgray, 4-5 green, 6 bold, 14-27 gray, 35 yellow, 36-38 lightyellow, 40 yellow, 41-43 lightyellow, 45 yellow, 46-52 lightyellow, 55 yellow, 56-58 lightyellow, 61 yellow, 62-64 lightyellow, 67 yellow, 68-70 lightyellow, 74-80 lightyellow, 83 yellow, 84-86 lightyellow, 88 yellow, 89-91 lightyellow, 93 yellow, 94-100 lightyellow, 102-103 yellow, 104-108 lightyellow, 113 bold, 119 darkgray
+13: 0 darkgray, 4-5 green, 6 bold, 35 yellow, 36-38 lightyellow, 40 yellow, 41-43 lightyellow, 45 yellow, 46-48 lightyellow, 49-51 yellow, 55-56 yellow, 57-59 lightyellow, 61-63 lightyellow, 67 yellow, 68-70 lightyellow, 73-75 lightyellow, 76-77 yellow, 78-80 lightyellow, 83 yellow, 84-86 lightyellow, 88 yellow, 89-91 lightyellow, 93 yellow, 94-96 lightyellow, 97-99 yellow, 103-106 yellow, 107-109 lightyellow, 113 bold, 119 darkgray
+14: 0 darkgray, 4-5 green, 6 bold, 18-31 gray, 35-36 yellow, 37-44 lightyellow, 45-46 yellow, 47-52 lightyellow, 56-57 yellow, 58-62 lightyellow, 67-71 lightyellow, 72-73 yellow, 74-81 lightyellow, 83-86 lightyellow, 88-92 lightyellow, 93-94 yellow, 95-100 lightyellow, 103-108 lightyellow, 113 bold, 119 darkgray
+15: 0 darkgray, 4-5 green, 6 bold, 36-43 yellow, 46-51 yellow, 57-61 yellow, 66-70 yellow, 73-80 yellow, 82-85 yellow, 87-91 yellow, 94-99 yellow, 102-107 yellow, 113 bold, 119 darkgray
+16: 0 darkgray, 4-5 green, 6 bold, 12 darkgray, 20 darkgray, 28 darkgray, 36 darkgray, 44 darkgray, 52 darkgray, 60 dim yellow, 68 darkgray, 76 darkgray, 84 darkgray, 92 darkgray, 100 darkgray, 108 darkgray, 113 bold, 119 darkgray
+17: 0 darkgray, 4-5 dim, 6 bold, 27-79 bold, 113 bold, 119 darkgray
+18: 0 darkgray, 4-5 green, 6 bold, 113 bold, 119 darkgray
+19: 0 darkgray, 4-5 green, 6 bold, 27-28 bold, 113 bold, 119 darkgray
+20: 0 darkgray, 4-5 green, 6 bold, 27-28 bold, 113 bold, 119 darkgray
+21: 0 darkgray, 4-5 green, 6 bold, 27-28 bold, 113 bold, 119 darkgray
+22: 0 darkgray, 4-5 green, 6 bold, 27-28 bold, 113 bold, 119 darkgray
+23: 0 darkgray, 1-5 reversed, 6 bold, 113 bold, 119 darkgray
+24: 0 darkgray, 4-5 green, 6 bold, 27-34 bold, 35-62 dim, 113 bold, 119 darkgray
+25: 0 darkgray, 4-5 green, 6 bold, 27-34 bold, 35-65 dim, 113 bold, 119 darkgray
+26: 0 darkgray, 4-5 green, 6 bold, 27-34 bold, 35-46 dim, 113 bold, 119 darkgray
+27: 0 darkgray, 4-5 green, 6 bold, 27-34 bold, 35-53 dim, 113 bold, 119 darkgray
+28: 0 darkgray, 4-5 green, 6 bold, 27-34 bold, 35-53 dim, 113 bold, 119 darkgray
+29: 0 darkgray, 4-5 yellow, 6 bold, 113 bold, 119 darkgray
+30: 0 darkgray, 4-5 green, 6 bold, 27-34 bold, 35-59 bold underlined, 60-71 dim, 113 bold, 119 darkgray
+31: 0 darkgray, 4-5 green, 6 bold, 113 bold, 119 darkgray
+32: 0 darkgray, 4-5 green, 6-89 bold, 90-112 bold dim, 113 bold, 119 darkgray
+33: 0 darkgray, 4-5 green, 6-15 cyan, 47-48 darkgray, 50-69 dim, 71-74 color2, 119 darkgray
+34: 0 darkgray, 4-5 green, 6-16 cyan, 47-48 darkgray, 119 darkgray
+35: 0 darkgray, 4-14 green, 47-48 darkgray, 119 darkgray
+36: 0 darkgray, 6-13 green, 47-48 darkgray, 119 darkgray
+37: 0 darkgray, 4-5 green, 6-15 dim blue, 47-48 darkgray, 119 darkgray
+38: 0-119 darkgray
+39: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 49 bold, 50-64 dim, 65 bold, 66-75 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim

@@ -102,7 +102,7 @@ const KEYS: &[(&str, &[(&str, &str)])] = &[
             ("shift+1-9", "project by number"),
             ("M  D", "monitor, daemon; again or esc returns"),
             ("esc", "one step back, then the menu: options, help, quit"),
-            ("u", "hide the hint strip or version notice"),
+            ("u", "hide the version notice"),
             ("q", "quit; asks first while lanes run (tui.on_quit)"),
         ],
     ),
@@ -225,6 +225,7 @@ pub fn render(app: &App, dialog: &Dialog, frame: &mut Frame, area: Rect) {
         Dialog::Settings(settings) => {
             return crate::settings::render(theme, settings, frame, area);
         }
+        Dialog::Welcome(welcome) => return crate::welcome::render(theme, welcome, frame, area),
         Dialog::Confirm {
             title,
             prompt,

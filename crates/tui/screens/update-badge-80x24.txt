@@ -19,8 +19,8 @@
 │   ◉ wrk-billing              ││                                              │
 │   ◉ wrk-index                ││                                              │
 │   ◉ wrk-thumbs               ││                                              │
+│   ✕ wrk-export        failed ││                                              │
 └──────────────────────────────┘└──────────────────────────────────────────────┘
- j k move  enter types into a service  tab next project  ? all keys  u hides th…
  enter type into it   x stop   r restart                  ? all keys   q quit
 
 --- styles (row: columns style) ---
@@ -45,6 +45,6 @@
 18: 0 darkgray, 4-5 green, 6-16 magenta, 31-32 darkgray, 79 darkgray
 19: 0 darkgray, 4-5 green, 6-14 magenta, 31-32 darkgray, 79 darkgray
 20: 0 darkgray, 4-5 green, 6-15 magenta, 31-32 darkgray, 79 darkgray
-21: 0-79 darkgray
-22: 1-3 bold, 4-10 dim, 11-15 bold, 16-38 dim, 39-41 bold, 42-56 dim, 57 bold, 58-68 dim, 69 bold, 70-79 dim
+21: 0 darkgray, 4-5 red, 6-15 magenta, 24-29 red, 31-32 darkgray, 79 darkgray
+22: 0-79 darkgray
 23: 1-5 bold, 6-21 dim, 22 bold, 23-30 dim, 31 bold, 32-42 dim, 58 bold, 59-70 dim, 71 bold, 72-79 dim

@@ -61,8 +61,14 @@ struct Tui {
 }
 
 impl Tui {
-    /// Runs `devlanes ui` in the lab's repository at `COLUMNS`x`ROWS`.
+    /// Runs `devlanes ui` in the lab's repository at `COLUMNS`x`ROWS`, with
+    /// the first-launch welcome already dismissed so keys reach the TUI.
     fn open(lab: &Lab) -> Result<Self> {
+        std::fs::write(
+            lab.home().join("notices.json"),
+            r#"{"dismissed":["tui-first-run"]}"#,
+        )
+        .map_err(setup)?;
         Self::run(lab, &["ui"], (COLUMNS, ROWS))
     }
 

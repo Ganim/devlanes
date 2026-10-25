@@ -23,6 +23,6 @@ expression: screen
 "│                                      ││                                                          │"
 "│                                      ││                                                          │"
 "│                                      ││                                                          │"
+"│                                      ││                                                          │"
 "└──────────────────────────────────────┘└──────────────────────────────────────────────────────────┘"
-" j k move  enter types into a service  tab next project  ? all keys  u hides this                   "
 " enter type into it   x stop   r restart   o open in browser                  ? all keys   q quit   "

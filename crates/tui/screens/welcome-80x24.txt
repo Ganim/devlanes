@@ -1,0 +1,50 @@
+ de┌───────────────────────────────────────────────────────────────────────┐mon
+ la│   ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎   │nes
+┌ @│   ╎                   ▄▄             ▄▄                           ╎   │───┐
+│  │   ╎                   ██             ██                           ╎   │   │
+│  │   ╎  ▗▄▄▄▄▄▖       ▄████ ▄█▀█▄ ██ ██ ██  ▀▀█▄ ████▄ ▄█▀█▄ ▄█▀▀▀   ╎   │   │
+│  │   ╎    ▗▄▄▄▄▄▖     ██ ██ ██▄█▀ ██▄██ ██ ▄█▀██ ██ ██ ██▄█▀ ▀███▄   ╎   │   │
+│  │   ╎      ▗▄▄▄▄▄▖   ▀████ ▀█▄▄▄  ▀█▀  ██ ▀█▄██ ██ ██ ▀█▄▄▄ ▄▄▄█▀   ╎   │   │
+│  │   ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎   │───┤
+│  │   Run a dev environment per git worktree, side by side.               │efa│
+│  │                                                                       │   │
+│  │   ▸ a lane per git worktree, with its own ports, hostnames and data   │efa│
+│  │   ▸ services, tasks and containers from devlanes.yaml                 │   │
+│  │   ▸ a live terminal and stored logs for every service                 │efa│
+│  │   ▸ everything keeps running after this window closes                 │   │
+│  │                                                                       │efa│
+│  │   j k     move through lanes and units                                │   │
+│  │   enter   type into a service; esc leaves                             │efa│
+│  │   tab     next project                                                │   │
+│  │   M  D    monitor, daemon log                                         │efa│
+│  │   ?       every key, any time                                         │   │
+│  │                                                                       │efa│
+│  │   docs    https://devlanes.run/docs  o opens it                       │   │
+└──│                                                                       │───┘
+ r └──────────────────────────────────────────────── enter or esc to start ┘t
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3-75 bold, 76-78 dim
+1: 0-2 dim, 3 bold, 7 darkgray, 15 darkgray, 23 darkgray, 31 darkgray, 39 dim yellow, 47 darkgray, 55 darkgray, 63 darkgray, 71 darkgray, 75 bold, 76-79 dim
+2: 0 darkgray, 2-3 bold, 7 darkgray, 27-28 yellow, 42-43 yellow, 71 darkgray, 75 bold, 76-79 darkgray
+3: 0 darkgray, 3 bold, 7 darkgray, 27-28 lightyellow, 42-43 lightyellow, 71 darkgray, 75 bold, 79 darkgray
+4: 0 darkgray, 3 bold, 7 darkgray, 10-16 yellow, 24 yellow, 25-28 lightyellow, 30 yellow, 31 lightyellow, 32 yellow, 33 lightyellow, 34 yellow, 36-37 lightyellow, 39-40 lightyellow, 42-43 lightyellow, 46-47 yellow, 48 lightyellow, 49 yellow, 51-54 lightyellow, 55 yellow, 57 yellow, 58 lightyellow, 59 yellow, 60 lightyellow, 61 yellow, 63 yellow, 64 lightyellow, 65-67 yellow, 71 darkgray, 75 bold, 79 darkgray
+5: 0 darkgray, 3 bold, 7 darkgray, 12-18 gray, 24-25 lightyellow, 27-28 lightyellow, 30-31 lightyellow, 32 yellow, 33 lightyellow, 34 yellow, 36-37 lightyellow, 38 yellow, 39-40 lightyellow, 42-43 lightyellow, 45 yellow, 46 lightyellow, 47 yellow, 48-49 lightyellow, 51-52 lightyellow, 54-55 lightyellow, 57-58 lightyellow, 59 yellow, 60 lightyellow, 61 yellow, 63 yellow, 64-66 lightyellow, 67 yellow, 71 darkgray, 75 bold, 79 darkgray
+6: 0 darkgray, 3 bold, 7 darkgray, 14-20 gray, 24 yellow, 25-28 lightyellow, 30 yellow, 31 lightyellow, 32-34 yellow, 37 yellow, 38 lightyellow, 39 yellow, 42-43 lightyellow, 45 yellow, 46 lightyellow, 47 yellow, 48-49 lightyellow, 51-52 lightyellow, 54-55 lightyellow, 57 yellow, 58 lightyellow, 59-61 yellow, 63-65 yellow, 66 lightyellow, 67 yellow, 71 darkgray, 75 bold, 79 darkgray
+7: 0 darkgray, 3 bold, 7 darkgray, 15 darkgray, 23 darkgray, 31 darkgray, 39 dim yellow, 47 darkgray, 55 darkgray, 63 darkgray, 71 darkgray, 75 bold, 76-79 darkgray
+8: 0 darkgray, 3 bold, 7-59 bold, 75 bold, 79 darkgray
+9: 0 darkgray, 3 bold, 75 bold, 79 darkgray
+10: 0 darkgray, 3 bold, 7-8 bold, 75 bold, 79 darkgray
+11: 0 darkgray, 3 bold, 7-8 bold, 75 bold, 79 darkgray
+12: 0 darkgray, 3 bold, 7-8 bold, 75 bold, 79 darkgray
+13: 0 darkgray, 3 bold, 7-8 bold, 75 bold, 79 darkgray
+14: 0 darkgray, 3 bold, 75 bold, 79 darkgray
+15: 0 darkgray, 3 bold, 7-14 bold, 15-42 dim, 75 bold, 79 darkgray
+16: 0 darkgray, 3 bold, 7-14 bold, 15-45 dim, 75 bold, 79 darkgray
+17: 0 darkgray, 3 bold, 7-14 bold, 15-26 dim, 75 bold, 79 darkgray
+18: 0 darkgray, 3 bold, 7-14 bold, 15-33 dim, 75 bold, 79 darkgray
+19: 0 darkgray, 3 bold, 7-14 bold, 15-33 dim, 75 bold, 79 darkgray
+20: 0 darkgray, 3 bold, 75 bold, 79 darkgray
+21: 0 darkgray, 1-2 reversed, 3 bold, 7-14 bold, 15-39 bold underlined, 40-51 dim, 75 bold, 79 darkgray
+22: 0-2 darkgray, 3 bold, 75 bold, 76-79 darkgray
+23: 1 bold, 2 dim, 3-51 bold, 52-74 bold dim, 75 bold, 76-79 dim

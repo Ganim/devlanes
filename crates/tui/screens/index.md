@@ -194,13 +194,13 @@ every key (?), this screen's first
 - 120x40: [txt](dialog-help-120x40.txt) · [png](dialog-help-120x40.png) · [ansi](dialog-help-120x40.ansi)
 - 80x24: [txt](dialog-help-80x24.txt) · [png](dialog-help-80x24.png) · [ansi](dialog-help-80x24.ansi)
 
-## first-run
+## welcome
 
-the first-run hint strip above the footer
+the first launch in a home: banner, features, first keys and the docs link
 
-- 200x60: [txt](first-run-200x60.txt) · [png](first-run-200x60.png) · [ansi](first-run-200x60.ansi)
-- 120x40: [txt](first-run-120x40.txt) · [png](first-run-120x40.png) · [ansi](first-run-120x40.ansi)
-- 80x24: [txt](first-run-80x24.txt) · [png](first-run-80x24.png) · [ansi](first-run-80x24.ansi)
+- 200x60: [txt](welcome-200x60.txt) · [png](welcome-200x60.png) · [ansi](welcome-200x60.ansi)
+- 120x40: [txt](welcome-120x40.txt) · [png](welcome-120x40.png) · [ansi](welcome-120x40.ansi)
+- 80x24: [txt](welcome-80x24.txt) · [png](welcome-80x24.png) · [ansi](welcome-80x24.ansi)
 
 ## theme-dark
 

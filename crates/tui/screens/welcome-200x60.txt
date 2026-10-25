@@ -1,0 +1,122 @@
+ devlanes  1 acme   2 billing   3 shop                                                                                                       starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+ lanes  1 main  2 feat/checkout 4/8  3 fix/cache  4 spike/old-search                                                                                                            1-9 or [ ] switch lanes
+┌ @0 · 34/38 up ───────────────────────────────┐┌ wrk-export  failed · exit 1 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ ▾ services                                34 ││ failed    exited with code 1                                                                                                                         │
+│   ● Gateway API                              ││ next      r restarts it                                                                                                                              │
+│   ● api-auth                                 ││           devlanes logs acme@0:wrk-export prints the whole log                                                                                       │
+│   ● api-users                                │├─ last output ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│   ● api-billing                              ││ 2026-10-21T10:40:00Z INFO job done queue=default id=job_8120 took=40ms                                                                               │
+│   ● api-orders                               ││ 2026-10-21T10:40:07Z INFO job done queue=default id=job_8121 took=53ms                                                                               │
+│   ● api-search                               ││ 2026-10-21T10:40:14Z INFO job done queue=default id=job_8122 took=66ms                                                                               │
+│   ● api-catalog                              ││ 2026-10-21T10:40:21Z INFO job done queue=default id=job_8123 took=79ms                                                                               │
+│   ● api-inventory                            ││ 2026-10-21T10:40:28Z INFO job done queue=default id=job_8124 took=92ms                                                                               │
+│   ● api-notify                               ││ 2026-10-21T10:40:35Z INFO job done queue=default id=job_8125 took=105ms                                                                              │
+│   ● api-reports                              ││ 2026-10-21T10:41:42Z INFO job done queue=default id=job_8126 took=118ms                                                                              │
+│   ● web-app                                  ││ 2026-10-21T10:41:49Z INFO job done queue=default id=job_8127 took=131ms                                                                              │
+│   ● web-admin                                ││ 2026-10-21T10:41:56Z INFO job done queue=default id=job_8128 took=144ms                                                                              │
+│   ● web-docs                                ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐                                             │
+│   · web-storybook                           │     ╎       ╎       ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎       ╎       ╎    │                                             │
+│   ● web-landing                             │                                 █████                      ████                                          │                                             │
+│   ◉ wrk-email                               │                                ░░███                      ░░███                                          │                                             │
+│   ◉ wrk-billing                             │   ██████████████             ███████   ██████  █████ █████ ░███   ██████   ████████    ██████   █████    │                                             │
+│   ◉ wrk-index                               │                             ███░░███  ███░░███░░███ ░░███  ░███  ░░░░░███ ░░███░░███  ███░░███ ███░░     │                                             │
+│   ◉ wrk-thumbs                              │       ██████████████       ░███ ░███ ░███████  ░███  ░███  ░███   ███████  ░███ ░███ ░███████ ░░█████    │                                             │
+│   ✕ wrk-export               failed · exit 1│                            ░███ ░███ ░███░░░   ░░███ ███   ░███  ███░░███  ░███ ░███ ░███░░░   ░░░░███   │                                             │
+│   ◉ wrk-cron                                │           ██████████████   ░░████████░░██████   ░░█████    █████░░████████ ████ █████░░██████  ██████    │                                             │
+│   ◉ wrk-webhooks                            │                             ░░░░░░░░  ░░░░░░     ░░░░░    ░░░░░  ░░░░░░░░ ░░░░ ░░░░░  ░░░░░░  ░░░░░░     │                                             │
+│   ◉ wrk-ledger                              │     ╎       ╎       ╎       ╎       ╎       ╎       ║       ╎       ╎       ╎       ╎       ╎       ╎    │                                             │
+│   ● stub-stripe                             │                    Run a dev environment per git worktree, side by side.                                 │                                             │
+│   ● stub-s3                                 │                                                                                                          │                                             │
+│   ◆ stub-twilio         orphaned · pid 48211│                    ▸ a lane per git worktree, with its own ports, hostnames and data                     │                                             │
+│   ● stub-sendgrid                           │                    ▸ services, tasks and containers from devlanes.yaml                                   │                                             │
+│   ● stub-segment                            │                    ▸ a live terminal and stored logs for every service                                   │                                             │
+│   ● stub-auth0                              │                    ▸ everything keeps running after this window closes                                   │                                             │
+│   ● proxy-edge                              │                                                                                                          │                                             │
+│   ● docs-search                             │                    j k     move through lanes and units                                                  │                                             │
+│   ● ml-ranker                               │                    enter   type into a service; esc leaves                                               │                                             │
+│   ⠋ ml-embed                        starting│                    tab     next project                                                                  │                                             │
+│   ● cache-warm                              │                    M  D    monitor, daemon log                                                           │                                             │
+│                                             │                    ?       every key, any time                                                           │                                             │
+│ ▾ tasks                                    7│                                                                                                          │                                             │
+│   ✓ migrate             done · runs at start│                    docs    https://devlanes.run/docs  o opens it                                         │                                             │
+│   ✓ seed                                done│                                                                                                          │                                             │
+│   · lint                             not run└─────────────────────────────────────────────────────────────────────────────────── enter or esc to start ┘                                             │
+│   · typecheck                        not run ││                                                                                                                                                      │
+│   · test-e2e                         not run ││                                                                                                                                                      │
+│   ✓ codegen                             done ││                                                                                                                                                      │
+│   · clean-cache                      not run ││                                                                                                                                                      │
+│                                              ││                                                                                                                                                      │
+│ ▾ infra                                      ││                                                                                                                                                      │
+│   ▾ containers                          2 up ││                                                                                                                                                      │
+│     ● localstack                             ││                                                                                                                                                      │
+│     ● rabbitmq                               ││                                                                                                                                                      │
+│   ▾ shared                              3 up ││                                                                                                                                                      │
+│     ● pgbouncer                              ││                                                                                                                                                      │
+│     ● postgres                               ││                                                                                                                                                      │
+│     ● redis                                  ││                                                                                                                                                      │
+│   ▸ setup                             4 done ││                                                                                                                                                      │
+│                                              ││                                                                                                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ r restart   n next problem   pgup scroll back   c select text   / filter                                                                                                         ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 10-17 bold black on yellow, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 179 bold, 180-187 dim, 191 bold, 192-198 dim
+1: 0-6 dim, 7-14 bold reversed, 16-17 dim, 18-34 yellow, 37-47 dim, 50-51 dim, 52-67 yellow, 176-178 bold, 179-182 dim, 183-185 bold, 186-199 dim
+2: 0 darkgray, 2-3 bold, 4-14 dim, 16-48 darkgray, 50-59 bold, 60-61 dim, 62-67 red, 68-70 dim, 71-76 red, 78-199 darkgray
+3: 0 darkgray, 2-3 dim, 44-45 dim, 47-48 darkgray, 50-59 dim, 60-77 red, 199 darkgray
+4: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-59 dim, 199 darkgray
+5: 0 darkgray, 4-5 green, 6-13 blue, 47-48 darkgray, 50-111 dim, 199 darkgray
+6: 0 darkgray, 4-5 green, 6-14 blue, 47-199 darkgray
+7: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+8: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+9: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+10: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+11: 0 darkgray, 4-5 green, 6-18 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+12: 0 darkgray, 4-5 green, 6-15 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+13: 0 darkgray, 4-5 green, 6-16 blue, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+14: 0 darkgray, 4-12 green, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+15: 0 darkgray, 4-14 green, 47-48 darkgray, 50-69 dim, 71-74 color2, 199 darkgray
+16: 0 darkgray, 4-13 green, 46-153 bold, 199 darkgray
+17: 0 darkgray, 4-5 dim, 6-18 dim green, 46 bold, 52 darkgray, 60 darkgray, 68 darkgray, 76 darkgray, 84 darkgray, 92 darkgray, 100 dim yellow, 108 darkgray, 116 darkgray, 124 darkgray, 132 darkgray, 140 darkgray, 148 darkgray, 153 bold, 199 darkgray
+18: 0 darkgray, 4-16 green, 46 bold, 80-84 lightyellow, 107-110 lightyellow, 153 bold, 199 darkgray
+19: 0 darkgray, 4-5 green, 6-14 magenta, 46 bold, 79-80 yellow, 81-83 lightyellow, 106-107 yellow, 108-110 lightyellow, 153 bold, 199 darkgray
+20: 0 darkgray, 4-5 green, 6-16 magenta, 46 bold, 50-63 yellow, 77-83 lightyellow, 87-92 lightyellow, 95-99 lightyellow, 101-105 lightyellow, 107 yellow, 108-110 lightyellow, 114-119 lightyellow, 123-130 lightyellow, 135-140 lightyellow, 144-148 lightyellow, 153 bold, 199 darkgray
+21: 0 darkgray, 4-5 green, 6-14 magenta, 46 bold, 76-78 lightyellow, 79-80 yellow, 81-83 lightyellow, 86-88 lightyellow, 89-90 yellow, 91-93 lightyellow, 94-95 yellow, 96-98 lightyellow, 100-101 yellow, 102-104 lightyellow, 107 yellow, 108-110 lightyellow, 113-117 yellow, 118-120 lightyellow, 122-123 yellow, 124-126 lightyellow, 127-128 yellow, 129-131 lightyellow, 134-136 lightyellow, 137-138 yellow, 139-141 lightyellow, 143-145 lightyellow, 146-147 yellow, 153 bold, 199 darkgray
+22: 0 darkgray, 4-5 green, 6-15 magenta, 46 bold, 54-67 gray, 75 yellow, 76-78 lightyellow, 80 yellow, 81-83 lightyellow, 85 yellow, 86-92 lightyellow, 95 yellow, 96-98 lightyellow, 101 yellow, 102-104 lightyellow, 107 yellow, 108-110 lightyellow, 114-120 lightyellow, 123 yellow, 124-126 lightyellow, 128 yellow, 129-131 lightyellow, 133 yellow, 134-140 lightyellow, 142-143 yellow, 144-148 lightyellow, 153 bold, 199 darkgray
+23: 0 darkgray, 1-45 reversed, 46 bold, 75 yellow, 76-78 lightyellow, 80 yellow, 81-83 lightyellow, 85 yellow, 86-88 lightyellow, 89-91 yellow, 95-96 yellow, 97-99 lightyellow, 101-103 lightyellow, 107 yellow, 108-110 lightyellow, 113-115 lightyellow, 116-117 yellow, 118-120 lightyellow, 123 yellow, 124-126 lightyellow, 128 yellow, 129-131 lightyellow, 133 yellow, 134-136 lightyellow, 137-139 yellow, 143-146 yellow, 147-149 lightyellow, 153 bold, 199 darkgray
+24: 0 darkgray, 4-5 green, 6-13 magenta, 46 bold, 58-71 gray, 75-76 yellow, 77-84 lightyellow, 85-86 yellow, 87-92 lightyellow, 96-97 yellow, 98-102 lightyellow, 107-111 lightyellow, 112-113 yellow, 114-121 lightyellow, 123-126 lightyellow, 128-132 lightyellow, 133-134 yellow, 135-140 lightyellow, 143-148 lightyellow, 153 bold, 199 darkgray
+25: 0 darkgray, 4-5 green, 6-17 magenta, 46 bold, 76-83 yellow, 86-91 yellow, 97-101 yellow, 106-110 yellow, 113-120 yellow, 122-125 yellow, 127-131 yellow, 134-139 yellow, 142-147 yellow, 153 bold, 199 darkgray
+26: 0 darkgray, 4-5 green, 6-15 magenta, 46 bold, 52 darkgray, 60 darkgray, 68 darkgray, 76 darkgray, 84 darkgray, 92 darkgray, 100 dim yellow, 108 darkgray, 116 darkgray, 124 darkgray, 132 darkgray, 140 darkgray, 148 darkgray, 153 bold, 199 darkgray
+27: 0 darkgray, 4-5 green, 6-16 darkgray, 46 bold, 67-119 bold, 153 bold, 199 darkgray
+28: 0 darkgray, 4-5 green, 6-12 darkgray, 46 bold, 153 bold, 199 darkgray
+29: 0 darkgray, 4-5 yellow, 6-16 darkgray, 26-33 yellow, 34-45 dim, 46 bold, 67-68 bold, 153 bold, 199 darkgray
+30: 0 darkgray, 4-5 green, 6-18 darkgray, 46 bold, 67-68 bold, 153 bold, 199 darkgray
+31: 0 darkgray, 4-5 green, 6-17 darkgray, 46 bold, 67-68 bold, 153 bold, 199 darkgray
+32: 0 darkgray, 4-5 green, 6-15 darkgray, 46 bold, 67-68 bold, 153 bold, 199 darkgray
+33: 0 darkgray, 4-5 green, 6-15 cyan, 46 bold, 153 bold, 199 darkgray
+34: 0 darkgray, 4-5 green, 6-16 cyan, 46 bold, 67-74 bold, 75-102 dim, 153 bold, 199 darkgray
+35: 0 darkgray, 4-14 green, 46 bold, 67-74 bold, 75-105 dim, 153 bold, 199 darkgray
+36: 0 darkgray, 6-13 green, 46 bold, 67-74 bold, 75-86 dim, 153 bold, 199 darkgray
+37: 0 darkgray, 4-5 green, 6-15 dim blue, 46 bold, 67-74 bold, 75-93 dim, 153 bold, 199 darkgray
+38: 0 darkgray, 46 bold, 67-74 bold, 75-93 dim, 153 bold, 199 darkgray
+39: 0 darkgray, 2-3 dim, 45 dim, 46 bold, 153 bold, 199 darkgray
+40: 0 darkgray, 4-5 green, 26-45 dim, 46 bold, 67-74 bold, 75-99 bold underlined, 100-111 dim, 153 bold, 199 darkgray
+41: 0 darkgray, 4-5 green, 42-45 dim, 46 bold, 153 bold, 199 darkgray
+42: 0 darkgray, 4-9 dim, 39-45 dim, 46-129 bold, 130-152 bold dim, 153 bold, 199 darkgray
+43: 0 darkgray, 4-14 dim, 39-45 dim, 47-48 darkgray, 199 darkgray
+44: 0 darkgray, 4-13 dim, 39-45 dim, 47-48 darkgray, 199 darkgray
+45: 0 darkgray, 4-5 green, 42-45 dim, 47-48 darkgray, 199 darkgray
+46: 0 darkgray, 4-16 dim, 39-45 dim, 47-48 darkgray, 199 darkgray
+47: 0 darkgray, 47-48 darkgray, 199 darkgray
+48: 0 darkgray, 2-3 dim, 47-48 darkgray, 199 darkgray
+49: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 199 darkgray
+50: 0 darkgray, 6-17 green, 47-48 darkgray, 199 darkgray
+51: 0 darkgray, 6-7 green, 8-15 cyan, 47-48 darkgray, 199 darkgray
+52: 0 darkgray, 4-5 dim, 42-45 dim, 47-48 darkgray, 199 darkgray
+53: 0 darkgray, 6-7 green, 8-16 dim magenta, 47-48 darkgray, 199 darkgray
+54: 0 darkgray, 6-7 green, 8-15 cyan, 47-48 darkgray, 199 darkgray
+55: 0 darkgray, 6-7 green, 8-12 cyan, 47-48 darkgray, 199 darkgray
+56: 0 darkgray, 4-5 dim, 40-45 dim, 47-48 darkgray, 199 darkgray
+57: 0 darkgray, 47-48 darkgray, 199 darkgray
+58: 0-199 darkgray
+59: 1 bold, 2-12 dim, 13 bold, 14-29 dim, 30-33 bold, 34-48 dim, 49 bold, 50-64 dim, 65 bold, 66-75 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim
