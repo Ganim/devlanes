@@ -339,15 +339,18 @@ async fn started_units_without_metrics_release_at_once() {
             },
         )
         .await;
+        // Held slots would keep `b` queued for the 30 s slot timeout, so any
+        // start timeout below that tells the two apart; loaded runners have
+        // taken 2 s per spawn.
         let started: StartResult = serde_json::from_value(
-            h.call(Method::Start, json!({"timeout_ms": 5000}), cx(&main))
+            h.call(Method::Start, json!({"timeout_ms": 20_000}), cx(&main))
                 .await
                 .expect("start"),
         )
         .expect("start result");
         assert!(started.ready && !started.timed_out, "{started:?}");
         assert_eq!(started.started.len(), 3);
-        let drained = eventually(Duration::from_secs(2), || async {
+        let drained = eventually(Duration::from_secs(10), || async {
             (gate.snapshot().in_flight == 0).then_some(())
         })
         .await;

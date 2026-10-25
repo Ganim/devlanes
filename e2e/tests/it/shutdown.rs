@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use devlanes_e2e::{Lab, Result, alive, lane, listening, pid, port, unit};
+use devlanes_e2e::{Lab, Result, alive, lane, listening, pid, port, start_time, unit};
 use serde_json::json;
 
 use crate::{BUDGET, need, units_in};
@@ -82,6 +82,9 @@ fn sigterm_stops_units_without_lane_stop_tasks() -> Result<()> {
 fn daemon_restart_brings_back_what_ran() -> Result<()> {
     let lab = Lab::with_config(CONFIG, BUDGET)?;
     let (api, _) = start(&lab)?;
+    // Windows hands a freed PID to the next process soon, so "the old run
+    // stopped" means no process with this PID and start time.
+    let api_started = need(start_time(api), "api start time")?;
     let daemon = need(lab.daemon_pid()?, "daemon pid")?;
     let restarted = lab.json(lab.repo(), &["daemon", "restart", "--yes"])?;
     let resumed = restarted["resumed"].as_array().cloned().unwrap_or_default();
@@ -92,7 +95,10 @@ fn daemon_restart_brings_back_what_ran() -> Result<()> {
         json!(["fixture-shutdown@0:api"]),
         "{restarted}"
     );
-    assert!(!alive(api), "the old run (pid {api}) stopped");
+    assert!(
+        !alive(api) || start_time(api).as_deref() != Some(api_started.as_str()),
+        "the old run (pid {api}) stopped"
+    );
     let lanes = lab.lanes(lab.repo())?;
     let zero = need(lane(&lanes, "fixture-shutdown@0"), "lane 0")?;
     assert_eq!(units_in(zero, "ready"), ["api"], "{zero}");

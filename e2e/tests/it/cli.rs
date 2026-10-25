@@ -470,7 +470,9 @@ fn agent_output_starts_with_stable_words() -> Result<()> {
     );
 
     let failed = agent(&["--timeout", "30s", "start", "crash"])?;
-    failed.expect_code(1)?;
+    // A panic, unlike an error, prints the daemon log, which says where a
+    // start that timed out waited (seen once on macOS).
+    assert_eq!(failed.code, Some(1), "{failed}");
     let first = body(&failed.stdout);
     assert!(
         first.first().is_some_and(|l| l.starts_with("failed crash")),

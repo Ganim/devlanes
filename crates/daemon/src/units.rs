@@ -1076,6 +1076,10 @@ mod tests {
 
     /// Bound for each awaited step; a lost exit shows up as a timeout, not a hang.
     const STEP: Duration = Duration::from_secs(5);
+    /// Bound for a cleanup stop, which also waits for the log to close (a disk
+    /// flush). Below the default stop timeout plus [`STOP_MARGIN`], so a lost
+    /// exit still fails instead of being settled by the overdue path.
+    const STOP: Duration = Duration::from_secs(15);
 
     /// A unit that exits on its own after `natural`, or when stopped, whichever is first.
     /// `hang` makes `wait` never return, like a runner whose exit report got lost.
@@ -1263,7 +1267,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(host.tail(10).await, ["hello", "prompt> "]);
-        tokio::time::timeout(STEP, host.stop(StopPolicy::default()))
+        // A real unit's output closes with its exit; a sender kept here would
+        // make the stop wait out the pump drain.
+        drop(output);
+        tokio::time::timeout(STOP, host.stop(StopPolicy::default()))
             .await
             .expect("stop is bounded")
             .expect("stop succeeds");
@@ -1420,7 +1427,8 @@ mod tests {
         })
         .await
         .expect("a pipe resize is a no-op");
-        tokio::time::timeout(STEP, host.stop(StopPolicy::default()))
+        drop(output);
+        tokio::time::timeout(STOP, host.stop(StopPolicy::default()))
             .await
             .expect("stop is bounded")
             .expect("stop succeeds");

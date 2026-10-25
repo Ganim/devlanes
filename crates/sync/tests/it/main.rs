@@ -208,11 +208,12 @@ async fn follows_create_modify_delete() {
     eventually("dir create", || d.dst.join("dir/sub/b.txt").exists()).await;
     fs::remove_dir_all(d.src.join("dir")).expect("rm -r");
     eventually("dir delete", || !d.dst.join("dir").exists()).await;
+    // The files are gone from the target before the pass that removed them
+    // ends and publishes its counts.
+    eventually("status counts the deletion", || handle.status().files == 1).await;
 
     assert_eq!(read(&d.dst.join("keep.txt")).as_deref(), Some("keep"));
-    let status = handle.status();
-    assert_eq!(status.files, 1);
-    assert!(status.removed >= 3);
+    assert!(handle.status().removed >= 3);
     handle.stop().await;
 }
 
