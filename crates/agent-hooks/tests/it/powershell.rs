@@ -60,10 +60,22 @@ fn blocks_backgrounded_dev_servers_in_powershell() {
             "{command}"
         );
     }
+    // The whole call runs in the background, so waiting inside it does not help.
+    for command in [
+        "pnpm dev",
+        "Start-Process npm -ArgumentList 'run','dev' -Wait",
+        "cmd /c start /wait pnpm dev",
+    ] {
+        assert_eq!(
+            verdict(&project, &home, command, true),
+            Verdict::Block,
+            "run_in_background: {command}"
+        );
+    }
     assert_eq!(
-        verdict(&project, &home, "pnpm dev", true),
-        Verdict::Block,
-        "run_in_background"
+        verdict(&project, &home, "Start-Process npm 'run dev' -WhatIf", true),
+        Verdict::Allow,
+        "-WhatIf starts nothing"
     );
     let other = tmp.path().join("other");
     for command in [

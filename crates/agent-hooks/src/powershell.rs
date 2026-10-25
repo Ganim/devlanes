@@ -359,7 +359,7 @@ fn command_blocks(
             change_dir(rest, dir, home);
             false
         }
-        "start-process" | "saps" | "start" => start_process(rest, dir, home),
+        "start-process" | "saps" | "start" => start_process(rest, detached, dir, home),
         "start-job" | "sajb" | "start-threadjob" => {
             let dir = job_directory(rest, dir, home);
             blocks
@@ -377,13 +377,15 @@ fn command_blocks(
 }
 
 /// `Start-Process` returns at once unless `-Wait` (`-Wait:$false` does not
-/// wait), and starts nothing with `-WhatIf`. The program is `-FilePath`, else
-/// the first positional argument; `-ArgumentList` and the other positional
+/// wait), and starts nothing with `-WhatIf`. With `-Wait` it still counts
+/// when `detached` holds, since the whole call runs in the background. The
+/// program is `-FilePath`, else the first positional argument;
+/// `-ArgumentList` and the other positional
 /// arguments are its arguments, and it runs in `-WorkingDirectory`, else
 /// `dir`. Parameters come in any order, with PowerShell's aliases and
 /// unambiguous prefixes. A word that names no `Start-Process` parameter, such
 /// as `--watch`, is an argument. Opening a URL starts a browser, not a server.
-fn start_process(args: &[Arg], dir: &Path, home: Option<&Path>) -> bool {
+fn start_process(args: &[Arg], detached: bool, dir: &Path, home: Option<&Path>) -> bool {
     let mut groups = array_groups(args).into_iter();
     let (mut file_path, mut working_directory) = (None, None);
     let mut arguments = Vec::new();
@@ -413,10 +415,10 @@ fn start_process(args: &[Arg], dir: &Path, home: Option<&Path>) -> bool {
                 };
                 match parameter.name {
                     "wait" | "whatif" => {
-                        if !value
+                        let on = !value
                             .first()
-                            .is_some_and(|value| matches!(*value, "$false" | "0"))
-                        {
+                            .is_some_and(|value| matches!(*value, "$false" | "0"));
+                        if on && (parameter.name == "whatif" || !detached) {
                             return false;
                         }
                     }
@@ -578,9 +580,10 @@ fn job_directory(args: &[Arg], dir: &Path, home: Option<&Path>) -> PathBuf {
         .map_or_else(|| dir.to_path_buf(), |value| moved(dir, value, home))
 }
 
-/// `cmd /c COMMAND` (or `/k`). cmd's `start` returns at once unless `/wait`,
-/// and runs in `/d DIR`, else `dir`; any other command runs in the foreground
-/// of the PowerShell command around it.
+/// `cmd /c COMMAND` (or `/k`). cmd's `start` returns at once unless `/wait`
+/// (which still counts when `detached` holds), and runs in `/d DIR`, else
+/// `dir`; any other command runs in the foreground of the PowerShell command
+/// around it.
 fn cmd(args: &[&str], detached: bool, dir: &Path) -> bool {
     let Some(at) = args
         .iter()
@@ -605,7 +608,9 @@ fn cmd(args: &[&str], detached: bool, dir: &Path) -> bool {
         if !target.is_empty() || !arg.starts_with('/') {
             target.push(arg);
         } else if arg.eq_ignore_ascii_case("/wait") {
-            return false;
+            if !detached {
+                return false;
+            }
         } else if arg.eq_ignore_ascii_case("/d")
             && let Some((value, _)) = rest.next()
         {
