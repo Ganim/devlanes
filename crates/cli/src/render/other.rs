@@ -864,6 +864,7 @@ fn fact_checks(data: &Value) -> Vec<Check> {
     });
     checks.extend(elevation_checks(data));
     checks.extend(shell_checks(&data["shell"]));
+    checks.extend(wsl_checks(data));
     // Docker is the daemon's to ask; without one there is nothing to say.
     if data.get("infra").is_some() {
         checks.extend(docker_checks(data));
@@ -897,6 +898,81 @@ fn fact_checks(data: &Value) -> Vec<Check> {
     checks.extend(reserved_port_checks(&data["reserved_ports"]));
     checks.extend(service_checks(data));
     checks.extend(tls_and_hosts_checks(data, running));
+    checks
+}
+
+/// The WSL distro this CLI runs in (`wsl`: `{distro, version, interop,
+/// systemd}`, added by the CLI inside WSL only) and what it changes: interop
+/// off, no systemd for `daemon install`, a CA that browsers on Windows do not
+/// trust because `tls.trust` leaves out `windows`, and worktrees on Windows
+/// drives (`windows_drive_worktrees`, from the daemon).
+fn wsl_checks(data: &Value) -> Vec<Check> {
+    let wsl = &data["wsl"];
+    if !wsl.is_object() {
+        return Vec::new();
+    }
+    let interop = wsl.get("interop").and_then(Value::as_bool) == Some(true);
+    let name = match wsl.get("distro").and_then(Value::as_str) {
+        Some(distro) => format!("WSL {} ({})", display_value(&wsl["version"]), clean(distro)),
+        None => format!("WSL {}", display_value(&wsl["version"])),
+    };
+    let restart = words::WSL_RESTART;
+    let mut checks = vec![if interop {
+        Check::new("wsl", Outcome::Ok, format!("{name}, Windows interop on"))
+    } else {
+        Check::new(
+            "wsl",
+            Outcome::Skip,
+            format!(
+                "{name}, Windows interop off: devlanes cannot open URLs in Windows or trust the CA there"
+            ),
+        )
+        .fix(format!(
+            "set enabled=true under [interop] in /etc/wsl.conf, {restart}"
+        ))
+    }];
+    if wsl.get("systemd").and_then(Value::as_bool) == Some(false) {
+        checks.push(
+            Check::new(
+                "wsl",
+                Outcome::Skip,
+                "systemd is not running in this distro, so devlanes daemon install cannot start the daemon with it",
+            )
+            .fix(format!(
+                "set systemd=true under [boot] in /etc/wsl.conf, {restart}"
+            )),
+        );
+    }
+    let ca = &data["ca"];
+    let windows_listed = list(ca, "trust")
+        .iter()
+        .any(|entry| text(entry, "store") == "windows");
+    if interop && ca.get("present").and_then(Value::as_bool) == Some(true) && !windows_listed {
+        checks.push(
+            Check::new(
+                "wsl",
+                Outcome::Skip,
+                "browsers on Windows do not trust the CA: tls.trust leaves out windows",
+            )
+            .fix("add windows to tls.trust in ~/.devlanes/config.yaml, then devlanes certs trust"),
+        );
+    }
+    for worktree in list(data, "windows_drive_worktrees") {
+        checks.push(
+            Check::new(
+                "wsl",
+                Outcome::Skip,
+                format!(
+                    "{} is on the Windows drive {} ({}): {}",
+                    text(worktree, "lane"),
+                    text(worktree, "drive"),
+                    text(worktree, "path"),
+                    words::WINDOWS_DRIVE_COST
+                ),
+            )
+            .fix("move the repository to the Linux filesystem, for example ~/src"),
+        );
+    }
     checks
 }
 

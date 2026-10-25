@@ -20,6 +20,8 @@ devlanes-config = { path = "../config" }
 # Path comparison for the lane that holds the working directory.
 devlanes-core = { path = "../core" }
 devlanes-proto = { path = "../proto" }
+# The `o` key opens URLs with the same opener as `devlanes url open`.
+devlanes-sys = { path = "../sys" }
 devlanes-term = { path = "../term" }
 futures-util.workspace = true
 # daemon.log timestamps shown in local time.

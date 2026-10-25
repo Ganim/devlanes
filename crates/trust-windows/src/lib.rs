@@ -79,14 +79,15 @@ impl WindowsTrust {
     /// The store for `target`; mobile targets are [`TrustError::Unsupported`].
     pub fn store(&self, target: TrustTarget) -> Result<Box<dyn TrustStore>, TrustError> {
         match target {
-            TrustTarget::System | TrustTarget::Chrome | TrustTarget::Firefox => {
-                Ok(Box::new(UserRootStore {
-                    root: self.root.clone(),
-                    disallowed: self.disallowed.clone(),
-                    target,
-                    subject: self.subject.clone(),
-                }))
-            }
+            TrustTarget::System
+            | TrustTarget::Chrome
+            | TrustTarget::Firefox
+            | TrustTarget::Windows => Ok(Box::new(UserRootStore {
+                root: self.root.clone(),
+                disallowed: self.disallowed.clone(),
+                target,
+                subject: self.subject.clone(),
+            })),
             TrustTarget::IosSimulator | TrustTarget::AndroidEmulator => {
                 Err(TrustError::Unsupported { target })
             }
@@ -387,7 +388,8 @@ mod tests {
         assert!(matches!(error, TrustError::Io { .. }), "{error:?}");
     }
 
-    /// Mobile targets are refused; the browser targets share one store.
+    /// Mobile targets are refused; the browser targets and `windows` share one
+    /// store.
     #[test]
     fn targets_share_the_user_root_store() {
         let trust = WindowsTrust::default();
@@ -395,6 +397,7 @@ mod tests {
             TrustTarget::System,
             TrustTarget::Chrome,
             TrustTarget::Firefox,
+            TrustTarget::Windows,
         ] {
             let store = trust.store(target).expect("store");
             assert_eq!(store.id(), STORE_ID);

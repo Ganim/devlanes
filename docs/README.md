@@ -20,6 +20,7 @@ Start with [getting started](getting-started.md). The two references are generat
 - [Terminals](guides/terminals.md): tab progress bars, clipboard.
 - [Remote setup](guides/remote-setup.md): preparing a box and a client for `devlanes remote connect`.
 - [Windows](guides/windows.md): requirements, Git for Windows' shell, stops, ports, HTTPS, hostnames and logon start on Windows 11.
+- [WSL](guides/wsl.md): devlanes inside a WSL distro with the browser on Windows: trusting the CA in Windows, opening URLs, systemd, worktrees on Windows drives.
 
 ## Other
 

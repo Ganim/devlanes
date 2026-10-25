@@ -910,15 +910,12 @@ async fn pump_attach(
     deliver(&sender, Msg::AttachClosed { generation }).await;
 }
 
-/// Hands a URL to the desktop's opener.
+/// Hands a URL to the desktop's opener, or inside WSL to the Windows browser.
 #[cfg(unix)]
 fn open_url(url: &str) -> io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let program = "open";
-    #[cfg(not(target_os = "macos"))]
-    let program = "xdg-open";
-    let status = std::process::Command::new(program)
-        .arg(url)
+    let opener = devlanes_sys::url_opener(url);
+    let status = std::process::Command::new(&opener.program)
+        .args(&opener.args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -926,7 +923,10 @@ fn open_url(url: &str) -> io::Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(io::Error::other(format!("{program} exited with {status}")))
+        Err(io::Error::other(format!(
+            "{} exited with {status}",
+            opener.program.display()
+        )))
     }
 }
 

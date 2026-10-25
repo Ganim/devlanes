@@ -23,5 +23,8 @@ devlanes-sys-windows = { path = "../sys-windows" }
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { version = "1", features = ["fs", "process", "pty", "std"] }

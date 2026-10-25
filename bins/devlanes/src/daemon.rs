@@ -536,6 +536,22 @@ pub async fn install(runtime: &Runtime) -> Result<u8, RpcError> {
         .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))?;
     crate::user_config::load(&paths).await?;
     let manager = Manager::current();
+    // WSL distros run without systemd unless wsl.conf turns it on; the unit
+    // written then would never start. Native Linux keeps systemctl's own error.
+    let wsl = tokio::task::spawn_blocking(|| devlanes_sys::wsl().cloned())
+        .await
+        .ok()
+        .flatten();
+    if manager == Manager::Systemd
+        && let Some(wsl) = wsl
+        && !wsl.systemd
+    {
+        return Err(RpcError::new(
+            "wsl_systemd_off",
+            json!({"distro": wsl.distro}),
+            1,
+        ));
+    }
     let path = manager.path(&user_home()?);
     let contents = manager.definition(&exe, &paths.home);
     let previous = tokio::fs::read_to_string(&path).await.ok();

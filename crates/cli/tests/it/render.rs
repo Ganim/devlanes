@@ -758,6 +758,86 @@ fn doctor_words_reserved_port_ranges() {
     );
 }
 
+/// Inside WSL the CLI adds `wsl` and the daemon `windows_drive_worktrees`:
+/// interop on passes; no systemd, a `tls.trust` without `windows` and a
+/// worktree on a Windows drive warn, and doctor still exits 0.
+#[test]
+fn doctor_inside_wsl() {
+    let data = json!({
+        "running": false,
+        "ca": {"present": true, "kind": "devlanes", "path": "/home/u/.devlanes/ca/ca.pem",
+               "trust": [{"store": "system", "state": "trusted"}]},
+        "wsl": {"distro": "Ubuntu", "version": 2, "interop": true, "systemd": false},
+        "windows_drive_worktrees": [{"lane": "acme@2", "path": "/mnt/c/src/acme", "drive": "C:\\"}],
+    });
+    let text = render_text(Method::Doctor, &data);
+    insta::assert_snapshot!("render_doctor_inside_wsl", text);
+    assert!(text.contains("--- plain (exit 0)"), "{text}");
+
+    // Interop off on WSL 1 without a distro name; `windows` listed, systemd on.
+    let mut quiet = data.clone();
+    quiet["wsl"] = json!({"distro": null, "version": 1, "interop": false, "systemd": true});
+    quiet["ca"]["trust"] = json!([{"store": "windows", "state": "untrusted"}]);
+    quiet["windows_drive_worktrees"] = json!([]);
+    let text = render_text(Method::Doctor, &quiet);
+    assert!(
+        text.contains("warn wsl: WSL 1, Windows interop off"),
+        "{text}"
+    );
+    assert!(
+        text.contains("fail tls: CA not trusted by windows"),
+        "{text}"
+    );
+    for absent in ["leaves out windows", "systemd", "Windows drive"] {
+        assert!(!text.contains(absent), "{absent}: {text}");
+    }
+
+    // Native Linux: no wsl facts, no wsl group.
+    let mut native = data;
+    let map = native.as_object_mut().expect("object");
+    map.remove("wsl");
+    map.remove("windows_drive_worktrees");
+    let text = render_text(Method::Doctor, &native);
+    assert!(!text.to_ascii_lowercase().contains("wsl"), "{text}");
+}
+
+/// The WSL start warning and the `daemon install` refusal name the fix.
+#[test]
+fn wsl_warning_and_error_are_worded() {
+    let event = Event {
+        seq: 1,
+        event: "lane.warning".into(),
+        data: json!({"lane": "acme@2", "code": "windows_drive", "data": {
+            "lane": "acme@2", "path": "/mnt/c/src/acme", "drive": "C:\\",
+        }}),
+    };
+    let line = runtime(OutputMode::Agent)
+        .reporter()
+        .event(Method::Subscribe, &event)
+        .expect("event")
+        .stdout;
+    assert_eq!(
+        line,
+        "warn acme@2: /mnt/c/src/acme is on the Windows drive C:\\: file access is slow and file watching misses edits made from Windows; move the repository to the Linux filesystem, for example ~/src\n"
+    );
+    let error = RpcError::new("wsl_systemd_off", json!({"distro": "Ubuntu"}), 1);
+    let rendered = runtime(OutputMode::Agent).reporter().error(&error, None);
+    assert!(
+        rendered
+            .stderr
+            .contains("systemd is not running in this WSL distro"),
+        "{}",
+        rendered.stderr
+    );
+    assert!(
+        rendered
+            .stderr
+            .contains("set systemd=true under [boot] in /etc/wsl.conf"),
+        "{}",
+        rendered.stderr
+    );
+}
+
 #[test]
 /// `daemon stop` names what it stopped and the `lane.stop` tasks that failed.
 fn daemon_stop_reports_units_and_failed_tasks() {

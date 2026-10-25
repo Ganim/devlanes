@@ -970,6 +970,8 @@ pub mod events {
     /// `{lane, code, data}` for advice that never blocks a start. Code
     /// `memory_baseline`: `{peak_memory_bytes, available_memory_bytes, units}` when
     /// the units being started usually peak above the memory available now.
+    /// Code `windows_drive`: `{lane, path, drive}` inside WSL when the worktree
+    /// is on a Windows drive such as `C:\`.
     pub const LANE_WARNING: &str = "lane.warning";
     /// `{stream_id, code, dropped_frames, dropped_bytes}`, sent only to the attached
     /// connection, when its terminal input was discarded. Code `input_overflow`:

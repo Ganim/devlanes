@@ -813,7 +813,7 @@
         },
         "trust": {
           "default": [],
-          "description": "Stores `devlanes certs trust` installs the CA into and `certs untrust` removes it from; an empty list means `[system]`. On Linux, browsers do not read the system store, so add `chrome` and `firefox` there; `devlanes doctor` shows each store's state.",
+          "description": "Stores `devlanes certs trust` installs the CA into and `certs untrust` removes it from; an empty list means `[system]`. On Linux, browsers do not read the system store, so add `chrome` and `firefox` there; inside WSL add `windows` for browsers on Windows. `devlanes doctor` shows each store's state.",
           "examples": [
             [
               "system",
@@ -821,6 +821,10 @@
             ],
             [
               "chrome"
+            ],
+            [
+              "system",
+              "windows"
             ]
           ],
           "items": {
@@ -830,12 +834,13 @@
               "system",
               "firefox",
               "chrome",
+              "windows",
               "ios-simulator",
               "android-emulator"
             ],
             "markdownDescription": "Certificate store that `devlanes certs trust` installs the CA into."
           },
-          "markdownDescription": "Stores `devlanes certs trust` installs the CA into and `certs untrust` removes it from; an empty list means `[system]`. On Linux, browsers do not read the system store, so add `chrome` and `firefox` there; `devlanes doctor` shows each store's state.",
+          "markdownDescription": "Stores `devlanes certs trust` installs the CA into and `certs untrust` removes it from; an empty list means `[system]`. On Linux, browsers do not read the system store, so add `chrome` and `firefox` there; inside WSL add `windows` for browsers on Windows. `devlanes doctor` shows each store's state.",
           "type": "array"
         }
       },
@@ -847,6 +852,7 @@
         "system",
         "firefox",
         "chrome",
+        "windows",
         "ios-simulator",
         "android-emulator"
       ],
@@ -854,6 +860,7 @@
         "The OS store: the login keychain on macOS, read by Safari, Chrome, Edge and `/usr/bin/curl`; on Linux, the distribution's CA anchors, updated through sudo.",
         "Every Firefox profile's certificate database, through `certutil` from the NSS tools (`brew install nss`, or `libnss3-tools` / `nss-tools` on Linux).",
         "The store Chrome and Chromium read: `~/.pki/nssdb` through `certutil` on Linux, the same login keychain as `system` on macOS.",
+        "The Windows user root store, read by Edge, Chrome and Firefox on Windows. For devlanes inside WSL, whose browser usually runs on Windows: it runs Windows' `certutil.exe` through interop, and Windows asks you to confirm each change. On Windows it is the same store as `system`; on macOS and Linux outside WSL `certs trust` reports it as unavailable.",
         "Reserved for the iOS simulator; not supported yet, so it is dropped with a warning.",
         "Reserved for the Android emulator; not supported yet, so it is dropped with a warning."
       ],
@@ -861,6 +868,7 @@
         "system",
         "firefox",
         "chrome",
+        "windows",
         "ios-simulator",
         "android-emulator"
       ],
@@ -869,6 +877,7 @@
         "The OS store: the login keychain on macOS, read by Safari, Chrome, Edge and `/usr/bin/curl`; on Linux, the distribution's CA anchors, updated through sudo.",
         "Every Firefox profile's certificate database, through `certutil` from the NSS tools (`brew install nss`, or `libnss3-tools` / `nss-tools` on Linux).",
         "The store Chrome and Chromium read: `~/.pki/nssdb` through `certutil` on Linux, the same login keychain as `system` on macOS.",
+        "The Windows user root store, read by Edge, Chrome and Firefox on Windows. For devlanes inside WSL, whose browser usually runs on Windows: it runs Windows' `certutil.exe` through interop, and Windows asks you to confirm each change. On Windows it is the same store as `system`; on macOS and Linux outside WSL `certs trust` reports it as unavailable.",
         "Reserved for the iOS simulator; not supported yet, so it is dropped with a warning.",
         "Reserved for the Android emulator; not supported yet, so it is dropped with a warning."
       ],

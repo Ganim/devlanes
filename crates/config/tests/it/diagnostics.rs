@@ -385,6 +385,10 @@ fn deferred_trust_targets_warn() {
     let user = parse_user("tls:\n  trust: [system, ios-simulator, android-emulator]\n")
         .expect("deferred targets are ignored");
     assert_eq!(user.tls.trust, [TrustTarget::System]);
+    // The opt-in Windows store is kept as written.
+    let wsl = parse_user("tls:\n  trust: [system, windows]\n").expect("windows target");
+    assert_eq!(wsl.tls.trust, [TrustTarget::System, TrustTarget::Windows]);
+    assert!(wsl.warnings().is_empty());
     let paths: Vec<_> = user.warnings().iter().map(|w| w.path.as_str()).collect();
     assert_eq!(paths, ["tls.trust.1", "tls.trust.2"]);
     assert!(user.warnings()[0].message.contains("not supported yet"));

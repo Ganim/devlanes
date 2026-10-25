@@ -1,6 +1,6 @@
 # Windows
 
-devlanes runs natively on Windows 11 24H2 (build 26100) or later, on x64 and arm64. The daemon, its units, the proxy and the CA all live on Windows, and the CLI works from PowerShell, cmd and Git Bash. This page covers what differs from macOS and Linux; everything else in the other guides applies unchanged.
+devlanes runs natively on Windows 11 24H2 (build 26100) or later, on x64 and arm64. The daemon, its units, the proxy and the CA all live on Windows, and the CLI works from PowerShell, cmd and Git Bash. This page covers what differs from macOS and Linux; everything else in the other guides applies unchanged. To run the Linux build inside a WSL distro instead, see [WSL](wsl.md).
 
 ## Requirements
 
@@ -107,7 +107,7 @@ With `proxy.lan: true` the proxy listens on every address, and Windows Defender 
 devlanes certs trust
 ```
 
-adds the CA to your user root store (`Cert:\CurrentUser\Root`). Chrome and Edge read that store, and Firefox 120 and later reads it through `security.enterprise_roots.enabled`, so the `system`, `chrome` and `firefox` targets of `tls.trust` all mean that one store. It needs no administrator rights, but Windows shows a security warning for each change, which you confirm with Yes; `devlanes certs untrust` asks again. Over SSH, or anywhere without a desktop, the command fails before any change and says to run it from a desktop session. A CA that an administrator trusted for every user counts as trusted, and one listed under Untrusted Certificates (`Disallowed`) counts as missing.
+adds the CA to your user root store (`Cert:\CurrentUser\Root`). Chrome and Edge read that store, and Firefox 120 and later reads it through `security.enterprise_roots.enabled`, so the `system`, `chrome`, `firefox` and `windows` targets of `tls.trust` all mean that one store. (`windows` exists for devlanes inside WSL, where it reaches this store from the distro; see [WSL](wsl.md).) It needs no administrator rights, but Windows shows a security warning for each change, which you confirm with Yes; `devlanes certs untrust` asks again. Over SSH, or anywhere without a desktop, the command fails before any change and says to run it from a desktop session. A CA that an administrator trusted for every user counts as trusted, and one listed under Untrusted Certificates (`Disallowed`) counts as missing.
 
 Units get the CA through `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and the other variables in [hostnames and HTTPS](https.md#programs-started-by-devlanes). `%USERPROFILE%\.devlanes\ca\bundle.pem` holds Mozilla's roots, the roots of your Windows store that are valid for servers (minus `Disallowed`) and the devlanes CA. Windows downloads most public roots only when a program first needs them, so its store alone would miss many. For tools you run yourself:
 

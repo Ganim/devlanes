@@ -18,13 +18,13 @@ async fn trust(store: &dyn TrustStore, ca_pem: &str) -> Result<TrustStatus, Trus
 ## API
 
 - `TrustStore`: `install`, `uninstall` and `status` for one store. Repeating an install or removing an absent CA succeeds without changes.
-- `TrustTarget`: the `tls.trust` names (`system`, `firefox`, `chrome`, `ios-simulator`, `android-emulator`).
+- `TrustTarget`: the `tls.trust` names (`system`, `firefox`, `chrome`, `windows`, `ios-simulator`, `android-emulator`).
 - `TrustStatus`: `Installed`, `Missing` or `Unknown { reason }`.
 - `CaCertificate`: the public CA plus the name stores file it under. It keeps only the first certificate of the PEM, so a key in the input never reaches a store. `is_name_constrained` tells an older, unconstrained devlanes CA apart.
 - `find_system_program`: absolute path of a root-run tool from the system directories, never `PATH`. On Windows it looks only in System32, for `.exe` and `.com` files.
 - `CommandExecutor` and `SystemExecutor`: every external command goes through this trait. The `fake` feature adds `fake::FakeExecutor`, which records argv for tests.
 - `nss::NssStore`: Firefox profiles or a shared NSS database, changed through `certutil`.
-- `TrustError`: typed failures, including `Unsupported`, `ToolMissing { hint }` and `InteractionRequired`.
+- `TrustError`: typed failures, including `Unsupported`, `Unavailable`, `ToolMissing { hint }` and `InteractionRequired`.
 
 ## Config example
 
@@ -41,7 +41,7 @@ Without `tls.trust`, `devlanes certs trust` uses only the `system` store.
 
 Trust changes run in the CLI process because they prompt for a password. The daemon never calls a `TrustStore`.
 
-`ios-simulator` and `android-emulator` are not supported in v1 and always return `TrustError::Unsupported`.
+`ios-simulator` and `android-emulator` are not supported in v1 and always return `TrustError::Unsupported`. `windows` is the Windows user root store, which `devlanes-trust-linux` reaches from WSL; elsewhere it is `TrustError::Unavailable`.
 
 NSS stores need `certutil`. When it is missing they fail with `ToolMissing` and an install hint, and `status` reports `Unknown`.
 

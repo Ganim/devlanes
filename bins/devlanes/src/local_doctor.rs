@@ -82,6 +82,27 @@ async fn reserved_ports(config: &Path) -> Value {
     devlanes_daemon::reserved_ports::report(&reading, pool, &[], proxy, &Default::default())
 }
 
+/// Adds `wsl` (`{distro, version, interop, systemd}`) to doctor `data` when
+/// this CLI runs inside WSL; outside WSL `data` is left as it is. The CLI checks
+/// this, not the daemon: a daemon started by systemd has no distro name.
+pub async fn add_wsl(data: &mut Value) {
+    let wsl = tokio::task::spawn_blocking(|| devlanes_sys::wsl().cloned())
+        .await
+        .ok()
+        .flatten();
+    if let (Some(wsl), Some(data)) = (wsl, data.as_object_mut()) {
+        data.insert(
+            "wsl".into(),
+            json!({
+                "distro": wsl.distro,
+                "version": wsl.version,
+                "interop": wsl.interop,
+                "systemd": wsl.systemd,
+            }),
+        );
+    }
+}
+
 /// `{path, private, mode?}` for the devlanes home: the client refuses another
 /// user's or a symlinked home, and the daemon tightens an open one to 0700.
 #[cfg(unix)]

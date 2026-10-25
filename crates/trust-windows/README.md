@@ -1,6 +1,6 @@
 # devlanes-trust-windows
 
-Windows implementation of `devlanes-trust`: the current user's `Root` certificate store for the `system`, `chrome` and `firefox` targets, plus the roots of `bundle.pem`. The composition root registers it on Windows; the CLI uses the store for `devlanes certs trust`, and the daemon calls `bundle_roots` when it writes the CA bundle.
+Windows implementation of `devlanes-trust`: the current user's `Root` certificate store for the `system`, `chrome`, `firefox` and `windows` targets, plus the roots of `bundle.pem`. The composition root registers it on Windows; the CLI uses the store for `devlanes certs trust`, and the daemon calls `bundle_roots` when it writes the CA bundle.
 
 ## Usage
 
@@ -22,7 +22,7 @@ fn bundle(own_der: &[u8]) -> String {
 ## API
 
 - `WindowsTrust`: builds the store for each `TrustTarget`. `with_stores` points it at other CurrentUser stores, which tests use for scratch stores.
-- `STORE_ID`: shared by `system`, `chrome` and `firefox`, so the CLI changes the store once per command.
+- `STORE_ID`: shared by `system`, `chrome`, `firefox` and `windows`, so the CLI changes the store once per command.
 - `bundle_roots`: Mozilla's roots plus the usable roots of the Windows store, minus `Disallowed` and the devlanes CA.
 
 ## Behaviour

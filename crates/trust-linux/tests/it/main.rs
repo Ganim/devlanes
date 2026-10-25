@@ -332,6 +332,162 @@ async fn missing_certutil_has_package_hint() {
     ));
 }
 
+const CERTUTIL_EXE: &str = "/mnt/c/Windows/System32/certutil.exe";
+const WSLPATH: &str = "/usr/bin/wslpath";
+
+/// A fake Windows user root store: `certutil.exe` answers lookups, adds and
+/// deletes as Windows does (adds answer `add`), and `wslpath -w` maps paths
+/// below `\\wsl.localhost\Ubuntu`.
+fn windows_executor(ca: &CaCertificate, add: CommandOutput) -> Arc<FakeExecutor> {
+    let present = Arc::new(Mutex::new(false));
+    let hash = ca.sha1_hex().to_ascii_lowercase();
+    Arc::new(
+        FakeExecutor::new(move |command| {
+            let args: Vec<&str> = command.args.iter().map(String::as_str).collect();
+            let mut present = present.lock().expect("lock");
+            Ok(match (command.program.as_str(), args.as_slice()) {
+                (WSLPATH, ["-w", path]) => {
+                    CommandOutput::ok(format!("\\\\wsl.localhost\\Ubuntu{}\n", path.replace('/', "\\")))
+                }
+                (CERTUTIL_EXE, ["-user", "-verifystore", "Root", _]) if *present => CommandOutput::ok(format!(
+                    "Root \"Trusted Root Certification Authorities\"\nCert Hash(sha1): {hash}\nCertUtil: -verifystore command completed successfully.\n"
+                )),
+                (CERTUTIL_EXE, ["-user", "-verifystore", "Root", _]) => CommandOutput {
+                    code: Some(17),
+                    stdout: "CertUtil: -verifystore command FAILED: 0x80090011 (-2146893807 NTE_NOT_FOUND)\n".into(),
+                    stderr: String::new(),
+                },
+                (CERTUTIL_EXE, ["-user", "-addstore", "Root", file]) => {
+                    assert!(file.starts_with("\\\\wsl.localhost\\Ubuntu\\"), "{file}");
+                    *present = add.success();
+                    add.clone()
+                }
+                (CERTUTIL_EXE, ["-user", "-delstore", "Root", _]) => {
+                    *present = false;
+                    CommandOutput::ok("CertUtil: -delstore command completed successfully.\n")
+                }
+                _ => CommandOutput::failed(1, "unexpected command"),
+            })
+        })
+        .with_programs(&[WSLPATH]),
+    )
+}
+
+/// Inside WSL the `windows` target looks up, adds and deletes the CA in the
+/// Windows user root store, by thumbprint and through `wslpath -w`.
+#[tokio::test]
+async fn windows_store_through_certutil() {
+    let home = tempfile::tempdir().expect("home");
+    let ca = ca();
+    let executor = windows_executor(
+        &ca,
+        CommandOutput::ok("CertUtil: -addstore command completed successfully.\n"),
+    );
+    let store = LinuxTrust::new(executor.clone(), home.path(), Privilege::Root)
+        .with_windows_certutil(Ok(CERTUTIL_EXE.into()))
+        .store(TrustTarget::Windows)
+        .expect("windows");
+    assert_eq!(store.id(), devlanes_trust_linux::WINDOWS_ID);
+    assert_eq!(store.target(), TrustTarget::Windows);
+    assert_eq!(
+        store.status(&ca).await.expect("status"),
+        TrustStatus::Missing
+    );
+    store.install(&ca).await.expect("install");
+    assert_eq!(
+        store.status(&ca).await.expect("status"),
+        TrustStatus::Installed
+    );
+    // Installed already: one lookup, no second add.
+    store.install(&ca).await.expect("install again");
+    store.uninstall(&ca).await.expect("uninstall");
+    store.uninstall(&ca).await.expect("uninstall again");
+    let thumbprint = ca.sha1_hex();
+    let argvs = executor.argvs();
+    let lookup = [
+        CERTUTIL_EXE,
+        "-user",
+        "-verifystore",
+        "Root",
+        thumbprint.as_str(),
+    ];
+    assert_eq!(argvs[0], lookup);
+    assert_eq!(argvs[1], lookup);
+    assert_eq!(argvs[2][..2], [WSLPATH, "-w"]);
+    assert_eq!(argvs[3][..4], [CERTUTIL_EXE, "-user", "-addstore", "Root"]);
+    assert!(argvs[3][4].ends_with(".pem"), "{:?}", argvs[3]);
+    assert_eq!(argvs[4..6], [lookup, lookup]);
+    assert_eq!(argvs[6], lookup);
+    assert_eq!(
+        argvs[7],
+        [
+            CERTUTIL_EXE,
+            "-user",
+            "-delstore",
+            "Root",
+            thumbprint.as_str()
+        ]
+    );
+    assert_eq!(argvs[8], lookup);
+    assert_eq!(argvs.len(), 9, "{argvs:?}");
+}
+
+/// A No in the Windows dialog fails the install with certutil's error name.
+#[tokio::test]
+async fn windows_store_reports_a_declined_dialog() {
+    let home = tempfile::tempdir().expect("home");
+    let ca = ca();
+    let declined = CommandOutput {
+        code: Some(1),
+        stdout: "CertUtil: -addstore command FAILED: 0x800704c7 (WIN32: 1223 ERROR_CANCELLED)\n"
+            .into(),
+        stderr: String::new(),
+    };
+    let store = LinuxTrust::new(
+        windows_executor(&ca, declined),
+        home.path(),
+        Privilege::Root,
+    )
+    .with_windows_certutil(Ok(CERTUTIL_EXE.into()))
+    .store(TrustTarget::Windows)
+    .expect("windows");
+    let error = store.install(&ca).await.expect_err("declined");
+    assert!(
+        matches!(&error, TrustError::CommandFailed { stderr, .. } if stderr.contains("ERROR_CANCELLED")),
+        "{error}"
+    );
+    assert_eq!(
+        store.status(&ca).await.expect("status"),
+        TrustStatus::Missing
+    );
+}
+
+/// Without WSL the target is unavailable; a certutil.exe that cannot start
+/// makes the status unknown with the interop hint.
+#[tokio::test]
+async fn windows_store_out_of_reach() {
+    let home = tempfile::tempdir().expect("home");
+    let executor = Arc::new(FakeExecutor::new(|_| {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    }));
+    let trust = LinuxTrust::new(executor.clone(), home.path(), Privilege::Root);
+    let native = trust
+        .with_windows_certutil(Err("this Linux is not a WSL distro".into()))
+        .store(TrustTarget::Windows);
+    assert!(matches!(
+        native,
+        Err(TrustError::Unavailable { target: TrustTarget::Windows, reason }) if reason.contains("not a WSL")
+    ));
+    let store = LinuxTrust::new(executor, home.path(), Privilege::Root)
+        .with_windows_certutil(Ok(CERTUTIL_EXE.into()))
+        .store(TrustTarget::Windows)
+        .expect("windows");
+    assert!(matches!(
+        store.status(&ca()).await.expect("status"),
+        TrustStatus::Unknown { reason } if reason.contains("interop")
+    ));
+}
+
 #[cfg(target_os = "linux")]
 mod real {
     use std::path::{Path, PathBuf};

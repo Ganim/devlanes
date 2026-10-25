@@ -76,9 +76,15 @@ impl MacosTrust {
         Ok(Self::new(Arc::new(SystemExecutor), PathBuf::from(home)))
     }
 
-    /// The store for `target`; mobile targets are [`TrustError::Unsupported`].
+    /// The store for `target`; mobile targets are [`TrustError::Unsupported`]
+    /// and `windows` is [`TrustError::Unavailable`].
     pub fn store(&self, target: TrustTarget) -> Result<Box<dyn TrustStore>, TrustError> {
         match target {
+            TrustTarget::Windows => Err(TrustError::Unavailable {
+                target,
+                reason: "only Windows and WSL distros can reach the Windows certificate store"
+                    .into(),
+            }),
             TrustTarget::System | TrustTarget::Chrome => {
                 let store =
                     KeychainStore::new(self.executor.clone(), login_keychain(&self.home), target);

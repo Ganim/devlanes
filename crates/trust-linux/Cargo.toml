@@ -12,6 +12,8 @@ publish.workspace = true
 # it on Linux. The crate is empty on Windows.
 [target.'cfg(unix)'.dependencies]
 async-trait.workspace = true
+# WSL detection and Windows' System32 for the `windows` target.
+devlanes-sys = { path = "../sys" }
 devlanes-trust = { path = "../trust" }
 rustix = { version = "1", features = ["process"] }
 tokio.workspace = true

@@ -548,6 +548,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                 let mut data = crate::local_doctor::facts(&paths).await;
                 crate::notices::annotate_doctor(None, &mut data).await;
                 data["service"] = crate::daemon::service_report().await;
+                crate::local_doctor::add_wsl(&mut data).await;
                 return render_result(runtime, Method::Doctor, &data, None);
             }
             Err(error) => return Err(rpc_error(error)),
@@ -629,6 +630,7 @@ async fn rpc(cli: &Cli, runtime: &Runtime, request: Request) -> Result<u8, RpcEr
                                 if data.is_object() {
                                     data["terminal"] = crate::local_doctor::terminal_facts();
                                 }
+                                crate::local_doctor::add_wsl(&mut data).await;
                             }
                             // The counterpart of the not-running answer's `false`.
                             if method == Method::DaemonStatus && data.is_object() {
@@ -1129,13 +1131,13 @@ async fn open_url(url: &str) -> Result<(), RpcError> {
     if url.is_empty() {
         return Err(RpcError::new("no_url", Value::Null, 3));
     }
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    tokio::process::Command::new(opener)
-        .arg(url)
+    // Inside WSL the choice reads the mount table and PATH.
+    let url_owned = url.to_owned();
+    let opener = tokio::task::spawn_blocking(move || devlanes_sys::url_opener(&url_owned))
+        .await
+        .map_err(|error| RpcError::new("open_failed", json!({"message": error.to_string()}), 1))?;
+    tokio::process::Command::new(&opener.program)
+        .args(&opener.args)
         .status()
         .await
         .map_err(|error| RpcError::new("open_failed", json!({"message": error.to_string()}), 1))?;

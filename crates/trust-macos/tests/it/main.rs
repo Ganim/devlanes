@@ -302,6 +302,13 @@ async fn targets_map_to_stores() {
             Err(TrustError::Unsupported { target: t }) if t == target
         ));
     }
+    assert!(matches!(
+        trust.store(TrustTarget::Windows),
+        Err(TrustError::Unavailable {
+            target: TrustTarget::Windows,
+            ..
+        })
+    ));
 }
 
 #[tokio::test]

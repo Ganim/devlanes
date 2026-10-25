@@ -963,7 +963,6 @@ impl Inner {
             "codex_sandbox": std::env::var_os("CODEX_SANDBOX").is_some(),
             "app_sandbox": std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some(),
         });
-        #[cfg_attr(unix, expect(unused_mut, reason = "Windows adds facts"))]
         let mut doctor = json!({
             "version": env!("CARGO_PKG_VERSION"),
             "pid": std::process::id(),
@@ -996,6 +995,10 @@ impl Inner {
             doctor["reserved_ports"] = self.reserved_ports_doctor().await;
             // `run:` strings and `ready.cmd` need Git for Windows' sh.exe.
             doctor["shell"] = json!({ "path": self.integ.shell });
+        }
+        // Inside WSL only: worktrees on Windows drives, where file watching misses edits.
+        if let Some(worktrees) = self.windows_drive_doctor().await {
+            doctor["windows_drive_worktrees"] = worktrees;
         }
         Ok(doctor)
     }

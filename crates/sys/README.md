@@ -33,6 +33,9 @@ All functions block. Call them from `spawn_blocking` in async code.
 - `listening_tcp`: TCP listeners of a set of PIDs, for diagnostics only.
 - `open_file`, `holders`: find processes that still hold a PTY slave or pipe open.
 - `raise_nofile_limit`, `child_nofile_limit`: raise the daemon's open-file limit and keep the original for children.
+- `wsl`: whether this Linux process runs in a WSL distro (distro name, WSL 1 or 2, interop, systemd), detected once from the kernel release, the WSL interop binfmt entry and `WSL_DISTRO_NAME`. A container on Docker Desktop's WSL kernel is not WSL. Always `None` on macOS.
+- `windows_drives`, `windows_system32`: the Windows drives mounted into a WSL distro, and where Windows' `System32` is among them. Empty outside WSL.
+- `url_opener`: the command that opens a URL in the user's browser: `open`, `xdg-open`, or inside WSL with interop `wslview` or Windows' `rundll32.exe`.
 - `macos` (macOS only): safe rusage, mach time, host CPU and sysctl readings for `devlanes-metrics-macos`.
 
 ## Behaviour

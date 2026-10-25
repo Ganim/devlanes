@@ -293,6 +293,13 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             "Docker isn't running or can't be reached".into(),
             Some(Hint::command(["doctor"])),
         ),
+        // `daemon install` inside WSL, before it writes a systemd unit.
+        "wsl_systemd_off" => (
+            "systemd is not running in this WSL distro, so it cannot start the daemon".into(),
+            Some(Hint(format!(
+                "set systemd=true under [boot] in /etc/wsl.conf, {WSL_RESTART}"
+            ))),
+        ),
         "timeout" => (
             match target(data) {
                 found if !found.is_empty() => format!("timed out waiting for {found}"),
@@ -1095,12 +1102,27 @@ pub(crate) fn lane_warning(code: &str, data: &Value) -> String {
             memory(data, "peak_memory_bytes"),
             memory(data, "available_memory_bytes")
         ),
+        // Inside WSL, `/mnt/<letter>` is the Windows drive `drive`.
+        "windows_drive" => format!(
+            "{} is on the Windows drive {}: {WINDOWS_DRIVE_COST}; move the repository to the Linux filesystem, for example ~/src",
+            field(data, "path"),
+            field(data, "drive")
+        ),
         other => match data.get("message").and_then(Value::as_str) {
             Some(message) => super::clean(message),
             None => super::clean(other).replace('_', " "),
         },
     }
 }
+
+/// How a change to WSL's own files takes effect, for fixes that edit them.
+pub(crate) const WSL_RESTART: &str =
+    "then run wsl.exe --shutdown from Windows and reopen the distro";
+
+/// What a worktree on a Windows drive costs inside WSL, for the start
+/// warning and `doctor`.
+pub(crate) const WINDOWS_DRIVE_COST: &str =
+    "file access is slow and file watching misses edits made from Windows";
 
 /// A `why` reason as one line, plus the command that addresses it.
 pub(crate) fn reason(code: &str, data: &Value, lane: &str, unit: &str) -> (String, Option<Hint>) {

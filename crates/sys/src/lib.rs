@@ -2,7 +2,8 @@
 //!
 //! Platform code is selected at compile time: procfs on Linux, libproc and `lsof`
 //! on macOS, `devlanes-sys-windows` on Windows. Every query is blocking; async
-//! callers should use `spawn_blocking`.
+//! callers should use `spawn_blocking`. [`wsl`] tells whether a Linux process
+//! runs inside WSL, for the few places that act differently there.
 //!
 //! ```
 //! let me = devlanes_sys::identity(std::process::id())?.expect("own process is visible");
@@ -22,6 +23,7 @@ pub use rustix::process::Signal;
 
 mod rlimit;
 mod tree;
+mod wsl;
 
 #[cfg(any(target_os = "linux", test))]
 mod procfs;
@@ -51,6 +53,9 @@ pub mod macos;
 
 pub use rlimit::{NofileLimit, child_nofile_limit, raise_nofile_limit};
 pub use tree::{DescendantTracker, session_members, session_members_known};
+pub use wsl::{
+    UrlOpener, WindowsDrive, WindowsDrives, Wsl, url_opener, windows_drives, windows_system32, wsl,
+};
 
 /// Failures reading process tables or invoking diagnostic tools.
 #[derive(Debug, thiserror::Error)]
