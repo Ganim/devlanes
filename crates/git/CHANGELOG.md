@@ -1,5 +1,11 @@
 # devlanes-git
 
+## 0.4.1 — 2026-10-26
+
+### Patch changes
+
+- [6545d4b](https://github.com/devlanes-run/devlanes/commit/6545d4bc38c1ea672a383bf1eb0c5e0077bf8adb) Fixed `git worktree move` failing with "Permission denied" on Windows while the devlanes daemon watched the repository.
+
 ## 0.4.0 — 2026-10-25
 
 ### Patch changes

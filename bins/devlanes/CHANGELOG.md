@@ -1,5 +1,17 @@
 # devlanes
 
+## 0.4.1 — 2026-10-26
+
+### Patch changes
+
+- [6545d4b](https://github.com/devlanes-run/devlanes/commit/6545d4bc38c1ea672a383bf1eb0c5e0077bf8adb) Fixed `git worktree move` failing with "Permission denied" on Windows while the devlanes daemon watched the repository.
+- [e7fccbd](https://github.com/devlanes-run/devlanes/commit/e7fccbd548210a7d6a802badcaad39c8c8d47043) Added mouse selection to the daemon log in the TUI: dragging over it copies the text on release.
+- [e7fccbd](https://github.com/devlanes-run/devlanes/commit/e7fccbd548210a7d6a802badcaad39c8c8d47043) Fixed the TUI reporting `started` when a service it started could not run, for example a command missing from PATH; the service now shows `start failed` with the reason.
+- [181698e](https://github.com/devlanes-run/devlanes/commit/181698ebbe25612c1149bb1c157857ff6acadf85) Changed `daemon status` and `doctor` on Windows to label the daemon's named pipe as `pipe` instead of `socket`.
+- [b8ce96e](https://github.com/devlanes-run/devlanes/commit/b8ce96e40a27becff2afdb4f4c934e7bb358375d) Changed the TUI's first-run hint row into a welcome popup with the main features, the first keys and a link to the docs, so the footer is always a single row of keys.
+- [e7fccbd](https://github.com/devlanes-run/devlanes/commit/e7fccbd548210a7d6a802badcaad39c8c8d47043) Changed the daemon log entry for a service that could not start to a warning that names the cause without listing every PATH directory; the service's own log still lists them.
+- [181698e](https://github.com/devlanes-run/devlanes/commit/181698ebbe25612c1149bb1c157857ff6acadf85) Added `devlanes daemon start`, which starts the daemon in the background unless it already runs and prints its status.
+
 ## 0.4.0 — 2026-10-25
 
 ### Minor changes

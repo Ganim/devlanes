@@ -1,5 +1,12 @@
 # devlanes-cli
 
+## 0.4.1 — 2026-10-26
+
+### Patch changes
+
+- [181698e](https://github.com/devlanes-run/devlanes/commit/181698ebbe25612c1149bb1c157857ff6acadf85) Changed `daemon status` and `doctor` on Windows to label the daemon's named pipe as `pipe` instead of `socket`.
+- [181698e](https://github.com/devlanes-run/devlanes/commit/181698ebbe25612c1149bb1c157857ff6acadf85) Added `devlanes daemon start`, which starts the daemon in the background unless it already runs and prints its status.
+
 ## 0.4.0 — 2026-10-25
 
 ### Minor changes

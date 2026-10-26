@@ -1,5 +1,11 @@
 # devlanes-daemon
 
+## 0.4.1 — 2026-10-26
+
+### Patch changes
+
+- [e7fccbd](https://github.com/devlanes-run/devlanes/commit/e7fccbd548210a7d6a802badcaad39c8c8d47043) Changed the daemon log entry for a service that could not start to a warning that names the cause without listing every PATH directory; the service's own log still lists them.
+
 ## 0.4.0 — 2026-10-25
 
 ### Minor changes
