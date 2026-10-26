@@ -306,6 +306,34 @@ impl Store {
         })
         .await
     }
+
+    /// [`Self::set_lane_desired_profiles`] that also replaces the services a plain
+    /// start brings back, in one update.
+    pub async fn set_lane_selection(
+        &self,
+        id: LaneId,
+        desired: DesiredState,
+        profiles: Vec<String>,
+        services: Vec<String>,
+    ) -> Result<(), Error> {
+        let profile = profiles.first().cloned();
+        let profiles = encode_profiles(&profiles)?;
+        let services = encode_profiles(&services)?;
+        self.call(move |c| {
+            require_changed(
+                diesel::update(lanes::table.find(id.0).filter(lanes::cleaned_at.is_null()))
+                    .set((
+                        lanes::desired_state.eq(desired.as_str()),
+                        lanes::profile.eq(profile),
+                        lanes::profiles.eq(profiles),
+                        lanes::services.eq(services),
+                    ))
+                    .execute(c)?,
+                "active lane",
+            )
+        })
+        .await
+    }
     /// Frees the lane's range and active index after clean phases finish, and
     /// forgets its setup records, once-only task markers and task history in the
     /// same transaction, so a failed clean leaves the lane as it was. Unit run
@@ -319,6 +347,7 @@ impl Store {
                         .set((
                             lanes::cleaned_at.eq(now()?),
                             lanes::desired_state.eq("stopped"),
+                            lanes::services.eq("[]"),
                         ))
                         .execute(c)?,
                     "lane",

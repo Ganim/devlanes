@@ -877,6 +877,8 @@ pub struct App {
     pub start_run: Option<StartRun>,
     /// `tui.on_quit`; the quit dialog's "remember" box updates it.
     pub on_quit: OnQuit,
+    /// `start.restore: false`: `s` on a lane starts its default selection.
+    pub start_default: bool,
     /// Where daemon.log times are shown: UTC until the runtime sets the
     /// system's zone, so tests draw the same everywhere.
     pub time_zone: jiff::tz::TimeZone,
@@ -961,6 +963,7 @@ impl App {
             start_error_ticks: 0,
             start_run: None,
             on_quit: OnQuit::Ask,
+            start_default: false,
             time_zone: jiff::tz::TimeZone::UTC,
             version: devlanes_version::VERSION,
             service_report: None,
@@ -4534,9 +4537,10 @@ impl App {
             ),
             RowId::Gap(_) => return,
         };
-        // `s` on the lane starts what the default profile (or autostart)
-        // selects, whatever the last start chose; `S` starts everything.
-        let profiles = if method == Method::Start && row == RowId::WholeLane {
+        // `s` on the lane brings back what it ran before, as a plain `devlanes
+        // start` does, or with `start.restore: false` its default selection;
+        // `S` starts everything.
+        let profiles = if method == Method::Start && row == RowId::WholeLane && self.start_default {
             vec![devlanes_proto::DEFAULT_PROFILE.to_owned()]
         } else {
             Vec::new()

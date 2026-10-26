@@ -38,7 +38,8 @@ use tokio_util::sync::CancellationToken;
 pub async fn tui_options(paths: &Paths) -> devlanes_tui::Options {
     use std::io::IsTerminal;
     // An invalid key leaves only that setting on its default, with a warning.
-    let tui = &crate::user_config::display(paths).tui;
+    let user = crate::user_config::display(paths);
+    let tui = &user.tui;
     // The TUI is always human output; each feature still needs a terminal
     // that supports it.
     let features = devlanes_term::Features::detect(
@@ -55,6 +56,7 @@ pub async fn tui_options(paths: &Paths) -> devlanes_tui::Options {
         theme: Some(tui.theme.as_str().to_owned()),
         glyphs: Some(tui.glyphs.as_str().to_owned()),
         on_quit: Some(tui.on_quit.as_str().to_owned()),
+        start_default: !user.start.restore,
         service: Some(crate::daemon::service_report().await).filter(|report| !report.is_null()),
         // The process's environment, zone and directory.
         env: None,

@@ -321,10 +321,12 @@ pub struct Selection {
     pub profile: Option<String>,
     /// Profiles to start together, in the order given (later env wins).
     ///
-    /// With neither `profile` nor `profiles`, `start`, `restart` and `resume` keep
-    /// the lane's profiles from its previous start. To go back to the default,
-    /// send [`DEFAULT_PROFILE`]: it selects the config's `default` profile, or
-    /// every `autostart` service when the config defines none.
+    /// With neither `units` nor profiles, `start` and `resume` bring back the
+    /// services the lane ran and nobody stopped, with its saved profiles (on a
+    /// running lane, together with what those profiles select); a lane without
+    /// saved services, such as one stopped as a whole, uses its default. To go back to the default anyway, send [`DEFAULT_PROFILE`]: it
+    /// selects the config's `default` profile, or every `autostart` service when
+    /// the config defines none.
     #[serde(default)]
     pub profiles: Vec<String>,
     #[serde(default)]
@@ -340,6 +342,11 @@ pub struct Selection {
     /// Stream the start's lane events on this request (see [`features::START_EVENTS`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub events: bool,
+    /// A short-lived `start` or `stop` (`devlanes with`): the lane's saved
+    /// profiles, services and desired state stay as they were, so the next plain
+    /// start does not bring back what this request ran.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transient: bool,
 }
 
 /// Profile name that resets a lane to its default selection (see [`Selection::profiles`]).
@@ -347,7 +354,7 @@ pub const DEFAULT_PROFILE: &str = "default";
 
 impl Selection {
     /// Requested profiles: `profile` first, then `profiles`, without repeats and
-    /// blank names. Empty means "keep the lane's previous profiles".
+    /// blank names. Empty means "the lane's saved profiles".
     pub fn profile_names(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for name in self.profile.iter().chain(&self.profiles) {

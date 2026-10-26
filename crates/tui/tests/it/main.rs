@@ -656,10 +656,27 @@ async fn idle_lane_starts_with_one_key() -> TestResult {
     app.update(key(KeyCode::Char(']')));
     assert_eq!(app.selected, Some(Selected::lane("acme@1")));
     let effects = app.update(key(KeyCode::Char('s')));
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::Control { method: Method::Start, lane, .. }] if lane == "acme@1"
-    ));
+    let [
+        Effect::Control {
+            method: Method::Start,
+            lane,
+            selection,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        return Err(format!("unexpected {effects:?}").into());
+    };
+    assert_eq!(lane, "acme@1");
+    // Empty: the daemon brings back what the lane ran, as a plain `devlanes start`.
+    assert!(selection.profiles.is_empty());
+    // `start.restore: false` names the default profile instead.
+    app.start_default = true;
+    let effects = app.update(key(KeyCode::Char('s')));
+    let [Effect::Control { selection, .. }] = effects.as_slice() else {
+        return Err(format!("unexpected {effects:?}").into());
+    };
+    assert_eq!(selection.profiles, [devlanes_proto::DEFAULT_PROFILE]);
     Ok(())
 }
 

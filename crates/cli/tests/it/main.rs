@@ -287,6 +287,33 @@ fn profile_repeats_into_an_ordered_list() {
 }
 
 #[test]
+/// `with` starts without changing what the lane saved for its next plain start,
+/// unless `--keep` leaves the units running; `start` always saves.
+fn with_starts_are_transient_unless_kept() {
+    for (args, transient) in [
+        (vec!["with", "--", "true"], Some(true)),
+        (vec!["with", "--keep", "--", "true"], None),
+    ] {
+        let cli = Cli::parse_from(std::iter::once("devlanes").chain(args.clone()));
+        match action(&cli, &runtime(&cli, OutputMode::Plain)) {
+            Action::With(plan) => assert_eq!(
+                plan.start.params.get("transient").and_then(|v| v.as_bool()),
+                transient,
+                "{args:?}"
+            ),
+            _ => panic!("expected with"),
+        }
+    }
+    let cli = Cli::parse_from(["devlanes", "start"]);
+    assert!(
+        request(action(&cli, &runtime(&cli, OutputMode::Plain)))
+            .params
+            .get("transient")
+            .is_none()
+    );
+}
+
+#[test]
 fn all_at_once_reaches_every_starting_request() {
     for args in [
         vec!["start", "--all-at-once"],

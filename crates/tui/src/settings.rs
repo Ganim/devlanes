@@ -32,7 +32,7 @@ use crate::ui::{fit, spans_width, spread};
 const CATEGORIES: [(&str, &[&str]); 4] = [
     ("general", &["tui", "terminal", "updates"]),
     ("network", &["proxy", "hostnames", "ports", "tls"]),
-    ("startup", &["startup"]),
+    ("startup", &["start", "startup"]),
     ("storage", &["logs", "metrics", "history", "state"]),
 ];
 
@@ -1207,7 +1207,12 @@ fn walk(node: &Value, root: &Value, prefix: &str, out: &mut Vec<Item>) {
             .unwrap_or_default();
         let applies = match key.as_str() {
             "tui.theme" | "tui.glyphs" => Applies::Now,
-            _ if key.starts_with("tui.") || key.starts_with("terminal.") => Applies::NextCommand,
+            _ if key.starts_with("tui.")
+                || key.starts_with("terminal.")
+                || key.starts_with("start.") =>
+            {
+                Applies::NextCommand
+            }
             _ => Applies::Daemon,
         };
         out.push(Item {

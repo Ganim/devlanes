@@ -6,7 +6,7 @@ The daemon owns processes, ports, proxy routes and SQLite. CLI and TUI clients e
 
 Each lane receives a non-overlapping block from the machine-wide port pool. Named service offsets persist within that block. A service must accept its assigned port; listening-socket inspection is diagnostic only. Hostnames put the lane in the registrable label, such as `api.acme-2.localhost`.
 
-Startup orders infrastructure, per-lane setup, lifecycle tasks, concurrent services, then after-services tasks. There is no service dependency graph or automatic restart. Monitoring reports resource use without enforcing limits.
+Startup orders infrastructure, per-lane setup, lifecycle tasks, concurrent services, then after-services tasks. There is no service dependency graph or automatic restart: a failed unit stays failed. Each lane saves the services it runs and its profiles (never the environment), so a plain start, `lane resume` or `daemon restart` from a shell brings back what ran after the daemon stopped; a whole-lane `stop` clears that. Monitoring reports resource use without enforcing limits.
 
 YAML configuration merges local maps by key and replaces lists/scalars before template expansion. `${{ ... }}` expressions use strict undefined-variable handling. Client environments stay in daemon memory; `.env` files supply expression values, not implicit process environment injection.
 

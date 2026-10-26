@@ -104,8 +104,44 @@ async fn connect(paths: &Paths) -> Result<Client, RpcError> {
     Client::connect_or_spawn(paths).await.map_err(rpc_error)
 }
 
+/// With `start.restore: false` in the user config, a start without services or
+/// profiles names the default profile, so the daemon does not bring back what
+/// the lane ran before.
+fn apply_start_restore(action: Action) -> Action {
+    let adjust = |mut request: Request| {
+        if request.method != Method::Start {
+            return request;
+        }
+        let plain =
+            serde_json::from_value::<Selection>(request.params.clone()).is_ok_and(|selection| {
+                selection.units.is_empty() && selection.profile_names().is_empty()
+            });
+        if plain
+            && let Ok(paths) = Paths::discover()
+            && !crate::user_config::display(&paths).start.restore
+        {
+            request.params["profiles"] = json!([devlanes_proto::DEFAULT_PROFILE]);
+        }
+        request
+    };
+    match action {
+        Action::With(mut plan) => {
+            plan.start = adjust(plan.start);
+            Action::With(plan)
+        }
+        Action::Rpc(request) => Action::Rpc(adjust(request)),
+        Action::RpcThenUi(request) => Action::RpcThenUi(adjust(request)),
+        Action::StartUi { request, forced } => Action::StartUi {
+            request: adjust(request),
+            forced,
+        },
+        other => other,
+    }
+}
+
 /// Main action switch. Variants that need integrations not wired yet report it plainly.
 async fn run(cli: &Cli, runtime: &Runtime, action: Action) -> Result<u8, RpcError> {
+    let action = apply_start_restore(action);
     match action {
         Action::Rpc(request) => rpc(cli, runtime, request).await,
         Action::RpcThenUi(request) => {

@@ -346,6 +346,7 @@ pub async fn run_with<D: WithDriver + ?Sized>(
                 } else {
                     ownership.units.clone()
                 },
+                transient: true,
                 ..Selection::default()
             };
             if let Err(error) = driver.stop(&ownership.lane, selection).await {

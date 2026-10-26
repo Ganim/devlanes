@@ -9,11 +9,16 @@ already run are left alone, so starting twice is safe. Waits
 until every started unit is ready or one fails; Ctrl-C detaches and leaves
 everything running.
 
+Without units or --profile it brings back the services the lane ran before,
+such as after a reboot or daemon crash. A lane stopped with devlanes stop has
+nothing to bring back and starts its default profile; start.restore: false in
+~/.devlanes/config.yaml always does that.
+
 Usage: devlanes start [OPTIONS] [UNIT]...
 
 Arguments:
   [UNIT]...
-          Units to start ([lane:]unit, globs, +tag) [default: the whole lane]
+          Units to start ([lane:]unit, globs, +tag) [default: what the lane ran before, else its default profile]
 
 Options:
       --profile <PROFILE>
@@ -69,7 +74,8 @@ Global options:
           Print timestamped diagnostics of the client and daemon to stderr; -vv for more [env: DEVLANES_VERBOSE=1|2]
 
 Examples:
-  devlanes start                       the whole lane of this worktree
+  devlanes start                       what this worktree's lane ran before
+                                       (its default profile after devlanes stop)
   devlanes start api web               only these services
   devlanes start --profile e2e         the units of the e2e profile
   devlanes start 2:+api --timeout 5m   units tagged api in lane 2

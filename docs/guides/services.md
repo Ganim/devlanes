@@ -247,7 +247,9 @@ profiles:
       NODE_ENV: production
 ```
 
-A unit's colour comes from its first tag with a `color` under `tags`, else its first category tag (`api`, `web`, `worker`, `db`), so put the category tag first and selection tags after. Profiles select by name, glob or `+tag`; with a `default` profile, a plain `devlanes start` starts exactly that selection. `--profile` repeats and the union is started.
+A unit's colour comes from its first tag with a `color` under `tags`, else its first category tag (`api`, `web`, `worker`, `db`), so put the category tag first and selection tags after. Profiles select by name, glob or `+tag`; with a `default` profile, a lane's first plain `devlanes start` starts exactly that selection. `--profile` repeats and the union is started.
+
+After that, a plain `devlanes start` of an idle lane brings back what it ran: the services you started (by profile or by name) and did not stop, with the same profiles. That is what makes a reboot or a daemon crash cost one command. On a lane that still runs, a plain start also starts what its profiles select and is missing, such as a service you just added. `devlanes stop` without unit names forgets what ran, so the next plain start uses the `default` profile again; stopping one service only leaves that service out. Set `start.restore: false` in `~/.devlanes/config.yaml` to always start the `default` profile.
 
 ## Monorepo with several apps
 

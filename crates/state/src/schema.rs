@@ -37,6 +37,7 @@ diesel::table! {
         created_at -> BigInt,
         cleaned_at -> Nullable<BigInt>,
         profiles -> Text,
+        services -> Text,
     }
 }
 diesel::table! {

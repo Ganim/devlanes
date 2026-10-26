@@ -1914,7 +1914,7 @@ impl Inner {
             tokio::spawn(async move {
                 let result = match policy {
                     RemovedWorktrees::Stop => engine
-                        .stop_lane(&project, &lane, None, None)
+                        .stop_lane(&project, &lane, None, None, false)
                         .await
                         .map(drop),
                     RemovedWorktrees::Clean => {

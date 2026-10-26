@@ -104,6 +104,10 @@ pub struct Lane {
     /// Ordered selection, including every profile needed for resume.
     #[serde(default)]
     pub profiles: Vec<String>,
+    /// Services the lane ran and nobody stopped, in the order they were added; a
+    /// plain start brings these back. A whole-lane stop or clean empties it.
+    #[serde(default)]
+    pub services: Vec<String>,
     /// Unix milliseconds when the lane was registered. Re-registering a cleaned
     /// lane resets it, since the revived lane starts with fresh setup state.
     pub created_at: i64,

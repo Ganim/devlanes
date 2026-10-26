@@ -238,7 +238,7 @@ profiles:
 
 A unit's color is the first of: the first tag with a `color` under `tags`; the first tag naming a category; the preset's category; the category of the name's first segment (`wrk-email` reads `wrk`); a hash of the first tag, or of that segment without tags. Categories include `api`, `server`, `backend`, `gateway`: blue; `web`, `app`, `frontend`, `ui`, `vite`, `next`: green; `worker`, `wrk`, `queue`, `job`, `cron`: magenta; `db`, `postgres`, `redis`, `docs`: cyan; `admin`: bright-magenta; `desktop`, `mobile`, `tauri`: bright-cyan; `stub`, `mock`, `fake`: gray. Put the category tag first and selection tags such as `essential` after it.
 
-Profiles select services by name, glob or `+tag`. Globs skip `autostart: false` services; names and tags include them. When a `default` profile exists, a plain `devlanes start` starts exactly its selection and `autostart` stops mattering outside globs, so use one of the two mechanisms, not both.
+Profiles select services by name, glob or `+tag`. Globs skip `autostart: false` services; names and tags include them. When a `default` profile exists, a plain `devlanes start` of a fresh or stopped lane starts exactly its selection and `autostart` stops mattering outside globs, so use one of the two mechanisms, not both. Otherwise a plain start brings back the services the lane ran and nobody stopped; `devlanes stop` without units resets that.
 
 ## Templates and extends
 

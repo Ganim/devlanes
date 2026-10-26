@@ -69,10 +69,11 @@ pub struct ProjectConfig<E: Extensions = OpaqueExtensions> {
     #[serde(default)]
     #[schemars(extend("examples" = [{"api":{"run_script":{"file":"apps/api/package.json","name":"dev"},"hosts":"api.${{ lane.domain }}"}}]))]
     pub services: IndexMap<String, ServiceConfig<E>>,
-    /// Named selections of services for `devlanes start --profile <name>`; `default` is
-    /// used when no profile is given. A profile is a list of names, globs and `+tag`
-    /// selectors, or a mapping that can also exclude services, skip infra, add `env` and
-    /// remap script names.
+    /// Named selections of services for `devlanes start --profile <name>`. A plain
+    /// `devlanes start` brings back what the lane ran before; `default` is used when
+    /// there is nothing to bring back, such as after `devlanes stop`. A profile is a list
+    /// of names, globs and `+tag` selectors, or a mapping that can also exclude services,
+    /// skip infra, add `env` and remap script names.
     #[serde(default)]
     #[schemars(extend("examples" = [{"default":["+api","+web"],"e2e":{"include":["*"],"run_scripts":{"dev":"start"}}}]))]
     pub profiles: IndexMap<String, ProfileConfig>,
