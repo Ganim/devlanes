@@ -548,7 +548,8 @@ pub struct ReadyCheck {
     pub tcp: Option<TcpReady>,
     /// Ready once a GET request to `path` on the unit's main port answers with `status`, or
     /// with a 2xx status when `status` is unset. Redirects are not followed. Best when the
-    /// app has a health route that fails while it is broken.
+    /// app has a health route that fails while it is broken. Each request sends
+    /// `User-Agent: devlanes-ready`, so an app can leave the checks out of its request logs.
     pub http: Option<Box<HttpReady>>,
     /// Ready once a line of output matches this regular expression, with colors and other
     /// terminal escape codes removed; recent lines printed before the check began count

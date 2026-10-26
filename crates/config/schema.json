@@ -1567,7 +1567,7 @@
               "type": "null"
             }
           ],
-          "description": "Ready once a GET request to `path` on the unit's main port answers with `status`, or with a 2xx status when `status` is unset. Redirects are not followed. Best when the app has a health route that fails while it is broken.",
+          "description": "Ready once a GET request to `path` on the unit's main port answers with `status`, or with a 2xx status when `status` is unset. Redirects are not followed. Best when the app has a health route that fails while it is broken. Each request sends `User-Agent: devlanes-ready`, so an app can leave the checks out of its request logs.",
           "examples": [
             {
               "path": "/healthz",
@@ -1575,7 +1575,7 @@
               "timeout": "60s"
             }
           ],
-          "markdownDescription": "Ready once a GET request to `path` on the unit's main port answers with `status`, or with a 2xx status when `status` is unset. Redirects are not followed. Best when the app has a health route that fails while it is broken."
+          "markdownDescription": "Ready once a GET request to `path` on the unit's main port answers with `status`, or with a 2xx status when `status` is unset. Redirects are not followed. Best when the app has a health route that fails while it is broken. Each request sends `User-Agent: devlanes-ready`, so an app can leave the checks out of its request logs."
         },
         "log": {
           "anyOf": [
