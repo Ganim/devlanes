@@ -30,7 +30,7 @@ The browser talks to `https://acme-2.localhost` and `https://api.acme-2.localhos
 
 For server-to-server calls prefer `${{ services.api.url }}` (`http://127.0.0.1:<port>`, no TLS, no proxy hop). Use `public_url` when the value ends up in a browser, an OAuth redirect or a webhook.
 
-The `http` check on `api` passes on any 2xx answer; with `status` set, only that code passes. Redirects are not followed, so a route that redirects to a login needs `status: 302`. The check sends `Host: 127.0.0.1:<port>`; an app that serves its health route only on its own hostname needs `host: ${{ self.hosts[0] }}` under `http`.
+The `http` check on `api` passes on any 2xx answer; with `status` set, only that code passes. Redirects are not followed, so a route that redirects to a login needs `status: 302`. The check sends `Host: 127.0.0.1:<port>`; an app that serves its health route only on its own hostname needs `host: ${{ self.hosts[0] }}` under `http`. Every check request sends `User-Agent: devlanes-ready`; match that header to keep the checks, retried every 150 ms until they pass, out of request logs, traces or metrics.
 
 A frontend that proxies `/api` to the backend itself (Vite `server.proxy`, Next rewrites) points at `${{ services.api.url }}` and needs no CORS at all:
 
