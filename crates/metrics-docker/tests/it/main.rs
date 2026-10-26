@@ -211,12 +211,12 @@ async fn empty_request_makes_no_engine_calls() {
             .is_empty()
     );
     let request = SampleRequest {
-        units: Vec::new(),
         containers: vec![ContainerTarget {
             project: ProjectId(1),
             lane: None,
             id: "missing".into(),
         }],
+        ..SampleRequest::default()
     };
     assert!(
         source.sample(&request).await.is_err(),
@@ -249,8 +249,8 @@ async fn docker_live_stats_and_info() {
         })
         .collect();
     let request = SampleRequest {
-        units: Vec::new(),
         containers: containers.clone(),
+        ..SampleRequest::default()
     };
     source.sample(&request).await.expect("first sample");
     tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;

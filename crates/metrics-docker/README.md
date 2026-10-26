@@ -13,12 +13,12 @@ async fn sample_postgres(docker: bollard::Docker) -> Result<(), Box<dyn std::err
     // The binary passes the infra integration's client, so both use one engine.
     let source = DockerSource::new(docker);
     let request = SampleRequest {
-        units: Vec::new(),
         containers: vec![ContainerTarget {
             project: ProjectId(1),
             lane: Some(LaneId(2)),
             id: "acme-lane2-postgres-1".into(),
         }],
+        ..SampleRequest::default()
     };
     let samples = source.sample(&request).await?;
     let vm = source.vm_info().await?; // CPUs and memory of the engine host

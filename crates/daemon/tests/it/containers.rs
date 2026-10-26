@@ -383,7 +383,7 @@ async fn db_state(h: &crate::Harness, main: &std::path::Path) -> Option<String> 
 }
 
 /// A machine at 37% CPU with 4 GiB of 16 GiB available, under warn pressure.
-struct FakeMachine;
+pub(crate) struct FakeMachine;
 
 #[async_trait]
 impl devlanes_core::gate::PressureSource for FakeMachine {

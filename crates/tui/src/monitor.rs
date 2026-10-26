@@ -74,6 +74,8 @@ pub enum MonitorId {
         lane: String,
         unit: String,
     },
+    /// The devlanes daemon's own row.
+    Daemon,
 }
 
 /// The monitor's sort, filter, grouping and selection.
@@ -137,9 +139,10 @@ impl MonitorView {
     }
 
     /// Scrolls the least that shows the selection in a table `height` rows
-    /// high.
-    pub fn reveal(&mut self, height: usize) {
-        if height == 0 {
+    /// high whose first `scrolling` rows scroll; rows after them are pinned
+    /// below and always in view.
+    pub fn reveal(&mut self, height: usize, scrolling: usize) {
+        if height == 0 || self.index >= scrolling {
             return;
         }
         if self.index < self.offset {
@@ -212,9 +215,13 @@ pub struct Group {
 pub enum MonitorRow {
     Group(Group),
     Entry(Box<Entry>),
+    /// The devlanes daemon, pinned under the table and left out of every
+    /// total, filter and sort.
+    Daemon(Box<Entry>),
 }
 
 impl MonitorRow {
+    /// The row's identity, which the selection follows.
     pub fn id(&self) -> MonitorId {
         match self {
             Self::Group(group) => MonitorId::Group(group.key.clone()),
@@ -222,8 +229,19 @@ impl MonitorRow {
                 lane: entry.lane.clone(),
                 unit: entry.unit.clone(),
             },
+            Self::Daemon(_) => MonitorId::Daemon,
         }
     }
+
+    /// True for rows pinned under the scrolling ones.
+    pub fn is_pinned(&self) -> bool {
+        matches!(self, Self::Daemon(_))
+    }
+}
+
+/// How many of `rows` scroll: all but the pinned ones at the end.
+pub fn scrolling(rows: &[MonitorRow]) -> usize {
+    rows.iter().filter(|row| !row.is_pinned()).count()
 }
 
 /// `svc`, `task`, `exec` or `ctr` from a metrics or status kind.
@@ -437,8 +455,50 @@ fn group(
     }
 }
 
-/// The table: filtered, sorted, grouped by lane unless flat. Groups sort by
-/// their totals under the same column; folded groups keep only their header.
+/// Where a group sits, whatever the sort: by project, the project's
+/// `(shared)` group first, then its lanes by number (`@0` on top), then
+/// lanes without a number by name. Sorting groups by their totals made the
+/// shared group and a lane swap places whenever their CPU crossed.
+pub fn group_order(key: &str, lanes: &[LaneSummary]) -> (String, bool, bool, u32, String) {
+    if let Some(project) = key.strip_suffix(" (shared)") {
+        return (project.to_owned(), false, false, 0, key.to_owned());
+    }
+    let (project, index) = match lanes.iter().find(|l| l.reference == key) {
+        Some(lane) => (lane.project.clone(), lane.index),
+        // Metrics can name a lane that status does not list yet.
+        None => match key.rsplit_once('@') {
+            Some((project, index)) => (project.to_owned(), index.parse().ok()),
+            None => (key.to_owned(), None),
+        },
+    };
+    (
+        project,
+        true,
+        index.is_none(),
+        index.unwrap_or(0),
+        key.to_owned(),
+    )
+}
+
+/// The daemon's row, when the daemon sampled itself.
+fn daemon_row(metrics: Option<&Metrics>) -> Option<MonitorRow> {
+    let daemon = metrics?.daemon.as_ref()?;
+    Some(MonitorRow::Daemon(Box::new(Entry {
+        lane: daemon.metrics.lane.clone(),
+        unit: daemon.metrics.unit.clone(),
+        label: "devlanes daemon".into(),
+        kind: "dmn",
+        state: "running".into(),
+        started_at_ms: daemon.started_at_ms,
+        summary: None,
+        container: None,
+        metrics: daemon.metrics.clone(),
+    })))
+}
+
+/// The table: filtered, sorted, grouped by lane unless flat, with the
+/// daemon's row last. Groups keep the place [`group_order`] gives them;
+/// folded groups keep only their header.
 pub fn rows(
     metrics: Option<&Metrics>,
     lanes: &[LaneSummary],
@@ -454,6 +514,7 @@ pub fn rows(
         return shown
             .into_iter()
             .map(|e| MonitorRow::Entry(Box::new(e.clone())))
+            .chain(daemon_row(metrics))
             .collect();
     }
     let mut keys: Vec<&str> = shown.iter().map(|e| e.lane.as_str()).collect();
@@ -476,20 +537,7 @@ pub fn rows(
             (header, members)
         })
         .collect();
-    let descending = view.descending();
-    groups.sort_by(|(a, _), (b, _)| {
-        let order = match view.sort {
-            SortKey::Cpu => by_number(a.cpu_percent, b.cpu_percent, descending),
-            SortKey::Mem | SortKey::Peak => by_number(
-                a.memory_bytes.map(|m| m as f64),
-                b.memory_bytes.map(|m| m as f64),
-                descending,
-            ),
-            SortKey::Lane | SortKey::Name => by_word(&a.key, &b.key, descending),
-            _ => Ordering::Equal,
-        };
-        order.then_with(|| a.key.cmp(&b.key))
-    });
+    groups.sort_by_cached_key(|(group, _)| group_order(&group.key, lanes));
     let mut rows = Vec::new();
     for (header, members) in groups {
         let folded = header.folded;
@@ -502,6 +550,7 @@ pub fn rows(
             );
         }
     }
+    rows.extend(daemon_row(metrics));
     rows
 }
 
@@ -540,27 +589,26 @@ mod tests {
             .map(|row| match row {
                 MonitorRow::Group(g) => format!("[{}]", g.key),
                 MonitorRow::Entry(e) => e.unit.clone(),
+                MonitorRow::Daemon(_) => "(daemon)".into(),
             })
             .collect()
     }
 
     #[test]
-    fn groups_sort_by_their_totals_and_rows_inside_them() {
+    fn groups_keep_their_place_and_rows_sort_inside_them() {
         let view = MonitorView::default();
-        let rows = rows(Some(&metrics()), &[], &view);
-        assert_eq!(
-            names(&rows),
-            [
-                "[acme@0]",
-                "api",
-                "web",
-                "[acme@1]",
-                "web",
-                "[acme (shared)]",
-                "postgres"
-            ]
-        );
-        let MonitorRow::Group(group) = &rows[0] else {
+        let expected = [
+            "[acme (shared)]",
+            "postgres",
+            "[acme@0]",
+            "api",
+            "web",
+            "[acme@1]",
+            "web",
+        ];
+        let shown = rows(Some(&metrics()), &[], &view);
+        assert_eq!(names(&shown), expected);
+        let MonitorRow::Group(group) = &shown[2] else {
             panic!("no group");
         };
         assert_eq!(
@@ -568,6 +616,46 @@ mod tests {
             Some(136.0),
             "members summed without lane series"
         );
+        // Shared infra busier than every lane, and a lane busier than @0:
+        // the groups stay where they were.
+        let mut busy = metrics();
+        busy.units[3].cpu_percent = Some(900.0);
+        busy.units[2].cpu_percent = Some(800.0);
+        assert_eq!(names(&rows(Some(&busy), &[], &view)), expected);
+        // Lanes go by number, not by name: @2 before @10.
+        let order = |key: &str| group_order(key, &[]);
+        assert!(order("acme (shared)") < order("acme@2"));
+        assert!(order("acme@2") < order("acme@10"));
+        assert!(order("acme@10") < order("acme@docs"));
+        assert!(order("acme@docs") < order("beta (shared)"));
+    }
+
+    #[test]
+    fn the_daemon_row_comes_last_whatever_the_filter() {
+        let mut data = metrics();
+        data.daemon = Some(Box::new(crate::api::DaemonMetrics {
+            pid: Some(7),
+            started_at_ms: None,
+            metrics: UnitMetrics {
+                lane: "devlanes".into(),
+                unit: "daemon".into(),
+                kind: "daemon".into(),
+                ..UnitMetrics::default()
+            },
+        }));
+        for view in [
+            MonitorView::default(),
+            MonitorView {
+                flat: true,
+                filter: "nothing matches".into(),
+                ..MonitorView::default()
+            },
+        ] {
+            let rows = rows(Some(&data), &[], &view);
+            let last = rows.last().map(MonitorRow::id);
+            assert_eq!(last, Some(MonitorId::Daemon));
+            assert_eq!(scrolling(&rows), rows.len() - 1);
+        }
     }
 
     #[test]
@@ -614,7 +702,7 @@ mod tests {
         view.folded.insert("acme@0".into());
         assert_eq!(
             names(&rows(Some(&metrics()), &[], &view)),
-            ["[acme@0]", "[acme@1]", "web", "[acme (shared)]", "postgres"]
+            ["[acme (shared)]", "postgres", "[acme@0]", "[acme@1]", "web"]
         );
     }
 

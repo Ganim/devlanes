@@ -2,9 +2,10 @@
 ┌ daemon ────────────────────────────────────┐┌ checks ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1 fail · 1 warn · i all ┐
 │version   1.0.0 · pid 4242                  ││fail tls     no CA: no CA has been created yet                                                                                                          │
 │uptime    7h 38m                            ││             fix: devlanes certs trust                                                                                                                  │
-│socket    /Users/acme/.devlanes/run/daemon.…││warn proxy   https on fallback port 8443: port 443 needs root                                                                                           │
-│managed   41 processes · 2 projects         ││             fix: free the standard port or set proxy ports in ~/.devlanes/config.yaml                                                                  │
-│clients   3 event subscribers               ││ok           daemon · sandbox · docker · proxy · hosts                                                                                                  │
+│usage     cpu 1.1% · mem 47M                ││warn proxy   https on fallback port 8443: port 443 needs root                                                                                           │
+│socket    /Users/acme/.devlanes/run/daemon.…││             fix: free the standard port or set proxy ports in ~/.devlanes/config.yaml                                                                  │
+│managed   41 processes · 2 projects         ││ok           daemon · sandbox · docker · proxy · hosts                                                                                                  │
+│clients   3 event subscribers               ││                                                                                                                                                        │
 │state     schema 7 · /Users/acme/.devlanes/…││                                                                                                                                                        │
 └────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ daemon.log ────────────────────────────────────────────────────────────────────────────────────────────────── selecting · v mark · y copy · Y whole entries · all levels · repeats folded · 40 lines ┐
@@ -55,7 +56,6 @@
 │                                                                                                                                                                                                      │
 │                                                                                                                                                                                                      │
 │                                                                                                                                                                                                      │
-│                                                                                                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
  h j k l move   v mark   y copy   Y copy whole entries   esc cancel                                                                                                               ? all keys   q quit
 
@@ -68,40 +68,40 @@
 5: 0 darkgray, 1-10 dim, 45-46 darkgray, 47-59 yellow, 60-132 dim, 199 darkgray
 6: 0 darkgray, 1-10 dim, 45-46 darkgray, 47-59 green, 199 darkgray
 7: 0 darkgray, 1-10 dim, 45-46 darkgray, 199 darkgray
-8: 0-199 darkgray
-9: 0-110 bold, 111-198 bold dim, 199 bold
-10: 0 bold, 1-198 darkgray, 199 bold
-11: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-69 blue, 71-75 dim, 199 bold
-12: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
-13: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
-14: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-70 blue, 72-76 dim, 199 bold
-15: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
-16: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
-17: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-69 blue, 71-75 dim, 199 bold
-18: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
-19: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
-20: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-70 blue, 72-76 dim, 199 bold
-21: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
-22: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
-23: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-69 blue, 71-75 dim, 199 bold
-24: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
-25: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
-26: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-70 blue, 72-76 dim, 199 bold
-27: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
-28: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
-29: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-69 blue, 71-75 dim, 199 bold
-30: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
-31: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
-32: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-70 blue, 72-76 dim, 199 bold
-33: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
-34: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
-35: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-69 blue, 71-75 dim, 199 bold
-36: 0 bold, 1-9 dim, 10-14 yellow, 55-60 dim, 68-74 dim, 185-198 dim, 199 bold
-37: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 185-198 dim, 199 bold
-38: 0 bold, 1 bold dim reversed, 2-9 dim reversed, 10-14 reversed blue, 15-47 reversed, 48-53 dim reversed, 54-68 reversed blue, 69 reversed, 70-74 dim reversed, 75-184 reversed, 185-198 dim reversed, 199 bold
-39: 0 bold, 1 dim reversed, 2-9 dim, 10-14 bold red, 49-54 dim, 55-71 magenta, 73-77 dim, 185-198 dim, 199 bold
-40: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-70 blue, 72-76 dim, 199 bold
-41: 0 bold, 199 bold
+8: 0 darkgray, 1-10 dim, 45-46 darkgray, 199 darkgray
+9: 0-199 darkgray
+10: 0-110 bold, 111-198 bold dim, 199 bold
+11: 0 bold, 1-198 darkgray, 199 bold
+12: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-69 blue, 71-75 dim, 199 bold
+13: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
+14: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
+15: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-70 blue, 72-76 dim, 199 bold
+16: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
+17: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
+18: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-69 blue, 71-75 dim, 199 bold
+19: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
+20: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
+21: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-70 blue, 72-76 dim, 199 bold
+22: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
+23: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
+24: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-69 blue, 71-75 dim, 199 bold
+25: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
+26: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
+27: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-70 blue, 72-76 dim, 199 bold
+28: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
+29: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
+30: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-69 blue, 71-75 dim, 199 bold
+31: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
+32: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
+33: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-70 blue, 72-76 dim, 199 bold
+34: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 199 bold
+35: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-68 blue, 70-74 dim, 199 bold
+36: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-69 blue, 71-75 dim, 199 bold
+37: 0 bold, 1-9 dim, 10-14 yellow, 55-60 dim, 68-74 dim, 185-198 dim, 199 bold
+38: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-71 blue, 73-77 dim, 185-198 dim, 199 bold
+39: 0 bold, 1 bold dim reversed, 2-9 dim reversed, 10-14 reversed blue, 15-47 reversed, 48-53 dim reversed, 54-68 reversed blue, 69 reversed, 70-74 dim reversed, 75-184 reversed, 185-198 dim reversed, 199 bold
+40: 0 bold, 1 dim reversed, 2-9 dim, 10-14 bold red, 49-54 dim, 55-71 magenta, 73-77 dim, 185-198 dim, 199 bold
+41: 0 bold, 1-9 dim, 10-14 blue, 48-53 dim, 54-70 blue, 72-76 dim, 199 bold
 42: 0 bold, 199 bold
 43: 0 bold, 199 bold
 44: 0 bold, 199 bold

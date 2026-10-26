@@ -18,7 +18,7 @@ async fn sample_self() -> Result<(), Box<dyn std::error::Error>> {
             sessions: vec![leader.sid],
             processes: vec![leader],
         }],
-        containers: Vec::new(),
+        ..SampleRequest::default()
     };
     let samples = source.sample(&request).await?;
     println!("{} samples", samples.len());
@@ -53,6 +53,8 @@ async fn pressure() -> Result<(), Box<dyn std::error::Error>> {
 ## Behaviour
 
 Membership is a unit's sessions, tracked processes whose `starttime` still matches, and their descendants by parent PID. CPU comes from `utime + stime` in clock ticks, RSS from `statm`. The memory number is PSS from `smaps_rollup`, which splits shared pages between processes so a tree's sum is meaningful. Reading it walks page tables, so it is refreshed every 10 seconds by default (`LinuxSource::with_pss_interval`), and RSS is used until the first read or where the file is unreadable.
+
+When the request names the daemon's own process, it is read by PID alone and reported as one `Subject::Daemon` sample, also when there are no units. Its children are not included, and it never counts for a unit.
 
 For the start gate, system CPU is the busy share of all cores between two `/proc/stat` reads, and available memory is `MemAvailable` from `/proc/meminfo`. Memory pressure comes from `/proc/pressure/memory`: warn at `some avg10` of 10% or more, critical at `full avg10` of 10% or more. When the daemon runs in a cgroup v2 group (a container or a systemd unit), that group's `memory.pressure` is used instead, and available memory is capped at `memory.max - memory.current`, because the services it starts share the limit. Kernels or containers without PSI report no level, which is logged once; the gate then treats memory pressure as normal.
 

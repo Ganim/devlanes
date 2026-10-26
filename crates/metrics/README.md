@@ -31,8 +31,8 @@ let summary = runs.finish(UnitRunId(1), 120_000); // p50/p95/peak for the run
 
 ## API
 
-- `MetricsSource`: async collector trait; takes a `SampleRequest` of `UnitTarget`s and `ContainerTarget`s.
-- `Sample`, `Subject`, `UnitKey`: one reading and what it measures. `Subject::key()` is a stable persistence key.
+- `MetricsSource`: async collector trait; takes a `SampleRequest` of `UnitTarget`s, `ContainerTarget`s and the daemon's own process.
+- `Sample`, `Subject`, `UnitKey`: one reading and what it measures. `Subject::key()` is a stable persistence key. `Subject::Daemon` is the daemon itself and belongs to no unit, lane or project.
 - `aggregate`: sums process and container samples into unit, lane and project totals.
 - `History`: 1 s ring (15 minutes) and 10 s ring (6 hours) per subject, plus one-minute `RollupRecord`s from `drain_rollups`.
 - `RunTracker`, `RunSummary`: per-run p50, p95 and peak of footprint and CPU.

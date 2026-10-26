@@ -284,6 +284,9 @@ fn fact_lines(app: &App, wide: bool) -> Vec<Line<'static>> {
     if let Some(uptime) = uptime {
         lines.push(line("uptime", uptime, plain));
     }
+    if let Some(usage) = daemon_usage(app) {
+        lines.push(line("usage", usage, plain));
+    }
     lines.push(line("socket", socket, plain));
     if !managed.is_empty() {
         lines.push(line("managed", managed.join(" · "), plain));
@@ -302,6 +305,20 @@ fn fact_lines(app: &App, wide: bool) -> Vec<Line<'static>> {
         lines.push(line("state", state, plain));
     }
     lines
+}
+
+/// `cpu 1.2% · mem 48M` from the last `metrics` reply; `None` before one
+/// arrives or from daemons that do not sample themselves.
+fn daemon_usage(app: &App) -> Option<String> {
+    let daemon = &app.metrics.as_ref()?.daemon.as_ref()?.metrics;
+    let mut parts = Vec::new();
+    if let Some(cpu) = daemon.cpu_percent {
+        parts.push(format!("cpu {}", super::monitor::cpu_text(cpu)));
+    }
+    if let Some(memory) = daemon.memory_bytes {
+        parts.push(format!("mem {}", super::monitor::format_bytes(memory)));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// One check in the checks box: its rows as drawn and its words unwrapped,

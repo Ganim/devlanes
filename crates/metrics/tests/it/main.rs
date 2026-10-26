@@ -337,6 +337,13 @@ fn aggregate_rolls_processes_and_containers_up() {
             rss_bytes: 9,
             ts_ms: 1,
         },
+        Sample {
+            subject: Subject::Daemon,
+            cpu_percent: 7.0,
+            footprint_bytes: 7,
+            rss_bytes: 7,
+            ts_ms: 1,
+        },
     ];
     let totals = aggregate(&leaves);
     let find = |subject: Subject| {
@@ -387,6 +394,12 @@ fn subject_keys_are_stable_and_serde_tagged() {
     };
     assert_eq!(shared.key(), "container:3:-:abc");
     assert_eq!(Subject::DockerVm.key(), "docker_vm");
+    assert_eq!(Subject::Daemon.key(), "daemon");
+    assert_eq!(
+        (Subject::Daemon.project(), Subject::Daemon.lane()),
+        (None, None)
+    );
+    assert!(Subject::Daemon.unit().is_none());
     let json = serde_json::to_value(Subject::Unit(unit("web"))).expect("json");
     assert_eq!(
         json,

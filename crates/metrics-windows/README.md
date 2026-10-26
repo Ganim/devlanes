@@ -18,7 +18,7 @@ async fn sample_self() -> Result<(), Box<dyn std::error::Error>> {
             sessions: Vec::new(),
             processes: vec![leader],
         }],
-        containers: Vec::new(),
+        ..SampleRequest::default()
     };
     let samples = source.sample(&request).await?; // one Subject::Process sample per member
     println!("{} samples", samples.len());
@@ -26,7 +26,7 @@ async fn sample_self() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`WindowsSource::sample_blocking` does the same on the calling thread.
+`WindowsSource::sample_blocking` does the same on the calling thread, taking the units and the daemon's identity.
 
 ```rust
 use devlanes_core::gate::PressureSource;
@@ -45,6 +45,8 @@ async fn pressure() -> Result<(), Box<dyn std::error::Error>> {
 ## Behaviour
 
 A unit's processes are exactly the identities the daemon passes in, which on Windows are the members of the unit's job as of the runner's last refresh (every half second). The collector walks no process tree and ignores session ids. A PID whose creation time no longer matches was reused and is skipped, as are exited processes and processes that refuse `PROCESS_QUERY_LIMITED_INFORMATION`. A child that starts and exits between two refreshes is never seen.
+
+When the request names the daemon's own process, it is read by PID alone and reported as one `Subject::Daemon` sample, also when there are no units. It never counts for a unit.
 
 CPU is kernel plus user time from `GetProcessTimes`, as a change since the previous sample. A process seen for the first time reads 0%, unlike macOS and Linux, which report the lifetime average: a process a few milliseconds old would read as several cores because its startup CPU is spread over an age the coarse Windows clocks cannot measure. `footprint_bytes` is the private working set from `PROCESS_MEMORY_COUNTERS_EX2`, the number Task Manager's Memory column shows. `rss_bytes` is the working set, which includes shared DLL pages.
 

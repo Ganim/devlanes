@@ -133,6 +133,24 @@ pub struct SystemMetrics {
     pub core_percents: Vec<f64>,
     /// `(ts_ms, cpu_percent, available_memory_bytes)`, oldest first.
     pub history: Vec<(u64, f64, u64)>,
+    /// `(ts_ms, available_memory_bytes)`, oldest first, including seconds
+    /// without a CPU reading, which `history` skips.
+    pub available_history: Vec<(u64, u64)>,
+    /// `(ts_ms, level)` with 0 normal, 1 warn and 2 critical, oldest first;
+    /// empty from daemons that do not send it.
+    pub pressure_history: Vec<(u64, f64)>,
+}
+
+/// The devlanes daemon's own process, kept out of every lane and total.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DaemonMetrics {
+    /// The daemon's process id.
+    pub pid: Option<u32>,
+    /// When the daemon started (Unix ms), for its uptime.
+    pub started_at_ms: Option<u64>,
+    /// Its readings in a unit row's shape: lane `devlanes`, unit `daemon`,
+    /// kind `daemon`.
+    pub metrics: UnitMetrics,
 }
 
 /// Everything one `metrics` call returns.
@@ -143,6 +161,8 @@ pub struct Metrics {
     pub units: Vec<UnitMetrics>,
     pub lanes: Vec<LaneMetrics>,
     pub system: Option<SystemMetrics>,
+    /// `None` from daemons that do not sample themselves.
+    pub daemon: Option<Box<DaemonMetrics>>,
 }
 
 /// A number field as `u64`; JSON numbers may arrive as floats.
@@ -165,6 +185,24 @@ fn points(value: &Value) -> Vec<(u64, f64, u64)> {
                         point.get(1)?.as_f64()?,
                         point.get(2)?.as_f64()? as u64,
                     ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Element `index` of each `history` row as a number, with the row's
+/// timestamp; rows where either is missing or not a number are skipped.
+fn column(value: &Value, index: usize) -> Vec<(u64, f64)> {
+    value
+        .get("history")
+        .and_then(Value::as_array)
+        .map(|points| {
+            points
+                .iter()
+                .filter_map(|point| {
+                    let point = point.as_array()?;
+                    Some((point.first()?.as_f64()? as u64, point.get(index)?.as_f64()?))
                 })
                 .collect()
         })
@@ -275,12 +313,36 @@ impl Metrics {
                     .map(|cores| cores.iter().filter_map(Value::as_f64).collect())
                     .unwrap_or_default(),
                 history: points(system),
+                available_history: column(system, 2)
+                    .into_iter()
+                    .map(|(ts, bytes)| (ts, bytes as u64))
+                    .collect(),
+                pressure_history: column(system, 3),
             });
+        let daemon = value.get("daemon").filter(|d| d.is_object()).map(|daemon| {
+            Box::new(DaemonMetrics {
+                pid: number(daemon, "pid").and_then(|n| u32::try_from(n).ok()),
+                started_at_ms: number(daemon, "started_at_ms"),
+                metrics: UnitMetrics {
+                    lane: "devlanes".into(),
+                    unit: "daemon".into(),
+                    kind: "daemon".into(),
+                    cpu_percent: daemon.get("cpu_percent").and_then(Value::as_f64),
+                    memory_bytes: number(daemon, "memory_bytes"),
+                    peak_cpu_percent: daemon.get("peak_cpu_percent").and_then(Value::as_f64),
+                    peak_memory_bytes: number(daemon, "peak_memory_bytes"),
+                    history: points(daemon),
+                    windows: windows(daemon),
+                    ..UnitMetrics::default()
+                },
+            })
+        });
         Self {
             range_ms: number(value, "range_ms"),
             units,
             lanes,
             system,
+            daemon,
         }
     }
 }
@@ -1001,9 +1063,23 @@ mod tests {
             "lanes": [{"lane": "acme@0", "cpu_percent": 395.0, "memory_bytes": 7000,
                        "peak_cpu_percent": 410.0, "history": [[1, 300.0, 6000]]}],
             "system": {"cpus": 10, "memory_total_bytes": 34359738368u64, "cpu_percent": 80.0,
-                       "memory_pressure": "normal", "history": [[1, 70.0, 9000]],
-                       "core_percents": [12.5, 90.0, "bad"]}
+                       "memory_pressure": "normal",
+                       "history": [[1, 70.0, 9000, 0], [2, null, 8000, 1], [3, 60.0, 7000]],
+                       "core_percents": [12.5, 90.0, "bad"]},
+            "daemon": {"pid": 42, "started_at_ms": 5, "cpu_percent": 1.5,
+                       "memory_bytes": 50000000, "peak_memory_bytes": 60000000,
+                       "history": [[1, 1.0, 49000000]]}
         }));
+        let system = parsed.system.as_ref().expect("system");
+        // A second without a CPU reading still has its memory and pressure;
+        // a row from an older daemon has no level.
+        assert_eq!(system.history.len(), 2);
+        assert_eq!(system.available_history, [(1, 9000), (2, 8000), (3, 7000)]);
+        assert_eq!(system.pressure_history, [(1, 0.0), (2, 1.0)]);
+        let daemon = parsed.daemon.as_ref().expect("daemon");
+        assert_eq!((daemon.pid, daemon.started_at_ms), (Some(42), Some(5)));
+        assert_eq!(daemon.metrics.memory_bytes, Some(50_000_000));
+        assert_eq!(daemon.metrics.history, [(1, 1.0, 49_000_000)]);
         assert_eq!(parsed.range_ms, Some(900_000));
         let postgres = &parsed.units[0];
         assert!(postgres.is_container() && postgres.shared);

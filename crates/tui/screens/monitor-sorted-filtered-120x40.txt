@@ -1,38 +1,38 @@
  devlanes  1 acme   2 billing   3 shop                       starting feat/checkout: 4 of 8 ready  M monitor   D daemon
 ┌ cpu ──────────────────────────────────────────────────────────── of 10 cores ┐┌ mem ─────────────────────── of 32.0G ┐
-│100%┤                                            acme@0        ■■■■■■■■■  37% ││  devlanes      10.3G ■■■■■■■■■  32%  │
-│    │                                            acme@1        ■■■■■■■■■   6% ││  used          22.4G ■■■■■■■■■  70%  │
-│    │⠑⢄⠢⡀⢄⠐⢄⠠⡀⠠⡀⣄⣤⣦⣄⣀⢀                           shop@0        ■■■■■■■■■   1% ││  available      9.6G  pressure normal│
-│    │   ⠈ ⠁⣀⣵⣾⣾⣿⣿⣿⣿⣿⣿⣷⣷⣬⣦⣈⠢⠑⢄⠑⢄⠢⡀⢄⠐⢄⠠⡀⠠⡀⢄ ⢄ ⡀⠠⡀⢀ acme (shared) ■■■■■■■■■   1% ││                                      │
-│ 50%┤⣴⣤⣶⣶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣶⣦⣶⣤⣶⣬⣦⣥⣤⣵⣬⣦⣬⣤⣵⣤⣵⣬⣦⣬⣦                              ││  acme@0         8.3G ■■■■■■■■■  26%  │
-│    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ devlanes      ■■■■■■■■■  44% ││  acme@1        1001M ■■■■■■■■■   3%  │
-│    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ system        ■■■■■■■■■  72% ││  shop@0         503M ■■■■■■■■■   2%  │
-│  0%┤⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                              ││  acme (shared)  640M ■■■■■■■■■   2%  │
+│100%┤                                            acme (shared) ■■■■■■■■■   1% ││  devlanes      10.3G ■■■■■■■■■  32%  │
+│    │                                            acme@0        ■■■■■■■■■  37% ││  used          22.4G ■■■■■■■■■  70%  │
+│    │⠑⢄⠢⡀⢄⠐⢄⠠⡀⠠⡀⣄⣤⣦⣄⣀⢀                           acme@1        ■■■■■■■■■   6% ││  available      9.6G  pressure normal│
+│    │   ⠈ ⠁⣀⣵⣾⣾⣿⣿⣿⣿⣿⣿⣷⣷⣬⣦⣈⠢⠑⢄⠑⢄⠢⡀⢄⠐⢄⠠⡀⠠⡀⢄ ⢄ ⡀⠠⡀⢀ shop@0        ■■■■■■■■■   1% ││                                      │
+│ 50%┤⣴⣤⣶⣶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣶⣦⣶⣤⣶⣬⣦⣥⣤⣵⣬⣦⣬⣤⣵⣤⣵⣬⣦⣬⣦                              ││  acme (shared)  640M ■■■■■■■■■   2%  │
+│    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ devlanes      ■■■■■■■■■  44% ││  acme@0         8.3G ■■■■■■■■■  26%  │
+│    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ system        ■■■■■■■■■  72% ││  acme@1        1001M ■■■■■■■■■   3%  │
+│  0%┤⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                              ││  shop@0         503M ■■■■■■■■■   2%  │
 │    └-1m 26s                                 now                              ││                                      │
 └──────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────┘
 ┌ units /acme 40 of 42 · flat ────────────────────────────────────────────────────────────────────────────── <- mem -> ┐
 │  name            lane          kind state    cpu            mem ▼           peak uptime cpu -28s                     │
-│● postgres        acme (shared) ctr  healthy   4.9% ■■■■■■■■  602M ■■■■■■■■  606M      - ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│◉ wrk-index       acme@0        svc  running   9.5% ■■■■■■■■  519M ■■■■■■■■  519M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│● api-gateway     acme@1        svc  ready     9.2% ■■■■■■■■  448M ■■■■■■■■  448M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│● stub-stripe     acme@0        svc  ready     9.6% ■■■■■■■■  444M ■■■■■■■■  445M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│● web-app         acme@0        svc  ready     1.7% ■■■■■■■■  431M ■■■■■■■■  433M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│● api-search      acme@0        svc  ready     104% ■■■■■■■■  417M ■■■■■■■■  418M 2h 14m █▇██████▇███▇██▇███▇██▇▇█▇▇█ │
-│● cache-warm      acme@0        svc  ready     7.0% ■■■■■■■■  410M ■■■■■■■■  410M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│◉ wrk-ledger      acme@0        svc  running   6.8% ■■■■■■■■  407M ■■■■■■■■  408M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│● api-reports     acme@0        svc  ready     0.3% ■■■■■■■■  394M ■■■■■■■■  397M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│⠋ ml-embed        acme@0        svc  starting  5.3% ■■■■■■■■  372M ■■■■■■■■  372M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
 │◉ wrk-webhooks    acme@0        svc  running   3.7% ■■■■■■■■  370M ■■■■■■■■  370M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
 │● api-notify      acme@0        svc  ready      15% ■■■■■■■■  358M ■■■■■■■■  360M 2h 14m ▁▁▁▁▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
 │● ml-ranker       acme@0        svc  ready     2.3% ■■■■■■■■  335M ■■■■■■■■  336M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
 │◉ wrk-cron        acme@0        svc  running   0.6% ■■■■■■■■  332M ■■■■■■■■  332M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
 │● api-inventory   acme@0        svc  ready      15% ■■■■■■■■  321M ■■■■■■■■  323M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
+│● docs-search     acme@0        svc  ready     1.4% ■■■■■■■■  296M ■■■■■■■■  299M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
+│◉ wrk-thumbs      acme@0        svc  running    23% ■■■■■■■■  294M ■■■■■■■■  294M 2h 14m ▁▁▁▁▁▂▁▁▁▂▂▁▁▂▂▁▂▂▂▁▂▂▂▁▂▂▂▂ │
+│● api-catalog     acme@0        svc  ready      36% ■■■■■■■■  260M ■■■■■■■■  261M 2h 14m ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▂▃▃▂▃▃▃▂▃ │
+│● proxy-edge      acme@0        svc  ready     0.3% ■■■■■■■■  259M ■■■■■■■■  262M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
+│● stub-auth0      acme@0        svc  ready      14% ■■■■■■■■  223M ■■■■■■■■  225M 2h 14m ▂▁▁▂▁▁▂▂▁▁▂▁▁▁▁▁▁▂▁▁▁▁▁▁▁▁▁▁ │
+│◉ wrk-billing     acme@0        svc  running    11% ■■■■■■■■  217M ■■■■■■■■  218M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
+│● api-orders      acme@0        svc  ready     9.7% ■■■■■■■■  211M ■■■■■■■■  211M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
+│⠋ migrate         acme@1        task running   0.5% ■■■■■■■■  195M ■■■■■■■■  195M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
+│╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌│
+│● devlanes daemon               dmn  running   1.1% ■■■■■■■■   47M ■■■■■■■■   47M 3h 00m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌ api-reports · acme@0 · cpu ──────────────────────────────┐┌ mem ────────────────────── ready · pid 51009 · up 2h 14m ┐
-│now 0.3%  avg 0.4%  min 0.2%  max 0.6%                    ││now 394.4M  avg 381.1M  min 363.4M  max 396.6M            │
-│100%┤                                                     ││512M┤                                                     │
-│    │                                                     ││    │⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶│
-│ 50%┤                                                     ││256M┤⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿│
+┌ api-users · acme@0 · cpu ────────────────────────────────┐┌ mem ────────────────────── ready · pid 51002 · up 2h 14m ┐
+│now 5.9%  avg 4.8%  min 2.2%  max 7.1%                    ││now 135.8M  avg 130.0M  min 125.1M  max 136.5M            │
+│100%┤                                                     ││256M┤                                                     │
+│    │                                                     ││    │                                                     │
+│ 50%┤                                                     ││128M┤⣤⣤⣤⣦⣤⣦⣤⣦⣴⣶⣴⣶⣴⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶│
 │    │                                                     ││    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿│
 │  0%┤⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀││   0┤⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿│
 │    └-1m 46s                                           now││    └-1m 46s                                           now│
@@ -42,41 +42,41 @@
 --- styles (row: columns style) ---
 0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 13-16 red, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 99 bold, 100-107 bold underlined, 111 bold, 112-118 dim
 1: 0 darkgray, 6-65 darkgray, 66-78 dim, 79-80 darkgray, 86-108 darkgray, 109-118 dim, 119 darkgray
-2: 0 darkgray, 1-4 dim, 5 darkgray, 64-66 green, 67-72 darkgray, 79-80 darkgray, 103-105 green, 106-111 darkgray, 119 darkgray
-3: 0 darkgray, 1-4 dim, 5 darkgray, 64 green, 65-72 darkgray, 79-80 darkgray, 103-106 green, 107-108 yellow, 109-111 darkgray, 112-116 yellow, 119 darkgray
-4: 0 darkgray, 1-4 dim, 5 darkgray, 6-16 dim, 17-21 yellow, 22 dim, 64-72 darkgray, 79-80 darkgray, 104-118 dim, 119 darkgray
+2: 0 darkgray, 1-4 dim, 5 darkgray, 64-72 darkgray, 79-80 darkgray, 103-105 green, 106-111 darkgray, 119 darkgray
+3: 0 darkgray, 1-4 dim, 5 darkgray, 64-66 green, 67-72 darkgray, 79-80 darkgray, 103-106 green, 107-108 yellow, 109-111 darkgray, 112-116 yellow, 119 darkgray
+4: 0 darkgray, 1-4 dim, 5 darkgray, 6-16 dim, 17-21 yellow, 22 dim, 64 green, 65-72 darkgray, 79-80 darkgray, 104-118 dim, 119 darkgray
 5: 0 darkgray, 1-4 dim, 5 darkgray, 9 dim, 11 dim, 12-26 yellow, 27-41 dim, 43 dim, 45-48 dim, 64-72 darkgray, 79-80 darkgray, 119 darkgray
-6: 0 darkgray, 1-4 dim, 5 darkgray, 6-48 green, 79-80 darkgray, 103-104 green, 105-111 darkgray, 119 darkgray
-7: 0 darkgray, 1-4 dim, 5 darkgray, 6-48 green, 64-67 green, 68-72 darkgray, 79-80 darkgray, 103-111 darkgray, 119 darkgray
+6: 0 darkgray, 1-4 dim, 5 darkgray, 6-48 green, 79-80 darkgray, 103-111 darkgray, 119 darkgray
+7: 0 darkgray, 1-4 dim, 5 darkgray, 6-48 green, 64-67 green, 68-72 darkgray, 79-80 darkgray, 103-104 green, 105-111 darkgray, 119 darkgray
 8: 0 darkgray, 1-4 dim, 5 darkgray, 6-48 green, 64-67 green, 68-69 yellow, 70-72 darkgray, 73-77 yellow, 79-80 darkgray, 103-111 darkgray, 119 darkgray
 9: 0 darkgray, 1-4 dim, 5 darkgray, 6-48 green, 79-80 darkgray, 103-111 darkgray, 119 darkgray
 10: 0 darkgray, 5-48 dim, 79-80 darkgray, 119 darkgray
 11: 0-119 darkgray
 12: 0 darkgray, 13-29 dim, 30-107 darkgray, 108-111 dim, 112-114 bold, 115-118 dim, 119 darkgray
 13: 0 darkgray, 1-118 dim, 119 darkgray
-14: 0 darkgray, 1-2 green, 19-46 dim, 53-60 darkgray, 68-75 green, 77-82 dim, 90-117 green, 119 darkgray
-15: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-74 green, 75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
-16: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-73 green, 74-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
-17: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-73 green, 74-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
-18: 0 darkgray, 1-2 green, 19-46 dim, 53-60 darkgray, 68-73 green, 74-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
-19: 0 darkgray, 1-2 green, 19-46 dim, 47-52 red, 53-56 green, 57-58 yellow, 59-60 lightred, 68-73 green, 74-75 darkgray, 77-82 dim, 90 red, 91 lightred, 92-93 red, 94 lightred, 95-97 red, 98 lightred, 99-100 red, 101-102 lightred, 103 red, 104-105 lightred, 106-107 red, 108-109 lightred, 110 red, 111-113 lightred, 114 red, 115-116 lightred, 117 red, 119 darkgray
-20: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-72 green, 73-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
-21: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-72 green, 73-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
-22: 0 darkgray, 1-2 bold green on darkgray, 3-18 bold on darkgray, 19-46 bold dim on darkgray, 47-52 bold on darkgray, 53-60 bold darkgray on darkgray, 61-67 bold on darkgray, 68-72 bold green on darkgray, 73-75 bold darkgray on darkgray, 76 bold on darkgray, 77-82 bold dim on darkgray, 83-89 bold on darkgray, 90-117 bold green on darkgray, 118 bold on darkgray, 119 darkgray
-23: 0 darkgray, 19-46 dim, 53-60 darkgray, 68-72 green, 73-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
-24: 0 darkgray, 1-2 green, 19-46 dim, 53-60 darkgray, 68-72 green, 73-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
-25: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-72 green, 73-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
-26: 0 darkgray, 1-2 green, 19-46 dim, 53-60 darkgray, 68-71 green, 72-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
-27: 0 darkgray, 1-2 green, 19-46 dim, 53-60 darkgray, 68-71 green, 72-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
-28: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-71 green, 72-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+14: 0 darkgray, 1-2 green, 19-46 dim, 53-60 darkgray, 68-72 green, 73-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+15: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-72 green, 73-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+16: 0 darkgray, 1-2 green, 19-46 dim, 53-60 darkgray, 68-71 green, 72-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+17: 0 darkgray, 1-2 green, 19-46 dim, 53-60 darkgray, 68-71 green, 72-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+18: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-71 green, 72-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+19: 0 darkgray, 1-2 green, 19-46 dim, 53-60 darkgray, 68-71 green, 72-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+20: 0 darkgray, 1-2 green, 19-46 dim, 53-54 green, 55-60 darkgray, 68-71 green, 72-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+21: 0 darkgray, 1-2 green, 19-46 dim, 53-55 green, 56-60 darkgray, 68-70 green, 71-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+22: 0 darkgray, 1-2 green, 19-46 dim, 53-60 darkgray, 68-70 green, 71-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+23: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-70 green, 71-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+24: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-70 green, 71-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+25: 0 darkgray, 1-2 green, 19-46 dim, 53 green, 54-60 darkgray, 68-70 green, 71-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+26: 0 darkgray, 19-46 dim, 53-60 darkgray, 68-70 green, 71-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
+27: 0-119 darkgray
+28: 0 darkgray, 1-2 green, 33-46 dim, 53-60 darkgray, 68 green, 69-75 darkgray, 77-82 dim, 90-117 green, 119 darkgray
 29: 0-119 darkgray
-30: 0 darkgray, 1-12 bold, 13-28 dim, 29-60 darkgray, 66-87 darkgray, 88-118 dim, 119 darkgray
+30: 0 darkgray, 1-10 bold, 11-26 dim, 27-60 darkgray, 66-87 darkgray, 88-118 dim, 119 darkgray
 31: 0 darkgray, 59-60 darkgray, 119 darkgray
 32: 0 darkgray, 1-4 dim, 5 darkgray, 59-60 darkgray, 61-64 dim, 65 darkgray, 119 darkgray
-33: 0 darkgray, 1-4 dim, 5 darkgray, 59-60 darkgray, 61-64 dim, 65 darkgray, 66-118 green, 119 darkgray
+33: 0 darkgray, 1-4 dim, 5 darkgray, 59-60 darkgray, 61-64 dim, 65 darkgray, 119 darkgray
 34: 0 darkgray, 1-4 dim, 5 darkgray, 59-60 darkgray, 61-64 dim, 65 darkgray, 66-118 green, 119 darkgray
 35: 0 darkgray, 1-4 dim, 5 darkgray, 59-60 darkgray, 61-64 dim, 65 darkgray, 66-118 green, 119 darkgray
-36: 0 darkgray, 1-4 dim, 5 darkgray, 6-58 dim, 59-60 darkgray, 61-64 dim, 65 darkgray, 66-118 green, 119 darkgray
+36: 0 darkgray, 1-4 dim, 5 darkgray, 6-58 green, 59-60 darkgray, 61-64 dim, 65 darkgray, 66-118 green, 119 darkgray
 37: 0 darkgray, 5-58 dim, 59-60 darkgray, 65-118 dim, 119 darkgray
 38: 0-119 darkgray
 39: 1-3 bold, 4-11 dim, 12-16 bold, 17-29 dim, 30-32 bold, 33-40 dim, 41 bold, 42-52 dim, 53 bold, 54-63 dim, 64 bold, 65-72 dim, 73 bold, 74-89 dim, 98 bold, 99-110 dim, 111 bold, 112-119 dim

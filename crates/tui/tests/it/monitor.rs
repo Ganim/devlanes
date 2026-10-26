@@ -3,7 +3,7 @@
 
 use crossterm::event::KeyCode;
 use devlanes_tui::{
-    Metrics, SystemMetrics, UnitMetrics,
+    DaemonMetrics, Metrics, SystemMetrics, UnitMetrics,
     app::{App, Effect, MonitorId, Msg, Selected, SortKey, View},
 };
 use ratatui::style::Color;
@@ -54,8 +54,32 @@ fn metrics(api_cpu: f64, web_cpu: f64) -> Metrics {
             cpu_stall_percent: None,
             core_percents: vec![10.0, 95.0, 40.0, 60.0],
             history: history(NOW, 60.0, 8 << 30),
+            available_history: history(NOW, 0.0, 8 << 30)
+                .into_iter()
+                .map(|p| (p.0, p.2))
+                .collect(),
+            pressure_history: Vec::new(),
         }),
+        daemon: None,
     }
+}
+
+/// [`metrics`] with the daemon's own row.
+fn with_daemon(mut metrics: Metrics) -> Metrics {
+    metrics.daemon = Some(Box::new(DaemonMetrics {
+        pid: Some(4242),
+        started_at_ms: Some(NOW - 3_600_000),
+        metrics: UnitMetrics {
+            lane: "devlanes".into(),
+            unit: "daemon".into(),
+            kind: "daemon".into(),
+            cpu_percent: Some(1.5),
+            memory_bytes: Some(48 << 20),
+            history: history(NOW, 1.5, 48 << 20),
+            ..UnitMetrics::default()
+        },
+    }));
+    metrics
 }
 
 /// The unit names in table order.
@@ -64,7 +88,7 @@ fn order(app: &App) -> Vec<String> {
         .iter()
         .filter_map(|row| match row.id() {
             MonitorId::Row { unit, .. } => Some(unit),
-            MonitorId::Group(_) => None,
+            MonitorId::Group(_) | MonitorId::Daemon => None,
         })
         .collect()
 }
@@ -301,5 +325,108 @@ async fn graphs_are_braille_in_gradient_colors_with_the_system_line() -> TestRes
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_daemon_row_stays_under_the_table_and_shows_its_own_graphs() -> TestResult {
+    let mut many = with_daemon(metrics(80.0, 5.0));
+    let template = many.units[0].clone();
+    many.units = (0..40)
+        .map(|i| UnitMetrics {
+            unit: format!("svc{i:02}"),
+            cpu_percent: Some(f64::from(40 - i)),
+            ..template.clone()
+        })
+        .collect();
+    let mut app = monitor(120, 40, many).await;
+    let text = draw(&app)?.backend().to_string();
+    assert!(
+        text.contains("devlanes daemon"),
+        "pinned before scrolling: {text}"
+    );
+    // The wheel scrolls the units; the daemon's row stays.
+    for _ in 0..3 {
+        app.update(wheel(true));
+    }
+    let text = draw(&app)?.backend().to_string();
+    assert!(
+        !text.contains("● svc00") && text.contains("devlanes daemon"),
+        "{text}"
+    );
+    // `G` selects it without scrolling, and the detail shows its graphs.
+    app.update(key(KeyCode::Char('G')));
+    assert_eq!(app.monitor.selected, Some(MonitorId::Daemon));
+    assert_eq!(app.monitor.offset, 9);
+    let text = draw(&app)?.backend().to_string();
+    for expected in ["devlanes daemon · cpu", "pid 4242", "now 1.5%"] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    // Nothing to open or control from here.
+    assert!(app.update(key(KeyCode::Enter)).is_empty());
+    assert_eq!(app.view, View::Monitor);
+    assert!(app.update(key(KeyCode::Char('x'))).is_empty());
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("daemon page"))
+    );
+    // The daemon is in no total: devlanes in the mem box is api and web only.
+    assert!(!order(&app).contains(&"daemon".to_owned()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_memory_graph_is_the_hosts_memory_colored_by_its_pressure() -> TestResult {
+    let mut data = metrics(80.0, 5.0);
+    // Pressure `warn` from 40 to 20 seconds ago, normal before and after.
+    if let Some(system) = data.system.as_mut() {
+        system.pressure_history = (0..900)
+            .map(|i| {
+                let level = if (860..880).contains(&i) { 1.0 } else { 0.0 };
+                (NOW - (899 - i) * 1_000, level)
+            })
+            .collect();
+    }
+    let mut app = monitor(120, 40, data).await;
+    app.update(key(KeyCode::Char('m')));
+    let terminal = draw(&app)?;
+    let text = terminal.backend().to_string();
+    // 16 GiB of host memory at the top, half of it in the middle.
+    assert!(text.contains(" 16G┤") && text.contains("8.0G┤"), "{text}");
+    // The mem box, in the top-left corner: from its top border to its
+    // bottom one and its right edge.
+    let buffer = terminal.backend().buffer();
+    let size = buffer.area;
+    let top = (0..size.height)
+        .find(|y| buffer[(0, *y)].symbol() == "┌")
+        .unwrap_or(0);
+    let bottom = (top + 1..size.height)
+        .find(|y| buffer[(0, *y)].symbol() == "└")
+        .unwrap_or(top);
+    let right = (1..size.width)
+        .find(|x| buffer[(*x, top)].symbol() == "┐")
+        .unwrap_or(0);
+    let mut columns: Vec<(u16, Color)> = Vec::new();
+    for y in top..bottom {
+        for x in 0..right {
+            let cell = &buffer[(x, y)];
+            let braille = cell
+                .symbol()
+                .chars()
+                .next()
+                .is_some_and(|c| ('\u{2801}'..='\u{28ff}').contains(&c));
+            if braille && cell.fg != Color::Reset {
+                columns.push((x, cell.fg));
+            }
+        }
+    }
+    let colored: Vec<Color> = columns.iter().map(|c| c.1).collect();
+    // The warn seconds are orange-red in 16 colors; the rest keep the
+    // load colors, so the newest column (normal) is green.
+    assert!(colored.contains(&Color::LightRed), "{colored:?}\n{text}");
+    assert!(colored.contains(&Color::Green), "{colored:?}");
+    let newest = columns.iter().max_by_key(|c| c.0).map(|c| c.1);
+    assert_eq!(newest, Some(Color::Green));
     Ok(())
 }

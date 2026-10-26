@@ -71,6 +71,7 @@ cargo build --workspace --all-targets --all-features
 - During parallel work, format and test only owned crates.
 - Run one nextest at a time per machine and keep the profile defaults in `.config/nextest.toml` (thread counts and test groups); more parallel test binaries have overwhelmed macOS.
 - Every process test needs a timeout and test-owned cleanup.
+- When a test fails intermittently, locally or in CI, fix the flake instead of rerunning the job or the test until it passes: find the race or the environment dependence and make the test deterministic, even when the failing test is unrelated to your change. Rerun only to confirm the fix.
 - Docker, SSH, trust-store and real framework tests use `#[ignore = "needs ..."]`; run them explicitly with their prerequisites.
 - Prefix Docker-only tests with `docker_`; the Linux CI jobs run them.
 - End-to-end tests live in `e2e/` (`devlanes-e2e`) and drive the real `devlanes` binary as separate processes, each with its own short `DEVLANES_HOME`, Git repository and locked port slot; the default nextest profile skips them, so run them with `cargo nextest run --profile e2e`, and the Docker ones by adding `--run-ignored only -E 'test(/^docker_/)'`.

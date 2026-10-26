@@ -273,6 +273,13 @@ fn live_rss_matches_ps_and_reuse_is_rejected() {
     linux::live_rss_matches_ps_and_reuse_is_rejected();
 }
 
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs Linux")]
+fn daemon_is_sampled_alone() {
+    #[cfg(target_os = "linux")]
+    linux::daemon_is_sampled_alone();
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::{
@@ -354,7 +361,7 @@ mod linux {
         let identity = process_identity(pid).expect("identity");
         let source = LinuxSource::with_pss_interval(Duration::ZERO);
         let samples = source
-            .sample_blocking(&[target(vec![identity])])
+            .sample_blocking(&[target(vec![identity])], None)
             .expect("sample");
         let sample = sample_for(&samples, pid).expect("child sampled");
         let ps = ps_rss_bytes(pid);
@@ -367,15 +374,70 @@ mod linux {
 
         let own = process_identity(std::process::id()).expect("own identity");
         let samples = source
-            .sample_blocking(&[target(vec![own])])
+            .sample_blocking(&[target(vec![own])], None)
             .expect("sample");
         assert!(sample_for(&samples, pid).is_some(), "child via ppid");
 
         let mut stale = identity;
         stale.start_time += 1;
         let samples = source
-            .sample_blocking(&[target(vec![stale])])
+            .sample_blocking(&[target(vec![stale])], None)
             .expect("sample");
         assert!(samples.is_empty(), "stale identity sampled: {samples:?}");
+    }
+
+    pub fn daemon_is_sampled_alone() {
+        // The test process plays the daemon; its child stands in for a unit process.
+        let child = Owned(
+            Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .spawn()
+                .expect("spawn sleep"),
+        );
+        let me = process_identity(std::process::id()).expect("own identity");
+        let source = LinuxSource::with_pss_interval(Duration::ZERO);
+
+        for _ in 0..2 {
+            let samples = source.sample_blocking(&[], Some(me)).expect("sample");
+            assert_eq!(
+                samples.len(),
+                1,
+                "only the daemon, no children: {samples:?}"
+            );
+            assert_eq!(samples[0].subject, Subject::Daemon);
+            assert!(samples[0].footprint_bytes > 0, "{samples:?}");
+        }
+
+        // A unit that tracks the daemon's PID counts neither the daemon nor, through
+        // it, the daemon's other children.
+        let child_identity = process_identity(child.0.id()).expect("child identity");
+        let samples = source
+            .sample_blocking(&[target(vec![me])], Some(me))
+            .expect("sample");
+        assert!(
+            samples
+                .iter()
+                .all(|sample| !matches!(sample.subject, Subject::Process { .. })),
+            "{samples:?}"
+        );
+        assert_eq!(samples.len(), 1, "only the daemon: {samples:?}");
+
+        // A child the unit tracks itself still counts, as a unit leader would.
+        let samples = source
+            .sample_blocking(&[target(vec![me, child_identity])], Some(me))
+            .expect("sample");
+        let daemons = samples
+            .iter()
+            .filter(|sample| sample.subject == Subject::Daemon)
+            .count();
+        assert_eq!(daemons, 1, "{samples:?}");
+        assert!(sample_for(&samples, me.pid).is_none(), "{samples:?}");
+        assert!(sample_for(&samples, child_identity.pid).is_some());
+
+        let mut stale = me;
+        stale.start_time += 1;
+        let samples = source.sample_blocking(&[], Some(stale)).expect("sample");
+        assert!(samples.is_empty(), "stale daemon identity: {samples:?}");
     }
 }

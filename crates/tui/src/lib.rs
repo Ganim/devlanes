@@ -32,8 +32,8 @@ pub mod words;
 use std::{io::IsTerminal, sync::Arc};
 
 pub use api::{
-    ApiError, AttachEvent, AttachInput, AttachSession, ClientApi, DaemonApi, EventStream,
-    LaneMetrics, Metrics, MetricsQuery, SystemMetrics, UnitMetrics, Window,
+    ApiError, AttachEvent, AttachInput, AttachSession, ClientApi, DaemonApi, DaemonMetrics,
+    EventStream, LaneMetrics, Metrics, MetricsQuery, SystemMetrics, UnitMetrics, Window,
 };
 pub use devlanes_client::Paths;
 pub use runtime::{TerminalGuard, drive, drive_start};

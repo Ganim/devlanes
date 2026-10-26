@@ -159,6 +159,19 @@ pub enum Method {
     Why,
     #[serde(rename = "url")]
     Url,
+    /// Reply `{units, lanes, range_ms, system?, daemon?}`, or `{lane, peaks}`
+    /// with `peaks: true`. Unit and lane rows have `history` rows of
+    /// `[ts_ms, cpu_percent, memory_bytes]`, plus `windows` when asked for or
+    /// past the raw ring.
+    ///
+    /// `system.history` rows are `[ts_ms, cpu_percent?, available_memory_bytes?,
+    /// level?]`, where `level` is the memory pressure at that tick: 0 normal,
+    /// 1 warn, 2 critical, `null` when unknown.
+    ///
+    /// `daemon` is the daemon's own process, sent once it has been sampled:
+    /// `{pid, started_at_ms, cpu_percent?, memory_bytes?, peak_cpu_percent?,
+    /// peak_memory_bytes?, history, windows?}` with the unit row formats and
+    /// peaks since the daemon started. It is never counted in a lane or unit.
     #[serde(rename = "metrics")]
     Metrics,
     #[serde(rename = "subscribe")]

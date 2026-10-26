@@ -2,15 +2,15 @@
 ┌ daemon ────────────────────────────────────┐┌ checks ─────────────────────────────────────── 1 fail · 1 warn · i all ┐
 │version   1.0.0 · pid 4242                  ││fail tls     no CA: no CA has been created yet                          │
 │uptime    7h 38m                            ││             fix: devlanes certs trust                                  │
-│socket    /Users/acme/.devlanes/run/daemon.…││warn proxy   https on fallback port 8443: port 443 needs root           │
-│managed   41 processes · 2 projects         ││             fix: free the standard port or set proxy ports in          │
-│clients   3 event subscribers               ││             ~/.devlanes/config.yaml                                    │
-│state     schema 7 · /Users/acme/.devlanes/…││ok           daemon · sandbox · docker · proxy · hosts                  │
+│usage     cpu 1.1% · mem 47M                ││warn proxy   https on fallback port 8443: port 443 needs root           │
+│socket    /Users/acme/.devlanes/run/daemon.…││             fix: free the standard port or set proxy ports in          │
+│managed   41 processes · 2 projects         ││             ~/.devlanes/config.yaml                                    │
+│clients   3 event subscribers               ││ok           daemon · sandbox · docker · proxy · hosts                  │
+│state     schema 7 · /Users/acme/.devlanes/…││                                                                        │
 └────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────────┘
 ┌ daemon.log ──────────────────────────────── following · all levels · repeats folded · /wrk-export 1 of 40 · 40 lines ┐
 │── 2026-10-21 ────────────────────────────────────────────────────────────────────────────────────────────────────────│
 │10:38:40 ERROR daemon::lifecycle    unit exited  unit=acme@0:wrk-export code=1                          ×5 since 10:06│
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -48,11 +48,11 @@
 5: 0 darkgray, 1-10 dim, 45-46 darkgray, 47-59 yellow, 60-108 dim, 119 darkgray
 6: 0 darkgray, 1-10 dim, 45-46 darkgray, 47-59 yellow, 60-82 dim, 119 darkgray
 7: 0 darkgray, 1-10 dim, 45-46 darkgray, 47-59 green, 119 darkgray
-8: 0-119 darkgray
-9: 0-44 bold, 45-118 bold dim, 119 bold
-10: 0 bold, 1-118 darkgray, 119 bold
-11: 0 bold, 1-9 dim, 10-14 bold red, 49-54 dim, 55-61 magenta, 62-71 bold reversed yellow, 73-77 dim, 105-118 dim, 119 bold
-12: 0 bold, 119 bold
+8: 0 darkgray, 1-10 dim, 45-46 darkgray, 119 darkgray
+9: 0-119 darkgray
+10: 0-44 bold, 45-118 bold dim, 119 bold
+11: 0 bold, 1-118 darkgray, 119 bold
+12: 0 bold, 1-9 dim, 10-14 bold red, 49-54 dim, 55-61 magenta, 62-71 bold reversed yellow, 73-77 dim, 105-118 dim, 119 bold
 13: 0 bold, 119 bold
 14: 0 bold, 119 bold
 15: 0 bold, 119 bold

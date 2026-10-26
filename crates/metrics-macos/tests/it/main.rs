@@ -38,6 +38,13 @@ fn busy_process_cpu_uses_converted_ticks() {
     macos::busy_process_cpu_uses_converted_ticks();
 }
 
+#[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "needs macOS")]
+fn daemon_is_sampled_alone() {
+    #[cfg(target_os = "macos")]
+    macos::daemon_is_sampled_alone();
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::{
@@ -137,7 +144,7 @@ mod macos {
         // Let exec and dyld finish mapping pages so both reads see a settled process.
         thread::sleep(Duration::from_millis(300));
         let samples = source
-            .sample_blocking(&[target("sleep", Vec::new(), vec![identity])])
+            .sample_blocking(&[target("sleep", Vec::new(), vec![identity])], None)
             .expect("sample");
         let sample = sample_for(&samples, pid).expect("child sampled");
         let ps = ps_rss_bytes(pid);
@@ -233,7 +240,7 @@ mod macos {
             .expect("runtime");
         let request = SampleRequest {
             units: vec![target("session", vec![leader.sid], Vec::new())],
-            containers: Vec::new(),
+            ..SampleRequest::default()
         };
         let samples = runtime
             .block_on(async {
@@ -250,7 +257,7 @@ mod macos {
 
         // Tracking only the leader still finds its child through the parent link.
         let samples = source
-            .sample_blocking(&[target("tree", Vec::new(), vec![leader])])
+            .sample_blocking(&[target("tree", Vec::new(), vec![leader])], None)
             .expect("sample");
         assert!(sample_for(&samples, child).is_some(), "child via ppid");
         assert_eq!(source.name(), "macos");
@@ -262,7 +269,7 @@ mod macos {
         identity.start_time += 1;
         let source = MacosSource::new().expect("source");
         let samples = source
-            .sample_blocking(&[target("stale", Vec::new(), vec![identity])])
+            .sample_blocking(&[target("stale", Vec::new(), vec![identity])], None)
             .expect("sample");
         assert!(samples.is_empty(), "stale identity sampled: {samples:?}");
     }
@@ -272,13 +279,79 @@ mod macos {
         let identity = process_identity(child.0.id()).expect("child identity");
         let source = MacosSource::new().expect("source");
         let units = [target("busy", Vec::new(), vec![identity])];
-        source.sample_blocking(&units).expect("first sample");
+        source.sample_blocking(&units, None).expect("first sample");
         thread::sleep(Duration::from_millis(500));
-        let samples = source.sample_blocking(&units).expect("second sample");
+        let samples = source.sample_blocking(&units, None).expect("second sample");
         let cpu = sample_for(&samples, identity.pid)
             .expect("busy sampled")
             .cpu_percent;
         // One spinning thread: unconverted ticks would read about 41x too low or high.
         assert!((10.0..=150.0).contains(&cpu), "cpu {cpu}%");
+    }
+
+    /// The samples whose subject is [`Subject::Daemon`].
+    fn daemon_samples(samples: &[Sample]) -> Vec<&Sample> {
+        samples
+            .iter()
+            .filter(|sample| sample.subject == Subject::Daemon)
+            .collect()
+    }
+
+    pub fn daemon_is_sampled_alone() {
+        // The test process plays the daemon; its child stands in for a unit process.
+        let child = spawn("/bin/sleep", &["30"]);
+        let me = process_identity(std::process::id()).expect("own identity");
+        let source = MacosSource::new().expect("source");
+
+        for _ in 0..2 {
+            let samples = source.sample_blocking(&[], Some(me)).expect("sample");
+            assert_eq!(
+                samples.len(),
+                1,
+                "only the daemon, no children: {samples:?}"
+            );
+            assert_eq!(samples[0].subject, Subject::Daemon);
+            assert!(samples[0].footprint_bytes > 0, "{samples:?}");
+        }
+
+        // A unit that tracks the daemon's PID counts neither the daemon nor, through
+        // it, the daemon's other children.
+        let child_identity = process_identity(child.0.id()).expect("child identity");
+        let units = [target("unit", Vec::new(), vec![me])];
+        let samples = source.sample_blocking(&units, Some(me)).expect("sample");
+        assert_eq!(daemon_samples(&samples).len(), 1, "{samples:?}");
+        assert!(sample_for(&samples, me.pid).is_none(), "{samples:?}");
+        assert!(
+            sample_for(&samples, child_identity.pid).is_none(),
+            "{samples:?}"
+        );
+
+        // A child the unit tracks itself still counts, as a unit leader would.
+        let units = [target("unit", Vec::new(), vec![me, child_identity])];
+        let samples = source.sample_blocking(&units, Some(me)).expect("sample");
+        assert_eq!(daemon_samples(&samples).len(), 1, "{samples:?}");
+        assert!(sample_for(&samples, me.pid).is_none(), "{samples:?}");
+        assert!(sample_for(&samples, child_identity.pid).is_some());
+
+        let mut stale = me;
+        stale.start_time += 1;
+        let samples = source.sample_blocking(&[], Some(stale)).expect("sample");
+        assert!(samples.is_empty(), "stale daemon identity: {samples:?}");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let request = SampleRequest {
+            daemon: Some(me),
+            ..SampleRequest::default()
+        };
+        let samples = runtime
+            .block_on(async {
+                tokio::time::timeout(COMMAND_TIMEOUT, source.sample(&request)).await
+            })
+            .expect("sample in time")
+            .expect("sample");
+        assert_eq!(daemon_samples(&samples).len(), 1, "{samples:?}");
     }
 }

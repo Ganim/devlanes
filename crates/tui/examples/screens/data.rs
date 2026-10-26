@@ -8,7 +8,7 @@ use devlanes_proto::{
     Actor, ActorKind, ContainerSummary, LaneSummary, LogLine, ORPHANED, RpcError, UnitSummary,
 };
 use devlanes_tui::{
-    LaneMetrics, Metrics, SystemMetrics, UnitMetrics,
+    DaemonMetrics, LaneMetrics, Metrics, SystemMetrics, UnitMetrics,
     api::{ProfileInfo, ProfileList, TaskInfo},
 };
 use serde_json::{Value, json};
@@ -580,12 +580,42 @@ pub fn metrics() -> Metrics {
                 (ts, 45.0 + wobble(500, i) * 35.0, 9_800 << 20)
             })
             .collect(),
+        available_history: (0..POINTS)
+            .map(|i| (NOW_MS - (POINTS - 1 - i) * STEP_MS, 9_800 << 20))
+            .collect(),
+        // Fifteen seconds of `warn` that every memory graph reaches back to.
+        pressure_history: (0..POINTS)
+            .map(|i| {
+                let level = if (POINTS - 50..POINTS - 35).contains(&i) {
+                    1.0
+                } else {
+                    0.0
+                };
+                (NOW_MS - (POINTS - 1 - i) * STEP_MS, level)
+            })
+            .collect(),
     };
+    let daemon = history(300, 1.2, 46 << 20, false);
     Metrics {
         range_ms: Some(900_000),
         units,
         lanes,
         system: Some(system),
+        daemon: Some(Box::new(DaemonMetrics {
+            pid: Some(4242),
+            started_at_ms: Some(NOW_MS - 3 * 3_600_000),
+            metrics: UnitMetrics {
+                lane: "devlanes".into(),
+                unit: "daemon".into(),
+                kind: "daemon".into(),
+                cpu_percent: daemon.last().map(|p| p.1),
+                memory_bytes: daemon.last().map(|p| p.2),
+                peak_cpu_percent: Some(4.0),
+                peak_memory_bytes: Some(52 << 20),
+                history: daemon,
+                ..UnitMetrics::default()
+            },
+        })),
     }
 }
 

@@ -18,7 +18,7 @@ async fn sample_self() -> Result<(), Box<dyn std::error::Error>> {
             sessions: vec![leader.sid],
             processes: vec![leader],
         }],
-        containers: Vec::new(),
+        ..SampleRequest::default()
     };
     let samples = source.sample(&request).await?; // one Subject::Process sample per member
     println!("{} samples", samples.len());
@@ -26,7 +26,7 @@ async fn sample_self() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`MacosSource::sample_blocking` does the same on the calling thread.
+`MacosSource::sample_blocking` does the same on the calling thread, taking the units and the daemon's identity.
 
 `MacosPressure` is the start gate's `PressureSource`:
 
@@ -50,6 +50,8 @@ System CPU is the busy share of all cores between two calls, from per-core `host
 ## Behaviour
 
 A process belongs to a unit when it is in one of the unit's sessions, is a tracked process whose start time still matches, or descends from either by parent PID. Only processes owned by the daemon's user are read. A tracked PID with a different start time was reused and is skipped. Start times use the same token as `devlanes-sys`.
+
+When the request names the daemon's own process, it is read by PID alone and reported as one `Subject::Daemon` sample, also when there are no units. Its children are not included, and it never counts for a unit.
 
 Memory is `phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V6)`, the number Activity Monitor shows. RSS is reported too, but it drops sharply once idle pages are compressed. CPU times are mach ticks converted with `mach_timebase_info`. A process seen for the first time reports its lifetime average.
 

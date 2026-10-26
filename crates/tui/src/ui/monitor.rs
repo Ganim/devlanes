@@ -15,12 +15,15 @@ use super::{draw_box, fit, hit, spans_width, unit_look};
 use crate::api::{Metrics, UnitMetrics};
 use crate::app::{App, Click};
 use crate::graph::{self, load_color};
-use crate::monitor::{Entry, Group, MonitorRow, SortKey};
+use crate::monitor::{Entry, Group, MonitorRow, SortKey, group_order};
 use crate::text::{self, clean, clip};
 use crate::theme::{Glyph, Glyphs, Theme, Tier, Tone};
 
 /// `(ts, value)` samples, a value normalized for a graph.
 type Points = Vec<(u64, f64)>;
+
+/// A history named for the column cache.
+type Named<'a> = (String, &'a [(u64, f64, u64)]);
 
 /// What every part of the page reads.
 struct Page<'a> {
@@ -82,37 +85,75 @@ impl Page<'_> {
         self.metrics.map_or(&[], |m| m.units.as_slice())
     }
 
-    /// The unit and container rows shown, without lane rows.
+    /// The unit and container rows shown, without lane rows or the daemon's.
     fn entries(&self) -> Vec<&Entry> {
         self.rows
             .iter()
             .filter_map(|row| match row {
                 MonitorRow::Entry(entry) => Some(entry.as_ref()),
-                MonitorRow::Group(_) => None,
+                MonitorRow::Group(_) | MonitorRow::Daemon(_) => None,
             })
             .collect()
     }
 
-    /// The devlanes total as `(ts, cpu, memory)`: lane series plus shared
-    /// containers, each container once; summed units on older daemons.
-    fn total_history(&self) -> Vec<(u64, f64, u64)> {
+    /// The histories the devlanes total adds up, each with a name for the
+    /// column cache: lane series plus shared containers, each container
+    /// once; every unit on older daemons, which send no lane series.
+    fn total_series(&self) -> Vec<Named<'_>> {
         let Some(metrics) = self.metrics else {
             return Vec::new();
         };
-        let mut series: Vec<&[(u64, f64, u64)]> = Vec::new();
-        if metrics.lanes.is_empty() {
-            series.extend(metrics.units.iter().map(|u| u.history.as_slice()));
-        } else {
-            series.extend(metrics.lanes.iter().map(|l| l.history.as_slice()));
-            series.extend(
-                metrics
-                    .units
-                    .iter()
-                    .filter(|u| u.shared)
-                    .map(|u| u.history.as_slice()),
-            );
+        /// A unit's or container's history, named by lane and unit.
+        fn unit(u: &UnitMetrics) -> Named<'_> {
+            (format!("{}:{}", u.lane, u.unit), u.history.as_slice())
         }
-        sum_series(&series)
+        if metrics.lanes.is_empty() {
+            return metrics.units.iter().map(unit).collect();
+        }
+        metrics
+            .lanes
+            .iter()
+            .map(|l| (format!("lane:{}", l.lane), l.history.as_slice()))
+            .chain(metrics.units.iter().filter(|u| u.shared).map(unit))
+            .collect()
+    }
+
+    /// `count` raw columns of the devlanes total's CPU (`cpu`) or memory.
+    /// Each series is folded into columns on its own and the columns are
+    /// added: lanes and containers are read by different collectors, so
+    /// their timestamps never match, and merging samples before folding
+    /// averaged (memory) or maxed (CPU) the parts instead of adding them.
+    fn total_columns(&self, cpu: bool, count: usize) -> Vec<Option<f64>> {
+        let (prefix, max) = if cpu {
+            ("total-cpu", true)
+        } else {
+            ("total-mem", false)
+        };
+        let mut totals: Vec<Option<f64>> = vec![None; count];
+        let hold = usize::try_from(graph::HOLD_MS / SAMPLE_MS).unwrap_or(0);
+        for (name, history) in self.total_series() {
+            let points: Points = history
+                .iter()
+                .map(|p| (p.0, if cpu { p.1 } else { p.2 as f64 }))
+                .collect();
+            let mut columns = self.columns(&format!("{prefix}:{name}"), &points, count, max);
+            // A part whose newest sample landed in the previous second (the
+            // collectors stamp at different moments of one tick) keeps its
+            // value at the right edge, so the newest total is not just the
+            // other parts. A part gone for longer drops out.
+            if let Some(last) = columns.iter().rposition(Option::is_some)
+                && count - 1 - last <= hold
+            {
+                let value = columns[last];
+                columns[last + 1..].fill(value);
+            }
+            for (total, value) in totals.iter_mut().zip(columns) {
+                if let Some(value) = value {
+                    *total = Some(total.unwrap_or(0.0) + value);
+                }
+            }
+        }
+        totals
     }
 
     /// The devlanes total now: `(cpu, memory)`.
@@ -182,10 +223,8 @@ impl Page<'_> {
                 )),
             }
         }
-        // Lanes first, then the shared groups, as in the mockups.
-        groups.sort_by(|a, b| {
-            (a.0.ends_with(" (shared)"), &a.0).cmp(&(b.0.ends_with(" (shared)"), &b.0))
-        });
+        // The table's order, so a meter and its table row line up.
+        groups.sort_by_cached_key(|g| group_order(&g.0, &self.app.lanes));
         groups
     }
 }
@@ -201,19 +240,6 @@ fn span(seconds: usize) -> String {
         60..3600 => format!("{}m {}s", seconds / 60, seconds % 60),
         _ => format!("{}h {}m", seconds / 3600, seconds / 60 % 60),
     }
-}
-
-/// Point-by-point sums of several histories, by timestamp.
-fn sum_series(series: &[&[(u64, f64, u64)]]) -> Vec<(u64, f64, u64)> {
-    let mut totals: std::collections::BTreeMap<u64, (f64, u64)> = std::collections::BTreeMap::new();
-    for history in series {
-        for (ts, cpu, memory) in history.iter() {
-            let total = totals.entry(*ts).or_default();
-            total.0 += cpu;
-            total.1 += memory;
-        }
-    }
-    totals.into_iter().map(|(ts, (c, m))| (ts, c, m)).collect()
 }
 
 /// The newest timestamp in the metrics, else the clock.
@@ -478,6 +504,9 @@ fn short_group(name: &str, width: usize) -> String {
     }
 }
 
+/// Columns left of a plot: a four-cell label and the tick.
+const AXIS_WIDTH: u16 = 5;
+
 /// The y-axis labels and the x-axis row around a graph in `area`; returns
 /// the plot area.
 fn axes(page: &Page, frame: &mut Frame, area: Rect, labels: [&str; 3]) -> Rect {
@@ -485,7 +514,12 @@ fn axes(page: &Page, frame: &mut Frame, area: Rect, labels: [&str; 3]) -> Rect {
     if area.width < 12 || area.height < 3 {
         return Rect::default();
     }
-    let plot = Rect::new(area.x + 5, area.y, area.width - 5, area.height - 1);
+    let plot = Rect::new(
+        area.x + AXIS_WIDTH,
+        area.y,
+        area.width - AXIS_WIDTH,
+        area.height - 1,
+    );
     let ascii = theme.glyphs == Glyphs::Ascii;
     let buf = frame.buffer_mut();
     for dy in 0..plot.height {
@@ -666,10 +700,11 @@ fn cpu_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize,
         inner.width - meters_width - 1,
         inner.height,
     );
-    let history = page.total_history();
+    let samples = plot_samples(graph_area);
+    let raw = page.total_columns(true, samples);
     // Fixed at the machine's cores; without the core count, percent of one
     // core up to the highest total seen, rounded to the next 100.
-    let peak = history.iter().map(|p| p.1).fold(total_cpu, f64::max);
+    let peak = raw.iter().flatten().copied().fold(total_cpu, f64::max);
     let scale = page.total_cpu_scale(peak);
     let labels = match cpus {
         Some(_) => ["100%".to_owned(), "50%".to_owned(), "0%".to_owned()],
@@ -684,22 +719,29 @@ fn cpu_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize,
     if plot.is_empty() {
         return;
     }
-    let samples = usize::from(plot.width) * 2;
-    let cpu: Points = history.iter().map(|p| (p.0, p.1)).collect();
-    let values = scaled(page.columns("cpu:devlanes", &cpu, samples, true), scale);
+    let values = scaled(raw, scale);
     let overlay = system.map_or_else(Vec::new, |s| {
         let line: Points = s.history.iter().map(|p| (p.0, p.1)).collect();
         scaled(page.columns("cpu:system", &line, samples, false), 100.0)
     });
+    let layers = graph::Layers {
+        values: &values,
+        overlay: &overlay,
+        floors: &[],
+    };
     graph::braille(
         frame.buffer_mut(),
         plot,
-        &values,
-        &overlay,
-        &|load| load_color(theme, load),
+        &layers,
+        &|load, _| load_color(theme, load),
         theme.quiet(),
         theme.glyphs,
     );
+}
+
+/// Samples a graph drawn by [`axes`] in `area` shows: two per plot column.
+fn plot_samples(area: Rect) -> usize {
+    usize::from(area.width.saturating_sub(AXIS_WIDTH)) * 2
 }
 
 /// The mem box: devlanes, used and available memory and the pressure, then
@@ -835,16 +877,22 @@ fn mem_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize,
         inner.width - meters_width - 1,
         inner.height,
     );
-    let history = page.total_history();
-    let peak = history
-        .iter()
-        .map(|p| p.2)
-        .max()
-        .unwrap_or(devlanes)
-        .max(devlanes)
-        .max(1);
-    // 0 to a round step above the highest total seen plus 20%; it only grows.
-    let scale = page.sticky("mem:devlanes", nice_bytes(peak as f64 * 1.2));
+    let samples = plot_samples(graph_area);
+    let raw = page.total_columns(false, samples);
+    let scale = match total.filter(|t| *t > 0) {
+        // The host's memory, so the top of the graph is all of it.
+        Some(total) => total as f64,
+        None => {
+            let peak = raw
+                .iter()
+                .flatten()
+                .copied()
+                .fold(devlanes as f64, f64::max);
+            // 0 to a round step above the highest total seen plus 20%; it
+            // only grows.
+            page.sticky("mem:devlanes", nice_bytes(peak.max(1.0) * 1.2))
+        }
+    };
     let labels = [
         axis_bytes(scale as u64),
         axis_bytes((scale / 2.0) as u64),
@@ -859,16 +907,43 @@ fn mem_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize,
     if plot.is_empty() {
         return;
     }
-    let samples = usize::from(plot.width) * 2;
-    let memory: Points = history.iter().map(|p| (p.0, p.2 as f64)).collect();
-    let values = scaled(page.columns("mem:devlanes", &memory, samples, false), scale);
-    let color = |row: f64| load_color(theme, (row * scale / base).max(floor));
+    let values = scaled(raw, scale);
+    // The machine's used memory as a line over the area, as the cpu graph
+    // draws the system's CPU; only against the host's total.
+    let overlay = match (total.filter(|t| *t > 0), system) {
+        (Some(total), Some(system)) => {
+            let used: Points = system
+                .available_history
+                .iter()
+                .map(|p| (p.0, total.saturating_sub(p.1) as f64))
+                .collect();
+            scaled(page.columns("mem:used", &used, samples, false), scale)
+        }
+        _ => Vec::new(),
+    };
+    // Each second colored by the pressure it had: `warn` at least orange,
+    // `critical` red. The current reading would recolor all of history.
+    let floors: Vec<Option<f64>> = system
+        .map_or_else(Vec::new, |s| {
+            page.columns("mem:pressure", &s.pressure_history, samples, true)
+        })
+        .into_iter()
+        .map(|level| match level {
+            Some(level) if level >= 2.0 => Some(1.0),
+            Some(level) if level >= 1.0 => Some(0.8),
+            _ => None,
+        })
+        .collect();
+    let layers = graph::Layers {
+        values: &values,
+        overlay: &overlay,
+        floors: &floors,
+    };
     graph::braille(
         frame.buffer_mut(),
         plot,
-        &values,
-        &[],
-        &color,
+        &layers,
+        &|row, pressure| load_color(theme, (row * scale / base).max(pressure)),
         theme.quiet(),
         theme.glyphs,
     );
@@ -880,12 +955,11 @@ fn summary_line(page: &Page, frame: &mut Frame, area: Rect) {
     let theme = page.theme;
     let (cpu, memory) = page.total_now();
     let scale = page.cpus().map_or(100.0, |c| c * 100.0);
-    let history = page.total_history();
-    let points: Points = history.iter().map(|p| (p.0, p.1)).collect();
-    let peak = points.iter().map(|p| p.1).fold(cpu, f64::max);
+    let raw = page.total_columns(true, 24);
+    let peak = raw.iter().flatten().copied().fold(cpu, f64::max);
     let graph_scale = page.total_cpu_scale(peak);
     let mut spans = vec![Span::styled(" cpu ", theme.quiet())];
-    for value in scaled(page.columns("cpu:devlanes", &points, 24, true), graph_scale) {
+    for value in scaled(raw, graph_scale) {
         let style = match value {
             Some(v) if v <= 0.0 => theme.rule(),
             Some(v) => loaded(theme, v),
@@ -1085,6 +1159,7 @@ fn table_box(page: &Page, frame: &mut Frame, area: Rect) {
         .iter()
         .map(|row| match row {
             MonitorRow::Entry(e) => text::width(&e.label) + 4,
+            MonitorRow::Daemon(e) => text::width(&e.label) + 2,
             MonitorRow::Group(g) => {
                 text::width(&g.key) + g.branch.as_deref().map_or(0, |b| text::width(b) + 2) + 2
             }
@@ -1102,8 +1177,19 @@ fn table_box(page: &Page, frame: &mut Frame, area: Rect) {
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     let body = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
-    let height = usize::from(body.height);
-    if page.rows.is_empty() {
+    let scrolling = crate::monitor::scrolling(&page.rows);
+    let pinned = page.rows.len() - scrolling;
+    // Pinned rows (the daemon's) sit at the bottom under a rule, which goes
+    // first when the table is short.
+    let reserved = match pinned {
+        0 => 0,
+        _ if body.height >= 4 => pinned + 1,
+        _ => pinned.min(usize::from(body.height.saturating_sub(1))),
+    };
+    let height = usize::from(body.height).saturating_sub(reserved);
+    let scroll_area = Rect::new(body.x, body.y, body.width, height as u16);
+    app.monitor_table_rows.set(height);
+    if scrolling == 0 {
         let text = if app.lanes.is_empty() {
             "No lanes yet."
         } else {
@@ -1111,35 +1197,98 @@ fn table_box(page: &Page, frame: &mut Frame, area: Rect) {
         };
         frame.render_widget(
             Paragraph::new(Line::styled(format!(" {text}"), theme.quiet())),
-            body,
+            scroll_area,
         );
+    }
+    let Some(last) = page.rows.len().checked_sub(1) else {
+        return;
+    };
+    let draw = Draw {
+        page,
+        layout: &layout,
+        selected: view.index.min(last),
+        // Memory bars are relative to the largest row in view.
+        largest: entries
+            .iter()
+            .filter_map(|e| e.metrics.memory_bytes)
+            .max()
+            .unwrap_or(1)
+            .max(1),
+        width,
+    };
+    // Too short to reserve a line for pinned rows: a selected one takes the
+    // only line, so the selection never goes out of sight.
+    if reserved == 0 && draw.selected >= scrolling {
+        let rect = Rect::new(body.x, body.y, body.width, 1);
+        draw.row(frame, rect, draw.selected, &page.rows[draw.selected]);
         return;
     }
-    let index = view.index.min(page.rows.len() - 1);
-    app.monitor_table_rows.set(height);
-    let offset = view.offset.min(page.rows.len().saturating_sub(height));
-    // Memory bars are relative to the largest row in view.
-    let largest = entries
-        .iter()
-        .filter_map(|e| e.metrics.memory_bytes)
-        .max()
-        .unwrap_or(1)
-        .max(1);
+    let offset = view.offset.min(scrolling.saturating_sub(height));
     for (dy, (row_index, row)) in page
         .rows
         .iter()
         .enumerate()
+        .take(scrolling)
         .skip(offset)
         .take(height)
         .enumerate()
     {
         let rect = Rect::new(body.x, body.y + dy as u16, body.width, 1);
-        let line = match row {
-            MonitorRow::Group(group) => group_line(page, &layout, group),
-            MonitorRow::Entry(entry) => entry_line(page, &layout, entry, largest),
+        draw.row(frame, rect, row_index, row);
+    }
+    if reserved == 0 {
+        return;
+    }
+    let mut y = body.bottom() - reserved as u16;
+    if reserved > pinned {
+        let dash = if theme.glyphs == Glyphs::Ascii {
+            "-"
+        } else {
+            "╌"
         };
+        frame.render_widget(
+            Paragraph::new(Line::styled(dash.repeat(width), theme.rule())),
+            Rect::new(body.x, y, body.width, 1),
+        );
+        y += 1;
+    }
+    for (row_index, row) in page.rows.iter().enumerate().skip(scrolling) {
+        if y >= body.bottom() {
+            break;
+        }
+        draw.row(frame, Rect::new(body.x, y, body.width, 1), row_index, row);
+        y += 1;
+    }
+}
+
+/// What drawing one table row needs besides the row.
+struct Draw<'a> {
+    page: &'a Page<'a>,
+    /// The columns every row lines up with.
+    layout: &'a Layout,
+    /// The selected row's index in `page.rows`.
+    selected: usize,
+    /// The largest memory of a row in view, which fills a memory bar.
+    largest: u64,
+    /// The table's inner width, which a selected row's background fills.
+    width: usize,
+}
+
+impl Draw<'_> {
+    /// Draws `row` (at `row_index` of the page's rows) into `rect`, with the
+    /// selection's look when it is the selected one, and registers its click.
+    fn row(&self, frame: &mut Frame, rect: Rect, row_index: usize, row: &MonitorRow) {
+        let page = self.page;
+        let theme = page.theme;
+        let indent = if page.app.monitor.flat { "" } else { "  " };
+        let line = match row {
+            MonitorRow::Group(group) => group_line(page, self.layout, group),
+            MonitorRow::Entry(entry) => entry_line(page, self.layout, entry, self.largest, indent),
+            MonitorRow::Daemon(entry) => entry_line(page, self.layout, entry, self.largest, ""),
+        };
+        let width = self.width;
         let mut spans = fit(line.spans, width).spans;
-        if row_index == index {
+        if row_index == self.selected {
             // monitor.md: a rule-colored background, bold text and a paint
             // mark in the first column, so bars and sparklines keep their
             // colors; reverse video only without color.
@@ -1169,7 +1318,7 @@ fn table_box(page: &Page, frame: &mut Frame, area: Rect) {
             spans.push(Span::styled(" ".repeat(pad), select(Style::new())));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), rect);
-        hit(app, rect, Click::MonitorRow(row.id()));
+        hit(page.app, rect, Click::MonitorRow(row.id()));
     }
 }
 
@@ -1238,8 +1387,14 @@ fn sparkline(
         .collect()
 }
 
-/// A unit or container row.
-fn entry_line(page: &Page, layout: &Layout, entry: &Entry, largest: u64) -> Line<'static> {
+/// A unit, container or daemon row, its name after `indent`.
+fn entry_line(
+    page: &Page,
+    layout: &Layout,
+    entry: &Entry,
+    largest: u64,
+    indent: &str,
+) -> Line<'static> {
     let theme = page.theme;
     let (glyph, tone) = match (&entry.summary, &entry.container) {
         (Some(unit), _) => {
@@ -1252,7 +1407,6 @@ fn entry_line(page: &Page, layout: &Layout, entry: &Entry, largest: u64) -> Line
         }
         (None, None) => (theme.glyph(Glyph::Ready), Tone::Ok),
     };
-    let indent = if page.app.monitor.flat { "" } else { "  " };
     let total = page.memory_total();
     let mut spans = Vec::new();
     for column in &layout.columns {
@@ -1260,7 +1414,7 @@ fn entry_line(page: &Page, layout: &Layout, entry: &Entry, largest: u64) -> Line
         match column {
             Column::Name => {
                 let name_width = width.saturating_sub(indent.len() + 2);
-                spans.push(Span::raw(indent));
+                spans.push(Span::raw(indent.to_owned()));
                 spans.push(Span::styled(format!("{glyph} "), theme.tone(tone)));
                 spans.push(Span::raw(format!(
                     "{:<name_width$} ",
@@ -1298,6 +1452,8 @@ fn entry_line(page: &Page, layout: &Layout, entry: &Entry, largest: u64) -> Line
                 }
                 None => spans.push(Span::styled(format!("{:>width$} ", "-"), theme.quiet())),
             },
+            // The daemon's row already says devlanes in its name.
+            Column::Lane if entry.kind == "dmn" => spans.push(Span::raw(" ".repeat(width + 1))),
             Column::Lane => spans.push(Span::styled(
                 format!("{:<width$} ", short_group(&entry.lane, width)),
                 theme.quiet(),
@@ -1464,6 +1620,31 @@ fn selected_series(page: &Page) -> Option<Series> {
                 ),
             }
         }
+        MonitorRow::Daemon(entry) => {
+            let mut status = vec!["daemon".to_owned()];
+            if let Some(pid) = page
+                .metrics
+                .and_then(|m| m.daemon.as_ref())
+                .and_then(|d| d.pid)
+            {
+                status.push(format!("pid {pid}"));
+            }
+            if entry.started_at_ms.is_some() {
+                status.push(format!("up {}", uptime(entry.started_at_ms, page.now)));
+            }
+            Series {
+                key: "daemon".to_owned(),
+                name: entry.label.clone(),
+                place: String::new(),
+                status,
+                history: entry.metrics.history.clone(),
+                now: (entry.metrics.cpu_percent, entry.metrics.memory_bytes),
+                peaks: (
+                    entry.metrics.peak_cpu_percent,
+                    entry.metrics.peak_memory_bytes,
+                ),
+            }
+        }
         MonitorRow::Group(group) => Series {
             key: format!("lane:{}", group.key),
             name: group.key.clone(),
@@ -1532,13 +1713,16 @@ fn cpu_graph(page: &Page, frame: &mut Frame, area: Rect, series: &Series) {
     let fill: Points = series.history.iter().map(|p| (p.0, p.1)).collect();
     let key = format!("detail-cpu:{}", series.key);
     let values = scaled(page.columns(&key, &fill, samples, true), scale);
+    let layers = graph::Layers {
+        values: &values,
+        ..graph::Layers::default()
+    };
     // 100% is one full core, red, whatever the scale.
     graph::braille(
         frame.buffer_mut(),
         plot,
-        &values,
-        &[],
-        &|row| load_color(theme, row * scale / 100.0),
+        &layers,
+        &|row, _| load_color(theme, row * scale / 100.0),
         theme.quiet(),
         theme.glyphs,
     );
@@ -1569,15 +1753,18 @@ fn mem_graph(page: &Page, frame: &mut Frame, area: Rect, series: &Series) {
     let key = format!("detail-mem:{}", series.key);
     let values = scaled(page.columns(&key, &points, samples, false), top);
     let total = page.memory_total();
-    let color = |row: f64| {
+    let color = |row: f64, _| {
         let load = memory_load((row * top) as u64, total).unwrap_or(0.0);
         load_color(theme, load)
+    };
+    let layers = graph::Layers {
+        values: &values,
+        ..graph::Layers::default()
     };
     graph::braille(
         frame.buffer_mut(),
         plot,
-        &values,
-        &[],
+        &layers,
         &color,
         theme.quiet(),
         theme.glyphs,
@@ -1753,6 +1940,45 @@ mod tests {
         assert_eq!(bytes_fine(518_936_576), "494.9M");
         assert_eq!(bytes_fine(11 << 30), "11.0G");
         assert_eq!(format_bytes(518_412_288), "494M");
+    }
+
+    #[test]
+    fn the_total_adds_parts_read_at_different_moments_of_a_second() {
+        use crate::api::LaneMetrics;
+        const BASE: u64 = 1_000_000_000;
+        // The lane is read 100 ms into each second and the shared container
+        // 900 ms in; in the newest second only the lane was read yet.
+        let lane: Vec<(u64, f64, u64)> = (0..=10)
+            .map(|s| (BASE + s * 1000 + 100, 10.0, 1000))
+            .collect();
+        let shared: Vec<(u64, f64, u64)> =
+            (0..10).map(|s| (BASE + s * 1000 + 900, 5.0, 500)).collect();
+        let mut app = App::new(120, 40);
+        app.metrics = Some(Metrics {
+            units: vec![UnitMetrics {
+                lane: "acme (shared)".into(),
+                unit: "postgres".into(),
+                kind: "container".into(),
+                shared: true,
+                history: shared,
+                ..UnitMetrics::default()
+            }],
+            lanes: vec![LaneMetrics {
+                lane: "acme@0".into(),
+                history: lane,
+                ..LaneMetrics::default()
+            }],
+            ..Metrics::default()
+        });
+        let page = Page {
+            app: &app,
+            theme: &app.theme,
+            metrics: app.metrics.as_ref(),
+            rows: Vec::new(),
+            now: BASE + 10_100,
+        };
+        assert_eq!(page.total_columns(false, 11), [Some(1500.0); 11]);
+        assert_eq!(page.total_columns(true, 11), [Some(15.0); 11]);
     }
 
     #[test]

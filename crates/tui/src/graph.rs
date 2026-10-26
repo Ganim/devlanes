@@ -73,16 +73,36 @@ pub fn load_color(theme: &Theme, load: f64) -> Option<Color> {
     ))
 }
 
-/// Draws `values` (0 to 1, two per cell, newest at the right) as a filled
-/// braille area, each cell colored by the load its row stands for. `overlay`
-/// (same layout) adds one dot per sample at its height, in `overlay_style`
-/// where the area leaves the cell empty: a system line or bucket maxima.
+/// What a braille graph draws, each laid out like `values`: two samples per
+/// cell, newest at the right.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Layers<'a> {
+    /// The filled area, 0 to 1.
+    pub values: &'a [Option<f64>],
+    /// One dot per sample at its height where the area leaves the cell
+    /// empty: a system line or bucket maxima.
+    pub overlay: &'a [Option<f64>],
+    /// A per-sample floor for the area's color (memory pressure at that
+    /// second); a cell takes the higher floor of its two samples.
+    pub floors: &'a [Option<f64>],
+}
+
+/// The sample of `series` that `side` (0 left, 1 right) of `column` shows in
+/// a graph `width` cells wide; samples line up at the right edge, so the
+/// newest is always in the last column.
+fn at(series: &[Option<f64>], width: usize, column: usize, side: usize) -> Option<f64> {
+    let index = (column * 2 + side + series.len()).checked_sub(width * 2)?;
+    *series.get(index)?
+}
+
+/// Draws `layers` as a filled braille area, each cell colored by `color`
+/// from the row's height (0 bottom to 1 top) and the cell's floor (0 without
+/// one), with the overlay in `overlay_style`.
 pub fn braille(
     buf: &mut Buffer,
     area: Rect,
-    values: &[Option<f64>],
-    overlay: &[Option<f64>],
-    color: &dyn Fn(f64) -> Option<Color>,
+    layers: &Layers,
+    color: &dyn Fn(f64, f64) -> Option<Color>,
     overlay_style: Style,
     glyphs: Glyphs,
 ) {
@@ -92,13 +112,15 @@ pub fn braille(
     let width = usize::from(area.width);
     let height = usize::from(area.height);
     let dots = height * 4;
-    // Samples line up at the right edge: the newest is always in the last column.
     let sample = |series: &[Option<f64>], column: usize, side: usize| -> Option<usize> {
-        let index = (column * 2 + side + series.len()).checked_sub(width * 2)?;
-        let value = (*series.get(index)?)?;
+        let value = at(series, width, column, side)?;
         Some((value.clamp(0.0, 1.0) * dots as f64).round() as usize)
     };
     for column in 0..width {
+        let floor = [0, 1]
+            .iter()
+            .filter_map(|side| at(layers.floors, width, column, *side))
+            .fold(0.0, f64::max);
         for row in 0..height {
             // Rows count from the bottom; `base` is the first dot this cell holds.
             let from_bottom = height - 1 - row;
@@ -106,7 +128,7 @@ pub fn braille(
             let mut fill = 0u8;
             let mut extra = 0u8;
             for (side, bits) in [LEFT, RIGHT].iter().enumerate() {
-                if let Some(level) = sample(values, column, side) {
+                if let Some(level) = sample(layers.values, column, side) {
                     for (dot, bit) in bits.iter().enumerate() {
                         if level > base + dot {
                             fill |= bit;
@@ -118,7 +140,7 @@ pub fn braille(
                         extra |= bits[0];
                     }
                 }
-                if let Some(level) = sample(overlay, column, side)
+                if let Some(level) = sample(layers.overlay, column, side)
                     && level > 0
                     && (base..base + 4).contains(&(level - 1))
                 {
@@ -136,7 +158,7 @@ pub fn braille(
             };
             let style = if fill != 0 {
                 let load = (from_bottom as f64 + 0.5) / height as f64;
-                color(load).map_or_else(Style::new, |c| Style::new().fg(c))
+                color(load, floor).map_or_else(Style::new, |c| Style::new().fg(c))
             } else {
                 overlay_style
             };
@@ -215,7 +237,8 @@ impl Timeline {
     }
 
     /// Folds `samples` into the columns: the highest when `max`, else the
-    /// average. Columns without a sample are `None`.
+    /// average. Columns without a sample are `None`, except short gaps
+    /// between two samples, which hold the earlier value (see [`HOLD_MS`]).
     pub fn fold(&self, samples: &[(u64, f64)], max: bool) -> Vec<Option<f64>> {
         let first = self.first();
         let mut sums = vec![(0.0f64, 0u32); self.count];
@@ -228,7 +251,38 @@ impl Timeline {
             };
             fold_into(bucket, *value, max);
         }
-        finish(sums, max)
+        let mut columns = finish(sums, max);
+        hold_gaps(&mut columns, self.step);
+        columns
+    }
+}
+
+/// The longest gap between two samples that a graph bridges. With no client
+/// watching the daemon samples every 5 s, which would draw history as
+/// isolated stripes; the extra second covers tick jitter.
+pub const HOLD_MS: u64 = 6_000;
+
+/// Fills empty columns between two filled ones with the earlier value when
+/// the filled ones are at most [`HOLD_MS`] apart. Gaps at either edge stay
+/// empty: before the first sample there is no data, and after the last one
+/// the next sample may not have arrived yet.
+fn hold_gaps(columns: &mut [Option<f64>], step: u64) {
+    let limit = usize::try_from(HOLD_MS / step.max(1)).unwrap_or(usize::MAX);
+    if limit < 2 {
+        return;
+    }
+    let mut last: Option<usize> = None;
+    for index in 0..columns.len() {
+        if columns[index].is_none() {
+            continue;
+        }
+        if let Some(previous) = last
+            && (2..=limit).contains(&(index - previous))
+        {
+            let value = columns[previous];
+            columns[previous + 1..index].fill(value);
+        }
+        last = Some(index);
     }
 }
 
@@ -352,12 +406,16 @@ mod tests {
     ) -> Vec<String> {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
+        let layers = Layers {
+            values,
+            overlay,
+            floors: &[],
+        };
         braille(
             &mut buf,
             area,
-            values,
-            overlay,
-            &|_| None,
+            &layers,
+            &|_, _| None,
             Style::new(),
             Glyphs::Unicode,
         );
@@ -401,18 +459,51 @@ mod tests {
     fn rows_take_the_load_they_stand_for() {
         let area = Rect::new(0, 0, 1, 4);
         let mut buf = Buffer::empty(area);
-        let color = |load: f64| Some(if load > 0.5 { Color::Red } else { Color::Green });
+        let color = |load: f64, _| Some(if load > 0.5 { Color::Red } else { Color::Green });
+        let layers = Layers {
+            values: &[Some(1.0), Some(1.0)],
+            ..Layers::default()
+        };
         braille(
             &mut buf,
             area,
-            &[Some(1.0), Some(1.0)],
-            &[],
+            &layers,
             &color,
             Style::new(),
             Glyphs::Unicode,
         );
         assert_eq!(buf[(0, 0)].fg, Color::Red, "top");
         assert_eq!(buf[(0, 3)].fg, Color::Green, "bottom");
+    }
+
+    #[test]
+    fn a_floor_colors_only_the_cells_of_its_samples() {
+        // Three cells of full columns; only the middle one's right sample
+        // has a floor.
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::empty(area);
+        let color = |_, floor: f64| {
+            Some(if floor > 0.0 {
+                Color::Red
+            } else {
+                Color::Green
+            })
+        };
+        let layers = Layers {
+            values: &[Some(1.0); 6],
+            floors: &[None, None, None, Some(0.8), None, None],
+            ..Layers::default()
+        };
+        braille(
+            &mut buf,
+            area,
+            &layers,
+            &color,
+            Style::new(),
+            Glyphs::Unicode,
+        );
+        let colors: Vec<Color> = (0..3).map(|x| buf[(x, 0)].fg).collect();
+        assert_eq!(colors, [Color::Green, Color::Red, Color::Green]);
     }
 
     #[test]
@@ -467,6 +558,22 @@ mod tests {
         assert_eq!(timeline.fold(&samples, true), [Some(3.0), Some(10.0)]);
         assert_eq!(timeline.fold(&samples, false), [Some(2.0), Some(6.0)]);
         assert_eq!(timeline.fold(&[], true), [None, None]);
+    }
+
+    #[test]
+    fn short_gaps_hold_the_earlier_value() {
+        // One-second columns; samples every 5 s, as an idle daemon sends.
+        let base = 1_000_000;
+        let samples = [(base, 1.0), (base + 5_000, 2.0), (base + 15_000, 3.0)];
+        let shown = Timeline::new(base + 17_000, 18_000, 18).fold(&samples, false);
+        // Five seconds apart: bridged.
+        assert_eq!(shown[0..5], [Some(1.0); 5]);
+        assert_eq!(shown[5], Some(2.0));
+        // Ten seconds apart: a real gap.
+        assert_eq!(shown[6], None);
+        assert_eq!(shown[15], Some(3.0));
+        // Nothing past the newest sample.
+        assert_eq!(shown[16..], [None, None]);
     }
 
     #[test]

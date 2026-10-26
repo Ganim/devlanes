@@ -5,7 +5,8 @@ use crate::{Sample, Subject};
 /// Sums leaf samples into unit, lane and project totals, sorted by subject.
 ///
 /// Processes roll up to their unit, lane and project; containers to their lane
-/// (when per-lane) and project. Other subjects are not leaves and are ignored.
+/// (when per-lane) and project. Other subjects are ignored: totals are not
+/// leaves, and the Docker VM and the daemon belong to no project.
 /// Each total carries the newest timestamp among its inputs. Callers must not
 /// pass the same process twice in one tick or it is counted twice.
 pub fn aggregate(leaves: &[Sample]) -> Vec<Sample> {
@@ -46,7 +47,8 @@ pub fn aggregate(leaves: &[Sample]) -> Vec<Sample> {
             Subject::Project { .. }
             | Subject::Lane { .. }
             | Subject::Unit(_)
-            | Subject::DockerVm => {}
+            | Subject::DockerVm
+            | Subject::Daemon => {}
         }
     }
     totals.into_values().collect()

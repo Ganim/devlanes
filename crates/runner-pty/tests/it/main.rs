@@ -321,24 +321,32 @@ async fn pipe_streams() -> Result<(), Error> {
     .await
 }
 
-/// The default size is 120x40; resize and input reach an interactive shell.
+/// The default size is 120x40; resize and input reach the program on the PTY.
+///
+/// The program is a script that reads a line before each `stty size`, so the
+/// resize lands while the shell is blocked in `read` and nothing else runs.
+/// An interactive shell made this flaky on macOS CI: with job control and
+/// line editing around each command, the second `stty size` sometimes still
+/// printed `40 120` after the resize had returned.
 #[tokio::test]
 async fn resize_and_input() -> Result<(), Error> {
     bounded(async {
-        let unit = runner().spawn_unit(spec("/bin/sh", &[], true)).await?;
+        let script = "read a; stty size; echo first-done; read b; stty size; exit 3";
+        let unit = runner().spawn_unit(shell(script, true)).await?;
         let mut cleanup = Cleanup::default();
         cleanup.unit(&unit);
         let mut output = unit.output();
         assert_eq!(unit.size()?, TerminalSize::default());
-        unit.input(Bytes::from_static(b"stty size\n")).await?;
-        read_until(&mut output, "40 120").await;
-        unit.resize(TerminalSize {
+        unit.input(Bytes::from_static(b"\n")).await?;
+        let first = read_until(&mut output, "first-done").await;
+        assert!(first.contains("40 120"), "{first:?}");
+        let resized = TerminalSize {
             columns: 100,
             rows: 50,
-        })
-        .await?;
-        unit.input(Bytes::from_static(b"stty size; exit 3\n"))
-            .await?;
+        };
+        unit.resize(resized).await?;
+        assert_eq!(unit.size()?, resized);
+        unit.input(Bytes::from_static(b"\n")).await?;
         read_until(&mut output, "50 100").await;
         assert_eq!(unit.wait().await?.code, Some(3));
         assert!(matches!(

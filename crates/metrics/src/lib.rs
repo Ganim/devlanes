@@ -4,9 +4,10 @@
 //!
 //! Collectors (`devlanes-metrics-macos`, `-linux`, `-docker`) implement
 //! [`MetricsSource`] and emit leaf samples ([`Subject::Process`],
-//! [`Subject::Container`], [`Subject::DockerVm`]). The daemon rolls leaves up with
-//! [`aggregate`], records everything in [`History`], feeds unit totals to
-//! [`RunTracker`] and persists [`RollupRecord`]s.
+//! [`Subject::Container`], [`Subject::DockerVm`], [`Subject::Daemon`]). The
+//! daemon rolls leaves up with [`aggregate`], records everything in
+//! [`History`], feeds unit totals to [`RunTracker`] and persists
+//! [`RollupRecord`]s.
 //!
 //! ```
 //! use devlanes_core::{LaneId, ProjectId};
@@ -84,6 +85,8 @@ pub enum Subject {
     },
     /// Sum of sampled containers inside the Docker engine's VM (macOS only).
     DockerVm,
+    /// The devlanes daemon's own process.
+    Daemon,
 }
 
 impl Subject {
@@ -94,7 +97,7 @@ impl Subject {
             | Self::Lane { project, .. }
             | Self::Container { project, .. } => Some(*project),
             Self::Unit(unit) | Self::Process { unit, .. } => Some(unit.project),
-            Self::DockerVm => None,
+            Self::DockerVm | Self::Daemon => None,
         }
     }
 
@@ -104,7 +107,7 @@ impl Subject {
             Self::Lane { lane, .. } => Some(*lane),
             Self::Container { lane, .. } => *lane,
             Self::Unit(unit) | Self::Process { unit, .. } => Some(unit.lane),
-            Self::Project { .. } | Self::DockerVm => None,
+            Self::Project { .. } | Self::DockerVm | Self::Daemon => None,
         }
     }
 
@@ -136,6 +139,7 @@ impl Subject {
                 None => format!("container:{}:-:{id}", project.0),
             },
             Self::DockerVm => "docker_vm".into(),
+            Self::Daemon => "daemon".into(),
         }
     }
 }
@@ -184,6 +188,9 @@ pub struct ContainerTarget {
 pub struct SampleRequest {
     pub units: Vec<UnitTarget>,
     pub containers: Vec<ContainerTarget>,
+    /// The daemon's own process, sampled alone as [`Subject::Daemon`] and never
+    /// part of any unit.
+    pub daemon: Option<ProcessIdentity>,
 }
 
 /// Collector failures. Processes or containers that vanish mid-sample are skipped,

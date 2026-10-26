@@ -30,7 +30,9 @@ struct State {
 /// whose start time still matches, and live descendants (by parent PID) of either,
 /// which catches children forked since the daemon's last descendant snapshot.
 /// Only processes owned by the daemon's uid are considered. A process claimed by
-/// several targets counts for the first one.
+/// several targets counts for the first one. The request's daemon process is
+/// read by PID alone, without its descendants. It never counts for a unit, and
+/// the descendant walk does not pass through it.
 #[derive(Debug, Clone)]
 pub struct MacosSource {
     state: Arc<Mutex<State>>,
@@ -48,14 +50,19 @@ impl MacosSource {
         })
     }
 
-    /// Samples synchronously. Blocks for the process-table scan (about a
-    /// millisecond for a few hundred PIDs); async callers use
-    /// [`MetricsSource::sample`], which runs this on the blocking pool.
-    pub fn sample_blocking(&self, units: &[UnitTarget]) -> Result<Vec<Sample>, Error> {
+    /// Samples synchronously: every unit's members as [`Subject::Process`] and,
+    /// when given, the `daemon` process alone as [`Subject::Daemon`]. Blocks for
+    /// the process-table scan (about a millisecond for a few hundred PIDs); async
+    /// callers use [`MetricsSource::sample`], which runs this on the blocking pool.
+    pub fn sample_blocking(
+        &self,
+        units: &[UnitTarget],
+        daemon: Option<ProcessIdentity>,
+    ) -> Result<Vec<Sample>, Error> {
         // A poisoned lock only means an earlier sample panicked; the CPU cache is
         // still usable and is rebuilt from scratch on every call anyway.
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        collect(&mut state, units)
+        collect(&mut state, units, daemon)
     }
 }
 
@@ -66,11 +73,13 @@ impl MetricsSource for MacosSource {
         "macos"
     }
 
-    /// Samples every unit target on the blocking pool; containers are ignored.
+    /// Samples every unit target and the daemon on the blocking pool; containers
+    /// are ignored.
     async fn sample(&self, request: &SampleRequest) -> Result<Vec<Sample>, Error> {
         let source = self.clone();
         let units = request.units.clone();
-        tokio::task::spawn_blocking(move || source.sample_blocking(&units))
+        let daemon = request.daemon;
+        tokio::task::spawn_blocking(move || source.sample_blocking(&units, daemon))
             .await
             .map_err(|error| Error::Unavailable {
                 source_name: "macos",
@@ -90,71 +99,109 @@ pub fn process_identity(pid: u32) -> Option<ProcessIdentity> {
     })
 }
 
-/// Resolves membership, reads rusage for members and converts CPU ticks to
-/// percentages against the previous call.
-fn collect(state: &mut State, units: &[UnitTarget]) -> Result<Vec<Sample>, Error> {
-    if units.is_empty() {
-        state.previous.clear();
-        return Ok(Vec::new());
-    }
-    let owners = membership(units)?;
+/// Resolves membership, reads rusage for members and the daemon, and converts
+/// CPU ticks to percentages against the previous call.
+fn collect(
+    state: &mut State,
+    units: &[UnitTarget],
+    daemon: Option<ProcessIdentity>,
+) -> Result<Vec<Sample>, Error> {
+    // Without units only the daemon is read, so the process-table scan is skipped.
+    let owners = if units.is_empty() {
+        HashMap::new()
+    } else {
+        membership(units, daemon.map(|daemon| daemon.pid))?
+    };
     let ts_ms = unix_ms(SystemTime::now());
     let now = Instant::now();
     let mach_now = ffi::mach_now();
-    let mut previous = HashMap::with_capacity(owners.len());
-    let mut samples = Vec::with_capacity(owners.len());
+    let mut previous = HashMap::with_capacity(owners.len() + 1);
+    let mut samples = Vec::with_capacity(owners.len() + 1);
     for (pid, index) in owners {
-        let Some(start_time) = ffi::start_token(pid) else {
+        let Some(reading) = read(state, pid, now, mach_now) else {
             continue;
         };
-        let usage = match ffi::rusage(pid, state.rusage_flavor) {
-            Ok(usage) => usage,
-            Err(()) => {
-                // macOS 13 and older reject v6; v4 carries every field read here.
-                state.rusage_flavor = ffi::RusageFlavor::V4;
-                ffi::rusage(pid, state.rusage_flavor).ok().flatten()
-            }
-        };
-        let Some(usage) = usage else {
-            continue;
-        };
-        let cpu_ns = state
-            .timebase
-            .nanos(usage.user_time.saturating_add(usage.system_time));
-        let key = (pid, start_time);
-        let cpu_percent = match state.previous.get(&key) {
-            Some(last) => percent(
-                cpu_ns.saturating_sub(last.cpu_ns),
-                now.duration_since(last.at).as_nanos(),
-            ),
-            // First sight: lifetime average, so a busy process is not reported idle
-            // for a tick. Both clocks are mach ticks since boot.
-            None => percent(
-                cpu_ns,
-                u128::from(
-                    state
-                        .timebase
-                        .nanos(mach_now.saturating_sub(usage.proc_start_abstime)),
-                ),
-            ),
-        };
-        previous.insert(key, CpuReading { cpu_ns, at: now });
+        previous.insert((pid, reading.start_time), reading.cpu);
         samples.push(Sample {
             subject: Subject::Process {
                 unit: units[index].unit.clone(),
                 pid,
-                start_time,
+                start_time: reading.start_time,
             },
-            cpu_percent,
-            footprint_bytes: usage.phys_footprint,
-            rss_bytes: usage.resident_size,
+            cpu_percent: reading.cpu_percent,
+            footprint_bytes: reading.footprint_bytes,
+            rss_bytes: reading.rss_bytes,
             ts_ms,
         });
     }
-    // Replacing the cache drops exited processes, so it never grows past the members.
+    if let Some(daemon) = daemon
+        && let Some(reading) = read(state, daemon.pid, now, mach_now)
+        // A different start time means the PID now names an unrelated process.
+        && reading.start_time == daemon.start_time
+    {
+        previous.insert((daemon.pid, reading.start_time), reading.cpu);
+        samples.push(Sample {
+            subject: Subject::Daemon,
+            cpu_percent: reading.cpu_percent,
+            footprint_bytes: reading.footprint_bytes,
+            rss_bytes: reading.rss_bytes,
+            ts_ms,
+        });
+    }
+    // Replacing the cache drops exited processes, so it never grows past the
+    // members and the daemon.
     state.previous = previous;
     samples.sort_by(|a, b| a.subject.cmp(&b.subject));
     Ok(samples)
+}
+
+/// One process's usage, with CPU against the previous call.
+struct Reading {
+    start_time: u64,
+    cpu: CpuReading,
+    cpu_percent: f64,
+    footprint_bytes: u64,
+    rss_bytes: u64,
+}
+
+/// Reads one process's rusage. Returns `None` once it exited or refuses to be
+/// read.
+fn read(state: &mut State, pid: u32, now: Instant, mach_now: u64) -> Option<Reading> {
+    let start_time = ffi::start_token(pid)?;
+    let usage = match ffi::rusage(pid, state.rusage_flavor) {
+        Ok(usage) => usage,
+        Err(()) => {
+            // macOS 13 and older reject v6; v4 carries every field read here.
+            state.rusage_flavor = ffi::RusageFlavor::V4;
+            ffi::rusage(pid, state.rusage_flavor).ok().flatten()
+        }
+    }?;
+    let cpu_ns = state
+        .timebase
+        .nanos(usage.user_time.saturating_add(usage.system_time));
+    let cpu_percent = match state.previous.get(&(pid, start_time)) {
+        Some(last) => percent(
+            cpu_ns.saturating_sub(last.cpu_ns),
+            now.duration_since(last.at).as_nanos(),
+        ),
+        // First sight: lifetime average, so a busy process is not reported idle
+        // for a tick. Both clocks are mach ticks since boot.
+        None => percent(
+            cpu_ns,
+            u128::from(
+                state
+                    .timebase
+                    .nanos(mach_now.saturating_sub(usage.proc_start_abstime)),
+            ),
+        ),
+    };
+    Some(Reading {
+        start_time,
+        cpu: CpuReading { cpu_ns, at: now },
+        cpu_percent,
+        footprint_bytes: usage.phys_footprint,
+        rss_bytes: usage.resident_size,
+    })
 }
 
 /// CPU time over wall time as a percentage of one core; 0 when no time elapsed.
@@ -165,11 +212,16 @@ fn percent(cpu_ns: u64, wall_ns: u128) -> f64 {
     cpu_ns as f64 / wall_ns as f64 * 100.0
 }
 
-/// Maps each member PID to the index of the target that owns it.
-fn membership(units: &[UnitTarget]) -> Result<HashMap<u32, usize>, Error> {
+/// Maps each member PID to the index of the target that owns it. The `daemon`
+/// PID is never a member, and its children join a unit only through their own
+/// session or tracking, not as its descendants.
+fn membership(units: &[UnitTarget], daemon: Option<u32>) -> Result<HashMap<u32, usize>, Error> {
     let uid = ffi::current_uid();
+    // Leaving the daemon out of the table keeps it from being a member and the
+    // descendant walk from reaching its other children (git, docker) through it.
     let table: HashMap<u32, ShortInfo> = ffi::list_pids()?
         .into_iter()
+        .filter(|&pid| Some(pid) != daemon)
         .filter_map(|pid| ffi::short_info(pid).map(|info| (pid, info)))
         .filter(|(_, info)| info.uid == uid && !info.zombie)
         .collect();

@@ -40,6 +40,13 @@ fn shared_process_counts_for_the_first_unit() {
 
 #[test]
 #[cfg_attr(not(windows), ignore = "needs Windows")]
+fn daemon_is_sampled_alone() {
+    #[cfg(windows)]
+    windows::daemon_is_sampled_alone();
+}
+
+#[test]
+#[cfg_attr(not(windows), ignore = "needs Windows")]
 fn pressure_readings_are_in_range() {
     #[cfg(windows)]
     windows::pressure_readings_are_in_range();
@@ -137,7 +144,7 @@ mod windows {
         let identity = process_identity(child.0.id()).expect("child identity");
         let source = WindowsSource::new();
         let units = [target("busy", vec![identity])];
-        let first = source.sample_blocking(&units);
+        let first = source.sample_blocking(&units, None);
         let sample = sample_for(&first, identity.pid).expect("child sampled");
         assert_eq!(sample.cpu_percent, 0.0, "first sight reads no CPU");
         assert!(matches!(
@@ -149,7 +156,7 @@ mod windows {
         let deadline = Instant::now() + TIMEOUT;
         let cpu = loop {
             thread::sleep(Duration::from_millis(300));
-            let samples = source.sample_blocking(&units);
+            let samples = source.sample_blocking(&units, None);
             let cpu = sample_for(&samples, identity.pid)
                 .expect("child sampled")
                 .cpu_percent;
@@ -176,6 +183,7 @@ mod windows {
                 lane: None,
                 id: "acme-db".into(),
             }],
+            daemon: None,
         };
         let samples = runtime()
             .block_on(async { tokio::time::timeout(TIMEOUT, source.sample(&request)).await })
@@ -207,7 +215,7 @@ mod windows {
         });
         assert!(
             source
-                .sample_blocking(&[target("gone", vec![stale, unknown[0], unknown[1]])])
+                .sample_blocking(&[target("gone", vec![stale, unknown[0], unknown[1]])], None)
                 .is_empty()
         );
 
@@ -217,22 +225,71 @@ mod windows {
         // `wait` reaps, but `child` keeps its handle, so the exited process
         // object and its PID remain.
         child.0.wait().expect("wait child");
-        let samples = source.sample_blocking(&[target("exited", vec![identity, me])]);
+        let samples = source.sample_blocking(&[target("exited", vec![identity, me])], None);
         assert_eq!(samples.len(), 1, "{samples:?}");
         assert!(sample_for(&samples, me.pid).is_some());
-        assert!(source.sample_blocking(&[]).is_empty());
+        assert!(source.sample_blocking(&[], None).is_empty());
     }
 
     pub fn shared_process_counts_for_the_first_unit() {
         let me = process_identity(std::process::id()).expect("own identity");
         let source = WindowsSource::new();
-        let samples =
-            source.sample_blocking(&[target("first", vec![me, me]), target("second", vec![me])]);
+        let samples = source.sample_blocking(
+            &[target("first", vec![me, me]), target("second", vec![me])],
+            None,
+        );
         assert_eq!(samples.len(), 1, "{samples:?}");
         assert!(matches!(
             &samples[0].subject,
             Subject::Process { unit, .. } if unit.unit == "first"
         ));
+    }
+
+    pub fn daemon_is_sampled_alone() {
+        // The test process plays the daemon; the busy child stands in for a unit
+        // process.
+        let child = busy();
+        let child_identity = process_identity(child.0.id()).expect("child identity");
+        let me = process_identity(std::process::id()).expect("own identity");
+        let source = WindowsSource::new();
+
+        for _ in 0..2 {
+            let samples = source.sample_blocking(&[], Some(me));
+            assert_eq!(
+                samples.len(),
+                1,
+                "only the daemon, no children: {samples:?}"
+            );
+            assert_eq!(samples[0].subject, Subject::Daemon);
+            assert!(samples[0].footprint_bytes > 0, "{samples:?}");
+        }
+
+        // A unit that lists the daemon's PID does not count it.
+        let samples = source.sample_blocking(&[target("unit", vec![me, child_identity])], Some(me));
+        let daemons = samples
+            .iter()
+            .filter(|sample| sample.subject == Subject::Daemon)
+            .count();
+        assert_eq!(daemons, 1, "{samples:?}");
+        assert!(sample_for(&samples, me.pid).is_none(), "{samples:?}");
+        assert!(sample_for(&samples, child_identity.pid).is_some());
+
+        let stale = ProcessIdentity {
+            start_time: me.start_time + 1,
+            ..me
+        };
+        assert!(source.sample_blocking(&[], Some(stale)).is_empty());
+
+        let request = SampleRequest {
+            daemon: Some(me),
+            ..SampleRequest::default()
+        };
+        let samples = runtime()
+            .block_on(async { tokio::time::timeout(TIMEOUT, source.sample(&request)).await })
+            .expect("sample in time")
+            .expect("sample");
+        assert_eq!(samples.len(), 1, "{samples:?}");
+        assert_eq!(samples[0].subject, Subject::Daemon);
     }
 
     pub fn pressure_readings_are_in_range() {

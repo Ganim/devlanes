@@ -125,6 +125,13 @@ pub struct LanePhases {
 const MAX_DAEMON_LOG: usize = 2000;
 /// Daemon facts refresh every this many one-second ticks while the tab is visible.
 const DAEMON_REFRESH_TICKS: u8 = 3;
+/// What the daemon page asks `metrics` for, for the daemon's `usage` fact:
+/// it reads only the newest values, so a minute of history is enough, where
+/// the monitor's query sends every unit's whole graph range.
+const DAEMON_PAGE_METRICS: MetricsQuery = MetricsQuery {
+    range_ms: 60_000,
+    points: 0,
+};
 /// Doctor refreshes this often while the daemon view is closed, for its badge.
 const DOCTOR_BACKGROUND_TICKS: u8 = 60;
 
@@ -2918,6 +2925,7 @@ impl App {
             });
             if !self.daemon.stopped {
                 effects.push(Effect::FetchDaemon);
+                effects.push(Effect::FetchMetrics(DAEMON_PAGE_METRICS));
             }
         }
         if view == View::Monitor && self.view != View::Monitor {
@@ -4030,7 +4038,7 @@ impl App {
                     }
                 }
                 Some(MonitorRow::Entry(entry)) => self.open_from_monitor(entry, effects),
-                None => {}
+                Some(MonitorRow::Daemon(_)) | None => {}
             },
             KeyCode::Char('s') => self.monitor_control(Method::Start, &rows, effects),
             KeyCode::Char('x') => self.monitor_control(Method::Stop, &rows, effects),
@@ -4041,7 +4049,8 @@ impl App {
         // Keys bring the selection into view, wherever the wheel left it.
         if self.monitor.index != index {
             let height = self.monitor_height();
-            self.monitor.reveal(height);
+            let scrolling = crate::monitor::scrolling(&self.monitor_rows());
+            self.monitor.reveal(height, scrolling);
         }
     }
 
@@ -4128,6 +4137,9 @@ impl App {
             }
             Some(MonitorRow::Group(group)) => {
                 self.set_notice(format!("{} starts and stops with its lanes", group.key));
+            }
+            Some(MonitorRow::Daemon(_)) => {
+                self.set_notice("The daemon starts and stops from the daemon page (D)".to_owned());
             }
             None => {}
         }
@@ -4832,7 +4844,7 @@ impl App {
     /// selection where it is; clicks on rows come through their hit areas.
     fn monitor_mouse(&mut self, mouse: MouseEvent, layout: &Areas, effects: &mut Vec<Effect>) {
         let _ = (layout, effects);
-        let rows = self.monitor_rows().len();
+        let rows = crate::monitor::scrolling(&self.monitor_rows());
         let height = self.monitor_height();
         match mouse.kind {
             MouseEventKind::ScrollUp => self.monitor.scroll(-3, rows, height),
@@ -5001,6 +5013,7 @@ impl App {
                 self.daemon.ticks = 0;
                 if self.connection == Connection::Online && self.daemon.busy.is_none() {
                     effects.push(Effect::FetchDaemon);
+                    effects.push(Effect::FetchMetrics(DAEMON_PAGE_METRICS));
                 }
             }
         }

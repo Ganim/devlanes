@@ -293,7 +293,7 @@ impl MetricsSource for DockerSource {
         "docker"
     }
 
-    /// Samples every container target; unit targets are ignored. Missing or
+    /// Samples every container target; unit targets and the daemon are ignored. Missing or
     /// stopped containers are skipped. Fails only when every request failed,
     /// which means the engine itself is unreachable.
     async fn sample(&self, request: &SampleRequest) -> Result<Vec<Sample>, Error> {
