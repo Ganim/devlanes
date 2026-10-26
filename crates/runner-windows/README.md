@@ -60,7 +60,7 @@ A bare program name is looked up on the unit's `PATH` with `PATHEXT` (`.COM`, `.
 | `SIGTERM`, `SIGHUP`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2` | Ctrl-Break |
 | `SIGKILL` | terminate the job |
 
-A graceful stop also posts `WM_CLOSE` to the members' visible windows, then sends one console event through the helper, which the supervisor does not wait for. In a pseudo console a `.cmd` shim asks "Terminate batch job (Y/N)?" after the event; once only `cmd.exe` is left, the runner answers `Y` once, which is not an escalation. Once only the console host is left, or at the timeout, the job is terminated; the report says whether the timeout was reached. A process ended by a console event exits with `STATUS_CONTROL_C_EXIT` (`0xC000013A`), which is reported as its code.
+A graceful stop also posts `WM_CLOSE` to the members' visible windows, then sends one console event through the helper, which the supervisor does not wait for. In a pseudo console a `.cmd` shim asks "Terminate batch job (Y/N)?" after the event; once only `cmd.exe` is left, the runner answers `Y`, again every half second while it still is (an answer typed before `cmd.exe` reached the prompt can be lost), which is not an escalation. Once only the console host is left, or at the timeout, the job is terminated; the report says whether the timeout was reached. A process ended by a console event exits with `STATUS_CONTROL_C_EXIT` (`0xC000013A`), which is reported as its code.
 
 ## Limitations
 

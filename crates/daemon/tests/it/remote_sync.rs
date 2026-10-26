@@ -118,8 +118,9 @@ async fn large_sync_reconnects_send_only_differences() {
         eprintln!("skipping large_sync_reconnects_send_only_differences: no IPv6 loopback");
         return;
     }
-    // Windows CI takes close to five minutes.
-    tokio::time::timeout(LIMIT * 8, async {
+    // Windows CI takes close to five minutes. Kept under nextest's ten-minute
+    // limit for this test, so the test's own message says what was slow.
+    tokio::time::timeout(LIMIT * 9, async {
         let tmp = temp();
         let main = repo(&tmp.path, "bigrepo", BIG);
         tokio::task::block_in_place(|| write_tree(&main.join("big")));
@@ -157,7 +158,10 @@ async fn large_sync_reconnects_send_only_differences() {
                 eprintln!("initial copy of {FILES} files: {:?}", first.elapsed());
                 break;
             }
-            assert!(first.elapsed() < LIMIT * 3, "no initial copy: {status}");
+            // The full copy takes 100 s on an idle Windows machine, too close to
+            // a 180 s budget once other tests run alongside. Only the reconnects
+            // below have budgets this test checks; this one catches a stall.
+            assert!(first.elapsed() < LIMIT * 6, "no initial copy: {status}");
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 

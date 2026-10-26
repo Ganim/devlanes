@@ -314,8 +314,18 @@ async fn running_phases_report_their_detail() {
             db(ContainerPhase::Healthy, Some("healthy")),
         ]);
         let (session, mut frames) = h.session();
+        // The harness's 10 s start timeout covers the whole start, and infra alone
+        // takes 3 s here (one look per second until the last snapshot). On a busy
+        // Windows runner the git calls and spawns around it took the rest, so the
+        // service spawned after the deadline and the start reported `timed_out`.
+        // This test is about the events, so only `LIMIT` bounds the start.
         let value = h
-            .call_on(Method::Start, json!({"events": true}), cx(&main), &session)
+            .call_on(
+                Method::Start,
+                json!({"events": true, "timeout_ms": LIMIT.as_secs() * 1000}),
+                cx(&main),
+                &session,
+            )
             .await
             .expect("start");
         let result: StartResult = serde_json::from_value(value).expect("result");

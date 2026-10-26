@@ -45,6 +45,10 @@ const EXIT_POLL: Duration = Duration::from_millis(50);
 const CTRL_C: &[u8] = b"\x03";
 /// The answer to `cmd.exe`'s "Terminate batch job (Y/N)?".
 const TERMINATE_BATCH: &[u8] = b"Y\r";
+/// How long an answer to that prompt may go unheeded before it is typed again.
+/// An answer typed while `cmd.exe` is still getting to the prompt can be lost,
+/// which on a busy machine left the stop waiting for its timeout.
+const ANSWER_AGAIN: Duration = Duration::from_millis(500);
 /// Poll period while waiting for a terminated job to empty.
 const SWEEP_POLL: Duration = Duration::from_millis(25);
 /// Exit code of processes the runner ends by terminating the job.
@@ -100,9 +104,8 @@ struct Inner {
     size: Mutex<TerminalSize>,
     /// A stop's Ctrl-C or Ctrl-Break went out.
     asked: AtomicBool,
-    /// `cmd.exe`'s "Terminate batch job (Y/N)?" was answered, which happens
-    /// once per unit.
-    answered: AtomicBool,
+    /// When `cmd.exe`'s "Terminate batch job (Y/N)?" was last answered.
+    answered: Mutex<Option<Instant>>,
     /// Live members other than the console host, as of the last refresh.
     members: Mutex<Vec<ProcessInfo>>,
     /// Members seen at a refresh that had not exited then, each held open:
@@ -211,7 +214,7 @@ pub(crate) async fn spawn(
         terminal: Mutex::new(terminal),
         size: Mutex::new(size),
         asked: AtomicBool::new(false),
-        answered: AtomicBool::new(false),
+        answered: Mutex::new(None),
         members: Mutex::new(Vec::new()),
         held: Mutex::new(Vec::new()),
         leader_exited: AtomicBool::new(false),
@@ -468,18 +471,18 @@ impl Inner {
         });
     }
 
-    /// Whether a stop may still need to answer a batch file's prompt.
+    /// Whether a stop may need to answer a batch file's prompt.
     fn awaits_batch_answer(&self) -> bool {
-        self.pty && !self.answered.load(Ordering::Acquire)
+        self.pty
     }
 
     /// Answers "Terminate batch job (Y/N)?" with `Y`: a `.cmd` shim
     /// (`npm.cmd`) asks that on the console after Ctrl-C or Ctrl-Break once
     /// what it ran has exited, and would otherwise hold the stop until its
     /// timeout. This is expected cleanup, so it is not an escalation. Done
-    /// once, after the stop's event went out, when only `cmd.exe` processes
-    /// are left. In a pipe unit `cmd.exe` reads end of input from `NUL` there
-    /// and goes on by itself.
+    /// after the stop's event went out, when only `cmd.exe` processes are
+    /// left, and again every [`ANSWER_AGAIN`] while they still are. In a pipe
+    /// unit `cmd.exe` reads end of input from `NUL` there and goes on by itself.
     async fn answer_batch_prompt(self: &Arc<Self>) {
         if !self.awaits_batch_answer() || !self.asked.load(Ordering::Acquire) {
             return;
@@ -487,7 +490,18 @@ impl Inner {
         let live = self.live_members().await;
         let shims_only =
             !live.is_empty() && live.iter().all(|p| p.name.eq_ignore_ascii_case("cmd.exe"));
-        if shims_only && !self.answered.swap(true, Ordering::AcqRel) {
+        if !shims_only {
+            return;
+        }
+        let due = {
+            let mut answered = lock(&self.answered);
+            let due = answered.is_none_or(|at| at.elapsed() >= ANSWER_AGAIN);
+            if due {
+                *answered = Some(Instant::now());
+            }
+            due
+        };
+        if due {
             tracing::debug!(pid = self.identity.pid, "answering a batch file's prompt");
             self.write_input(Bytes::from_static(TERMINATE_BATCH), false);
         }
