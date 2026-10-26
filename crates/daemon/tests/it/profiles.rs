@@ -223,11 +223,27 @@ async fn plain_start_restores_what_ran_before_the_daemon_stopped() {
         let restored = lane(&again, &main).await;
         assert_eq!(restored.profiles, ["front"]);
         assert_eq!(running_sorted(&restored), ["api", "web"]);
-        again
+        again.close().await;
+
+        // Naming one service on an idle lane keeps the others it never stopped.
+        let third = with_infra(&home).await;
+        third
+            .call(Method::Start, json!({"units": ["web"]}), cx(&main))
+            .await
+            .expect("start web");
+        assert_eq!(running_sorted(&lane(&third, &main).await), ["web"]);
+        third.close().await;
+        let fourth = with_infra(&home).await;
+        fourth
+            .call(Method::Start, json!({}), cx(&main))
+            .await
+            .expect("plain start");
+        assert_eq!(running_sorted(&lane(&fourth, &main).await), ["api", "web"]);
+        fourth
             .call(Method::Stop, json!({}), cx(&main))
             .await
             .expect("stop");
-        again.close().await;
+        fourth.close().await;
     })
     .await
     .expect("timeout");

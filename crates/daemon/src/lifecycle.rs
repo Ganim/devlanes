@@ -2147,7 +2147,10 @@ impl Inner {
             let (desired, services) = if options.setup_only {
                 (record.desired_state, record.services.clone())
             } else {
-                let kept = if whole_lane {
+                // Only a start of the whole selection (restored, or the profiles
+                // given) rebuilds the set; named units add to it, since what
+                // they leave out was never stopped.
+                let kept = if whole_lane && options.selectors.is_empty() {
                     &[][..]
                 } else {
                     &record.services[..]
