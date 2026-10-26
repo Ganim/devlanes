@@ -1233,6 +1233,33 @@ fn human_status_shows_display_names_and_running() {
 }
 
 #[test]
+/// An idle lane's status says nothing runs and names the start command; agents
+/// already read the `idle` word.
+fn status_of_idle_lanes_says_nothing_runs() {
+    let one = json!({"items": [lane(Some(1), "main", "idle", vec![unit("api", "idle")])]});
+    let rendered = render_text(Method::Status, &one);
+    let parts = modes(&rendered);
+    for text in &parts[..2] {
+        assert!(
+            text.contains("not running; next: devlanes start --lane acme@1"),
+            "{text}"
+        );
+    }
+    assert!(!parts[2].contains("next:"), "{}", parts[2]);
+    let two = json!({"items": [
+        lane(Some(1), "main", "idle", vec![]),
+        lane(Some(2), "feat/billing", "idle", vec![]),
+    ]});
+    assert!(render_text(Method::Status, &two).contains("nothing is running"));
+    let mut shell = lane(Some(1), "main", "idle", vec![]);
+    shell["needs_env"] = json!(true);
+    let text = render_text(Method::Status, &json!({"items": [shell]}));
+    assert!(!text.contains("not running"), "{text}");
+    let running = json!({"items": [lane(Some(1), "main", "running", vec![unit("api", "ready")])]});
+    assert!(!render_text(Method::Status, &running).contains("not running"));
+}
+
+#[test]
 /// A start that found everything up says so instead of looking like a fresh start.
 fn start_of_a_running_lane_says_already_running() {
     let data = json!({

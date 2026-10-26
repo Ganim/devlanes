@@ -877,6 +877,22 @@ pub(super) fn status(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         lines.push(String::new());
         lines.extend(unit_table(lane, cx));
     }
+    // An all-idle table reads like a stale one; say so, as the TUI does. A lane
+    // that needs a start from a shell already names the command in its note.
+    if lanes.iter().all(|lane| lane.state == "idle") {
+        let note = match lanes.as_slice() {
+            [lane] if lane.needs_env => None,
+            [lane] => Some(format!(
+                "not running; next: {}",
+                Hint::command(["start", "--lane", lane.reference.as_str()]).0
+            )),
+            _ => Some("nothing is running".into()),
+        };
+        if let Some(note) = note {
+            lines.push(String::new());
+            lines.push(note);
+        }
+    }
     lines
 }
 

@@ -1,6 +1,13 @@
 //! Daemon access behind a trait, so rendering and key handling are testable with a fake.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -660,6 +667,8 @@ pub struct ClientApi {
     cwd: PathBuf,
     env: BTreeMap<String, String>,
     shared: Mutex<Option<Client>>,
+    /// Whether the cwd's project was looked up, which registers it with the daemon.
+    cwd_seen: AtomicBool,
 }
 
 impl ClientApi {
@@ -676,6 +685,7 @@ impl ClientApi {
                 .map(|(name, value)| (devlanes_core::env::fold_name(name), value))
                 .collect(),
             shared: Mutex::new(Some(client)),
+            cwd_seen: AtomicBool::new(false),
         }))
     }
 
@@ -751,6 +761,20 @@ fn from_value<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ApiErro
 impl DaemonApi for ClientApi {
     /// Calls `status`.
     async fn status(&self) -> Result<Vec<LaneSummary>, ApiError> {
+        // `all` never registers a project, so a repository with a devlanes.yaml
+        // that no command ran in yet would be missing. A cwd-scoped status first
+        // registers it, as a plain `devlanes status` there does. Its errors (no
+        // or an invalid devlanes.yaml) leave the TUI as it was; only a lost
+        // connection asks again.
+        if !self.cwd_seen.load(Ordering::Relaxed) {
+            let scoped = self
+                .shared_request(Method::Status, json!({}), self.context(None, false))
+                .await;
+            match scoped {
+                Err(error) if error.is_disconnect() => return Err(error),
+                _ => self.cwd_seen.store(true, Ordering::Relaxed),
+            }
+        }
         let value = self
             // The TUI shows every project, not just the cwd's (cli-design 5).
             .shared_request(
