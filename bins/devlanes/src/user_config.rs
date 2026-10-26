@@ -5,15 +5,16 @@
 //! does the daemon, which then does not start (`daemon restart` checks first);
 //! doctor reads it leniently and lists every problem; display settings (TUI
 //! look, the tab's progress bar) keep every valid key after a warning.
+//! `config get|set|unset` read and edit the file here, without the daemon.
 
 use std::{
     path::{Path, PathBuf},
     sync::OnceLock,
 };
 
-use devlanes_cli::{Hint, Rendered};
+use devlanes_cli::{Hint, OutputMode, Rendered, Runtime};
 use devlanes_client::Paths;
-use devlanes_config::{ConfigError, UserConfig};
+use devlanes_config::{Applies, ConfigError, UserConfig};
 use devlanes_proto::RpcError;
 use serde_json::{Value, json};
 
@@ -129,6 +130,200 @@ fn warnings(problems: &[ConfigError]) -> String {
             )
         })
         .collect()
+}
+
+/// `config get [KEY]`: the effective value of one setting or section, or of
+/// the whole user config, defaults included. Read like the display settings,
+/// so a broken file still shows what devlanes uses and its problems are
+/// warnings.
+pub async fn get(runtime: &Runtime, paths: &Paths, key: Option<&str>) -> Result<u8, RpcError> {
+    if let Some(key) = key {
+        devlanes_config::check_user_key(key).map_err(|error| unknown_setting(key, &error))?;
+    }
+    let shared = paths.clone();
+    let config = blocking(move || display(&shared).clone()).await?;
+    let value = match key {
+        Some(key) => devlanes_config::user_setting(&config, key)
+            .map_err(|error| unknown_setting(key, &error))?,
+        None => devlanes_config::effective_user_value(&config),
+    };
+    let stdout = if runtime.mode == OutputMode::Json {
+        let mut data = json!({"file": file(paths), "value": value});
+        if let Some(key) = key {
+            data["key"] = json!(key);
+        }
+        format!("{data}\n")
+    } else if runtime.quiet {
+        String::new()
+    } else {
+        devlanes_config::to_yaml(&value)
+            .map_err(|error| RpcError::new("render_failed", json!({"message": error.message}), 1))?
+    };
+    emit(&Rendered {
+        stdout,
+        ..Rendered::default()
+    });
+    Ok(0)
+}
+
+/// `config set KEY VALUE`: writes `value`, read as YAML, to the user config,
+/// keeping the file's comments. A value that does not parse or validate
+/// leaves the file as it is.
+pub async fn set(runtime: &Runtime, paths: &Paths, key: &str, value: &str) -> Result<u8, RpcError> {
+    devlanes_config::check_user_key(key).map_err(|error| unknown_setting(key, &error))?;
+    let path = file(paths);
+    let value = devlanes_config::parse_setting_value(value)
+        .map_err(|error| invalid_setting(&path, &format!("{key}: {}", error.message)))?;
+    let (target, owned_key, written) = (path.clone(), key.to_owned(), value.clone());
+    blocking(move || {
+        file_value(&target)?;
+        devlanes_config::set_user_value(&target, &owned_key, &written)
+            .map_err(|error| invalid_setting(&target, &error.message))
+    })
+    .await??;
+    let text = format!(
+        "set {key} to {} in {}; {}\n",
+        shown(&value),
+        path.display(),
+        takes_effect(key)
+    );
+    report(
+        runtime,
+        text,
+        json!({"file": path, "key": key, "value": value, "applies": applies_name(key)}),
+    );
+    Ok(0)
+}
+
+/// `config unset KEY`: removes the setting so its default applies again. A
+/// key the schema does not know is still removed when the file has it, so a
+/// misspelled setting can be taken out.
+pub async fn unset(runtime: &Runtime, paths: &Paths, key: &str) -> Result<u8, RpcError> {
+    let known = devlanes_config::check_user_key(key);
+    let path = file(paths);
+    let (target, owned_key) = (path.clone(), key.to_owned());
+    let present = blocking(move || {
+        let file = file_value(&target)?;
+        let present = owned_key
+            .split('.')
+            .try_fold(&file, |node, segment| node.get(segment))
+            .is_some();
+        if present {
+            devlanes_config::remove_user_value(&target, &owned_key)
+                .map_err(|error| invalid_setting(&target, &error.message))?;
+        }
+        Ok::<_, RpcError>(present)
+    })
+    .await??;
+    if let Err(error) = known
+        && !present
+    {
+        return Err(unknown_setting(key, &error));
+    }
+    let text = if present {
+        format!(
+            "removed {key} from {}; its default {}\n",
+            path.display(),
+            takes_effect(key)
+        )
+    } else {
+        format!(
+            "{key} is not set in {}; its default applies\n",
+            path.display()
+        )
+    };
+    report(
+        runtime,
+        text,
+        json!({"file": path, "key": key, "removed": present, "applies": applies_name(key)}),
+    );
+    Ok(0)
+}
+
+/// Prints `text`, or `data` as JSON; `--quiet` keeps only the JSON.
+fn report(runtime: &Runtime, text: String, data: Value) {
+    let stdout = match runtime.mode {
+        OutputMode::Json => format!("{data}\n"),
+        _ if runtime.quiet => String::new(),
+        _ => text,
+    };
+    emit(&Rendered {
+        stdout,
+        ..Rendered::default()
+    });
+}
+
+/// When a change to `key` takes effect, as the end of a sentence. A running
+/// TUI does not reread the file, so the colors and glyphs its options page
+/// previews (`Applies::Now`) also wait for the next command here.
+fn takes_effect(key: &str) -> &'static str {
+    match devlanes_config::applies(key) {
+        Applies::Now | Applies::NextCommand => "takes effect with the next devlanes command",
+        Applies::Daemon => "takes effect after `devlanes daemon restart`",
+    }
+}
+
+/// [`takes_effect`] for JSON output: `next_command` or `daemon`.
+fn applies_name(key: &str) -> &'static str {
+    match devlanes_config::applies(key) {
+        Applies::Now | Applies::NextCommand => "next_command",
+        Applies::Daemon => "daemon",
+    }
+}
+
+/// A value on one line: strings as they are, lists and mappings in flow form.
+fn shown(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// The user config file as data, a missing one empty; a file that is not
+/// YAML fails as a `config_error` at its line. Blocking.
+fn file_value(path: &Path) -> Result<Value, RpcError> {
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(RpcError::new(
+                "io",
+                json!({"message": format!("reading {}: {error}", path.display())}),
+                1,
+            ));
+        }
+    };
+    devlanes_config::parse_user_value(&source).map_err(|mut error| {
+        error.location.file = path.display().to_string();
+        config_error(&error)
+    })
+}
+
+/// A key the user config has no setting or section for.
+fn unknown_setting(key: &str, error: &ConfigError) -> RpcError {
+    RpcError::new(
+        "unknown_setting",
+        json!({"key": key, "message": error.message}),
+        2,
+    )
+}
+
+/// A refused edit of the user config at `path`, which is left unchanged.
+fn invalid_setting(path: &Path, message: &str) -> RpcError {
+    RpcError::new(
+        "invalid_setting",
+        json!({"file": path, "message": message}),
+        1,
+    )
+}
+
+/// Runs file work off the async threads.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, RpcError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| RpcError::new("io", json!({"message": error.to_string()}), 1))
 }
 
 #[cfg(test)]

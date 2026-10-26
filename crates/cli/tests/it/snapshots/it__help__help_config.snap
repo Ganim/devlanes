@@ -2,12 +2,20 @@
 source: crates/cli/tests/it/help.rs
 expression: long_help(path)
 ---
-Validate devlanes.yaml
+Validate devlanes.yaml, or read and change the user config.yaml.
+
+`check` validates the project's devlanes.yaml in this worktree. `get`, `set` and
+`unset` act on the user config.yaml in the devlanes home (~/.devlanes, or
+$DEVLANES_HOME), the settings this machine shares across projects; they work
+without the daemon.
 
 Usage: devlanes config [OPTIONS] <COMMAND>
 
 Commands:
   check  Validate this worktree's devlanes.yaml, including preset options
+  get    Print a setting of the user config.yaml with defaults included; without a key, every setting
+  set    Change a setting in the user config.yaml, keeping its comments; refuses invalid values
+  unset  Remove a setting from the user config.yaml so its default applies again
   help   Print this message or the help of the given subcommand(s)
 
 Options:
@@ -50,3 +58,11 @@ Global options:
 
   -v, --verbose...
           Print timestamped diagnostics of the client and daemon to stderr; -vv for more [env: DEVLANES_VERBOSE=1|2]
+
+Examples:
+  devlanes config check                     validate this worktree's devlanes.yaml
+  devlanes config get                       every user setting, defaults included
+  devlanes config get proxy.https_port
+  devlanes config set tui.theme dark
+  devlanes config set tls.trust '[system, firefox]'
+  devlanes config unset tui.theme           back to the default

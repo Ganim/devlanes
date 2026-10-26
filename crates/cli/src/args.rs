@@ -196,7 +196,15 @@ The daemon owns the process: logs, stop, attach and status work on it by its\n\
         #[command(subcommand)]
         command: InfraCommand,
     },
-    /// Validate devlanes.yaml
+    /// Validate devlanes.yaml, or read and change the user config.yaml
+    #[command(
+        long_about = "Validate devlanes.yaml, or read and change the user config.yaml.\n\n\
+`check` validates the project's devlanes.yaml in this worktree. `get`, `set` and\n\
+`unset` act on the user config.yaml in the devlanes home (~/.devlanes, or\n\
+$DEVLANES_HOME), the settings this machine shares across projects; they work\n\
+without the daemon.",
+        after_help = CONFIG_AFTER
+    )]
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -625,10 +633,40 @@ pub enum InfraCommand {
         follow: bool,
     },
 }
+const CONFIG_AFTER: &str = "\
+Examples:
+  devlanes config check                     validate this worktree's devlanes.yaml
+  devlanes config get                       every user setting, defaults included
+  devlanes config get proxy.https_port
+  devlanes config set tui.theme dark
+  devlanes config set tls.trust '[system, firefox]'
+  devlanes config unset tui.theme           back to the default";
+
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     /// Validate this worktree's devlanes.yaml, including preset options
     Check,
+    /// Print a setting of the user config.yaml with defaults included; without a key, every setting
+    Get {
+        /// Dotted setting or section, such as tui.theme or proxy [default: the whole config]
+        #[arg(id = "config_key", value_name = "KEY")]
+        key: Option<String>,
+    },
+    /// Change a setting in the user config.yaml, keeping its comments; refuses invalid values
+    Set {
+        /// Dotted setting, such as tui.theme or proxy.https_port
+        #[arg(id = "config_key", value_name = "KEY")]
+        key: String,
+        /// New value, read as YAML: true, 443, dark, 30d or [system, firefox]
+        #[arg(value_name = "VALUE", allow_negative_numbers = true)]
+        value: String,
+    },
+    /// Remove a setting from the user config.yaml so its default applies again
+    Unset {
+        /// Dotted setting or section, such as tui.theme
+        #[arg(id = "config_key", value_name = "KEY")]
+        key: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -706,6 +744,15 @@ pub enum Action {
     DaemonInstall,
     DaemonUninstall,
     DaemonRun,
+    /// `config get`: a dotted key of the user config, or all of it. Never
+    /// talks to the daemon, like `config set` and `config unset`.
+    ConfigGet(Option<String>),
+    /// `config set KEY VALUE`, the value as typed.
+    ConfigSet {
+        key: String,
+        value: String,
+    },
+    ConfigUnset(String),
     Completions(clap_complete::Shell),
     Tunnel,
     Askpass(Option<String>),
@@ -1010,7 +1057,17 @@ impl Cli {
                     )
                 }
             },
-            Some(Command::Config { .. }) => (Method::ConfigCheck, json!({})),
+            Some(Command::Config { command }) => match command {
+                ConfigCommand::Check => (Method::ConfigCheck, json!({})),
+                ConfigCommand::Get { key } => return Ok(Action::ConfigGet(key.clone())),
+                ConfigCommand::Set { key, value } => {
+                    return Ok(Action::ConfigSet {
+                        key: key.clone(),
+                        value: value.clone(),
+                    });
+                }
+                ConfigCommand::Unset { key } => return Ok(Action::ConfigUnset(key.clone())),
+            },
             Some(Command::Doctor) => (Method::Doctor, json!({})),
             Some(Command::Certs { command }) => match command {
                 CertsCommand::Trust { hosts, resolver } => {

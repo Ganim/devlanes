@@ -26,6 +26,7 @@ Use `load_project(path)` for a file or directory. It also reads the sibling `dev
 - `check(path)`: load and validate a project, returning warnings or a `ConfigError`. `check_compose_files` runs its `infra.compose` file check alone, for a config parsed from text.
 - `load_user_lenient`: load `config.yaml` keeping every valid key; each unknown or invalid key falls back to its default and comes back as a located error.
 - `set_user_value(path, "tui.theme", &json!("dark"))` and `remove_user_value(path, key)`: change one dotted key of `config.yaml` in place. `edit_user_source` does the same on text.
+- `user_setting(&config, "proxy.https_port")`, `user_keys()` and `applies(key)`: a dotted key's effective value, every known key, and whether a change takes effect now, with the next command or after a daemon restart. `devlanes config get|set|unset` and the TUI's options page use them.
 - `evaluate_typed`, `evaluate_env`, and `resolve_lane_vars`: resolve expressions using a caller-supplied `ExpressionContext`.
 - `validate_with_presets`: pass opaque preset option objects to registered integration parsers.
 - `project_schema_with_presets`: generate a project schema with integration-owned option schemas; `project_schema()` omits registration.

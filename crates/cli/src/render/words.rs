@@ -325,6 +325,19 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             config_invalid(data),
             Some(Hint::command(["config", "check"])),
         ),
+        // `config get|set|unset` with a key the user config does not have.
+        "unknown_setting" => (
+            text(data, "message"),
+            Some(Hint::command(["config", "get"])),
+        ),
+        // `config set|unset` refused the edit; the file is unchanged.
+        "invalid_setting" => (
+            match text(data, "file") {
+                file if file.is_empty() => text(data, "message"),
+                file => format!("{file} was not changed: {}", text(data, "message")),
+            },
+            None,
+        ),
         "no_config" => no_config(data),
         "units_required" => (
             "name at least one unit".into(),

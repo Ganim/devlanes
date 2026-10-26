@@ -11,6 +11,7 @@
 use std::{cell::RefCell, collections::HashMap, path::PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use devlanes_config::Applies;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -67,17 +68,6 @@ impl Kind {
 pub struct Choice {
     pub value: String,
     pub about: String,
-}
-
-/// When a saved change takes effect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Applies {
-    /// The TUI redraws with it (colors, glyphs); it previews before saving.
-    Now,
-    /// The next command reads it.
-    NextCommand,
-    /// The daemon reads it when it starts.
-    Daemon,
 }
 
 /// One setting, from the user config schema.
@@ -1205,11 +1195,7 @@ fn walk(node: &Value, root: &Value, prefix: &str, out: &mut Vec<Item>) {
                     .collect()
             })
             .unwrap_or_default();
-        let applies = match key.as_str() {
-            "tui.theme" | "tui.glyphs" => Applies::Now,
-            _ if key.starts_with("tui.") || key.starts_with("terminal.") => Applies::NextCommand,
-            _ => Applies::Daemon,
-        };
+        let applies = devlanes_config::applies(&key);
         out.push(Item {
             about: one_line(property.get("description")),
             default: property.get("default").cloned(),

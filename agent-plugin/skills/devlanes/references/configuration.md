@@ -287,7 +287,7 @@ For build output another program loads from a fixed path, such as an unpacked br
 
 `devlanes.local.yaml` next to `devlanes.yaml` holds personal changes and stays out of Git. It merges by key before templates, for example `services: { web: { autostart: false } }`.
 
-Machine settings live in `~/.devlanes/config.yaml` (or `$DEVLANES_HOME/config.yaml`): `ports.range`, `lanes.data_dir` (root of the lane data folders), `proxy` ports and LAN access, `startup` (how many services start at once), `tls` (devlanes or mkcert CA, trust stores), `hostnames`, `terminal`, log and history retention, `updates.check`. They never go in the project file. An unknown key or invalid value stops the daemon from starting, with the file and line to fix; `devlanes doctor` checks the file without restarting.
+Machine settings live in `~/.devlanes/config.yaml` (or `$DEVLANES_HOME/config.yaml`): `ports.range`, `lanes.data_dir` (root of the lane data folders), `proxy` ports and LAN access, `startup` (how many services start at once), `tls` (devlanes or mkcert CA, trust stores), `hostnames`, `terminal`, log and history retention, `updates.check`. They never go in the project file. Prefer `devlanes config set proxy.https_port 8443` over editing the file: it keeps comments, refuses a value that would not load and says whether the change needs `devlanes daemon restart`. `devlanes config get KEY` prints the value in effect, defaults included, and `devlanes config unset KEY` puts the default back; none of them needs the daemon. An unknown key or invalid value written by hand stops the daemon from starting, with the file and line to fix; `devlanes doctor` checks the file without restarting.
 
 ## Checklist
 

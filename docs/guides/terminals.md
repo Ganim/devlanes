@@ -11,6 +11,8 @@ terminal:
   marks: auto
 ```
 
+`devlanes config set terminal.title never` changes one setting without opening the file, and `devlanes config get terminal` prints the values in effect.
+
 `auto` uses a feature only on human output to a terminal known to support it, never inside tmux or screen, in CI or under `TERM=dumb`. Agent, JSON, plain and piped output never get any of them. `DEVLANES_TERM_PROGRESS`, `DEVLANES_TERM_TITLE`, `DEVLANES_TERM_LINKS`, `DEVLANES_TERM_NOTIFICATIONS` and `DEVLANES_TERM_MARKS` set to `0` or `1` override the settings for one command.
 
 To work in a unit from another terminal, run `devlanes attach <lane>:<unit>` there, or `devlanes env shell` for a shell with the lane's environment. Older configs that name a terminal app (`terminal: ghostty`, `terminal.app`) still load; the name is ignored and `devlanes doctor` warns about it.

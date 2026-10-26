@@ -1,5 +1,6 @@
 //! Actions that must run in the user's terminal, never in the daemon: CA trust, the
-//! hosts helper and the OS resolver file (they prompt for a password).
+//! hosts helper and the OS resolver file (they prompt for a password), and reading
+//! or editing the user config.
 
 #[cfg(unix)]
 use std::net::SocketAddr;
@@ -74,6 +75,11 @@ pub async fn run(runtime: &Runtime, action: Action) -> Result<u8, RpcError> {
             }
             Ok(code)
         }
+        Action::ConfigGet(key) => crate::user_config::get(runtime, &paths()?, key.as_deref()).await,
+        Action::ConfigSet { key, value } => {
+            crate::user_config::set(runtime, &paths()?, &key, &value).await
+        }
+        Action::ConfigUnset(key) => crate::user_config::unset(runtime, &paths()?, &key).await,
         action @ (Action::Tunnel | Action::Askpass(_)) => crate::remote::run(action).await,
         _ => Err(RpcError::new(
             "usage",

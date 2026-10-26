@@ -1,4 +1,5 @@
 //! Dynamic completion that asks an already-running daemon and never spawns one.
+//! User config keys come from the config schema instead.
 
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -15,6 +16,9 @@ struct DaemonCandidates;
 impl CompletionSource for DaemonCandidates {
     /// Builds a tiny runtime per call because completion runs before main's runtime exists.
     fn existing_daemon_candidates(&self, kind: CompletionKind, _prefix: &str) -> Vec<String> {
+        if kind == CompletionKind::Setting {
+            return devlanes_config::user_keys();
+        }
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -95,7 +99,10 @@ async fn candidates(kind: CompletionKind) -> Option<Vec<String>> {
                         names.push(format!("{}:{}", lane.reference, unit.name));
                     }
                 }
-                CompletionKind::Task | CompletionKind::Host | CompletionKind::Profile => {}
+                CompletionKind::Task
+                | CompletionKind::Host
+                | CompletionKind::Profile
+                | CompletionKind::Setting => {}
             }
         }
         names

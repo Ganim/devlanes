@@ -38,7 +38,7 @@ terminal:
   progress: auto
 ```
 
-Project settings live in each repository's `devlanes.yaml`; `docs/examples/user-config.yaml` lists every user setting.
+Project settings live in each repository's `devlanes.yaml`; `docs/examples/user-config.yaml` lists every user setting. `devlanes config get [KEY]`, `config set KEY VALUE` and `config unset KEY` read and change `config.yaml` without the daemon, keeping its comments.
 
 ## Behaviour
 
