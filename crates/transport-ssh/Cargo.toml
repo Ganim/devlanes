@@ -28,7 +28,7 @@ openssh = { version = "0.11", default-features = false, features = ["process-mux
 [target.'cfg(windows)'.dependencies]
 devlanes-ipc = { path = "../ipc" }
 devlanes-sys-windows = { path = "../sys-windows" }
-getrandom = "0.3"
+getrandom.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]

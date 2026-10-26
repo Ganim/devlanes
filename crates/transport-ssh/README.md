@@ -32,13 +32,13 @@ The crate launches `ssh -M -f -N` itself and hands the socket to `openssh`, beca
 
 Only a session channel is used, so boxes with `AllowTcpForwarding no` work.
 
-The probe looks for `devlanes` on the box's `PATH`, then in `$HOME/.devlanes/bin`. A box without it fails with `SshError::NotInstalled`, which is permanent until a tunnel has opened once and temporary afterwards (a binary briefly missing during an upgrade); installing devlanes there is up to the user. A tunnel that exits with `devlanes_transport::EXIT_DAEMON_STOPPED` (the box daemon is stopped and `remote.start_daemon` is off there) becomes the temporary `SshError::BoxDaemonStopped`, so the link keeps retrying.
+The probe looks for `devlanes` on the box's `PATH`, then in `$HOME/.devlanes/bin`, and tags its lines, so whatever the box's login shell prints around them is ignored. Before handing the tunnel to the protocol, the transport skips up to 64 KiB of such output until the tunnel's preamble line (`devlanes_transport::read_preamble`); output without one fails as `SshError::Preamble` with that output in the message. A box without devlanes fails with `SshError::NotInstalled`, which is permanent until a tunnel has opened once and temporary afterwards (a binary briefly missing during an upgrade); installing devlanes there is up to the user. A tunnel that exits with `devlanes_transport::EXIT_DAEMON_STOPPED` (the box daemon is stopped and `remote.start_daemon` is off there) becomes the temporary `SshError::BoxDaemonStopped`, so the link keeps retrying.
 
 The control socket path must stay under 100 bytes for macOS, so pass a short `control_dir` if `DEVLANES_HOME` is deep.
 
 ## Windows
 
-Win32-OpenSSH has no ControlMaster. Each session is one `ssh.exe` (`System32\OpenSSH` first, else the first on `PATH`) inside a kill-on-close job: the box prints the probe and a random sentinel line, then execs `devlanes tunnel --stdio`, so probe and tunnel cost one authentication. Exit status 255 counts as ssh's own failure only when the box printed nothing. Prompts travel over a named pipe `\\.\pipe\devlanes-askpass-<pid>-<random>` that only the current user can open; the askpass process opens only names of that shape and checks that the pipe is owned by its user. Nothing is written to `control_dir`.
+Win32-OpenSSH has no ControlMaster. Each session is one `ssh.exe` (`System32\OpenSSH` first, else the first on `PATH`) inside a kill-on-close job: the box prints the probe and a random sentinel line, then execs `devlanes tunnel --stdio`, whose preamble follows, so probe and tunnel cost one authentication. Exit status 255 counts as ssh's own failure only when the box printed nothing. Prompts travel over a named pipe `\\.\pipe\devlanes-askpass-<pid>-<random>` that only the current user can open; the askpass process opens only names of that shape and checks that the pipe is owned by its user. Nothing is written to `control_dir`.
 
 ## License
 

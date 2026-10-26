@@ -19,6 +19,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # most tools cannot use.
 dunce = "1"
 futures-util = { version = "0.3", features = ["sink"] }
+getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: JSON output follows struct field order, and the feature is pinned
 # here so per-crate and workspace builds don't disagree through feature unification.

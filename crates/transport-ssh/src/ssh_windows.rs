@@ -5,8 +5,8 @@
 //! authenticates again. To keep that to one authentication per connect, the
 //! probe and the tunnel share the process: the box prints the probe and a
 //! sentinel line, then execs `devlanes tunnel --stdio`, and everything after
-//! the sentinel is mux traffic. A standalone [`SshTransport::probe`] is a run
-//! of its own.
+//! the sentinel is the tunnel's: its preamble line, then mux traffic. A
+//! standalone [`SshTransport::probe`] is a run of its own.
 //!
 //! Every `ssh.exe` starts inside a kill-on-close job, so whatever it starts
 //! (a `ProxyCommand`) ends with the session, and with the daemon if the
@@ -30,7 +30,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use devlanes_sys_windows::job::{Job, JobOptions};
 use devlanes_sys_windows::spawn::{self, Child, CreationFlags, Environment, Spawn, Stdio, Stream};
-use devlanes_transport::{BoxDuplex, Joined, Transport, TransportError};
+use devlanes_transport::{
+    BoxDuplex, Joined, PreambleError, Prefixed, Transport, TransportError, read_preamble,
+};
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf};
 use tokio::sync::oneshot;
@@ -141,6 +143,9 @@ pub enum SshError {
          `devlanes daemon install` to keep it running"
     )]
     BoxDaemonStopped(String),
+    /// The tunnel's output did not start with its preamble line.
+    #[error(transparent)]
+    Preamble(#[from] PreambleError),
 }
 
 impl SshError {
@@ -149,9 +154,11 @@ impl SshError {
         match self {
             Self::Master { permanent, .. } | Self::NotInstalled { permanent, .. } => *permanent,
             Self::ProgramMissing(_) => true,
-            Self::Io(_) | Self::AuthTimeout(_) | Self::Probe(_) | Self::BoxDaemonStopped(_) => {
-                false
-            }
+            Self::Io(_)
+            | Self::AuthTimeout(_)
+            | Self::Probe(_)
+            | Self::BoxDaemonStopped(_)
+            | Self::Preamble(_) => false,
         }
     }
 }
@@ -260,16 +267,18 @@ impl SshTransport {
         *sessions = CancellationToken::new();
     }
 
-    /// Opens the tunnel.
-    async fn open(&self) -> Result<SshStream, SshError> {
+    /// Opens the tunnel and reads up to its preamble.
+    async fn open(&self) -> Result<Prefixed<SshStream>, SshError> {
         let stream = self.start().await?;
+        let preamble = read_preamble(stream, crate::PREAMBLE_WAIT).await?;
         self.connected.store(true, Ordering::Relaxed);
-        Ok(stream)
+        Ok(preamble.stream)
     }
 
     /// Runs the session script: probe, sentinel, tunnel. A box without
     /// devlanes ends the session after the probe with
-    /// [`SshError::NotInstalled`].
+    /// [`SshError::NotInstalled`]. The returned stream starts with the
+    /// tunnel's output, its preamble first.
     async fn start(&self) -> Result<SshStream, SshError> {
         // Taken before ssh starts, so a `close` while it authenticates ends
         // this session too instead of leaving a tunnel opened after it.
@@ -1074,9 +1083,10 @@ mod tests {
             let ssh = install(
                 dir.path(),
                 "ssh",
-                &Behaviour::new()
-                    .record(dir.path().join("args"))
-                    .stdout("Linux\nx86_64\n/usr/local/bin/devlanes\n"),
+                &Behaviour::new().record(dir.path().join("args")).stdout(
+                    "motd\ndevlanes-probe:os=Linux\ndevlanes-probe:arch=x86_64\n\
+                         devlanes-probe:program=/usr/local/bin/devlanes\n",
+                ),
             )?;
             let mut options = SshOptions::new(dir.path());
             options.ssh_program = ssh;

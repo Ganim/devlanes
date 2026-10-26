@@ -123,7 +123,7 @@ They create containers labelled `dev.devlanes.*` and remove them afterwards. To 
 
 ## Remote and SSH
 
-Remote is mirroring only: a client never runs commands on a box. Most of it is tested without SSH. `crates/daemon/tests/it/remote.rs` runs a box daemon and a client daemon in one process over an in-memory transport, covering mirrored ports, proxy routes, refused daemon requests, sync, reconnect and failure:
+Remote is mirroring only: a client never runs commands on a box. Most of it is tested without SSH. `crates/daemon/tests/it/remote.rs` runs a box daemon and a client daemon in one process over an in-memory transport, covering mirrored ports, proxy routes, the registry feed, sync, reconnect and failure:
 
 ```sh
 cargo nextest run -p devlanes-daemon -E 'test(/remote/)'

@@ -4,9 +4,13 @@
 //! Client side: `connect` keeps one reconnecting [`Link`] per box in the daemon,
 //! mirrors the box's registry ([`mirror`]: same-number loopback listeners and proxy
 //! routes) and applies its folder syncs ([`sync`]) below
-//! `$DEVLANES_HOME/sync/<host>/`. Box side: `status` lists the tunnels serving
-//! clients and `sync.status` lists the sync entries a tunnel may stream.
+//! `$DEVLANES_HOME/sync/<host>/`; every box knows this machine by the id and
+//! name in [`identity`]. Box side: `remote.registry` ([`feed`]) streams what
+//! a tunnel's client mirrors, `status` lists the tunnels serving clients and
+//! `sync.status` lists the sync entries a tunnel may stream.
 
+mod feed;
+mod identity;
 mod mirror;
 mod sync;
 
@@ -64,6 +68,8 @@ pub(crate) struct Remotes {
     /// Box side: tunnels currently serving a client, for `status`.
     clients: Mutex<BTreeMap<u64, RemoteClient>>,
     next_client: AtomicU64,
+    /// What this machine sends every box, read from disk on the first connect.
+    identity: tokio::sync::OnceCell<identity::ClientIdentity>,
 }
 
 impl Remotes {
@@ -413,14 +419,7 @@ struct DisconnectParams {
     host: Option<String>,
 }
 
-/// Extra `subscribe` field a box's tunnel sends to be listed by `status`.
-#[derive(Debug, Default, Deserialize)]
-struct SubscribeExtra {
-    #[serde(default)]
-    remote_client: Option<RemoteClient>,
-}
-
-/// Removes a tunnel from the box's client list when its subscription ends.
+/// Removes a tunnel from the box's client list when its registry feed ends.
 struct ClientGuard {
     engine: Arc<Inner>,
     id: u64,
@@ -521,6 +520,7 @@ impl Inner {
     /// The live connection to `host`, or a new one. A stopped link is closed, with
     /// its listeners, before its replacement starts.
     async fn ensure_host(self: &Arc<Self>, host: &str) -> Result<Arc<HostConn>, RpcError> {
+        let identity = self.client_identity().await?;
         let _connecting = self.remote.connecting.lock().await;
         let old = {
             let mut hosts = lock(&self.remote.hosts);
@@ -532,19 +532,40 @@ impl Inner {
         if let Some(old) = old {
             old.close().await;
         }
-        let conn = self.open_host(host)?;
+        let conn = self.open_host(host, identity)?;
         lock(&self.remote.hosts).insert(host.to_owned(), conn.clone());
         Ok(conn)
     }
 
+    /// The id and name this machine sends to boxes, created on first use.
+    async fn client_identity(&self) -> Result<identity::ClientIdentity, RpcError> {
+        self.remote
+            .identity
+            .get_or_try_init(|| async {
+                let home = self.opts.home.clone();
+                tokio::task::spawn_blocking(move || identity::load(&home))
+                    .await
+                    .map_err(|error| crate::registry::internal("client_identity", error))?
+                    .map_err(|error| crate::registry::internal("client_identity", error))
+            })
+            .await
+            .cloned()
+    }
+
     /// Starts the link and the host's watcher and mirror tasks.
-    fn open_host(self: &Arc<Self>, host: &str) -> Result<Arc<HostConn>, RpcError> {
+    fn open_host(
+        self: &Arc<Self>,
+        host: &str,
+        identity: identity::ClientIdentity,
+    ) -> Result<Arc<HostConn>, RpcError> {
         let board = Arc::new(PromptBoard::default());
         let prompter = Arc::new(HostPrompter {
             board: board.clone(),
         });
         let transport = self.integ.remote.transport(host, prompter)?;
-        let options = SessionOptions::new(format!("devlanes {}", devlanes_version::VERSION));
+        let mut options = SessionOptions::new(format!("devlanes {}", devlanes_version::VERSION));
+        options.client_id = identity.id;
+        options.client_name = identity.name;
         let link = Link::spawn(transport, options, self.integ.remote.backoff());
         let conn = Arc::new(HostConn {
             name: host.to_owned(),
@@ -669,24 +690,6 @@ impl Inner {
             }
         }
         Ok(result)
-    }
-
-    /// `subscribe`; a tunnel's `remote_client` is listed by `status` while it lasts.
-    pub(crate) async fn remote_subscribe(
-        self: &Arc<Self>,
-        value: Value,
-        session: &Session,
-    ) -> Result<Value, RpcError> {
-        let extra: SubscribeExtra = serde_json::from_value(value.clone()).unwrap_or_default();
-        let _guard = extra.remote_client.map(|client| {
-            let id = self.remote.next_client.fetch_add(1, Ordering::Relaxed);
-            lock(&self.remote.clients).insert(id, client);
-            ClientGuard {
-                engine: self.clone(),
-                id,
-            }
-        });
-        self.subscribe_method(value, session).await
     }
 
     /// `sync.status`: sync entries of lanes with running services (what a tunnel may

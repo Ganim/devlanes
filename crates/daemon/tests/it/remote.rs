@@ -1,7 +1,7 @@
 //! Remote operation over the in-memory transport: a box engine behind a real daemon
 //! socket, `devlanes-tunnel`'s box services on the box end of the pipe, and a
 //! client engine that connects, mirrors and syncs. Remote is mirroring only: the
-//! box refuses daemon requests from a client.
+//! protocol has no way to send the box a daemon request.
 //!
 //! Box and client share this machine, so the box's services hold `127.0.0.1:<port>`
 //! and the client mirrors on `[::1]` only; routed hostnames then go through relay
@@ -34,8 +34,8 @@ use devlanes_proto::{
 };
 use devlanes_state::Store;
 use devlanes_transport::{
-    AuthorizedTarget, Backoff, BoxDuplex, Dialer, LoopbackDialer, RpcCallError, ServeOptions,
-    SessionOptions, Transport,
+    AuthorizedTarget, Backoff, BoxDuplex, Dialer, LoopbackDialer, ServeOptions, SessionOptions,
+    Transport,
     memory::{MemoryTransport, memory_transport},
     serve,
 };
@@ -148,12 +148,16 @@ impl BoxSide {
         let handler: Arc<dyn Handler> = Arc::new(h.engine.clone());
         let server = tokio::spawn(server.run(handler, || Ok(())));
         let (transport, mut listener) = memory_transport();
+        let mut serve_options = ServeOptions::new("devlanes test-box");
+        // As `devlanes tunnel --stdio` does, from the box daemon's `daemon.status`.
+        serve_options.box_info = devlanes_tunnel::box_info(&paths).await.expect("box info");
         let mut services = devlanes_tunnel::services(
             paths,
             RemoteClient {
                 pid: 1,
                 ssh: Some("memory".into()),
                 since_ms: 0,
+                ..RemoteClient::default()
             },
         );
         if let Some(dialer) = dialer {
@@ -162,8 +166,9 @@ impl BoxSide {
         let accept = tokio::spawn(async move {
             while let Some(stream) = listener.accept().await {
                 let services = services.clone();
+                let options = serve_options.clone();
                 tokio::spawn(async move {
-                    let _ = serve(stream, services, ServeOptions::new("devlanes test-box")).await;
+                    let _ = serve(stream, services, options).await;
                 });
             }
         });
@@ -406,8 +411,8 @@ async fn http_get(port: u16, host: &str) -> Option<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 /// Connect mirrors ports and hostnames (hidden units and foreign hostnames
-/// excluded, a busy local port reported), the box refuses daemon requests, a
-/// folder syncs into the devlanes-owned root, a lane started mid-session gets
+/// excluded, a busy local port reported), the box reports its info and lists
+/// the client by id, a folder syncs into the devlanes-owned root, a lane started mid-session gets
 /// listeners, a reconnect keeps listeners and resends no unchanged file, a failed
 /// link unmirrors, and disconnect cleans up.
 async fn remote_box_end_to_end() {
@@ -445,28 +450,17 @@ async fn remote_box_end_to_end() {
             .await
             .ok();
 
-        // Remote is mirroring only: the box refuses a daemon request sent by a client.
-        // (Before `connect`, so the client's link stays the transport's last one.)
+        // The box reports its `ports.range` in the handshake. (Before `connect`,
+        // so the client's link stays the transport's last one.)
         let direct =
             devlanes_transport::Session::connect(&side.transport, SessionOptions::new("probe"))
                 .await
                 .expect("session");
-        let refused = direct
-            .request(json!({"method": "daemon.shutdown", "params": {}, "context": {"yes": true}}))
-            .await;
-        let code = match refused {
-            Err(RpcCallError::Remote(error)) => error
-                .data
-                .and_then(|data| serde_json::from_value::<RpcError>(data).ok())
-                .map(|error| error.code),
-            other => panic!("the box answered a daemon request: {other:?}"),
-        };
-        assert_eq!(code.as_deref(), Some("not_supported"));
-        direct.close();
-        assert!(
-            !box_lanes(&side.h).await.is_empty(),
-            "the box daemon is still running"
+        assert_eq!(
+            direct.box_info().ports_range.as_deref(),
+            Some("29000-29499")
         );
+        direct.close();
 
         let connected = client
             .h
@@ -527,16 +521,21 @@ async fn remote_box_end_to_end() {
         );
         assert_eq!(client.route_state("api.example.com").await, None);
 
-        // The box lists its connected client.
+        // The box lists its connected client by the id the client keeps in its
+        // home, with its host name.
+        let client_id = std::fs::read_to_string(client.h.home.join("remote-client-id"))
+            .expect("the client stored its id");
         let status = side
             .h
             .call(Method::Status, json!({"all": true}), Context::default())
             .await
             .expect("box status");
-        assert!(
-            status["clients"].as_array().is_some_and(|c| !c.is_empty()),
-            "box status lists connected clients: {status}"
-        );
+        let listed = status["clients"]
+            .as_array()
+            .and_then(|clients| clients.iter().find(|c| c["id"] == client_id.trim()))
+            .cloned();
+        let listed = listed.unwrap_or_else(|| panic!("box status lists the client: {status}"));
+        assert!(listed["name"].is_string(), "{listed}");
 
         // Sync: what differs from the marked destination, stale files pruned, then
         // changes and deletions. The box's `to:` is ignored.
@@ -1027,6 +1026,179 @@ async fn refused_opens_are_reported() {
         let _ = events.await;
         client.stop().await;
         side.stop().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+/// A box project with a routed service, an idle one and a task.
+const FEED_BOX: &str = r#"project: feedapp
+tasks:
+  hello: { run: "echo hi" }
+services:
+  web:
+    run: tcp-echo
+    hosts: ["web.${{ lane.domain }}"]
+  idle:
+    run: tcp-echo
+"#;
+
+/// Applies `remote.registry` events from `frames` to `registry` until `done`
+/// holds; false when the feed went quiet first.
+async fn follow_feed(
+    frames: &mut tokio::sync::mpsc::Receiver<Frame>,
+    registry: &mut devlanes_transport::Registry,
+    done: impl Fn(&devlanes_transport::Registry) -> bool,
+) -> bool {
+    use devlanes_proto::remote::{REGISTRY_CHANGE_EVENT, REGISTRY_SNAPSHOT_EVENT};
+    let follow = async {
+        while !done(registry) {
+            let Some(frame) = frames.recv().await else {
+                return false;
+            };
+            let Frame::Control(Control::Event(event)) = frame else {
+                continue;
+            };
+            if event.event == REGISTRY_SNAPSHOT_EVENT {
+                let snapshot = serde_json::from_value(event.data["snapshot"].clone())
+                    .expect("snapshot payload");
+                registry.replace(snapshot);
+            } else if event.event == REGISTRY_CHANGE_EVENT {
+                let change =
+                    serde_json::from_value(event.data["change"].clone()).expect("change payload");
+                registry.apply(change);
+            }
+        }
+        true
+    };
+    tokio::time::timeout(SOON, follow).await.unwrap_or(false)
+}
+
+/// The unit of the box registry named `name`.
+fn feed_unit<'a>(
+    registry: &'a devlanes_transport::Registry,
+    name: &str,
+) -> Option<&'a devlanes_transport::UnitInfo> {
+    registry.units().find(|unit| unit.key.name == name)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// `remote.registry` sends a snapshot, then follows a lane coming up, a unit
+/// starting and stopping and a task run. The task carries its state only. The
+/// requesting client is listed by `status` while the feed lasts.
+async fn registry_feed_follows_lanes_units_and_tasks() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "feedrepo", FEED_BOX);
+        let h = engine_with(&tmp.path.join("box"), "23000-23499", None, None).await;
+        let (session, mut frames) = Session::local(9_003);
+        let request = Request {
+            id: 1,
+            method: Method::RemoteRegistry,
+            params: json!({"client": {"pid": 7, "since_ms": 0, "id": "0123abcd", "name": "laptop"}}),
+            context: Context::default(),
+        };
+        let engine = h.engine.clone();
+        let feeding = session.clone();
+        let feed = tokio::spawn(async move { engine.handle(request, feeding).await });
+        let mut registry = devlanes_transport::Registry::default();
+        // The first event is the snapshot, empty before any project registered.
+        assert!(
+            follow_feed(&mut frames, &mut registry, |_| true).await,
+            "no snapshot"
+        );
+
+        let status = h
+            .call(Method::Status, json!({"all": true}), Context::default())
+            .await
+            .expect("status");
+        assert_eq!(status["clients"][0]["id"], "0123abcd", "{status}");
+        assert_eq!(status["clients"][0]["name"], "laptop", "{status}");
+
+        h.call(Method::Start, json!({"units": ["web"]}), cx(&main))
+            .await
+            .expect("start web");
+        let up = follow_feed(&mut frames, &mut registry, |registry| {
+            registry.lanes().any(|lane| lane.key.project == "feedapp")
+                && feed_unit(registry, "web").is_some_and(|web| {
+                    devlanes_transport::serving(&web.state)
+                        && !web.ports.is_empty()
+                        && web.hosts.iter().any(|host| host.host.starts_with("web."))
+                })
+                && feed_unit(registry, "idle").is_some_and(|idle| idle.state == "idle")
+        })
+        .await;
+        assert!(up, "lane and web followed: {registry:?}");
+        let web_port = feed_unit(&registry, "web")
+            .and_then(|web| web.ports.first())
+            .map(|port| port.port)
+            .expect("web port");
+        assert!(registry.mirrored_ports().contains_key(&web_port));
+
+        h.call(Method::Run, json!({"task": "hello"}), cx(&main))
+            .await
+            .expect("run hello");
+        let ran = follow_feed(&mut frames, &mut registry, |registry| {
+            feed_unit(registry, "hello").is_some_and(|task| {
+                task.key.kind == devlanes_transport::UnitKind::Task && task.state != "running"
+            })
+        })
+        .await;
+        assert!(ran, "task followed: {registry:?}");
+        let task = feed_unit(&registry, "hello").expect("task");
+        assert!(task.ports.is_empty() && task.hosts.is_empty(), "{task:?}");
+
+        h.call(Method::Stop, json!({"units": ["web"]}), cx(&main))
+            .await
+            .expect("stop web");
+        let stopped = follow_feed(&mut frames, &mut registry, |registry| {
+            feed_unit(registry, "web").is_some_and(|web| !devlanes_transport::serving(&web.state))
+        })
+        .await;
+        assert!(stopped, "stop followed: {registry:?}");
+        assert!(!registry.mirrored_ports().contains_key(&web_port));
+
+        session.close();
+        let _ = feed.await;
+        let status = h
+            .call(Method::Status, json!({"all": true}), Context::default())
+            .await
+            .expect("status");
+        assert!(status.get("clients").is_none(), "{status}");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A box daemon that stops ends the session: the tunnel's registry feed
+/// breaks, and the client's link goes back to reconnecting.
+async fn a_stopped_box_daemon_ends_the_session() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let side = BoxSide::start(&tmp, "box", "24000-24499").await;
+        let client = ClientSide::start(&tmp, "client", "24500-24999", &side).await;
+        let connected = client
+            .h
+            .call(
+                Method::Connect,
+                json!({"host": "box", "background": true}),
+                Context::default(),
+            )
+            .await
+            .expect("connect");
+        assert_eq!(connected["state"], "connected", "{connected}");
+        side.token.cancel();
+        let _ = side.server.await;
+        let down = eventually(SOON, || async {
+            (client.host().await["state"] == "reconnecting").then_some(())
+        })
+        .await;
+        assert!(down.is_some(), "{}", client.host().await);
+        side.accept.abort();
+        side.h.close().await;
+        client.stop().await;
     })
     .await
     .expect("timeout");

@@ -12,6 +12,7 @@ use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
 
+use crate::server::ClientInfo;
 use crate::transport::BoxError;
 use crate::wire::{DialTarget, RejectReason};
 
@@ -35,7 +36,7 @@ pub struct LaneInfo {
     pub domain: Option<String>,
 }
 
-/// Whether a unit is a managed process or a container.
+/// Whether a unit is a managed process, a container or a task run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnitKind {
@@ -43,6 +44,15 @@ pub enum UnitKind {
     Service,
     /// A container owned by the box's infra.
     Container,
+    /// A task run, listed for its state only: never mirrored or dialable.
+    Task,
+}
+
+impl UnitKind {
+    /// Whether units of this kind serve ports a client may mirror and dial.
+    pub fn has_endpoints(self) -> bool {
+        !matches!(self, Self::Task)
+    }
 }
 
 /// Identifies a unit within a lane.
@@ -91,7 +101,7 @@ pub struct HostInfo {
     pub host_header: HostHeader,
 }
 
-/// A service or container and its network endpoints.
+/// A service, container or task and its network endpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitInfo {
     /// Unit identity.
@@ -104,6 +114,14 @@ pub struct UnitInfo {
     pub ports: Vec<PortInfo>,
     /// Routed hostnames.
     pub hosts: Vec<HostInfo>,
+}
+
+impl UnitInfo {
+    /// Whether a client may mirror and dial this unit's ports: it is not hidden
+    /// and its kind has endpoints. Its state decides the rest ([`serving`]).
+    pub fn exposed(&self) -> bool {
+        !self.hidden && self.key.kind.has_endpoints()
+    }
 }
 
 /// The full registry at one point in time.
@@ -235,36 +253,41 @@ impl Registry {
         self.units.get(key)
     }
 
-    /// Ports a client should mirror: every port of every non-hidden unit that is
-    /// [`serving`]. An idle unit's port stays free on the client until it starts.
+    /// Ports a client should mirror: every port of every [`UnitInfo::exposed`]
+    /// unit that is [`serving`]. An idle unit's port stays free on the client
+    /// until it starts.
     pub fn mirrored_ports(&self) -> BTreeMap<u16, &UnitKey> {
         self.units
             .values()
-            .filter(|unit| !unit.hidden && serving(&unit.state))
+            .filter(|unit| unit.exposed() && serving(&unit.state))
             .flat_map(|unit| unit.ports.iter().map(move |port| (port.port, &unit.key)))
             .collect()
     }
 
-    /// Every port of every non-hidden unit, idle ones included: the ports a client
-    /// keeps out of its own allocations so the box's units can be mirrored once
-    /// they start.
+    /// Every port of every [`UnitInfo::exposed`] unit, idle ones included: the
+    /// ports a client keeps out of its own allocations so the box's units can be
+    /// mirrored once they start.
     pub fn advertised_ports(&self) -> BTreeSet<u16> {
         self.units
             .values()
-            .filter(|unit| !unit.hidden)
+            .filter(|unit| unit.exposed())
             .flat_map(|unit| unit.ports.iter().map(|port| port.port))
             .collect()
     }
 
     /// Decides whether the box may dial `target`.
     ///
-    /// Only ports advertised by a non-hidden unit that is running pass, so a
-    /// connected client cannot use the box as a pivot to arbitrary local services,
-    /// nor reach whatever took over the port of a stopped unit.
+    /// Only ports advertised by a non-hidden service or container that is
+    /// running pass, so a connected client cannot use the box as a pivot to
+    /// arbitrary local services, nor reach whatever took over the port of a
+    /// stopped unit. Tasks never advertise ports.
     pub fn authorize(&self, target: &DialTarget) -> Result<AuthorizedTarget, RejectReason> {
         let DialTarget::Port { port } = *target;
         let mut refusal = RejectReason::NotRegistered;
         for unit in self.units.values() {
+            if !unit.key.kind.has_endpoints() {
+                continue;
+            }
             let advertises = unit.ports.iter().any(|p| p.port == port)
                 || unit.hosts.iter().any(|h| h.port == port);
             if !advertises {
@@ -328,15 +351,18 @@ pub enum RegistryUpdate {
 pub struct RegistryFeed {
     /// State at subscription time.
     pub snapshot: RegistrySnapshot,
-    /// Changes after `snapshot`; ending the stream ends the session.
-    pub updates: BoxStream<'static, RegistryUpdate>,
+    /// Changes after `snapshot`. An error or the end of the stream ends the
+    /// session: a client must never keep mirroring state the box stopped
+    /// reporting.
+    pub updates: BoxStream<'static, Result<RegistryUpdate, BoxError>>,
 }
 
 /// Box-side supplier of registry state, implemented by the box daemon.
 #[async_trait]
 pub trait RegistrySource: Send + Sync {
-    /// Returns a consistent snapshot and every change after it.
-    async fn subscribe(&self) -> Result<RegistryFeed, BoxError>;
+    /// Returns a consistent snapshot and every change after it, for the client
+    /// described by `client`.
+    async fn subscribe(&self, client: &ClientInfo) -> Result<RegistryFeed, BoxError>;
 }
 
 /// In-process [`RegistrySource`] backed by a broadcast channel.
@@ -399,18 +425,19 @@ impl SharedRegistry {
 
 #[async_trait]
 impl RegistrySource for SharedRegistry {
-    async fn subscribe(&self) -> Result<RegistryFeed, BoxError> {
+    /// Serves every client the same state.
+    async fn subscribe(&self, _client: &ClientInfo) -> Result<RegistryFeed, BoxError> {
         let (snapshot, receiver) = self.snapshot_and_receiver();
         let source = self.clone();
         let updates =
             futures_util::stream::unfold((source, receiver), |(source, mut receiver)| async move {
                 match receiver.recv().await {
-                    Ok(update) => Some((update, (source, receiver))),
+                    Ok(update) => Some((Ok(update), (source, receiver))),
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         // Older queued events could roll back a fresh snapshot,
                         // so the receiver is replaced together with it.
                         let (snapshot, receiver) = source.snapshot_and_receiver();
-                        Some((RegistryUpdate::Resync(snapshot), (source, receiver)))
+                        Some((Ok(RegistryUpdate::Resync(snapshot)), (source, receiver)))
                     }
                     Err(broadcast::error::RecvError::Closed) => None,
                 }
@@ -594,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn lagging_subscriber_resyncs() -> Result<(), BoxError> {
         let shared = SharedRegistry::new(RegistrySnapshot::default(), 1);
-        let mut feed = shared.subscribe().await?;
+        let mut feed = shared.subscribe(&ClientInfo::default()).await?;
         shared.publish(RegistryEvent::UnitUpserted {
             unit: unit("a", 1, false),
         });
@@ -602,9 +629,35 @@ mod tests {
             unit: unit("b", 2, false),
         });
         match feed.updates.next().await {
-            Some(RegistryUpdate::Resync(snapshot)) => assert_eq!(snapshot.units.len(), 2),
+            Some(Ok(RegistryUpdate::Resync(snapshot))) => assert_eq!(snapshot.units.len(), 2),
             other => panic!("expected resync, got {other:?}"),
         }
         Ok(())
+    }
+
+    /// Tasks are listed with their state, but even a running task with ports
+    /// is never mirrored, kept free or dialable.
+    #[test]
+    fn tasks_are_listed_but_never_exposed() {
+        let mut task = unit("migrate", 20005, false);
+        task.key.kind = UnitKind::Task;
+        let registry = Registry::from_snapshot(RegistrySnapshot {
+            lanes: Vec::new(),
+            units: vec![task.clone()],
+        });
+        assert_eq!(registry.units().count(), 1);
+        assert_eq!(
+            registry.unit(&task.key).map(|unit| unit.state.as_str()),
+            Some("running")
+        );
+        assert!(!task.exposed());
+        assert!(registry.mirrored_ports().is_empty());
+        assert!(registry.advertised_ports().is_empty());
+        assert_eq!(
+            registry.authorize(&DialTarget::Port { port: 20005 }),
+            Err(RejectReason::NotRegistered)
+        );
+        let encoded = serde_json::to_value(&task.key).expect("encodes");
+        assert_eq!(encoded["kind"], "task");
     }
 }

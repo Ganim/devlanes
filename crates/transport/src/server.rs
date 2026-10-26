@@ -15,13 +15,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::mux::{self, MuxStream};
 use crate::registry::{AuthorizedTarget, Registry, RegistrySource, RegistryUpdate};
-use crate::rpc::{self, RpcHandler};
 use crate::session::Timing;
 use crate::sync::{self, SyncSource};
 use crate::transport::{BoxDuplex, BoxError, Duplex};
 use crate::wire::{
-    self, BoxControl, Channel, ClientControl, DialTarget, OpenReply, OpenRequest, PROTOCOL_VERSION,
-    RejectReason, WireError,
+    self, BoxControl, BoxInfo, Channel, ClientControl, DialTarget, FEATURES, OpenReply,
+    OpenRequest, PROTOCOL_VERSION, RejectReason, WireError, negotiate,
 };
 
 /// Connects to an authorized endpoint on the box.
@@ -53,8 +52,6 @@ impl Dialer for LoopbackDialer {
 pub struct BoxServices {
     /// Registry snapshot and changes; also the authorization source for dials.
     pub registry: Arc<dyn RegistrySource>,
-    /// Handler for forwarded daemon requests.
-    pub rpc: Arc<dyn RpcHandler>,
     /// Connects authorized data streams.
     pub dialer: Arc<dyn Dialer>,
     /// Sync feeds; use [`crate::NoSync`] when unsupported.
@@ -66,6 +63,10 @@ pub struct BoxServices {
 pub struct ServeOptions {
     /// Version label sent to clients for diagnostics, such as `devlanes 0.1.0`.
     pub server: String,
+    /// Features this box implements; defaults to [`FEATURES`].
+    pub features: Vec<String>,
+    /// What clients learn about the box in the handshake.
+    pub box_info: BoxInfo,
     /// Ping cadence; the box closes after `ping_interval + ping_timeout` of silence.
     pub timing: Timing,
     /// Limit for connecting a data stream's target.
@@ -73,13 +74,36 @@ pub struct ServeOptions {
 }
 
 impl ServeOptions {
-    /// Default timing with the given version label.
+    /// Default timing, this build's features and no box info, with the given
+    /// version label.
     pub fn new(server: impl Into<String>) -> Self {
         Self {
             server: server.into(),
+            features: FEATURES.iter().map(|name| (*name).to_owned()).collect(),
+            box_info: BoxInfo::default(),
             timing: Timing::default(),
             dial_timeout: Duration::from_secs(10),
         }
+    }
+}
+
+/// A connected client as its handshake describes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientInfo {
+    /// Version label, such as `devlanes 0.5.0`.
+    pub label: String,
+    /// Random id the client machine keeps across restarts; empty when it sent none.
+    pub id: String,
+    /// The client machine's host name; empty when it sent none.
+    pub name: String,
+    /// Features both ends implement, which this session may use.
+    pub features: Vec<String>,
+}
+
+impl ClientInfo {
+    /// Whether this session may use `feature`.
+    pub fn has_feature(&self, feature: &str) -> bool {
+        self.features.iter().any(|name| name == feature)
     }
 }
 
@@ -103,7 +127,7 @@ pub enum ServeError {
         /// The client's version label.
         client: String,
     },
-    /// The registry source failed to subscribe.
+    /// The registry source failed to subscribe or to deliver a change.
     #[error("registry source: {0}")]
     Registry(BoxError),
     /// The registry source ended its update stream.
@@ -182,7 +206,17 @@ where
     )
     .await
     .map_err(|_| ServeError::HandshakeTimeout)??;
-    let Some((OpenRequest::Control { protocol, client }, _)) = open else {
+    let Some((
+        OpenRequest::Control {
+            protocol,
+            client,
+            features,
+            client_id,
+            client_name,
+        },
+        _,
+    )) = open
+    else {
         return Err(ServeError::Handshake(
             "first stream must be the control stream",
         ));
@@ -199,22 +233,36 @@ where
         .await;
         return Err(ServeError::IncompatibleClient { protocol, client });
     }
+    let peer = ClientInfo {
+        features: negotiate(&options.features, &features),
+        label: client,
+        id: client_id,
+        name: client_name,
+    };
     let feed = services
         .registry
-        .subscribe()
+        .subscribe(&peer)
         .await
         .map_err(ServeError::Registry)?;
     let registry = Arc::new(RwLock::new(Registry::from_snapshot(feed.snapshot.clone())));
     let welcome = BoxControl::Welcome {
         protocol: PROTOCOL_VERSION,
         server: options.server.clone(),
+        features: options.features.clone(),
+        box_info: options.box_info.clone(),
     };
     send_control(&mut control, &welcome, timing).await?;
     let snapshot = BoxControl::Snapshot {
         snapshot: feed.snapshot,
     };
     send_control(&mut control, &snapshot, timing).await?;
-    tracing::debug!("client {client} connected");
+    tracing::debug!(
+        client = %peer.label,
+        id = %peer.id,
+        name = %peer.name,
+        features = ?peer.features,
+        "client connected"
+    );
 
     let context = Arc::new(StreamContext {
         registry: registry.clone(),
@@ -246,14 +294,15 @@ where
             update = updates.next() => {
                 // Authorization switches to the new state before the client hears about it.
                 let message = match update {
-                    Some(RegistryUpdate::Event(event)) => {
+                    Some(Ok(RegistryUpdate::Event(event))) => {
                         write(&registry).apply(event.clone());
                         BoxControl::Event { event }
                     }
-                    Some(RegistryUpdate::Resync(snapshot)) => {
+                    Some(Ok(RegistryUpdate::Resync(snapshot))) => {
                         write(&registry).replace(snapshot.clone());
                         BoxControl::Snapshot { snapshot }
                     }
+                    Some(Err(error)) => return Err(ServeError::Registry(error)),
                     None => return Err(ServeError::RegistryClosed),
                 };
                 context.revoke();
@@ -303,9 +352,6 @@ async fn handle_stream(stream: MuxStream, context: Arc<StreamContext>) {
     };
     match open {
         OpenRequest::Control { .. } => tracing::warn!("ignoring a second control stream"),
-        OpenRequest::Rpc { request } => {
-            rpc::serve_call(channel, request, context.services.rpc.clone()).await;
-        }
         OpenRequest::Sync { request } => {
             sync::serve_subscription(channel, request, context.services.sync.clone()).await;
         }

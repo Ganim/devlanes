@@ -161,7 +161,7 @@ impl Inner {
     }
 
     /// Lane summaries with the sampler's latest CPU and memory.
-    fn summaries(
+    pub(crate) fn summaries(
         &self,
         lanes: &[LanePair],
         mine: Option<&devlanes_proto::Actor>,

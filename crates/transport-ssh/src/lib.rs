@@ -23,6 +23,11 @@ pub use askpass::{
 pub use probe::{INSTALL_DIR, RemotePlatform, RemoteProbe};
 pub use ssh::{SshError, SshOptions, SshStream, SshTransport};
 
+/// How long a started tunnel gets to write its preamble line. It writes the
+/// line before anything else, so only a box that runs an older release (whose
+/// tunnel waits for the client) or a stuck login shell takes this long.
+pub(crate) const PREAMBLE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Quotes `value` for a POSIX shell using single quotes.
 pub(crate) fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
@@ -230,20 +235,6 @@ mod tests {
         }
     }
 
-    /// Refuses every daemon request; the box side here serves only the handshake.
-    struct NoRpc;
-
-    #[async_trait::async_trait]
-    impl devlanes_transport::RpcHandler for NoRpc {
-        async fn call(
-            &self,
-            _request: serde_json::Value,
-            _input: devlanes_transport::RpcInput,
-        ) -> Result<devlanes_transport::RpcReplyStream, devlanes_transport::RpcError> {
-            Err(devlanes_transport::RpcError::new("unused"))
-        }
-    }
-
     /// A stopped box daemon keeps the link retrying with the hint as its error,
     /// and the link connects once the box serves again.
     #[tokio::test]
@@ -262,7 +253,6 @@ mod tests {
                 while let Some(stream) = listener.accept().await {
                     let services = BoxServices {
                         registry: Arc::new(SharedRegistry::new(RegistrySnapshot::default(), 4)),
-                        rpc: Arc::new(NoRpc),
                         dialer: Arc::new(LoopbackDialer),
                         sync: Arc::new(NoSync),
                     };

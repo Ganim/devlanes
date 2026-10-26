@@ -20,7 +20,7 @@ Install devlanes on the box yourself, with the same install methods as on any ma
 
 When no daemon runs on the box, the connection starts one. Set `remote.start_daemon: false` in the box's user config to keep that under your control: the client then reports that the box daemon is not running and keeps retrying until you start it there with `devlanes daemon start`. A daemon started that way exits about 30 seconds after the last client or TUI leaves while nothing runs (`daemon.exit_when_idle`), so run `devlanes daemon install` on the box, or set `daemon.exit_when_idle: false` there, to keep it running.
 
-`devlanes status --json` on the box lists the clients connected to it under `clients`.
+`devlanes status --json` on the box lists the clients connected to it under `clients`: each with its `id`, a random id the client machine keeps in `~/.devlanes/remote-client-id` so it stays the same across reconnects and restarts, its host `name`, and the tunnel's `pid`, `ssh` address and start time (`since_ms`).
 
 ## Mirroring
 
@@ -30,7 +30,7 @@ Both machines allocate ports from the same default pool, so while a box is conne
 
 The box's hostnames join your local proxy. TLS is terminated with your local CA, so `devlanes certs trust` on the client is enough, and the traffic goes to the box as a plain stream through the connection. Only names under `.localhost` (or your `hostnames.tld`) are accepted; others are listed under `skipped_hosts` and never get a route or a certificate. Hostnames belong to the box: its services got their public URLs when they started. When one of a box lane's hostnames is already served by a local lane, `remote connect` warns and skips that whole box lane (its ports too) instead of renaming it, since a renamed host would break CORS origins and cookies.
 
-New lanes, services and containers on the box appear live; removed ones are unbound. Connections to a unit that stops or becomes hidden are closed.
+New lanes, services and containers on the box appear live; removed ones are unbound. Connections to a unit that stops or becomes hidden are closed. Task runs of the box's lanes are listed with their state only; they are never mirrored.
 
 A connection to a mirrored port that cannot reach the box's service is closed and reported with one of these messages:
 
@@ -64,6 +64,10 @@ Hidden units still show in `devlanes status` on the box.
 
 Two daemons take part, one on each machine. The client daemon owns the connection: it runs `ssh`, binds the mirrored ports, adds the box's routes to its proxy and writes synced folders. The box daemon owns the box's lanes, as it would without any client. Between them, sshd on the box starts one `devlanes tunnel --stdio` per client connection. The tunnel talks to the client over its stdin and stdout, multiplexed into streams (yamux), and to the box daemon over its local socket like any other devlanes command. On Unix clients all of it runs over one ssh ControlMaster per box; Windows clients run one `ssh.exe` per connection.
 
+Before anything else the tunnel writes one line, `devlanes-tunnel 4`, naming its protocol version. A login shell or profile file on the box may print to stdout first (Tailscale SSH runs `su -l`, for example); the client drops up to 64 KiB of such output before that line and logs it at debug level. When the line never comes, the connection fails with the dropped output in the error. Then the client opens a control stream: it sends the protocol version, its release, its id and host name, and the protocol features it implements. The box answers with its version, its features, the port its proxy serves HTTPS on and its `ports.range`, then the first copy of its registry: lanes, units, states, ports and hostnames, never environments. Data streams (one per mirrored connection) and sync streams follow, all opened by the client. The client never sends the box a command.
+
+Both ends must speak the same protocol version, which changes only for changes an older release cannot handle. Anything added later is a named feature that both ends list in the handshake, and a feature is used only when both list it, so releases with the same protocol version work together.
+
 A request from a browser on the client takes this path:
 
 ```text
@@ -79,8 +83,8 @@ Raw TCP clients such as `psql` skip the proxy and start at the mirror listener.
 The checks are split between the processes:
 
 - The client daemon checks the protocol version in the handshake and stops on a mismatch. A different release with the same protocol, and linger off on a Linux box, become warnings from the box's version label.
-- The tunnel follows the box daemon's events, reads `status --all` and `hosts` again after each change, and sends the client only the differences: lanes, units, states, ports and hostnames, never environments.
-- The tunnel authorizes every stream: the port must belong to a running unit that is not hidden. It then dials loopback on the box.
+- The box daemon builds the registry from the same lanes as `status --all` and the same routes as `hosts`, and streams it to the tunnel: a full copy, then each change. A tunnel that falls behind gets a fresh full copy. The tunnel passes it on to the client. When the box daemon stops or sends something the tunnel cannot read, the session ends and the client reconnects, so it never mirrors a registry the box stopped reporting.
+- The tunnel authorizes every stream: the port must belong to a running service or container that is not hidden. It then dials loopback on the box.
 - The client daemon decides what is bound and routed. Local lanes win: a box port inside a local port block is not bound, and a box lane with a hostname a local lane serves is skipped whole. Box hostnames outside `.localhost` and `hostnames.tld` are refused.
 - For a sync, the client sends the list of files it holds and the box compares it with its source, so only differences cross the link.
 

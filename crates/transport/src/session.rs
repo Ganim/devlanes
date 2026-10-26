@@ -12,12 +12,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::mux::{self, MuxClient, MuxError, MuxStream};
 use crate::registry::ClientRegistry;
-use crate::rpc::{RpcCall, RpcCallError};
 use crate::sync::SyncSubscription;
 use crate::transport::{BoxDuplex, Transport, TransportError};
 use crate::wire::{
-    self, BoxControl, Channel, ClientControl, DialTarget, OpenReply, OpenRequest, PROTOCOL_VERSION,
-    Prefixed, RejectReason, WireError,
+    self, BoxControl, BoxInfo, Channel, ClientControl, DialTarget, FEATURES, OpenReply,
+    OpenRequest, PROTOCOL_VERSION, Prefixed, RejectReason, WireError, negotiate,
 };
 
 /// Liveness and handshake limits shared by both ends.
@@ -46,6 +45,12 @@ impl Default for Timing {
 pub struct SessionOptions {
     /// Version label sent to the box for diagnostics.
     pub client: String,
+    /// Random id of this machine, kept across restarts, by which the box lists it.
+    pub client_id: String,
+    /// This machine's host name, shown next to the id on the box.
+    pub client_name: String,
+    /// Features this client implements; defaults to [`FEATURES`].
+    pub features: Vec<String>,
     /// Ping and handshake limits.
     pub timing: Timing,
     /// State replaced by each session's snapshot; share it across reconnects.
@@ -56,11 +61,14 @@ pub struct SessionOptions {
 }
 
 impl SessionOptions {
-    /// Default timing, a fresh registry and a 3-minute attempt limit, enough for a
-    /// person to answer SSH prompts.
+    /// Default timing, this build's features, no identity, a fresh registry and
+    /// a 3-minute attempt limit, enough for a person to answer SSH prompts.
     pub fn new(client: impl Into<String>) -> Self {
         Self {
             client: client.into(),
+            client_id: String::new(),
+            client_name: String::new(),
+            features: FEATURES.iter().map(|name| (*name).to_owned()).collect(),
             timing: Timing::default(),
             registry: ClientRegistry::new(),
             connect_timeout: Duration::from_secs(180),
@@ -183,7 +191,7 @@ pub struct Session {
 
 struct Inner {
     mux: MuxClient,
-    server: String,
+    welcome: Welcome,
     registry: ClientRegistry,
     timing: Timing,
     end: watch::Receiver<Option<SessionEnd>>,
@@ -200,10 +208,19 @@ impl Drop for Inner {
 impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Session")
-            .field("server", &self.inner.server)
+            .field("server", &self.inner.welcome.server)
+            .field("features", &self.inner.welcome.features)
             .field("end", &*self.inner.end.borrow())
             .finish()
     }
+}
+
+/// What the box's welcome told this session.
+struct Welcome {
+    server: String,
+    /// Features both ends list.
+    features: Vec<String>,
+    box_info: BoxInfo,
 }
 
 impl Session {
@@ -223,7 +240,7 @@ impl Session {
     pub async fn establish(io: BoxDuplex, options: SessionOptions) -> Result<Self, SessionError> {
         let mux = mux::client(io);
         match handshake(&mux, &options).await {
-            Ok((control, server)) => {
+            Ok((control, welcome)) => {
                 let (end_tx, end) = watch::channel(None);
                 let cancel = CancellationToken::new();
                 tokio::spawn(run_control(
@@ -237,7 +254,7 @@ impl Session {
                 Ok(Self {
                     inner: Arc::new(Inner {
                         mux,
-                        server,
+                        welcome,
                         registry: options.registry,
                         timing: options.timing,
                         end,
@@ -254,7 +271,22 @@ impl Session {
 
     /// The box's version label from the handshake.
     pub fn server(&self) -> &str {
-        &self.inner.server
+        &self.inner.welcome.server
+    }
+
+    /// Features both ends list, which this session may use.
+    pub fn features(&self) -> &[String] {
+        &self.inner.welcome.features
+    }
+
+    /// Whether both ends list `feature`.
+    pub fn has_feature(&self, feature: &str) -> bool {
+        self.features().iter().any(|name| name == feature)
+    }
+
+    /// What the box reported about itself in the handshake.
+    pub fn box_info(&self) -> &BoxInfo {
+        &self.inner.welcome.box_info
     }
 
     /// The registry this session keeps up to date.
@@ -278,22 +310,6 @@ impl Session {
             }
             None => Err(OpenError::Interrupted),
         }
-    }
-
-    /// Starts a forwarded daemon request that may stream replies and take input.
-    pub async fn call(&self, request: Value) -> Result<RpcCall, SessionError> {
-        let channel = self.open_stream(&OpenRequest::Rpc { request }).await?;
-        Ok(RpcCall::new(channel))
-    }
-
-    /// Sends a request without input and returns its first reply.
-    ///
-    /// Use [`Session::call`] for requests that stream several replies.
-    pub async fn request(&self, request: Value) -> Result<Value, RpcCallError> {
-        let mut call = self.call(request).await?;
-        call.finish_input().await?;
-        let value = call.next().await.ok_or(RpcCallError::NoValue)??;
-        Ok(value)
     }
 
     /// Starts a sync subscription; the request is opaque to the transport.
@@ -337,25 +353,41 @@ impl Session {
     }
 }
 
-/// Opens the control stream, checks the protocol and applies the first snapshot.
+/// Opens the control stream, checks the protocol, negotiates features and
+/// applies the first snapshot.
 async fn handshake(
     mux: &MuxClient,
     options: &SessionOptions,
-) -> Result<(Channel<MuxStream>, String), SessionError> {
+) -> Result<(Channel<MuxStream>, Welcome), SessionError> {
     let limit = options.timing.handshake_timeout;
     let exchange = async {
         let mut control = wire::channel(mux.open().await?);
         let hello = OpenRequest::Control {
             protocol: PROTOCOL_VERSION,
             client: options.client.clone(),
+            features: options.features.clone(),
+            client_id: options.client_id.clone(),
+            client_name: options.client_name.clone(),
         };
         wire::send(&mut control, &hello).await?;
-        let server = match wire::recv::<_, BoxControl>(&mut control).await? {
-            Some((BoxControl::Welcome { protocol, server }, _)) if protocol == PROTOCOL_VERSION => {
-                server
-            }
+        let welcome = match wire::recv::<_, BoxControl>(&mut control).await? {
             Some((
-                BoxControl::Welcome { protocol, server }
+                BoxControl::Welcome {
+                    protocol,
+                    server,
+                    features,
+                    box_info,
+                },
+                _,
+            )) if protocol == PROTOCOL_VERSION => Welcome {
+                server,
+                features: negotiate(&options.features, &features),
+                box_info,
+            },
+            Some((
+                BoxControl::Welcome {
+                    protocol, server, ..
+                }
                 | BoxControl::Incompatible { protocol, server },
                 _,
             )) => {
@@ -373,7 +405,7 @@ async fn handshake(
             Some(_) => return Err(SessionError::Handshake("expected registry snapshot")),
             None => return Err(SessionError::Handshake("box closed the control stream")),
         }
-        Ok((control, server))
+        Ok((control, welcome))
     };
     match timeout(limit, exchange).await {
         Err(_) => Err(SessionError::HandshakeTimeout),
@@ -478,25 +510,21 @@ mod tests {
     use crate::server::{BoxServices, LoopbackDialer, ServeError, ServeOptions, serve};
     use crate::sync::NoSync;
 
-    struct NoRpc;
-
-    #[async_trait::async_trait]
-    impl crate::rpc::RpcHandler for NoRpc {
-        async fn call(
-            &self,
-            _request: Value,
-            _input: crate::rpc::RpcInput,
-        ) -> Result<crate::rpc::RpcReplyStream, crate::rpc::RpcError> {
-            Err(crate::rpc::RpcError::new("unused"))
-        }
-    }
-
     fn services() -> BoxServices {
         BoxServices {
             registry: Arc::new(SharedRegistry::new(RegistrySnapshot::default(), 4)),
-            rpc: Arc::new(NoRpc),
             dialer: Arc::new(LoopbackDialer),
             sync: Arc::new(NoSync),
+        }
+    }
+
+    /// A welcome for this protocol without features or box info.
+    fn welcome() -> BoxControl {
+        BoxControl::Welcome {
+            protocol: PROTOCOL_VERSION,
+            server: "box".into(),
+            features: Vec::new(),
+            box_info: BoxInfo::default(),
         }
     }
 
@@ -504,7 +532,7 @@ mod tests {
     async fn data_keeps_a_session_alive_without_pongs() -> Result<(), Box<dyn std::error::Error>> {
         timeout(Duration::from_secs(10), async {
             let (client_io, box_io) = tokio::io::duplex(1024 * 1024);
-            // A box that never answers pings but streams one call's reply for a while,
+            // A box that never answers pings but streams one sync feed for a while,
             // like a large transfer that queues pongs behind data.
             let streaming = Arc::new(std::sync::atomic::AtomicBool::new(true));
             let flag = streaming.clone();
@@ -512,27 +540,25 @@ mod tests {
                 let mut mux = mux::server(Box::new(box_io));
                 let mut control = wire::channel(mux.accept().await.ok_or("no control")?);
                 let _hello = wire::recv::<_, OpenRequest>(&mut control).await?;
-                let welcome = BoxControl::Welcome {
-                    protocol: PROTOCOL_VERSION,
-                    server: "box".into(),
-                };
-                wire::send(&mut control, &welcome).await?;
+                wire::send(&mut control, &welcome()).await?;
                 let snapshot = BoxControl::Snapshot {
                     snapshot: RegistrySnapshot::default(),
                 };
                 wire::send(&mut control, &snapshot).await?;
-                let mut call = wire::channel(mux.accept().await.ok_or("no call")?);
+                let mut feed = wire::channel(mux.accept().await.ok_or("no sync stream")?);
                 let started = Instant::now();
                 while started.elapsed() < Duration::from_millis(800) {
-                    let item = crate::wire::RpcBoxFrame::Item { value: Value::Null };
-                    wire::send(&mut call, &item).await?;
+                    let item = crate::wire::SyncFrame::Manifest {
+                        manifest: Value::Null,
+                    };
+                    wire::send(&mut feed, &item).await?;
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
                 flag.store(false, std::sync::atomic::Ordering::SeqCst);
                 // Hold everything open, reading pings without answering, until the
                 // client gives up.
                 while let Ok(Some(_)) = wire::recv::<_, Value>(&mut control).await {}
-                drop(call);
+                drop(feed);
                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
             });
             let mut options = SessionOptions::new("client");
@@ -542,8 +568,8 @@ mod tests {
                 handshake_timeout: Duration::from_secs(5),
             };
             let session = Session::establish(Box::new(client_io), options).await?;
-            let mut call = session.call(Value::Null).await?;
-            let reader = tokio::spawn(async move { while let Some(Ok(_)) = call.next().await {} });
+            let mut feed = session.subscribe_sync(Value::Null).await?;
+            let reader = tokio::spawn(async move { while let Some(Ok(_)) = feed.next().await {} });
             while streaming.load(std::sync::atomic::Ordering::SeqCst) {
                 assert_eq!(session.end(), None, "session died while data was flowing");
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -567,6 +593,9 @@ mod tests {
             let hello = OpenRequest::Control {
                 protocol: PROTOCOL_VERSION + 1,
                 client: "future".into(),
+                features: Vec::new(),
+                client_id: String::new(),
+                client_name: String::new(),
             };
             wire::send(&mut control, &hello).await?;
             let reply = wire::recv::<_, BoxControl>(&mut control).await?;
@@ -654,6 +683,8 @@ mod tests {
                 let reply = BoxControl::Welcome {
                     protocol: PROTOCOL_VERSION + 1,
                     server: "devlanes 9.0.0".into(),
+                    features: Vec::new(),
+                    box_info: BoxInfo::default(),
                 };
                 wire::send(&mut control, &reply).await?;
                 // Hold the stream until the client gives up.

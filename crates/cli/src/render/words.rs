@@ -803,6 +803,13 @@ fn more_errors(code: &str, data: &Value) -> Option<(String, Option<Hint>)> {
             with_message(format!("remote {}", field(data, "host"))),
             Some(Hint::command(["remote", "ls"])),
         ),
+        "client_identity" => (
+            with_message(
+                "cannot read or create remote-client-id in the devlanes home, which boxes list this machine by"
+                    .to_owned(),
+            ),
+            None,
+        ),
         "script_error" => (
             match data.get("file").and_then(Value::as_str) {
                 Some(file) => format!(

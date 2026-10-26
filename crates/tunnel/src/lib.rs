@@ -1,27 +1,30 @@
 //! Box side of remote operation: `devlanes tunnel --stdio`.
 //!
-//! Remote is mirroring only. [`services`] answers a client daemon's mux streams
-//! from this machine's own daemon, reached over its Unix socket like any other
-//! client:
+//! Remote is mirroring only. The tunnel writes the transport's preamble line,
+//! then [`services`] answers a client daemon's mux streams from this machine's
+//! own daemon, reached over its socket like any other client:
 //!
-//! - the registry comes from `status --all` and `hosts`, refreshed on daemon events
-//!   and published as incremental changes; it carries ports, hostnames and states,
-//!   never environments or secrets;
-//! - data streams dial loopback ports of running, non-hidden units, nothing else;
-//! - syncs stream `sync.status` entries; the client never chooses a path;
-//! - daemon requests are refused: a client never runs commands on the box.
+//! - the registry is the daemon's `remote.registry` feed: a snapshot, then
+//!   each change; it carries ports, hostnames and states, never environments
+//!   or secrets, and a feed that ends or breaks ends the session;
+//! - data streams dial loopback ports of running, non-hidden services and
+//!   containers, nothing else;
+//! - syncs stream `sync.status` entries; the client never chooses a path.
 
 mod registry;
-mod rpc;
 mod sync;
 
 use std::sync::Arc;
 
 use devlanes_client::{Client, Paths};
-use devlanes_proto::remote::RemoteClient;
+use devlanes_proto::{Context, Method, remote::RemoteClient};
 use devlanes_transport::{
-    BoxServices, EXIT_DAEMON_STOPPED, LoopbackDialer, ServeError, ServeOptions,
+    BoxInfo, BoxServices, EXIT_DAEMON_STOPPED, LoopbackDialer, ServeError, ServeOptions,
+    TUNNEL_PREAMBLE,
 };
+use serde::Deserialize;
+use serde_json::json;
+use tokio::io::AsyncWriteExt;
 
 /// Login-session variables a daemon started by the tunnel must not keep: the
 /// daemon outlives the SSH session, and an agent socket would let its processes
@@ -44,6 +47,12 @@ pub enum TunnelError {
     /// (`remote.start_daemon: false`).
     #[error("box daemon is not running")]
     DaemonStopped,
+    /// The box daemon's `daemon.status` did not have the expected shape.
+    #[error("box daemon sent an unexpected daemon.status: {0}")]
+    Status(#[from] serde_json::Error),
+    /// Writing the preamble to stdout failed.
+    #[error("writing to the client: {0}")]
+    Stdout(#[from] std::io::Error),
     /// The session with the client failed.
     #[error(transparent)]
     Serve(#[from] ServeError),
@@ -55,18 +64,18 @@ impl TunnelError {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::DaemonStopped => u8::try_from(EXIT_DAEMON_STOPPED).unwrap_or(1),
-            Self::Daemon(_) | Self::Serve(_) => 1,
+            Self::Daemon(_) | Self::Status(_) | Self::Stdout(_) | Self::Serve(_) => 1,
         }
     }
 }
 
 /// Box services backed by the daemon behind `paths`.
 ///
-/// `client` is listed by the box's `status` while the registry feed is open.
+/// `client` (with the id and name from each client's handshake) is listed by
+/// the box's `status` while that client's registry feed is open.
 pub fn services(paths: Paths, client: RemoteClient) -> BoxServices {
     BoxServices {
         registry: Arc::new(registry::DaemonRegistry::new(paths.clone(), client)),
-        rpc: Arc::new(rpc::Refuse),
         dialer: Arc::new(LoopbackDialer),
         sync: Arc::new(sync::DaemonSync::new(paths)),
     }
@@ -107,30 +116,64 @@ fn linger_off() -> bool {
 
 /// Serves one client over this process's stdin and stdout until it leaves.
 ///
-/// Starts the box daemon when it is not running and `start_daemon` (the box's
-/// `remote.start_daemon`) allows it; otherwise a stopped daemon fails with
-/// [`TunnelError::DaemonStopped`]. Nothing but mux frames may reach stdout, so
-/// diagnostics belong on stderr, which ssh hands back to the client.
+/// Writes [`TUNNEL_PREAMBLE`] first, before anything that could take time, so
+/// the client can tell this tunnel's output from what the box's login shell
+/// printed. Starts the box daemon when it is not running and `start_daemon`
+/// (the box's `remote.start_daemon`) allows it; otherwise a stopped daemon
+/// fails with [`TunnelError::DaemonStopped`]. Nothing but the preamble and mux
+/// frames may reach stdout, so diagnostics belong on stderr, which ssh hands
+/// back to the client.
 pub async fn run_stdio(paths: Paths, start_daemon: bool) -> Result<(), TunnelError> {
+    let mut stdout = tokio::io::stdout();
+    stdout.write_all(TUNNEL_PREAMBLE.as_bytes()).await?;
+    stdout.flush().await?;
     drop(daemon_client(&paths, start_daemon).await?);
+    let box_info = box_info(&paths).await?;
     let client = RemoteClient {
         pid: std::process::id(),
         ssh: std::env::var("SSH_CONNECTION")
             .ok()
             .filter(|value| !value.is_empty()),
         since_ms: now_ms(),
+        ..RemoteClient::default()
     };
     // `loginctl` blocks briefly; it runs once, before serving starts.
     let label = tokio::task::spawn_blocking(server_label)
         .await
         .unwrap_or_else(|_| format!("devlanes {}", devlanes_version::VERSION));
+    let mut options = ServeOptions::new(label);
+    options.box_info = box_info;
     devlanes_transport::serve(
         devlanes_transport::stdio(),
         services(paths, client),
-        ServeOptions::new(label),
+        options,
     )
     .await?;
     Ok(())
+}
+
+/// The `daemon.status` fields a box reports to clients; a daemon from before
+/// they existed leaves them out.
+#[derive(Debug, Deserialize)]
+struct StatusFields {
+    #[serde(default)]
+    https_port: Option<u16>,
+    #[serde(default)]
+    ports_range: Option<String>,
+}
+
+/// What the running box daemon behind `paths` tells clients about this box,
+/// for [`ServeOptions::box_info`]: its proxy's HTTPS port and `ports.range`.
+pub async fn box_info(paths: &Paths) -> Result<BoxInfo, TunnelError> {
+    let status = Client::connect(paths)
+        .await?
+        .request(Method::DaemonStatus, json!({}), Context::default())
+        .await?;
+    let fields: StatusFields = serde_json::from_value(status)?;
+    Ok(BoxInfo {
+        https_port: fields.https_port,
+        ports_range: fields.ports_range,
+    })
 }
 
 /// A connection to the box daemon, starting it first only when `start_daemon`.
@@ -150,15 +193,6 @@ pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
-
-/// A box error carried as transport RPC error data, so the client daemon can hand
-/// the structured error to its CLI unchanged.
-pub(crate) fn rpc_error(error: devlanes_proto::RpcError) -> devlanes_transport::RpcError {
-    devlanes_transport::RpcError {
-        message: error.code.clone(),
-        data: serde_json::to_value(&error).ok(),
-    }
 }
 
 #[cfg(test)]

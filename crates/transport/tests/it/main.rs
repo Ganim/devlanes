@@ -8,17 +8,17 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use devlanes_transport::memory::{MemoryTransport, memory_transport};
 use devlanes_transport::{
-    Backoff, BoxServices, DialTarget, LaneInfo, LaneKey, Link, LinkState, LoopbackDialer,
-    OpenError, PortInfo, Registry, RegistryEvent, RegistrySnapshot, RejectReason, RpcCallError,
-    RpcError, RpcHandler, RpcInput, RpcReplyStream, ServeOptions, Session, SessionEnd,
-    SessionOptions, SharedRegistry, SyncError, SyncFeed, SyncInput, SyncInputEvent, SyncMessage,
-    SyncSource, Timing, UnitInfo, UnitKey, UnitKind, serve,
+    Backoff, BoxError, BoxInfo, BoxServices, ClientInfo, DialTarget, LaneInfo, LaneKey, Link,
+    LinkState, LoopbackDialer, OpenError, PortInfo, Registry, RegistryEvent, RegistryFeed,
+    RegistrySnapshot, RegistrySource, RegistryUpdate, RejectReason, ServeError, ServeOptions,
+    Session, SessionEnd, SessionOptions, SharedRegistry, SyncError, SyncFeed, SyncInput,
+    SyncInputEvent, SyncMessage, SyncSource, Timing, UnitInfo, UnitKey, UnitKind, serve,
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -68,56 +68,6 @@ fn snapshot(units: Vec<UnitInfo>) -> RegistrySnapshot {
             domain: Some("app.localhost".into()),
         }],
         units,
-    }
-}
-
-/// Handler covering unary, streaming, input, failure and cancellation.
-struct TestRpc {
-    dropped: mpsc::UnboundedSender<()>,
-}
-
-/// Reports when a reply stream is dropped, proving cancellation reached the box.
-struct DropSignal(mpsc::UnboundedSender<()>);
-
-impl Drop for DropSignal {
-    fn drop(&mut self) {
-        let _ = self.0.send(());
-    }
-}
-
-#[async_trait]
-impl RpcHandler for TestRpc {
-    async fn call(&self, request: Value, mut input: RpcInput) -> Result<RpcReplyStream, RpcError> {
-        match request["op"].as_str() {
-            Some("echo") => {
-                let value = request["value"].clone();
-                Ok(futures_util::stream::once(async move { Ok(value) }).boxed())
-            }
-            Some("count") => {
-                let n = request["n"].as_u64().unwrap_or(0);
-                Ok(futures_util::stream::iter((0..n).map(|i| Ok(json!(i)))).boxed())
-            }
-            Some("collect") => {
-                let mut values = Vec::new();
-                while let Some(value) = input.recv().await {
-                    values.push(value);
-                }
-                Ok(futures_util::stream::once(async move { Ok(Value::Array(values)) }).boxed())
-            }
-            Some("hang") => {
-                let signal = DropSignal(self.dropped.clone());
-                Ok(
-                    futures_util::stream::once(async move { Ok(json!("started")) })
-                        .chain(futures_util::stream::pending())
-                        .map(move |item| {
-                            let _keep = &signal;
-                            item
-                        })
-                        .boxed(),
-                )
-            }
-            _ => Err(RpcError::new("unknown op")),
-        }
     }
 }
 
@@ -172,7 +122,6 @@ fn async_stream_once(
 struct TestBox {
     transport: MemoryTransport,
     registry: SharedRegistry,
-    cancelled: mpsc::UnboundedReceiver<()>,
     task: JoinHandle<()>,
 }
 
@@ -183,20 +132,24 @@ impl Drop for TestBox {
 }
 
 fn start_box(initial: RegistrySnapshot) -> TestBox {
+    let mut options = ServeOptions::new("devlanes-test-box");
+    options.timing = fast_timing();
+    start_box_with(initial, options)
+}
+
+/// [`start_box`] with its own serve options.
+fn start_box_with(initial: RegistrySnapshot, options: ServeOptions) -> TestBox {
     let (transport, mut listener) = memory_transport();
     let registry = SharedRegistry::new(initial, 64);
-    let (dropped, cancelled) = mpsc::unbounded_channel();
     let services = BoxServices {
         registry: Arc::new(registry.clone()),
-        rpc: Arc::new(TestRpc { dropped }),
         dialer: Arc::new(LoopbackDialer),
         sync: Arc::new(TestSync),
     };
     let task = tokio::spawn(async move {
         while let Some(link) = listener.accept().await {
             let services = services.clone();
-            let mut options = ServeOptions::new("devlanes-test-box");
-            options.timing = fast_timing();
+            let options = options.clone();
             tokio::spawn(async move {
                 let _ = serve(link, services, options).await;
             });
@@ -205,9 +158,13 @@ fn start_box(initial: RegistrySnapshot) -> TestBox {
     TestBox {
         transport,
         registry,
-        cancelled,
         task,
     }
+}
+
+/// Names as owned strings.
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|name| (*name).to_owned()).collect()
 }
 
 fn session_options() -> SessionOptions {
@@ -262,52 +219,148 @@ async fn control_stream_delivers_snapshot() -> TestResult {
     .await
 }
 
+/// A feature both ends list is used; one only one end lists is not, and a
+/// client without features gets none. The box's info reaches the client.
 #[tokio::test]
-async fn rpc_forwarding_supports_unary_streaming_input_and_errors() -> TestResult {
+async fn features_are_negotiated_and_box_info_reaches_the_client() -> TestResult {
     bounded(async {
-        let test_box = start_box(snapshot(Vec::new()));
-        let session = Session::connect(&test_box.transport, session_options()).await?;
+        let mut options = ServeOptions::new("devlanes-test-box");
+        options.timing = fast_timing();
+        options.features = names(&["shared", "box_only"]);
+        options.box_info = BoxInfo {
+            https_port: Some(8443),
+            ports_range: Some("20000-29999".into()),
+        };
+        let test_box = start_box_with(snapshot(Vec::new()), options);
 
-        let value = session
-            .request(json!({"op": "echo", "value": {"x": 1}}))
-            .await?;
-        assert_eq!(value, json!({"x": 1}));
+        let mut with = session_options();
+        with.features = names(&["client_only", "shared"]);
+        let session = Session::connect(&test_box.transport, with).await?;
+        assert_eq!(session.features(), ["shared"]);
+        assert!(session.has_feature("shared"));
+        assert!(!session.has_feature("box_only"));
+        assert!(!session.has_feature("client_only"));
+        assert_eq!(session.box_info().https_port, Some(8443));
+        assert_eq!(
+            session.box_info().ports_range.as_deref(),
+            Some("20000-29999")
+        );
 
-        let mut call = session.call(json!({"op": "count", "n": 3})).await?;
-        call.finish_input().await?;
-        let mut items = Vec::new();
-        while let Some(item) = call.next().await {
-            items.push(item?);
-        }
-        assert_eq!(items, [json!(0), json!(1), json!(2)]);
-
-        let mut call = session.call(json!({"op": "collect"})).await?;
-        call.send(json!("a")).await?;
-        call.send(json!("b")).await?;
-        call.finish_input().await?;
-        assert_eq!(call.next().await.transpose()?, Some(json!(["a", "b"])));
-        assert!(call.next().await.is_none());
-
-        let error = session.request(json!({"op": "nope"})).await;
-        assert!(matches!(error, Err(RpcCallError::Remote(e)) if e.message == "unknown op"));
+        let mut without = session_options();
+        without.features = Vec::new();
+        let session = Session::connect(&test_box.transport, without).await?;
+        assert!(session.features().is_empty());
+        assert!(!session.has_feature("shared"));
         Ok(())
     })
     .await
 }
 
+/// A registry source that records the client it serves and hands out a feed
+/// whose updates the test controls.
+struct ScriptedRegistry {
+    seen: std::sync::Mutex<Option<oneshot::Sender<ClientInfo>>>,
+    updates: std::sync::Mutex<Option<mpsc::UnboundedReceiver<Result<RegistryUpdate, BoxError>>>>,
+}
+
+#[async_trait]
+impl RegistrySource for ScriptedRegistry {
+    /// An empty snapshot, then whatever the test sends.
+    async fn subscribe(&self, client: &ClientInfo) -> Result<RegistryFeed, BoxError> {
+        if let Some(seen) = self.seen.lock().map_err(|e| e.to_string())?.take() {
+            let _ = seen.send(client.clone());
+        }
+        let receiver = self
+            .updates
+            .lock()
+            .map_err(|e| e.to_string())?
+            .take()
+            .ok_or("subscribed twice")?;
+        let updates = futures_util::stream::unfold(receiver, |mut receiver| async move {
+            receiver.recv().await.map(|update| (update, receiver))
+        })
+        .boxed();
+        Ok(RegistryFeed {
+            snapshot: RegistrySnapshot::default(),
+            updates,
+        })
+    }
+}
+
+/// The box's registry source learns the client's identity and the negotiated
+/// features; a feed that fails ends the session on both ends, with the
+/// source's error on the box.
 #[tokio::test]
-async fn dropping_a_call_cancels_it_on_the_box() -> TestResult {
+async fn a_failing_registry_feed_ends_the_session() -> TestResult {
     bounded(async {
-        let mut test_box = start_box(snapshot(Vec::new()));
-        let session = Session::connect(&test_box.transport, session_options()).await?;
-        let mut call = session.call(json!({"op": "hang"})).await?;
-        assert_eq!(call.next().await.transpose()?, Some(json!("started")));
-        drop(call);
-        test_box
-            .cancelled
-            .recv()
-            .await
-            .ok_or("handler stream never dropped")?;
+        let (transport, mut listener) = memory_transport();
+        let (seen_tx, seen) = oneshot::channel();
+        let (updates, receiver) = mpsc::unbounded_channel();
+        let services = BoxServices {
+            registry: Arc::new(ScriptedRegistry {
+                seen: std::sync::Mutex::new(Some(seen_tx)),
+                updates: std::sync::Mutex::new(Some(receiver)),
+            }),
+            dialer: Arc::new(LoopbackDialer),
+            sync: Arc::new(TestSync),
+        };
+        let server = tokio::spawn(async move {
+            let link = listener.accept().await.ok_or("no link")?;
+            let mut options = ServeOptions::new("box");
+            options.timing = fast_timing();
+            options.features = names(&["shared"]);
+            serve(link, services, options)
+                .await
+                .map_err(|error| error.to_string())
+        });
+        let mut options = session_options();
+        options.client_id = "0123abcd".into();
+        options.client_name = "laptop".into();
+        options.features = names(&["shared", "other"]);
+        let session = Session::connect(&transport, options).await?;
+        let client = seen.await?;
+        assert_eq!(client.id, "0123abcd");
+        assert_eq!(client.name, "laptop");
+        assert_eq!(client.label, "devlanes-test-client");
+        assert_eq!(client.features, ["shared"]);
+
+        updates.send(Err("the box daemon sent a malformed registry".into()))?;
+        let end = tokio::time::timeout(Duration::from_secs(5), session.closed()).await?;
+        assert_ne!(end, SessionEnd::Closed, "{end}");
+        let result = server.await?;
+        let error = result.expect_err("serve failed");
+        assert!(error.contains("malformed registry"), "{error}");
+        Ok(())
+    })
+    .await
+}
+
+/// A feed that simply ends also ends the session.
+#[tokio::test]
+async fn a_closed_registry_feed_ends_the_session() -> TestResult {
+    bounded(async {
+        let (transport, mut listener) = memory_transport();
+        let (updates, receiver) = mpsc::unbounded_channel::<Result<RegistryUpdate, BoxError>>();
+        let services = BoxServices {
+            registry: Arc::new(ScriptedRegistry {
+                seen: std::sync::Mutex::new(None),
+                updates: std::sync::Mutex::new(Some(receiver)),
+            }),
+            dialer: Arc::new(LoopbackDialer),
+            sync: Arc::new(TestSync),
+        };
+        let server = tokio::spawn(async move {
+            let link = listener.accept().await.ok_or("no link")?;
+            let mut options = ServeOptions::new("box");
+            options.timing = fast_timing();
+            let result = serve(link, services, options).await;
+            Ok::<_, String>(matches!(result, Err(ServeError::RegistryClosed)))
+        });
+        let session = Session::connect(&transport, session_options()).await?;
+        drop(updates);
+        let end = tokio::time::timeout(Duration::from_secs(5), session.closed()).await?;
+        assert_ne!(end, SessionEnd::Closed, "{end}");
+        assert!(server.await??, "serve ended with RegistryClosed");
         Ok(())
     })
     .await
@@ -467,7 +520,12 @@ async fn frozen_link_hits_ping_timeout() -> TestResult {
         assert_eq!(session.closed().await, SessionEnd::PingTimeout);
         // One interval to send the ping plus the timeout, with scheduling slack.
         assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(session.call(json!({"op": "echo"})).await.is_err());
+        assert!(
+            session
+                .subscribe_sync(json!({"folder": "ext"}))
+                .await
+                .is_err()
+        );
         Ok(())
     })
     .await
@@ -549,10 +607,8 @@ async fn box_closes_silent_client() -> TestResult {
     bounded(async {
         let (transport, mut listener) = memory_transport();
         let registry = SharedRegistry::new(snapshot(Vec::new()), 8);
-        let (dropped, _cancelled) = mpsc::unbounded_channel();
         let services = BoxServices {
             registry: Arc::new(registry),
-            rpc: Arc::new(TestRpc { dropped }),
             dialer: Arc::new(LoopbackDialer),
             sync: Arc::new(TestSync),
         };

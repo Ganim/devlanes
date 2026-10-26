@@ -30,6 +30,7 @@ async-trait.workspace = true
 base64.workspace = true
 dunce.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 globset = "0.4"
 indexmap = "2"
 jiff = "0.2"
@@ -47,7 +48,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 
 [target.'cfg(unix)'.dependencies]
 fs2 = "0.4"
-rustix = { version = "1", features = ["process", "fs", "stdio"] }
+rustix = { version = "1", features = ["process", "fs", "stdio", "system"] }
 
 [target.'cfg(windows)'.dependencies]
 devlanes-shell-windows = { path = "../shell-windows" }

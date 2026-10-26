@@ -313,7 +313,8 @@ impl Mirror {
             .map(|route| route.host)
             .collect();
         let suffixes = route_suffixes(engine);
-        let visible: Vec<&UnitInfo> = registry.units().filter(|unit| !unit.hidden).collect();
+        // Hidden units and tasks are listed by the box but never mirrored.
+        let visible: Vec<&UnitInfo> = registry.units().filter(|unit| unit.exposed()).collect();
 
         // A box lane whose hostname this machine already serves is skipped whole:
         // renaming it would break the CORS origins and cookies the box chose.

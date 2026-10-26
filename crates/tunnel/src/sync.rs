@@ -310,7 +310,6 @@ mod tests {
         let (transport, mut listener) = memory_transport();
         let services = BoxServices {
             registry: Arc::new(SharedRegistry::new(RegistrySnapshot::default(), 4)),
-            rpc: Arc::new(crate::rpc::Refuse),
             dialer: Arc::new(LoopbackDialer),
             sync: Arc::new(TestSource {
                 entry: SyncEntry {

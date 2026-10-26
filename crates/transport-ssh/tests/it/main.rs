@@ -17,9 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use devlanes_transport::{
-    DialTarget, RpcCallError, Session, SessionOptions, SyncMessage, Transport,
-};
+use devlanes_transport::{DialTarget, Session, SessionOptions, SyncMessage, Transport};
 use devlanes_transport_ssh::{
     AskpassConfig, AskpassPrompt, PromptKind, PromptRelay, SshOptions, SshTransport,
 };
@@ -194,14 +192,12 @@ async fn ssh_tunnel_session() -> TestResult {
             }
             return Err("devlanes is not installed on the box".into());
         }
-        // A working tunnel waits for the client's hello or starts the mux (yamux opens
-        // with an RTT ping); an unimplemented one exits at once, and the stream
-        // surfaces its stderr as the read error.
-        let mut raw = transport.connect().await?;
-        let mut byte = [0u8; 1];
-        match tokio::time::timeout(Duration::from_secs(3), raw.read(&mut byte)).await {
-            Err(_) | Ok(Ok(1..)) => {}
-            Ok(Err(error)) => {
+        // A working tunnel writes its preamble (which `connect` reads), then waits
+        // for the client's hello or starts the mux (yamux opens with an RTT ping);
+        // an unimplemented one exits at once, and its stderr is the error.
+        let mut raw = match transport.connect().await {
+            Ok(raw) => raw,
+            Err(error) => {
                 let message = error.to_string();
                 let lower = message.to_lowercase();
                 if lower.contains("not_supported_yet") || lower.contains("not supported yet") {
@@ -212,19 +208,22 @@ async fn ssh_tunnel_session() -> TestResult {
                 }
                 return Err(error.into());
             }
+        };
+        let mut byte = [0u8; 1];
+        match tokio::time::timeout(Duration::from_secs(3), raw.read(&mut byte)).await {
+            Err(_) | Ok(Ok(1..)) => {}
+            Ok(Err(error)) => return Err(error.into()),
             Ok(Ok(_)) => return Err("tunnel closed its output without an error".into()),
         }
         drop(raw);
         let session = Session::connect(&transport, SessionOptions::new("ssh-test")).await?;
         assert!(!session.server().is_empty());
-        // Remote is mirroring only: the box refuses daemon requests.
-        let request = serde_json::json!({"method": "daemon.shutdown", "params": {}});
-        match session.request(request).await {
-            Err(RpcCallError::Remote(error)) => {
-                assert_eq!(error.message, "not_supported", "{error:?}");
-            }
-            other => return Err(format!("the box answered a daemon request: {other:?}").into()),
-        }
+        // The box reports its `ports.range` from its daemon.
+        assert!(
+            session.box_info().ports_range.is_some(),
+            "{:?}",
+            session.box_info()
+        );
         session.close();
         transport.close().await;
         Ok(())

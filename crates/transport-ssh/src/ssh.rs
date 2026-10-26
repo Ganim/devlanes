@@ -11,7 +11,9 @@ use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use devlanes_transport::{BoxDuplex, Joined, Transport, TransportError};
+use devlanes_transport::{
+    BoxDuplex, Joined, PreambleError, Prefixed, Transport, TransportError, read_preamble,
+};
 use openssh::{ChildStdin, ChildStdout, Session, Stdio};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::{Mutex, oneshot};
@@ -121,6 +123,9 @@ pub enum SshError {
          `devlanes daemon install` to keep it running"
     )]
     BoxDaemonStopped(String),
+    /// The tunnel's output did not start with its preamble line.
+    #[error(transparent)]
+    Preamble(#[from] PreambleError),
 }
 
 impl SshError {
@@ -133,7 +138,8 @@ impl SshError {
             | Self::AuthTimeout(_)
             | Self::Ssh(_)
             | Self::Probe(_)
-            | Self::BoxDaemonStopped(_) => false,
+            | Self::BoxDaemonStopped(_)
+            | Self::Preamble(_) => false,
         }
     }
 }
@@ -218,11 +224,13 @@ impl SshTransport {
         self.master.lock().await.take();
     }
 
-    /// Opens the tunnel, starting or reusing the master.
-    async fn open(&self) -> Result<SshStream, SshError> {
+    /// Opens the tunnel, starting or reusing the master, and reads up to its
+    /// preamble. The master is free for other connects meanwhile.
+    async fn open(&self) -> Result<Prefixed<SshStream>, SshError> {
         let stream = self.open_tunnel().await?;
+        let preamble = read_preamble(stream, crate::PREAMBLE_WAIT).await?;
         self.connected.store(true, Ordering::Relaxed);
-        Ok(stream)
+        Ok(preamble.stream)
     }
 
     /// [`SshTransport::open`] without the bookkeeping.

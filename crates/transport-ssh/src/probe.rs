@@ -45,65 +45,76 @@ pub struct RemoteProbe {
     pub program: Option<String>,
 }
 
-/// Builds the probe script; prints `uname -s`, `uname -m`, then the program or an empty line.
+/// What every probe line starts with, so output a login shell or profile file
+/// prints around it is told apart.
+const PROBE_TAG: &str = "devlanes-probe:";
+
+/// Builds the probe script: it prints tagged `os=`, `arch=` and `program=`
+/// lines, the last one empty when devlanes is not found, and leaves the program
+/// found in `p`. The newline first puts the tags on lines of their own even
+/// after login output without a final newline.
 pub(crate) fn probe_script(program: &str) -> String {
     let program = sh_quote(program);
     format!(
-        "uname -s; uname -m; \
-         if command -v {program} >/dev/null 2>&1; then command -v {program}; \
-         elif [ -x \"$HOME/{INSTALL_DIR}/devlanes\" ]; then printf '%s\\n' \"$HOME/{INSTALL_DIR}/devlanes\"; \
-         else echo; fi"
+        "if command -v {program} >/dev/null 2>&1; then p=$(command -v {program}); \
+         elif [ -x \"$HOME/{INSTALL_DIR}/devlanes\" ]; then p=\"$HOME/{INSTALL_DIR}/devlanes\"; \
+         else p=; fi; \
+         printf '\\n{PROBE_TAG}os=%s\\n{PROBE_TAG}arch=%s\\n{PROBE_TAG}program=%s\\n' \
+         \"$(uname -s)\" \"$(uname -m)\" \"$p\""
     )
 }
 
-/// Parses probe output; `None` when it does not have the expected shape.
+/// Parses probe output, ignoring lines that are not the probe's own; `None`
+/// when the platform lines are missing.
 pub(crate) fn parse_probe(output: &str) -> Option<RemoteProbe> {
-    let mut lines = output.lines();
-    let sysname = lines.next()?;
-    let machine = lines.next()?;
-    let program = lines
-        .next()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(str::to_owned);
+    let mut sysname = None;
+    let mut machine = None;
+    let mut program = None;
+    for line in output.lines() {
+        let Some((key, value)) = line
+            .trim_end_matches('\r')
+            .strip_prefix(PROBE_TAG)
+            .and_then(|rest| rest.split_once('='))
+        else {
+            continue;
+        };
+        // The last of each wins: the probe prints after any login output.
+        match key {
+            "os" => sysname = Some(value),
+            "arch" => machine = Some(value),
+            "program" => program = Some(value.trim()),
+            _ => {}
+        }
+    }
     Some(RemoteProbe {
-        platform: RemotePlatform::from_uname(sysname, machine),
-        program,
+        platform: RemotePlatform::from_uname(sysname?, machine?),
+        program: program.filter(|p| !p.is_empty()).map(str::to_owned),
     })
 }
 
 /// Builds the script a Windows session runs: a `start` line, what
 /// [`probe_script`] prints, an `end` line, then `exec <program> tunnel
 /// --stdio` when devlanes was found. Everything after `end` belongs to the
-/// tunnel, so probe and tunnel share one ssh connection and one
-/// authentication. The newline before `start` puts it on a line of its own
-/// even after login output without a final newline.
+/// tunnel, which writes its preamble first, so probe and tunnel share one ssh
+/// connection and one authentication. The newline before `start` puts it on a
+/// line of its own even after login output without a final newline.
 #[cfg(windows)]
 pub(crate) fn session_script(program: &str, start: &str, end: &str) -> String {
-    let program = sh_quote(program);
+    let probe = probe_script(program);
     let start = sh_quote(start);
     let end = sh_quote(end);
     format!(
-        "printf '\\n%s\\n' {start}; uname -s; uname -m; \
-         if command -v {program} >/dev/null 2>&1; then p=$(command -v {program}); \
-         elif [ -x \"$HOME/{INSTALL_DIR}/devlanes\" ]; then p=\"$HOME/{INSTALL_DIR}/devlanes\"; \
-         else p=; fi; \
-         printf '%s\\n' \"$p\" {end}; \
+        "printf '\\n%s\\n' {start}; {probe}; printf '%s\\n' {end}; \
          if [ -n \"$p\" ]; then exec \"$p\" tunnel --stdio; fi"
     )
 }
 
-/// Parses the lines a [`session_script`] printed before its end line: exactly
-/// the three after the last `start` line, so whatever a login shell's startup
-/// files print first is ignored.
+/// Parses the probe lines a [`session_script`] printed after its last `start`
+/// line, so whatever a login shell's startup files print first is ignored.
 #[cfg(windows)]
 pub(crate) fn parse_session_header(lines: &[String], start: &str) -> Option<RemoteProbe> {
     let at = lines.iter().rposition(|line| line == start)?;
-    let probe = &lines[at + 1..];
-    if probe.len() != 3 {
-        return None;
-    }
-    parse_probe(&probe.join("\n"))
+    parse_probe(&lines[at + 1..].join("\n"))
 }
 
 #[cfg(test)]
@@ -112,7 +123,9 @@ mod tests {
 
     #[test]
     fn probe_output_parses_missing_and_present_binaries() {
-        let missing = parse_probe("Linux\nx86_64\n\n");
+        let missing = parse_probe(
+            "\ndevlanes-probe:os=Linux\ndevlanes-probe:arch=x86_64\ndevlanes-probe:program=\n",
+        );
         assert_eq!(
             missing,
             Some(RemoteProbe {
@@ -123,7 +136,10 @@ mod tests {
                 program: None,
             })
         );
-        let present = parse_probe("Darwin\narm64\n/usr/local/bin/devlanes\n");
+        let present = parse_probe(
+            "devlanes-probe:os=Darwin\r\ndevlanes-probe:arch=arm64\r\n\
+             devlanes-probe:program=/usr/local/bin/devlanes\r\n",
+        );
         assert_eq!(
             present.as_ref().map(|p| p.platform.arch.as_str()),
             Some("aarch64")
@@ -132,18 +148,46 @@ mod tests {
             present.and_then(|p| p.program).as_deref(),
             Some("/usr/local/bin/devlanes")
         );
-        assert_eq!(parse_probe("Linux\n"), None);
+        assert_eq!(parse_probe("devlanes-probe:os=Linux\n"), None);
     }
 
-    /// Windows sessions read the probe from the three lines between the start
-    /// and end lines, whatever a login shell printed first.
+    /// Output a login shell or profile file prints around the probe (Tailscale
+    /// SSH runs `su -l`) is not the probe's.
+    #[test]
+    fn probe_output_ignores_other_lines() {
+        let probe = parse_probe(
+            "Last login: Mon Oct 26\nLinux\nwelcome to acme\n\
+             devlanes-probe:os=Linux\ndevlanes-probe:arch=aarch64\n\
+             devlanes-probe:program=/home/acme/.devlanes/bin/devlanes\nlogout\n",
+        );
+        assert_eq!(
+            probe,
+            Some(RemoteProbe {
+                platform: RemotePlatform {
+                    os: "linux".into(),
+                    arch: "aarch64".into()
+                },
+                program: Some("/home/acme/.devlanes/bin/devlanes".into()),
+            })
+        );
+        assert_eq!(parse_probe("Linux\nx86_64\n/usr/bin/devlanes\n"), None);
+        let script = probe_script("devlanes");
+        assert!(
+            script.contains("printf '\\ndevlanes-probe:os=%s\\n"),
+            "{script}"
+        );
+    }
+
+    /// Windows sessions read the probe from the lines after the start line,
+    /// whatever a login shell printed first.
     #[cfg(windows)]
     #[test]
     fn session_headers_use_the_lines_after_the_start() {
         let lines = |text: &str| text.lines().map(str::to_owned).collect::<Vec<_>>();
         let present = parse_session_header(
             &lines(
-                "welcome from .bashrc\nno newline here\nstart-1\nLinux\nx86_64\n/home/acme/.devlanes/bin/devlanes",
+                "welcome from .bashrc\nno newline here\nstart-1\n\ndevlanes-probe:os=Linux\n\
+                 devlanes-probe:arch=x86_64\ndevlanes-probe:program=/home/acme/.devlanes/bin/devlanes",
             ),
             "start-1",
         );
@@ -151,15 +195,10 @@ mod tests {
             present.and_then(|probe| probe.program).as_deref(),
             Some("/home/acme/.devlanes/bin/devlanes")
         );
-        let missing = parse_session_header(&lines("start-1\nLinux\naarch64\n"), "start-1");
-        assert_eq!(missing, None, "a missing program is still a line");
         let missing = parse_session_header(
-            &[
-                "start-1".into(),
-                "Linux".into(),
-                "aarch64".into(),
-                String::new(),
-            ],
+            &lines(
+                "start-1\ndevlanes-probe:os=Linux\ndevlanes-probe:arch=aarch64\ndevlanes-probe:program=",
+            ),
             "start-1",
         );
         assert_eq!(
@@ -175,24 +214,17 @@ mod tests {
         // Login output glued to the start line is not the start line.
         assert_eq!(
             parse_session_header(
-                &lines("motdstart-1\nLinux\nx86_64\n/bin/devlanes"),
+                &lines("motdstart-1\ndevlanes-probe:os=Linux\ndevlanes-probe:arch=x86_64"),
                 "start-1"
             ),
             None
         );
-        assert_eq!(
-            parse_session_header(&lines("start-1\nextra\nLinux\nx86_64\n/bin/d"), "start-1"),
-            None
-        );
         let script = session_script("devlanes", "start-1", "ready-1");
         assert!(
-            script.starts_with("printf '\\n%s\\n' 'start-1'; uname -s;"),
+            script.starts_with("printf '\\n%s\\n' 'start-1'; if command -v"),
             "{script}"
         );
-        assert!(
-            script.contains("printf '%s\\n' \"$p\" 'ready-1'"),
-            "{script}"
-        );
+        assert!(script.contains("printf '%s\\n' 'ready-1'"), "{script}");
         assert!(
             script.ends_with("exec \"$p\" tunnel --stdio; fi"),
             "{script}"

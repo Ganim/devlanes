@@ -189,6 +189,13 @@ pub enum Method {
     Disconnect,
     #[serde(rename = "host.list")]
     HostList,
+    /// Box side, for `devlanes tunnel`: the registry a connected client mirrors,
+    /// streamed as [`remote::REGISTRY_SNAPSHOT_EVENT`] and then
+    /// [`remote::REGISTRY_CHANGE_EVENT`]s until the request's connection
+    /// closes. Params: [`remote::RegistryParams`]. The tunnel's client is
+    /// listed by `status` while the request lasts.
+    #[serde(rename = "remote.registry")]
+    RemoteRegistry,
     /// Sent by `devlanes certs trust --hosts` and `certs untrust --hosts` after changing the
     /// helper: the daemon drops its sudo backoff and reapplies `/etc/hosts` now.
     #[serde(rename = "hosts.retry")]
@@ -986,14 +993,38 @@ pub mod remote {
     }
 
     /// A tunnel registered with its box daemon while it serves a client.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
     pub struct RemoteClient {
         pub pid: u32,
         /// `$SSH_CONNECTION` of the tunnel: client address and port, box address and port.
         #[serde(default)]
         pub ssh: Option<String>,
         pub since_ms: u64,
+        /// Random id the client machine keeps in its `$DEVLANES_HOME`, the same
+        /// across reconnects and restarts; empty when the client sent none.
+        #[serde(default)]
+        pub id: String,
+        /// The client machine's host name; empty when the client sent none.
+        #[serde(default)]
+        pub name: String,
     }
+
+    /// Params of `remote.registry`.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct RegistryParams {
+        /// The client the tunnel serves, listed by `status` while the request lasts.
+        #[serde(default)]
+        pub client: Option<RemoteClient>,
+    }
+
+    /// First event of `remote.registry`, and again whenever the daemon could not
+    /// keep up with its own changes: `{snapshot}`, the whole registry in the
+    /// remote protocol's `RegistrySnapshot` shape, replacing what came before.
+    pub const REGISTRY_SNAPSHOT_EVENT: &str = "remote.registry.snapshot";
+    /// One registry change after the snapshot: `{change}`, a remote protocol
+    /// `RegistryEvent` (`lane_upserted`, `lane_removed`, `unit_upserted`,
+    /// `unit_removed`).
+    pub const REGISTRY_CHANGE_EVENT: &str = "remote.registry.change";
 }
 
 /// Event names. Payloads are JSON objects documented next to each constant.

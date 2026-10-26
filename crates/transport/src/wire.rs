@@ -21,11 +21,42 @@ use crate::registry::{RegistryEvent, RegistrySnapshot};
 /// Wire protocol revision; both ends must match exactly.
 ///
 /// Covers the framing here and the opaque payloads devlanes puts in them
-/// (`devlanes_proto::remote`: sync requests and manifests). Bump it whenever any
-/// of those shapes changes. Revision 2 added sync manifests sent by the client and
+/// (`devlanes_proto::remote`: sync requests and manifests). It changes only for
+/// breaking changes; additive behaviour is a named feature instead (see
+/// [`FEATURES`]). Revision 2 added sync manifests sent by the client and
 /// `not_running` refusals; revision 3 streams the client's manifest in batches as
-/// sync input frames, ended by an explicit marker.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// sync input frames, ended by an explicit marker; revision 4 adds the tunnel
+/// preamble, features, client identity and box info to the handshake, task units
+/// to the registry, and removes daemon request streams.
+pub const PROTOCOL_VERSION: u32 = 4;
+
+/// Additive protocol features this build implements, listed by both ends in the
+/// handshake. A side uses a feature only when the other side lists it too.
+pub const FEATURES: &[&str] = &[];
+
+/// Names in both lists, sorted and without repeats: the features a session uses.
+pub(crate) fn negotiate(ours: &[String], theirs: &[String]) -> Vec<String> {
+    let mut shared: Vec<String> = ours
+        .iter()
+        .filter(|name| theirs.contains(name))
+        .cloned()
+        .collect();
+    shared.sort();
+    shared.dedup();
+    shared
+}
+
+/// What the box reports about itself in the handshake. Every field is optional,
+/// so a box that cannot tell leaves it out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoxInfo {
+    /// Port the box's proxy serves HTTPS on, as in the URLs it generates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub https_port: Option<u16>,
+    /// The box's `ports.range` user setting, such as `20000-29999`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ports_range: Option<String>,
+}
 
 /// Frames above this size are rejected before allocation.
 pub(crate) const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
@@ -227,9 +258,20 @@ pub(crate) fn into_raw<S>(channel: Channel<S>) -> Prefixed<S> {
 #[serde(tag = "open", rename_all = "snake_case")]
 pub(crate) enum OpenRequest {
     /// The single control stream; must be the first stream of a session.
-    Control { protocol: u32, client: String },
-    /// One forwarded daemon request.
-    Rpc { request: Value },
+    Control {
+        protocol: u32,
+        /// Version label, such as `devlanes 0.5.0`.
+        client: String,
+        /// Every feature the client implements.
+        #[serde(default)]
+        features: Vec<String>,
+        /// Random id the client machine keeps across restarts.
+        #[serde(default)]
+        client_id: String,
+        /// The client machine's host name.
+        #[serde(default)]
+        client_name: String,
+    },
     /// A raw byte stream to a registered endpoint.
     Data { target: DialTarget },
     /// A sync subscription; the request is interpreted by the box's sync source.
@@ -247,11 +289,29 @@ pub(crate) enum ClientControl {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum BoxControl {
-    Welcome { protocol: u32, server: String },
-    Incompatible { protocol: u32, server: String },
-    Snapshot { snapshot: RegistrySnapshot },
-    Event { event: RegistryEvent },
-    Pong { nonce: u64 },
+    Welcome {
+        protocol: u32,
+        /// Version label, such as `devlanes 0.5.0`.
+        server: String,
+        /// Every feature the box implements.
+        #[serde(default)]
+        features: Vec<String>,
+        #[serde(default, rename = "box")]
+        box_info: BoxInfo,
+    },
+    Incompatible {
+        protocol: u32,
+        server: String,
+    },
+    Snapshot {
+        snapshot: RegistrySnapshot,
+    },
+    Event {
+        event: RegistryEvent,
+    },
+    Pong {
+        nonce: u64,
+    },
 }
 
 /// What a data stream connects to on the box.
@@ -289,27 +349,6 @@ pub(crate) enum OpenReply {
     },
 }
 
-/// Client frames on an RPC stream after the request.
-///
-/// EOF without `EndInput` means the client dropped the call, which cancels it:
-/// yamux reports a reset as EOF, so the explicit marker is the only way to
-/// tell "no more input" from "caller is gone".
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum RpcClientFrame {
-    Input { value: Value },
-    EndInput,
-}
-
-/// Box frames on an RPC stream.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum RpcBoxFrame {
-    Item { value: Value },
-    Error { error: crate::rpc::RpcError },
-    End,
-}
-
 /// Box frames on a sync stream. `Chunk` carries file bytes as the payload.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -333,8 +372,9 @@ pub(crate) enum SyncFrame {
 
 /// Client frames on a sync stream after the request, such as manifest batches.
 ///
-/// As on RPC streams, EOF means the client left; `EndInput` is the only way to
-/// say that no more input follows while still reading.
+/// EOF without `EndInput` means the client left, which cancels the subscription:
+/// yamux reports a reset as EOF, so the explicit marker is the only way to say
+/// that no more input follows while still reading.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum SyncClientFrame {
@@ -375,6 +415,47 @@ mod tests {
             codec.decode(&mut src),
             Err(WireError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn negotiation_keeps_features_both_sides_list() {
+        let names = |list: &[&str]| list.iter().map(|name| (*name).to_owned()).collect();
+        let ours: Vec<String> = names(&["b", "a", "c"]);
+        assert_eq!(negotiate(&ours, &names(&["c", "a", "x"])), ["a", "c"]);
+        assert!(negotiate(&ours, &[]).is_empty());
+        assert!(negotiate(&[], &ours).is_empty());
+    }
+
+    /// Fields added in revision 4 have defaults, so a handshake without them
+    /// still decodes far enough to compare protocol revisions.
+    #[test]
+    fn handshake_fields_are_optional() -> Result<(), serde_json::Error> {
+        let hello: OpenRequest = serde_json::from_value(serde_json::json!({
+            "open": "control", "protocol": 3, "client": "devlanes 0.4.0", "later": true
+        }))?;
+        assert!(matches!(
+            hello,
+            OpenRequest::Control { protocol: 3, ref features, ref client_id, .. }
+                if features.is_empty() && client_id.is_empty()
+        ));
+        let welcome: BoxControl = serde_json::from_value(serde_json::json!({
+            "type": "welcome", "protocol": 4, "server": "devlanes 0.5.0"
+        }))?;
+        assert!(matches!(
+            welcome,
+            BoxControl::Welcome { ref box_info, .. } if *box_info == BoxInfo::default()
+        ));
+        let encoded = serde_json::to_value(BoxControl::Welcome {
+            protocol: 4,
+            server: "box".into(),
+            features: vec!["x".into()],
+            box_info: BoxInfo {
+                https_port: Some(8443),
+                ports_range: None,
+            },
+        })?;
+        assert_eq!(encoded["box"], serde_json::json!({"https_port": 8443}));
+        Ok(())
     }
 
     #[tokio::test]

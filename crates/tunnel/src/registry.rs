@@ -1,23 +1,17 @@
-//! The box registry, built from the daemon's `status --all` and `hosts`.
-
-use std::time::Duration;
+//! The box registry, followed through the daemon's `remote.registry` feed.
 
 use async_trait::async_trait;
 use devlanes_client::{Client, Frame, Paths};
 use devlanes_proto::{
-    Context, Control, Event, LaneSummary, Method, Page, events, remote::RemoteClient,
+    Context, Control, Event, Method, Outcome, RpcError,
+    remote::{REGISTRY_CHANGE_EVENT, REGISTRY_SNAPSHOT_EVENT, RegistryParams, RemoteClient},
 };
 use devlanes_transport::{
-    BoxError, HostHeader, HostInfo, LaneInfo, LaneKey, PortInfo, Registry, RegistryFeed,
-    RegistrySnapshot, RegistrySource, RegistryUpdate, UnitInfo, UnitKey, UnitKind,
+    BoxError, ClientInfo, RegistryEvent, RegistryFeed, RegistrySnapshot, RegistrySource,
+    RegistryUpdate,
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::{Value, json};
-use tokio::sync::mpsc;
-
-/// Events arriving within this window cause one refresh.
-const DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// [`RegistrySource`] over the box daemon's socket.
 pub(crate) struct DaemonRegistry {
@@ -32,246 +26,199 @@ impl DaemonRegistry {
     }
 }
 
+/// Why the daemon's registry feed cannot be used.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FeedError {
+    /// The connection to the box daemon failed.
+    #[error("box daemon: {0}")]
+    Daemon(#[from] devlanes_client::Error),
+    /// The daemon predates `remote.registry`: it runs an older release than this tunnel.
+    #[error(
+        "the box daemon runs an older devlanes than `devlanes tunnel`; run `devlanes daemon \
+         restart` on the box"
+    )]
+    OldDaemon,
+    /// The daemon refused the request.
+    #[error("the box daemon refused remote.registry: {} ({})", .0.code, .0.data)]
+    Refused(RpcError),
+    /// The daemon ended the feed.
+    #[error("the box daemon ended the registry feed")]
+    Ended,
+    /// An event did not have the shape of its name.
+    #[error("the box daemon sent a malformed {event} event: {error}")]
+    Malformed {
+        /// The event name.
+        event: String,
+        /// What did not decode.
+        error: serde_json::Error,
+    },
+}
+
+/// Payload of [`REGISTRY_SNAPSHOT_EVENT`].
+#[derive(Deserialize)]
+struct SnapshotData {
+    snapshot: RegistrySnapshot,
+}
+
+/// Payload of [`REGISTRY_CHANGE_EVENT`].
+#[derive(Deserialize)]
+struct ChangeData {
+    change: RegistryEvent,
+}
+
 #[async_trait]
 impl RegistrySource for DaemonRegistry {
-    /// Subscribes to events first, so no change falls between the snapshot and them.
-    async fn subscribe(&self) -> Result<RegistryFeed, BoxError> {
-        let mut events = Client::connect(&self.paths).await?;
-        let params = json!({"follow": true, "remote_client": self.client});
-        events
-            .begin_request(Method::Subscribe, params, Context::default())
-            .await?;
-        let mut query = Client::connect(&self.paths).await?;
-        let mut current = fetch(&mut query).await?;
-        let snapshot = current.snapshot();
-        let (updates, receiver) = mpsc::channel(64);
-        tokio::spawn(async move {
-            while let Some(()) = changed(&mut events).await {
-                let next = match fetch(&mut query).await {
-                    Ok(next) => next,
-                    Err(error) => {
-                        tracing::debug!(%error, "registry refresh failed");
-                        return;
-                    }
-                };
-                for event in current.diff(&next) {
-                    if updates.send(RegistryUpdate::Event(event)).await.is_err() {
-                        return;
-                    }
+    /// Starts `remote.registry` for `client` and waits for its first snapshot.
+    async fn subscribe(&self, client: &ClientInfo) -> Result<RegistryFeed, BoxError> {
+        let mut daemon = Client::connect(&self.paths)
+            .await
+            .map_err(FeedError::from)?;
+        let params = RegistryParams {
+            client: Some(RemoteClient {
+                id: client.id.clone(),
+                name: client.name.clone(),
+                ..self.client.clone()
+            }),
+        };
+        let params = serde_json::to_value(params).map_err(|error| FeedError::Malformed {
+            event: "remote.registry params".into(),
+            error,
+        })?;
+        daemon
+            .begin_request(Method::RemoteRegistry, params, Context::default())
+            .await
+            .map_err(FeedError::from)?;
+        let snapshot = match next_update(&mut daemon).await? {
+            RegistryUpdate::Resync(snapshot) => snapshot,
+            RegistryUpdate::Event(_) => {
+                return Err(FeedError::Malformed {
+                    event: REGISTRY_CHANGE_EVENT.into(),
+                    error: serde::de::Error::custom("a change came before the snapshot"),
                 }
-                current = next;
+                .into());
             }
-            // The daemon connection ended: closing the feed ends the session, and
-            // the client reconnects to a fresh tunnel.
-        });
-        let updates = futures_util::stream::unfold(receiver, |mut receiver| async move {
-            receiver.recv().await.map(|update| (update, receiver))
+        };
+        // Ends after the first error: the session ends with it.
+        let updates = futures_util::stream::unfold(Some(daemon), |daemon| async move {
+            let mut daemon = daemon?;
+            match next_update(&mut daemon).await {
+                Ok(update) => Some((Ok(update), Some(daemon))),
+                Err(error) => Some((Err(BoxError::from(error)), None)),
+            }
         })
         .boxed();
         Ok(RegistryFeed { snapshot, updates })
     }
 }
 
-/// Waits for an event that may change the registry, then lets a burst settle.
-/// `None` once the subscription ended.
-async fn changed(events: &mut Client) -> Option<()> {
+/// The next registry update of the feed on `daemon`. Other events are skipped,
+/// so a newer daemon may add some.
+async fn next_update(daemon: &mut Client) -> Result<RegistryUpdate, FeedError> {
     loop {
-        let event = next_event(events).await?;
-        if relevant(&event) {
-            break;
-        }
-    }
-    let settle = tokio::time::sleep(DEBOUNCE);
-    tokio::pin!(settle);
-    loop {
-        tokio::select! {
-            () = &mut settle => return Some(()),
-            event = next_event(events) => {
-                event?;
+        match daemon.next_frame().await? {
+            Frame::Control(Control::Event(event)) => {
+                if let Some(update) = decode(&event)? {
+                    return Ok(update);
+                }
             }
+            Frame::Control(Control::Response(response)) => {
+                return Err(match response.result {
+                    Outcome::Error { error } if error.code == "unknown_method" => {
+                        FeedError::OldDaemon
+                    }
+                    Outcome::Error { error } => FeedError::Refused(error),
+                    Outcome::Ok { .. } => FeedError::Ended,
+                });
+            }
+            _ => {}
         }
     }
 }
 
-/// Log lines and remote bookkeeping never change lanes, units or ports.
-fn relevant(event: &Event) -> bool {
-    event.event != events::LOG && !event.event.starts_with("remote.")
-}
-
-/// The next event of the subscription; `None` when it ended.
-async fn next_event(events: &mut Client) -> Option<Event> {
-    loop {
-        match events.next_frame().await {
-            Ok(Frame::Control(Control::Event(event))) => return Some(event),
-            Ok(Frame::Control(Control::Response(_))) | Err(_) => return None,
-            Ok(_) => {}
-        }
-    }
-}
-
-/// One `hosts` row.
-#[derive(Debug, Deserialize)]
-struct HostRow {
-    host: String,
-    lane: String,
-    unit: String,
-    port: u16,
-    #[serde(default)]
-    fallback: bool,
-    #[serde(default)]
-    host_header_upstream: bool,
-}
-
-/// Queries lanes and routes and maps them to transport types.
-async fn fetch(client: &mut Client) -> Result<Registry, devlanes_client::Error> {
-    let status = client
-        .request(Method::Status, json!({"all": true}), Context::default())
-        .await?;
-    let hosts = client
-        .request(Method::Hosts, json!({}), Context::default())
-        .await?;
-    Ok(build(status, &hosts))
-}
-
-/// Maps daemon output to the registry: assigned lanes, their services and started
-/// containers with ports, hosts and hidden flags.
-pub(crate) fn build(status: Value, hosts: &Value) -> Registry {
-    let lanes = serde_json::from_value::<Page<LaneSummary>>(status)
-        .map(|page| page.items)
-        .unwrap_or_default();
-    let rows: Vec<HostRow> = hosts
-        .get("items")
-        .cloned()
-        .and_then(|items| serde_json::from_value(items).ok())
-        .unwrap_or_default();
-    let hosts_of = |lane: &str, unit: &str| -> Vec<HostInfo> {
-        rows.iter()
-            .filter(|row| row.lane == lane && row.unit == unit)
-            .map(|row| HostInfo {
-                host: row.host.clone(),
-                port: row.port,
-                fallback: row.fallback,
-                host_header: if row.host_header_upstream {
-                    HostHeader::Upstream
-                } else {
-                    HostHeader::Keep
-                },
-            })
-            .collect()
+/// The update a feed event carries; `None` for other events.
+fn decode(event: &Event) -> Result<Option<RegistryUpdate>, FeedError> {
+    let malformed = |error| FeedError::Malformed {
+        event: event.event.clone(),
+        error,
     };
-    let mut snapshot = RegistrySnapshot::default();
-    for lane in lanes {
-        // Unassigned lanes have no ports or hostnames to mirror.
-        let Some(index) = lane.index else { continue };
-        let key = LaneKey {
-            project: lane.project.clone(),
-            lane: index.to_string(),
-        };
-        snapshot.lanes.push(LaneInfo {
-            key: key.clone(),
-            index,
-            domain: lane.domain.clone(),
-        });
-        for unit in &lane.units {
-            if !(unit.kind.is_empty() || unit.kind == "service") {
-                continue;
-            }
-            snapshot.units.push(UnitInfo {
-                key: UnitKey {
-                    lane: key.clone(),
-                    kind: UnitKind::Service,
-                    name: unit.name.clone(),
-                },
-                hidden: unit.hidden,
-                state: unit.state.clone(),
-                ports: unit
-                    .ports
-                    .iter()
-                    .map(|(name, port)| PortInfo {
-                        name: name.clone(),
-                        port: *port,
-                    })
-                    .collect(),
-                hosts: hosts_of(&lane.reference, &unit.name),
-            });
+    match event.event.as_str() {
+        REGISTRY_SNAPSHOT_EVENT => {
+            let data: SnapshotData =
+                serde_json::from_value(event.data.clone()).map_err(malformed)?;
+            Ok(Some(RegistryUpdate::Resync(data.snapshot)))
         }
-        for container in &lane.containers {
-            snapshot.units.push(UnitInfo {
-                key: UnitKey {
-                    lane: key.clone(),
-                    kind: UnitKind::Container,
-                    name: container.name.clone(),
-                },
-                hidden: container.hidden,
-                state: "running".into(),
-                ports: container
-                    .ports
-                    .iter()
-                    .map(|(name, port)| PortInfo {
-                        name: name.clone(),
-                        port: *port,
-                    })
-                    .collect(),
-                hosts: hosts_of(&lane.reference, &container.name),
-            });
+        REGISTRY_CHANGE_EVENT => {
+            let data: ChangeData = serde_json::from_value(event.data.clone()).map_err(malformed)?;
+            Ok(Some(RegistryUpdate::Event(data.change)))
         }
+        _ => Ok(None),
     }
-    Registry::from_snapshot(snapshot)
 }
 
 #[cfg(test)]
 mod tests {
+    use devlanes_transport::{LaneKey, UnitKey, UnitKind};
+    use serde_json::json;
+
     use super::*;
 
+    fn event(name: &str, data: serde_json::Value) -> Event {
+        Event {
+            seq: 0,
+            event: name.into(),
+            data,
+        }
+    }
+
     #[test]
-    fn maps_services_containers_hosts_and_hidden_flags() {
-        let status = json!({"items": [{
-            "reference": "app@1", "project": "app", "index": 1, "branch": "x",
-            "path": "/w", "state": "running", "config_changed": false,
-            "domain": "app-1.localhost",
-            "units": [
-                {"name": "web", "lane": "app@1", "state": "ready", "pid": 1, "exit_code": null,
-                 "ports": {"default": 4100}, "urls": [], "actor": {"kind": "human"},
-                 "reason": null, "kind": "service"},
-                {"name": "admin", "lane": "app@1", "state": "ready", "pid": 2, "exit_code": null,
-                 "ports": {"default": 4101}, "urls": [], "actor": {"kind": "human"},
-                 "reason": null, "kind": "service", "hidden": true},
-                {"name": "worker", "lane": "app@1", "state": "stopped", "pid": null, "exit_code": null,
-                 "ports": {"default": 4103}, "urls": [], "actor": {"kind": "human"},
-                 "reason": null, "kind": "service"},
-                {"name": "migrate", "lane": "app@1", "state": "exited", "pid": null, "exit_code": 0,
-                 "ports": {}, "urls": [], "actor": {"kind": "human"}, "reason": null, "kind": "task"}
-            ],
-            "containers": [{"name": "db", "ports": {"5432": 4102}, "hidden": false}]
-        }, {
-            "reference": "app@feature", "project": "app", "index": null, "branch": null,
-            "path": "/v", "state": "unassigned", "config_changed": false, "units": []
-        }], "truncated": false, "next_cursor": null});
-        let hosts = json!({"items": [
-            {"host": "web.app-1.localhost", "lane": "app@1", "unit": "web", "port": 4100,
-             "fallback": false, "host_header_upstream": true, "state": "ready"}
-        ]});
-        let registry = build(status, &hosts);
-        assert_eq!(registry.lanes().count(), 1);
-        let units: Vec<_> = registry.units().collect();
-        assert_eq!(units.len(), 4, "task skipped: {units:?}");
-        let web = units
-            .iter()
-            .find(|u| u.key.name == "web")
-            .expect("web is listed");
-        assert_eq!(web.hosts.len(), 1);
-        assert_eq!(web.hosts[0].host_header, HostHeader::Upstream);
-        let mirrored: Vec<u16> = registry.mirrored_ports().keys().copied().collect();
-        assert_eq!(
-            mirrored,
-            [4100, 4102],
-            "hidden admin and stopped worker are not mirrored"
-        );
-        let advertised: Vec<u16> = registry.advertised_ports().into_iter().collect();
-        assert_eq!(
-            advertised,
-            [4100, 4102, 4103],
-            "the idle worker's port is kept free"
-        );
+    fn feed_events_decode_into_updates() -> Result<(), FeedError> {
+        let snapshot = decode(&event(
+            REGISTRY_SNAPSHOT_EVENT,
+            json!({"snapshot": {"lanes": [], "units": []}}),
+        ))?;
+        assert!(matches!(snapshot, Some(RegistryUpdate::Resync(ref s)) if s.units.is_empty()));
+        let change = decode(&event(
+            REGISTRY_CHANGE_EVENT,
+            json!({"change": {"type": "unit_removed", "unit": {
+                "lane": {"project": "app", "lane": "0"}, "kind": "task", "name": "migrate"
+            }}}),
+        ))?;
+        let removed = UnitKey {
+            lane: LaneKey {
+                project: "app".into(),
+                lane: "0".into(),
+            },
+            kind: UnitKind::Task,
+            name: "migrate".into(),
+        };
+        assert!(matches!(
+            change,
+            Some(RegistryUpdate::Event(RegistryEvent::UnitRemoved { ref unit })) if *unit == removed
+        ));
+        assert!(decode(&event("lane.changed", json!({})))?.is_none());
+        Ok(())
+    }
+
+    /// A malformed answer is an error, never an empty registry that would
+    /// unbind everything on the client.
+    #[test]
+    fn malformed_feed_events_are_errors() {
+        for data in [
+            json!({}),
+            json!({"snapshot": {"lanes": "nope"}}),
+            json!({"snapshot": null}),
+        ] {
+            let result = decode(&event(REGISTRY_SNAPSHOT_EVENT, data.clone()));
+            assert!(
+                matches!(result, Err(FeedError::Malformed { .. })),
+                "{data}: {result:?}"
+            );
+        }
+        let result = decode(&event(
+            REGISTRY_CHANGE_EVENT,
+            json!({"change": {"type": "x"}}),
+        ));
+        let message = result.expect_err("unknown change").to_string();
+        assert!(message.contains("remote.registry.change"), "{message}");
     }
 }
