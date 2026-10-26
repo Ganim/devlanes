@@ -85,16 +85,16 @@ pub struct DnsServer {
     zone: Arc<Zone>,
 }
 
-/// Whether binding the TCP twin of an ephemeral UDP port failed in a way
+/// Whether binding the UDP twin of an ephemeral TCP port failed in a way
 /// another port fixes.
 #[cfg(unix)]
 fn retry_twin(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::AddrInUse
 }
 
-/// Whether binding the TCP twin of an ephemeral UDP port failed in a way
-/// another port fixes. Windows hands out UDP ports without regard to the TCP
-/// ranges Hyper-V and WSL reserve, where TCP binds fail with access denied.
+/// Whether binding the UDP twin of an ephemeral TCP port failed in a way
+/// another port fixes. Binds inside the ranges Hyper-V and WSL reserve fail
+/// with access denied.
 #[cfg(windows)]
 fn retry_twin(error: &io::Error) -> bool {
     matches!(
@@ -118,16 +118,24 @@ impl DnsServer {
             return Ok(Self::new(udp, tcp, zone));
         }
         let mut last = io::Error::new(io::ErrorKind::AddrInUse, "no shared free port");
+        // Rejected ports stay bound until the end, so the OS cannot hand the
+        // same one out again on the next attempt.
+        let mut rejected = Vec::new();
         for _ in 0..EPHEMERAL_ATTEMPTS {
-            let udp = UdpSocket::bind(listen)
+            // TCP first: Windows keeps its ephemeral TCP ports out of the TCP
+            // ranges Hyper-V and WSL reserve, but not its ephemeral UDP ports.
+            let tcp = TcpListener::bind(listen)
                 .await
                 .map_err(|e| bind_error(listen, e))?;
-            let addr = udp.local_addr().map_err(|e| bind_error(listen, e))?;
-            match TcpListener::bind(addr).await {
-                Ok(tcp) => return Ok(Self::new(udp, tcp, zone)),
-                // The UDP port's TCP twin is taken, or on Windows inside a
-                // reserved TCP range (WSAEACCES); another ephemeral port will do.
-                Err(error) if retry_twin(&error) => last = error,
+            let addr = tcp.local_addr().map_err(|e| bind_error(listen, e))?;
+            match UdpSocket::bind(addr).await {
+                Ok(udp) => return Ok(Self::new(udp, tcp, zone)),
+                // The TCP port's UDP twin is taken, or on Windows inside a
+                // reserved UDP range (WSAEACCES); another ephemeral port will do.
+                Err(error) if retry_twin(&error) => {
+                    last = error;
+                    rejected.push(tcp);
+                }
                 Err(error) => return Err(bind_error(addr, error)),
             }
         }
