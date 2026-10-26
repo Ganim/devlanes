@@ -42,7 +42,7 @@ PRERELEASE = re.compile(r"^(\d+\.\d+\.\d+)(?:-(alpha|beta|rc)(?:\.([1-9]\d*))?)?
 PEP440_LABELS = {"alpha": "a", "beta": "b", "rc": "rc"}
 
 CLASSIFIERS = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Rust",
