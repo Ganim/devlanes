@@ -180,6 +180,14 @@ Run a crate's ignored tests with `cargo nextest run -p <crate> --run-ignored onl
 
 `crates/tui/screens/*.txt` and its `index.md` are every TUI state drawn against a fake daemon, as text with the styles of each cell, so a pull request shows what changed on screen. Any change to what the TUI draws changes them, including changes outside `crates/tui`. Rewrite them with `DEVLANES_BLESS=1 cargo nextest run -p devlanes-tui -E 'test(screens_are_current)'`, check the diff and commit them with the change; the test fails in CI while they're stale. `cargo run -p devlanes-tui --example screens` writes the same files plus gitignored PNG and ANSI versions for looking at the screens.
 
+`.gitattributes` marks these files, `Cargo.lock`, the `.snap` files and `docs/reference/` with `merge=ours`, so a merge or rebase keeps one side instead of stopping on conflict markers. Git ignores that attribute until the driver exists, so run this once per clone:
+
+```sh
+git config merge.ours.driver true
+```
+
+After resolving, regenerate before committing: `cargo build` rewrites `Cargo.lock` and the schemas, `DEVLANES_BLESS=1` rewrites the screens and `docs/reference/`, and `INSTA_UPDATE=always` rewrites the snapshots. During a rebase "ours" is the branch you rebase onto, so your side of these files only comes back by regenerating them. `CHANGELOG.md` files use Git's built-in `merge=union` instead, because nothing can regenerate them: both sides' lines are kept without conflict markers, so check that entries sit under the right version.
+
 ## Change files
 
 A pull request that changes something a devlanes user can notice adds a change file in `.sampo/changesets/`. [Sampo](https://github.com/bruits/sampo) reads these files to choose the next versions and write each crate's `CHANGELOG.md` in the release pull request. Refactors, tests, CI and documentation need none; say so in the pull request description. No check enforces it, so reviewers look for one.

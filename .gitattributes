@@ -5,3 +5,22 @@
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
 *.bat text eol=crlf
+
+# Generated files that a build or test rewrites. merge=ours keeps the current side on
+# conflict (needs `git config merge.ours.driver true`, see CONTRIBUTING.md); regenerate
+# afterwards, since CI fails while they're stale.
+Cargo.lock                      linguist-generated=true merge=ours
+crates/config/schema.json       linguist-generated=true merge=ours
+crates/config/user-schema.json  linguist-generated=true merge=ours
+docs/reference/cli.md           linguist-generated=true merge=ours
+docs/reference/config.md        linguist-generated=true merge=ours
+
+# Generated, but left visible in pull request diffs because reviewing them is their purpose.
+crates/tui/screens/*.txt        merge=ours
+crates/tui/screens/index.md     merge=ours
+*.snap                          merge=ours
+
+# Written by the release pull request from changesets that it then deletes, so they can't be
+# regenerated; merge=union keeps both sides' entries instead of dropping one. Check the
+# order of the result.
+CHANGELOG.md                    linguist-generated=true merge=union
