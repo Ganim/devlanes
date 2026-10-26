@@ -62,6 +62,10 @@ pub struct Route {
     pub certificate_names: Vec<String>,
     /// Project and lane that own the route, such as `acme@0`, shown in its TLS certificate.
     pub owner: Option<String>,
+    /// The unit behind the route, such as `web`; error pages name it in their commands.
+    pub unit: Option<String>,
+    /// The route belongs to a lane on a remote box, reached through its connection.
+    pub remote: bool,
 }
 
 impl Route {
@@ -78,6 +82,8 @@ impl Route {
             port: None,
             certificate_names: Vec::new(),
             owner: None,
+            unit: None,
+            remote: false,
         }
     }
 

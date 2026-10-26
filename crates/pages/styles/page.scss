@@ -1,0 +1,346 @@
+// Tokens and components follow the devlanes.run docs (website repository,
+// `src/styles/_tokens.scss`, `_header.scss`, `_terminal.scss` and `docs.scss`).
+// Fonts are not embedded: pages are served offline, so installed fonts are used when present.
+
+$paint: #f5c542;
+$terminal: #1a1917;
+$terminal-raised: #272622;
+$terminal-ink: #e8e6df;
+$terminal-border: #666158;
+$mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+$prose: 'Overpass', system-ui, -apple-system, 'Segoe UI', sans-serif;
+$mobile-width: 720px;
+
+:root {
+  --surface: #f2f2ef;
+  --ink: #24231f;
+  --muted: #63615a;
+  --line: #d1cfc7;
+  --code-bg: color-mix(in srgb, var(--line) 45%, var(--surface));
+  --info: #2f5f8f;
+  --warning: #8a6400;
+  --error: #b42318;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #22211e;
+    --ink: #f2f0ea;
+    --muted: #b0ada3;
+    --line: #4c4941;
+    --info: #7c9fc6;
+    --warning: #{$paint};
+    --error: #ee7d6f;
+  }
+}
+
+@each $severity in info, warning, error {
+  .severity-#{$severity} {
+    --severity: var(--#{$severity});
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--ink);
+  font: 17px/1.6 $prose;
+}
+
+a {
+  color: inherit;
+  text-decoration-color: $paint;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 5px;
+
+  &:hover {
+    text-decoration-color: currentColor;
+  }
+}
+
+:focus-visible {
+  outline: 3px solid #a77900;
+  outline-offset: 3px;
+}
+
+::selection {
+  background: $paint;
+  color: $terminal;
+}
+
+code,
+pre {
+  font-family: $mono;
+  font-variant-ligatures: none;
+}
+
+:not(pre) > code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--code-bg);
+  font-size: 0.82em;
+  overflow-wrap: anywhere;
+}
+
+h1,
+h2 {
+  font-family: $mono;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+h1 {
+  margin: 0;
+  color: var(--severity);
+  font-size: clamp(24px, 4vw, 31px);
+  letter-spacing: -1px;
+}
+
+h2 {
+  margin: 40px 0 14px;
+  font-size: 19px;
+  letter-spacing: -0.4px;
+}
+
+p {
+  margin: 0 0 16px;
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 20px 40px;
+  border-bottom: 1px solid var(--line);
+  font: 13px $mono;
+
+  nav {
+    display: flex;
+    gap: 24px;
+    margin-left: auto;
+
+    a {
+      text-decoration: none;
+
+      &:hover {
+        text-decoration: underline;
+      }
+    }
+  }
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font: 700 18px $mono;
+  text-decoration: none;
+}
+
+main {
+  max-width: 840px;
+  margin: 0 auto;
+  padding: 48px 40px 24px;
+}
+
+.eyebrow {
+  margin-bottom: 10px;
+  color: var(--muted);
+  font: 13px $mono;
+}
+
+.code {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 0;
+}
+
+.code-id {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--severity);
+  color: var(--surface);
+  font: 700 12px $mono;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0 28px;
+  padding-bottom: 28px;
+  border-bottom: 1px solid var(--line);
+}
+
+.button {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--muted);
+  font: 12px $mono;
+  text-decoration: none;
+
+  &:hover {
+    border-color: var(--ink);
+    color: var(--ink);
+  }
+}
+
+.summary {
+  font-size: 18px;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  margin-bottom: 10px;
+
+  span {
+    min-width: 120px;
+    color: var(--muted);
+    font: 12px $mono;
+  }
+}
+
+.callout {
+  margin: 20px 0;
+  padding: 10px 16px;
+  border-left: 3px solid $paint;
+  background: color-mix(in srgb, $paint 12%, var(--surface));
+
+  p {
+    margin: 0;
+  }
+}
+
+// Terminals stay dark in both themes, like on the website.
+%terminal {
+  background: $terminal;
+  color: $terminal-ink;
+  border: 1px solid $terminal-border;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.terminal {
+  @extend %terminal;
+  margin: 24px 0;
+  overflow: hidden;
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--surface) 88%, $paint);
+
+  pre {
+    margin: 0;
+    padding: 14px 18px;
+    max-height: 420px;
+    overflow: auto;
+  }
+}
+
+.terminal-bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #47443d;
+  background: $terminal-raised;
+  color: #c3beb2;
+  font: 11px $mono;
+}
+
+.terminal-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: $paint;
+}
+
+.checks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  li {
+    padding: 14px 0;
+    border-top: 1px dashed var(--line);
+  }
+
+  p {
+    margin: 0;
+  }
+}
+
+.command {
+  @extend %terminal;
+  margin: 8px 0 0;
+  padding: 8px 14px;
+  overflow-x: auto;
+
+  span {
+    color: $paint;
+  }
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font: 13px $mono;
+
+  th,
+  td {
+    padding: 7px 12px 7px 0;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  th {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 400;
+    border-bottom: 1px solid var(--line);
+  }
+
+  tr + tr td {
+    border-top: 1px dashed var(--line);
+  }
+}
+
+.note {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+footer {
+  max-width: 840px;
+  margin: 0 auto;
+  padding: 24px 40px 48px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+@media (max-width: $mobile-width) {
+  .site-header {
+    padding: 16px 20px;
+  }
+
+  main {
+    padding: 32px 20px 16px;
+  }
+
+  footer {
+    padding: 20px 20px 40px;
+  }
+}

@@ -20,13 +20,13 @@
 │   ◉ wrk-email                             │ ▌ proxy.https_port                    8080▏ │ ✕ must differ from proxy.http_port                             │                                           │
 │   ◉ wrk-billing                           │   proxy.http_port                       8080│                                                                │                                           │
 │   ◉ wrk-index                             │   proxy.lan                            false│ proxy.https_port                                               │                                           │
-│   ◉ wrk-thumbs                            │   hostnames.resolver               localhost│ Port the HTTPS proxy listens on; defaults to 443. When the     │                                           │
-│   ✕ wrk-export               failed · exit│   hostnames.hosts_file               default│ port is taken or not allowed (low ports on Linux need extra    │                                           │
-│   ◉ wrk-cron                              │   hostnames.tld                      default│ permission), the daemon falls back to 8443 and service URLs    │                                           │
-│   ◉ wrk-webhooks                          │   ports.range                    20000-32767│ carry the port.                                                │                                           │
-│   ◉ wrk-ledger                            │   tls.ca                            devlanes│                                                                │                                           │
-│   ● stub-stripe                           │   tls.trust                             none│ default  443                                                   │                                           │
-│   ● stub-s3                               │                                             │ example  443, 8443                                             │                                           │
+│   ◉ wrk-thumbs                            │   proxy.via                             true│ Port the HTTPS proxy listens on; defaults to 443. When the     │                                           │
+│   ✕ wrk-export               failed · exit│   hostnames.resolver               localhost│ port is taken or not allowed (low ports on Linux need extra    │                                           │
+│   ◉ wrk-cron                              │   hostnames.hosts_file               default│ permission), the daemon falls back to 8443 and service URLs    │                                           │
+│   ◉ wrk-webhooks                          │   hostnames.tld                      default│ carry the port.                                                │                                           │
+│   ◉ wrk-ledger                            │   ports.range                    20000-32767│                                                                │                                           │
+│   ● stub-stripe                           │   tls.ca                            devlanes│ default  443                                                   │                                           │
+│   ● stub-s3                               │   tls.trust                             none│ example  443, 8443                                             │                                           │
 │   ◆ stub-twilio         orphaned · pid 482│                                             │                                                                │                                           │
 │   ● stub-sendgrid                         │                                             │ Applies after saving and a daemon restart.                     │                                           │
 │   ● stub-segment                          │                                             │                                                                │                                           │
@@ -82,13 +82,13 @@
 19: 0 darkgray, 4-5 green, 6-14 magenta, 44 bold, 46 bold reversed, 47-82 reversed, 83-89 bold, 90 darkgray, 92-125 red, 155 bold, 199 darkgray
 20: 0 darkgray, 4-5 green, 6-16 magenta, 44 bold, 46 bold, 90 darkgray, 155 bold, 199 darkgray
 21: 0 darkgray, 4-5 green, 6-14 magenta, 44 bold, 46 bold, 85-89 dim, 90 darkgray, 92-107 bold, 155 bold, 199 darkgray
-22: 0 darkgray, 4-5 green, 6-15 magenta, 44 bold, 46 bold, 81-89 dim, 90 darkgray, 155 bold, 199 darkgray
-23: 0 darkgray, 1-43 reversed, 44 bold, 46 bold, 83-89 dim, 90 darkgray, 155 bold, 199 darkgray
+22: 0 darkgray, 4-5 green, 6-15 magenta, 44 bold, 46 bold, 86-89 dim, 90 darkgray, 155 bold, 199 darkgray
+23: 0 darkgray, 1-43 reversed, 44 bold, 46 bold, 81-89 dim, 90 darkgray, 155 bold, 199 darkgray
 24: 0 darkgray, 4-5 green, 6-13 magenta, 44 bold, 46 bold, 83-89 dim, 90 darkgray, 155 bold, 199 darkgray
-25: 0 darkgray, 4-5 green, 6-17 magenta, 44 bold, 46 bold, 79-89 dim, 90 darkgray, 155 bold, 199 darkgray
-26: 0 darkgray, 4-5 green, 6-15 magenta, 44 bold, 46 bold, 82-89 dim, 90 darkgray, 155 bold, 199 darkgray
-27: 0 darkgray, 4-5 green, 6-16 darkgray, 44 bold, 46 bold, 86-89 dim, 90 darkgray, 92-100 dim, 155 bold, 199 darkgray
-28: 0 darkgray, 4-5 green, 6-12 darkgray, 44 bold, 90 darkgray, 92-100 dim, 155 bold, 199 darkgray
+25: 0 darkgray, 4-5 green, 6-17 magenta, 44 bold, 46 bold, 83-89 dim, 90 darkgray, 155 bold, 199 darkgray
+26: 0 darkgray, 4-5 green, 6-15 magenta, 44 bold, 46 bold, 79-89 dim, 90 darkgray, 155 bold, 199 darkgray
+27: 0 darkgray, 4-5 green, 6-16 darkgray, 44 bold, 46 bold, 82-89 dim, 90 darkgray, 92-100 dim, 155 bold, 199 darkgray
+28: 0 darkgray, 4-5 green, 6-12 darkgray, 44 bold, 46 bold, 86-89 dim, 90 darkgray, 92-100 dim, 155 bold, 199 darkgray
 29: 0 darkgray, 4-5 yellow, 6-16 darkgray, 26-33 yellow, 34-43 dim, 44 bold, 90 darkgray, 155 bold, 199 darkgray
 30: 0 darkgray, 4-5 green, 6-18 darkgray, 44 bold, 90 darkgray, 92-133 dim, 155 bold, 199 darkgray
 31: 0 darkgray, 4-5 green, 6-17 darkgray, 44 bold, 90 darkgray, 155 bold, 199 darkgray

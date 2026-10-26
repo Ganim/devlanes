@@ -39,6 +39,7 @@ linked = [[
   "cargo/devlanes-metrics-linux",
   "cargo/devlanes-metrics-macos",
   "cargo/devlanes-metrics-windows",
+  "cargo/devlanes-pages",
   "cargo/devlanes-pki",
   "cargo/devlanes-platform-bun",
   "cargo/devlanes-platform-deno",

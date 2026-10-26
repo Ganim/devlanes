@@ -474,6 +474,7 @@ mod tests {
             lane: lane.into(),
             unit: "web".into(),
             certificate_names: Vec::new(),
+            remote: false,
         }
     }
 

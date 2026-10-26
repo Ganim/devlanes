@@ -26,7 +26,8 @@ expression: user
   "proxy": {
     "https_port": 443,
     "http_port": 80,
-    "lan": false
+    "lan": false,
+    "via": true
   },
   "logs": {
     "retention": {

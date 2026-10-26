@@ -365,7 +365,10 @@ async fn ipv6_fallback_and_sse_streaming() -> Result {
     .await?
 }
 
-/// Status output escapes logs, and loop markers stop re-entry before dialing.
+const BROWSER: (&str, &str) = ("accept", "text/html,application/xhtml+xml,*/*;q=0.8");
+
+/// Error pages escape logs, name their error and follow `Accept`; loop markers stop
+/// re-entry before dialing; plain HTTP redirects with an empty, uncached 308.
 #[tokio::test]
 async fn status_pages_loop_detection_and_redirect() -> Result {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -373,26 +376,43 @@ async fn status_pages_loop_detection_and_redirect() -> Result {
         route.state = RouteState::Failed {
             log_tail: "<script>bad()</script>".into(),
         };
+        route.owner = Some("acme@2".into());
+        route.unit = Some("web".into());
         let table = RouteTable::new(vec![route])?;
         let running = run_proxy(Proxy::new(ProxyConfig::default(), table.clone()), None).await?;
-        let response = request(
-            TcpStream::connect(running.address).await?,
-            "app.lane.localhost",
-            "/",
-            &[],
-        )
-        .await?;
+        let connect = || TcpStream::connect(running.address);
+        let response = request(connect().await?, "app.lane.localhost", "/", &[BROWSER]).await?;
         assert_eq!(response.status(), 503);
-        let text = String::from_utf8(response.into_body().collect().await?.to_bytes().to_vec())?;
-        assert!(text.contains("&lt;script&gt;"));
+        assert_eq!(response.headers()["x-devlanes-error"], "service-failed");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(
+            response.headers()["content-type"]
+                .to_str()?
+                .starts_with("text/html")
+        );
+        let html = text(response).await?;
+        assert!(!html.contains("<script>bad"));
+        assert!(html.contains("bad()"));
+        let response = request(connect().await?, "app.lane.localhost", "/", &[]).await?;
+        assert!(
+            response.headers()["content-type"]
+                .to_str()?
+                .starts_with("text/markdown")
+        );
+        assert!(
+            text(response)
+                .await?
+                .contains("`devlanes debug why acme@2:web`")
+        );
         let response = request(
-            TcpStream::connect(running.address).await?,
+            connect().await?,
             "app.lane.localhost",
             "/",
             &[("x-devlanes-via", "app.lane.localhost")],
         )
         .await?;
         assert_eq!(response.status(), 508);
+        assert_eq!(response.headers()["x-devlanes-error"], "proxy-loop");
         let config = ProxyConfig {
             https_redirect_port: Some(8443),
             ..ProxyConfig::default()
@@ -410,6 +430,224 @@ async fn status_pages_loop_detection_and_redirect() -> Result {
             response.headers()["location"],
             "https://app.lane.localhost:8443/a?b=c"
         );
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(!response.headers().contains_key("x-devlanes-error"));
+        assert_eq!(text(response).await?, "");
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
+}
+
+/// Unknown hosts list the routes to clients on this machine and suggest the closest.
+#[tokio::test]
+async fn unknown_host_suggests_routes() -> Result {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut route = Route::new("app.acme-1.localhost", Upstream::Local(1));
+        route.owner = Some("acme@1".into());
+        let proxy = Proxy::new(ProxyConfig::default(), RouteTable::new(vec![route])?);
+        let running = run_proxy(proxy, None).await?;
+        let response = request(
+            TcpStream::connect(running.address).await?,
+            "app.acme-2.localhost",
+            "/",
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), 404);
+        assert_eq!(response.headers()["x-devlanes-error"], "unknown-host");
+        let markdown = text(response).await?;
+        assert!(markdown.contains("Did you mean `app.acme-1.localhost` (acme@1)?"));
+        assert!(markdown.contains("- `app.acme-1.localhost` (acme@1)"));
+        let response = request(
+            TcpStream::connect(running.address).await?,
+            "localhost",
+            "/",
+            &[],
+        )
+        .await?;
+        assert!(text(response).await?.contains("localhost and IP addresses"));
+        // A DNS-rebinding page arrives from loopback with its own domain as Host.
+        let response = request(
+            TcpStream::connect(running.address).await?,
+            "rebind.example.invalid",
+            "/",
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), 404);
+        assert!(!text(response).await?.contains("app.acme-1.localhost"));
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
+}
+
+/// Forwarded responses name devlanes in `Via`, marked for box routes, unless turned off.
+#[tokio::test]
+async fn via_header() -> Result {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let upstream = fixture(false, false).await?;
+        let mut remote = Route::new("box.lane.localhost", upstream.address);
+        remote.remote = true;
+        let table = RouteTable::new(vec![
+            Route::new("app.lane.localhost", upstream.address),
+            remote,
+        ])?;
+        let running = run_proxy(Proxy::new(ProxyConfig::default(), table.clone()), None).await?;
+        for (host, via) in [
+            ("app.lane.localhost", "1.1 devlanes.run"),
+            ("box.lane.localhost", "1.1 devlanes.run (remote)"),
+        ] {
+            let response =
+                request(TcpStream::connect(running.address).await?, host, "/", &[]).await?;
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.headers()["via"], via);
+        }
+        let config = ProxyConfig {
+            via: false,
+            ..ProxyConfig::default()
+        };
+        let quiet = run_proxy(Proxy::new(config, table), None).await?;
+        let response = request(
+            TcpStream::connect(quiet.address).await?,
+            "app.lane.localhost",
+            "/",
+            &[],
+        )
+        .await?;
+        assert!(!response.headers().contains_key("via"));
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
+}
+
+/// A request to a starting service waits for it to become ready and is then forwarded;
+/// past `start_wait` it gets the starting page.
+#[tokio::test]
+async fn starting_requests_wait_for_ready() -> Result {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let upstream = fixture(false, false).await?;
+        let mut route = Route::new("app.lane.localhost", upstream.address);
+        route.state = RouteState::Starting;
+        let limits = ProxyLimits {
+            start_wait: Duration::from_secs(5),
+            ..ProxyLimits::default()
+        };
+        let proxy = Proxy::new(
+            ProxyConfig::default(),
+            RouteTable::new(vec![route.clone()])?,
+        )
+        .with_limits(limits);
+        let running = run_proxy(proxy.clone(), None).await?;
+        let pending = tokio::spawn(request(
+            TcpStream::connect(running.address).await?,
+            "app.lane.localhost",
+            "/",
+            &[],
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!pending.is_finished());
+        let mut ready = route.clone();
+        ready.state = RouteState::Ready;
+        proxy.replace_routes(RouteTable::new(vec![ready])?);
+        assert_eq!(pending.await??.status(), 200);
+
+        let limits = ProxyLimits {
+            start_wait: Duration::from_millis(100),
+            ..ProxyLimits::default()
+        };
+        let proxy =
+            Proxy::new(ProxyConfig::default(), RouteTable::new(vec![route])?).with_limits(limits);
+        let running = run_proxy(proxy, None).await?;
+        let response = request(
+            TcpStream::connect(running.address).await?,
+            "app.lane.localhost",
+            "/",
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), 503);
+        assert_eq!(response.headers()["x-devlanes-error"], "service-starting");
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
+}
+
+/// Refused connections are retried, so a server that comes back within `refused_retry`
+/// gets the request; without retries the client gets the unreachable page.
+#[tokio::test]
+async fn refused_connections_are_retried() -> Result {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let address = TcpListener::bind("127.0.0.1:0").await?.local_addr()?;
+        let table = RouteTable::new(vec![Route::new("app.lane.localhost", address)])?;
+        let none = ProxyLimits {
+            refused_retry: Duration::ZERO,
+            ..ProxyLimits::default()
+        };
+        let running = run_proxy(
+            Proxy::new(ProxyConfig::default(), table.clone()).with_limits(none),
+            None,
+        )
+        .await?;
+        let response = request(
+            TcpStream::connect(running.address).await?,
+            "app.lane.localhost",
+            "/",
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), 503);
+        assert_eq!(
+            response.headers()["x-devlanes-error"],
+            "upstream-unreachable"
+        );
+
+        let running = run_proxy(Proxy::new(ProxyConfig::default(), table), None).await?;
+        let pending = tokio::spawn(request(
+            TcpStream::connect(running.address).await?,
+            "app.lane.localhost",
+            "/",
+            &[],
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let listener = TcpListener::bind(address).await?;
+        let (mut socket, _) = listener.accept().await?;
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(socket.read_u8().await?);
+        }
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await?;
+        let response = pending.await??;
+        assert_eq!(response.status(), 200);
+        assert_eq!(text(response).await?, "ok");
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
+}
+
+/// An HTTP/1.1 absolute-form target wins over a different Host, which is regenerated.
+#[tokio::test]
+async fn absolute_form_overrides_host() -> Result {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let upstream = fixture(false, false).await?;
+        let proxy = Proxy::new(
+            ProxyConfig::default(),
+            RouteTable::new(vec![Route::new("app.lane.localhost", upstream.address)])?,
+        );
+        let running = run_proxy(proxy, None).await?;
+        let response = request(
+            TcpStream::connect(running.address).await?,
+            "other.localhost",
+            "http://app.lane.localhost/a",
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), 200);
+        let echoed = text(response).await?.to_ascii_lowercase();
+        assert!(echoed.starts_with("get /a http/1.1\r\n"), "{echoed}");
+        assert!(echoed.contains("host: app.lane.localhost\r\n"), "{echoed}");
+        assert!(!echoed.contains("other.localhost"), "{echoed}");
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     })
     .await?

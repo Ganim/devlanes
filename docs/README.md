@@ -7,6 +7,7 @@ Start with [getting started](getting-started.md). The two references are generat
 - [CLI](reference/cli.md): every command and option.
 - [Config](reference/config.md): every field of `devlanes.yaml` and the user `config.yaml`.
 - [Examples](examples/README.md): commented configuration files.
+- [Proxy errors](errors/README.md): every error page the proxy serves, its causes and fixes.
 
 ## Guides
 

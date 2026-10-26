@@ -462,6 +462,8 @@ pub struct RouteEntry {
     pub unit: String,
     /// Extra certificate names, normally the lane apex domain.
     pub certificate_names: Vec<String>,
+    /// The route mirrors a lane on a remote box.
+    pub remote: bool,
 }
 
 /// Receives complete routing snapshots.

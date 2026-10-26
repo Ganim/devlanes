@@ -6,13 +6,13 @@
 │ │ ▌ proxy.https_port               8080▏ │ ✕ must differ from              │ │
 │ │   proxy.http_port                  8080│ proxy.http_port                 │ │
 │ │   proxy.lan                       false│                                 │─┤
-│ │   hostnames.resolver          localhost│ proxy.https_port                │a│
-│ │   hostnames.hosts_fi…           default│ Port the HTTPS proxy listens    │ │
-│ │   hostnames.tld                 default│ on; defaults to 443. When the   │a│
-│ │   ports.range               20000-32767│ port is taken or not allowed    │ │
-│ │   tls.ca                       devlanes│ (low ports on Linux need extra  │a│
-│ │   tls.trust                        none│ permission), the daemon falls   │ │
-│ │                                        │ back to 8443 and service URLs   │a│
+│ │   proxy.via                        true│ proxy.https_port                │a│
+│ │   hostnames.resolver          localhost│ Port the HTTPS proxy listens    │ │
+│ │   hostnames.hosts_fi…           default│ on; defaults to 443. When the   │a│
+│ │   hostnames.tld                 default│ port is taken or not allowed    │ │
+│ │   ports.range               20000-32767│ (low ports on Linux need extra  │a│
+│ │   tls.ca                       devlanes│ permission), the daemon falls   │ │
+│ │   tls.trust                        none│ back to 8443 and service URLs   │a│
 │ │                                        │ carry the port.                 │ │
 │ │                                        │                                 │a│
 │ │                                        │ default  443                    │ │
@@ -32,13 +32,13 @@
 5: 0 darkgray, 2 bold, 4 bold reversed, 5-35 reversed, 36-42 bold, 43 darkgray, 45-62 red, 77 bold, 79 darkgray
 6: 0 darkgray, 2 bold, 4 bold, 43 darkgray, 45-59 red, 77 bold, 79 darkgray
 7: 0 darkgray, 2 bold, 4 bold, 38-42 dim, 43 darkgray, 77 bold, 78-79 darkgray
-8: 0 darkgray, 2 bold, 4 bold, 34-42 dim, 43 darkgray, 45-60 bold, 77 bold, 79 darkgray
-9: 0 darkgray, 2 bold, 4 bold, 36-42 dim, 43 darkgray, 77 bold, 79 darkgray
+8: 0 darkgray, 2 bold, 4 bold, 39-42 dim, 43 darkgray, 45-60 bold, 77 bold, 79 darkgray
+9: 0 darkgray, 2 bold, 4 bold, 34-42 dim, 43 darkgray, 77 bold, 79 darkgray
 10: 0 darkgray, 2 bold, 4 bold, 36-42 dim, 43 darkgray, 77 bold, 79 darkgray
-11: 0 darkgray, 2 bold, 4 bold, 32-42 dim, 43 darkgray, 77 bold, 79 darkgray
-12: 0 darkgray, 2 bold, 4 bold, 35-42 dim, 43 darkgray, 77 bold, 79 darkgray
-13: 0 darkgray, 2 bold, 4 bold, 39-42 dim, 43 darkgray, 77 bold, 79 darkgray
-14: 0 darkgray, 2 bold, 43 darkgray, 77 bold, 79 darkgray
+11: 0 darkgray, 2 bold, 4 bold, 36-42 dim, 43 darkgray, 77 bold, 79 darkgray
+12: 0 darkgray, 2 bold, 4 bold, 32-42 dim, 43 darkgray, 77 bold, 79 darkgray
+13: 0 darkgray, 2 bold, 4 bold, 35-42 dim, 43 darkgray, 77 bold, 79 darkgray
+14: 0 darkgray, 2 bold, 4 bold, 39-42 dim, 43 darkgray, 77 bold, 79 darkgray
 15: 0 darkgray, 2 bold, 43 darkgray, 77 bold, 79 darkgray
 16: 0 darkgray, 2 bold, 43 darkgray, 77 bold, 79 darkgray
 17: 0 darkgray, 2 bold, 43 darkgray, 45-53 dim, 77 bold, 79 darkgray

@@ -29,6 +29,8 @@ proxy:
   https_port: 443
   http_port: 80
   lan: false
+  # Via: 1.1 devlanes.run on forwarded responses.
+  via: true
 # How many services start at once, across all lanes and projects.
 startup:
   # adaptive (default): start at `initial`, slow down under CPU or memory pressure.

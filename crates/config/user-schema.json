@@ -401,7 +401,8 @@
         {
           "http_port": 80,
           "https_port": 443,
-          "lan": false
+          "lan": false,
+          "via": true
         }
       ],
       "markdownDescription": "Ports and network exposure of the daemon's proxy, which routes each lane hostname to its service.",
@@ -440,6 +441,16 @@
             true
           ],
           "markdownDescription": "Accept connections from other devices on the network; defaults to false, which refuses every peer that is not this machine. Those devices must still resolve the hostnames to this machine and trust the CA.",
+          "type": "boolean"
+        },
+        "via": {
+          "default": true,
+          "description": "Add `Via: 1.1 devlanes.run` to every response the proxy forwards from a service (`1.1 devlanes.run (remote)` for lanes on a remote box), so a client can tell that devlanes sat in between. Defaults to true; set false if a client or test compares response headers exactly.",
+          "examples": [
+            true,
+            false
+          ],
+          "markdownDescription": "Add `Via: 1.1 devlanes.run` to every response the proxy forwards from a service (`1.1 devlanes.run (remote)` for lanes on a remote box), so a client can tell that devlanes sat in between. Defaults to true; set false if a client or test compares response headers exactly.",
           "type": "boolean"
         }
       },
@@ -1208,14 +1219,16 @@
       "default": {
         "http_port": 80,
         "https_port": 443,
-        "lan": false
+        "lan": false,
+        "via": true
       },
       "description": "Ports of the daemon's HTTP/HTTPS proxy, which serves every `hosts` entry, and whether other devices on the network may connect to it.",
       "examples": [
         {
           "http_port": 80,
           "https_port": 443,
-          "lan": false
+          "lan": false,
+          "via": true
         }
       ],
       "markdownDescription": "Ports of the daemon's HTTP/HTTPS proxy, which serves every `hosts` entry, and whether other devices on the network may connect to it."

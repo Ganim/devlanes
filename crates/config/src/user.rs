@@ -668,7 +668,7 @@ pub enum TrustTarget {
 #[serde(default, deny_unknown_fields)]
 /// Ports and network exposure of the daemon's proxy, which routes each lane hostname to
 /// its service.
-#[schemars(extend("examples" = [{"https_port":443,"http_port":80,"lan":false}]))]
+#[schemars(extend("examples" = [{"https_port":443,"http_port":80,"lan":false,"via":true}]))]
 pub struct ProxyConfig {
     /// Port the HTTPS proxy listens on; defaults to 443. When the port is taken or not
     /// allowed (low ports on Linux need extra permission), the daemon falls back to 8443
@@ -685,6 +685,12 @@ pub struct ProxyConfig {
     /// hostnames to this machine and trust the CA.
     #[schemars(extend("examples" = [false,true]))]
     pub lan: bool,
+    /// Add `Via: 1.1 devlanes.run` to every response the proxy forwards from a service
+    /// (`1.1 devlanes.run (remote)` for lanes on a remote box), so a client can tell that
+    /// devlanes sat in between. Defaults to true; set false if a client or test compares
+    /// response headers exactly.
+    #[schemars(extend("examples" = [true,false]))]
+    pub via: bool,
 }
 
 /// The port the HTTPS proxy binds when [`ProxyConfig::https_port`] is taken or not allowed.
@@ -700,6 +706,7 @@ impl Default for ProxyConfig {
             https_port: 443,
             http_port: 80,
             lan: false,
+            via: true,
         }
     }
 }

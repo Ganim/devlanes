@@ -10,13 +10,13 @@
 │   │ ▌ proxy.https_port                    8080▏ │ ✕ must differ from proxy.http_port                             │53m│
 │   │   proxy.http_port                       8080│                                                                │   │
 │   │   proxy.lan                            false│ proxy.https_port                                               │66m│
-│   │   hostnames.resolver               localhost│ Port the HTTPS proxy listens on; defaults to 443. When the     │   │
-│   │   hostnames.hosts_file               default│ port is taken or not allowed (low ports on Linux need extra    │79m│
-│   │   hostnames.tld                      default│ permission), the daemon falls back to 8443 and service URLs    │   │
-│   │   ports.range                    20000-32767│ carry the port.                                                │92m│
-│   │   tls.ca                            devlanes│                                                                │   │
-│   │   tls.trust                             none│ default  443                                                   │105│
-│   │                                             │ example  443, 8443                                             │   │
+│   │   proxy.via                             true│ Port the HTTPS proxy listens on; defaults to 443. When the     │   │
+│   │   hostnames.resolver               localhost│ port is taken or not allowed (low ports on Linux need extra    │79m│
+│   │   hostnames.hosts_file               default│ permission), the daemon falls back to 8443 and service URLs    │   │
+│   │   hostnames.tld                      default│ carry the port.                                                │92m│
+│   │   ports.range                    20000-32767│                                                                │   │
+│   │   tls.ca                            devlanes│ default  443                                                   │105│
+│   │   tls.trust                             none│ example  443, 8443                                             │   │
 │   │                                             │                                                                │118│
 │   │                                             │ Applies after saving and a daemon restart.                     │   │
 │   │                                             │                                                                │131│
@@ -52,13 +52,13 @@
 9: 0 darkgray, 4 bold, 6 bold reversed, 7-42 reversed, 43-49 bold, 50 darkgray, 52-85 red, 115 bold, 119 darkgray
 10: 0 darkgray, 4 bold, 6 bold, 50 darkgray, 115 bold, 119 darkgray
 11: 0 darkgray, 4 bold, 6 bold, 45-49 dim, 50 darkgray, 52-67 bold, 115 bold, 119 darkgray
-12: 0 darkgray, 4 bold, 6 bold, 41-49 dim, 50 darkgray, 115 bold, 119 darkgray
-13: 0 darkgray, 4 bold, 6 bold, 43-49 dim, 50 darkgray, 115 bold, 119 darkgray
+12: 0 darkgray, 4 bold, 6 bold, 46-49 dim, 50 darkgray, 115 bold, 119 darkgray
+13: 0 darkgray, 4 bold, 6 bold, 41-49 dim, 50 darkgray, 115 bold, 119 darkgray
 14: 0 darkgray, 4 bold, 6 bold, 43-49 dim, 50 darkgray, 115 bold, 119 darkgray
-15: 0 darkgray, 4 bold, 6 bold, 39-49 dim, 50 darkgray, 115 bold, 119 darkgray
-16: 0 darkgray, 4 bold, 6 bold, 42-49 dim, 50 darkgray, 115 bold, 119 darkgray
-17: 0 darkgray, 4 bold, 6 bold, 46-49 dim, 50 darkgray, 52-60 dim, 115 bold, 119 darkgray
-18: 0 darkgray, 4 bold, 50 darkgray, 52-60 dim, 115 bold, 119 darkgray
+15: 0 darkgray, 4 bold, 6 bold, 43-49 dim, 50 darkgray, 115 bold, 119 darkgray
+16: 0 darkgray, 4 bold, 6 bold, 39-49 dim, 50 darkgray, 115 bold, 119 darkgray
+17: 0 darkgray, 4 bold, 6 bold, 42-49 dim, 50 darkgray, 52-60 dim, 115 bold, 119 darkgray
+18: 0 darkgray, 4 bold, 6 bold, 46-49 dim, 50 darkgray, 52-60 dim, 115 bold, 119 darkgray
 19: 0 darkgray, 4 bold, 50 darkgray, 115 bold, 119 darkgray
 20: 0 darkgray, 4 bold, 50 darkgray, 52-93 dim, 115 bold, 119 darkgray
 21: 0 darkgray, 4 bold, 50 darkgray, 115 bold, 119 darkgray

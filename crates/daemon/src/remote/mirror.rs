@@ -422,6 +422,7 @@ impl Mirror {
                         .filter(|domain| routable(domain, &suffixes))
                         .into_iter()
                         .collect(),
+                    remote: true,
                 });
             }
         }

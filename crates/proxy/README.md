@@ -26,9 +26,9 @@ async fn serve(shutdown: CancellationToken) -> Result<(), Box<dyn std::error::Er
 - `RouteTable::new` validates exact, wildcard and fallback routes, including named-port selections.
 - `Proxy::replace_routes` publishes a snapshot without interrupting active streams.
 - `Proxy::tls_config` and `serve_tls` use a shared CA with HTTP/1.1 and HTTP/2 ALPN.
-- `RouteState` supplies idle, starting, failed and reconnecting status pages.
+- `RouteState` selects the idle, starting, failed and reconnecting pages from `devlanes-pages`.
 - `Proxy::listener_health` reports each accept loop's `ListenerHealth`: whether it is running, its accept error count and the latest error.
-- `Proxy::with_limits` replaces the default `ProxyLimits` (connection cap, header timeout, idle timeout).
+- `Proxy::with_limits` replaces the default `ProxyLimits` (connection cap, header and idle timeouts, how long requests wait for starting services and reconnecting boxes, how long refused connections are retried).
 
 ## Config example
 
@@ -49,7 +49,9 @@ Host is preserved unless a route selects `HostHeader::Upstream`. `Upstream::Loca
 
 Routes marked `fallback` apply only when no other route matches, even an exact fallback route against a wildcard. Within each group an exact host beats the longest matching wildcard.
 
-The proxy replaces `Forwarded` and the `X-Forwarded-*` headers and drops client-sent `X-Real-IP`, `X-Forwarded-Ssl`, `X-Forwarded-Scheme`, `X-Forwarded-Prefix`, `X-Forwarded-Server`, `X-Original-URL` and `Front-End-Https`. Upstream apps always connect from loopback, so with `lan: true` they see 127.0.0.1 as the peer address and must read the client address from `X-Forwarded-For` or `Forwarded`. Failure pages include the service's log tail only for loopback clients.
+The proxy replaces `Forwarded` and the `X-Forwarded-*` headers and drops client-sent `X-Real-IP`, `X-Forwarded-Ssl`, `X-Forwarded-Scheme`, `X-Forwarded-Prefix`, `X-Forwarded-Server`, `X-Original-URL` and `Front-End-Https`. Upstream apps always connect from loopback, so with `lan: true` they see 127.0.0.1 as the peer address and must read the client address from `X-Forwarded-For` or `Forwarded`. Forwarded responses get `Via: 1.1 devlanes.run`, or `1.1 devlanes.run (remote)` for box routes, unless `ProxyConfig::via` is off.
+
+When the proxy answers itself, the response carries `x-devlanes-error` with the error's slug, and the body is HTML or Markdown depending on `Accept`. Failure pages include the service's log tail only for loopback clients. Unknown-host pages list the routed hostnames only for loopback clients requesting `localhost`, an IP or a `.localhost` name, which no DNS-rebinding page can use as its origin. A request to a starting route or a reconnecting box waits for the route to turn ready before it gets a page, and refused connections to a ready route are retried for a few seconds; neither can send a request twice. Plain HTTP to a known route gets an empty 308 to HTTPS. In HTTP/1, an absolute-form target overrides a conflicting Host.
 
 `bind_listeners(80, 8080, false)` binds both address families and falls back when the requested port is denied or occupied; use `(443, 8443, false)` for TLS. If IPv6 is unavailable on the host, it serves IPv4 only and sets `ipv6_error`. Serve every listener from `BoundListeners::listeners` through `Proxy`, which rejects non-loopback peers unless `ProxyConfig::lan` is enabled. Set `https_redirect_port` to the actual TLS port when enabling HTTP redirects.
 

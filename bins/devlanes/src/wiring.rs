@@ -643,6 +643,7 @@ async fn proxy(
     let config = devlanes_proxy::ProxyConfig {
         lan,
         https_redirect_port: https.as_ref().map(|l| l.port),
+        via: user.proxy.via,
         ..devlanes_proxy::ProxyConfig::default()
     };
     let proxy = devlanes_proxy::Proxy::new(config, devlanes_proxy::RouteTable::default());
@@ -745,6 +746,8 @@ impl RouteSink for ProxyRoutes {
                 route.start_hint = entry.start_hint;
                 route.certificate_names = entry.certificate_names;
                 route.owner = Some(entry.lane).filter(|lane| !lane.is_empty());
+                route.unit = Some(entry.unit).filter(|unit| !unit.is_empty());
+                route.remote = entry.remote;
                 route
             })
             .collect();
@@ -2180,6 +2183,7 @@ mod tests {
             lane: lane.into(),
             unit: unit.into(),
             certificate_names: Vec::new(),
+            remote: false,
         }
     }
 

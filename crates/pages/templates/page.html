@@ -1,0 +1,79 @@
+{# build.rs drops every whitespace run that contains a line break, so never let a line break stand in for a space. #}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="devlanes-error" content="{{ v.code }}">
+<title>{{ v.title }} · devlanes</title>
+<style>{{ style|safe }}</style>
+</head>
+<body class="severity-{{ v.severity }}">
+<header class="site-header">
+  <a class="brand" href="https://devlanes.run/">
+    <svg viewBox="0 0 64 64" width="26" height="26" aria-hidden="true"><rect x="8" y="16" width="32" height="8" rx="4" fill="#f5c542"/><rect x="16" y="28" width="32" height="8" rx="4" fill="currentColor"/><rect x="24" y="40" width="32" height="8" rx="4" fill="currentColor"/></svg>
+    <span>devlanes</span>
+  </a>
+  <nav>
+    <a href="https://devlanes.run/docs/">Docs</a>
+    <a href="https://github.com/devlanes-run/devlanes">GitHub</a>
+  </nav>
+</header>
+<main>
+  <p class="eyebrow">{{ v.status }} {{ v.reason }}</p>
+  <h1>{{ v.title }}</h1>
+  <p class="code"><span class="code-id">{{ v.id }}</span><code>{{ v.code }}</code></p>
+  <div class="actions">
+    <a class="button" href="{{ v.docs_url }}">Docs for {{ v.id }}</a>
+    <a class="button" href="{{ v.issue_url }}">Open an issue</a>
+  </div>
+  <p class="summary">{{ v.summary }}</p>
+  {% if !v.hint.is_empty() %}
+  <p class="callout">{{ v.hint }}</p>
+  {% endif %}
+  {% if let Some(suggestion) = v.suggestion %}
+  <p class="callout">Did you mean <code>{{ suggestion.host }}</code>{% if let Some(owner) = suggestion.owner %} ({{ owner }}){% endif %}?</p>
+  {% endif %}
+  {% if !v.logs.is_empty() %}
+  <section class="terminal" aria-label="Recent output">
+    <div class="terminal-bar"><span class="terminal-dot"></span>recent output</div>
+    <pre>{{ v.logs }}</pre>
+  </section>
+  {% endif %}
+  {% if !v.known.is_empty() %}
+  <h2>Routed hostnames</h2>
+  <div class="table-scroll" role="region" aria-label="Routed hostnames" tabindex="0">
+    <table>
+      <thead><tr><th>Host</th><th>Lane</th></tr></thead>
+      <tbody>
+        {% for known in v.known %}
+        <tr><td>{{ known.host }}</td><td>{% if let Some(owner) = known.owner %}{{ owner }}{% endif %}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if v.hidden > 0 %}
+  <p class="note">{{ v.hidden }} more in <code>devlanes url ls</code>.</p>
+  {% endif %}
+  {% endif %}
+  <h2>Diagnose</h2>
+  {% if v.remote %}
+  <p class="note">Run these on the box that runs the lane.</p>
+  {% endif %}
+  <ul class="checks">
+    {% for check in v.checks %}
+    <li>
+      <p>{% for (code, part) in check.segments() %}{% if code %}<code>{{ part }}</code>{% else %}{{ part }}{% endif %}{% endfor %}</p>
+      {% if let Some(command) = check.command %}
+      <pre class="command"><span aria-hidden="true">$ </span>{{ command }}</pre>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</main>
+<footer>
+  <p>Sent by the devlanes {{ v.version }} proxy, not by the service.</p>
+</footer>
+</body>
+</html>

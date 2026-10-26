@@ -197,6 +197,7 @@ impl Inner {
                     lane: reference.clone(),
                     unit: unit.clone(),
                     certificate_names: vec![view.domain.clone()],
+                    remote: false,
                 });
             }
         }

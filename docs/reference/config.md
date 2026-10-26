@@ -310,10 +310,11 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 
 | Path | Type | Description | Example |
 | --- | --- | --- | --- |
-| `proxy` | object | Ports of the daemon's HTTP/HTTPS proxy, which serves every `hosts` entry, and whether other devices on the network may connect to it. | `{"http_port":80,"https_port":443,"lan":false}` |
+| `proxy` | object | Ports of the daemon's HTTP/HTTPS proxy, which serves every `hosts` entry, and whether other devices on the network may connect to it. | `{"http_port":80,"https_port":443,"lan":false,"via":true}` |
 | `proxy.http_port` | integer | Port for plain HTTP; defaults to 80, falling back to 8080 like `https_port`, and must differ from it. While HTTPS runs it redirects known hostnames to HTTPS; without a CA it serves them over plain HTTP. | `80` |
 | `proxy.https_port` | integer | Port the HTTPS proxy listens on; defaults to 443. When the port is taken or not allowed (low ports on Linux need extra permission), the daemon falls back to 8443 and service URLs carry the port. | `443` |
 | `proxy.lan` | boolean | Accept connections from other devices on the network; defaults to false, which refuses every peer that is not this machine. Those devices must still resolve the hostnames to this machine and trust the CA. | `false` |
+| `proxy.via` | boolean | Add `Via: 1.1 devlanes.run` to every response the proxy forwards from a service (`1.1 devlanes.run (remote)` for lanes on a remote box), so a client can tell that devlanes sat in between. Defaults to true; set false if a client or test compares response headers exactly. | `true` |
 
 ### startup
 

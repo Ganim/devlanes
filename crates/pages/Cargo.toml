@@ -1,0 +1,22 @@
+[package]
+name = "devlanes-pages"
+description = "Error pages the devlanes proxy serves itself, as HTML or Markdown."
+version = "0.4.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+devlanes-version = { path = "../version" }
+askama = { version = "0.16", default-features = false, features = ["derive", "std"] }
+percent-encoding = "2"
+
+# The stylesheet is compiled and hashed at build time, so none of these ship in the binary.
+[build-dependencies]
+base64.workspace = true
+grass = { version = "0.13", default-features = false }
+sha2 = "0.10"
+
+[lints]
+workspace = true

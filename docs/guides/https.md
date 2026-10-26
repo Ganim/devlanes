@@ -10,7 +10,7 @@ Every service with `hosts` is reachable at `https://<host>` through the daemon's
 4. The request goes to `127.0.0.1:<service port>` over HTTP/1.1 with `Host` preserved, `X-Forwarded-Proto: https`, `X-Forwarded-Host`, `X-Forwarded-For`, `X-Forwarded-Port` and `Forwarded`. WebSocket upgrades are bridged with no idle timeout.
 5. Plain `http://` on port 80 (or 8080) answers known hostnames with a 308 to https.
 
-A hostname whose lane is idle, whose service is starting or has failed gets a 503 page that says so, with the command to start it and, for failures, the end of the service's log. 404 means no route has that name; 508 means a service proxied a request back to devlanes without rewriting `Host`.
+A request to a starting service waits until it is ready. A hostname whose service is stopped or has failed gets a 503 page with the commands to diagnose it and, for failures, the end of the service's output. 404 means no route has that name; 508 means a service proxied a request back to devlanes without rewriting `Host`. [Proxy errors](../errors/README.md) lists every page.
 
 ## Trust the CA once
 
