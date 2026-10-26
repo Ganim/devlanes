@@ -77,15 +77,15 @@ cargo build --workspace --all-targets --all-features
 
 ## Change files
 
-Every change a devlanes user could notice gets a change file in `.sampo/changesets/`, in the same commit as the change. Write it yourself without asking; ask only when you can't tell whether users notice. "Change files" in `CONTRIBUTING.md` is the full guide. The rules that matter most:
+Every change a devlanes user could notice gets a change file in `.sampo/changesets/`, in the pull request that makes it. Write it yourself without asking; ask only when you can't tell whether users notice. "Change files" in `CONTRIBUTING.md` is the full guide. The rules that matter most:
 
 - Create it with `sampo add -p cargo/<crate> -b <bump> -m '<line>'` or by hand. List each changed crate as `cargo/<package name>`, plus `cargo/devlanes` whenever someone running devlanes notices.
 - Until 1.0: `minor` for anything that breaks what worked (removed or renamed commands, flags or config keys, configs that stop loading, protocol or state changes), `patch` for everything else. Never `major`.
 - The first line is the whole entry for most changes: one sentence starting with Added, Changed, Fixed, Deprecated or Removed, naming the command, flag or config key, and saying what changes for the user. No implementation details.
-- Add a body only for breaking changes, deprecations, removals and large features: what to do instead, or the smallest example to get started. A few lines at most.
+- Add a body only for breaking changes, deprecations, removals and large features (what to do instead, or the smallest example to get started), or for a second effect on the same feature. A few lines at most.
 - The writing style above applies. Cut what a user wouldn't miss before committing.
 - No change file for refactors, tests, CI or documentation; say so in the pull request description.
-- One change file per change. Update it when the change grows instead of adding another.
+- One change file per feature or fix a user would look for in the changelog, not one per adjustment. Small tweaks and fixes to the same part of devlanes share one entry; a fix or adjustment to something the same pull request adds gets none. Separate features keep separate files. When the work grows, edit the file instead of adding another, and reread every change file in the pull request before pushing.
 
 Never edit versions or `CHANGELOG.md` files by hand; the release pull request does. A new crate goes into `packages.linked` in `.sampo/config.toml`. Code that reports the devlanes version uses `devlanes_version::VERSION`, never its own crate's `CARGO_PKG_VERSION`.
 

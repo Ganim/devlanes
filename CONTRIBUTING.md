@@ -182,7 +182,7 @@ Run a crate's ignored tests with `cargo nextest run -p <crate> --run-ignored onl
 
 ## Change files
 
-A pull request that changes something a devlanes user can notice adds a change file in `.sampo/changesets/`, in the same commit as the change. [Sampo](https://github.com/bruits/sampo) reads these files to choose the next versions and write each crate's `CHANGELOG.md` in the release pull request. Refactors, tests, CI and documentation need none; say so in the pull request description. No check enforces it, so reviewers look for one.
+A pull request that changes something a devlanes user can notice adds a change file in `.sampo/changesets/`. [Sampo](https://github.com/bruits/sampo) reads these files to choose the next versions and write each crate's `CHANGELOG.md` in the release pull request. Refactors, tests, CI and documentation need none; say so in the pull request description. No check enforces it, so reviewers look for one.
 
 Create a change file with `sampo add` (`cargo install --locked sampo`), without prompts:
 
@@ -201,7 +201,23 @@ cargo/devlanes-daemon: patch
 Fixed `devlanes start` leaving services stopped after a config reload.
 ```
 
-One change file per change: a pull request with two unrelated changes adds two. If a change grows during review, edit its change file instead of adding another.
+Write one change file per feature or fix a user would look for in the changelog, not one per adjustment made along the way. Small tweaks and fixes to the same part of devlanes go in one entry, so these two:
+
+```markdown
+Changed the TUI monitor (`M`) to keep each project's shared infra on top and its lanes below in lane order, instead of reordering them by usage.
+```
+
+```markdown
+Fixed TUI monitor (`M`) graphs drawing history as separate stripes for the time before the monitor was open.
+```
+
+belong in one file:
+
+```markdown
+Changed the TUI monitor (`M`) to keep each project's shared infra on top and its lanes in lane order, and fixed its graphs drawing separate stripes for the time before it was open.
+```
+
+Separate features keep separate files: a new daemon row in the monitor and a rescaled memory graph are two entries. A fix or tweak to something the same pull request adds needs no entry, since users never saw the earlier version. If the work grows during review, edit its change file instead of adding another, and reread all of the pull request's change files before pushing.
 
 ### Crates
 
