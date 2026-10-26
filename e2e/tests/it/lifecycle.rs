@@ -243,13 +243,15 @@ fn start_right_after_an_edit_uses_the_new_config() -> Result<()> {
 }
 
 /// A daemon whose spawning client stopped waiting (closed the readiness pipe,
-/// as the client does after its start timeout) keeps serving, and the client's
-/// next command reaches it.
+/// as the client does when a step stalls) keeps serving, and the client's
+/// next command reaches it. Step lines go into the closed pipe too.
 #[test]
 fn daemon_outlives_a_client_that_stopped_waiting() -> Result<()> {
     let lab = Lab::with_config(EDIT_BEFORE, BUDGET)?;
     let mut command = lab.command(lab.repo(), &["daemon", "run"])?;
-    command.env("DEVLANES_READY_FD", "1");
+    command
+        .env("DEVLANES_READY_FD", "1")
+        .env("DEVLANES_READY_STEPS", "1");
     let mut daemon = lab.spawn(command)?;
     // Closed long before readiness: binding and reconciling alone take longer.
     drop(daemon.stdout.take());

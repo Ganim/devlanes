@@ -321,7 +321,8 @@ fn terminal_foreground() -> bool {
 
 /// Transport errors become exit code 4 (daemon unreachable), RPC errors keep their own.
 /// A daemon that refused an invalid user config already arrives as the client's
-/// `config_error`, so it reads and hints like a strict load of that file.
+/// `config_error`, so it reads and hints like a strict load of that file. A
+/// start that stalled is `daemon_start_stalled`, which points at the daemon log.
 pub fn rpc_error(error: ClientError) -> RpcError {
     match error {
         ClientError::Rpc(error) => error,
@@ -337,6 +338,9 @@ pub fn rpc_error(error: ClientError) -> RpcError {
         }
         ClientError::Sandbox(reason) => {
             RpcError::new("daemon_sandboxed", json!({"message": reason}), 4)
+        }
+        ClientError::StartupStalled { step, log } => {
+            devlanes_client::startup_stalled_error(step.as_deref(), &log)
         }
         // Same shape as the daemon's own `protocol_mismatch`, so both read alike.
         ClientError::Incompatible { peer } => RpcError::new(
@@ -1115,6 +1119,28 @@ mod tests {
             error.data["client_protocol"],
             devlanes_proto::PROTOCOL_VERSION
         );
+    }
+
+    /// A stalled start keeps its step and log, and exits 4 like an unreachable
+    /// daemon; one with no step reported carries none.
+    #[test]
+    fn stalled_start_is_its_own_error() {
+        let log = std::path::Path::new("/home/acme/.devlanes/logs/daemon.log");
+        let error = rpc_error(ClientError::StartupStalled {
+            step: Some("proxy".into()),
+            log: log.to_owned(),
+        });
+        assert_eq!(
+            (error.code.as_str(), error.exit_code),
+            ("daemon_start_stalled", 4)
+        );
+        assert_eq!(error.data["step"], "proxy");
+        assert_eq!(error.data["log"], json!(log));
+        let error = rpc_error(ClientError::StartupStalled {
+            step: None,
+            log: log.to_owned(),
+        });
+        assert!(error.data.get("step").is_none(), "{}", error.data);
     }
 
     /// Startup reasons keep their code, so hints match it instead of the wording.

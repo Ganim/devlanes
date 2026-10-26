@@ -20,14 +20,15 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 filter = 'test(/(^|::)docker_/)'
 test-group = 'docker'
 
-# 50,000 files and several reconnects; its own timeout is six minutes. It runs
-# alone: writing and syncing that many files has slowed tests next to it on a
-# Windows runner from about 4 s to past their 60 s limit.
+# 50,000 files and several reconnects. Its waits fail when the sync stops making
+# progress, and its own 15-minute timeout is only a hang guard, so nextest ends it
+# after that, at 16 minutes. It runs alone: writing and syncing that many files has
+# slowed tests next to it on a Windows runner from about 4 s to past their 60 s limit.
 [[profile.default.overrides]]
 filter = 'test(/(^|::)large_sync_/)'
 test-group = 'heavy'
 threads-required = 'num-test-threads'
-slow-timeout = { period = "120s", terminate-after = 4 }
+slow-timeout = { period = "120s", terminate-after = 8 }
 
 [profile.e2e]
 default-filter = 'package(devlanes-e2e)'

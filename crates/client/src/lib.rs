@@ -19,22 +19,55 @@ pub use devlanes_proto::{Context, Hello, Method, RpcError};
 use devlanes_proto::{Control, Outcome, PROTOCOL_VERSION, Request};
 pub use paths::{Paths, user_home};
 use serde_json::Value;
-use tokio::time::{Instant, sleep, timeout};
 #[cfg(unix)]
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
-};
+use tokio::process::Command;
+use tokio::time::{Instant, sleep, timeout};
 
 pub type Result<T> = std::result::Result<T, Error>;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const START_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest a spawned daemon may stay in one startup step before the client
+/// treats it as hung. Each step line restarts this wait, so it bounds one step,
+/// not the whole start. It is three times the longest bound a step sets itself
+/// (Windows' 10 s `git --exec-path`), which also leaves room for a machine that
+/// stalls outright: a CI runner once could not start a process for 15 s.
+const STARTUP_STEP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Hang guard for the whole wait on a daemon that holds its singleton lock but
+/// does not answer yet, a start this client cannot follow step by step. A
+/// `devlanes daemon run` reports nine steps (singleton lock, user config, state
+/// database, certificate authority, proxy, docker, shell on Windows, hosts,
+/// reconcile) and its own spawning client gives up once one of them outlasts
+/// [`STARTUP_STEP_TIMEOUT`]. A start that client accepts therefore answers
+/// within nine such bounds; the guard allows ten, one more for the hello after
+/// `ready`.
+const STARTING_WAIT_LIMIT: Duration = Duration::from_secs(10 * STARTUP_STEP_TIMEOUT.as_secs());
 const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PENDING_FRAMES: usize = 256;
 /// Most bytes read from a spawned daemon's readiness pipe, newline included.
 /// Bounds a misbehaving child's output; a failure reason such as an invalid user
 /// config with its path and message still fits.
 pub const READY_LINE_LIMIT: u64 = 4096;
+
+/// Prefix of the lines a spawned daemon writes to its readiness pipe as each
+/// startup step begins (`starting: state database`), before its one answer
+/// line.
+pub const STARTUP_STEP: &str = "starting: ";
+
+/// Set to `1` in a spawned daemon's environment by clients that read
+/// [`STARTUP_STEP`] lines. Without it the daemon writes only its answer line,
+/// which a client from before step lines reads as the whole reply; that client
+/// can spawn a newer daemon when devlanes was upgraded while it ran.
+pub const READY_STEPS_ENV: &str = "DEVLANES_READY_STEPS";
+
+/// The step a whole [`STARTUP_STEP`] line reports; `None` for any other line.
+/// A step line without its newline was cut at end of file or at
+/// [`READY_LINE_LIMIT`], so it ends the pipe like an answer: what follows a
+/// cut could only be read as a line of its own.
+fn startup_step(line: &[u8]) -> Option<String> {
+    let step = line
+        .strip_suffix(b"\n")?
+        .strip_prefix(STARTUP_STEP.as_bytes())?;
+    Some(String::from_utf8_lossy(step).trim().to_owned())
+}
 
 /// Readiness-line code of a daemon that refused an invalid user config. The line is
 /// `USER_CONFIG_INVALID: {"message","file","line","column"}`; JSON keeps a message
@@ -63,6 +96,31 @@ pub fn user_config_startup_error(reason: &str) -> Option<RpcError> {
     ))
 }
 
+/// What [`Error::StartupStalled`] says, as the CLI and the TUI word
+/// `daemon_start_stalled`.
+fn stalled_message(step: Option<&str>) -> String {
+    let waited = STARTUP_STEP_TIMEOUT.as_secs();
+    match step {
+        Some(step) => format!(
+            "the daemon has not finished starting: step {step:?} made no progress for {waited}s"
+        ),
+        None => format!("the daemon reported nothing for {waited}s after it was launched"),
+    }
+}
+
+/// The `daemon_start_stalled` error (exit 4) behind [`Error::StartupStalled`],
+/// `{step?, log, waited_s}`, so every client words and hints it the same way.
+pub fn startup_stalled_error(step: Option<&str>, log: &std::path::Path) -> RpcError {
+    let mut data = serde_json::json!({
+        "log": log,
+        "waited_s": STARTUP_STEP_TIMEOUT.as_secs(),
+    });
+    if let Some(step) = step {
+        data["step"] = Value::from(step);
+    }
+    RpcError::new("daemon_start_stalled", data, 4)
+}
+
 /// Transport errors stay separate from structured daemon failures for exit-code rendering.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -81,6 +139,10 @@ pub enum Error {
     UnexpectedFrame(&'static str),
     #[error("daemon connection or startup timed out")]
     Timeout,
+    /// A spawned daemon stayed in one startup step, or reported none since it
+    /// was launched (`step` is `None`), for the client's per-step wait (30 s).
+    #[error("{}; see {}", stalled_message(.step.as_deref()), .log.display())]
+    StartupStalled { step: Option<String>, log: PathBuf },
     #[error(
         "auto-spawn refused in sandbox ({0}); start devlanes outside the sandbox or run devlanes daemon install"
     )]
@@ -230,6 +292,9 @@ impl Client {
     /// Like [`Client::connect_or_spawn`], with `remove_env` dropped from a spawned
     /// daemon's environment, such as the SSH variables of a tunnel's login session.
     pub async fn connect_or_spawn_without(paths: &Paths, remove_env: &[&str]) -> Result<Self> {
+        // Read before the attempt too: a daemon that removes its marker while
+        // this hello waits has just begun to accept, and is worth one more try.
+        let was_starting = marker_exists(paths).await;
         match Self::connect(paths).await {
             Ok(client) => return Ok(client),
             Err(error) if error.is_not_running() => {}
@@ -238,6 +303,16 @@ impl Client {
                 return Err(Error::Sandbox(
                     "connecting to the daemon socket is not permitted",
                 ));
+            }
+            // A daemon binds its endpoint before its startup steps and answers
+            // only after reconciling, so an unanswered hello while it holds the
+            // lock and its starting marker is one still starting. Without the
+            // marker it has started and hangs, which the timeout reports.
+            Err(Error::Timeout)
+                if (was_starting && lock_held(paths).await) || starting(paths).await =>
+            {
+                tracing::debug!("a daemon holds the lock but does not answer yet; waiting");
+                return Self::connect_while_starting(paths).await;
             }
             Err(error) => return Err(error),
         }
@@ -251,6 +326,9 @@ impl Client {
     }
 
     /// Spawns `devlanes daemon run`, waits for its readiness line and connects.
+    /// The wait lasts while the daemon keeps reporting startup steps and ends
+    /// as soon as it exits; only one step outlasting [`STARTUP_STEP_TIMEOUT`]
+    /// fails it, with [`Error::StartupStalled`].
     async fn spawn_daemon(paths: &Paths, remove_env: &[&str]) -> Result<Self> {
         let begun = Instant::now();
         let owned_paths = paths.clone();
@@ -266,7 +344,11 @@ impl Client {
                 error
             }
         })?;
-        let (deadline, message) = start_daemon(paths, remove_env, begun).await?;
+        let lines = start_daemon(paths, remove_env, begun).await?;
+        let Answer {
+            line: message,
+            step,
+        } = read_answer(paths, lines, begun).await?;
         if message != b"ready\n" && message != b"already-running\n" {
             let reason = String::from_utf8_lossy(&message).trim().to_owned();
             // A refused user config is a structured error, so the CLI and the TUI word it
@@ -275,13 +357,16 @@ impl Client {
                 return Err(Error::Rpc(error));
             }
             // A daemon that died before writing a reason left it in its own log.
-            return Err(Error::Startup(if reason.is_empty() {
-                format!(
-                    "the daemon exited without a reason; see {}",
-                    paths.logs.join("daemon.log").display()
-                )
-            } else {
-                reason
+            let log = paths.logs.join("daemon.log");
+            return Err(Error::Startup(match (reason.is_empty(), step) {
+                (false, _) => reason,
+                (true, Some(step)) => format!(
+                    "the daemon exited in step {step:?} without a reason; see {}",
+                    log.display()
+                ),
+                (true, None) => {
+                    format!("the daemon exited without a reason; see {}", log.display())
+                }
             }));
         }
         // Losing the race to another client's daemon means this invocation did not spawn it.
@@ -292,14 +377,42 @@ impl Client {
             elapsed_ms = begun.elapsed().as_millis() as u64,
             "daemon announced readiness (reconciled, socket bound)"
         );
+        // After `already-running` the other client's daemon may still be
+        // binding its endpoint or in any of its steps.
+        let mut client = Self::connect_while_starting(paths).await?;
+        client.spawned = spawned;
+        Ok(client)
+    }
+
+    /// Connects to a daemon that may hold its singleton lock without
+    /// answering yet, while it starts. Retries while the lock is held, fails at
+    /// once when the lock is free and nothing listens (that daemon exited), and
+    /// gives up after [`STARTING_WAIT_LIMIT`] on one that never answers. An
+    /// unanswered hello without the [`STARTING_MARKER`] fails at once: that
+    /// daemon finished starting and hangs.
+    async fn connect_while_starting(paths: &Paths) -> Result<Self> {
+        let deadline = Instant::now() + STARTING_WAIT_LIMIT;
         loop {
-            match Self::connect(paths).await {
-                Ok(mut client) => {
-                    client.spawned = spawned;
-                    return Ok(client);
+            // A marker gone during an attempt was removed right before the
+            // first accept, so the next attempt is answered.
+            let was_starting = marker_exists(paths).await;
+            let error = match Self::connect(paths).await {
+                Ok(client) => return Ok(client),
+                Err(Error::Timeout) if !was_starting && !marker_exists(paths).await => {
+                    return Err(Error::Timeout);
                 }
-                Err(error) if error.is_not_running() => {}
+                Err(error) if error.is_not_running() || matches!(error, Error::Timeout) => error,
                 Err(error) => return Err(error),
+            };
+            if !lock_held(paths).await {
+                return Err(if error.is_not_running() {
+                    Error::Startup(format!(
+                        "the daemon exited before it accepted connections; see {}",
+                        paths.logs.join("daemon.log").display()
+                    ))
+                } else {
+                    error
+                });
             }
             if Instant::now() >= deadline {
                 return Err(Error::Timeout);
@@ -603,14 +716,17 @@ fn same_name(name: &str, listed: &str) -> bool {
     name.eq_ignore_ascii_case(listed)
 }
 
-/// Spawns `devlanes daemon run` and reads its readiness line; returns the
-/// deadline for connecting afterwards and the line.
+/// The lines of a spawned daemon's readiness pipe, each cut to
+/// [`READY_LINE_LIMIT`]: step reports, then its answer, or an empty line when
+/// the pipe closed first. The channel closes after the answer.
+type ReadyLines = tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>;
+
+/// Most lines the readiness reader holds before the client takes them.
+const READY_LINES_QUEUED: usize = 16;
+
+/// Spawns `devlanes daemon run` and returns the lines of its readiness pipe.
 #[cfg(unix)]
-async fn start_daemon(
-    paths: &Paths,
-    remove_env: &[&str],
-    begun: Instant,
-) -> Result<(Instant, Vec<u8>)> {
+async fn start_daemon(paths: &Paths, remove_env: &[&str], begun: Instant) -> Result<ReadyLines> {
     let mut command = Command::new(std::env::current_exe()?);
     // The daemon outlives this shell and serves every later one, so it keeps
     // only what it needs itself; services get each request's client env.
@@ -621,6 +737,7 @@ async fn start_daemon(
         .args(["daemon", "run"])
         .env("DEVLANES_HOME", &paths.home)
         .env("DEVLANES_READY_FD", "1")
+        .env(READY_STEPS_ENV, "1")
         .current_dir(&paths.home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -638,23 +755,68 @@ async fn start_daemon(
     );
     // Tokio reaps the child after this handle is dropped; never kill a potentially live daemon.
     drop(child);
-    let mut reader = BufReader::new(stdout);
-    let deadline = Instant::now() + START_TIMEOUT;
-    let mut message = Vec::new();
-    timeout(START_TIMEOUT, async {
-        use tokio::io::AsyncReadExt;
-        (&mut reader)
-            .take(READY_LINE_LIMIT)
-            .read_until(b'\n', &mut message)
-            .await
-    })
-    .await
-    .map_err(|_| Error::Timeout)??;
-    Ok((deadline, message))
+    Ok(read_lines(stdout))
 }
 
-/// Spawns `devlanes daemon run` and reads its readiness line; returns the
-/// deadline for connecting afterwards and the line.
+/// Whether the reader goes on after `read`: only a whole step line has more
+/// lines after it.
+fn more_lines(read: &std::io::Result<Vec<u8>>) -> bool {
+    read.as_ref().is_ok_and(|line| startup_step(line).is_some())
+}
+
+/// Reads the lines of a readiness pipe in a task, up to the first line that
+/// is no whole step line (the answer, a cut line, or an empty one at end of
+/// file) or a read error, which it sends last.
+#[cfg(any(unix, test))]
+fn read_lines(pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static) -> ReadyLines {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    let (sender, lines) = tokio::sync::mpsc::channel(READY_LINES_QUEUED);
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(pipe);
+        loop {
+            let mut line = Vec::new();
+            let read = (&mut reader)
+                .take(READY_LINE_LIMIT)
+                .read_until(b'\n', &mut line)
+                .await
+                .map(|_| line);
+            let more = more_lines(&read);
+            if sender.send(read).await.is_err() || !more {
+                return;
+            }
+        }
+    });
+    lines
+}
+
+/// [`read_lines`] on a plain thread, for pipes without async reads (Windows'
+/// anonymous pipes). Unlike `spawn_blocking`, the thread never holds up the
+/// runtime's shutdown when a daemon hangs without answering; it ends with the
+/// pipe or the process.
+#[cfg(any(windows, test))]
+fn read_lines_blocking(pipe: impl std::io::Read + Send + 'static) -> std::io::Result<ReadyLines> {
+    use std::io::{BufRead, BufReader, Read};
+    let (sender, lines) = tokio::sync::mpsc::channel(READY_LINES_QUEUED);
+    std::thread::Builder::new()
+        .name("daemon-ready".into())
+        .spawn(move || {
+            let mut reader = BufReader::new(pipe);
+            loop {
+                let mut line = Vec::new();
+                let read = (&mut reader)
+                    .take(READY_LINE_LIMIT)
+                    .read_until(b'\n', &mut line)
+                    .map(|_| line);
+                let more = more_lines(&read);
+                if sender.blocking_send(read).is_err() || !more {
+                    return;
+                }
+            }
+        })?;
+    Ok(lines)
+}
+
+/// Spawns `devlanes daemon run` and returns the lines of its readiness pipe.
 ///
 /// The daemon inherits only the readiness pipe (as stdout, so
 /// `DEVLANES_READY_FD=1` holds) and NUL: a shell reading this command's output,
@@ -666,13 +828,8 @@ async fn start_daemon(
 /// breakaway fails the spawn with access denied, and the daemon then starts
 /// inside it (`doctor` reports a job that kills on close).
 #[cfg(windows)]
-async fn start_daemon(
-    paths: &Paths,
-    remove_env: &[&str],
-    begun: Instant,
-) -> Result<(Instant, Vec<u8>)> {
+async fn start_daemon(paths: &Paths, remove_env: &[&str], begun: Instant) -> Result<ReadyLines> {
     use std::ffi::{OsStr, OsString};
-    use std::io::{BufRead, BufReader, Read};
     use std::os::windows::io::AsHandle;
 
     use devlanes_sys_windows::spawn::{self, CreationFlags, Environment, Spawn, Stdio, Stream};
@@ -684,6 +841,7 @@ async fn start_daemon(
     let own = [
         "DEVLANES_HOME",
         "DEVLANES_READY_FD",
+        READY_STEPS_ENV,
         devlanes_proto::remote::ASKPASS_ENV,
     ];
     let mut variables: Vec<(OsString, OsString)> = daemon_env(std::env::vars_os(), remove_env)
@@ -695,6 +853,7 @@ async fn start_daemon(
         .collect();
     variables.push(("DEVLANES_HOME".into(), paths.home.clone().into()));
     variables.push(("DEVLANES_READY_FD".into(), "1".into()));
+    variables.push((READY_STEPS_ENV.into(), "1".into()));
     let environment = Environment::new(variables)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     // A path holds no `"`, so quoting is enough for the program's argv[0].
@@ -737,26 +896,50 @@ async fn start_daemon(
     );
     // Dropping the handle leaves the daemon running.
     drop(child);
-    // Anonymous pipes have no async reads on Windows. A plain thread, unlike
-    // `spawn_blocking`, never holds up the runtime's shutdown when a daemon
-    // hangs without answering; it ends with the pipe or the process.
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    std::thread::Builder::new()
-        .name("daemon-ready".into())
-        .spawn(move || {
-            let mut message = Vec::new();
-            let read = BufReader::new(reader)
-                .take(READY_LINE_LIMIT)
-                .read_until(b'\n', &mut message)
-                .map(|_| message);
-            let _ = sender.send(read);
-        })?;
-    let deadline = Instant::now() + START_TIMEOUT;
-    let message = timeout(START_TIMEOUT, receiver)
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::Startup("the readiness reader stopped".into()))??;
-    Ok((deadline, message))
+    Ok(read_lines_blocking(reader)?)
+}
+
+/// The end of a spawned daemon's readiness pipe.
+#[derive(Debug)]
+struct Answer {
+    /// `ready`, `already-running`, a failure reason, or empty when the pipe
+    /// closed (the daemon exited) without one.
+    line: Vec<u8>,
+    /// The last startup step the daemon reported.
+    step: Option<String>,
+}
+
+/// Reads `lines` up to the daemon's answer. Each step report restarts the
+/// [`STARTUP_STEP_TIMEOUT`] wait, so only a single step is bounded, and a
+/// closed pipe ends the wait at once. `begun` is when the spawn began, for the
+/// logged step times.
+async fn read_answer(paths: &Paths, mut lines: ReadyLines, begun: Instant) -> Result<Answer> {
+    let mut step: Option<String> = None;
+    loop {
+        let line = match timeout(STARTUP_STEP_TIMEOUT, lines.recv()).await {
+            Ok(Some(line)) => line?,
+            Ok(None) => return Err(Error::Startup("the readiness reader stopped".into())),
+            // Without a step the process has not reached its first one, or
+            // is a daemon from before step lines.
+            Err(_) => {
+                return Err(Error::StartupStalled {
+                    step,
+                    log: paths.logs.join("daemon.log"),
+                });
+            }
+        };
+        match startup_step(&line) {
+            Some(next) => {
+                tracing::debug!(
+                    step = %next,
+                    elapsed_ms = begun.elapsed().as_millis() as u64,
+                    "daemon startup step"
+                );
+                step = Some(next);
+            }
+            None => return Ok(Answer { line, step }),
+        }
+    }
 }
 
 /// What a failed endpoint probe says.
@@ -766,6 +949,69 @@ const PROBE_FAILED: &str = "Unix socket bind probe failed";
 /// What a failed endpoint probe says.
 #[cfg(windows)]
 const PROBE_FAILED: &str = "named pipe probe failed";
+
+/// Name of the file under `paths.run` that a daemon keeps from taking its lock
+/// until it accepts connections; the daemon names it
+/// `devlanes_daemon::STARTING_MARKER`.
+pub const STARTING_MARKER: &str = "daemon.starting";
+
+/// Whether the [`STARTING_MARKER`] exists. Alone it proves nothing: a daemon
+/// that died while starting leaves it behind with its lock free.
+async fn marker_exists(paths: &Paths) -> bool {
+    tokio::fs::try_exists(paths.run.join(STARTING_MARKER))
+        .await
+        .unwrap_or(false)
+}
+
+/// Whether a daemon holds its lock and has not accepted a connection yet, so
+/// an unanswered hello is worth waiting for.
+async fn starting(paths: &Paths) -> bool {
+    marker_exists(paths).await && lock_held(paths).await
+}
+
+/// Whether a daemon holds its singleton lock under `paths.run`, so it runs or
+/// is starting. A probe that fails cannot tell, and counts as free so that no
+/// caller waits on it.
+async fn lock_held(paths: &Paths) -> bool {
+    let run = paths.run.clone();
+    match tokio::task::spawn_blocking(move || daemon_lock_held(&run)).await {
+        Ok(Ok(held)) => held,
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "cannot probe the daemon lock");
+            false
+        }
+        Err(error) => {
+            tracing::debug!(%error, "the daemon lock probe failed");
+            false
+        }
+    }
+}
+
+/// Probes the daemon's `daemon.lock` in `run` (blocking I/O) with the call the
+/// daemon takes it with: std's `try_lock` is `flock(LOCK_EX | LOCK_NB)` on
+/// Unix, as the daemon's `fs2` lock is, and `LockFileEx` with
+/// `LOCKFILE_FAIL_IMMEDIATELY` on Windows, where the daemon uses std too. A
+/// lock the probe gets is released at once. A missing file means no daemon
+/// ever took it.
+fn daemon_lock_held(run: &std::path::Path) -> std::io::Result<bool> {
+    let lock = match std::fs::File::open(run.join("daemon.lock")) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    match lock.try_lock() {
+        // While the probe holds it, a daemon that starts answers
+        // `already-running`. Its client then waits the same way, and fails
+        // like one whose daemon exited only when no other daemon took the lock
+        // meanwhile.
+        Ok(()) => {
+            lock.unlock()?;
+            Ok(false)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
 
 /// A bind probe catches socket restrictions even when the launcher omitted sandbox markers.
 fn probe_socket(paths: &Paths) -> Result<()> {
@@ -791,7 +1037,268 @@ fn frame_size(frame: &Frame) -> Result<usize> {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{daemon_env, user_config_startup_error};
+    use std::time::Duration;
+
+    use tokio::time::Instant;
+
+    use tokio::io::AsyncWriteExt;
+
+    use super::{
+        Answer, CONNECT_TIMEOUT, Client, Error, Paths, READY_LINE_LIMIT, ReadyLines,
+        STARTING_MARKER, STARTING_WAIT_LIMIT, STARTUP_STEP_TIMEOUT, daemon_env, daemon_lock_held,
+        local, read_answer, read_lines, read_lines_blocking, user_config_startup_error,
+    };
+
+    /// A readiness pipe that already holds `lines`, and its sender, which
+    /// keeps it open until dropped.
+    fn pipe(
+        lines: &[&str],
+    ) -> (
+        ReadyLines,
+        tokio::sync::mpsc::Sender<std::io::Result<Vec<u8>>>,
+    ) {
+        let (sender, receiver) = tokio::sync::mpsc::channel(16);
+        for line in lines {
+            sender
+                .try_send(Ok(line.as_bytes().to_vec()))
+                .expect("queued");
+        }
+        (receiver, sender)
+    }
+
+    /// Steps keep the client waiting past the step bound in total, and the
+    /// answer comes back with the last step.
+    #[tokio::test(start_paused = true)]
+    async fn steps_keep_a_slow_start_waiting() {
+        let paths = Paths::new("acme-home").expect("paths");
+        let (lines, sender) = pipe(&[]);
+        let feeder = tokio::spawn(async move {
+            for step in ["singleton lock", "state database", "reconcile"] {
+                tokio::time::sleep(STARTUP_STEP_TIMEOUT - Duration::from_secs(1)).await;
+                let line = format!("{}{step}\n", super::STARTUP_STEP);
+                sender.send(Ok(line.into_bytes())).await.expect("sent");
+            }
+            sender.send(Ok(b"ready\n".to_vec())).await.expect("sent");
+        });
+        let begun = Instant::now();
+        let Answer { line, step } = read_answer(&paths, lines, begun).await.expect("answer");
+        assert_eq!(line, b"ready\n");
+        assert_eq!(step.as_deref(), Some("reconcile"));
+        assert!(begun.elapsed() > STARTUP_STEP_TIMEOUT * 2);
+        feeder.await.expect("feeder");
+    }
+
+    /// A step that outlasts the bound fails with that step, a daemon that
+    /// reports none fails without one, and a pipe that closes after a step
+    /// fails at once with an empty answer.
+    #[tokio::test(start_paused = true)]
+    async fn a_stuck_step_stalls_and_an_exit_ends_the_wait() {
+        let paths = Paths::new("acme-home").expect("paths");
+        let (lines, _open) = pipe(&["starting: state database\n"]);
+        let stalled = read_answer(&paths, lines, Instant::now()).await;
+        let Err(error @ Error::StartupStalled { step, .. }) = &stalled else {
+            panic!("{stalled:?}");
+        };
+        assert_eq!(step.as_deref(), Some("state database"));
+        assert!(
+            error.to_string().starts_with(
+                "the daemon has not finished starting: step \"state database\" made no progress for 30s; see "
+            ),
+            "{error}"
+        );
+
+        let (lines, _open) = pipe(&[]);
+        let stalled = read_answer(&paths, lines, Instant::now()).await;
+        let Err(error @ Error::StartupStalled { step: None, .. }) = &stalled else {
+            panic!("{stalled:?}");
+        };
+        assert!(
+            error
+                .to_string()
+                .starts_with("the daemon reported nothing for 30s after it was launched; see "),
+            "{error}"
+        );
+
+        let (lines, closed) = pipe(&["starting: proxy\n", ""]);
+        drop(closed);
+        let begun = Instant::now();
+        let Answer { line, step } = read_answer(&paths, lines, begun).await.expect("answer");
+        assert!(line.is_empty());
+        assert_eq!(step.as_deref(), Some("proxy"));
+        assert_eq!(begun.elapsed(), Duration::ZERO);
+    }
+
+    /// Every line `lines` delivers until it closes.
+    async fn collect(mut lines: ReadyLines) -> Vec<Vec<u8>> {
+        let mut all = Vec::new();
+        while let Some(line) = lines.recv().await {
+            all.push(line.expect("read"));
+        }
+        all
+    }
+
+    /// What the async and the thread reader deliver for a pipe that holds
+    /// `bytes` and then closes.
+    async fn read_both(bytes: Vec<u8>) -> [Vec<Vec<u8>>; 2] {
+        // Large enough for every byte, so the writer never waits for a
+        // reader that stopped at its answer.
+        let (mut writer, pipe) = tokio::io::duplex(bytes.len().max(1));
+        writer.write_all(&bytes).await.expect("written");
+        drop(writer);
+        let lines = collect(read_lines(pipe)).await;
+        let blocking = read_lines_blocking(std::io::Cursor::new(bytes)).expect("reader thread");
+        [lines, collect(blocking).await]
+    }
+
+    /// Both readers pass step lines and stop after the first other line: the
+    /// answer, a step line cut at end of file or at the line bound (whose
+    /// rest is never read as a line of its own), or the empty line of a pipe
+    /// that closed first.
+    #[tokio::test]
+    async fn readers_stop_at_the_first_line_that_is_no_whole_step() {
+        let answered = b"starting: proxy\nready\nleftover\n".to_vec();
+        for lines in read_both(answered).await {
+            assert_eq!(lines, [&b"starting: proxy\n"[..], b"ready\n"]);
+        }
+
+        let cut = b"starting: singleton lock\nstarting: sta".to_vec();
+        for lines in read_both(cut).await {
+            assert_eq!(
+                lines,
+                [&b"starting: singleton lock\n"[..], b"starting: sta"]
+            );
+        }
+
+        let limit = usize::try_from(READY_LINE_LIMIT).expect("fits");
+        let mut long = format!("starting: {}\n", "x".repeat(limit)).into_bytes();
+        long.extend_from_slice(b"ready\n");
+        for lines in read_both(long.clone()).await {
+            assert_eq!(lines, [&long[..limit]]);
+        }
+
+        for lines in read_both(Vec::new()).await {
+            assert_eq!(lines, [b""]);
+        }
+    }
+
+    /// Takes `file`'s lock the way the daemon takes `daemon.lock`.
+    fn lock_as_the_daemon(file: &std::fs::File) {
+        #[cfg(unix)]
+        fs2::FileExt::try_lock_exclusive(file).expect("locked");
+        #[cfg(windows)]
+        file.try_lock().expect("locked");
+    }
+
+    /// Releases a lock [`lock_as_the_daemon`] took. Windows may release a lock
+    /// some time after its handle closes, so the tests unlock explicitly.
+    fn release(file: std::fs::File) {
+        #[cfg(unix)]
+        fs2::FileExt::unlock(&file).expect("unlocked");
+        #[cfg(windows)]
+        file.unlock().expect("unlocked");
+    }
+
+    /// The probe sees a lock taken as the daemon takes it, and leaves a free
+    /// lock free.
+    #[test]
+    fn the_lock_probe_sees_the_daemon_lock() {
+        let run = tempfile::tempdir().expect("run");
+        assert!(!daemon_lock_held(run.path()).expect("no file"));
+        let path = run.path().join("daemon.lock");
+        let file = std::fs::File::create(&path).expect("lock file");
+        assert!(!daemon_lock_held(run.path()).expect("free"));
+        lock_as_the_daemon(&file);
+        assert!(daemon_lock_held(run.path()).expect("held"));
+        release(file);
+        assert!(!daemon_lock_held(run.path()).expect("released"));
+    }
+
+    /// A daemon that holds its lock and accepts but never answers: with the
+    /// starting marker the client waits to the hang guard, without it (the
+    /// daemon finished starting and hangs) it gives up after one connect
+    /// timeout. The paused clock jumps over each wait.
+    #[tokio::test(start_paused = true)]
+    async fn only_a_starting_daemon_is_waited_for() {
+        let home = tempfile::tempdir().expect("home");
+        let paths = Paths::new(home.path()).expect("paths");
+        // A long temporary path puts the Unix socket outside `run`, in a
+        // directory only `prepare` creates.
+        paths.prepare().expect("directories");
+        let file = std::fs::File::create(paths.run.join("daemon.lock")).expect("lock file");
+        lock_as_the_daemon(&file);
+        let mut listener = local::LocalListener::bind(&paths.socket)
+            .await
+            .expect("listener");
+        // Holds every connection open without a hello.
+        let silent = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok(stream) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let marker = paths.run.join(STARTING_MARKER);
+        for (starting, waited) in [(false, CONNECT_TIMEOUT), (true, STARTING_WAIT_LIMIT)] {
+            if starting {
+                std::fs::write(&marker, b"").expect("marker");
+            }
+            let begun = Instant::now();
+            let ended = Client::connect_while_starting(&paths).await.map(drop);
+            assert!(matches!(ended, Err(Error::Timeout)), "{ended:?}");
+            let elapsed = begun.elapsed();
+            assert!(
+                elapsed >= waited && elapsed < waited + CONNECT_TIMEOUT * 2,
+                "starting {starting}: {elapsed:?}"
+            );
+        }
+        // The marker goes while a hello waits, as when the daemon begins to
+        // accept: one more attempt, then the timeout of a daemon that hangs.
+        let removal = tokio::spawn({
+            let marker = marker.clone();
+            async move {
+                tokio::time::sleep(CONNECT_TIMEOUT / 2).await;
+                std::fs::remove_file(&marker).expect("marker removed");
+            }
+        });
+        let begun = Instant::now();
+        let ended = Client::connect_while_starting(&paths).await.map(drop);
+        assert!(matches!(ended, Err(Error::Timeout)), "{ended:?}");
+        let elapsed = begun.elapsed();
+        assert!(
+            elapsed >= CONNECT_TIMEOUT * 2 && elapsed < CONNECT_TIMEOUT * 3,
+            "marker removed mid-attempt: {elapsed:?}"
+        );
+        removal.await.expect("removal");
+        silent.abort();
+        release(file);
+    }
+
+    /// While the lock is held and nothing listens the client keeps waiting;
+    /// once it is free the wait fails at once, as when the daemon exited.
+    #[tokio::test]
+    async fn a_held_lock_keeps_the_client_waiting() {
+        let home = tempfile::tempdir().expect("home");
+        let paths = Paths::new(home.path()).expect("paths");
+        std::fs::create_dir_all(&paths.run).expect("run");
+        let file = std::fs::File::create(paths.run.join("daemon.lock")).expect("lock file");
+        lock_as_the_daemon(&file);
+        let waiting = tokio::spawn({
+            let paths = paths.clone();
+            async move { Client::connect_while_starting(&paths).await.map(drop) }
+        });
+        // It cannot end while the lock is held, however few probes this
+        // sleep allows.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!waiting.is_finished());
+        release(file);
+        let ended = tokio::time::timeout(Duration::from_secs(120), waiting)
+            .await
+            .expect("hang guard")
+            .expect("task");
+        assert!(
+            matches!(&ended, Err(Error::Startup(message)) if message.starts_with("the daemon exited before it accepted connections")),
+            "{ended:?}"
+        );
+    }
 
     /// A refused user config becomes a located `config_error`; other or cut lines do not.
     #[test]

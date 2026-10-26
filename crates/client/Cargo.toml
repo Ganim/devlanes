@@ -21,8 +21,15 @@ tokio.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# The daemon's lock on Unix, so tests take `daemon.lock` exactly as it does.
+fs2 = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 devlanes-sys-windows = { path = "../sys-windows" }

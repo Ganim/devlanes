@@ -2001,6 +2001,16 @@ fn daemon_errors_are_worded_with_hints() {
             4,
         ),
         RpcError::new(
+            "daemon_start_stalled",
+            json!({"step": "proxy", "log": "/home/u/.devlanes/logs/daemon.log", "waited_s": 30}),
+            4,
+        ),
+        RpcError::new(
+            "daemon_start_stalled",
+            json!({"log": "/home/u/.devlanes/logs/daemon.log", "waited_s": 30}),
+            4,
+        ),
+        RpcError::new(
             "name_taken",
             json!({"name": "api", "kind": "service", "lane": "acme@2"}),
             2,

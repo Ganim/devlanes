@@ -59,6 +59,7 @@ pub fn run() -> ExitCode {
             home: paths.home.clone(),
             socket: paths.socket.clone(),
         };
+        readiness.step("singleton lock");
         let server = match Server::bind(options).await {
             Ok(server) => server,
             Err(devlanes_daemon::Error::AlreadyRunning) => {
@@ -83,20 +84,23 @@ pub fn run() -> ExitCode {
             }
         };
         let spawned = readiness.spawned_by_client();
-        let handler = match crate::wiring::engine(&paths, server.shutdown_token(), spawned).await {
-            Ok(handler) => handler,
-            Err(error) => {
-                tracing::error!(%error, "engine startup failed");
-                let _ = readiness.failed(&error.to_string());
-                return 1;
-            }
-        };
+        let step = |step: &str| readiness.step(step);
+        let handler =
+            match crate::wiring::engine(&paths, server.shutdown_token(), spawned, &step).await {
+                Ok(handler) => handler,
+                Err(error) => {
+                    tracing::error!(%error, "engine startup failed");
+                    let _ = readiness.failed(&error.to_string());
+                    return 1;
+                }
+            };
         tracing::info!(
             version = env!("CARGO_PKG_VERSION"),
             pid = std::process::id(),
             "daemon started"
         );
         watch_signals(server.shutdown_token(), server.interrupt_token());
+        readiness.step("reconcile");
         // Taken by whichever comes first: readiness, or a failed reconcile.
         let readiness = std::sync::Mutex::new(Some(readiness));
         let take = || readiness.lock().ok().and_then(|mut slot| slot.take());

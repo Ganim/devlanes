@@ -931,15 +931,17 @@ mod tests {
         let marker = dir.path().join("pid");
         let errors = dir.path().join("pid.err");
         let env = windows_env(&[("MARK", &marker.to_string_lossy().replace('\\', "/"))]);
+        // The sleep never ends by itself, so only the job can have ended it.
+        //
         // `/proc/<pid>/winpid` is the Windows PID behind an MSYS one. MSYS
         // gives `$!` a new Windows PID when the forked shell execs `sleep`, so
-        // a read before that names a copy that exits at once; the loop keeps
-        // the marker current until the test sees `sleep.exe`, and retries a
-        // write that failed. The attempt's deadline ends the loop. Only
-        // external commands redirect: the shell's three standard streams share
-        // one `NUL` handle, and a redirection in the shell itself (`exec 2>`,
-        // `read <`) closes it for the other two. The sleep never ends by
-        // itself, so only the job can have ended it.
+        // a read before that names a copy that exits at once. The loop keeps
+        // the marker current until the test sees `sleep.exe` and retries a
+        // write that failed; the attempt's deadline ends it.
+        //
+        // Redirections stay on external commands because the shell's three
+        // standard streams share one `NUL` handle, and a redirection in the
+        // shell itself (`exec 2>`, `read <`) closes it for the other two.
         let script = "sleep infinity & while :; do \
              cat /proc/$!/winpid > \"$MARK.tmp\" 2>> \"$MARK.err\" \
              && mv -f \"$MARK.tmp\" \"$MARK\" 2>> \"$MARK.err\"; sleep 0.2; done";
@@ -976,6 +978,10 @@ mod tests {
         .expect("watcher");
         let Some(background) = background else {
             let errors = std::fs::read_to_string(&errors).unwrap_or_default();
+            // A detached attempt would keep its job, and `sh.exe` in `dir`,
+            // until the runtime shuts down, after `dir` tried to delete itself.
+            attempt.abort();
+            let _ = attempt.await;
             panic!("the background sleep did not start; the shell wrote: {errors:?}");
         };
         // The attempt may not have set its deadline yet when the marker

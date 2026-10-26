@@ -47,10 +47,15 @@ impl ApiError {
 }
 
 impl From<devlanes_client::Error> for ApiError {
-    /// Keeps structured daemon errors and folds every transport failure into a disconnect.
+    /// Keeps structured daemon errors and folds every transport failure into a
+    /// disconnect. A stalled start becomes the CLI's `daemon_start_stalled`,
+    /// so it names the step and points at the daemon log.
     fn from(error: devlanes_client::Error) -> Self {
         match error {
             devlanes_client::Error::Rpc(rpc) => Self::Rpc(rpc),
+            devlanes_client::Error::StartupStalled { step, log } => Self::Rpc(
+                devlanes_client::startup_stalled_error(step.as_deref(), &log),
+            ),
             other => Self::Disconnected(other.to_string()),
         }
     }

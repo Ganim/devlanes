@@ -1087,6 +1087,7 @@ dependencies = [
  "devlanes-sys-windows",
  "devlanes-version",
  "dunce",
+ "fs2",
  "rustix",
  "serde",
  "serde_json",

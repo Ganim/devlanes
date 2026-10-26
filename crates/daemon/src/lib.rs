@@ -369,7 +369,12 @@ impl Server {
     /// Acquires the lock before inspecting a stale socket, preventing spawn races.
     pub async fn bind(options: Options) -> Result<Self, Error> {
         let prepared = options.clone();
-        let lock = tokio::task::spawn_blocking(move || prepare(&prepared)).await??;
+        let lock = tokio::task::spawn_blocking(move || {
+            let lock = prepare(&prepared)?;
+            std::fs::write(starting_marker(&prepared.home), b"")?;
+            Ok::<_, Error>(lock)
+        })
+        .await??;
         let listener = match LocalListener::bind(&options.socket).await {
             Ok(listener) => listener,
             Err(BindError::AlreadyListening(_)) => return Err(Error::AlreadyRunning),
@@ -411,6 +416,7 @@ impl Server {
         handler: Arc<dyn Handler>,
         ready: impl FnOnce() -> std::io::Result<()>,
     ) -> Result<(), Error> {
+        let marker = starting_marker(&self.options.home);
         if let Err(error) = handler.reconcile().await {
             if let Err(stopped) = handler
                 .shutdown(Shutdown::new(ShutdownReason::Signal))
@@ -419,7 +425,13 @@ impl Server {
                 tracing::warn!(code = %stopped.code, "shutdown after a failed reconcile");
             }
             let _ = local::remove(&self.options.socket).await;
+            let _ = tokio::fs::remove_file(&marker).await;
             return Err(Error::Reconcile(startup_reason(&error)));
+        }
+        // Before the first accept: from here on an unanswered hello means a
+        // hung daemon, which clients report after their connect timeout.
+        if let Err(error) = tokio::fs::remove_file(&marker).await {
+            tracing::warn!(%error, "the starting marker was not removed");
         }
         ready()?;
         let Self {
@@ -528,6 +540,18 @@ fn startup_reason(error: &RpcError) -> String {
         None => error.data.to_string(),
     };
     format!("{}: {message}", error.code.to_uppercase())
+}
+
+/// Name of the file under `run` that exists while a daemon holds the
+/// singleton lock and has not accepted a connection yet; the client reads it
+/// as `devlanes_client::STARTING_MARKER`. Offline maintenance that holds the
+/// lock writes none. A daemon that dies while starting leaves it behind with
+/// the lock free, which clients read as no daemon.
+pub const STARTING_MARKER: &str = "daemon.starting";
+
+/// The [`STARTING_MARKER`] path under `home`.
+fn starting_marker(home: &Path) -> PathBuf {
+    home.join("run").join(STARTING_MARKER)
 }
 
 /// Uses no-follow opens inside owner-only directories to protect the singleton lock.

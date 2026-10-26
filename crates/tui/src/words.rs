@@ -448,6 +448,21 @@ pub fn rpc(error: &RpcError) -> Worded {
             logs_hint(data),
         ),
         "git_failed" => (format!("git failed: {message}"), rest, None),
+        "daemon_start_stalled" => {
+            let waited = data.get("waited_s").and_then(Value::as_u64).unwrap_or(30);
+            (
+                match field(data, "step") {
+                    step if step.is_empty() => {
+                        format!("the daemon reported nothing for {waited}s after it was launched")
+                    }
+                    step => format!(
+                        "the daemon has not finished starting: step \"{step}\" made no progress for {waited}s"
+                    ),
+                },
+                Vec::new(),
+                Some("devlanes daemon logs".into()),
+            )
+        }
         "unsupported" | "unsupported_method" => (
             format!(
                 "the daemon is too old for {}; upgrade and restart it",
@@ -594,6 +609,29 @@ mod tests {
         let worded = api(&ApiError::Disconnected("client I/O: broken pipe".into()));
         assert_eq!(worded.summary, "can't reach the daemon");
         assert_eq!(worded.detail, ["client I/O: broken pipe"]);
+    }
+
+    /// A stalled start reads as the CLI words it, from the client error, and
+    /// points at the daemon log.
+    #[test]
+    fn stalled_starts_name_the_step_and_the_log() {
+        let log = std::path::PathBuf::from("/home/acme/.devlanes/logs/daemon.log");
+        let stalled = |step: Option<&str>| {
+            api(&ApiError::from(devlanes_client::Error::StartupStalled {
+                step: step.map(str::to_owned),
+                log: log.clone(),
+            }))
+        };
+        let worded = stalled(Some("proxy"));
+        assert_eq!(
+            worded.summary,
+            "the daemon has not finished starting: step \"proxy\" made no progress for 30s"
+        );
+        assert_eq!(worded.hint.as_deref(), Some("devlanes daemon logs"));
+        assert_eq!(
+            stalled(None).summary,
+            "the daemon reported nothing for 30s after it was launched"
+        );
     }
 
     #[test]

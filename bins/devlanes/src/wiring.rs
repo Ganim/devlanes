@@ -92,11 +92,16 @@ const IDLE_EXIT_GRACE: Duration = Duration::from_secs(30);
 /// cannot start (no Docker, no CA, a busy proxy port) degrade to reported errors
 /// instead of failing the daemon; an invalid user config fails it. `spawned`:
 /// a client started this daemon, so it may exit when idle (`daemon.exit_when_idle`).
+/// `step` is called as each startup step begins, for the spawning client; a
+/// client waiting on a daemon it did not spawn counts these steps in its hang
+/// guard (`STARTING_WAIT_LIMIT` in devlanes-client).
 pub async fn engine(
     paths: &Paths,
     shutdown: CancellationToken,
     spawned: bool,
+    step: &dyn Fn(&str),
 ) -> anyhow::Result<Arc<dyn devlanes_daemon::Handler>> {
+    step("user config");
     match tokio::task::spawn_blocking(devlanes_sys::raise_nofile_limit).await? {
         Ok(limit) => tracing::info!(?limit, "raised the open-file limit"),
         Err(error) => tracing::warn!(%error, "cannot raise the open-file limit"),
@@ -110,20 +115,27 @@ pub async fn engine(
                 HOSTS_PROBE_TIMEOUT,
             ))
         });
+    step("state database");
     let store = open_store(&paths.db).await?;
+    step("certificate authority");
     let ca_tld = crate::local::ca_tld(&user);
     let (ca_env, ca_status, ca) =
         certificate_authority(&paths.home, user.tls.ca, ca_tld.as_deref()).await;
     let ca_permitted = ca.as_ref().and_then(|ca| ca.permitted_dns_names());
+    step("proxy");
     let idle = Arc::new(devlanes_daemon::idle::IdleBoard::default());
     let routes = Arc::new(proxy(&user, ca, idle.clone(), shutdown.clone()).await);
+    step("docker");
     let infra = Arc::new(ContainerInfra::new().await);
     #[cfg(unix)]
     let mut integ = Integrations::with_runner(Arc::new(PtyUnits(
         devlanes_runner_pty::PtyRunner::default(),
     )));
     #[cfg(windows)]
-    let shell = windows_shell().await;
+    let shell = {
+        step("shell");
+        windows_shell().await
+    };
     #[cfg(windows)]
     let mut integ = Integrations::with_runner(Arc::new(WindowsUnits(
         devlanes_runner_windows::WindowsRunner::default().with_shell(shell.clone()),
@@ -157,6 +169,7 @@ pub async fn engine(
         home: paths.home.clone(),
         exe: std::env::current_exe().ok(),
     });
+    step("hosts");
     #[cfg(unix)]
     {
         integ.hosts = hosts_file(hosts_policy, hosts_tld, hosts_probe)

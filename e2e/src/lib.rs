@@ -19,7 +19,11 @@ use std::{
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Mutex, OnceLock, mpsc},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -302,6 +306,11 @@ pub struct Lab {
     /// Compose projects the guard removes; any also passes the Docker client settings through.
     compose_projects: Vec<String>,
     owned: Mutex<Vec<Owned>>,
+    /// A command found the daemon unreachable or stalled in its start (exit
+    /// 4), or outlived its bound. Tests
+    /// return their errors instead of panicking, so the guard cannot tell a
+    /// failed test otherwise, and the daemon log goes with the home.
+    troubled: AtomicBool,
 }
 
 impl Lab {
@@ -388,6 +397,7 @@ impl Lab {
             deadline,
             compose_projects: Vec::new(),
             owned: Mutex::new(Vec::new()),
+            troubled: AtomicBool::new(false),
         })
     }
 
@@ -536,7 +546,24 @@ impl Lab {
                 stderr: "the test deadline has passed".into(),
             });
         }
-        let output = run_bounded(command, bound)?;
+        let output = run_bounded(command, bound).inspect_err(|error| {
+            if matches!(error, Error::Timeout { .. }) {
+                self.troubled.store(true, Ordering::Relaxed);
+            }
+        })?;
+        // Exit 4 also covers answers a test may expect, such as a protocol
+        // mismatch, which need no log.
+        let unreachable = [
+            "unreachable",
+            "start_stalled",
+            "finished starting",
+            "reported nothing",
+        ]
+        .iter()
+        .any(|words| output.stderr.contains(words));
+        if output.code == Some(4) && unreachable {
+            self.troubled.store(true, Ordering::Relaxed);
+        }
         for value in output.ndjson() {
             self.track_json(&value);
         }
@@ -657,7 +684,10 @@ impl Lab {
                 thread::sleep(Duration::from_millis(100));
             }
         }
-        if thread::panicking() || std::env::var_os("DEVLANES_E2E_DUMP").is_some() {
+        if thread::panicking()
+            || self.troubled.load(Ordering::Relaxed)
+            || std::env::var_os("DEVLANES_E2E_DUMP").is_some()
+        {
             self.dump_daemon_log();
         }
         self.compose_down();

@@ -658,6 +658,23 @@ pub(crate) fn error_message(error: &RpcError) -> (String, Option<Hint>) {
             },
             Some(Hint::command(["daemon", "install"])),
         ),
+        // `{step?, log, waited_s}`: a spawned daemon stopped reporting startup
+        // steps; no step means it reported none since it was launched.
+        "daemon_start_stalled" => {
+            let waited = int(data, "waited_s").unwrap_or(30);
+            (
+                match data.get("step").and_then(Value::as_str) {
+                    Some(step) => format!(
+                        "the daemon has not finished starting: step \"{}\" made no progress for {waited}s",
+                        super::clean(step)
+                    ),
+                    None => {
+                        format!("the daemon reported nothing for {waited}s after it was launched")
+                    }
+                },
+                Some(Hint::command(["daemon", "logs"])),
+            )
+        }
         // The daemon's message already names the command; the hint carries it instead.
         "helper_version_mismatch" => (
             helper_mismatch(data.get("helper").unwrap_or(data)),

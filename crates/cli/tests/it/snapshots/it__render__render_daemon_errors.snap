@@ -50,6 +50,10 @@ error: acme@2 still runs api, worker; stop the lane, then retry
 hint: devlanes stop --lane acme@2
 error: the daemon is shutting down; retry once it has stopped, or start a new one now
 hint: devlanes daemon restart
+error: the daemon has not finished starting: step "proxy" made no progress for 30s
+hint: devlanes daemon logs
+error: the daemon reported nothing for 30s after it was launched
+hint: devlanes daemon logs
 error: api is a configured service of acme@2; give exec another --name, or run the configured service
 hint: devlanes start acme@2:api
 error: seed is a configured task of acme@2; give exec another --name, or run the configured task
