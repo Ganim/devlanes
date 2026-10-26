@@ -490,6 +490,8 @@ fn fixtures() -> Vec<(&'static str, Method, Value)> {
                 {"lane": "acme@2", "unit": "api", "cpu_percent": 12.5, "memory_bytes": 314_572_800, "history": []},
                 {"lane": "acme@2", "unit": "web", "cpu_percent": 0.4, "memory_bytes": 52_428_800, "history": []},
                 {"lane": "acme@0", "unit": "api", "cpu_percent": null, "memory_bytes": null, "history": []},
+                // Stopped within the range: sent for the monitor's graphs, left out of `top`.
+                {"lane": "acme@1", "unit": "worker", "cpu_percent": null, "memory_bytes": null, "history": [[1, 3.0, 1024]], "ended": true},
             ]}),
         ),
         (

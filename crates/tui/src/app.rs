@@ -4305,6 +4305,10 @@ impl App {
             ));
             return;
         }
+        if entry.metrics.removed {
+            self.set_notice(format!("{} no longer exists", entry.metrics.lane));
+            return;
+        }
         if !self.lanes.iter().any(|l| l.reference == entry.lane) {
             return;
         }
@@ -4317,6 +4321,20 @@ impl App {
     fn monitor_control(&mut self, method: Method, rows: &[MonitorRow], effects: &mut Vec<Effect>) {
         let verb = method_verb(method);
         match rows.get(self.monitor.index) {
+            // The reference may name a newer lane by now, which the key must
+            // not start or stop.
+            Some(MonitorRow::Entry(entry)) if entry.metrics.removed => {
+                self.set_notice(format!("{} no longer exists", entry.metrics.lane));
+            }
+            Some(MonitorRow::Group(group)) if group.removed => {
+                self.set_notice(format!(
+                    "{} no longer exists",
+                    group
+                        .key
+                        .strip_suffix(crate::monitor::REMOVED)
+                        .unwrap_or(&group.key)
+                ));
+            }
             Some(MonitorRow::Entry(entry)) if entry.is_container() => {
                 self.set_notice(format!(
                     "{} starts and stops with its lane; select the lane row",

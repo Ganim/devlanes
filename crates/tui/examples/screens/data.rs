@@ -632,7 +632,7 @@ pub fn metrics() -> Metrics {
                 peak_cpu_percent: history.iter().map(|p| p.1).reduce(f64::max),
                 peak_memory_bytes: history.iter().map(|p| p.2).max(),
                 history,
-                windows: Vec::new(),
+                ..LaneMetrics::default()
             }
         })
         .collect();
@@ -688,6 +688,62 @@ pub fn metrics() -> Metrics {
             },
         })),
     }
+}
+
+/// [`metrics`] after acme@2 stopped 40 seconds ago and an earlier acme@1,
+/// cleaned 80 seconds ago, gave its reference to the acme@1 that starts now.
+/// Their rows come back ended, without readings, with the history they had.
+pub fn metrics_with_ended() -> Metrics {
+    let mut metrics = metrics();
+    let rows = [
+        ("acme@2", "api-gateway", 2, 40, 18.0, 210u64 << 20, false),
+        ("acme@2", "web-app", 2, 40, 9.0, 330 << 20, false),
+        ("acme@1", "web-app", 7, 80, 24.0, 280 << 20, true),
+        ("acme@1", "api-orders", 7, 80, 30.0, 190 << 20, true),
+    ];
+    let mut ended: Vec<UnitMetrics> = Vec::new();
+    for (seed, (lane, name, id, gone_s, cpu, memory, removed)) in rows.into_iter().enumerate() {
+        let mut history = history(200 + seed as u64, cpu, memory, false);
+        history.truncate(history.len() - gone_s);
+        ended.push(UnitMetrics {
+            lane: lane.into(),
+            unit: name.into(),
+            kind: "service".into(),
+            // Removed rows lose their peaks with their lane.
+            peak_cpu_percent: (!removed).then_some(cpu * 1.5),
+            peak_memory_bytes: (!removed).then_some(memory + memory / 10),
+            history,
+            series: Some(format!("unit:1:{id}:{name}")),
+            ended: true,
+            removed,
+            ..UnitMetrics::default()
+        });
+    }
+    for (lane, id, removed) in [("acme@2", 2, false), ("acme@1", 7, true)] {
+        let members: Vec<&UnitMetrics> = ended
+            .iter()
+            .filter(|u| u.lane == lane && u.removed == removed)
+            .collect();
+        let points = members.first().map_or(0, |m| m.history.len());
+        let history = (0..points)
+            .map(|i| {
+                let ts = members[0].history[i].0;
+                let cpu = members.iter().map(|m| m.history[i].1).sum();
+                let memory = members.iter().map(|m| m.history[i].2).sum();
+                (ts, cpu, memory)
+            })
+            .collect();
+        metrics.lanes.push(LaneMetrics {
+            lane: lane.into(),
+            history,
+            series: Some(format!("lane:1:{id}")),
+            ended: true,
+            removed,
+            ..LaneMetrics::default()
+        });
+    }
+    metrics.units.extend(ended);
+    metrics
 }
 
 /// `profile.list` for the monorepo.

@@ -159,6 +159,247 @@ async fn units_are_sampled_and_missing_readings_are_absent() {
     .expect("timeout");
 }
 
+/// A `metrics` reply over the last `range_ms`.
+async fn metrics(h: &crate::Harness, context: Context, range_ms: u64) -> Value {
+    h.call(Method::Metrics, json!({"range_ms": range_ms}), context)
+        .await
+        .expect("metrics")
+}
+
+/// The rows of `metrics[list]` (`units` or `lanes`) under `lane`, of `unit`
+/// when given.
+fn rows(metrics: &Value, list: &str, lane: &str, unit: Option<&str>) -> Vec<Value> {
+    metrics[list]
+        .as_array()
+        .expect(list)
+        .iter()
+        .filter(|row| row["lane"] == lane && unit.is_none_or(|unit| row["unit"] == unit))
+        .cloned()
+        .collect()
+}
+
+/// The number of history points of a row.
+fn points(row: &Value) -> usize {
+    row["history"].as_array().map_or(0, Vec::len)
+}
+
+/// Starts `api` in `demo@0` and in the extra lane `second` (`demo@1`) and
+/// waits until both have a history.
+async fn two_lanes(h: &crate::Harness, main: &std::path::Path) -> Context {
+    h.call(Method::LaneNew, json!({"name": "second"}), cx(main))
+        .await
+        .expect("lane new");
+    h.call(Method::Start, json!({}), cx(main))
+        .await
+        .expect("start");
+    let second = Context {
+        lane: Some("second".into()),
+        ..cx(main)
+    };
+    h.call(Method::Start, json!({}), second.clone())
+        .await
+        .expect("start the extra lane");
+    let sampled = eventually(Duration::from_secs(15), || async {
+        let rows = api_rows(h, cx(main)).await;
+        (rows.len() == 2 && rows.iter().all(|row| row.3 >= 2)).then_some(rows)
+    })
+    .await;
+    assert!(sampled.is_some(), "both lanes build a history");
+    second
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A stopped lane's `api` row stays as `ended` with no reading and its
+/// history and peaks, and its lane row has no reading; a cleaned lane's rows
+/// come back `removed` with their history. Both leave once their newest
+/// sample is outside the requested range.
+async fn stopped_and_cleaned_lanes_keep_their_rows_in_range() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let source = Arc::new(Switchable {
+            reporting: AtomicBool::new(true),
+        });
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                metrics: vec![source],
+                ..Setup::default()
+            },
+        )
+        .await;
+        let second = two_lanes(&h, &main).await;
+        let live = metrics(&h, cx(&main), 120_000).await;
+        for row in rows(&live, "units", "demo@1", Some("api"))
+            .iter()
+            .chain(&rows(&live, "lanes", "demo@1", None))
+        {
+            assert_eq!(
+                (&row["ended"], &row["removed"]),
+                (&json!(false), &json!(false)),
+                "{row}"
+            );
+        }
+
+        h.call(Method::Stop, json!({}), second)
+            .await
+            .expect("stop the extra lane");
+        // The lane row ends with the first tick after the stop.
+        let (api, lane) = eventually(Duration::from_secs(15), || async {
+            let reply = metrics(&h, cx(&main), 120_000).await;
+            let lane = rows(&reply, "lanes", "demo@1", None).pop()?;
+            let api = rows(&reply, "units", "demo@1", Some("api")).pop()?;
+            (lane["ended"] == true).then_some((api, lane))
+        })
+        .await
+        .expect("the stopped lane's rows stay");
+        assert_eq!(
+            (&api["ended"], &api["removed"]),
+            (&json!(true), &json!(false)),
+            "{api}"
+        );
+        assert!(
+            api["cpu_percent"].is_null() && api["memory_bytes"].is_null(),
+            "{api}"
+        );
+        assert!(points(&api) >= 2, "history stays: {api}");
+        assert_eq!(
+            api["peak_cpu_percent"], 3.0,
+            "peaks of the start stay: {api}"
+        );
+        assert!(
+            api["series"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("unit:"))
+        );
+        assert!(
+            lane["cpu_percent"].is_null() && lane["memory_bytes"].is_null(),
+            "no current reading: {lane}"
+        );
+        assert_eq!(lane["removed"], false, "{lane}");
+        assert!(points(&lane) >= 2, "{lane}");
+
+        let yes = Context {
+            yes: true,
+            ..cx(&main)
+        };
+        h.call(Method::LaneClean, json!({}), yes)
+            .await
+            .expect("clean the first lane");
+        let cleaned = metrics(&h, cx(&main), 120_000).await;
+        let api = rows(&cleaned, "units", "demo@0", Some("api"));
+        let lane = rows(&cleaned, "lanes", "demo@0", None);
+        assert_eq!((api.len(), lane.len()), (1, 1), "{cleaned}");
+        for row in api.iter().chain(&lane) {
+            assert_eq!(
+                (&row["ended"], &row["removed"]),
+                (&json!(true), &json!(true)),
+                "{row}"
+            );
+            assert!(row["cpu_percent"].is_null() && row["peak_cpu_percent"].is_null());
+            assert!(points(row) >= 2, "history stays: {row}");
+        }
+        assert_eq!(
+            rows(&cleaned, "units", "demo@1", Some("api"))[0]["removed"],
+            false,
+            "the stopped lane still exists"
+        );
+
+        // Nothing runs, so every newest sample leaves a 1 s range.
+        let short = eventually(Duration::from_secs(15), || async {
+            let reply = metrics(&h, cx(&main), 1_000).await;
+            reply["units"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+                .then_some(reply)
+        })
+        .await
+        .expect("ended rows leave the range");
+        let lanes = short["lanes"].as_array().expect("lanes");
+        assert_eq!(lanes.len(), 1, "the removed lane is gone: {short}");
+        assert_eq!(
+            (&lanes[0]["lane"], &lanes[0]["ended"]),
+            (&json!("demo@1"), &json!(true)),
+            "an existing lane keeps its row: {short}"
+        );
+        let wide = metrics(&h, cx(&main), 120_000).await;
+        assert_eq!(rows(&wide, "units", "demo@0", Some("api")).len(), 1);
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A cleaned lane's reference taken by a new lane gives two rows under it,
+/// the removed one and the live one, each with its own series.
+async fn a_reused_reference_keeps_the_cleaned_lanes_rows_apart() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", CONFIG);
+        let source = Arc::new(Switchable {
+            reporting: AtomicBool::new(true),
+        });
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                metrics: vec![source],
+                ..Setup::default()
+            },
+        )
+        .await;
+        two_lanes(&h, &main).await;
+        let yes = Context {
+            yes: true,
+            ..cx(&main)
+        };
+        h.call(Method::LaneClean, json!({"lane": "demo@1"}), yes)
+            .await
+            .expect("clean the extra lane");
+        h.call(Method::LaneNew, json!({"name": "again"}), cx(&main))
+            .await
+            .expect("lane new");
+        let again = Context {
+            lane: Some("again".into()),
+            ..cx(&main)
+        };
+        h.call(Method::Start, json!({}), again)
+            .await
+            .expect("start the new lane");
+        let (api, lanes) = eventually(Duration::from_secs(15), || async {
+            let reply = metrics(&h, cx(&main), 120_000).await;
+            let api = rows(&reply, "units", "demo@1", Some("api"));
+            let lanes = rows(&reply, "lanes", "demo@1", None);
+            let fresh = |rows: &[Value]| {
+                rows.iter()
+                    .any(|row| row["removed"] == false && row["ended"] == false && points(row) >= 1)
+            };
+            (api.len() == 2 && lanes.len() == 2 && fresh(&api) && fresh(&lanes))
+                .then_some((api, lanes))
+        })
+        .await
+        .expect("the new lane is sampled next to the cleaned one");
+        for rows in [&api, &lanes] {
+            let removed = rows.iter().filter(|row| row["removed"] == true).count();
+            assert_eq!(removed, 1, "{rows:?}");
+            assert_ne!(rows[0]["series"], rows[1]["series"], "{rows:?}");
+            let gone = rows
+                .iter()
+                .find(|row| row["removed"] == true)
+                .expect("removed");
+            assert!(gone["cpu_percent"].is_null() && points(gone) >= 2, "{gone}");
+            let live = rows
+                .iter()
+                .find(|row| row["removed"] == false)
+                .expect("live");
+            assert_eq!(live["cpu_percent"], 3.0, "{live}");
+        }
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
 /// Reports each unit's leader at 1 MiB and, when the request names the
 /// daemon, the daemon at 2% CPU and 7 MiB. Keeps the daemon identities it was
 /// asked about.

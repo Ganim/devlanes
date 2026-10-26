@@ -929,14 +929,25 @@ mod tests {
             .expect("Git for Windows' sh.exe");
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("pid");
+        let errors = dir.path().join("pid.err");
         let env = windows_env(&[("MARK", &marker.to_string_lossy().replace('\\', "/"))]);
-        // `/proc/<pid>/winpid` is the Windows PID behind an MSYS one.
-        let script =
-            "sleep 60 & cat /proc/$!/winpid > \"$MARK.tmp\" && mv \"$MARK.tmp\" \"$MARK\"; wait";
-        // `sh.exe` on a loaded runner has taken more than the 10 s an attempt
-        // may last to start the background sleep. With the clock paused, the
-        // attempt's blocking wait keeps tokio from advancing it, so the
-        // deadline passes only when the test advances it, after the sleep runs.
+        // `/proc/<pid>/winpid` is the Windows PID behind an MSYS one. MSYS
+        // gives `$!` a new Windows PID when the forked shell execs `sleep`, so
+        // a read before that names a copy that exits at once; the loop keeps
+        // the marker current until the test sees `sleep.exe`, and retries a
+        // write that failed. The attempt's deadline ends the loop. Only
+        // external commands redirect: the shell's three standard streams share
+        // one `NUL` handle, and a redirection in the shell itself (`exec 2>`,
+        // `read <`) closes it for the other two. The sleep never ends by
+        // itself, so only the job can have ended it.
+        let script = "sleep infinity & while :; do \
+             cat /proc/$!/winpid > \"$MARK.tmp\" 2>> \"$MARK.err\" \
+             && mv -f \"$MARK.tmp\" \"$MARK\" 2>> \"$MARK.err\"; sleep 0.2; done";
+        // Tokio does not advance a paused clock while a `spawn_blocking` task
+        // (the watcher below) runs, so the deadline passes only when the test
+        // advances it, however long `sh.exe` takes to start the sleep. The
+        // real-time limits below only catch a hang and, together, stay under
+        // nextest's 180 s limit.
         tokio::time::pause();
         let attempt = tokio::spawn({
             let cwd = dir.path().to_path_buf();
@@ -947,21 +958,26 @@ mod tests {
         });
         // Real time from here on: the paused clock would not wait.
         let background = tokio::task::spawn_blocking(move || {
-            let limit = std::time::Instant::now() + Duration::from_secs(60);
+            let limit = std::time::Instant::now() + Duration::from_secs(100);
             while std::time::Instant::now() < limit {
                 if let Ok(text) = std::fs::read_to_string(&marker)
                     && let Ok(pid) = text.trim().parse::<u32>()
-                    && let Ok(Some(identity)) = devlanes_sys::identity(pid)
+                    && let Ok(Some(info)) = devlanes_sys::process(pid)
+                    && !info.zombie
+                    && info.name.eq_ignore_ascii_case("sleep.exe")
                 {
-                    return Some(identity);
+                    return Some(info.identity());
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             None
         })
         .await
-        .expect("watcher")
-        .expect("the background sleep started");
+        .expect("watcher");
+        let Some(background) = background else {
+            let errors = std::fs::read_to_string(&errors).unwrap_or_default();
+            panic!("the background sleep did not start; the shell wrote: {errors:?}");
+        };
         // The attempt may not have set its deadline yet when the marker
         // appears; each advance passes whatever deadline it has set.
         let limit = std::time::Instant::now() + Duration::from_secs(30);
@@ -973,9 +989,10 @@ mod tests {
             tokio::time::advance(CMD_ATTEMPT).await;
         }
         assert!(!attempt.await.expect("attempt"));
-        // Ending a job's processes is asynchronous; allow it a moment.
+        // Ending a job's processes is asynchronous.
         let alive = tokio::task::spawn_blocking(move || {
-            for _ in 0..100 {
+            let limit = std::time::Instant::now() + Duration::from_secs(30);
+            while std::time::Instant::now() < limit {
                 if !devlanes_sys::matches(&background).unwrap_or(false) {
                     return false;
                 }

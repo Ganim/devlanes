@@ -103,12 +103,28 @@ pub struct UnitMetrics {
     pub windows: Vec<Window>,
     /// Typical memory of recent runs, when the daemon sends one.
     pub baseline_memory_bytes: Option<u64>,
+    /// The daemon's key of the row's series (`unit:1:2:web`), unique per
+    /// row; `None` from older daemons.
+    pub series: Option<String>,
+    /// Not running now; the row is sent while its history is in range, with
+    /// no `cpu_percent` or `memory_bytes`.
+    pub ended: bool,
+    /// The row's lane no longer exists, so `lane` may name a newer lane.
+    pub removed: bool,
 }
 
 impl UnitMetrics {
     /// True for an infra container row.
     pub fn is_container(&self) -> bool {
         self.kind == "container"
+    }
+
+    /// The name graph caches keep the row's columns under: the daemon's
+    /// series key, else `<lane>:<unit>` for older daemons that send none.
+    pub fn series_key(&self) -> String {
+        self.series
+            .clone()
+            .unwrap_or_else(|| format!("{}:{}", self.lane, self.unit))
     }
 }
 
@@ -123,6 +139,14 @@ pub struct LaneMetrics {
     pub peak_memory_bytes: Option<u64>,
     pub history: Vec<(u64, f64, u64)>,
     pub windows: Vec<Window>,
+    /// The daemon's key of the lane's series (`lane:1:2`); `None` from
+    /// older daemons.
+    pub series: Option<String>,
+    /// No lane sample in the latest tick; `cpu_percent` and `memory_bytes`
+    /// are `None`.
+    pub ended: bool,
+    /// The lane no longer exists, so `lane` may name a newer lane.
+    pub removed: bool,
 }
 
 /// The whole machine, when the daemon reads it.
@@ -247,6 +271,7 @@ impl Metrics {
     /// `units` with `lane`, `unit`, `cpu_percent`, `memory_bytes`, `history`.
     pub fn parse(value: &Value) -> Self {
         let text = |row: &Value, key: &str| row.get(key).and_then(Value::as_str).map(str::to_owned);
+        let flag = |row: &Value, key: &str| row.get(key).and_then(Value::as_bool) == Some(true);
         let units = value
             .get("units")
             .and_then(Value::as_array)
@@ -279,6 +304,9 @@ impl Metrics {
                             history: points(unit),
                             windows: windows(unit),
                             baseline_memory_bytes: number(unit, "baseline_memory_bytes"),
+                            series: text(unit, "series"),
+                            ended: flag(unit, "ended"),
+                            removed: flag(unit, "removed"),
                         })
                     })
                     .collect()
@@ -299,6 +327,9 @@ impl Metrics {
                             peak_memory_bytes: number(lane, "peak_memory_bytes"),
                             history: points(lane),
                             windows: windows(lane),
+                            series: text(lane, "series"),
+                            ended: flag(lane, "ended"),
+                            removed: flag(lane, "removed"),
                         })
                     })
                     .collect()
@@ -1110,6 +1141,38 @@ mod tests {
         assert_eq!(parsed.units[0].history, vec![(1, 1.0, 10), (2, 2.5, 20)]);
         assert_eq!(parsed.units[1].cpu_percent, None);
         assert_eq!(parsed.system, None);
+        // Older daemons send no series key and no ended or removed flags.
+        let api = &parsed.units[0];
+        assert_eq!(
+            (api.series.as_deref(), api.ended, api.removed),
+            (None, false, false)
+        );
+    }
+
+    #[test]
+    fn metrics_parse_reads_series_keys_and_ended_and_removed_rows() {
+        let parsed = Metrics::parse(&json!({
+            "units": [
+                {"lane": "acme@1", "unit": "web", "series": "unit:1:2:web",
+                 "ended": true, "removed": true, "cpu_percent": null, "memory_bytes": null,
+                 "history": [[1, 4.0, 10]]},
+                {"lane": "acme@0", "unit": "api", "series": "unit:1:1:api",
+                 "ended": false, "removed": "yes"}
+            ],
+            "lanes": [{"lane": "acme@1", "series": "lane:1:2", "ended": true, "removed": true,
+                       "history": [[1, 4.0, 10]]}]
+        }));
+        let web = &parsed.units[0];
+        assert_eq!(web.series.as_deref(), Some("unit:1:2:web"));
+        assert!(web.ended && web.removed);
+        assert_eq!((web.cpu_percent, web.memory_bytes), (None, None));
+        assert_eq!(web.history, [(1, 4.0, 10)]);
+        // A flag that is not a boolean reads as false.
+        let api = &parsed.units[1];
+        assert!(!api.ended && !api.removed);
+        let lane = &parsed.lanes[0];
+        assert_eq!(lane.series.as_deref(), Some("lane:1:2"));
+        assert!(lane.ended && lane.removed);
     }
 
     #[test]

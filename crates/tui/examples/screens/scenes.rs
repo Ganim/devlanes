@@ -16,7 +16,7 @@ use devlanes_client::update::InstallMethod;
 use devlanes_proto::{AttachResult, Event, Page, RpcError, events};
 use devlanes_tui::{
     ApiError,
-    app::{App, Dialog, Effect, Msg, RowId, Section, Selected, Target},
+    app::{App, Dialog, Effect, MonitorId, Msg, RowId, Section, Selected, Target},
     logfile::{LogChunk, LogPosition},
     settings,
     start::StartFrame,
@@ -584,6 +584,25 @@ fn scenes() -> Vec<Scene> {
                 f.key(KeyCode::Enter);
                 f.key(KeyCode::Char('j'));
                 f.key(KeyCode::Char('j'));
+                f.key(KeyCode::Char('j'));
+            },
+        },
+        Scene {
+            name: "monitor-ended",
+            what: "a stopped lane (acme@2) and a removed one (an earlier acme@1): kept for their history, no meters; acme@0 folded, the removed lane's web-app selected",
+            setup: |f| {
+                f.shifted('M');
+                f.app.monitor.folded.insert("acme@0".into());
+                f.app.monitor.selected = Some(MonitorId::Row {
+                    lane: "acme@1 (removed)".into(),
+                    unit: "web-app".into(),
+                    series: Some("unit:1:7:web-app".into()),
+                });
+                f.send(Msg::Metrics(Ok(data::metrics_with_ended())));
+                // A frame tells the keys how many rows the table shows, and
+                // moving brings the selection into view on short screens.
+                let _ = render(&f.app);
+                f.key(KeyCode::Char('k'));
                 f.key(KeyCode::Char('j'));
             },
         },

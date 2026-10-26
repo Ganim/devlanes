@@ -15,15 +15,25 @@ use super::{draw_box, fit, hit, spans_width, unit_look};
 use crate::api::{Metrics, UnitMetrics};
 use crate::app::{App, Click};
 use crate::graph::{self, load_color};
-use crate::monitor::{Entry, Group, MonitorRow, SortKey, group_order};
+use crate::monitor::{Entry, Group, MonitorRow, SortKey, group_key, group_order};
 use crate::text::{self, clean, clip};
 use crate::theme::{Glyph, Glyphs, Theme, Tier, Tone};
 
 /// `(ts, value)` samples, a value normalized for a graph.
 type Points = Vec<(u64, f64)>;
 
-/// A history named for the column cache.
-type Named<'a> = (String, &'a [(u64, f64, u64)]);
+/// One part of the devlanes total.
+struct Part<'a> {
+    /// Names the part's columns in the cache: the daemon's series key when
+    /// it sends one. A lane cleaned and made again keeps its reference, and
+    /// under the reference the cache would hand the new lane the old lane's
+    /// finished columns.
+    name: String,
+    history: &'a [(u64, f64, u64)],
+    /// The part has no reading now, so its newest column is not carried to
+    /// the right edge.
+    ended: bool,
+}
 
 /// What every part of the page reads.
 struct Page<'a> {
@@ -96,16 +106,21 @@ impl Page<'_> {
             .collect()
     }
 
-    /// The histories the devlanes total adds up, each with a name for the
-    /// column cache: lane series plus shared containers, each container
-    /// once; every unit on older daemons, which send no lane series.
-    fn total_series(&self) -> Vec<Named<'_>> {
+    /// The histories the devlanes total adds up: lane series plus shared
+    /// containers, each container once; every unit on older daemons, which
+    /// send no lane series. Ended and removed rows stay in while the daemon
+    /// sends them, so the total keeps their past columns.
+    fn total_series(&self) -> Vec<Part<'_>> {
         let Some(metrics) = self.metrics else {
             return Vec::new();
         };
-        /// A unit's or container's history, named by lane and unit.
-        fn unit(u: &UnitMetrics) -> Named<'_> {
-            (format!("{}:{}", u.lane, u.unit), u.history.as_slice())
+        /// A unit's or container's part.
+        fn unit(u: &UnitMetrics) -> Part<'_> {
+            Part {
+                name: u.series_key(),
+                history: u.history.as_slice(),
+                ended: u.ended,
+            }
         }
         if metrics.lanes.is_empty() {
             return metrics.units.iter().map(unit).collect();
@@ -113,7 +128,14 @@ impl Page<'_> {
         metrics
             .lanes
             .iter()
-            .map(|l| (format!("lane:{}", l.lane), l.history.as_slice()))
+            .map(|l| Part {
+                name: l
+                    .series
+                    .clone()
+                    .unwrap_or_else(|| format!("lane:{}", l.lane)),
+                history: l.history.as_slice(),
+                ended: l.ended,
+            })
             .chain(metrics.units.iter().filter(|u| u.shared).map(unit))
             .collect()
     }
@@ -131,17 +153,21 @@ impl Page<'_> {
         };
         let mut totals: Vec<Option<f64>> = vec![None; count];
         let hold = usize::try_from(graph::HOLD_MS / SAMPLE_MS).unwrap_or(0);
-        for (name, history) in self.total_series() {
-            let points: Points = history
+        for part in self.total_series() {
+            let points: Points = part
+                .history
                 .iter()
                 .map(|p| (p.0, if cpu { p.1 } else { p.2 as f64 }))
                 .collect();
-            let mut columns = self.columns(&format!("{prefix}:{name}"), &points, count, max);
+            let key = format!("{prefix}:{}", part.name);
+            let mut columns = self.columns(&key, &points, count, max);
             // A part whose newest sample landed in the previous second (the
             // collectors stamp at different moments of one tick) keeps its
             // value at the right edge, so the newest total is not just the
-            // other parts. A part gone for longer drops out.
-            if let Some(last) = columns.iter().rposition(Option::is_some)
+            // other parts. A part gone for longer drops out, and so does one
+            // that ended: carrying its last value would count it as running.
+            if !part.ended
+                && let Some(last) = columns.iter().rposition(Option::is_some)
                 && count - 1 - last <= hold
             {
                 let value = columns[last];
@@ -188,17 +214,22 @@ impl Page<'_> {
         )
     }
 
-    /// Lanes and shared groups with their CPU and memory now, for meters.
+    /// Lanes and shared groups with their CPU and memory now, for meters;
+    /// only those with a reading now.
     fn groups(&self) -> Vec<(String, f64, u64)> {
         let Some(metrics) = self.metrics else {
             return Vec::new();
         };
+        // Stopped and removed lanes stay in the reply for their history; as
+        // meters they would read 0% and push the running lanes down.
+        let reading = |cpu: Option<f64>, memory: Option<u64>| cpu.is_some() || memory.is_some();
         let mut groups: Vec<(String, f64, u64)> = metrics
             .lanes
             .iter()
+            .filter(|l| reading(l.cpu_percent, l.memory_bytes))
             .map(|l| {
                 (
-                    l.lane.clone(),
+                    group_key(&l.lane, l.removed),
                     l.cpu_percent.unwrap_or(0.0),
                     l.memory_bytes.unwrap_or(0),
                 )
@@ -206,18 +237,17 @@ impl Page<'_> {
             .collect();
         // Shared containers count in their own group; older daemons send no
         // lane series, so every unit sums into its lane.
-        for unit in metrics
-            .units
-            .iter()
-            .filter(|u| u.shared || metrics.lanes.is_empty())
-        {
-            match groups.iter_mut().find(|g| g.0 == unit.lane) {
+        for unit in metrics.units.iter().filter(|u| {
+            (u.shared || metrics.lanes.is_empty()) && reading(u.cpu_percent, u.memory_bytes)
+        }) {
+            let key = group_key(&unit.lane, unit.removed);
+            match groups.iter_mut().find(|g| g.0 == key) {
                 Some(group) => {
                     group.1 += unit.cpu_percent.unwrap_or(0.0);
                     group.2 += unit.memory_bytes.unwrap_or(0);
                 }
                 None => groups.push((
-                    unit.lane.clone(),
+                    key,
                     unit.cpu_percent.unwrap_or(0.0),
                     unit.memory_bytes.unwrap_or(0),
                 )),
@@ -851,8 +881,9 @@ fn mem_box(page: &Page, frame: &mut Frame, area: Rect, wide: bool, names: usize,
     }
     // The three largest rows, where there is room under the meters.
     let room = usize::from(inner.height).saturating_sub(lines.len() + 1);
-    if room > 1 {
-        let mut largest = page.entries();
+    let mut largest = page.entries();
+    largest.retain(|e| e.metrics.memory_bytes.is_some());
+    if room > 1 && !largest.is_empty() {
         largest.sort_by_key(|e| std::cmp::Reverse(e.metrics.memory_bytes.unwrap_or(0)));
         lines.push(Line::styled(" largest", theme.quiet()));
         let width = usize::from(meters_width) - 9;
@@ -1406,7 +1437,16 @@ fn entry_line(
             let (glyph, tone, _) = super::list::container_look(page.app, lane, container);
             (glyph, tone)
         }
+        // An ended row whose lane is gone, or that status no longer lists.
+        (None, None) if entry.ended() => (theme.glyph(Glyph::Stopped), Tone::Quiet),
         (None, None) => (theme.glyph(Glyph::Ready), Tone::Ok),
+    };
+    // The name of a row kept only for its history reads like a stopped
+    // unit's in the lane list.
+    let label_style = if entry.ended() {
+        theme.quiet()
+    } else {
+        Style::new()
     };
     let total = page.memory_total();
     let mut spans = Vec::new();
@@ -1417,10 +1457,10 @@ fn entry_line(
                 let name_width = width.saturating_sub(indent.len() + 2);
                 spans.push(Span::raw(indent.to_owned()));
                 spans.push(Span::styled(format!("{glyph} "), theme.tone(tone)));
-                spans.push(Span::raw(format!(
-                    "{:<name_width$} ",
-                    clip(&entry.label, name_width)
-                )));
+                spans.push(Span::styled(
+                    format!("{:<name_width$} ", clip(&entry.label, name_width)),
+                    label_style,
+                ));
             }
             Column::Cpu => match entry.metrics.cpu_percent {
                 Some(cpu) => {
@@ -1460,7 +1500,7 @@ fn entry_line(
                 theme.quiet(),
             )),
             Column::Uptime => {
-                let text = if entry.is_container() {
+                let text = if entry.is_container() || entry.ended() {
                     "-".into()
                 } else {
                     uptime(entry.started_at_ms, page.now)
@@ -1468,7 +1508,9 @@ fn entry_line(
                 spans.push(Span::raw(format!("{text:>width$} ")));
             }
             Column::Spark => {
-                let key = format!("spark:{}:{}", entry.lane, entry.unit);
+                // A newer lane under the same reference must not get this
+                // row's cached columns.
+                let key = format!("spark:{}", entry.metrics.series_key());
                 spans.extend(sparkline(page, &key, &entry.metrics.history, width, 100.0));
                 spans.push(Span::raw(" "));
             }
@@ -1541,7 +1583,7 @@ fn group_line(page: &Page, layout: &Layout, group: &Group) -> Line<'static> {
             Column::Spark => {
                 // A lane against the whole machine; without the core count,
                 // against the highest it reached, a scale that only grows.
-                let key = format!("spark:{}", group.key);
+                let key = format!("spark:{}", group.series.as_deref().unwrap_or(&group.key));
                 let scale = page.cpus().map_or_else(
                     || {
                         let peak = group.history.iter().map(|p| p.1).fold(100.0, f64::max);
@@ -1568,7 +1610,9 @@ fn group_line(page: &Page, layout: &Layout, group: &Group) -> Line<'static> {
 
 /// The selected row's series and what the detail says about it.
 struct Series {
-    /// Names the series for the column cache and its sticky scales.
+    /// Names the series for the column cache and its sticky scales: the
+    /// daemon's series key when it sends one, so the detail of a newer lane
+    /// or unit under the same reference starts from its own columns.
     key: String,
     name: String,
     place: String,
@@ -1609,7 +1653,7 @@ fn selected_series(page: &Page) -> Option<Series> {
                 status.push(format!("shared by {}", entry.metrics.lanes.join(", ")));
             }
             Series {
-                key: format!("{}:{}", entry.lane, entry.unit),
+                key: entry.metrics.series_key(),
                 name: entry.label.clone(),
                 place: entry.lane.clone(),
                 status,
@@ -1647,7 +1691,10 @@ fn selected_series(page: &Page) -> Option<Series> {
             }
         }
         MonitorRow::Group(group) => Series {
-            key: format!("lane:{}", group.key),
+            key: group
+                .series
+                .clone()
+                .unwrap_or_else(|| format!("lane:{}", group.key)),
             name: group.key.clone(),
             place: group.branch.clone().unwrap_or_default(),
             status: vec![

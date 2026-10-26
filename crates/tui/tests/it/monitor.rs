@@ -3,7 +3,7 @@
 
 use crossterm::event::KeyCode;
 use devlanes_tui::{
-    DaemonMetrics, Metrics, SystemMetrics, UnitMetrics,
+    DaemonMetrics, LaneMetrics, Metrics, SystemMetrics, UnitMetrics,
     app::{App, Effect, MonitorId, Msg, Selected, SortKey, View},
 };
 use ratatui::style::Color;
@@ -112,6 +112,7 @@ async fn the_sort_steps_reverses_and_the_selection_follows_its_row() -> TestResu
     let web = MonitorId::Row {
         lane: "acme@0".into(),
         unit: "web".into(),
+        series: None,
     };
     assert_eq!(app.monitor.selected, Some(web.clone()));
     // web gets busy and moves up; the cursor goes with it.
@@ -428,5 +429,238 @@ async fn the_memory_graph_is_the_hosts_memory_colored_by_its_pressure() -> TestR
     assert!(colored.contains(&Color::Green), "{colored:?}");
     let newest = columns.iter().max_by_key(|c| c.0).map(|c| c.1);
     assert_eq!(newest, Some(Color::Green));
+    Ok(())
+}
+
+/// A lane series keyed `series` around `cpu`, sampled until `until`; one
+/// that stopped before now has no reading and is `ended`.
+fn lane(lane: &str, series: &str, cpu: f64, until: u64, removed: bool) -> LaneMetrics {
+    let live = until == NOW;
+    LaneMetrics {
+        lane: lane.into(),
+        cpu_percent: live.then_some(cpu),
+        memory_bytes: live.then_some(100 << 20),
+        history: history(NOW, cpu, 100 << 20)
+            .into_iter()
+            .filter(|p| p.0 <= until)
+            .collect(),
+        series: Some(series.into()),
+        ended: !live,
+        removed,
+        ..LaneMetrics::default()
+    }
+}
+
+/// [`metrics`] with lane series instead of acme@0's units, so the totals
+/// add lanes.
+fn with_lanes(lanes: Vec<LaneMetrics>) -> Metrics {
+    Metrics {
+        units: Vec::new(),
+        lanes,
+        ..metrics(0.0, 0.0)
+    }
+}
+
+/// The oldest 16 cells of each row of the cpu box's graph at 120x40, which
+/// hold samples from more than a minute ago.
+fn oldest_cpu_columns(app: &App) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let terminal = draw(app)?;
+    let buffer = terminal.backend().buffer();
+    let height = buffer.area.height;
+    let top = (0..height)
+        .find(|y| buffer[(0, *y)].symbol() == "┌")
+        .ok_or("no cpu box")?;
+    let bottom = (top + 1..height)
+        .find(|y| buffer[(0, *y)].symbol() == "└")
+        .ok_or("no cpu box bottom")?;
+    // The plot starts after the box border and the four-cell axis with its tick.
+    Ok((top + 1..bottom - 1)
+        .map(|y| (6..22).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect())
+}
+
+#[tokio::test]
+async fn the_total_keeps_a_stopped_lanes_past_columns() -> TestResult {
+    let live = with_lanes(vec![
+        lane("acme@0", "lane:1:1", 40.0, NOW, false),
+        lane("acme@1", "lane:1:2", 200.0, NOW, false),
+    ]);
+    let mut app = monitor(120, 40, live.clone()).await;
+    let before = oldest_cpu_columns(&app)?;
+    // acme@1 stopped 30 seconds ago, then was cleaned: the daemon still sends
+    // its series, without a reading, while the history is in range.
+    for removed in [false, true] {
+        let stopped = with_lanes(vec![
+            lane("acme@0", "lane:1:1", 40.0, NOW, false),
+            lane("acme@1", "lane:1:2", 200.0, NOW - 30_000, removed),
+        ]);
+        app.update(Msg::Metrics(Ok(stopped.clone())));
+        assert_eq!(oldest_cpu_columns(&app)?, before, "removed: {removed}");
+        // A frame without the cache's help draws the same past.
+        let fresh = monitor(120, 40, stopped).await;
+        assert_eq!(oldest_cpu_columns(&fresh)?, before, "removed: {removed}");
+    }
+    // Without acme@1 the past is lower, so the columns above were its own.
+    let without = monitor(
+        120,
+        40,
+        with_lanes(vec![lane("acme@0", "lane:1:1", 40.0, NOW, false)]),
+    )
+    .await;
+    assert_ne!(oldest_cpu_columns(&without)?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopped_and_removed_lanes_keep_their_rows_but_no_meters() -> TestResult {
+    let mut data = with_lanes(vec![
+        lane("acme@0", "lane:1:1", 40.0, NOW, false),
+        lane("acme@1", "lane:1:2", 90.0, NOW - 30_000, false),
+        lane("acme@4", "lane:1:5", 90.0, NOW - 30_000, true),
+    ]);
+    let stopped = |lane: &str, unit: &str, series: &str, removed: bool| UnitMetrics {
+        lane: lane.into(),
+        unit: unit.into(),
+        kind: "service".into(),
+        history: history(NOW, 90.0, 100 << 20)
+            .into_iter()
+            .filter(|p| p.0 <= NOW - 30_000)
+            .collect(),
+        series: Some(series.into()),
+        ended: true,
+        removed,
+        ..UnitMetrics::default()
+    };
+    data.units = vec![
+        UnitMetrics {
+            lane: "acme@0".into(),
+            unit: "web".into(),
+            kind: "service".into(),
+            cpu_percent: Some(40.0),
+            memory_bytes: Some(100 << 20),
+            history: history(NOW, 40.0, 100 << 20),
+            series: Some("unit:1:1:web".into()),
+            ..UnitMetrics::default()
+        },
+        stopped("acme@1", "api", "unit:1:2:api", false),
+        stopped("acme@4", "search", "unit:1:5:search", true),
+    ];
+    let app = monitor(120, 40, data).await;
+    let terminal = draw(&app)?;
+    let text = terminal.backend().to_string();
+    let lines: Vec<&str> = text.lines().collect();
+    let top = lines
+        .iter()
+        .position(|line| line.contains("┌ cpu"))
+        .ok_or("no cpu box")?;
+    let boxes = lines[top..]
+        .iter()
+        .position(|line| line.contains("┌ units"))
+        .ok_or("no table")?;
+    let meters = lines[top..top + boxes].join("\n");
+    assert!(meters.contains("acme@0"), "{meters}");
+    // Stopped and removed lanes keep their table rows, not their meters.
+    for gone in ["acme@1", "acme@4", "search", "api"] {
+        assert!(!meters.contains(gone), "{gone}: {meters}");
+    }
+    let table = lines[top + boxes..].join("\n");
+    for kept in ["acme@1", "acme@4 (removed)", "search"] {
+        assert!(table.contains(kept), "{kept}: {table}");
+    }
+    // Nothing to ask about the removed lane's unit: a stopped glyph and word.
+    let row = table
+        .lines()
+        .find(|line| line.contains("search"))
+        .unwrap_or_default();
+    assert!(row.contains("· search") && row.contains("stopped"), "{row}");
+    // Keys on it would act on whichever lane has the reference by now.
+    let mut app = app;
+    app.update(key(KeyCode::Char('G')));
+    assert_eq!(
+        app.monitor.selected,
+        Some(MonitorId::Row {
+            lane: "acme@4 (removed)".into(),
+            unit: "search".into(),
+            series: Some("unit:1:5:search".into()),
+        })
+    );
+    assert!(app.update(key(KeyCode::Char('x'))).is_empty());
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text == "acme@4 no longer exists"),
+        "{:?}",
+        app.notice.as_ref().map(|n| &n.text)
+    );
+    app.update(key(KeyCode::Char('k')));
+    assert!(app.update(key(KeyCode::Char('r'))).is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_removed_lanes_with_one_reference_do_not_share_columns() -> TestResult {
+    // acme@1 was busy and cleaned; a new acme@1, idle, was cleaned since.
+    let first = with_lanes(vec![
+        lane("acme@0", "lane:1:1", 10.0, NOW, false),
+        lane("acme@1", "lane:1:2", 300.0, NOW - 30_000, true),
+    ]);
+    let second = with_lanes(vec![
+        lane("acme@0", "lane:1:1", 10.0, NOW, false),
+        lane("acme@1", "lane:1:3", 0.0, NOW - 10_000, true),
+    ]);
+    let mut app = monitor(120, 40, first).await;
+    let busy = oldest_cpu_columns(&app)?;
+    app.update(Msg::Metrics(Ok(second.clone())));
+    let after = oldest_cpu_columns(&app)?;
+    // The cache would hand the second lane the first one's columns if both
+    // went by their reference.
+    let fresh = monitor(120, 40, second).await;
+    assert_eq!(after, oldest_cpu_columns(&fresh)?);
+    assert_ne!(after, busy);
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_removed_lanes_in_one_reply_keep_their_rows_apart() -> TestResult {
+    // Both acme@1 lanes were cleaned within the range: one `(removed)` group
+    // holds a `web` of each.
+    let mut data = with_lanes(vec![
+        lane("acme@1", "lane:1:2", 300.0, NOW - 30_000, true),
+        lane("acme@1", "lane:1:3", 0.0, NOW - 10_000, true),
+    ]);
+    let web = |series: &str, until: u64| UnitMetrics {
+        lane: "acme@1".into(),
+        unit: "web".into(),
+        kind: "service".into(),
+        history: history(NOW, 50.0, 100 << 20)
+            .into_iter()
+            .filter(|p| p.0 <= until)
+            .collect(),
+        series: Some(series.into()),
+        ended: true,
+        removed: true,
+        ..UnitMetrics::default()
+    };
+    data.units = vec![
+        web("unit:1:2:web", NOW - 30_000),
+        web("unit:1:3:web", NOW - 10_000),
+    ];
+    let mut app = monitor(120, 40, data).await;
+    let rows = app.monitor_rows();
+    let Some(devlanes_tui::app::MonitorRow::Group(group)) = rows.first() else {
+        return Err("no group first".into());
+    };
+    // Neither lane series is the group's total, so the header sums its rows.
+    assert_eq!(
+        (group.key.as_str(), group.series.as_deref()),
+        ("acme@1 (removed)", None)
+    );
+    assert_ne!(rows[1].id(), rows[2].id(), "one id would pin the selection");
+    // `j` reaches the second `web` and stays there.
+    app.update(key(KeyCode::Char('g')));
+    app.update(key(KeyCode::Char('j')));
+    app.update(key(KeyCode::Char('j')));
+    assert_eq!(app.monitor.index, 2);
+    assert_eq!(app.monitor.selected, Some(rows[2].id()));
     Ok(())
 }

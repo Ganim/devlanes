@@ -73,6 +73,10 @@ pub enum MonitorId {
     Row {
         lane: String,
         unit: String,
+        /// The daemon's series key. Two lanes cleaned under one reference
+        /// share a `(removed)` group, and without it their rows would have one
+        /// id, which pins the selection to the first of them.
+        series: Option<String>,
     },
     /// The devlanes daemon's own row.
     Daemon,
@@ -160,16 +164,33 @@ impl MonitorView {
     }
 }
 
+/// What a removed lane's group key adds to its reference.
+pub(crate) const REMOVED: &str = " (removed)";
+
+/// The table group of a row or lane series in `lane`: the lane itself, or
+/// `<lane> (removed)` once the daemon no longer has the lane, so a newer
+/// lane that took the same reference gets a group of its own.
+pub fn group_key(lane: &str, removed: bool) -> String {
+    if removed {
+        format!("{lane}{REMOVED}")
+    } else {
+        lane.to_owned()
+    }
+}
+
 /// A unit or container row.
 #[derive(Debug, Clone)]
 pub struct Entry {
+    /// The row's group: its lane, `<project> (shared)` or `<lane> (removed)`
+    /// (see [`group_key`]).
     pub lane: String,
     pub unit: String,
     /// The display name, else the unit name.
     pub label: String,
     /// `svc`, `task`, `exec` or `ctr`.
     pub kind: &'static str,
-    /// The shown state word, `up` for containers without one.
+    /// The shown state word; containers without one read `up`, or `stopped`
+    /// once ended.
     pub state: String,
     pub started_at_ms: Option<u64>,
     /// The listed unit, for its glyph and color.
@@ -179,8 +200,14 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// True for an infra container row.
     pub fn is_container(&self) -> bool {
         self.kind == "ctr"
+    }
+
+    /// True when the row is not running now and stays only for its history.
+    pub fn ended(&self) -> bool {
+        self.metrics.ended
     }
 
     /// Highest memory over the range, from the history.
@@ -200,6 +227,11 @@ pub struct Group {
     pub key: String,
     pub branch: Option<String>,
     pub shared: bool,
+    /// The lane no longer exists; the key ends in ` (removed)`.
+    pub removed: bool,
+    /// The daemon's key of the lane series the header shows, when it sent
+    /// one.
+    pub series: Option<String>,
     /// Rows in the group, before the filter.
     pub count: usize,
     pub folded: bool,
@@ -228,6 +260,7 @@ impl MonitorRow {
             Self::Entry(entry) => MonitorId::Row {
                 lane: entry.lane.clone(),
                 unit: entry.unit.clone(),
+                series: entry.metrics.series.clone(),
             },
             Self::Daemon(_) => MonitorId::Daemon,
         }
@@ -275,8 +308,14 @@ fn sources(metrics: Option<&Metrics>, lanes: &[LaneSummary]) -> Vec<UnitMetrics>
     }
 }
 
-/// A metrics row with what lane status knows about it.
+/// A metrics row with what lane status knows about it. Ended rows without a
+/// summary to ask read `stopped`; no ended row has an uptime.
 fn entry(row: UnitMetrics, lanes: &[LaneSummary]) -> Entry {
+    // A removed row's reference may already name a newer lane, whose units
+    // and containers say nothing about this row.
+    let lanes = if row.removed { &[][..] } else { lanes };
+    let key = group_key(&row.lane, row.removed);
+    let ended = row.ended;
     let lane = lanes.iter().find(|l| l.reference == row.lane);
     if row.is_container() {
         // Shared containers list in every lane that uses them; any will do.
@@ -291,7 +330,7 @@ fn entry(row: UnitMetrics, lanes: &[LaneSummary]) -> Entry {
             .as_ref()
             .and_then(|c| c.state.clone())
             .map_or_else(
-                || "up".to_owned(),
+                || if ended { "stopped" } else { "up" }.to_owned(),
                 |state| {
                     if state == "running" {
                         "up".into()
@@ -301,7 +340,7 @@ fn entry(row: UnitMetrics, lanes: &[LaneSummary]) -> Entry {
                 },
             );
         return Entry {
-            lane: row.lane.clone(),
+            lane: key,
             unit: name.clone(),
             label: name,
             kind: "ctr",
@@ -321,16 +360,21 @@ fn entry(row: UnitMetrics, lanes: &[LaneSummary]) -> Entry {
         kind_word(&row.kind)
     };
     Entry {
-        lane: row.lane.clone(),
+        lane: key,
         unit: row.unit.clone(),
         label: summary
             .as_ref()
             .map_or_else(|| row.unit.clone(), |u| u.label().to_owned()),
         kind,
-        state: summary
+        state: summary.as_ref().map_or_else(
+            || if ended { "stopped" } else { "running" }.into(),
+            |u| u.shown_state().to_owned(),
+        ),
+        // A stopped unit's summary can keep the start of its last run.
+        started_at_ms: summary
             .as_ref()
-            .map_or_else(|| "running".into(), |u| u.shown_state().to_owned()),
-        started_at_ms: summary.as_ref().and_then(|u| u.started_at_ms),
+            .and_then(|u| u.started_at_ms)
+            .filter(|_| !ended),
         summary,
         container: None,
         metrics: row,
@@ -440,11 +484,19 @@ fn group(
         .iter()
         .filter_map(|m| m.metrics.memory_bytes)
         .reduce(|a, b| a + b);
-    let summary = lanes.iter().find(|l| l.reference == key);
+    let removed = key.ends_with(REMOVED);
+    // A removed lane's reference may belong to a newer lane, whose branch is
+    // not this one's.
+    let summary = lanes
+        .iter()
+        .filter(|_| !removed)
+        .find(|l| l.reference == key);
     Group {
         key: key.to_owned(),
         branch: summary.and_then(|l| l.branch.clone()),
         shared: key.ends_with(" (shared)"),
+        removed,
+        series: lane.and_then(|l| l.series.clone()),
         count: total,
         folded,
         cpu_percent: lane.and_then(|l| l.cpu_percent).or(sum_cpu),
@@ -457,23 +509,34 @@ fn group(
 
 /// Where a group sits, whatever the sort: by project, the project's
 /// `(shared)` group first, then its lanes by number (`@0` on top), then
-/// lanes without a number by name. Sorting groups by their totals made the
-/// shared group and a lane swap places whenever their CPU crossed.
-pub fn group_order(key: &str, lanes: &[LaneSummary]) -> (String, bool, bool, u32, String) {
+/// lanes without a number by name, then removed lanes in the same order.
+/// Sorting groups by their totals made the shared group and a lane swap
+/// places whenever their CPU crossed.
+pub fn group_order(key: &str, lanes: &[LaneSummary]) -> (String, u8, bool, u32, String) {
     if let Some(project) = key.strip_suffix(" (shared)") {
-        return (project.to_owned(), false, false, 0, key.to_owned());
+        return (project.to_owned(), 0, false, 0, key.to_owned());
     }
-    let (project, index) = match lanes.iter().find(|l| l.reference == key) {
+    let (reference, rank) = match key.strip_suffix(REMOVED) {
+        Some(reference) => (reference, 2),
+        None => (key, 1),
+    };
+    // A removed lane's reference may belong to a newer lane now, so its
+    // project and number come from the reference itself.
+    let summary = lanes
+        .iter()
+        .filter(|_| rank == 1)
+        .find(|l| l.reference == reference);
+    let (project, index) = match summary {
         Some(lane) => (lane.project.clone(), lane.index),
         // Metrics can name a lane that status does not list yet.
-        None => match key.rsplit_once('@') {
+        None => match reference.rsplit_once('@') {
             Some((project, index)) => (project.to_owned(), index.parse().ok()),
-            None => (key.to_owned(), None),
+            None => (reference.to_owned(), None),
         },
     };
     (
         project,
-        true,
+        rank,
         index.is_none(),
         index.unwrap_or(0),
         key.to_owned(),
@@ -520,7 +583,17 @@ pub fn rows(
     let mut keys: Vec<&str> = shown.iter().map(|e| e.lane.as_str()).collect();
     keys.sort_unstable();
     keys.dedup();
-    let lane_metrics = |key: &str| metrics.and_then(|m| m.lanes.iter().find(|l| l.lane == key));
+    // Lane series match by group key too, so a removed lane's header shows
+    // its own series and not the newer lane's under the same reference.
+    let lane_metrics = |key: &str| {
+        let mut found = metrics
+            .into_iter()
+            .flat_map(|m| m.lanes.iter())
+            .filter(|l| group_key(&l.lane, l.removed) == key);
+        // Two lanes cleaned under one reference share a group, and neither
+        // series is its total; the header sums its rows instead.
+        found.next().filter(|_| found.next().is_none())
+    };
     let mut groups: Vec<(Group, Vec<&Entry>)> = keys
         .into_iter()
         .map(|key| {
@@ -628,6 +701,198 @@ mod tests {
         assert!(order("acme@2") < order("acme@10"));
         assert!(order("acme@10") < order("acme@docs"));
         assert!(order("acme@docs") < order("beta (shared)"));
+        // Removed lanes follow every live lane of their project, by number.
+        assert!(order("acme@docs") < order("acme@1 (removed)"));
+        assert!(order("acme@1 (removed)") < order("acme@2 (removed)"));
+        assert!(order("acme@2 (removed)") < order("acme@docs (removed)"));
+        assert!(order("acme@docs (removed)") < order("beta (shared)"));
+    }
+
+    /// `row` ended, without readings, its series keyed `series`.
+    fn ended(mut row: UnitMetrics, series: &str, removed: bool) -> UnitMetrics {
+        row.cpu_percent = None;
+        row.memory_bytes = None;
+        row.history = vec![(1_000, 30.0, 300)];
+        row.series = Some(series.into());
+        row.ended = true;
+        row.removed = removed;
+        row
+    }
+
+    /// A lane series without a reading now.
+    fn ended_lane(lane: &str, series: &str, removed: bool) -> LaneMetrics {
+        LaneMetrics {
+            lane: lane.into(),
+            history: vec![(1_000, 30.0, 300)],
+            series: Some(series.into()),
+            ended: true,
+            removed,
+            ..LaneMetrics::default()
+        }
+    }
+
+    #[test]
+    fn removed_rows_group_after_the_live_lanes_without_their_status() {
+        let mut data = metrics();
+        // acme@1 was cleaned and made again: the old lane's web stays for
+        // its history next to the new lane's web.
+        data.units
+            .push(ended(unit("acme@1", "web", 0.0, 0), "unit:1:2:web", true));
+        data.lanes = vec![
+            LaneMetrics {
+                lane: "acme@1".into(),
+                cpu_percent: Some(70.0),
+                series: Some("lane:1:3".into()),
+                ..LaneMetrics::default()
+            },
+            ended_lane("acme@1", "lane:1:2", true),
+        ];
+        let status = LaneSummary {
+            reference: "acme@1".into(),
+            project: "acme".into(),
+            index: Some(1),
+            branch: Some("feat/new".into()),
+            units: vec![UnitSummary {
+                name: "web".into(),
+                lane: "acme@1".into(),
+                state: "ready".into(),
+                started_at_ms: Some(5),
+                ..UnitSummary::default()
+            }],
+            ..LaneSummary::default()
+        };
+        let shown = rows(Some(&data), &[status], &MonitorView::default());
+        assert_eq!(
+            names(&shown),
+            [
+                "[acme (shared)]",
+                "postgres",
+                "[acme@0]",
+                "api",
+                "web",
+                "[acme@1]",
+                "web",
+                "[acme@1 (removed)]",
+                "web",
+            ]
+        );
+        let group = |at: usize| match &shown[at] {
+            MonitorRow::Group(group) => group.clone(),
+            _ => panic!("no group at {at}"),
+        };
+        let live = group(5);
+        assert_eq!(live.branch.as_deref(), Some("feat/new"));
+        assert_eq!(live.series.as_deref(), Some("lane:1:3"));
+        assert_eq!(live.cpu_percent, Some(70.0));
+        // The removed lane's header has its own series, and the new lane's
+        // branch is not its branch.
+        let removed = group(7);
+        assert!(removed.removed && !removed.shared);
+        assert_eq!(removed.branch, None);
+        assert_eq!(removed.series.as_deref(), Some("lane:1:2"));
+        assert_eq!(removed.cpu_percent, None);
+        assert_eq!(removed.history, [(1_000, 30.0, 300)]);
+        let MonitorRow::Entry(entry) = &shown[8] else {
+            panic!("no entry");
+        };
+        // The new lane's web is ready since 5; the removed one is neither.
+        assert_eq!(entry.state, "stopped");
+        assert!(entry.summary.is_none());
+        assert_eq!(entry.started_at_ms, None);
+        assert_ne!(shown[8].id(), shown[6].id());
+    }
+
+    #[test]
+    fn ended_rows_take_their_state_from_status_or_read_stopped() {
+        let status = LaneSummary {
+            reference: "acme@0".into(),
+            units: vec![UnitSummary {
+                name: "api".into(),
+                lane: "acme@0".into(),
+                state: "failed".into(),
+                started_at_ms: Some(5),
+                ..UnitSummary::default()
+            }],
+            containers: vec![ContainerSummary {
+                name: "minio".into(),
+                state: Some("exited 1".into()),
+                ..ContainerSummary::default()
+            }],
+            ..LaneSummary::default()
+        };
+        let container = |name: &str| UnitMetrics {
+            kind: "container".into(),
+            ..unit("acme@0", name, 0.0, 0)
+        };
+        let data = Metrics {
+            units: vec![
+                ended(unit("acme@0", "api", 0.0, 0), "unit:1:1:api", false),
+                ended(unit("acme@0", "docs", 0.0, 0), "unit:1:1:docs", false),
+                ended(container("minio"), "container:1:1:acme-minio-1", false),
+                ended(container("redis"), "container:1:1:acme-redis-1", false),
+            ],
+            ..Metrics::default()
+        };
+        let view = MonitorView {
+            flat: true,
+            sort: SortKey::Name,
+            ..MonitorView::default()
+        };
+        let states: Vec<(String, String, Option<u64>)> = rows(Some(&data), &[status], &view)
+            .iter()
+            .filter_map(|row| match row {
+                MonitorRow::Entry(e) => Some((e.unit.clone(), e.state.clone(), e.started_at_ms)),
+                _ => None,
+            })
+            .collect();
+        let expected = [
+            ("api", "failed", None),
+            ("docs", "stopped", None),
+            ("minio", "exited 1", None),
+            ("redis", "stopped", None),
+        ]
+        .map(|(unit, state, started)| (unit.to_owned(), state.to_owned(), started));
+        assert_eq!(states, expected);
+    }
+
+    #[test]
+    fn a_lane_whose_units_all_ended_keeps_its_header() {
+        let mut data = metrics();
+        data.units[2] = ended(data.units[2].clone(), "unit:1:2:web", false);
+        data.lanes = vec![ended_lane("acme@1", "lane:1:2", false)];
+        let shown = rows(Some(&data), &[], &MonitorView::default());
+        let Some(MonitorRow::Group(group)) = shown.get(5) else {
+            panic!("no acme@1 header: {:?}", names(&shown));
+        };
+        assert_eq!(group.key, "acme@1");
+        assert_eq!((group.cpu_percent, group.memory_bytes), (None, None));
+        assert_eq!(group.series.as_deref(), Some("lane:1:2"));
+    }
+
+    #[test]
+    fn the_selection_settles_when_an_ended_row_drops_out() {
+        let mut data = metrics();
+        data.units
+            .push(ended(unit("acme@1", "web", 0.0, 0), "unit:1:2:web", true));
+        let mut view = MonitorView::default();
+        let before = rows(Some(&data), &[], &view);
+        let last = before.len() - 1;
+        view.select_index(&before, last);
+        assert_eq!(
+            view.selected,
+            Some(MonitorId::Row {
+                lane: "acme@1 (removed)".into(),
+                unit: "web".into(),
+                series: Some("unit:1:2:web".into()),
+            })
+        );
+        // Its history left the range: the row and its group go, and the
+        // selection takes the row now last.
+        data.units.pop();
+        let after = rows(Some(&data), &[], &view);
+        view.settle(&after);
+        assert_eq!(view.index, after.len() - 1);
+        assert_eq!(view.selected, Some(after[after.len() - 1].id()));
     }
 
     #[test]
@@ -719,7 +984,8 @@ mod tests {
             view.selected,
             Some(MonitorId::Row {
                 lane: "acme@1".into(),
-                unit: "web".into()
+                unit: "web".into(),
+                series: None,
             })
         );
         // api calms down; web on acme@1 moves to the top and the cursor follows.

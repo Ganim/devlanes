@@ -1,0 +1,122 @@
+ devlanes  1 acme   2 billing   3 shop                                                                                                       starting feat/checkout: 4 of 8 ready  M monitor   D daemon
+┌ cpu ────────────────────────────────────────────────────────────────────────────────────── devlanes 44% · system 72% ┐┌ mem ──────────────────────────────────────────────── 32.0G · pressure normal ┐
+│100%┤                                                                             acme (shared) ■■■■■■■■■■■■■■■■   1% ││ 32G┤                                  devlanes      10.3G ■■■■■■■■■  32%     │
+│    │                                                                             acme@0        ■■■■■■■■■■■■■■■■  37% ││    │                                  used          22.4G ■■■■■■■■■  70%     │
+│    │       ⡀                                                                     acme@1        ■■■■■■■■■■■■■■■■   6% ││    │                                  available      9.6G  pressure normal   │
+│    │⢂⠈⢂⠈⢄⠐⠄⠐⠄⠑⡀⠡⡀⠢⠈⢂⠈⠄⠐⡀⠡⡀⠢ ⢄⠐⠄⠠⡀⢀ ⢄ ⡀            ⡀                              shop@0        ■■■■■■■■■■■■■■■■   1% ││    │                                                                         │
+│    │ ⠁ ⠂ ⠂⠈ ⠈ ⠈ ⠐ ⠁ ⠂⠈⠂⠈ ⠐ ⠡ ⠂⠈⠄⠐⡀⠡ ⢂⠈⠄⠑⡀⢂⠈⠄⠐⡀⠠⣀⣴⣶⣿⣦⣄⢀                                                               ││    │⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒  acme (shared)  640M ■■■■■■■■■   2%     │
+│    │                                  ⠈ ⠐ ⠁⠈⢢⣴⣼⣿⣿⣿⣿⣿⣿⣷⣦⣈⠄⠐⡀⠢ ⢄ ⡀  ⢀              devlanes      ■■■■■■■■■■■■■■■■  44% ││    │                                  acme@0         8.3G ■■■■■■■■■  26%     │
+│    │⣀ ⡀⢀⡀⢀⡀⢀⡀⢀ ⣀ ⣀ ⡀⢠⡀⢀⡀⢀⡀⣀⡀⣄ ⣀⢀⣀⢠⡀⢀⡀⢀ ⣄ ⣀⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣤⡔ ⠡ ⢂⠐⠄⠑⡀⠢⠈⢄⠐⡀⠡⡀⢂ ⢄⠐⠄⠐ system        ■■■■■■■■■■■■■■■■  72% ││    │                                  acme@1        1001M ■■■■■■■■■   3%     │
+│ 50%┤⣿⣷⣿⣾⣿⣾⣿⣾⣿⣿⣿⣿⣷⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣶⣄⣤⣀⣤⣈⣄⡀⣀⢡⣀⢂⡈⢀⠐⣀⠡⡀⠂⠈⢄                                     ││ 16G┤                                  shop@0         503M ■■■■■■■■■   2%     │
+│    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ busiest                             ││    │                                  largest                                │
+│    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿  stub-stripe                     19%││    │⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣶⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤   postgres                         602M │
+│    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿  api-users                       15%││    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿   api-gateway                      448M │
+│    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿  api-orders                      12%││    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿   checkout-api                     270M │
+│    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿  api-gateway                    9.2%││    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                         │
+│  0%┤⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                     ││   0┤⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                         │
+│    └-2m 32s                                                                  now                                     ││    └-1m 4s                       now                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘
+┌ units 13 of 46 · by lane ───────────────────────────────────────────────────────────────────────────────────────── <- cpu -> ┐┌ web-app · acme@1 (removed) ──────────────────────────────────────────┐
+│  name                  kind state    cpu ▼          mem             peak uptime cpu -44s                                     ││service · stopped                                                     │
+│▾ acme (shared)              shared    5.6%           640M                       ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││                                                                      │
+│  ● postgres            ctr  healthy   4.9% ■■■■■■■■  602M ■■■■■■■■  606M      - ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││cpu   now -  avg 21%  min 9.6%  max 31%                               │
+│  ● redis               ctr  healthy   0.7% ■■■■■■■■   38M ■■■■■■■■   38M      - ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││100%┤                                                                 │
+│▸ acme@0  main · 33                    372%           8.3G                       ▄▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ ││    │                                                                 │
+│▾ acme@1  feat/checkout                 56%          1001M                       ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││    │                                                                 │
+│  ● stub-stripe         svc  ready      19% ■■■■■■■■  157M ■■■■■■■■  158M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▁▁▂▂▁▁▂▂▁▁▂▂ ││    │                                                                 │
+│  ⠋ api-users           svc  starting   15% ■■■■■■■■  119M ■■■■■■■■  120M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││    │                                                                 │
+│  ⠋ api-orders          svc  starting   12% ■■■■■■■■   82M ■■■■■■■■   82M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││    │                                                                 │
+│  ● api-gateway         svc  ready     9.2% ■■■■■■■■  448M ■■■■■■■■  448M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││    │                                                                 │
+│  ⠋ migrate             task running   0.5% ■■■■■■■■  195M ■■■■■■■■  195M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││ 50%┤                                                                 │
+│▾ acme@2  fix/cache                       -              -                       ▁▁▁▁                                         ││    │                                                                 │
+│  · api-gateway         svc  idle                  -              -  211M      - ▁▁▁▁                                         ││    │                                                                 │
+│  · web-app             svc  idle                  -              -  332M      - ▁▁▁▁                                         ││    │                                                                 │
+│▾ acme@1 (removed)                        -              -                                                                    ││    │⣷⡀⣦⡀⣄⢰⡄⢠⡀⢀ ⢀ ⡀                                                   │
+│  · api-orders          svc  stopped               -              -  190M      -                                              ││    │⣿⣿⣿⣿⣿⣿⣿⣾⣿⣾⣷⣼⣦⣿⣦⣷⣄⣧⣸⣦⣰⣄⢰⡄⣦                                        │
+│▌ · web-app             svc  stopped               -              -  281M      -                                              ││    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                        │
+│▾ shop@0  main                         9.2%           503M                       ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││  0%┤⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                        │
+│  ● checkout-api        svc  ready     6.0% ■■■■■■■■  270M ■■■■■■■■  271M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││    └-2m 10s                                                       now│
+│  ● storefront          svc  ready     3.2% ■■■■■■■■  232M ■■■■■■■■  233M 2h 14m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││                                                                      │
+│                                                                                                                              ││mem   now -  avg 270.7M  min 257.7M  max 281.0M                       │
+│                                                                                                                              ││512M┤                                                                 │
+│                                                                                                                              ││    │                                                                 │
+│                                                                                                                              ││    │                                                                 │
+│                                                                                                                              ││    │                                                                 │
+│                                                                                                                              ││    │                                                                 │
+│                                                                                                                              ││    │                                                                 │
+│                                                                                                                              ││    │⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀                                        │
+│                                                                                                                              ││256M┤⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                        │
+│                                                                                                                              ││    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                        │
+│                                                                                                                              ││    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                        │
+│                                                                                                                              ││    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                        │
+│                                                                                                                              ││    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                        │
+│                                                                                                                              ││    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                        │
+│                                                                                                                              ││    │⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                        │
+│                                                                                                                              ││   0┤⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                                        │
+│                                                                                                                              ││    └-2m 10s                                                       now│
+│╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌││                                                                      │
+│● devlanes daemon       dmn  running   1.1% ■■■■■■■■   47M ■■■■■■■■   47M 3h 00m ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+ j k move   enter open unit   < > sort   i reverse   / filter   e flat   m memory graph   s x r start stop restart   esc back                                                     ? all keys   q quit
+
+--- styles (row: columns style) ---
+0: 1-2 bold color220, 3 bold color221, 4-5 bold color214, 6 bold color215, 7-8 bold color208, 11-12 dim, 13-16 red, 20-21 dim, 22-28 yellow, 32-33 dim, 34-37 green, 179 bold, 180-187 bold underlined, 191 bold, 192-198 dim
+1: 0 darkgray, 6-91 darkgray, 92-118 dim, 119-120 darkgray, 126-173 darkgray, 174-198 dim, 199 darkgray
+2: 0 darkgray, 1-4 dim, 5 darkgray, 97-112 darkgray, 119-120 darkgray, 121-124 dim, 125 darkgray, 180-182 green, 183-188 darkgray, 199 darkgray
+3: 0 darkgray, 1-4 dim, 5 darkgray, 97-102 green, 103-112 darkgray, 119-120 darkgray, 121-124 dim, 125 darkgray, 180-183 green, 184-185 yellow, 186-188 darkgray, 189-193 yellow, 199 darkgray
+4: 0 darkgray, 1-4 dim, 5 darkgray, 13 dim, 97 green, 98-112 darkgray, 119-120 darkgray, 121-124 dim, 125 darkgray, 181-195 dim, 199 darkgray
+5: 0 darkgray, 1-4 dim, 5 darkgray, 6-28 dim, 30-35 dim, 37 dim, 39 dim, 52 yellow, 97-112 darkgray, 119-120 darkgray, 121-124 dim, 125 darkgray, 199 darkgray
+6: 0 darkgray, 1-4 dim, 5 darkgray, 7 dim, 9 dim, 11-12 dim, 14 dim, 16 dim, 18 dim, 20 dim, 22-25 dim, 27 dim, 29 dim, 31-36 dim, 38-48 dim, 49-54 yellow, 55 dim, 119-120 darkgray, 121-124 dim, 125 darkgray, 126-157 dim, 180-188 darkgray, 199 darkgray
+7: 0 darkgray, 1-4 dim, 5 darkgray, 40 dim, 42 dim, 44-45 dim, 46-57 yellow, 58-61 dim, 63 dim, 65 dim, 68 dim, 97-103 green, 104-112 darkgray, 119-120 darkgray, 121-124 dim, 125 darkgray, 180-181 green, 182-188 darkgray, 199 darkgray
+8: 0 darkgray, 1-4 dim, 5 darkgray, 6 yellow, 8-15 yellow, 17 yellow, 19 yellow, 21-30 yellow, 32-39 yellow, 41 yellow, 43-60 yellow, 62 dim, 64-76 dim, 78-81 dim, 97-104 green, 105-108 yellow, 109-112 darkgray, 113-117 yellow, 119-120 darkgray, 121-124 dim, 125 darkgray, 180-188 darkgray, 199 darkgray
+9: 0 darkgray, 1-4 dim, 5 darkgray, 6-74 green, 75 dim, 76 green, 77 dim, 78 green, 79-80 dim, 81 green, 119-120 darkgray, 121-124 dim, 125 darkgray, 180-188 darkgray, 199 darkgray
+10: 0 darkgray, 1-4 dim, 5 darkgray, 6-81 green, 83-89 dim, 119-120 darkgray, 121-124 dim, 125 darkgray, 159-166 dim, 199 darkgray
+11: 0 darkgray, 1-4 dim, 5 darkgray, 6-81 green, 119-120 darkgray, 121-124 dim, 125 darkgray, 126-132 green, 133-140 lightred, 141-157 green, 199 darkgray
+12: 0 darkgray, 1-4 dim, 5 darkgray, 6-81 green, 119-120 darkgray, 121-124 dim, 125 darkgray, 126-132 green, 133-140 lightred, 141-157 green, 199 darkgray
+13: 0 darkgray, 1-4 dim, 5 darkgray, 6-81 green, 119-120 darkgray, 121-124 dim, 125 darkgray, 126-132 green, 133-140 lightred, 141-157 green, 199 darkgray
+14: 0 darkgray, 1-4 dim, 5 darkgray, 6-81 green, 119-120 darkgray, 121-124 dim, 125 darkgray, 126-132 green, 133-140 lightred, 141-157 green, 199 darkgray
+15: 0 darkgray, 1-4 dim, 5 darkgray, 6-81 green, 119-120 darkgray, 121-124 dim, 125 darkgray, 126-132 green, 133-140 lightred, 141-157 green, 199 darkgray
+16: 0 darkgray, 5-81 dim, 119-120 darkgray, 125-157 dim, 199 darkgray
+17: 0-199 darkgray
+18: 0 darkgray, 7-26 dim, 27-115 darkgray, 116-119 dim, 120-122 bold, 123-126 dim, 127-128 darkgray, 129-136 bold, 137-156 dim, 157-199 darkgray
+19: 0 darkgray, 1-126 dim, 127-128 darkgray, 199 darkgray
+20: 0 darkgray, 1-2 dim, 3-24 bold, 30-38 dim, 39-68 bold, 82-125 green, 127-128 darkgray, 199 darkgray
+21: 0 darkgray, 3-4 green, 25-38 dim, 45-52 darkgray, 60-67 green, 69-74 dim, 82-125 green, 127-128 darkgray, 199 darkgray
+22: 0 darkgray, 3-4 green, 25-38 dim, 45-52 darkgray, 60 green, 61-67 darkgray, 69-74 dim, 82-125 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+23: 0 darkgray, 1-2 dim, 3-24 bold, 39-68 bold, 82-125 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+24: 0 darkgray, 1-2 dim, 3-24 bold, 39-68 bold, 82-125 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+25: 0 darkgray, 3-4 green, 25-38 dim, 45-46 green, 47-52 darkgray, 60-61 green, 62-67 darkgray, 69-74 dim, 82-125 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+26: 0 darkgray, 25-38 dim, 45 green, 46-52 darkgray, 60-61 green, 62-67 darkgray, 69-74 dim, 82-125 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+27: 0 darkgray, 25-38 dim, 45 green, 46-52 darkgray, 60 green, 61-67 darkgray, 69-74 dim, 82-125 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+28: 0 darkgray, 3-4 green, 25-38 dim, 45 green, 46-52 darkgray, 60-65 green, 66-67 darkgray, 69-74 dim, 82-125 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+29: 0 darkgray, 25-38 dim, 45-52 darkgray, 60-62 green, 63-67 darkgray, 69-74 dim, 82-125 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+30: 0 darkgray, 1-2 dim, 3-24 bold, 39-68 bold, 82-85 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+31: 0 darkgray, 3-74 dim, 82-85 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+32: 0 darkgray, 3-74 dim, 82-85 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+33: 0 darkgray, 1-2 dim, 3-24 bold, 39-68 bold, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-143 green, 145 green, 147 green, 199 darkgray
+34: 0 darkgray, 3-74 dim, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+35: 0 darkgray, 1-2 bold on darkgray, 3-74 bold dim on darkgray, 75-126 bold on darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+36: 0 darkgray, 1-2 dim, 3-24 bold, 39-68 bold, 82-125 green, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+37: 0 darkgray, 3-4 green, 25-38 dim, 45-52 darkgray, 60-63 green, 64-67 darkgray, 69-74 dim, 82-125 green, 127-128 darkgray, 133-198 dim, 199 darkgray
+38: 0 darkgray, 3-4 green, 25-38 dim, 45-52 darkgray, 60-62 green, 63-67 darkgray, 69-74 dim, 82-125 green, 127-128 darkgray, 199 darkgray
+39: 0 darkgray, 127-128 darkgray, 199 darkgray
+40: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+41: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+42: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+43: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+44: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+45: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 199 darkgray
+46: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+47: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+48: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+49: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+50: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+51: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+52: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+53: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+54: 0 darkgray, 127-128 darkgray, 129-132 dim, 133 darkgray, 134-158 green, 199 darkgray
+55: 0 darkgray, 127-128 darkgray, 133-198 dim, 199 darkgray
+56: 0-128 darkgray, 199 darkgray
+57: 0 darkgray, 1-2 green, 25-38 dim, 45-52 darkgray, 60 green, 61-67 darkgray, 69-74 dim, 82-125 green, 127-128 darkgray, 199 darkgray
+58: 0-199 darkgray
+59: 1-3 bold, 4-11 dim, 12-16 bold, 17-29 dim, 30-32 bold, 33-40 dim, 41 bold, 42-52 dim, 53 bold, 54-63 dim, 64 bold, 65-72 dim, 73 bold, 74-89 dim, 90-94 bold, 95-116 dim, 117-119 bold, 120-127 dim, 178 bold, 179-190 dim, 191 bold, 192-199 dim

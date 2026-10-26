@@ -398,7 +398,12 @@ pub(super) fn metrics(data: &Value, cx: &Ctx<'_>) -> Vec<String> {
         lines.extend(table(&rows, "  "));
         return lines;
     }
-    let units = list(data, "units");
+    // The daemon also sends units and lanes that stopped within the range, so
+    // the monitor's graphs keep their past; `top` is about what runs now.
+    let units: Vec<&Value> = list(data, "units")
+        .iter()
+        .filter(|unit| unit.get("ended").and_then(Value::as_bool) != Some(true))
+        .collect();
     if units.is_empty() {
         return vec!["no running units".into()];
     }

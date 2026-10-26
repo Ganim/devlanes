@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use devlanes_core::{ProcessIdentity, UnitRunId, gate::MemoryPressure};
+use devlanes_core::{LaneId, ProcessIdentity, UnitRunId, gate::MemoryPressure};
 use devlanes_metrics::{
     COARSE_CAPACITY, COARSE_INTERVAL_MS, ContainerTarget, History, RAW_CAPACITY, RunTracker,
     Sample, SampleRequest, Series, Subject, UnitKey, UnitTarget, Window, aggregate,
@@ -54,6 +54,14 @@ pub(crate) struct MetricsState {
     /// Infra containers of the last tick with their readings; rebuilt every tick,
     /// so containers that went away drop out.
     pub containers: BTreeMap<Subject, ContainerRow>,
+    /// Row labels of unit, lane and container series as of their last sample,
+    /// so `metrics` can still send rows for what stopped or went away. Keyed
+    /// by series, not by lane reference, because a
+    /// cleaned lane's reference can come back on a new lane. Pruned with the
+    /// series.
+    pub labels: BTreeMap<Subject, Label>,
+    /// Unit, lane and container subjects that got a sample in the latest tick.
+    pub sampled: BTreeSet<Subject>,
     pub interest_until: Option<Instant>,
     /// When the sampler last pruned (Unix ms).
     pub last_prune_ms: u64,
@@ -128,7 +136,30 @@ impl MetricsState {
         self.latest.retain(|key, _| subjects.contains_key(key));
         self.cpu_readings
             .retain(|key, _| subjects.contains_key(key));
+        self.labels
+            .retain(|subject, _| history.series(subject).is_some());
     }
+}
+
+/// What a `metrics` row of one series shows besides its readings, as of the
+/// series' last sample.
+#[derive(Debug, Clone)]
+pub(crate) enum Label {
+    Unit {
+        /// Lane reference.
+        lane: String,
+        unit: String,
+        /// [`crate::model::Kind::word`].
+        kind: &'static str,
+        role: &'static str,
+    },
+    Lane {
+        /// Lane reference.
+        lane: String,
+    },
+    /// The container's row with `latest` cleared, so a gone container never
+    /// reports a reading.
+    Container(ContainerRow),
 }
 
 /// One sampled infra container and the lanes that use it.
@@ -192,6 +223,9 @@ struct Target {
     key: UnitKey,
     /// Leader PID when the target was collected; a restart changes it.
     pid: Option<u32>,
+    /// [`crate::model::Kind::word`], for the unit's [`Label`].
+    kind: &'static str,
+    role: &'static str,
 }
 
 impl Inner {
@@ -227,6 +261,8 @@ impl Inner {
             ..SampleRequest::default()
         };
         let mut containers: BTreeMap<Subject, ContainerRow> = BTreeMap::new();
+        // Lane series with their references, for the lanes' labels.
+        let mut lane_refs: Vec<(Subject, String)> = Vec::new();
         for (project, lane) in self.all_lanes() {
             let project_name = project.name();
             let (reference, lane_id, units) = {
@@ -236,7 +272,15 @@ impl Inner {
                     .units
                     .iter()
                     .filter(|(_, rec)| rec.host.is_alive())
-                    .map(|(name, rec)| (name.clone(), rec.host.clone(), rec.run_id))
+                    .map(|(name, rec)| {
+                        (
+                            name.clone(),
+                            rec.host.clone(),
+                            rec.run_id,
+                            rec.kind.word(),
+                            rec.role,
+                        )
+                    })
                     .collect();
                 let reference = st.reference(&project_name);
                 // Shared infra appears in every lane's list; one row per container.
@@ -263,9 +307,16 @@ impl Inner {
                         .lanes
                         .push(reference.clone());
                 }
+                lane_refs.push((
+                    Subject::Lane {
+                        project: project.id,
+                        lane: record.id,
+                    },
+                    reference.clone(),
+                ));
                 (reference, record.id, units)
             };
-            for (name, host, run) in units {
+            for (name, host, run, kind, role) in units {
                 let key = UnitKey {
                     project: project.id,
                     lane: lane_id,
@@ -283,6 +334,8 @@ impl Inner {
                     run,
                     key,
                     pid: identity.map(|identity| identity.pid),
+                    kind,
+                    role,
                 });
             }
         }
@@ -324,6 +377,44 @@ impl Inner {
             .iter()
             .map(|target| (target.reference.clone(), target.name.clone()))
             .collect();
+        let fresh: BTreeSet<Subject> = totals
+            .iter()
+            .map(|sample| &sample.subject)
+            .filter(|subject| matches!(subject, Subject::Unit(_) | Subject::Lane { .. }))
+            .chain(container_samples.iter().map(|sample| &sample.subject))
+            .cloned()
+            .collect();
+        // Labels only for series that got a point, so each one has a series to
+        // be pruned with and shows what its newest point was taken under.
+        let mut labels: Vec<(Subject, Label)> = Vec::new();
+        for target in &targets {
+            let subject = Subject::Unit(target.key.clone());
+            if fresh.contains(&subject) {
+                labels.push((
+                    subject,
+                    Label::Unit {
+                        lane: target.reference.clone(),
+                        unit: target.name.clone(),
+                        kind: target.kind,
+                        role: target.role,
+                    },
+                ));
+            }
+        }
+        for (subject, reference) in lane_refs {
+            if fresh.contains(&subject) {
+                labels.push((subject, Label::Lane { lane: reference }));
+            }
+        }
+        for (subject, row) in &containers {
+            if row.latest.is_some() {
+                let row = ContainerRow {
+                    latest: None,
+                    ..row.clone()
+                };
+                labels.push((subject.clone(), Label::Container(row)));
+            }
+        }
         let system = self.read_system().await;
         let now = now_ms();
         let (rollups, finished) = {
@@ -352,6 +443,8 @@ impl Inner {
                 );
             }
             state.containers = containers;
+            state.labels.extend(labels);
+            state.sampled = fresh;
             for target in &targets {
                 if let Some(run) = target.run
                     && !state.tracked.contains_key(&run)
@@ -511,10 +604,15 @@ impl Inner {
             if unit.state == "idle" || unit.state == "stopped" || unit.state == "exited" {
                 continue;
             }
-            if let Some((cpu, memory)) = state
-                .latest
-                .get(&(summary.reference.clone(), unit.name.clone()))
-            {
+            let key = (summary.reference.clone(), unit.name.clone());
+            // `latest` outlives a unit that stopped (it is no target any more,
+            // so nothing clears it) and a cleaned lane whose reference a new
+            // lane took; only a sample of the latest tick is current.
+            let current = state
+                .subjects
+                .get(&key)
+                .is_some_and(|subject| state.sampled.contains(subject));
+            if let Some((cpu, memory)) = state.latest.get(&key).filter(|_| current) {
                 unit.cpu_percent = Some(*cpu);
                 unit.memory_bytes = Some(*memory);
             }
@@ -591,25 +689,50 @@ impl Inner {
         let state = lock(&self.metrics);
         let mut units = Vec::new();
         let mut lanes = Vec::new();
+        // Series already sent, so no remembered row repeats one.
+        let mut sent: BTreeSet<Subject> = BTreeSet::new();
+        // Lanes with a record now; remembered rows of any other lane are `removed`.
+        let mut current: BTreeSet<LaneId> = BTreeSet::new();
         for (project, lane) in self.all_lanes() {
             let st = lane.st();
             let reference = st.reference(&project.name());
+            let lane_id = st.record.as_ref().map(|record| record.id);
+            current.extend(lane_id);
             for (name, rec) in &st.units {
-                if !rec.host.is_alive() {
+                let alive = rec.host.is_alive();
+                // From the lane's id rather than `subjects`, which is keyed by
+                // reference and can still point at a cleaned lane's series when
+                // a new lane took its reference. Without a record the unit was
+                // never sampled and has no series.
+                let subject = lane_id.map(|lane| {
+                    Subject::Unit(UnitKey {
+                        project: project.id,
+                        lane,
+                        unit: name.clone(),
+                    })
+                });
+                let series = subject
+                    .as_ref()
+                    .and_then(|subject| state.history.series(subject));
+                if !alive && !view.holds(series) {
                     continue;
                 }
-                let key = (reference.clone(), name.clone());
-                let latest = state.latest.get(&key).copied();
-                let series = state
-                    .subjects
-                    .get(&key)
-                    .and_then(|subject| state.history.series(subject));
+                // `latest` is keyed by reference too; a reading of the latest
+                // tick for this series is the only one that belongs to it.
+                let latest = subject
+                    .as_ref()
+                    .filter(|subject| alive && state.sampled.contains(subject))
+                    .and_then(|_| state.latest.get(&(reference.clone(), name.clone())))
+                    .copied();
                 let peak = st.peaks.get(name).copied().unwrap_or((None, None));
                 let mut row = json!({
                     "lane": reference,
                     "unit": name,
                     "kind": rec.kind.word(),
                     "role": rec.role,
+                    "series": subject.as_ref().map(Subject::key),
+                    "ended": !alive,
+                    "removed": false,
                     "cpu_percent": latest.map(|l| l.0),
                     "memory_bytes": latest.map(|l| l.1),
                     "peak_cpu_percent": peak.1,
@@ -620,20 +743,29 @@ impl Inner {
                     row["windows"] = json!(view.windows(series));
                 }
                 units.push(row);
+                sent.extend(subject);
             }
-            let Some(record) = &st.record else { continue };
-            let series = state.history.series(&Subject::Lane {
+            let Some(lane_id) = lane_id else { continue };
+            let subject = Subject::Lane {
                 project: project.id,
-                lane: record.id,
-            });
-            let Some(series) = series else { continue };
-            let latest = series.latest();
+                lane: lane_id,
+            };
+            let Some(series) = state.history.series(&subject) else {
+                continue;
+            };
+            // The newest point stays for hours once nothing in the lane runs;
+            // only a sample of the latest tick is a current reading.
+            let fresh = state.sampled.contains(&subject);
+            let latest = series.latest().filter(|_| fresh);
             let peak = st
                 .started_at_ms
                 .map(|started| peak_since(series, started))
                 .unwrap_or_default();
             let mut row = json!({
                 "lane": reference,
+                "series": subject.key(),
+                "ended": !fresh,
+                "removed": false,
                 "cpu_percent": latest.map(|p| p.cpu_percent),
                 "memory_bytes": latest.map(|p| p.footprint_bytes),
                 "peak_cpu_percent": peak.0,
@@ -644,8 +776,12 @@ impl Inner {
                 row["windows"] = json!(view.windows(Some(series)));
             }
             lanes.push(row);
+            sent.insert(subject);
         }
-        units.extend(container_entries(&state, &view));
+        let (ended_units, ended_lanes) = remembered_entries(&state, &view, &sent, &current);
+        units.extend(ended_units);
+        lanes.extend(ended_lanes);
+        units.extend(container_entries(&state, &view, &current));
         let system = self.integ.system_pressure.is_some().then(|| {
             let reading = state.system.clone().unwrap_or_default();
             let history: Vec<Value> = state
@@ -774,6 +910,16 @@ struct View {
 }
 
 impl View {
+    /// Whether the series' newest raw point is inside the range. Rows of what
+    /// stopped or went away are sent only while this holds, so a graph keeps
+    /// their past until it leaves the range, and no row comes back with an
+    /// empty history.
+    fn holds(&self, series: Option<&Series>) -> bool {
+        series
+            .and_then(Series::latest)
+            .is_some_and(|point| point.ts_ms >= self.since_ms)
+    }
+
     /// The bucket of a timestamp inside the range.
     fn bucket(&self, ts_ms: u64, points: usize) -> usize {
         let offset = ts_ms.saturating_sub(self.since_ms);
@@ -890,21 +1036,105 @@ impl View {
     }
 }
 
-/// Running infra containers as `metrics` rows with `kind: container`, grouped
-/// under their lane or `<project> (shared)`. Replicas of one service are told
-/// apart by their container name.
-fn container_entries(state: &MetricsState, view: &View) -> Vec<Value> {
-    let running: Vec<(&Subject, &ContainerRow)> = state
+/// Whether a remembered series belongs to a lane that has no record now
+/// (`current` holds the ids that do). Shared containers have no lane and never
+/// count as removed.
+fn lane_removed(subject: &Subject, current: &BTreeSet<LaneId>) -> bool {
+    subject.lane().is_some_and(|lane| !current.contains(&lane))
+}
+
+/// Ended `metrics` rows for remembered unit and lane series that are not in
+/// `sent` and whose newest point is inside the range, as `(units, lanes)`.
+/// They carry the labels of their last sample and no readings or peaks.
+fn remembered_entries(
+    state: &MetricsState,
+    view: &View,
+    sent: &BTreeSet<Subject>,
+    current: &BTreeSet<LaneId>,
+) -> (Vec<Value>, Vec<Value>) {
+    let mut units = Vec::new();
+    let mut lanes = Vec::new();
+    for (subject, label) in &state.labels {
+        if sent.contains(subject) {
+            continue;
+        }
+        let series = state.history.series(subject);
+        if !view.holds(series) {
+            continue;
+        }
+        // Units still in an existing lane's units went out above with its
+        // `peaks`; these belong to a gone lane or are no longer in its units.
+        let mut row = match label {
+            Label::Unit {
+                lane,
+                unit,
+                kind,
+                role,
+            } => json!({
+                "lane": lane,
+                "unit": unit,
+                "kind": kind,
+                "role": role,
+                "peak_cpu_percent": null,
+                "peak_memory_bytes": null,
+            }),
+            Label::Lane { lane } => json!({
+                "lane": lane,
+                "peak_cpu_percent": null,
+                "peak_memory_bytes": null,
+            }),
+            Label::Container(_) => continue,
+        };
+        row["series"] = json!(subject.key());
+        row["ended"] = json!(true);
+        row["removed"] = json!(lane_removed(subject, current));
+        row["cpu_percent"] = Value::Null;
+        row["memory_bytes"] = Value::Null;
+        row["history"] = json!(view.history(series));
+        if view.windows {
+            row["windows"] = json!(view.windows(series));
+        }
+        match label {
+            Label::Lane { .. } => lanes.push(row),
+            _ => units.push(row),
+        }
+    }
+    (units, lanes)
+}
+
+/// Infra containers as `metrics` rows with `kind: container`, grouped under
+/// their lane or `<project> (shared)`: those of the last tick, then remembered
+/// ones that are no longer listed. Containers without a reading this tick are
+/// `ended` and sent only while their newest point is inside the range.
+/// Replicas of one service are told apart by their container name.
+fn container_entries(state: &MetricsState, view: &View, current: &BTreeSet<LaneId>) -> Vec<Value> {
+    let gone = state
+        .labels
+        .iter()
+        .filter_map(|(subject, label)| match label {
+            Label::Container(row) if !state.containers.contains_key(subject) => {
+                Some((subject, row))
+            }
+            _ => None,
+        });
+    let rows: Vec<(&Subject, &ContainerRow)> = state
         .containers
         .iter()
-        .filter(|(_, row)| row.latest.is_some())
+        .chain(gone)
+        .filter(|(subject, row)| row.latest.is_some() || view.holds(state.history.series(subject)))
         .collect();
-    running
-        .iter()
+    rows.iter()
         .map(|(subject, row)| {
-            let replicas = running
+            // Same lane id too: a cleaned lane's container and the one of the
+            // new lane that took its reference share group and name, and are
+            // no replicas of each other.
+            let replicas = rows
                 .iter()
-                .filter(|(_, other)| other.group == row.group && other.name == row.name)
+                .filter(|(other_subject, other)| {
+                    other.group == row.group
+                        && other.name == row.name
+                        && other_subject.lane() == subject.lane()
+                })
                 .count();
             let unit = if replicas > 1 { &row.docker } else { &row.name };
             let series = state.history.series(subject);
@@ -915,6 +1145,9 @@ fn container_entries(state: &MetricsState, view: &View) -> Vec<Value> {
                 "container": row.docker,
                 "shared": row.shared,
                 "lanes": row.lanes,
+                "series": subject.key(),
+                "ended": row.latest.is_none(),
+                "removed": lane_removed(subject, current),
                 "cpu_percent": row.latest.map(|l| l.0),
                 "memory_bytes": row.latest.map(|l| l.1),
                 "history": view.history(series),
@@ -954,6 +1187,15 @@ mod tests {
         state.history.record(&sample);
         let key = ("acme@1".to_owned(), unit.to_owned());
         state.subjects.insert(key.clone(), sample.subject.clone());
+        state.labels.insert(
+            sample.subject.clone(),
+            Label::Unit {
+                lane: key.0.clone(),
+                unit: key.1.clone(),
+                kind: "service",
+                role: "service",
+            },
+        );
         state.latest.insert(key.clone(), (1.0, 1));
         state.cpu_readings.insert(
             key,
@@ -989,10 +1231,222 @@ mod tests {
                 .series(&unit_sample("gone", 0).subject)
                 .is_none()
         );
+        // A label goes with its series, even while the unit is still sampled.
+        let labelled: Vec<&Subject> = state.labels.keys().collect();
+        assert_eq!(labelled, [&unit_sample("recent", 0).subject]);
         // Within a minute of the last pass nothing is walked again.
         track(&mut state, "gone", 0);
         state.prune(now + 1_000, &live);
         assert_eq!(state.subjects.len(), 3);
+        assert_eq!(state.labels.len(), 2);
+    }
+
+    /// A sample of `subject` at `ts_ms`.
+    fn sample(subject: Subject, ts_ms: u64) -> Sample {
+        Sample {
+            subject,
+            cpu_percent: 1.0,
+            footprint_bytes: 1,
+            rss_bytes: 1,
+            ts_ms,
+        }
+    }
+
+    /// A unit subject of project 1.
+    fn unit_in(lane: i64, unit: &str) -> Subject {
+        Subject::Unit(UnitKey {
+            project: ProjectId(1),
+            lane: LaneId(lane),
+            unit: unit.into(),
+        })
+    }
+
+    /// The view of the last 10 s before `now`.
+    fn last_ten_seconds(now: u64) -> View {
+        View {
+            since_ms: now - 10_000,
+            range_ms: 10_000,
+            points: None,
+            windows: false,
+        }
+    }
+
+    /// A row's `(lane, unit, series, removed)`.
+    fn summary(row: &Value) -> (String, String, String, bool) {
+        (
+            row["lane"].as_str().unwrap_or_default().to_owned(),
+            row["unit"].as_str().unwrap_or_default().to_owned(),
+            row["series"].as_str().unwrap_or_default().to_owned(),
+            row["removed"].as_bool().unwrap_or_default(),
+        )
+    }
+
+    /// A series is in range while its newest point is, however old its
+    /// first one.
+    #[test]
+    fn a_series_is_in_range_by_its_newest_point() {
+        let view = last_ten_seconds(100_000);
+        let mut history = History::default();
+        let subject = unit_in(1, "api");
+        assert!(!view.holds(None));
+        history.record(&sample(subject.clone(), 50_000));
+        assert!(!view.holds(history.series(&subject)));
+        history.record(&sample(subject.clone(), 90_000));
+        assert!(view.holds(history.series(&subject)), "exactly at the edge");
+    }
+
+    /// Remembered units and lanes go out as ended rows from their labels while
+    /// they are in range and not sent yet; `removed` when their lane has no
+    /// record. A reused reference keeps two rows apart by series.
+    #[test]
+    fn remembered_rows_follow_the_range_and_the_current_lanes() {
+        let now = 100_000;
+        let mut state = MetricsState::default();
+        let unit_label = |lane: &str, unit: &str| Label::Unit {
+            lane: lane.into(),
+            unit: unit.into(),
+            kind: "service",
+            role: "service",
+        };
+        // Lane 2 was `acme@1` before it was cleaned; lane 3 has that reference now.
+        for (subject, label, ts) in [
+            (unit_in(2, "api"), unit_label("acme@1", "api"), 95_000),
+            (unit_in(3, "api"), unit_label("acme@1", "api"), 99_000),
+            (unit_in(1, "old"), unit_label("acme@0", "old"), 80_000),
+            (unit_in(1, "gone"), unit_label("acme@0", "gone"), 95_000),
+            (
+                Subject::Lane {
+                    project: ProjectId(1),
+                    lane: LaneId(2),
+                },
+                Label::Lane {
+                    lane: "acme@1".into(),
+                },
+                95_000,
+            ),
+        ] {
+            state.history.record(&sample(subject.clone(), ts));
+            state.labels.insert(subject, label);
+        }
+        let sent = BTreeSet::from([unit_in(3, "api")]);
+        let current = BTreeSet::from([LaneId(1), LaneId(3)]);
+        let (units, lanes) = remembered_entries(&state, &last_ten_seconds(now), &sent, &current);
+        let units: Vec<_> = units.iter().map(summary).collect();
+        assert_eq!(
+            units,
+            [
+                (
+                    "acme@0".into(),
+                    "gone".into(),
+                    "unit:1:1:gone".into(),
+                    false
+                ),
+                ("acme@1".into(), "api".into(), "unit:1:2:api".into(), true),
+            ]
+        );
+        assert_eq!(lanes.len(), 1);
+        let lane = &lanes[0];
+        assert_eq!(
+            (&lane["series"], &lane["removed"], &lane["ended"]),
+            (&json!("lane:1:2"), &json!(true), &json!(true))
+        );
+        assert!(lane["cpu_percent"].is_null() && lane["peak_cpu_percent"].is_null());
+        assert_eq!(lane["history"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// A container row of `group`.
+    fn container_row(
+        name: &str,
+        docker: &str,
+        group: &str,
+        latest: Option<(f64, u64)>,
+    ) -> ContainerRow {
+        ContainerRow {
+            name: name.into(),
+            docker: docker.into(),
+            shared: group.ends_with("(shared)"),
+            group: group.into(),
+            lanes: vec!["acme@0".into()],
+            latest,
+        }
+    }
+
+    /// Listed containers with a reading are live; listed ones without and
+    /// gone ones are ended while in range, gone per-lane ones of a lane
+    /// without a record are `removed`, and ended rows count as replicas only
+    /// within their own lane.
+    #[test]
+    fn container_rows_keep_ended_and_gone_containers_in_range() {
+        let now = 100_000;
+        let container = |lane: Option<i64>, id: &str| Subject::Container {
+            project: ProjectId(1),
+            lane: lane.map(LaneId),
+            id: id.into(),
+        };
+        let mut state = MetricsState::default();
+        let listed = [
+            (
+                container(Some(1), "db-1"),
+                container_row("db", "db-1", "acme@0", Some((1.0, 1))),
+            ),
+            (
+                container(Some(1), "db-2"),
+                container_row("db", "db-2", "acme@0", None),
+            ),
+            (
+                container(Some(1), "old-1"),
+                container_row("old", "old-1", "acme@0", None),
+            ),
+            // Lane 3 took lane 2's reference after lane 2 was cleaned.
+            (
+                container(Some(3), "cache-1"),
+                container_row("cache", "cache-1", "acme@1", Some((1.0, 1))),
+            ),
+        ];
+        for (subject, row) in listed {
+            let ts = if row.name == "old" { 50_000 } else { 99_000 };
+            state.history.record(&sample(subject.clone(), ts));
+            state.containers.insert(subject, row);
+        }
+        let gone = [
+            (
+                container(Some(2), "cache-1"),
+                container_row("cache", "cache-1", "acme@1", None),
+            ),
+            (
+                container(None, "shared-1"),
+                container_row("shared", "shared-1", "acme (shared)", None),
+            ),
+        ];
+        for (subject, row) in gone {
+            state.history.record(&sample(subject.clone(), 95_000));
+            state.labels.insert(subject, Label::Container(row));
+        }
+        let current = BTreeSet::from([LaneId(1), LaneId(3)]);
+        let rows = container_entries(&state, &last_ten_seconds(now), &current);
+        let rows: Vec<(String, String, bool, bool)> = rows
+            .iter()
+            .map(|row| {
+                let (lane, unit, _, removed) = summary(row);
+                (
+                    lane,
+                    unit,
+                    row["ended"].as_bool().unwrap_or_default(),
+                    removed,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("acme@0".into(), "db-1".into(), false, false),
+                ("acme@0".into(), "db-2".into(), true, false),
+                // Not replicas of the cleaned lane's `cache`: both keep the name.
+                ("acme@1".into(), "cache".into(), false, false),
+                ("acme (shared)".into(), "shared".into(), true, false),
+                ("acme@1".into(), "cache".into(), true, true),
+            ]
+        );
     }
 
     /// Every pressure word maps to its wire level; anything else has none.

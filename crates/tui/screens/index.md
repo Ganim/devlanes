@@ -282,6 +282,14 @@ flat (e), sorted by memory (>), filtered with /acme
 - 120x40: [txt](monitor-sorted-filtered-120x40.txt) · [png](monitor-sorted-filtered-120x40.png) · [ansi](monitor-sorted-filtered-120x40.ansi)
 - 80x24: [txt](monitor-sorted-filtered-80x24.txt) · [png](monitor-sorted-filtered-80x24.png) · [ansi](monitor-sorted-filtered-80x24.ansi)
 
+## monitor-ended
+
+a stopped lane (acme@2) and a removed one (an earlier acme@1): kept for their history, no meters; acme@0 folded, the removed lane's web-app selected
+
+- 200x60: [txt](monitor-ended-200x60.txt) · [png](monitor-ended-200x60.png) · [ansi](monitor-ended-200x60.ansi)
+- 120x40: [txt](monitor-ended-120x40.txt) · [png](monitor-ended-120x40.png) · [ansi](monitor-ended-120x40.ansi)
+- 80x24: [txt](monitor-ended-80x24.txt) · [png](monitor-ended-80x24.png) · [ansi](monitor-ended-80x24.ansi)
+
 ## monitor-detail
 
 the detail graphs zoomed (z) on api-search
