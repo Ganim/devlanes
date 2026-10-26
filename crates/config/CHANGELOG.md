@@ -1,5 +1,12 @@
 # devlanes-config
 
+## 0.4.2 — 2026-10-26
+
+### Patch changes
+
+- [6b60828](https://github.com/devlanes-run/devlanes/commit/6b608289d00c02d7f6181fad56def7e8546e3977) Added `devlanes config get`, `set` and `unset` to read and change the user config.yaml.
+- [488f5be](https://github.com/devlanes-run/devlanes/commit/488f5bee3ef717386e6ea4ece47870af144ce613) Added `ready.http.host` to set the Host header an http readiness check sends, for apps that answer their health route only on their own hostname, such as `host: ${{ self.hosts[0] }}`.
+
 ## 0.4.1 — 2026-10-26
 
 ### Patch changes

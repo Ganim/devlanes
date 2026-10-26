@@ -1,7 +1,7 @@
 [package]
 name = "devlanes"
 description = "Run a dev environment per git worktree, side by side: CLI, TUI and daemon in one binary"
-version = "0.4.4"
+version = "0.4.5"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

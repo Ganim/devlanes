@@ -1,5 +1,12 @@
 # devlanes-cli
 
+## 0.4.3 — 2026-10-26
+
+### Patch changes
+
+- [6b60828](https://github.com/devlanes-run/devlanes/commit/6b608289d00c02d7f6181fad56def7e8546e3977) Added `devlanes config get`, `set` and `unset` to read and change the user config.yaml.
+- [488f5be](https://github.com/devlanes-run/devlanes/commit/488f5bee3ef717386e6ea4ece47870af144ce613) Changed http readiness timeouts to name the request that failed, such as `GET /-/health (Host: 127.0.0.1:20008) answered 404`, and to suggest `ready.http.host` alongside `path` and `status`.
+
 ## 0.4.2 — 2026-10-26
 
 ### Patch changes

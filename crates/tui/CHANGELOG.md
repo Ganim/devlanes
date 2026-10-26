@@ -1,5 +1,13 @@
 # devlanes-tui
 
+## 0.4.5 — 2026-10-26
+
+### Patch changes
+
+- [488f5be](https://github.com/devlanes-run/devlanes/commit/488f5bee3ef717386e6ea4ece47870af144ce613) Changed http readiness timeouts to name the request that failed, such as `GET /-/health (Host: 127.0.0.1:20008) answered 404`, and to suggest `ready.http.host` alongside `path` and `status`.
+- [9358913](https://github.com/devlanes-run/devlanes/commit/9358913dc7705cf14ec78ae44f957aad388bca01) Added a summary printed when the TUI closes: the devlanes banner, the lane shown last with its state, whether the daemon still runs, and the command that stops the lane while it runs.
+- [8e3a939](https://github.com/devlanes-run/devlanes/commit/8e3a9396b46ed150536bff85c2fd77575162cf26) Fixed the TUI pane losing its colors, cutting long lines and jumping back to the newest line when scrolling up past a service's or task's screen into its stored logs.
+
 ## 0.4.4 — 2026-10-26
 
 ### Patch changes

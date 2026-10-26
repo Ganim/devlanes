@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-cli"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-config"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "devlanes-core",
  "devlanes-preset-next",
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-daemon"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-hosts-helper"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "tempfile",
 ]
@@ -1552,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-resolve"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "async-trait",
  "devlanes-config",
@@ -1584,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-resolver-hosts"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "devlanes-hosts-helper",
@@ -1921,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-tui"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "ab_glyph",
  "async-trait",
