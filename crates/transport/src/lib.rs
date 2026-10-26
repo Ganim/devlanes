@@ -19,6 +19,8 @@
 //!
 //! The box side is [`serve`], driven by injected [`BoxServices`]. [`Link`]
 //! reconnects with backoff and keeps one [`ClientRegistry`] across sessions.
+//! It stops for a [`TransportError::Permanent`] failure and waits for
+//! [`Link::resume`] after a [`TransportError::NeedsAuth`] one.
 //! [`memory`] provides an in-process transport with fault injection for tests.
 
 pub mod memory;

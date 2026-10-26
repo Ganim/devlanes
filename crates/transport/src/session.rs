@@ -153,6 +153,11 @@ impl SessionError {
             _ => false,
         }
     }
+
+    /// Reports whether a person has to sign in again before reconnecting.
+    pub fn is_needs_auth(&self) -> bool {
+        matches!(self, Self::Transport(error) if error.is_needs_auth())
+    }
 }
 
 /// Failure to open a data stream.

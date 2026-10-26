@@ -56,9 +56,11 @@ impl RemoteConnector for EnvConnector {
         &self,
         host: &str,
         _prompts: Arc<dyn RemotePrompter>,
+        connected_before: bool,
     ) -> Result<Arc<dyn Transport>, RpcError> {
         let home = std::env::temp_dir();
         let mut options = SshOptions::new(home);
+        options.connected_before = connected_before;
         if let Some(port) = env("DEVLANES_TEST_SSH_PORT") {
             options.ssh_options.push(format!("Port={port}"));
         }

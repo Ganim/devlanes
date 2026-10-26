@@ -536,7 +536,7 @@ pub enum RemoteCommand {
         #[arg(long)]
         background: bool,
     },
-    /// Disconnect from a box and remove its mirrored ports and hostnames
+    /// Disconnect from a box, remove its mirrored ports and hostnames, and stop reconnecting it after daemon restarts
     Disconnect {
         /// Box to disconnect [default: every box]
         #[arg(id = "disconnect_host", value_name = "HOST")]

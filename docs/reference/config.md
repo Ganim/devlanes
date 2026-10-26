@@ -260,7 +260,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | Path | Type | Description | Example |
 | --- | --- | --- | --- |
 | `history` | object | How long the database keeps records of finished service and task runs, and of remote boxes that no longer connect. | `{"remote_hosts_retention":"90d","retention":"7d"}` |
-| `history.remote_hosts_retention` | duration | How long a remote box stays listed by `devlanes remote ls` after its last successful connection; defaults to `90d` and must be longer than `0s`. A record without a connection time is never deleted by age, and `state.max_size` can delete records sooner. | `90d` |
+| `history.remote_hosts_retention` | duration | How long a remote box stays listed by `devlanes remote ls` after its last successful connection; defaults to `90d` and must be longer than `0s`. A record without a connection time is never deleted by age, and `state.max_size` can delete records sooner. A box connected with `devlanes remote connect` and not disconnected since is never deleted, so the daemon can connect it again after a restart. | `90d` |
 | `history.retention` | duration | How long records of finished service and task runs (start and end times, exit status) are kept after the run ends; defaults to `7d` and must be longer than `0s`. A run that still has log index entries or a metrics summary in the database stays until those expire, and `state.max_size` can delete runs sooner. | `7d` |
 
 ### hostnames

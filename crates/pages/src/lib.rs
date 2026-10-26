@@ -214,8 +214,12 @@ impl<'a> ErrorPage<'a> {
             summary: self.code.summary(),
             hint,
             severity: self.code.severity().as_str(),
-            // Reconnecting is diagnosed from this machine, where the connection lives.
-            remote: self.remote && self.code != ErrorCode::BoxReconnecting,
+            // The connection lives on this machine, so its problems are fixed here.
+            remote: self.remote
+                && !matches!(
+                    self.code,
+                    ErrorCode::BoxReconnecting | ErrorCode::BoxSignInNeeded
+                ),
             logs: self.logs.trim_end(),
             suggestion,
             known,
@@ -409,6 +413,31 @@ mod tests {
         assert!(markdown.contains("devlanes start acme@2:api"));
         let generic = ErrorPage::new(ErrorCode::ServiceIdle).render(Format::Markdown);
         assert!(generic.contains("devlanes start <service>"));
+    }
+
+    /// A box that needs a sign-in is fixed on this machine: its page names the
+    /// box through the daemon's hint and does not send the reader to the box.
+    #[test]
+    fn sign_in_pages_are_diagnosed_here() {
+        let page = ErrorPage::new(ErrorCode::BoxSignInNeeded)
+            .unit(Some("acme@2"), Some("web"))
+            .remote(true)
+            .hint("Sign in to my-box again: devlanes remote connect my-box");
+        let markdown = page.render(Format::Markdown);
+        assert!(
+            markdown.contains("Sign in to my-box again: devlanes remote connect my-box"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("Run these on the box"), "{markdown}");
+        assert!(
+            markdown.contains("`devlanes remote connect <box>`"),
+            "{markdown}"
+        );
+        let idle = ErrorPage::new(ErrorCode::ServiceIdle).remote(true);
+        assert!(
+            idle.render(Format::Markdown)
+                .contains("Run these on the box")
+        );
     }
 
     /// A wrong lane number or a typo suggests the routed host; unrelated hosts do not.

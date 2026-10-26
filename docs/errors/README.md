@@ -12,6 +12,7 @@ While the daemon runs, its proxy answers every request to this machine's HTTP an
 | [DL202](service-starting.md) | `service-starting` | 503 | The service was not ready within 30 seconds. |
 | [DL203](service-failed.md) | `service-failed` | 503 | The service exited or its ready check failed. |
 | [DL204](box-reconnecting.md) | `box-reconnecting` | 503 | The service's box stayed disconnected for 15 seconds. |
+| [DL205](box-sign-in-needed.md) | `box-sign-in-needed` | 503 | The service's box needs you to sign in again before it reconnects. |
 | [DL301](upstream-unreachable.md) | `upstream-unreachable` | 503 | Nothing listened on the service's port for 5 seconds. |
 | [DL302](upstream-failed.md) | `upstream-failed` | 502 | The service broke off the request. |
 | [DL303](unexpected-upgrade.md) | `unexpected-upgrade` | 502 | The service switched protocols unasked. |

@@ -121,6 +121,9 @@ pub struct RemoteHost {
     pub daemon_version: Option<String>,
     /// Unix milliseconds of the last successful connection.
     pub last_connected: Option<i64>,
+    /// Connected with `remote connect` and not disconnected since: a restarted
+    /// daemon connects it again.
+    pub wanted: bool,
 }
 
 impl Store {
@@ -565,6 +568,7 @@ impl Store {
                 address: host.address,
                 daemon_version: host.daemon_version,
                 last_connected: host.last_connected,
+                wanted: i32::from(host.wanted),
             };
             diesel::insert_into(remote_hosts::table)
                 .values(&row)
@@ -573,6 +577,17 @@ impl Store {
                 .set(&row)
                 .execute(c)?;
             Ok(())
+        })
+        .await
+    }
+    /// Marks a remote host as wanted (reconnected after a daemon restart) or
+    /// not. Returns false when no host has that name.
+    pub async fn set_remote_host_wanted(&self, name: String, wanted: bool) -> Result<bool, Error> {
+        self.call(move |c| {
+            let changed = diesel::update(remote_hosts::table.find(name))
+                .set(remote_hosts::wanted.eq(i32::from(wanted)))
+                .execute(c)?;
+            Ok(changed > 0)
         })
         .await
     }
@@ -590,6 +605,7 @@ impl Store {
                     address: row.address,
                     daemon_version: row.daemon_version,
                     last_connected: row.last_connected,
+                    wanted: row.wanted != 0,
                 })
                 .collect())
         })

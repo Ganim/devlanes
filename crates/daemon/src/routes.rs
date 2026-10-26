@@ -312,6 +312,7 @@ impl Inner {
                     RouteStatus::Starting => "starting",
                     RouteStatus::Failed { .. } => "failed",
                     RouteStatus::Reconnecting => "reconnecting",
+                    RouteStatus::SignInNeeded => "sign_in_needed",
                 };
                 // Wildcards have no single address to open.
                 let url = (!route.host.contains('*'))

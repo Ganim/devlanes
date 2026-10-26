@@ -11,6 +11,8 @@
 //!
 //! Listeners stay bound while the link reconnects; connections accepted meanwhile
 //! wait briefly for the new session and the proxy shows a reconnecting page.
+//! They also stay while the link waits for a sign-in; connections then fail at
+//! once and the proxy shows the sign-in page.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -72,7 +74,8 @@ pub(super) struct View {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OpenFailure {
     /// `not_registered`, `hidden`, `not_running` or `dial_failed` when the box
-    /// refused; `timeout`, `interrupted`, `session_lost` or `not_connected` otherwise.
+    /// refused; `timeout`, `interrupted`, `session_lost`, `not_connected` or
+    /// `needs_auth` otherwise.
     pub reason: &'static str,
     pub message: String,
     /// Milliseconds since the Unix epoch.
@@ -193,6 +196,9 @@ enum Phase {
     Connected,
     /// Down but retrying: listeners stay, routes show "reconnecting".
     Down,
+    /// Down until a person signs in again: listeners stay, routes show the
+    /// sign-in page.
+    SignIn,
     /// Given up: nothing stays mirrored.
     Over,
 }
@@ -202,8 +208,9 @@ impl Phase {
     fn of(state: &LinkState) -> Self {
         match state {
             LinkState::Connected(_) => Self::Connected,
+            LinkState::NeedsAuth { .. } => Self::SignIn,
             LinkState::Failed { .. } | LinkState::Stopped => Self::Over,
-            _ => Self::Down,
+            LinkState::Connecting { .. } | LinkState::Retrying { .. } => Self::Down,
         }
     }
 }
@@ -292,9 +299,7 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>) {
         if phase == Phase::Over {
             mirror.clear(&inner).await;
         } else {
-            mirror
-                .reconcile(&inner, &current, phase == Phase::Connected)
-                .await;
+            mirror.reconcile(&inner, &current, phase).await;
         }
         drop(inner);
         // Local lanes matter because their hostnames win over the box's.
@@ -359,7 +364,7 @@ impl Mirror {
     }
 
     /// Binds new ports, drops stale ones, retries conflicts and republishes routes.
-    async fn reconcile(&mut self, engine: &Arc<Inner>, registry: &Registry, connected: bool) {
+    async fn reconcile(&mut self, engine: &Arc<Inner>, registry: &Registry, phase: Phase) {
         let local_hosts: BTreeSet<String> = engine
             .local_route_entries()
             .into_iter()
@@ -634,16 +639,20 @@ impl Mirror {
                     }
                 };
                 let reference = lane_ref(&unit.key.lane);
+                let box_name = &self.conn.name;
+                // The proxy shows the hint on the page of the route's state.
+                let start_hint = if phase == Phase::SignIn {
+                    format!("Sign in to {box_name} again: devlanes remote connect {box_name}")
+                } else {
+                    format!("Start it on {box_name}: devlanes start --lane {reference}")
+                };
                 routes.push(RouteEntry {
                     host: host.host.to_ascii_lowercase(),
                     port: local_port,
                     fallback: host.fallback,
                     host_header_upstream: host.host_header == HostHeader::Upstream,
-                    status: route_status(&unit.state, connected),
-                    start_hint: format!(
-                        "Start it on {}: devlanes start --lane {reference}",
-                        self.conn.name
-                    ),
+                    status: route_status(&unit.state, phase),
+                    start_hint,
                     project: unit.key.lane.project.clone(),
                     lane: reference,
                     unit: unit.key.name.clone(),
@@ -779,10 +788,13 @@ fn lane_ref(lane: &LaneKey) -> String {
     format!("{}@{}", lane.project, lane.lane)
 }
 
-/// Proxy state for a box unit: reconnecting while the link is down.
-fn route_status(state: &str, connected: bool) -> RouteStatus {
-    if !connected {
-        return RouteStatus::Reconnecting;
+/// Proxy state for a box unit: reconnecting while the link is down, and
+/// waiting for a sign-in while it needs a person.
+fn route_status(state: &str, phase: Phase) -> RouteStatus {
+    match phase {
+        Phase::Connected => {}
+        Phase::SignIn => return RouteStatus::SignInNeeded,
+        Phase::Down | Phase::Over => return RouteStatus::Reconnecting,
     }
     match state {
         "starting" => RouteStatus::Starting,
@@ -930,6 +942,14 @@ async fn splice(stream: TcpStream, port: u16, conn: Arc<HostConn>, engine: Weak<
             Some(session) => session,
             // A disconnect in progress closes this listener anyway.
             None if conn.cancel.is_cancelled() => return,
+            None if conn.needs_auth() => {
+                let message = format!(
+                    "box {} needs you to sign in again: run `devlanes remote connect {}`",
+                    conn.name, conn.name
+                );
+                open_failed(&engine, &conn, port, "needs_auth", message);
+                return;
+            }
             None => {
                 let message = match conn.link_error() {
                     Some(error) => format!("box {} is not connected: {error}", conn.name),

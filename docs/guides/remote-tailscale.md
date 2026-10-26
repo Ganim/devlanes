@@ -62,7 +62,7 @@ Tailscale SSH needs an `ssh` rule in the policy as well as network access to por
 
 `users` lists the accounts on the box you may log in as, and the `User` in your `Host` entry must be one of them. With `accept`, devlanes needs nothing else: connects and reconnects authenticate without a prompt, with or without anyone at the terminal.
 
-Restarting or upgrading `tailscaled` on the box ends every Tailscale SSH session, and so does a policy change that removes your access. The daemon reconnects afterwards, or reports `Permission denied` when access is gone.
+Restarting or upgrading `tailscaled` on the box ends every Tailscale SSH session, and so does a policy change that removes your access. The daemon reconnects afterwards. When access is gone, the box waits in `needs_auth` with `Permission denied` until you run `devlanes remote connect` again.
 
 On Linux, Tailscale SSH runs commands through `su -l` when it can, which starts a login shell; OpenSSH runs them in a plain non-interactive shell. The box then reads `~/.profile` (or your shell's login files) for devlanes' commands too, so the `PATH` that finds `devlanes`, and that a box daemon started over this connection inherits, comes from those files. Keep them from printing anything, since devlanes reads the command's output.
 
@@ -98,7 +98,7 @@ devlanes exposes nothing on the tailnet, so `tailscale serve`, Funnel and bindin
 ```sh
 tailscale status                                 # both machines online in the tailnet
 ssh devbox true                                  # same name, same account as devlanes uses
-devlanes remote ls                               # connected, reconnecting (with the error), failed
+devlanes remote ls                               # connected, reconnecting or needs_auth (with the error), failed
 devlanes status --json | jq .clients             # on the box: who is connected
 ```
 

@@ -338,7 +338,9 @@ pub struct HistoryConfig {
     /// How long a remote box stays listed by `devlanes remote ls` after its last
     /// successful connection; defaults to `90d` and must be longer than `0s`. A record
     /// without a connection time is never deleted by age, and `state.max_size` can
-    /// delete records sooner.
+    /// delete records sooner. A box connected with `devlanes remote connect` and not
+    /// disconnected since is never deleted, so the daemon can connect it again after
+    /// a restart.
     #[schemars(extend("examples" = ["90d","180d"]))]
     pub remote_hosts_retention: ConfigDuration,
 }

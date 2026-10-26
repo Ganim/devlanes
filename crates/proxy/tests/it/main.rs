@@ -573,6 +573,38 @@ async fn starting_requests_wait_for_ready() -> Result {
     .await?
 }
 
+/// A route whose box waits for a sign-in answers with its page at once, even
+/// with a long reconnect wait, naming the box through the daemon's hint.
+#[tokio::test]
+async fn sign_in_pages_do_not_wait() -> Result {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut route = Route::new("app.lane.localhost", Upstream::Local(1));
+        route.state = RouteState::SignInNeeded;
+        route.remote = true;
+        route.start_hint = "Sign in to my-box again: devlanes remote connect my-box".into();
+        let limits = ProxyLimits {
+            reconnect_wait: Duration::from_secs(60),
+            ..ProxyLimits::default()
+        };
+        let proxy =
+            Proxy::new(ProxyConfig::default(), RouteTable::new(vec![route])?).with_limits(limits);
+        let running = run_proxy(proxy, None).await?;
+        let response = request(
+            TcpStream::connect(running.address).await?,
+            "app.lane.localhost",
+            "/",
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), 503);
+        assert_eq!(response.headers()["x-devlanes-error"], "box-sign-in-needed");
+        let body = text(response).await?;
+        assert!(body.contains("devlanes remote connect my-box"), "{body}");
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
+}
+
 /// Refused connections are retried, so a server that comes back within `refused_retry`
 /// gets the request; without retries the client gets the unreachable page.
 #[tokio::test]

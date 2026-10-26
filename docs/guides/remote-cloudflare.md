@@ -88,7 +88,7 @@ cloudflared access ssh-config --hostname ssh.example.com --short-lived-cert
 
 It prints a `Match host ssh.example.com exec "... access ssh-gen --hostname %h"` block. Before each connection ssh runs `ssh-gen`, which needs a valid Access token like `access ssh` does and writes a new certificate to `~/.cloudflared`. Since the block matches the hostname, connect with `devlanes remote connect ssh.example.com`, or adapt the block to your alias. On Windows, check the block with `ssh ssh.example.com true` before using it with devlanes.
 
-sshd checks a certificate only when ssh authenticates. On macOS and Linux the devlanes connection stays up after its certificate expires, and a new certificate is needed only when it connects again; on Windows every reconnect authenticates. With `ssh-gen` in the `Match exec` line that happens by itself while the token is valid. Certificates you renew some other way must be renewed before they expire: a reconnect with an expired certificate fails with `Permission denied`, and devlanes stops retrying after that.
+sshd checks a certificate only when ssh authenticates. On macOS and Linux the devlanes connection stays up after its certificate expires, and a new certificate is needed only when it connects again; on Windows every reconnect authenticates. With `ssh-gen` in the `Match exec` line that happens by itself while the token is valid. Certificates you renew some other way must be renewed before they expire: a reconnect with an expired certificate fails with `Permission denied`, and the box waits in `needs_auth` until you renew the certificate and run `devlanes remote connect` again.
 
 ## Checking
 

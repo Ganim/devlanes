@@ -753,6 +753,7 @@ impl RouteSink for ProxyRoutes {
                         devlanes_proxy::RouteState::Failed { log_tail }
                     }
                     RouteStatus::Reconnecting => devlanes_proxy::RouteState::Reconnecting,
+                    RouteStatus::SignInNeeded => devlanes_proxy::RouteState::SignInNeeded,
                 };
                 route.start_hint = entry.start_hint;
                 route.certificate_names = entry.certificate_names;
@@ -893,8 +894,10 @@ impl RemoteConnector for SshConnector {
         &self,
         host: &str,
         prompts: Arc<dyn RemotePrompter>,
+        connected_before: bool,
     ) -> Result<Arc<dyn devlanes_transport::Transport>, RpcError> {
         let mut options = devlanes_transport_ssh::SshOptions::new(&self.home);
+        options.connected_before = connected_before;
         options.askpass = self
             .exe
             .clone()

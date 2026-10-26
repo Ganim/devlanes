@@ -175,10 +175,12 @@ async fn age_retention_preserves_live_rows_and_once_markers() {
         ])
         .await
         .expect("metrics");
-    for (name, clock) in [
-        ("expired", Some(9 * DAY)),
-        ("boundary", Some(10 * DAY)),
-        ("unknown", None),
+    // A wanted box is reconnected by the next daemon, so age never removes it.
+    for (name, clock, wanted) in [
+        ("expired", Some(9 * DAY), false),
+        ("boundary", Some(10 * DAY), false),
+        ("unknown", None, false),
+        ("wanted", Some(DAY), true),
     ] {
         store
             .upsert_remote_host(RemoteHost {
@@ -187,6 +189,7 @@ async fn age_retention_preserves_live_rows_and_once_markers() {
                 address: "example.invalid".into(),
                 daemon_version: None,
                 last_connected: clock,
+                wanted,
             })
             .await
             .expect("remote");
@@ -376,16 +379,19 @@ async fn size_budget_reclaims_pages_and_keeps_history_until_metrics_are_gone() {
         })
         .await
         .expect("summary");
-    store
-        .upsert_remote_host(RemoteHost {
-            name: "box".into(),
-            transport: "ssh".into(),
-            address: "example.invalid".into(),
-            daemon_version: None,
-            last_connected: Some(4),
-        })
-        .await
-        .expect("host");
+    for (name, wanted) in [("box", false), ("wanted", true)] {
+        store
+            .upsert_remote_host(RemoteHost {
+                name: name.into(),
+                transport: "ssh".into(),
+                address: "example.invalid".into(),
+                daemon_version: None,
+                last_connected: Some(4),
+                wanted,
+            })
+            .await
+            .expect("host");
+    }
     let allocation = store
         .allocate(request(BlockOwner::Lane(lane.id), 1))
         .await
@@ -479,6 +485,15 @@ async fn size_budget_reclaims_pages_and_keeps_history_until_metrics_are_gone() {
     assert_eq!(store.projects().await.expect("projects").len(), 1);
     assert_eq!(store.worktrees(p.id).await.expect("worktrees").len(), 1);
     assert_eq!(store.lanes(None).await.expect("lanes").len(), 1);
+    let hosts = store.remote_hosts().await.expect("hosts");
+    assert_eq!(
+        hosts
+            .iter()
+            .map(|host| host.name.as_str())
+            .collect::<Vec<_>>(),
+        ["wanted"],
+        "the size budget keeps a wanted box"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

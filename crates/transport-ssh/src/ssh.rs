@@ -57,6 +57,9 @@ pub struct SshOptions {
     pub ssh_options: Vec<String>,
     /// Prompt relay; without it the master runs with `BatchMode=yes`.
     pub askpass: Option<AskpassConfig>,
+    /// The box connected before, such as one a restarted daemon restores:
+    /// failures are classified as after a first successful tunnel.
+    pub connected_before: bool,
 }
 
 impl SshOptions {
@@ -70,6 +73,7 @@ impl SshOptions {
             auth_timeout: Duration::from_secs(120),
             ssh_options: Vec::new(),
             askpass: None,
+            connected_before: false,
         }
     }
 }
@@ -92,8 +96,12 @@ pub enum SshError {
         status: String,
         /// Tail of ssh's log.
         log: String,
-        /// Whether retrying cannot help, such as rejected credentials.
+        /// Whether retrying cannot help, such as rejected credentials on a
+        /// first connection.
         permanent: bool,
+        /// Rejected credentials or a host key failure on a box that connected
+        /// before: a person has to sign in again.
+        needs_auth: bool,
     },
     /// The master did not finish authenticating in time.
     #[error("ssh to {0} did not authenticate in time")]
@@ -148,12 +156,25 @@ impl SshError {
             | Self::BoxDaemonStopped(_) => false,
         }
     }
+
+    /// Reports whether a person has to sign in again before reconnecting.
+    pub fn needs_auth(&self) -> bool {
+        matches!(
+            self,
+            Self::Master {
+                needs_auth: true,
+                ..
+            }
+        )
+    }
 }
 
 impl From<SshError> for TransportError {
     fn from(error: SshError) -> Self {
         if error.is_permanent() {
             TransportError::permanent(error)
+        } else if error.needs_auth() {
+            TransportError::needs_auth(error)
         } else {
             TransportError::transient(error)
         }
@@ -197,8 +218,10 @@ pub struct SshTransport {
     destination: String,
     options: SshOptions,
     master: Mutex<Option<Master>>,
-    /// Set after the first tunnel opened: from then on a failing DNS lookup is a
-    /// network blip (sleep, Wi-Fi change), not a misspelt host.
+    /// Set after the first tunnel opened, or from the start with
+    /// [`SshOptions::connected_before`]: from then on a failing DNS lookup is a
+    /// network blip (sleep, Wi-Fi change), not a misspelt host, and rejected
+    /// credentials need a person to sign in again.
     connected: AtomicBool,
 }
 
@@ -207,9 +230,9 @@ impl SshTransport {
     pub fn new(destination: impl Into<String>, options: SshOptions) -> Self {
         Self {
             destination: destination.into(),
-            options,
+            connected: AtomicBool::new(options.connected_before),
             master: Mutex::new(None),
-            connected: AtomicBool::new(false),
+            options,
         }
     }
 
@@ -470,20 +493,22 @@ fn private_dir(dir: &Path) -> io::Result<()> {
 ///
 /// A name that does not resolve is permanent only before the first successful
 /// connection (a typo); afterwards it is a network change that will pass.
+/// Rejected credentials and host key failures are permanent before the first
+/// connection and need a person to sign in again after it.
 fn master_error(destination: &str, status: ExitStatus, log: &str, first: bool) -> SshError {
     // These need new credentials or known_hosts changes, not time.
-    const PERMANENT: [&str; 3] = [
+    const AUTH: [&str; 3] = [
         "Permission denied",
         "Host key verification failed",
         "REMOTE HOST IDENTIFICATION HAS CHANGED",
     ];
     let log = log.trim();
-    let permanent = PERMANENT.iter().any(|needle| log.contains(needle))
-        || (first && log.contains("Could not resolve hostname"));
+    let auth = AUTH.iter().any(|needle| log.contains(needle));
     SshError::Master {
         destination: destination.to_owned(),
         status: status.to_string(),
-        permanent,
+        permanent: first && (auth || log.contains("Could not resolve hostname")),
+        needs_auth: auth && !first,
         log: tail(log.as_bytes()),
     }
 }
@@ -713,6 +738,40 @@ mod tests {
             let env = std::fs::read_to_string(dir.path().join("env"))?;
             assert!(env.contains("require=force"), "{env}");
             assert!(env.contains(".askpass"), "{env}");
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Rejected credentials or a changed host key on a box that connected
+    /// before, in this process or as `connected_before` says, wait for a
+    /// person to sign in instead of stopping the link.
+    #[tokio::test]
+    async fn auth_failures_after_a_connection_need_sign_in()
+    -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for log in [
+                "user@box: Permission denied (publickey).",
+                "Host key verification failed.",
+            ] {
+                let dir = tempfile::tempdir()?;
+                let mut options = SshOptions::new(dir.path());
+                options.ssh_program = fake_ssh(dir.path(), log)?;
+                let transport = SshTransport::new("box", options.clone());
+                transport.connected.store(true, Ordering::Relaxed);
+                let Err(error) = transport.connect().await else {
+                    panic!("fake ssh unexpectedly connected");
+                };
+                assert!(error.is_needs_auth(), "{log}: {error}");
+                assert!(!error.is_permanent(), "{log}: {error}");
+
+                options.connected_before = true;
+                let restored = SshTransport::new("box", options);
+                let Err(error) = restored.connect().await else {
+                    panic!("fake ssh unexpectedly connected");
+                };
+                assert!(error.is_needs_auth(), "{log}: {error}");
+            }
             Ok(())
         })
         .await?

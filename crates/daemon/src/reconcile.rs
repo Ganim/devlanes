@@ -48,8 +48,9 @@ impl Inner {
         }
     }
 
-    /// Reloads known projects, records surviving units as orphans and starts
-    /// background loops. Never terminates anything.
+    /// Reloads known projects, records surviving units as orphans, starts
+    /// background loops and reconnects the boxes an earlier daemon had
+    /// connected. Never terminates anything.
     pub(crate) async fn reconcile(self: &Arc<Self>) -> Result<(), RpcError> {
         if !once(&self.background) {
             return Ok(());
@@ -76,6 +77,7 @@ impl Inner {
         });
         self.start_dns().await;
         self.start_background();
+        self.restore_remotes();
         Ok(())
     }
 

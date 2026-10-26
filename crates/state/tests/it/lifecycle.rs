@@ -5,7 +5,60 @@ use devlanes_state::{
     Error, RemoteHost, RollupRow, SCHEMA_VERSION, Store, TaskRunInput, UnitRunInput,
 };
 
-use crate::{lane, project};
+use crate::{lane, project, schema};
+
+#[tokio::test]
+/// Migration 009 keeps the boxes of earlier daemons, none of them wanted, and
+/// its down script keeps the rows.
+async fn migration_adds_unwanted_remote_hosts_and_down_keeps_them() {
+    use diesel::{migration::MigrationSource, prelude::*};
+    use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+    const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+    let dir = tempfile::tempdir().expect("directory");
+    let path = dir.path().join("hosts.db");
+    let mut c = SqliteConnection::establish(path.to_str().expect("path")).expect("connection");
+    c.applied_migrations().expect("ledger");
+    let migrations = <_ as MigrationSource<diesel::sqlite::Sqlite>>::migrations(&MIGRATIONS)
+        .expect("migrations");
+    c.run_migrations(&migrations[..8]).expect("v8");
+    diesel::insert_into(schema::remote_hosts::table)
+        .values((
+            schema::remote_hosts::name.eq("box"),
+            schema::remote_hosts::transport.eq("ssh"),
+            schema::remote_hosts::address.eq("box.example.invalid"),
+            schema::remote_hosts::last_connected.eq(Some(5_i64)),
+        ))
+        .execute(&mut c)
+        .expect("legacy host");
+    let store = Store::open(&path).await.expect("upgrade");
+    assert_eq!(
+        store.schema_version().await.expect("version"),
+        SCHEMA_VERSION
+    );
+    let hosts = store.remote_hosts().await.expect("hosts");
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].last_connected, Some(5));
+    assert!(!hosts[0].wanted, "an earlier daemon's box is not restored");
+    assert!(
+        store
+            .set_remote_host_wanted("box".into(), true)
+            .await
+            .expect("want")
+    );
+    store.close().await.expect("close");
+    // Later migrations go first; 009 is the one under test.
+    while c.applied_migrations().expect("ledger").len() > 9 {
+        c.revert_last_migration(MIGRATIONS)
+            .expect("down a later migration");
+    }
+    c.revert_last_migration(MIGRATIONS).expect("down 009");
+    let names: Vec<String> = schema::remote_hosts::table
+        .select(schema::remote_hosts::name)
+        .load(&mut c)
+        .expect("hosts after down");
+    assert_eq!(names, ["box"]);
+    c.run_pending_migrations(MIGRATIONS).expect("redo 009");
+}
 
 #[tokio::test]
 /// Replacement writes clear nullable fields and history records preserve every value.
@@ -154,6 +207,7 @@ async fn all_lifecycle_write_models_round_trip_and_replace() {
         address: "example.invalid".into(),
         daemon_version: Some("0.1.0".into()),
         last_connected: Some(123),
+        wanted: true,
     };
     store.upsert_remote_host(host.clone()).await.expect("host");
     host.daemon_version = None;
@@ -162,7 +216,22 @@ async fn all_lifecycle_write_models_round_trip_and_replace() {
         .upsert_remote_host(host.clone())
         .await
         .expect("replace host");
+    assert_eq!(store.remote_hosts().await.expect("hosts"), [host.clone()]);
+    assert!(
+        store
+            .set_remote_host_wanted("box".into(), false)
+            .await
+            .expect("disconnect")
+    );
+    host.wanted = false;
     assert_eq!(store.remote_hosts().await.expect("hosts"), [host]);
+    assert!(
+        !store
+            .set_remote_host_wanted("unknown".into(), true)
+            .await
+            .expect("unknown host"),
+        "no row for an unknown host"
+    );
     assert!(matches!(
         store.reset().await,
         Err(Error::ActiveRuns { units: 1, .. })
@@ -407,6 +476,7 @@ async fn history_retention_and_reset() {
             address: "box.example".into(),
             daemon_version: Some("0.1.0".into()),
             last_connected: Some(1),
+            wanted: true,
         })
         .await
         .expect("host");

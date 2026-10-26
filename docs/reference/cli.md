@@ -577,7 +577,7 @@ devlanes remote connect [OPTIONS] <HOST>
 
 ### devlanes remote disconnect
 
-Disconnect from a box and remove its mirrored ports and hostnames
+Disconnect from a box, remove its mirrored ports and hostnames, and stop reconnecting it after daemon restarts
 
 ```text
 devlanes remote disconnect [OPTIONS] [HOST]

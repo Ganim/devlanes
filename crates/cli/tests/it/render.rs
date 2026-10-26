@@ -2006,6 +2006,41 @@ fn failed_opens_are_one_line() {
     );
 }
 
+/// A box waiting for a sign-in shows its state, the error and the command
+/// that resumes it in `remote ls`, and `connect` failing that way says so.
+#[test]
+fn boxes_that_need_a_sign_in_name_the_command() {
+    let hosts = json!({"items": [{
+        "host": "hetzner", "state": "needs_auth", "transport": "ssh",
+        "error": "ssh to hetzner failed (255): Permission denied (publickey).",
+        "fix": "devlanes remote connect hetzner", "ports": [],
+    }], "truncated": false, "next_cursor": null});
+    let text = render_text(Method::HostList, &hosts);
+    assert!(text.contains("needs_auth"), "{text}");
+    assert!(text.contains("Permission denied (publickey)"), "{text}");
+    assert!(text.contains("devlanes remote connect hetzner"), "{text}");
+
+    let error = RpcError::new(
+        "remote_needs_auth",
+        json!({"host": "hetzner", "message": "Permission denied (publickey).",
+               "fix": "devlanes remote connect hetzner"}),
+        4,
+    );
+    let rendered = runtime(OutputMode::Agent).reporter().error(&error, None);
+    assert!(
+        rendered
+            .stderr
+            .contains("hetzner needs you to sign in again: Permission denied (publickey)."),
+        "{}",
+        rendered.stderr
+    );
+    assert!(
+        rendered.stderr.contains("devlanes remote connect hetzner"),
+        "{}",
+        rendered.stderr
+    );
+}
+
 /// Warnings about another box name it; the proxy port and range overlap
 /// warnings say what to do.
 #[test]

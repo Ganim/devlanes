@@ -45,6 +45,9 @@ pub enum RouteState {
     },
     /// The route belongs to a remote box whose connection is down and retrying.
     Reconnecting,
+    /// The route belongs to a remote box whose connection waits for a person to
+    /// sign in again; requests get the sign-in page without waiting.
+    SignInNeeded,
 }
 
 /// A hostname mapping independent of daemon/configuration types.

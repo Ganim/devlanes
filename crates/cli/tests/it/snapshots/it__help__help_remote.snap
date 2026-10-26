@@ -8,7 +8,7 @@ Usage: devlanes remote [OPTIONS] <COMMAND>
 
 Commands:
   connect     Connect to a box over SSH and mirror its lanes, ports and hostnames here
-  disconnect  Disconnect from a box and remove its mirrored ports and hostnames
+  disconnect  Disconnect from a box, remove its mirrored ports and hostnames, and stop reconnecting it after daemon restarts
   ls          List known boxes and their connection state
   sync        List the synced folders of running lanes
   help        Print this message or the help of the given subcommand(s)

@@ -89,9 +89,24 @@ devlanes remote ls                          # state, mirrored ports, skipped lan
 devlanes remote disconnect hetzner
 ```
 
-Passphrase, one-time-password and host-key prompts appear in the terminal running `remote connect`, prefixed with the box name; type `yes` to a host-key question even though the input is hidden. A reconnect that needs a prompt while no `remote connect` is attached fails as `Permission denied`, so keys in an agent are what make unattended reconnects work.
+Passphrase, one-time-password and host-key prompts appear in the terminal running `remote connect`, prefixed with the box name; type `yes` to a host-key question even though the input is hidden.
 
-The connection belongs to your local daemon, not to the terminal: Ctrl-C detaches, the daemon reconnects with backoff after sleep or network loss and keeps the mirrored ports bound meanwhile. A daemon restart drops connections; run `remote connect` again afterwards.
+The connection belongs to your local daemon, not to the terminal: Ctrl-C detaches, the daemon reconnects with backoff after sleep or network loss and keeps the mirrored ports bound meanwhile. It also survives a restart of the local daemon (`devlanes daemon restart`, a reboot with `devlanes daemon install`, an upgrade): the new daemon connects every box you connected and did not disconnect, in the background. Only `remote disconnect` ends that.
+
+### Unattended reconnects
+
+Reconnects after sleep, after a network change and after a daemon restart usually run with no terminal attached. Keys in an agent, or a key without a passphrase, let them run without a prompt. When a reconnect needs you anyway, because ssh asks for a password, a passphrase or a new host key, or rejects credentials that worked before, the box waits instead of retrying:
+
+```sh
+devlanes remote ls
+#   host: hetzner
+#   state: needs_auth
+#   error: ssh to hetzner failed (255): … Permission denied (publickey).
+#   fix: devlanes remote connect hetzner
+devlanes remote connect hetzner     # answers the prompts here and resumes
+```
+
+While it waits, the box's ports stay bound, its hostnames answer with a [sign-in needed](../errors/box-sign-in-needed.md) page and `status --json` lists it under `hosts` with the same `fix`. A box that never connected is different: rejected credentials on the first `remote connect` fail it for good, as before.
 
 ### Several boxes
 
@@ -119,7 +134,7 @@ Synced folders land under `%USERPROFILE%\.devlanes\sync`. Windows keeps only a r
 ## Checking
 
 ```sh
-devlanes remote ls                                  # connected, reconnecting (with the error), failed
+devlanes remote ls                                  # connected, reconnecting or needs_auth (with the error), failed
 devlanes url ls                                     # the box's hostnames next to your local ones
 devlanes status --json | jq .clients                # on the box: who is connected
 curl -sS https://api.acme.localhost/healthz          # from the client, once the box lane is ready
@@ -149,6 +164,9 @@ curl -sS https://api.acme.localhost/healthz          # from the client, once the
 | `the box's URLs use HTTPS port 443, which this machine cannot serve: permission denied (low ports may need privileges); …` | the box's proxy runs on a low port that the client's user may not bind (on macOS the extra port binds loopback only, which needs root below 1024) | on Linux, allow low ports as [Ports 443 and 80](https.md#ports-443-and-80) describes, then `devlanes daemon restart`; otherwise use the client's own HTTPS port |
 | `linger off` | Linux box without `loginctl enable-linger` | run it on the box |
 | `ssh to hetzner failed (255): Permission denied` | no agent or key for the daemon's ssh | load the key, `devlanes daemon restart`, connect again |
+| `needs_auth` in `remote ls`, a sign-in needed page in the browser | a reconnect asked for a password, passphrase or host key with no `remote connect` attached, or ssh rejected credentials that worked before | `devlanes remote connect hetzner` in a terminal; load the key into an agent so later reconnects need no prompt |
+| `hetzner needs you to sign in again: … Host key verification failed` | the box's host key changed | check the new key, `ssh-keygen -R hetzner`, then `devlanes remote connect hetzner` |
+| a box connects again after a daemon restart | it was connected when the daemon stopped, and only `remote disconnect` ends that | `devlanes remote disconnect hetzner` when you no longer want it |
 | `no ssh client found` | Windows without OpenSSH Client | add the optional feature, or put `ssh.exe` on `PATH` |
 
 ## Limits

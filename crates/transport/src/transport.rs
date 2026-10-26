@@ -26,7 +26,9 @@ pub trait Transport: Send + Sync {
     /// Opens a fresh pipe to the box.
     ///
     /// Return [`TransportError::Permanent`] when retrying cannot help (missing
-    /// binary, rejected credentials) so reconnect loops stop instead of spinning.
+    /// binary, rejected credentials) so reconnect loops stop instead of spinning,
+    /// and [`TransportError::NeedsAuth`] when a person has to sign in again to a
+    /// box that worked before, so [`crate::Link`] waits for them.
     async fn connect(&self) -> Result<BoxDuplex, TransportError>;
 }
 
@@ -42,6 +44,10 @@ pub enum TransportError {
     /// A failure that needs user action before another attempt makes sense.
     #[error(transparent)]
     Permanent(BoxError),
+    /// A person has to answer a prompt or fix credentials or a host key before
+    /// another attempt makes sense, on a box that connected before.
+    #[error(transparent)]
+    NeedsAuth(BoxError),
 }
 
 impl TransportError {
@@ -55,9 +61,31 @@ impl TransportError {
         Self::Permanent(error.into())
     }
 
+    /// Wraps a cause that a person resolves by signing in again, which makes
+    /// [`crate::Link`] wait for [`crate::Link::resume`].
+    pub fn needs_auth(error: impl Into<BoxError>) -> Self {
+        Self::NeedsAuth(error.into())
+    }
+
+    /// The same cause, reclassified as [`TransportError::NeedsAuth`], for a
+    /// caller that knows a prompt went unanswered during the attempt.
+    pub fn into_needs_auth(self) -> Self {
+        match self {
+            Self::Io(error) => Self::NeedsAuth(Box::new(error)),
+            Self::Transient(error) | Self::Permanent(error) | Self::NeedsAuth(error) => {
+                Self::NeedsAuth(error)
+            }
+        }
+    }
+
     /// Reports whether reconnecting without user action is pointless.
     pub fn is_permanent(&self) -> bool {
         matches!(self, Self::Permanent(_))
+    }
+
+    /// Reports whether a person has to sign in again before reconnecting.
+    pub fn is_needs_auth(&self) -> bool {
+        matches!(self, Self::NeedsAuth(_))
     }
 
     /// Returns the integration-specific cause when it has type `E`.
@@ -66,7 +94,9 @@ impl TransportError {
     pub fn downcast_ref<E: std::error::Error + 'static>(&self) -> Option<&E> {
         match self {
             Self::Io(_) => None,
-            Self::Transient(error) | Self::Permanent(error) => error.downcast_ref(),
+            Self::Transient(error) | Self::Permanent(error) | Self::NeedsAuth(error) => {
+                error.downcast_ref()
+            }
         }
     }
 }

@@ -468,6 +468,9 @@ pub enum RouteStatus {
     },
     /// A mirrored route whose box connection is down and retrying.
     Reconnecting,
+    /// A mirrored route whose box connection waits for a person to sign in
+    /// again with `devlanes remote connect`.
+    SignInNeeded,
 }
 
 /// One hostname route, independent of the proxy crate's types.
@@ -763,10 +766,14 @@ pub trait RemotePrompter: Send + Sync {
 /// Builds transports to boxes; the composition root wires SSH, tests an in-memory pipe.
 pub trait RemoteConnector: Send + Sync {
     /// A transport to `host`; prompts during authentication go to `prompts`.
+    /// `connected_before` is set for a box an earlier daemon connected, which
+    /// this daemon restores: its failures count as after a first connection,
+    /// so rejected credentials wait for a sign-in instead of failing for good.
     fn transport(
         &self,
         host: &str,
         prompts: Arc<dyn RemotePrompter>,
+        connected_before: bool,
     ) -> Result<Arc<dyn devlanes_transport::Transport>, devlanes_proto::RpcError>;
 
     /// Transport name recorded in `remote_hosts`.
@@ -797,6 +804,7 @@ impl RemoteConnector for NoRemote {
         &self,
         _: &str,
         _: Arc<dyn RemotePrompter>,
+        _: bool,
     ) -> Result<Arc<dyn devlanes_transport::Transport>, devlanes_proto::RpcError> {
         Err(devlanes_proto::RpcError::new(
             "not_supported_yet",

@@ -803,6 +803,13 @@ fn more_errors(code: &str, data: &Value) -> Option<(String, Option<Hint>)> {
             with_message(format!("remote {}", field(data, "host"))),
             Some(Hint::command(["remote", "ls"])),
         ),
+        "remote_needs_auth" => {
+            let host = text(data, "host");
+            (
+                with_message(format!("{host} needs you to sign in again")),
+                Some(Hint::command(["remote", "connect", host.as_str()])),
+            )
+        }
         "client_identity" => {
             let path = text(data, "path");
             let file = if path.is_empty() {

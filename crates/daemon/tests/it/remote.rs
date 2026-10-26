@@ -11,6 +11,8 @@
 mod boxes;
 #[path = "remote_sync.rs"]
 mod large_sync;
+#[path = "remote_lifecycle.rs"]
+mod lifecycle;
 #[path = "remote_ssh.rs"]
 mod real_ssh;
 
@@ -28,7 +30,8 @@ use std::{
 use devlanes_daemon::{
     Engine, EngineOptions, Handler, Options, Server, Session,
     integrations::{
-        Integrations, RemoteConnector, RemotePrompter, RouteEntry, RouteSink, RouteStatus,
+        Integrations, RemoteConnector, RemotePrompt, RemotePrompter, RouteEntry, RouteSink,
+        RouteStatus,
     },
 };
 use devlanes_ipc::Frame;
@@ -215,9 +218,16 @@ impl BoxSide {
     }
 }
 
+/// The password [`SignIn`] accepts.
+const PASSWORD: &str = "hunter2";
+
 /// A connector handing out each test box's memory transport by box name.
 struct MemoryConnector {
     boxes: BTreeMap<String, MemoryTransport>,
+    /// While set, connecting asks for [`PASSWORD`] first.
+    sign_in: Arc<AtomicBool>,
+    /// `connected_before` of every transport handed out, in order.
+    handed_out: Arc<std::sync::Mutex<Vec<bool>>>,
 }
 
 impl RemoteConnector for MemoryConnector {
@@ -225,10 +235,22 @@ impl RemoteConnector for MemoryConnector {
     fn transport(
         &self,
         host: &str,
-        _prompts: Arc<dyn RemotePrompter>,
+        prompts: Arc<dyn RemotePrompter>,
+        connected_before: bool,
     ) -> Result<Arc<dyn Transport>, RpcError> {
         match self.boxes.get(host) {
-            Some(transport) => Ok(Arc::new(transport.clone())),
+            Some(transport) => {
+                self.handed_out
+                    .lock()
+                    .expect("handed out")
+                    .push(connected_before);
+                Ok(Arc::new(SignIn {
+                    host: host.to_owned(),
+                    inner: transport.clone(),
+                    prompts,
+                    required: self.sign_in.clone(),
+                }))
+            }
             None => Err(RpcError::new("bad_request", json!({"host": host}), 2)),
         }
     }
@@ -246,6 +268,39 @@ impl RemoteConnector for MemoryConnector {
     /// Fast retries keep the reconnect checks short.
     fn backoff(&self) -> Backoff {
         Backoff::new(Duration::from_millis(50), Duration::from_millis(200))
+    }
+}
+
+/// A box's memory transport that, while `required` is set, asks for
+/// [`PASSWORD`] the way ssh asks through askpass, and fails like ssh rejecting
+/// the login when the answer is missing or wrong.
+struct SignIn {
+    host: String,
+    inner: MemoryTransport,
+    prompts: Arc<dyn RemotePrompter>,
+    required: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl Transport for SignIn {
+    /// Asks first when a sign-in is required, then connects.
+    async fn connect(&self) -> Result<BoxDuplex, devlanes_transport::TransportError> {
+        if self.required.load(Ordering::SeqCst) {
+            let answer = self
+                .prompts
+                .ask(RemotePrompt {
+                    host: self.host.clone(),
+                    prompt: format!("{}'s password: ", self.host),
+                    kind: "secret",
+                })
+                .await;
+            if answer.as_deref() != Some(PASSWORD) {
+                return Err(devlanes_transport::TransportError::permanent(
+                    "Permission denied (password).",
+                ));
+            }
+        }
+        self.inner.connect().await
     }
 }
 
@@ -316,7 +371,10 @@ impl RouteSink for ProxyRoutes {
                         devlanes_proxy::RouteState::Failed { log_tail }
                     }
                     RouteStatus::Reconnecting => devlanes_proxy::RouteState::Reconnecting,
+                    RouteStatus::SignInNeeded => devlanes_proxy::RouteState::SignInNeeded,
                 };
+                route.start_hint = entry.start_hint;
+                route.remote = entry.remote;
                 route.certificate_names = entry.certificate_names;
                 route.listen_port = entry.box_https_port;
                 route
@@ -333,6 +391,10 @@ struct ClientSide {
     h: Harness,
     proxy_port: u16,
     proxy_stop: CancellationToken,
+    /// See [`MemoryConnector::sign_in`].
+    sign_in: Arc<AtomicBool>,
+    /// See [`MemoryConnector::handed_out`].
+    handed_out: Arc<std::sync::Mutex<Vec<bool>>>,
 }
 
 impl ClientSide {
@@ -364,11 +426,15 @@ impl ClientSide {
         tokio::spawn(async move {
             let _ = serving.serve(listener, stop).await;
         });
+        let sign_in = Arc::new(AtomicBool::new(false));
+        let handed_out = Arc::new(std::sync::Mutex::new(Vec::new()));
         let connector = Arc::new(MemoryConnector {
             boxes: boxes
                 .iter()
                 .map(|(name, side)| ((*name).to_owned(), side.transport.clone()))
                 .collect(),
+            sign_in: sign_in.clone(),
+            handed_out: handed_out.clone(),
         });
         let h = engine_with(
             &tmp.path.join(name),
@@ -381,6 +447,8 @@ impl ClientSide {
             h,
             proxy_port,
             proxy_stop,
+            sign_in,
+            handed_out,
         }
     }
 

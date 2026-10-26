@@ -226,6 +226,7 @@ pub(crate) struct RemoteRow {
     pub address: String,
     pub daemon_version: Option<String>,
     pub last_connected: Option<i64>,
+    pub wanted: i32,
 }
 
 impl From<ProjectRow> for Project {

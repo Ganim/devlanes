@@ -26,7 +26,8 @@ pub struct RetentionPolicy {
     pub metrics: Duration,
     /// Maximum age of closed segment metadata; does not delete log files.
     pub logs: Duration,
-    /// Maximum age since last connection; hosts without a timestamp are retained.
+    /// Maximum age since last connection; hosts without a timestamp and wanted
+    /// hosts (connected and not disconnected) are retained.
     pub remote_hosts: Duration,
     /// Database plus WAL/shared-memory budget; protected live state may exceed it.
     pub max_size_bytes: u64,
@@ -217,9 +218,11 @@ fn prune_age(
         )
         .execute(c)?,
     );
+    // Wanted boxes stay until `remote disconnect`: a restarted daemon connects them.
     let remote_hosts = count(
         diesel::delete(
             remote_hosts::table
+                .filter(remote_hosts::wanted.eq(0))
                 .filter(remote_hosts::last_connected.lt(cutoff(now_ms, policy.remote_hosts))),
         )
         .execute(c)?,
@@ -305,6 +308,7 @@ fn budget_batch(c: &mut SqliteConnection, page_budget: u64, limit: usize) -> Res
             .map(|(id, at)| (at, 3, id, String::new())),
     );
     let remotes = remote_hosts::table
+        .filter(remote_hosts::wanted.eq(0))
         .filter(remote_hosts::last_connected.is_not_null())
         .order((remote_hosts::last_connected, remote_hosts::name))
         .select((
