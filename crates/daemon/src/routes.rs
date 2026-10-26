@@ -52,7 +52,9 @@ impl Inner {
         self.with_remote_routes(self.local_routes().entries)
     }
 
-    /// Appends mirrored routes whose hostnames no local route claims.
+    /// Appends mirrored routes whose hostnames no local route claims, in connect
+    /// order, so the box connected first keeps a name two boxes claim until the
+    /// later one's mirror skips that lane.
     fn with_remote_routes(&self, mut routes: Vec<RouteEntry>) -> Vec<RouteEntry> {
         let key = |route: &RouteEntry| {
             let host = route.host.trim_end_matches('.').to_ascii_lowercase();
@@ -198,6 +200,7 @@ impl Inner {
                     unit: unit.clone(),
                     certificate_names: vec![view.domain.clone()],
                     remote: false,
+                    box_https_port: None,
                 });
             }
         }

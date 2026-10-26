@@ -2005,3 +2005,50 @@ fn failed_opens_are_one_line() {
         "warn hetzner: a connection to port 20101 (acme@0:web) failed: the unit is not running on the box\n"
     );
 }
+
+/// Warnings about another box name it; the proxy port and range overlap
+/// warnings say what to do.
+#[test]
+fn box_collision_warnings_name_the_other_box() {
+    let line = |data: serde_json::Value| {
+        let event = Event {
+            seq: 1,
+            event: "remote.warning".into(),
+            data,
+        };
+        runtime(OutputMode::Agent)
+            .reporter()
+            .event(Method::Subscribe, &event)
+            .expect("event")
+            .stdout
+    };
+    assert_eq!(
+        line(
+            json!({"host": "beta", "code": "lane_skipped", "lane": "acme@0",
+            "hosts": ["web.acme.localhost"], "box": "alpha"})
+        ),
+        "warn beta: lane acme@0 is not mirrored; box alpha, connected earlier, already serves web.acme.localhost\n"
+    );
+    assert_eq!(
+        line(
+            json!({"host": "beta", "code": "port_in_use", "port": 20004, "box": "alpha",
+            "held_by": "acme@0:db", "message": "…"})
+        ),
+        "warn beta: port 20004 is not mirrored; box alpha already mirrors it for acme@0:db\n"
+    );
+    assert_eq!(
+        line(
+            json!({"host": "hetzner", "code": "proxy_port_in_use", "port": 8443,
+            "own_port": 443, "holder": "in use by nginx (pid 812)", "message": "…"})
+        ),
+        "warn hetzner: the box's URLs use HTTPS port 8443, which this machine cannot serve (in use by nginx (pid 812)); open its hostnames on port 443 instead\n"
+    );
+    assert_eq!(
+        line(
+            json!({"host": "beta", "code": "ports_range_overlap", "range": "20000-32767",
+            "overlaps": ["this machine's (20000-32767)", "box alpha's (20000-29999)"],
+            "message": "…"})
+        ),
+        "warn beta: the box's ports.range 20000-32767 overlaps this machine's (20000-32767) and box alpha's (20000-29999); lanes can get the same ports on both, which are then not mirrored; give one machine a different ports.range\n"
+    );
+}

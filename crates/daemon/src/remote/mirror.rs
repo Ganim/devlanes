@@ -5,7 +5,9 @@
 //!
 //! Local lanes win: a box port inside one of this machine's port blocks is never
 //! bound (its hostnames still route through a relay), and local allocations keep
-//! clear of the box's ports (`Remotes::advertised_ports`).
+//! clear of the box's ports (`Remotes::advertised_ports`). Between boxes, the one
+//! connected first keeps a hostname both serve, and a port another box's mirror
+//! holds is reported with that box.
 //!
 //! Listeners stay bound while the link reconnects; connections accepted meanwhile
 //! wait briefly for the new session and the proxy shows a reconnecting page.
@@ -159,6 +161,32 @@ impl View {
     }
 }
 
+/// Why a box lane is skipped: its hostnames that are served already.
+#[derive(Debug, Default)]
+struct Collision {
+    hosts: BTreeSet<String>,
+    /// A local lane serves at least one of them.
+    local: bool,
+    /// Boxes connected earlier that serve the others.
+    boxes: BTreeSet<String>,
+}
+
+impl Collision {
+    /// The earlier box to name, unless a local lane is involved: local lanes
+    /// win over every box, so they are the reason then.
+    fn other_box(&self) -> Option<&String> {
+        if self.local { None } else { self.boxes.first() }
+    }
+
+    /// The reason `remote ls` shows next to the skipped lane.
+    fn reason(&self) -> String {
+        match self.other_box() {
+            Some(other) => format!("box {other}, connected earlier, serves its hostnames"),
+            None => "this machine serves its hostnames".to_owned(),
+        }
+    }
+}
+
 /// The link's state as the mirror sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -190,6 +218,18 @@ impl Drop for Bound {
     /// Stops accepting; the listener closes with the task.
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+/// Stops the accept loops of `bounds` and waits until their listeners are closed.
+/// Dropping a [`Bound`] only schedules that, and another box's mirror woken right
+/// after would then find the port still taken by this daemon.
+async fn unbind(bounds: Vec<Bound>) {
+    for bound in &bounds {
+        bound.task.abort();
+    }
+    for mut bound in bounds {
+        let _ = (&mut bound.task).await;
     }
 }
 
@@ -250,7 +290,7 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>) {
         let current = registry.borrow_and_update().clone();
         let phase = Phase::of(&state.borrow_and_update());
         if phase == Phase::Over {
-            mirror.clear(&inner);
+            mirror.clear(&inner).await;
         } else {
             mirror
                 .reconcile(&inner, &current, phase == Phase::Connected)
@@ -285,23 +325,36 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>) {
             break;
         }
     }
-    // Listeners and relays close as `mirror` drops.
+    // Closed before `HostConn::close` returns, so a box woken by the disconnect
+    // can bind these numbers; relays close as `mirror` drops.
+    let bounds = std::mem::take(&mut mirror.ports)
+        .into_values()
+        .flat_map(|port| port.bound)
+        .collect();
+    unbind(bounds).await;
 }
 
 impl Mirror {
     /// Unbinds everything and drops the host's routes, once the link gave up.
-    fn clear(&mut self, engine: &Arc<Inner>) {
-        self.ports.clear();
+    async fn clear(&mut self, engine: &Arc<Inner>) {
+        let bounds = std::mem::take(&mut self.ports)
+            .into_values()
+            .flat_map(|port| port.bound)
+            .collect();
+        unbind(bounds).await;
         self.relays.clear();
         self.skipped.clear();
-        let had_routes = {
+        let (had_routes, had_ports) = {
             let mut view = lock(&self.conn.view);
-            let had = !view.routes.is_empty();
+            let had = (!view.routes.is_empty(), !view.bound.is_empty());
             *view = View::default();
             had
         };
         if had_routes {
             engine.publish_routes();
+        }
+        if had_routes || had_ports {
+            engine.remote.wake_others(self.conn.serial);
         }
     }
 
@@ -316,30 +369,60 @@ impl Mirror {
         // Hidden units and tasks are listed by the box but never mirrored.
         let visible: Vec<&UnitInfo> = registry.units().filter(|unit| unit.exposed()).collect();
 
-        // A box lane whose hostname this machine already serves is skipped whole:
-        // renaming it would break the CORS origins and cookies the box chose.
-        let mut collisions: BTreeMap<LaneKey, BTreeSet<String>> = BTreeMap::new();
+        // Hostnames of boxes connected earlier, which keep them over this one.
+        let earlier: Vec<(String, BTreeSet<String>)> = engine
+            .remote
+            .all()
+            .into_iter()
+            .filter(|other| other.serial < self.conn.serial)
+            .map(|other| {
+                let hosts = lock(&other.view)
+                    .routes
+                    .iter()
+                    .map(|route| route.host.clone())
+                    .collect();
+                (other.name.clone(), hosts)
+            })
+            .collect();
+
+        // A box lane whose hostname this machine or an earlier box already serves
+        // is skipped whole: renaming it would break the CORS origins and cookies
+        // the box chose.
+        let mut collisions: BTreeMap<LaneKey, Collision> = BTreeMap::new();
         for unit in &visible {
             for host in &unit.hosts {
                 let name = host.host.to_ascii_lowercase();
-                if local_hosts.contains(&name) {
-                    collisions
-                        .entry(unit.key.lane.clone())
-                        .or_default()
-                        .insert(name);
+                let owner = if local_hosts.contains(&name) {
+                    None
+                } else if let Some((other, _)) =
+                    earlier.iter().find(|(_, hosts)| hosts.contains(&name))
+                {
+                    Some(other.clone())
+                } else {
+                    continue;
+                };
+                let collision = collisions.entry(unit.key.lane.clone()).or_default();
+                collision.hosts.insert(name);
+                match owner {
+                    Some(other) => {
+                        collision.boxes.insert(other);
+                    }
+                    None => collision.local = true,
                 }
             }
         }
-        for (lane, hosts) in &collisions {
+        for (lane, collision) in &collisions {
             if !self.skipped.contains(lane) {
-                tracing::warn!(host = %self.conn.name, lane = %lane_ref(lane), ?hosts, "lane skipped: its hostnames are served locally");
+                let other = collision.other_box();
+                tracing::warn!(host = %self.conn.name, lane = %lane_ref(lane), hosts = ?collision.hosts, ?other, "lane skipped: its hostnames are served already");
                 engine.bus.emit(
                     wire::WARNING_EVENT,
                     json!({
                         "host": self.conn.name,
                         "code": "lane_skipped",
                         "lane": lane_ref(lane),
-                        "hosts": hosts,
+                        "hosts": collision.hosts,
+                        "box": other,
                     }),
                 );
             }
@@ -358,7 +441,16 @@ impl Mirror {
             }
         }
         let local = local_blocks(engine).await;
-        self.ports.retain(|port, _| wanted.contains_key(port));
+        let mut released = Vec::new();
+        let stale: Vec<u16> = self
+            .ports
+            .keys()
+            .copied()
+            .filter(|port| !wanted.contains_key(port))
+            .collect();
+        for port in stale {
+            released.extend(self.ports.remove(&port).into_iter().flat_map(|m| m.bound));
+        }
         for (port, unit) in &wanted {
             let mirror = self.ports.entry(*port).or_insert_with(|| PortMirror {
                 unit: unit.key.name.clone(),
@@ -378,7 +470,7 @@ impl Mirror {
                 .map(|(_, owner)| owner);
             if let Some(owner) = owner {
                 // Local lanes win: dropping the listeners frees the port for them.
-                mirror.bound.clear();
+                released.append(&mut mirror.bound);
                 mirror.conflicts.clear();
                 if mirror
                     .local
@@ -428,12 +520,23 @@ impl Mirror {
                     Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {}
                     Err(error) => {
                         let in_use = error.kind() == std::io::ErrorKind::AddrInUse;
-                        let pid = if in_use {
+                        // Another box's mirror runs in this daemon, so its pid
+                        // would only name devlanes itself.
+                        let other_box = if in_use {
+                            other_box_holding(engine, &self.conn, *port)
+                        } else {
+                            None
+                        };
+                        let pid = if in_use && other_box.is_none() {
                             engine.integ.ports.holder(*port).await
                         } else {
                             None
                         };
-                        let message = if in_use {
+                        let message = if let Some((other, unit)) = &other_box {
+                            format!(
+                                "port {port} is in use on this machine by box {other} ({unit}); not mirrored"
+                            )
+                        } else if in_use {
                             let holder = match pid {
                                 Some(pid) => format!("{} (pid {pid})", process_name(pid).await),
                                 None => "another process".to_owned(),
@@ -458,6 +561,8 @@ impl Mirror {
                                     "port": port,
                                     "address": address,
                                     "pid": pid,
+                                    "box": other_box.as_ref().map(|(other, _)| other),
+                                    "held_by": other_box.as_ref().map(|(_, unit)| unit),
                                     "unit": mirror.unit,
                                     "lane": mirror.lane,
                                 }),
@@ -465,18 +570,25 @@ impl Mirror {
                         }
                         mirror.conflicts.insert(
                             address,
-                            json!({"address": address, "pid": pid, "message": message}),
+                            json!({
+                                "address": address,
+                                "pid": pid,
+                                "box": other_box.as_ref().map(|(other, _)| other),
+                                "message": message,
+                            }),
                         );
                     }
                 }
             }
         }
+        unbind(released).await;
 
         // Hostnames: the proxy dials 127.0.0.1 first, so a routed port this machine
         // does not hold there gets a relay on an ephemeral port instead.
         let mut routes = Vec::new();
         let mut relayed = BTreeSet::new();
         let mut refused_hosts = Vec::new();
+        let box_https_port = lock(&self.conn.info).https_port;
         for unit in &mirrored {
             let lane = registry
                 .lanes()
@@ -524,6 +636,7 @@ impl Mirror {
                         .into_iter()
                         .collect(),
                     remote: true,
+                    box_https_port,
                 });
             }
         }
@@ -565,15 +678,30 @@ impl Mirror {
                 .collect(),
             skipped: collisions
                 .iter()
-                .map(|(lane, hosts)| json!({"lane": lane_ref(lane), "hosts": hosts}))
+                .map(|(lane, collision)| {
+                    json!({
+                        "lane": lane_ref(lane),
+                        "hosts": collision.hosts,
+                        "box": collision.other_box(),
+                        "reason": collision.reason(),
+                    })
+                })
                 .collect(),
             refused_hosts,
             open_errors: BTreeMap::new(),
             warned: BTreeMap::new(),
         };
-        let routes_changed = {
+        let (routes_changed, others_affected) = {
             let mut current = lock(&self.conn.view);
-            let changed = current.routes != view.routes;
+            // Other boxes care which names and ports this one holds, not their states.
+            let hosts = |routes: &[RouteEntry]| -> BTreeSet<String> {
+                routes.iter().map(|route| route.host.clone()).collect()
+            };
+            let changed = (
+                current.routes != view.routes,
+                hosts(&current.routes) != hosts(&view.routes)
+                    || current.bound.keys().ne(view.bound.keys()),
+            );
             // Failed opens outlive a reconcile, but not the port they are about.
             view.open_errors = std::mem::take(&mut current.open_errors);
             view.warned = std::mem::take(&mut current.warned);
@@ -583,6 +711,9 @@ impl Mirror {
         };
         if routes_changed {
             engine.publish_routes();
+        }
+        if others_affected {
+            engine.remote.wake_others(self.conn.serial);
         }
     }
 
@@ -609,6 +740,20 @@ impl Mirror {
         self.relays.insert(port, (local, Bound { address, task }));
         Some(local)
     }
+}
+
+/// The box other than `conn` whose mirror holds `port` here, with the unit
+/// behind it (`project@lane:unit`).
+fn other_box_holding(engine: &Inner, conn: &HostConn, port: u16) -> Option<(String, String)> {
+    engine
+        .remote
+        .all()
+        .into_iter()
+        .filter(|other| other.serial != conn.serial)
+        .find_map(|other| {
+            let unit = lock(&other.view).bound.get(&port).cloned()?;
+            Some((other.name.clone(), unit))
+        })
 }
 
 /// `project@lane` for a box lane key.
@@ -687,7 +832,7 @@ fn routable(host: &str, suffixes: &[String]) -> bool {
 }
 
 /// The process name for `pid`, for port conflict messages.
-async fn process_name(pid: u32) -> String {
+pub(super) async fn process_name(pid: u32) -> String {
     tokio::task::spawn_blocking(move || {
         devlanes_sys::processes()
             .ok()?

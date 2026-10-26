@@ -35,6 +35,12 @@ pub fn bind_listeners(port: u16, fallback_port: u16, lan: bool) -> io::Result<Bo
     bind_listeners_with(port, fallback_port, lan, bind)
 }
 
+/// Binds `port` on loopback like [`bind_listeners`] without `lan`, and without a
+/// fallback: scoped listeners serve URLs that already name their port.
+pub(crate) fn bind_loopback(port: u16) -> io::Result<BoundListeners> {
+    bind_pair(port, false, &bind)
+}
+
 /// `bind_listeners` with an injectable socket binder, so tests can simulate missing IPv6.
 fn bind_listeners_with(
     port: u16,

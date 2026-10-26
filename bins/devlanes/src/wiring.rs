@@ -647,8 +647,9 @@ async fn proxy(
         ..devlanes_proxy::ProxyConfig::default()
     };
     let proxy = devlanes_proxy::Proxy::new(config, devlanes_proxy::RouteTable::default());
+    let mut box_ca = None;
     if let (Some(listeners), Some(ca)) = (https, ca) {
-        match proxy.tls_config(ca) {
+        match proxy.tls_config(ca.clone()) {
             Ok(tls) => {
                 status.insert(
                     "https".into(),
@@ -662,6 +663,7 @@ async fn proxy(
                         }
                     });
                 }
+                box_ca = Some(ca);
             }
             Err(error) => {
                 status.insert(
@@ -701,6 +703,9 @@ async fn proxy(
         proxy,
         status: Value::Object(status),
         rejected: Mutex::new(Vec::new()),
+        box_ca,
+        shutdown,
+        box_ports: Mutex::new(BTreeMap::new()),
     }
 }
 
@@ -710,6 +715,12 @@ struct ProxyRoutes {
     status: Value,
     /// Entries the last snapshot dropped: `{host, lane, unit, reason}`.
     rejected: Mutex<Vec<Value>>,
+    /// The CA of the HTTPS listeners, for box ports; `None` without HTTPS.
+    box_ca: Option<Arc<devlanes_pki::CertificateAuthority>>,
+    /// The daemon's shutdown, which also stops box ports.
+    shutdown: CancellationToken,
+    /// Box HTTPS ports being served, each stopped by its token.
+    box_ports: Mutex<BTreeMap<u16, CancellationToken>>,
 }
 
 impl RouteSink for ProxyRoutes {
@@ -748,6 +759,7 @@ impl RouteSink for ProxyRoutes {
                 route.owner = Some(entry.lane).filter(|lane| !lane.is_empty());
                 route.unit = Some(entry.unit).filter(|unit| !unit.is_empty());
                 route.remote = entry.remote;
+                route.listen_port = entry.box_https_port;
                 route
             })
             .collect();
@@ -769,8 +781,8 @@ impl RouteSink for ProxyRoutes {
         *self.rejected.lock().unwrap_or_else(|e| e.into_inner()) = rejected;
     }
 
-    /// Bind results plus the accept loops' live health, and the entries the last
-    /// snapshot dropped.
+    /// Bind results plus the accept loops' live health, the entries the last
+    /// snapshot dropped and the box HTTPS ports served (`box_https_ports`).
     fn status(&self) -> Value {
         let mut status = listener_status(&self.status, &self.proxy.listener_health());
         let rejected = self
@@ -778,12 +790,52 @@ impl RouteSink for ProxyRoutes {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if let Some(map) = status.as_object_mut()
-            && !rejected.is_empty()
-        {
-            map.insert("rejected".into(), Value::Array(rejected));
+        let box_ports: Vec<u16> = self
+            .box_ports
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .copied()
+            .collect();
+        if let Some(map) = status.as_object_mut() {
+            if !rejected.is_empty() {
+                map.insert("rejected".into(), Value::Array(rejected));
+            }
+            if !box_ports.is_empty() {
+                map.insert("box_https_ports".into(), json!(box_ports));
+            }
         }
         status
+    }
+
+    /// Serves the routes of boxes using `port` there with the HTTPS listeners' CA.
+    fn open_box_port(&self, port: u16) -> std::io::Result<()> {
+        let Some(ca) = &self.box_ca else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this machine serves no HTTPS",
+            ));
+        };
+        let mut ports = self.box_ports.lock().unwrap_or_else(|e| e.into_inner());
+        if ports.contains_key(&port) {
+            return Ok(());
+        }
+        let stop = self.shutdown.child_token();
+        self.proxy.listen_scoped(port, ca.clone(), stop.clone())?;
+        ports.insert(port, stop);
+        Ok(())
+    }
+
+    /// Stops the listeners of a box port.
+    fn close_box_port(&self, port: u16) {
+        let stop = self
+            .box_ports
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&port);
+        if let Some(stop) = stop {
+            stop.cancel();
+        }
     }
 }
 
@@ -800,9 +852,14 @@ fn listener_status(bound: &Value, health: &[devlanes_proxy::ListenerHealth]) -> 
             entry.insert("serving".into(), Value::Bool(false));
             continue;
         }
+        // Box HTTPS ports are TLS listeners too, on their own ports.
+        let port = entry.get("port").and_then(Value::as_u64);
         let listeners: Vec<&devlanes_proxy::ListenerHealth> = health
             .iter()
-            .filter(|listener| listener.tls == tls)
+            .filter(|listener| {
+                listener.tls == tls
+                    && port.is_none_or(|port| u64::from(listener.address.port()) == port)
+            })
             .collect();
         let serving = !listeners.is_empty()
             && listeners
@@ -2166,6 +2223,7 @@ mod tests {
             unit: unit.into(),
             certificate_names: Vec::new(),
             remote: false,
+            box_https_port: None,
         }
     }
 
@@ -2180,6 +2238,9 @@ mod tests {
             ),
             status: json!({}),
             rejected: Mutex::new(Vec::new()),
+            box_ca: None,
+            shutdown: CancellationToken::new(),
+            box_ports: Mutex::new(BTreeMap::new()),
         };
         sink.publish(vec![
             entry("web.acme.localhost", "acme@0", "web", 3000),
@@ -2505,6 +2566,19 @@ mod tests {
         let stopped = listener_status(&bound, &[listener(8080, false, None)]);
         assert_eq!(stopped["http"]["serving"], false);
         assert_eq!(listener_status(&bound, &[])["http"]["serving"], false);
+
+        // A closed box HTTPS port stays in the health list but is not the proxy's.
+        let https = json!({"https": {"bound": true, "port": 443}});
+        let tls = |port: u16, running: bool| devlanes_proxy::ListenerHealth {
+            tls: true,
+            ..listener(port, running, None)
+        };
+        let status = listener_status(&https, &[tls(443, true), tls(8443, false)]);
+        assert_eq!(status["https"]["serving"], true);
+        assert_eq!(
+            status["https"]["listeners"].as_array().map(Vec::len),
+            Some(1)
+        );
     }
 
     #[tokio::test]

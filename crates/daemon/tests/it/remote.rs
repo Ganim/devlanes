@@ -7,16 +7,19 @@
 //! and the client mirrors on `[::1]` only; routed hostnames then go through relay
 //! ports, which keeps every checked byte on the mux.
 
+#[path = "remote_boxes.rs"]
+mod boxes;
 #[path = "remote_sync.rs"]
 mod large_sync;
 #[path = "remote_ssh.rs"]
 mod real_ssh;
 
 use std::{
+    collections::BTreeMap,
     net::{IpAddr, Ipv6Addr},
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -29,6 +32,7 @@ use devlanes_daemon::{
     },
 };
 use devlanes_ipc::Frame;
+use devlanes_pki::CertificateAuthority;
 use devlanes_proto::{
     Context, Control, LaneSummary, Method, Page, Request, RpcError, remote::RemoteClient,
 };
@@ -130,6 +134,23 @@ impl BoxSide {
         ports: &str,
         dialer: Option<Arc<dyn Dialer>>,
     ) -> Self {
+        Self::start_full(tmp, name, ports, dialer, None).await
+    }
+
+    /// [`BoxSide::start`] for a box whose proxy reports `https_port`.
+    async fn start_on_https(tmp: &Temp, name: &str, ports: &str, https_port: u16) -> Self {
+        Self::start_full(tmp, name, ports, None, Some(https_port)).await
+    }
+
+    /// [`BoxSide::start_with`], with the HTTPS port the box reports in the
+    /// handshake when `https_port` is set.
+    async fn start_full(
+        tmp: &Temp,
+        name: &str,
+        ports: &str,
+        dialer: Option<Arc<dyn Dialer>>,
+        https_port: Option<u16>,
+    ) -> Self {
         let h = engine_with(&tmp.path.join(name), ports, None, None).await;
         let home = tmp.path.join(format!("{name}-srv"));
         let options = Options {
@@ -151,6 +172,9 @@ impl BoxSide {
         let mut serve_options = ServeOptions::new("devlanes test-box");
         // As `devlanes tunnel --stdio` does, from the box daemon's `daemon.status`.
         serve_options.box_info = devlanes_tunnel::box_info(&paths).await.expect("box info");
+        if https_port.is_some() {
+            serve_options.box_info.https_port = https_port;
+        }
         let mut services = devlanes_tunnel::services(
             paths,
             RemoteClient {
@@ -190,19 +214,22 @@ impl BoxSide {
     }
 }
 
-/// A connector handing out the box's memory transport.
+/// A connector handing out each test box's memory transport by box name.
 struct MemoryConnector {
-    transport: MemoryTransport,
+    boxes: BTreeMap<String, MemoryTransport>,
 }
 
 impl RemoteConnector for MemoryConnector {
-    /// The in-memory pipe to the test box.
+    /// The in-memory pipe to the test box named `host`.
     fn transport(
         &self,
-        _host: &str,
+        host: &str,
         _prompts: Arc<dyn RemotePrompter>,
     ) -> Result<Arc<dyn Transport>, RpcError> {
-        Ok(Arc::new(self.transport.clone()))
+        match self.boxes.get(host) {
+            Some(transport) => Ok(Arc::new(transport.clone())),
+            None => Err(RpcError::new("bad_request", json!({"host": host}), 2)),
+        }
     }
 
     /// Recorded in `remote_hosts`.
@@ -222,9 +249,52 @@ impl RemoteConnector for MemoryConnector {
 }
 
 /// The client's proxy, fed like the composition root feeds it.
-struct ProxyRoutes(devlanes_proxy::Proxy);
+struct ProxyRoutes {
+    proxy: devlanes_proxy::Proxy,
+    /// With HTTPS: the port this machine reports as its own (nothing listens
+    /// there) and the CA that box ports serve with.
+    tls: Option<(u16, Arc<CertificateAuthority>)>,
+    box_ports: Mutex<BTreeMap<u16, CancellationToken>>,
+}
+
+impl ProxyRoutes {
+    /// Feeds `proxy`, with HTTPS on `tls` when set.
+    fn new(proxy: devlanes_proxy::Proxy, tls: Option<(u16, Arc<CertificateAuthority>)>) -> Self {
+        Self {
+            proxy,
+            tls,
+            box_ports: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
 
 impl RouteSink for ProxyRoutes {
+    /// Reports the HTTPS port, when there is one.
+    fn status(&self) -> Value {
+        match &self.tls {
+            Some((port, _)) => json!({"https": {"bound": true, "port": port}}),
+            None => Value::Null,
+        }
+    }
+
+    /// Serves the box port with the CA, as the composition root does.
+    fn open_box_port(&self, port: u16) -> std::io::Result<()> {
+        let Some((_, ca)) = &self.tls else {
+            return Err(std::io::ErrorKind::Unsupported.into());
+        };
+        let stop = CancellationToken::new();
+        self.proxy.listen_scoped(port, ca.clone(), stop.clone())?;
+        lock(&self.box_ports).insert(port, stop);
+        Ok(())
+    }
+
+    /// Stops a box port's listeners.
+    fn close_box_port(&self, port: u16) {
+        if let Some(stop) = lock(&self.box_ports).remove(&port) {
+            stop.cancel();
+        }
+    }
+
     /// Converts and swaps the route table.
     fn publish(&self, routes: Vec<RouteEntry>) {
         let routes = routes
@@ -245,13 +315,21 @@ impl RouteSink for ProxyRoutes {
                     RouteStatus::Reconnecting => devlanes_proxy::RouteState::Reconnecting,
                 };
                 route.certificate_names = entry.certificate_names;
+                route.listen_port = entry.box_https_port;
                 route
             })
             .collect();
         if let Ok(table) = devlanes_proxy::RouteTable::new(routes) {
-            self.0.replace_routes(table);
+            self.proxy.replace_routes(table);
         }
     }
+}
+
+/// Locks a test mutex, ignoring poisoning.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The client engine plus its plain-HTTP proxy port.
@@ -262,8 +340,20 @@ struct ClientSide {
 }
 
 impl ClientSide {
-    /// A client engine whose `connect` reaches `side`'s box.
+    /// A client engine whose `connect box` reaches `side`'s box.
     async fn start(tmp: &Temp, name: &str, ports: &str, side: &BoxSide) -> Self {
+        Self::start_with(tmp, name, ports, &[("box", side)], None).await
+    }
+
+    /// A client engine whose `connect <name>` reaches each named box, with
+    /// HTTPS on `tls` (its own reported port and CA) when set.
+    async fn start_with(
+        tmp: &Temp,
+        name: &str,
+        ports: &str,
+        boxes: &[(&str, &BoxSide)],
+        tls: Option<(u16, Arc<CertificateAuthority>)>,
+    ) -> Self {
         let proxy = devlanes_proxy::Proxy::new(
             devlanes_proxy::ProxyConfig::default(),
             devlanes_proxy::RouteTable::default(),
@@ -279,13 +369,16 @@ impl ClientSide {
             let _ = serving.serve(listener, stop).await;
         });
         let connector = Arc::new(MemoryConnector {
-            transport: side.transport.clone(),
+            boxes: boxes
+                .iter()
+                .map(|(name, side)| ((*name).to_owned(), side.transport.clone()))
+                .collect(),
         });
         let h = engine_with(
             &tmp.path.join(name),
             ports,
             Some(connector),
-            Some(Arc::new(ProxyRoutes(proxy))),
+            Some(Arc::new(ProxyRoutes::new(proxy, tls))),
         )
         .await;
         Self {
@@ -297,6 +390,11 @@ impl ClientSide {
 
     /// `host ls` entry of the box.
     async fn host(&self) -> Value {
+        self.host_named("box").await
+    }
+
+    /// `host ls` entry of the box called `name`.
+    async fn host_named(&self, name: &str) -> Value {
         let list = self
             .h
             .call(Method::HostList, json!({}), Context::default())
@@ -304,9 +402,23 @@ impl ClientSide {
             .expect("host ls");
         list["items"]
             .as_array()
-            .and_then(|items| items.iter().find(|item| item["host"] == "box"))
+            .and_then(|items| items.iter().find(|item| item["host"] == name))
             .cloned()
             .unwrap_or(Value::Null)
+    }
+
+    /// `connect <name> --background`, which must succeed.
+    async fn connect(&self, name: &str) {
+        let connected = self
+            .h
+            .call(
+                Method::Connect,
+                json!({"host": name, "background": true}),
+                Context::default(),
+            )
+            .await
+            .expect("connect");
+        assert_eq!(connected["state"], "connected", "{connected}");
     }
 
     /// Box ports this client mirrors.

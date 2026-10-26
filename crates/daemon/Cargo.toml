@@ -56,6 +56,7 @@ devlanes-sys-windows = { path = "../sys-windows" }
 
 [dev-dependencies]
 devlanes-client = { path = "../client" }
+devlanes-pki = { path = "../pki" }
 devlanes-proxy = { path = "../proxy" }
 devlanes-resolver-hosts = { path = "../resolver-hosts", features = ["fake"] }
 devlanes-runner-pty = { path = "../runner-pty" }
@@ -64,5 +65,8 @@ devlanes-start-gate = { path = "../start-gate" }
 devlanes-transport-ssh = { path = "../transport-ssh" }
 devlanes-tunnel = { path = "../tunnel" }
 dunce.workspace = true
+# A TLS client for the box HTTPS port test.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

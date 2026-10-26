@@ -783,6 +783,89 @@ async fn tls_h1_h2_sse_and_unknown_host() -> Result {
     .await?
 }
 
+/// A free loopback port, released for the code under test to bind.
+fn free_port() -> Result<u16> {
+    Ok(std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port())
+}
+
+/// A scoped listener serves the routes of its port over TLS, with the port the
+/// browser used as `x-forwarded-port`; other names fail the handshake or, over
+/// plain HTTP, get the unknown-host page without being listed. Cancelling closes it.
+#[tokio::test]
+async fn scoped_listeners_serve_only_their_routes() -> Result {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("ca");
+        let ca = Arc::new(
+            tokio::task::spawn_blocking(move || CertificateAuthority::load_or_create(&path))
+                .await??,
+        );
+        let upstream = fixture(false, false).await?;
+        let port = free_port()?;
+        let mut boxed = Route::new("web.box.localhost", upstream.address);
+        boxed.listen_port = Some(port);
+        let local = Route::new("web.local.localhost", upstream.address);
+        let proxy = Proxy::new(ProxyConfig::default(), RouteTable::new(vec![boxed, local])?);
+        let shutdown = CancellationToken::new();
+        proxy.listen_scoped(port, ca.clone(), shutdown.clone())?;
+
+        let h1 = tls_client(&ca, b"http/1.1")?;
+        let stream = h1
+            .connect(
+                "web.box.localhost".try_into()?,
+                TcpStream::connect(("127.0.0.1", port)).await?,
+            )
+            .await?;
+        let authority = format!("web.box.localhost:{port}");
+        let response = request(stream, &authority, "/", &[]).await?;
+        assert_eq!(response.status(), 200);
+        let echoed = text(response).await?;
+        assert!(
+            echoed.contains(&format!("x-forwarded-port: {port}\r\n")),
+            "{echoed}"
+        );
+        assert!(echoed.contains("x-forwarded-proto: https\r\n"), "{echoed}");
+        assert!(
+            h1.connect(
+                "web.local.localhost".try_into()?,
+                TcpStream::connect(("127.0.0.1", port)).await?
+            )
+            .await
+            .is_err(),
+            "a route of another scope got a certificate"
+        );
+
+        let plain = run_proxy(proxy.scoped(port), None).await?;
+        let response = request(
+            TcpStream::connect(plain.address).await?,
+            "web.local.localhost",
+            "/",
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), 404);
+        assert_eq!(response.headers()["x-devlanes-error"], "unknown-host");
+        let page = text(response).await?;
+        assert!(page.contains("web.box.localhost"), "{page}");
+        assert!(!page.contains("- `web.local.localhost`"), "{page}");
+
+        shutdown.cancel();
+        let mut closed = false;
+        for _ in 0..50 {
+            if TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(closed, "the scoped listener outlived its shutdown");
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
+}
+
 /// TLS WebSockets remain HTTP/1.1 while ordinary clients may negotiate h2.
 #[tokio::test]
 async fn tls_websocket_echo() -> Result {

@@ -80,7 +80,7 @@ The client runs macOS, Linux or Windows (see [Windows clients](#windows-clients)
 - A `Host` entry in `~/.ssh/config`. devlanes runs the system `ssh`, so `ProxyJump`, `ProxyCommand`, certificates, `IdentityFile` and `User` apply. The name you give `remote connect` is that `Host`. Boxes on a tailnet or behind Cloudflare Zero Trust have their own pages: [Tailscale](remote-tailscale.md) and [Cloudflare](remote-cloudflare.md).
 - Your key in an agent. The ssh master is a child of the local daemon and uses the agent the daemon was started with; a daemon spawned from your shell inherits that shell's `SSH_AUTH_SOCK`. If the agent socket changes (new login, 1Password restart), `devlanes daemon restart` picks up the new one.
 - `devlanes certs trust`, once. The box's hostnames are served by your local proxy with your local CA.
-- Optionally a different `ports.range` than the box in `~/.devlanes/config.yaml`, so lanes created on both machines before they first connected do not overlap. Overlapping ports are reported, not mirrored, and the local allocator avoids the box's ports from then on.
+- A different `ports.range` than the box in `~/.devlanes/config.yaml`, so lanes created on both machines before they first connected do not overlap. Overlapping ports are reported, not mirrored, and the local allocator avoids the box's ports from then on. While the ranges overlap, every connection warns about it. With several boxes, give each box its own range as well.
 
 ```sh
 devlanes remote connect hetzner             # stays attached: shows state, relays ssh prompts
@@ -92,6 +92,14 @@ devlanes remote disconnect hetzner
 Passphrase, one-time-password and host-key prompts appear in the terminal running `remote connect`, prefixed with the box name; type `yes` to a host-key question even though the input is hidden. A reconnect that needs a prompt while no `remote connect` is attached fails as `Permission denied`, so keys in an agent are what make unattended reconnects work.
 
 The connection belongs to your local daemon, not to the terminal: Ctrl-C detaches, the daemon reconnects with backoff after sleep or network loss and keeps the mirrored ports bound meanwhile. A daemon restart drops connections; run `remote connect` again afterwards.
+
+### Several boxes
+
+Connect to each box by its own name. Give every machine its own `ports.range`, for example `20000-24999` on the client, `25000-29999` on one box and `30000-32767` on the other, then `devlanes daemon restart` on each; lanes that already have ports keep them until `devlanes lane clean`. When two boxes run the same project, the box you connected first keeps the shared hostnames, and the other box's lane is listed under `skipped_lanes` in `remote ls` until the first one disconnects.
+
+### Box proxy on another port
+
+A box whose proxy could not bind 443 (a VPS where unprivileged users cannot bind low ports) serves HTTPS on 8443 and puts that port in its URLs. The client then listens on 8443 too, on loopback only, and serves that box's hostnames there, so `https://web.acme.localhost:8443` opens unchanged. Nothing to configure. When something else holds that port on the client, `remote ls` says so; the box's hostnames still open on the client's own HTTPS port.
 
 ### Windows clients
 
@@ -134,6 +142,10 @@ curl -sS https://api.acme.localhost/healthz          # from the client, once the
 | ``the box printed more than 64 KiB before `devlanes tunnel --stdio` started`` | a profile file prints a lot on every login | make it quiet for non-interactive sessions |
 | `port 5432 is in use on this machine by postgres (pid 812); not mirrored` | a local process holds the port | stop it, or mark the box container `hidden` |
 | `lane acme@1 is not mirrored; this machine already serves acme-1.localhost` | a local lane of the same project uses that hostname | stop the local lane, or give one side another `project` name |
+| `lane acme@0 is not mirrored; box hetzner, connected earlier, already serves acme.localhost` | two connected boxes serve the same hostname | disconnect the other box or stop that lane there; the lane is mirrored once the name is free |
+| `port 20012 is in use on this machine by box hetzner (acme@0:api); not mirrored` | another connected box's mirror holds the port | give the boxes different `ports.range` values |
+| `the box's ports.range 20000-32767 overlaps this machine's (20000-32767); …` | both machines hand out ports from the same pool | set another `ports.range` in `~/.devlanes/config.yaml` on one machine, then `devlanes daemon restart` there |
+| `the box's URLs use HTTPS port 8443, which this machine cannot serve (in use by …); open its hostnames on port 443 instead` | another process holds the box's proxy port on the client | stop that process, then run `devlanes remote connect` for the box again; until then use the client's own HTTPS port |
 | `linger off` | Linux box without `loginctl enable-linger` | run it on the box |
 | `ssh to hetzner failed (255): Permission denied` | no agent or key for the daemon's ssh | load the key, `devlanes daemon restart`, connect again |
 | `no ssh client found` | Windows without OpenSSH Client | add the optional feature, or put `ssh.exe` on `PATH` |

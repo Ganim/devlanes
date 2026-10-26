@@ -487,6 +487,10 @@ pub struct RouteEntry {
     pub certificate_names: Vec<String>,
     /// The route mirrors a lane on a remote box.
     pub remote: bool,
+    /// For a box route, the port the box's proxy serves HTTPS on, which the URLs
+    /// the box generated carry. A port opened with [`RouteSink::open_box_port`]
+    /// serves the routes naming it.
+    pub box_https_port: Option<u16>,
 }
 
 /// Receives complete routing snapshots.
@@ -509,6 +513,20 @@ pub trait RouteSink: Send + Sync {
             .get("port")
             .and_then(Value::as_u64)
             .and_then(|port| u16::try_from(port).ok())
+    }
+    /// Serves HTTPS on `127.0.0.1` and `::1` at `port` as well, with the local CA,
+    /// for the routes whose `box_https_port` is `port` only; other hosts there
+    /// are unknown. Used when a box's proxy port differs from [`Self::https_port`].
+    fn open_box_port(&self, port: u16) -> std::io::Result<()> {
+        let _ = port;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this proxy serves no extra ports",
+        ))
+    }
+    /// Stops serving a port [`Self::open_box_port`] opened.
+    fn close_box_port(&self, port: u16) {
+        let _ = port;
     }
 }
 

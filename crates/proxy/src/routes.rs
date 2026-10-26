@@ -66,6 +66,9 @@ pub struct Route {
     pub unit: Option<String>,
     /// The route belongs to a lane on a remote box, reached through its connection.
     pub remote: bool,
+    /// A port whose scoped listeners ([`crate::Proxy::scoped`]) also serve this route,
+    /// besides the shared ones: a box's own HTTPS port, which its URLs carry.
+    pub listen_port: Option<u16>,
 }
 
 impl Route {
@@ -84,6 +87,7 @@ impl Route {
             owner: None,
             unit: None,
             remote: false,
+            listen_port: None,
         }
     }
 
@@ -177,12 +181,19 @@ impl RouteTable {
 
     /// Looks up a normalized hostname, never a URL or a host:port authority.
     pub fn lookup(&self, host: &str) -> Option<&Route> {
+        self.lookup_in(host, None)
+    }
+
+    /// [`Self::lookup`] among the routes a listener scoped to `scope` serves: those
+    /// whose `listen_port` is that port. `None` searches every route.
+    pub(crate) fn lookup_in(&self, host: &str, scope: Option<u16>) -> Option<&Route> {
         let host = host.trim_end_matches('.').to_ascii_lowercase();
         if host.starts_with("*.") || !valid_pattern(&host) {
             return None;
         }
         self.routes
             .iter()
+            .filter(|route| in_scope(route, scope))
             .find(|route| matches_host(&route.host, &host))
     }
 
@@ -224,6 +235,11 @@ fn normalize(route: &mut Route) -> Result<(), RouteError> {
         }
     }
     Ok(())
+}
+
+/// Whether a listener scoped to `scope` serves `route`; unscoped listeners serve all.
+pub(crate) fn in_scope(route: &Route, scope: Option<u16>) -> bool {
+    scope.is_none_or(|port| route.listen_port == Some(port))
 }
 
 /// Wildcards route subdomains at any depth; TLS adds an exact SAN for deeper names.

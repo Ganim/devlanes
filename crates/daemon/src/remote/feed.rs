@@ -329,6 +329,7 @@ mod tests {
             unit: unit.into(),
             certificate_names: Vec::new(),
             remote: false,
+            box_https_port: None,
         };
         let routes = [
             route("web.app-1.localhost", "web", 4100),

@@ -958,7 +958,12 @@ pub(crate) fn remote_warning(code: &str, data: &Value) -> String {
         .map(display_value)
         .collect::<Vec<_>>()
         .join(", ");
+    let other_box = text(data, "box");
     match code {
+        "lane_skipped" if !other_box.is_empty() => format!(
+            "{host}: lane {} is not mirrored; box {other_box}, connected earlier, already serves {hosts}",
+            field(data, "lane")
+        ),
         "lane_skipped" => format!(
             "{host}: lane {} is not mirrored; this machine already serves {hosts}",
             field(data, "lane")
@@ -966,9 +971,29 @@ pub(crate) fn remote_warning(code: &str, data: &Value) -> String {
         "hosts_skipped" => format!(
             "{host}: {hosts} are not mirrored; they are outside the hostnames this machine routes"
         ),
+        "port_in_use" if !other_box.is_empty() => format!(
+            "{host}: port {} is not mirrored; box {other_box} already mirrors it for {}",
+            field(data, "port"),
+            field(data, "held_by")
+        ),
         "port_in_use" => format!(
             "{host}: port {} is busy here, so it is not mirrored",
             field(data, "port")
+        ),
+        "proxy_port_in_use" => format!(
+            "{host}: the box's URLs use HTTPS port {}, which this machine cannot serve ({}); open its hostnames on port {} instead",
+            field(data, "port"),
+            super::clean(&field(data, "holder")),
+            field(data, "own_port")
+        ),
+        "ports_range_overlap" => format!(
+            "{host}: the box's ports.range {} overlaps {}; lanes can get the same ports on both, which are then not mirrored; give one machine a different ports.range",
+            field(data, "range"),
+            list(data, "overlaps")
+                .iter()
+                .map(display_value)
+                .collect::<Vec<_>>()
+                .join(" and ")
         ),
         "open_failed" => {
             let unit = match target(data) {
