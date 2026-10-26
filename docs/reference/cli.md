@@ -574,7 +574,6 @@ devlanes remote connect [OPTIONS] <HOST>
 
 - `<HOST>`: SSH destination, as in ~/.ssh/config
 - `--background`: Return once connected instead of staying attached for prompts
-- `--install`: If devlanes is missing on the box, install this machine's release there (HTTPS download, checksum verified, never replaces an existing binary)
 
 ### devlanes remote disconnect
 

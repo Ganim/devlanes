@@ -954,6 +954,17 @@ pub(crate) fn remote_warning(code: &str, data: &Value) -> String {
             "{host}: port {} is busy here, so it is not mirrored",
             field(data, "port")
         ),
+        "open_failed" => {
+            let unit = match target(data) {
+                target if target.is_empty() => String::new(),
+                target => format!(" ({target})"),
+            };
+            format!(
+                "{host}: a connection to port {}{unit} failed: {}",
+                field(data, "port"),
+                super::clean(&field(data, "message"))
+            )
+        }
         other => match data.get("message").and_then(Value::as_str) {
             Some(message) => format!("{host}: {}", super::clean(message)),
             None => format!("{host}: {}", super::clean(other).replace('_', " ")),

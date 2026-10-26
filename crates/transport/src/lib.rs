@@ -44,5 +44,7 @@ pub use sync::{
     NoSync, SyncError, SyncFeed, SyncInput, SyncInputEvent, SyncMessage, SyncSource,
     SyncStreamError, SyncSubscription,
 };
-pub use transport::{BoxDuplex, BoxError, Duplex, Joined, Transport, TransportError, stdio};
+pub use transport::{
+    BoxDuplex, BoxError, Duplex, EXIT_DAEMON_STOPPED, Joined, Transport, TransportError, stdio,
+};
 pub use wire::{DialTarget, PROTOCOL_VERSION, Prefixed, RejectReason, WireError};

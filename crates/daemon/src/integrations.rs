@@ -740,14 +740,6 @@ pub trait RemotePrompter: Send + Sync {
     async fn ask(&self, prompt: RemotePrompt) -> Option<String>;
 }
 
-/// What `remote connect` asked for beyond the host.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ConnectOptions {
-    /// Install the client's own release on a box that lacks devlanes
-    /// (`--install`); without it a missing binary is only reported.
-    pub install: bool,
-}
-
 /// Builds transports to boxes; the composition root wires SSH, tests an in-memory pipe.
 pub trait RemoteConnector: Send + Sync {
     /// A transport to `host`; prompts during authentication go to `prompts`.
@@ -755,7 +747,6 @@ pub trait RemoteConnector: Send + Sync {
         &self,
         host: &str,
         prompts: Arc<dyn RemotePrompter>,
-        options: ConnectOptions,
     ) -> Result<Arc<dyn devlanes_transport::Transport>, devlanes_proto::RpcError>;
 
     /// Transport name recorded in `remote_hosts`.
@@ -786,7 +777,6 @@ impl RemoteConnector for NoRemote {
         &self,
         _: &str,
         _: Arc<dyn RemotePrompter>,
-        _: ConnectOptions,
     ) -> Result<Arc<dyn devlanes_transport::Transport>, devlanes_proto::RpcError> {
         Err(devlanes_proto::RpcError::new(
             "not_supported_yet",

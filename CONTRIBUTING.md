@@ -136,7 +136,7 @@ e2e/ssh/run.sh                              # builds a Linux devlanes for the bo
 DEVLANES_TEST_SSH_BIN=skip e2e/ssh/run.sh   # no box binary; only the connection test runs
 ```
 
-To use `dl remote connect` by hand you need a box with `devlanes` on its PATH (or pass `--install`) and an entry for it in `~/.ssh/config`. A Linux VM or a spare machine works best: a box on the same machine as the client is confusing, because mirroring binds the box's port numbers locally and they collide with the box's own listeners.
+To use `dl remote connect` by hand you need a box with `devlanes` installed (on its PATH or in `~/.devlanes/bin`) and an entry for it in `~/.ssh/config`. A Linux VM or a spare machine works best: a box on the same machine as the client is confusing, because mirroring binds the box's port numbers locally and they collide with the box's own listeners.
 
 ```sh
 dl remote connect mybox      # streams connection status; Ctrl-C detaches, the connection stays up

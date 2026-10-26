@@ -21,13 +21,15 @@ use devlanes_core::ports::PortBlock;
 use devlanes_proto::{events, remote as wire};
 use devlanes_state::BlockOwner;
 use devlanes_transport::{
-    DialTarget, HostHeader, LaneKey, LinkState, Registry, UnitInfo, UnitKind, serving,
+    DialTarget, HostHeader, LaneKey, LinkState, OpenError, Registry, RejectReason, UnitInfo,
+    UnitKind, serving,
 };
 use serde_json::{Value, json};
 use tokio::{
     net::{TcpListener, TcpSocket, TcpStream},
     sync::broadcast,
     task::JoinHandle,
+    time::Instant,
 };
 
 use super::HostConn;
@@ -39,6 +41,9 @@ use crate::{
 
 /// How long a connection accepted during a reconnect waits for the new session.
 const HOLD: Duration = Duration::from_secs(10);
+
+/// Shortest time between two `open_failed` warnings for the same port and reason.
+const OPEN_WARNING_EVERY: Duration = Duration::from_secs(60);
 
 /// What a host mirrors right now, for routes and status output.
 #[derive(Debug, Clone, Default)]
@@ -52,6 +57,21 @@ pub(super) struct View {
     /// Box hostnames outside the names this machine routes (`.localhost` or the
     /// configured TLD).
     pub refused_hosts: Vec<Value>,
+    /// The last failed open per box port, until the next successful one.
+    pub open_errors: BTreeMap<u16, OpenFailure>,
+    /// When the last `open_failed` warning per port and reason went out.
+    pub warned: BTreeMap<(u16, &'static str), Instant>,
+}
+
+/// A connection to a mirrored port that did not reach the box's service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OpenFailure {
+    /// `not_registered`, `hidden`, `not_running` or `dial_failed` when the box
+    /// refused; `timeout`, `interrupted`, `session_lost` or `not_connected` otherwise.
+    pub reason: &'static str,
+    pub message: String,
+    /// Milliseconds since the Unix epoch.
+    pub at_ms: u64,
 }
 
 impl View {
@@ -64,6 +84,48 @@ impl View {
             .filter_map(|conflict| conflict.get("message").and_then(Value::as_str))
             .map(str::to_owned)
             .collect()
+    }
+
+    /// The mirrored ports for status output, each with its `last_error`
+    /// (`{reason, message, at_ms}`, or null).
+    pub(super) fn ports_json(&self) -> Vec<Value> {
+        self.ports
+            .iter()
+            .map(|port| {
+                let error = port
+                    .get("port")
+                    .and_then(Value::as_u64)
+                    .and_then(|number| u16::try_from(number).ok())
+                    .and_then(|number| self.open_errors.get(&number))
+                    .map_or(Value::Null, |failure| {
+                        json!({
+                            "reason": failure.reason,
+                            "message": failure.message,
+                            "at_ms": failure.at_ms,
+                        })
+                    });
+                let mut port = port.clone();
+                if let Some(fields) = port.as_object_mut() {
+                    fields.insert("last_error".into(), error);
+                }
+                port
+            })
+            .collect()
+    }
+
+    /// Records a failed open of `port` and reports whether its warning is due:
+    /// the first for this port and reason, or the first after [`OPEN_WARNING_EVERY`].
+    fn record_failure(&mut self, port: u16, failure: OpenFailure, now: Instant) -> bool {
+        let key = (port, failure.reason);
+        self.open_errors.insert(port, failure);
+        let due = self
+            .warned
+            .get(&key)
+            .is_none_or(|last| now.duration_since(*last) >= OPEN_WARNING_EVERY);
+        if due {
+            self.warned.insert(key, now);
+        }
+        due
     }
 }
 
@@ -124,6 +186,8 @@ impl PortMirror {
 
 /// Mirror state owned by one host's mirror task.
 struct Mirror {
+    /// Handed to accept loops, which report failed opens on the event bus.
+    engine: Weak<Inner>,
     conn: Arc<HostConn>,
     addresses: Vec<IpAddr>,
     ports: BTreeMap<u16, PortMirror>,
@@ -140,6 +204,7 @@ pub(super) async fn run(engine: Weak<Inner>, conn: Arc<HostConn>) {
         return;
     };
     let mut mirror = Mirror {
+        engine: engine.clone(),
         conn: conn.clone(),
         addresses: inner.integ.remote.mirror_addresses(),
         ports: BTreeMap::new(),
@@ -320,7 +385,12 @@ impl Mirror {
                         mirror.conflicts.remove(&address);
                         mirror.bound.push(Bound {
                             address,
-                            task: tokio::spawn(accept_loop(listener, *port, self.conn.clone())),
+                            task: tokio::spawn(accept_loop(
+                                listener,
+                                *port,
+                                self.conn.clone(),
+                                self.engine.clone(),
+                            )),
                         });
                     }
                     // No IPv6 loopback on this machine: nothing to mirror there.
@@ -435,7 +505,7 @@ impl Mirror {
         }
         self.relays.retain(|port, _| relayed.contains(port));
 
-        let view = View {
+        let mut view = View {
             routes,
             ports: self
                 .ports
@@ -467,10 +537,17 @@ impl Mirror {
                 .map(|(lane, hosts)| json!({"lane": lane_ref(lane), "hosts": hosts}))
                 .collect(),
             refused_hosts,
+            open_errors: BTreeMap::new(),
+            warned: BTreeMap::new(),
         };
         let routes_changed = {
             let mut current = lock(&self.conn.view);
             let changed = current.routes != view.routes;
+            // Failed opens outlive a reconcile, but not the port they are about.
+            view.open_errors = std::mem::take(&mut current.open_errors);
+            view.open_errors
+                .retain(|port, _| self.ports.contains_key(port) || self.relays.contains_key(port));
+            view.warned = std::mem::take(&mut current.warned);
             *current = view;
             changed
         };
@@ -493,7 +570,12 @@ impl Mirror {
             }
         };
         let local = listener.local_addr().ok()?.port();
-        let task = tokio::spawn(accept_loop(listener, port, self.conn.clone()));
+        let task = tokio::spawn(accept_loop(
+            listener,
+            port,
+            self.conn.clone(),
+            self.engine.clone(),
+        ));
         self.relays.insert(port, (local, Bound { address, task }));
         Some(local)
     }
@@ -623,11 +705,11 @@ fn bind(address: IpAddr, port: u16) -> std::io::Result<TcpListener> {
 }
 
 /// Accepts local connections and splices each into a data stream to the box.
-async fn accept_loop(listener: TcpListener, port: u16, conn: Arc<HostConn>) {
+async fn accept_loop(listener: TcpListener, port: u16, conn: Arc<HostConn>, engine: Weak<Inner>) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(splice(stream, port, conn.clone()));
+                tokio::spawn(splice(stream, port, conn.clone(), engine.clone()));
             }
             Err(error) => {
                 // Out of descriptors and similar: back off instead of spinning.
@@ -638,17 +720,25 @@ async fn accept_loop(listener: TcpListener, port: u16, conn: Arc<HostConn>) {
     }
 }
 
-/// One local connection to box port `port`.
-async fn splice(stream: TcpStream, port: u16, conn: Arc<HostConn>) {
+/// One local connection to box port `port`. A connection that cannot reach the
+/// box's service is recorded on the port and reported with `open_failed`.
+async fn splice(stream: TcpStream, port: u16, conn: Arc<HostConn>, engine: Weak<Inner>) {
     let session = match conn.session() {
         Some(session) => session,
         None => match conn.session_within(HOLD).await {
             Some(session) => session,
-            None => return,
+            // A disconnect in progress closes this listener anyway.
+            None if conn.cancel.is_cancelled() => return,
+            None => {
+                let message = format!("box {} is not connected", conn.name);
+                open_failed(&engine, &conn, port, "not_connected", message);
+                return;
+            }
         },
     };
     match session.open(DialTarget::Port { port }).await {
         Ok(remote) => {
+            lock(&conn.view).open_errors.remove(&port);
             let spliced =
                 devlanes_transport::splice(stream, remote, devlanes_transport::HALF_CLOSE_IDLE)
                     .await;
@@ -657,7 +747,112 @@ async fn splice(stream: TcpStream, port: u16, conn: Arc<HostConn>) {
             }
         }
         Err(error) => {
-            tracing::debug!(%error, port, host = %conn.name, "box refused a mirrored connection")
+            let (reason, message) = open_error(&error);
+            open_failed(&engine, &conn, port, reason, message);
         }
+    }
+}
+
+/// The reason code and message of a failed open, as `last_error` shows them.
+fn open_error(error: &OpenError) -> (&'static str, String) {
+    match error {
+        OpenError::Rejected { reason, message } => {
+            let reason = match reason {
+                RejectReason::NotRegistered => "not_registered",
+                RejectReason::Hidden => "hidden",
+                RejectReason::NotRunning => "not_running",
+                RejectReason::DialFailed => "dial_failed",
+            };
+            (reason, format!("the box refused the connection: {message}"))
+        }
+        OpenError::Timeout => ("timeout", "the box did not answer in time".to_owned()),
+        OpenError::Interrupted => (
+            "interrupted",
+            "the stream closed before the box answered".to_owned(),
+        ),
+        OpenError::Session(_) | OpenError::Wire(_) => (
+            "session_lost",
+            format!("the connection to the box was lost: {error}"),
+        ),
+    }
+}
+
+/// Records a failed open of `port` in the host's view and emits a
+/// `remote.warning` with code `open_failed`, at most once a minute per port
+/// and reason.
+fn open_failed(
+    engine: &Weak<Inner>,
+    conn: &HostConn,
+    port: u16,
+    reason: &'static str,
+    message: String,
+) {
+    let failure = OpenFailure {
+        reason,
+        message: message.clone(),
+        at_ms: super::now_ms(),
+    };
+    let due = lock(&conn.view).record_failure(port, failure, Instant::now());
+    if !due {
+        tracing::debug!(host = %conn.name, port, reason, %message, "mirrored connection failed");
+        return;
+    }
+    let Some(engine) = engine.upgrade() else {
+        return;
+    };
+    let unit = conn
+        .registry
+        .current()
+        .units()
+        .find(|unit| unit.ports.iter().any(|known| known.port == port))
+        .map(|unit| (lane_ref(&unit.key.lane), unit.key.name.clone()));
+    let (lane, unit) = unit.unzip();
+    tracing::warn!(host = %conn.name, port, reason, %message, "mirrored connection failed");
+    engine.bus.emit(
+        wire::WARNING_EVENT,
+        json!({
+            "host": conn.name,
+            "code": "open_failed",
+            "port": port,
+            "lane": lane,
+            "unit": unit,
+            "reason": reason,
+            "message": message,
+        }),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failure with `reason` and a message naming it.
+    fn failure(reason: &'static str) -> OpenFailure {
+        OpenFailure {
+            reason,
+            message: format!("{reason} happened"),
+            at_ms: 1,
+        }
+    }
+
+    /// One warning per port and reason a minute; every failure still becomes
+    /// the port's `last_error`.
+    #[test]
+    fn failed_opens_warn_once_a_minute_per_port_and_reason() {
+        let mut view = View {
+            ports: vec![json!({"port": 3000}), json!({"port": 3001})],
+            ..View::default()
+        };
+        let start = Instant::now();
+        assert!(view.record_failure(3000, failure("not_running"), start));
+        assert!(!view.record_failure(3000, failure("not_running"), start + Duration::from_secs(5)));
+        assert!(view.record_failure(3000, failure("timeout"), start + Duration::from_secs(6)));
+        assert!(view.record_failure(3001, failure("not_running"), start + Duration::from_secs(7)));
+        assert!(view.record_failure(3000, failure("not_running"), start + OPEN_WARNING_EVERY));
+        let ports = view.ports_json();
+        assert_eq!(ports[0]["last_error"]["reason"], "not_running");
+        assert_eq!(ports[0]["last_error"]["message"], "not_running happened");
+        view.open_errors.remove(&3001);
+        assert_eq!(view.ports_json()[1]["last_error"], Value::Null);
     }
 }

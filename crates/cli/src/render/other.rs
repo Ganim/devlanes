@@ -1876,6 +1876,37 @@ fn old_copy_checks(copies: &Value) -> Vec<Check> {
     checks
 }
 
+/// `remote ls`: the generic tree, with each mirrored port's `last_error` on one
+/// line (`last_error: <message> (<reason>, 5m ago)`) and left out when there is none.
+pub(super) fn host_list(data: &Value) -> Vec<String> {
+    let mut data = data.clone();
+    let ports = data
+        .get_mut("items")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get_mut("ports").and_then(Value::as_array_mut))
+        .flatten();
+    for port in ports {
+        let Some(fields) = port.as_object_mut() else {
+            continue;
+        };
+        let Some(error) = fields.remove("last_error").filter(Value::is_object) else {
+            continue;
+        };
+        let mut about = vec![text(&error, "reason")];
+        about.extend(error.get("at_ms").and_then(Value::as_u64).map(ago));
+        about.retain(|part| !part.is_empty());
+        let line = if about.is_empty() {
+            text(&error, "message")
+        } else {
+            format!("{} ({})", text(&error, "message"), about.join(", "))
+        };
+        fields.insert("last_error".into(), Value::String(line));
+    }
+    tree(&data)
+}
+
 /// A past epoch-milliseconds time as `5m ago`, `3h ago` or `2d ago`.
 fn ago(ms: u64) -> String {
     let now = std::time::SystemTime::now()

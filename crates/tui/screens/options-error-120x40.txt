@@ -17,7 +17,7 @@
 │   │   ports.range                    20000-32767│                                                                │   │
 │   │   tls.ca                            devlanes│ default  443                                                   │105│
 │   │   tls.trust                             none│ example  443, 8443                                             │   │
-│   │                                             │                                                                │118│
+│   │   remote.start_daemon                   true│                                                                │118│
 │   │                                             │ Applies after saving and a daemon restart.                     │   │
 │   │                                             │                                                                │131│
 │   │                                             │                                                                │   │
@@ -59,7 +59,7 @@
 16: 0 darkgray, 4 bold, 6 bold, 39-49 dim, 50 darkgray, 115 bold, 119 darkgray
 17: 0 darkgray, 4 bold, 6 bold, 42-49 dim, 50 darkgray, 52-60 dim, 115 bold, 119 darkgray
 18: 0 darkgray, 4 bold, 6 bold, 46-49 dim, 50 darkgray, 52-60 dim, 115 bold, 119 darkgray
-19: 0 darkgray, 4 bold, 50 darkgray, 115 bold, 119 darkgray
+19: 0 darkgray, 4 bold, 6 bold, 46-49 dim, 50 darkgray, 115 bold, 119 darkgray
 20: 0 darkgray, 4 bold, 50 darkgray, 52-93 dim, 115 bold, 119 darkgray
 21: 0 darkgray, 4 bold, 50 darkgray, 115 bold, 119 darkgray
 22: 0 darkgray, 4 bold, 50 darkgray, 115 bold, 119 darkgray

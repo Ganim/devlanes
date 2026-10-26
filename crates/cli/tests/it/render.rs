@@ -1962,3 +1962,48 @@ fn http_ready_timeouts_name_the_last_answer() {
       did not become ready before the timeout; last answer 302 (set `ready.http.status: 302` or use a path that answers 2xx)
     ");
 }
+
+/// `remote ls` shows a port's last failed open on one line and nothing for a
+/// port without one; the `open_failed` warning names the port and unit.
+#[test]
+fn failed_opens_are_one_line() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .expect("clock");
+    let hosts = json!({"items": [{
+        "host": "hetzner", "state": "connected", "transport": "ssh",
+        "ports": [
+            {"port": 20101, "lane": "acme@0", "unit": "web", "kind": "service",
+             "addresses": ["127.0.0.1"], "conflicts": [], "relay": null,
+             "last_error": {"reason": "not_running", "at_ms": now,
+                            "message": "the box refused the connection: target's unit is not running"}},
+            {"port": 20102, "lane": "acme@0", "unit": "api", "kind": "service",
+             "addresses": ["127.0.0.1"], "conflicts": [], "relay": null, "last_error": null},
+        ],
+    }], "truncated": false, "next_cursor": null});
+    let text = render_text(Method::HostList, &hosts);
+    assert!(
+        text.contains(
+            "last_error: the box refused the connection: target's unit is not running (not_running, just now)"
+        ),
+        "{text}"
+    );
+    assert_eq!(text.matches("last_error").count(), 3, "{text}");
+    let event = Event {
+        seq: 1,
+        event: "remote.warning".into(),
+        data: json!({"host": "hetzner", "code": "open_failed", "port": 20101, "lane": "acme@0",
+            "unit": "web", "reason": "not_running",
+            "message": "the box refused the connection: target's unit is not running"}),
+    };
+    let line = runtime(OutputMode::Agent)
+        .reporter()
+        .event(Method::Subscribe, &event)
+        .expect("event")
+        .stdout;
+    assert_eq!(
+        line,
+        "warn hetzner: a connection to port 20101 (acme@0:web) failed: the box refused the connection: target's unit is not running\n"
+    );
+}

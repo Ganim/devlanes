@@ -27,7 +27,7 @@
 │   ◉ wrk-ledger                            │   ports.range                    20000-32767│                                                                │                                           │
 │   ● stub-stripe                           │   tls.ca                            devlanes│ default  443                                                   │                                           │
 │   ● stub-s3                               │   tls.trust                             none│ example  443, 8443                                             │                                           │
-│   ◆ stub-twilio         orphaned · pid 482│                                             │                                                                │                                           │
+│   ◆ stub-twilio         orphaned · pid 482│   remote.start_daemon                   true│                                                                │                                           │
 │   ● stub-sendgrid                         │                                             │ Applies after saving and a daemon restart.                     │                                           │
 │   ● stub-segment                          │                                             │                                                                │                                           │
 │   ● stub-auth0                            │                                             │                                                                │                                           │
@@ -89,7 +89,7 @@
 26: 0 darkgray, 4-5 green, 6-15 magenta, 44 bold, 46 bold, 79-89 dim, 90 darkgray, 155 bold, 199 darkgray
 27: 0 darkgray, 4-5 green, 6-16 darkgray, 44 bold, 46 bold, 82-89 dim, 90 darkgray, 92-100 dim, 155 bold, 199 darkgray
 28: 0 darkgray, 4-5 green, 6-12 darkgray, 44 bold, 46 bold, 86-89 dim, 90 darkgray, 92-100 dim, 155 bold, 199 darkgray
-29: 0 darkgray, 4-5 yellow, 6-16 darkgray, 26-33 yellow, 34-43 dim, 44 bold, 90 darkgray, 155 bold, 199 darkgray
+29: 0 darkgray, 4-5 yellow, 6-16 darkgray, 26-33 yellow, 34-43 dim, 44 bold, 46 bold, 86-89 dim, 90 darkgray, 155 bold, 199 darkgray
 30: 0 darkgray, 4-5 green, 6-18 darkgray, 44 bold, 90 darkgray, 92-133 dim, 155 bold, 199 darkgray
 31: 0 darkgray, 4-5 green, 6-17 darkgray, 44 bold, 90 darkgray, 155 bold, 199 darkgray
 32: 0 darkgray, 4-5 green, 6-15 darkgray, 44 bold, 90 darkgray, 155 bold, 199 darkgray

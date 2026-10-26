@@ -601,6 +601,21 @@ fn user_tld_validation() {
     assert_eq!(issues.len(), 1, "{issues:?}");
 }
 
+/// A box starts its daemon for connecting clients unless `remote.start_daemon` is false.
+#[test]
+fn remote_start_daemon_defaults_to_true() {
+    assert!(parse_user("{}").expect("defaults").remote.start_daemon);
+    assert!(parse_user("remote: {}").expect("empty").remote.start_daemon);
+    assert!(
+        !parse_user("remote: { start_daemon: false }")
+            .expect("off")
+            .remote
+            .start_daemon
+    );
+    assert!(parse_user("remote: { start_daemon: maybe }").is_err());
+    assert!(parse_user("remote: { start: false }").is_err());
+}
+
 /// Startup pacing parses typed percentages and derives windows from the core count.
 #[test]
 fn startup_settings() {

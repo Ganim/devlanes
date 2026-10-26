@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 
-use devlanes_daemon::integrations::{ConnectOptions, RemoteConnector, RemotePrompter};
+use devlanes_daemon::integrations::{RemoteConnector, RemotePrompter};
 use devlanes_proto::{Context, Method, RpcError};
 use devlanes_transport::Transport;
 use devlanes_transport_ssh::{SshOptions, SshTransport};
@@ -56,7 +56,6 @@ impl RemoteConnector for EnvConnector {
         &self,
         host: &str,
         _prompts: Arc<dyn RemotePrompter>,
-        _options: ConnectOptions,
     ) -> Result<Arc<dyn Transport>, RpcError> {
         let home = std::env::temp_dir();
         let mut options = SshOptions::new(home);

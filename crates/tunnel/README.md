@@ -7,10 +7,11 @@ The box side of `devlanes remote connect`. The client's SSH transport runs `devl
 ```rust
 use devlanes_client::Paths;
 
-// `devlanes tunnel --stdio`: starts the box daemon if needed, then serves one
-// client over stdin and stdout until it leaves.
-async fn tunnel() -> Result<(), Box<dyn std::error::Error>> {
-    devlanes_tunnel::run_stdio(Paths::discover()?).await?;
+// `devlanes tunnel --stdio`: starts the box daemon if needed and allowed (the
+// box's `remote.start_daemon`), then serves one client over stdin and stdout
+// until it leaves.
+async fn tunnel(start_daemon: bool) -> Result<(), Box<dyn std::error::Error>> {
+    devlanes_tunnel::run_stdio(Paths::discover()?, start_daemon).await?;
     Ok(())
 }
 ```
@@ -31,10 +32,10 @@ async fn serve_pipe(paths: Paths, stream: impl Duplex + 'static) -> Result<(), S
 
 ## API
 
-- `run_stdio(paths)`: the `tunnel --stdio` entry point.
+- `run_stdio(paths, start_daemon)`: the `tunnel --stdio` entry point.
 - `services(paths, client)`: `BoxServices` for `devlanes_transport::serve`; `client` is listed by the box's `status` while the session lasts.
 - `server_label()`: the version label sent in the handshake.
-- `TunnelError`: the box daemon was unreachable or the session failed.
+- `TunnelError`: the box daemon was unreachable or stopped, or the session failed; `exit_code` gives the process status.
 
 ## Config example
 
@@ -63,6 +64,7 @@ The tunnel offers the `extension` sync to the client that ran `devlanes remote c
 - Every daemon request a client sends is refused with `not_supported`.
 - Syncs stream the entries the daemon lists in `sync.status`; the client names an entry, never a path. It then sends the files it holds in batches and an end marker. Each batch is compared with the source on arrival and only its outcome is kept; after the marker the box sends new and changed files, then deletions. A client that leaves before the marker leaves nothing behind, so its next subscription starts over. Files over 256 MiB are skipped, and one client follows at most 16 syncs.
 - A daemon the tunnel starts does not inherit the SSH session's variables (`SSH_AUTH_SOCK` and friends). On Linux the handshake label says `(linger off)` when the box would stop it at logout.
+- With `start_daemon` false and no daemon running, the tunnel fails with `box daemon is not running` and exit status `devlanes_transport::EXIT_DAEMON_STOPPED`, which the client's SSH transport reports as temporary.
 - stdout carries only mux frames. Errors go to stderr, which ssh returns to the client as the connection error.
 
 ## License

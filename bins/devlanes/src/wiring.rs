@@ -14,9 +14,7 @@ use devlanes_core::{
     contrib::{CA_BUNDLE_ENV, CA_CERT_ENV, Contributor, ScriptRunner},
 };
 use devlanes_daemon::integrations::ExitDetails;
-use devlanes_daemon::integrations::{
-    ConnectOptions, RemoteConnector, RemotePrompt, RemotePrompter,
-};
+use devlanes_daemon::integrations::{RemoteConnector, RemotePrompt, RemotePrompter};
 use devlanes_daemon::{
     Engine, EngineOptions, Handler,
     integrations::{
@@ -844,19 +842,8 @@ impl RemoteConnector for SshConnector {
         &self,
         host: &str,
         prompts: Arc<dyn RemotePrompter>,
-        connect: ConnectOptions,
     ) -> Result<Arc<dyn devlanes_transport::Transport>, RpcError> {
         let mut options = devlanes_transport_ssh::SshOptions::new(&self.home);
-        // A box without devlanes gets this client's own release, and only with
-        // `remote connect --install`; otherwise the plan is reported.
-        options.manifest_url = Some(devlanes_version::release_manifest_url(
-            devlanes_version::VERSION,
-        ));
-        options.bootstrap = if connect.install {
-            devlanes_transport_ssh::BootstrapPolicy::Install
-        } else {
-            devlanes_transport_ssh::BootstrapPolicy::Report
-        };
         options.askpass = self
             .exe
             .clone()

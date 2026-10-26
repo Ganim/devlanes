@@ -39,7 +39,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Session,
     engine::{Inner, required},
-    integrations::{ConnectOptions, RemotePrompt, RemotePrompter, RouteEntry},
+    integrations::{RemotePrompt, RemotePrompter, RouteEntry},
     model::lock,
 };
 
@@ -296,7 +296,7 @@ impl HostConn {
         if let Some(map) = value.as_object_mut() {
             map.insert("transport".into(), json!(self.kind));
             map.insert("lanes".into(), json!(lanes));
-            map.insert("ports".into(), json!(view.ports));
+            map.insert("ports".into(), json!(view.ports_json()));
             map.insert(
                 "routes".into(),
                 json!(
@@ -396,9 +396,6 @@ struct ConnectParams {
     host: String,
     #[serde(default)]
     background: bool,
-    /// Install devlanes on a box that lacks it.
-    #[serde(default)]
-    install: bool,
 }
 
 /// `disconnect` parameters; no host means every box.
@@ -482,10 +479,7 @@ impl Inner {
                 2,
             ));
         }
-        let options = ConnectOptions {
-            install: args.install,
-        };
-        let conn = self.ensure_host(&args.host, options).await?;
+        let conn = self.ensure_host(&args.host).await?;
         let _watching = conn.board.watch(session);
         if args.background {
             conn.settled(CONNECT_WAIT).await;
@@ -518,11 +512,7 @@ impl Inner {
 
     /// The live connection to `host`, or a new one. A stopped link is closed, with
     /// its listeners, before its replacement starts.
-    async fn ensure_host(
-        self: &Arc<Self>,
-        host: &str,
-        options: ConnectOptions,
-    ) -> Result<Arc<HostConn>, RpcError> {
+    async fn ensure_host(self: &Arc<Self>, host: &str) -> Result<Arc<HostConn>, RpcError> {
         let _connecting = self.remote.connecting.lock().await;
         let old = {
             let mut hosts = lock(&self.remote.hosts);
@@ -534,22 +524,18 @@ impl Inner {
         if let Some(old) = old {
             old.close().await;
         }
-        let conn = self.open_host(host, options)?;
+        let conn = self.open_host(host)?;
         lock(&self.remote.hosts).insert(host.to_owned(), conn.clone());
         Ok(conn)
     }
 
     /// Starts the link and the host's watcher and mirror tasks.
-    fn open_host(
-        self: &Arc<Self>,
-        host: &str,
-        options: ConnectOptions,
-    ) -> Result<Arc<HostConn>, RpcError> {
+    fn open_host(self: &Arc<Self>, host: &str) -> Result<Arc<HostConn>, RpcError> {
         let board = Arc::new(PromptBoard::default());
         let prompter = Arc::new(HostPrompter {
             board: board.clone(),
         });
-        let transport = self.integ.remote.transport(host, prompter, options)?;
+        let transport = self.integ.remote.transport(host, prompter)?;
         let options = SessionOptions::new(format!("devlanes {}", devlanes_version::VERSION));
         let link = Link::spawn(transport, options, self.integ.remote.backoff());
         let conn = Arc::new(HostConn {

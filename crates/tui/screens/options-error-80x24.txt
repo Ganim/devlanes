@@ -13,7 +13,7 @@
 │ │   ports.range               20000-32767│ (low ports on Linux need extra  │a│
 │ │   tls.ca                       devlanes│ permission), the daemon falls   │ │
 │ │   tls.trust                        none│ back to 8443 and service URLs   │a│
-│ │                                        │ carry the port.                 │ │
+│ │   remote.start_daemon              true│ carry the port.                 │ │
 │ │                                        │                                 │a│
 │ │                                        │ default  443                    │ │
 │ │                                        │ example  443, 8443              │a│
@@ -39,7 +39,7 @@
 12: 0 darkgray, 2 bold, 4 bold, 32-42 dim, 43 darkgray, 77 bold, 79 darkgray
 13: 0 darkgray, 2 bold, 4 bold, 35-42 dim, 43 darkgray, 77 bold, 79 darkgray
 14: 0 darkgray, 2 bold, 4 bold, 39-42 dim, 43 darkgray, 77 bold, 79 darkgray
-15: 0 darkgray, 2 bold, 43 darkgray, 77 bold, 79 darkgray
+15: 0 darkgray, 2 bold, 4 bold, 39-42 dim, 43 darkgray, 77 bold, 79 darkgray
 16: 0 darkgray, 2 bold, 43 darkgray, 77 bold, 79 darkgray
 17: 0 darkgray, 2 bold, 43 darkgray, 45-53 dim, 77 bold, 79 darkgray
 18: 0 darkgray, 2 bold, 43 darkgray, 45-53 dim, 77 bold, 79 darkgray

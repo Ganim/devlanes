@@ -31,7 +31,7 @@ use crate::ui::{fit, spans_width, spread};
 /// here join the first tab.
 const CATEGORIES: [(&str, &[&str]); 4] = [
     ("general", &["tui", "terminal", "updates"]),
-    ("network", &["proxy", "hostnames", "ports", "tls"]),
+    ("network", &["proxy", "hostnames", "ports", "tls", "remote"]),
     ("startup", &["startup"]),
     ("storage", &["logs", "metrics", "history", "state"]),
 ];
@@ -1207,7 +1207,13 @@ fn walk(node: &Value, root: &Value, prefix: &str, out: &mut Vec<Item>) {
             .unwrap_or_default();
         let applies = match key.as_str() {
             "tui.theme" | "tui.glyphs" => Applies::Now,
-            _ if key.starts_with("tui.") || key.starts_with("terminal.") => Applies::NextCommand,
+            // `devlanes tunnel` reads `remote.*` at each client connection.
+            _ if key.starts_with("tui.")
+                || key.starts_with("terminal.")
+                || key.starts_with("remote.") =>
+            {
+                Applies::NextCommand
+            }
             _ => Applies::Daemon,
         };
         out.push(Item {
@@ -1968,6 +1974,14 @@ mod tests {
         };
         // The reserved public resolver is not offered.
         assert!(choices.iter().all(|choice| choice.value != "public"));
+        // The tunnel reads it at each connection, so no daemon restart.
+        let start_daemon = categories[1]
+            .items
+            .iter()
+            .find(|item| item.key == "remote.start_daemon")
+            .expect("remote.start_daemon");
+        assert_eq!(start_daemon.kind, Kind::Bool);
+        assert_eq!(start_daemon.applies, Applies::NextCommand);
         let title = categories[0]
             .items
             .iter()

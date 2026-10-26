@@ -201,6 +201,7 @@ pub(crate) fn result(method: Method, data: &Value, cx: &Ctx<'_>) -> Vec<String> 
         Method::DaemonStatus => other::daemon_status(data),
         Method::DaemonShutdown => other::daemon_shutdown(data),
         Method::DaemonResetState => other::reset_state(data),
+        Method::HostList => other::host_list(data),
         _ => tree(data),
     }
 }

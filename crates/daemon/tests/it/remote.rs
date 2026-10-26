@@ -15,15 +15,17 @@ mod real_ssh;
 use std::{
     net::{IpAddr, Ipv6Addr},
     path::Path,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
 use devlanes_daemon::{
     Engine, EngineOptions, Handler, Options, Server, Session,
     integrations::{
-        ConnectOptions, Integrations, RemoteConnector, RemotePrompter, RouteEntry, RouteSink,
-        RouteStatus,
+        Integrations, RemoteConnector, RemotePrompter, RouteEntry, RouteSink, RouteStatus,
     },
 };
 use devlanes_ipc::Frame;
@@ -32,7 +34,8 @@ use devlanes_proto::{
 };
 use devlanes_state::Store;
 use devlanes_transport::{
-    Backoff, RpcCallError, ServeOptions, SessionOptions, Transport,
+    AuthorizedTarget, Backoff, BoxDuplex, Dialer, LoopbackDialer, RpcCallError, ServeOptions,
+    SessionOptions, Transport,
     memory::{MemoryTransport, memory_transport},
     serve,
 };
@@ -117,6 +120,16 @@ struct BoxSide {
 impl BoxSide {
     /// Starts the daemon socket and the tunnel services for the box under `tmp`.
     async fn start(tmp: &Temp, name: &str, ports: &str) -> Self {
+        Self::start_with(tmp, name, ports, None).await
+    }
+
+    /// [`BoxSide::start`] with `dialer` in place of the loopback dialer.
+    async fn start_with(
+        tmp: &Temp,
+        name: &str,
+        ports: &str,
+        dialer: Option<Arc<dyn Dialer>>,
+    ) -> Self {
         let h = engine_with(&tmp.path.join(name), ports, None, None).await;
         let home = tmp.path.join(format!("{name}-srv"));
         let options = Options {
@@ -135,7 +148,7 @@ impl BoxSide {
         let handler: Arc<dyn Handler> = Arc::new(h.engine.clone());
         let server = tokio::spawn(server.run(handler, || Ok(())));
         let (transport, mut listener) = memory_transport();
-        let services = devlanes_tunnel::services(
+        let mut services = devlanes_tunnel::services(
             paths,
             RemoteClient {
                 pid: 1,
@@ -143,6 +156,9 @@ impl BoxSide {
                 since_ms: 0,
             },
         );
+        if let Some(dialer) = dialer {
+            services.dialer = dialer;
+        }
         let accept = tokio::spawn(async move {
             while let Some(stream) = listener.accept().await {
                 let services = services.clone();
@@ -180,7 +196,6 @@ impl RemoteConnector for MemoryConnector {
         &self,
         _host: &str,
         _prompts: Arc<dyn RemotePrompter>,
-        _options: ConnectOptions,
     ) -> Result<Arc<dyn Transport>, RpcError> {
         Ok(Arc::new(self.transport.clone()))
     }
@@ -875,6 +890,139 @@ async fn colliding_lane_is_skipped() {
         .await
         .unwrap_or(false);
         assert!(warned, "skip is announced");
+        session.close();
+        let _ = events.await;
+        client.stop().await;
+        side.stop().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+/// A box dialer that refuses while `refuse` is set and dials loopback otherwise.
+struct SwitchDialer {
+    refuse: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl Dialer for SwitchDialer {
+    /// Fails like a service that stopped listening, or dials it.
+    async fn dial(&self, target: &AuthorizedTarget) -> std::io::Result<BoxDuplex> {
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "refused by the test",
+            ));
+        }
+        LoopbackDialer.dial(target).await
+    }
+}
+
+/// Connects to `[::1]:<port>` and waits until the mirror closes the connection.
+async fn knock(port: u16) {
+    let attempt = async {
+        let mut stream = TcpStream::connect((Ipv6Addr::LOCALHOST, port)).await.ok()?;
+        let mut rest = Vec::new();
+        stream.read_to_end(&mut rest).await.ok()
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(5), attempt).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A connection the box refuses shows as the port's `last_error` in `host.list`
+/// and emits one `open_failed` warning however often it repeats; the next
+/// connection that gets through clears the error.
+async fn refused_opens_are_reported() {
+    if !ipv6_loopback().await {
+        eprintln!("skipping refused_opens_are_reported: no IPv6 loopback");
+        return;
+    }
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let remote_repo = repo(&tmp.path, "boxrepo", BOX);
+        let dialer = Arc::new(SwitchDialer {
+            refuse: AtomicBool::new(false),
+        });
+        let side = BoxSide::start_with(&tmp, "box", "25000-25499", Some(dialer.clone())).await;
+        side.h
+            .call(Method::Start, json!({"units": ["echo"]}), cx(&remote_repo))
+            .await
+            .expect("box start");
+        let echo_port = box_port(&side.h, 0, "echo").await;
+        let client = ClientSide::start(&tmp, "client", "25500-25999", &side).await;
+        let (session, mut frames) = Session::local(9_002);
+        let request = Request {
+            id: 1,
+            method: Method::Subscribe,
+            params: json!({"follow": true}),
+            context: Context::default(),
+        };
+        let engine = client.h.engine.clone();
+        let watching = session.clone();
+        let events = tokio::spawn(async move { engine.handle(request, watching).await });
+        client
+            .h
+            .call(
+                Method::Connect,
+                json!({"host": "box", "background": true}),
+                Context::default(),
+            )
+            .await
+            .expect("connect");
+        eventually(SOON, || async {
+            client.mirrored().await.contains(&echo_port).then_some(())
+        })
+        .await
+        .expect("echo mirrored");
+
+        dialer.refuse.store(true, Ordering::SeqCst);
+        for _ in 0..3 {
+            knock(echo_port).await;
+        }
+        let port_entry = || async {
+            client.host().await["ports"]
+                .as_array()
+                .and_then(|ports| ports.iter().find(|port| port["port"] == echo_port).cloned())
+                .unwrap_or(Value::Null)
+        };
+        let failed = eventually(SOON, || async {
+            let port = port_entry().await;
+            (port["last_error"]["reason"] == "dial_failed").then_some(port)
+        })
+        .await
+        .expect("the refusal is recorded");
+        let message = failed["last_error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("refused by the test"), "{failed}");
+        assert!(failed["last_error"]["at_ms"].as_u64().is_some(), "{failed}");
+
+        let mut warnings = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(frame) = frames.recv().await {
+                if let Frame::Control(Control::Event(event)) = frame
+                    && event.event == "remote.warning"
+                    && event.data["code"] == "open_failed"
+                {
+                    warnings.push(event.data);
+                }
+            }
+        })
+        .await;
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0]["host"], "box");
+        assert_eq!(warnings[0]["port"], echo_port);
+        assert_eq!(warnings[0]["lane"], "boxapp@0");
+        assert_eq!(warnings[0]["unit"], "echo");
+        assert_eq!(warnings[0]["reason"], "dial_failed");
+
+        dialer.refuse.store(false, Ordering::SeqCst);
+        assert!(echo(echo_port).await, "the port works again");
+        let cleared = eventually(SOON, || async {
+            let port = port_entry().await;
+            (port["port"] == echo_port && port["last_error"].is_null()).then_some(())
+        })
+        .await;
+        assert!(cleared.is_some(), "a working open clears last_error");
+
         session.close();
         let _ = events.await;
         client.stop().await;

@@ -72,5 +72,8 @@ expression: user
   },
   "daemon": {
     "exit_when_idle": true
+  },
+  "remote": {
+    "start_daemon": true
   }
 }

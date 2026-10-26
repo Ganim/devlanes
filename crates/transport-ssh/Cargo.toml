@@ -11,7 +11,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-devlanes-version = { path = "../version" }
 async-trait.workspace = true
 devlanes-transport = { path = "../transport" }
 serde.workspace = true
@@ -33,7 +32,6 @@ getrandom = "0.3"
 tokio-util.workspace = true
 
 [dev-dependencies]
-sha2 = "0.10"
 tempfile.workspace = true
 
 # A fake ssh.exe where `#!/bin/sh` fakes cannot run.

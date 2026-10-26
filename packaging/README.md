@@ -1,6 +1,6 @@
 # Packaging
 
-Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula, the npm packages and the PyPI wheels all come from `.github/workflows/release.yml` and the scripts here; `.github/workflows/build.yml` builds the archives for it and for the `next` builds of `main`. `install.sh` and `install.ps1` at the repository root install from the same archives.
+Release archives, checksums, the release manifest, the Homebrew formula, the npm packages and the PyPI wheels all come from `.github/workflows/release.yml` and the scripts here; `.github/workflows/build.yml` builds the archives for it and for the `next` builds of `main`. `install.sh` and `install.ps1` at the repository root install from the same archives.
 
 | Path | Purpose |
 |---|---|
@@ -30,7 +30,7 @@ Every channel except the source build installs the release archives. Homebrew ha
 
 ## Next builds
 
-`.github/workflows/next.yml` builds every commit on `main` after the CI workflow passes on it, with the same `build.yml` as releases. It runs inside that commit's CI run, called by the last `ci.yml` job, so the build and publish show in the commit's checks as `CI / next / ...`; `gh workflow run next.yml` builds the tip of `main` by hand. The version is the current one with the patch bumped and `-next.N` added, where N counts the commits since the last stable tag: after 0.3.0 that's `0.3.1-next.14`, which sorts after 0.3.0 and before any release that follows. That version is written into the build only, never committed. The archives, `SHA256SUMS`, `release-manifest.json`, the schemas and `install.sh` then replace the assets of the GitHub prerelease `next`, whose tag moves to that commit. Only `install.sh` reads it: npm, PyPI, Homebrew, cargo binstall and the website stay on stable releases, and a prerelease is never GitHub's `latest`. Only the tip of `main` is built and published: CI runs can finish out of order, so a run for an older commit stops before building, and the `tip` job skips `publish` for a build that finishes after `main` moved, which then records no deployment. Builds of different commits run side by side, and publishes wait for each other. `remote connect --install` from a `next` build fetches the `next` manifest, which only matches while that build is still the latest. Repository settings must not enable immutable releases, which forbid replacing assets. Each publish is a deployment to the `next` environment.
+`.github/workflows/next.yml` builds every commit on `main` after the CI workflow passes on it, with the same `build.yml` as releases. It runs inside that commit's CI run, called by the last `ci.yml` job, so the build and publish show in the commit's checks as `CI / next / ...`; `gh workflow run next.yml` builds the tip of `main` by hand. The version is the current one with the patch bumped and `-next.N` added, where N counts the commits since the last stable tag: after 0.3.0 that's `0.3.1-next.14`, which sorts after 0.3.0 and before any release that follows. That version is written into the build only, never committed. The archives, `SHA256SUMS`, `release-manifest.json`, the schemas and `install.sh` then replace the assets of the GitHub prerelease `next`, whose tag moves to that commit. Only `install.sh` reads it: npm, PyPI, Homebrew, cargo binstall and the website stay on stable releases, and a prerelease is never GitHub's `latest`. Only the tip of `main` is built and published: CI runs can finish out of order, so a run for an older commit stops before building, and the `tip` job skips `publish` for a build that finishes after `main` moved, which then records no deployment. Builds of different commits run side by side, and publishes wait for each other. `remote connect --install` from an older `next` build fetches the `next` manifest, which only matches while that build is still the latest. Repository settings must not enable immutable releases, which forbid replacing assets. Each publish is a deployment to the `next` environment.
 
 ## Releasing
 
@@ -99,7 +99,7 @@ The `pypi` job has no PyPI secret either. The `devlanes` project on PyPI trusts 
 
 ## Release manifest
 
-`release-manifest.json` has the shape `ReleaseManifest::from_json` in `crates/transport-ssh` accepts:
+`release-manifest.json` has this shape:
 
 ```json
 {
@@ -116,7 +116,7 @@ The `pypi` job has no PyPI secret either. The `devlanes` project on PyPI trusts 
 }
 ```
 
-A binary cannot embed the checksums of its own release archives, because they are computed after it is built. The manifest is therefore a release asset. `devlanes remote connect --install` downloads the manifest for its own version from `https://github.com/devlanes-run/devlanes/releases/download/vVERSION/release-manifest.json` to bootstrap a box, which trusts HTTPS to GitHub for the manifest and the manifest for the archive. Embedding the manifest at build time would need a second build after the archives exist, which changes the archives again. The daemon's update check reads only the `version` of `releases/latest/download/release-manifest.json`.
+A binary cannot embed the checksums of its own release archives, because they are computed after it is built, so the manifest is a release asset. The daemon's update check reads only the `version` of `releases/latest/download/release-manifest.json`. Releases before `remote connect --install` was removed download the manifest of their own version (`releases/download/vVERSION/release-manifest.json`, or the `next` one for a build of `main`) to install devlanes on a box, so every release keeps publishing it in this shape.
 
 ## crates.io and cargo binstall
 

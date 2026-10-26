@@ -34,14 +34,3 @@ pub const LATEST_RELEASE_MANIFEST_URL: &str = concat!(
     repository!(),
     "/releases/latest/download/release-manifest.json"
 );
-
-/// The manifest of the release `version` (without a leading `v`), which lists its
-/// archives and their checksums. A build of `main` (`X.Y.Z-next.N`) has no release of
-/// its own, so its manifest is the rolling `next` one, which may already list a newer build.
-pub fn release_manifest_url(version: &str) -> String {
-    if version.contains("-next.") {
-        format!("{REPOSITORY}/releases/download/next/release-manifest.json")
-    } else {
-        format!("{REPOSITORY}/releases/download/v{version}/release-manifest.json")
-    }
-}

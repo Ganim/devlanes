@@ -535,10 +535,6 @@ pub enum RemoteCommand {
         /// Return once connected instead of staying attached for prompts
         #[arg(long)]
         background: bool,
-        /// If devlanes is missing on the box, install this machine's release there
-        /// (HTTPS download, checksum verified, never replaces an existing binary)
-        #[arg(long)]
-        install: bool,
     },
     /// Disconnect from a box and remove its mirrored ports and hostnames
     Disconnect {
@@ -1052,13 +1048,9 @@ impl Cli {
                 DaemonCommand::Run => return Ok(Action::DaemonRun),
             },
             Some(Command::Remote { command }) => match command {
-                RemoteCommand::Connect {
-                    host,
-                    background,
-                    install,
-                } => (
+                RemoteCommand::Connect { host, background } => (
                     Method::Connect,
-                    json!({"host": host, "background": background, "install": install}),
+                    json!({"host": host, "background": background}),
                 ),
                 RemoteCommand::Disconnect { host } => (Method::Disconnect, json!({"host": host})),
                 RemoteCommand::Ls => (Method::HostList, json!({})),

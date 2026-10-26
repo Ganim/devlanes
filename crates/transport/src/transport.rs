@@ -62,7 +62,7 @@ impl TransportError {
 
     /// Returns the integration-specific cause when it has type `E`.
     ///
-    /// Callers use this to recover typed details such as an SSH bootstrap plan.
+    /// Callers use this to recover typed details such as an SSH failure.
     pub fn downcast_ref<E: std::error::Error + 'static>(&self) -> Option<&E> {
         match self {
             Self::Io(_) => None,
@@ -117,6 +117,12 @@ impl<R: Unpin, W: AsyncWrite + Unpin> AsyncWrite for Joined<R, W> {
         Pin::new(&mut self.get_mut().writer).poll_shutdown(cx)
     }
 }
+
+/// Exit status of `devlanes tunnel --stdio` when no box daemon runs and the
+/// box's user config turns off starting one (`remote.start_daemon: false`).
+/// Transports that run the tunnel report it as a temporary failure, so the
+/// client keeps retrying until the daemon is started. 75 is `EX_TEMPFAIL`.
+pub const EXIT_DAEMON_STOPPED: i32 = 75;
 
 /// The process's stdin and stdout as one duplex, for `devlanes tunnel --stdio` on the box.
 pub fn stdio() -> Joined<tokio::io::Stdin, tokio::io::Stdout> {

@@ -101,3 +101,8 @@ tui:
 # A daemon installed with `devlanes daemon install` never stops on its own.
 daemon:
   exit_when_idle: true
+# On a box: devlanes remote connect from another machine starts this machine's daemon
+# when none runs. false leaves that to you (devlanes daemon install or devlanes start);
+# the client then reports the stopped daemon and retries until it runs.
+remote:
+  start_daemon: true

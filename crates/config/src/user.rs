@@ -68,6 +68,9 @@ pub struct UserConfig {
     /// The daemon's lifetime: whether it stops on its own once the last TUI closes and
     /// nothing runs.
     pub daemon: DaemonConfig,
+    /// Settings for this machine as a box that other machines reach with
+    /// `devlanes remote connect`.
+    pub remote: RemoteConfig,
 }
 
 /// Terminal UI settings: when it opens, its colors and symbols, and what quitting does
@@ -293,6 +296,27 @@ impl Default for DaemonConfig {
         Self {
             exit_when_idle: true,
         }
+    }
+}
+
+/// This machine as a box for `devlanes remote connect` from another machine.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(extend("examples" = [{"start_daemon":false}]))]
+pub struct RemoteConfig {
+    /// Start the devlanes daemon when a client connects with `devlanes remote connect`
+    /// and none is running here; defaults to true. Set false to keep the daemon under
+    /// your own control (`devlanes daemon install` or `devlanes start`): a client that
+    /// connects while it is stopped then reports that the box daemon is not running and
+    /// keeps retrying until it runs. Read at each connection, so no restart is needed.
+    #[schemars(extend("examples" = [true,false]))]
+    pub start_daemon: bool,
+}
+
+impl Default for RemoteConfig {
+    /// Connections start the daemon unless turned off.
+    fn default() -> Self {
+        Self { start_daemon: true }
     }
 }
 

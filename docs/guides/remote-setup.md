@@ -10,13 +10,7 @@ devlanes on the box is an ordinary install. It needs:
 - `git`, and Docker if the project has `infra`.
 - The `devlanes` binary on the `PATH` that a non-interactive ssh session gets, or at `~/.devlanes/bin/devlanes`. `remote connect` finds it with `sh -c 'command -v devlanes'`, which does not read `.bashrc` or `.zshrc`.
 
-The quickest way is from the client:
-
-```sh
-devlanes remote connect hetzner --install
-```
-
-With `--install`, a box without devlanes gets your release downloaded over HTTPS (`curl` or `wget` on the box), checked against the release's SHA-256 and placed at `~/.devlanes/bin/devlanes`. An existing binary is never replaced, and a running box daemon is never upgraded. Add `~/.devlanes/bin` to the box's `PATH` yourself so that `devlanes start` works in your ssh shell too.
+Install it on the box the way you would on any machine, from an ssh shell there. The [README](../../README.md) lists the install methods. `install.sh` puts the binary in `~/.local/bin`, which a non-interactive ssh session may not have on its `PATH`: check with `ssh hetzner 'command -v devlanes'`, or install with `sh -s -- --dir ~/.devlanes/bin`, where `remote connect` also looks. Install the same release as on the client. `remote connect` never installs or upgrades devlanes on a box; without a binary it fails with `devlanes is not installed on hetzner` and stops retrying.
 
 Then, on the box:
 
@@ -40,6 +34,15 @@ sudo loginctl enable-linger "$USER"
 Without it, `devlanes remote ls` on the client warns `linger off` and the lanes vanish when your last ssh session ends. `devlanes daemon install` on the box adds a systemd user unit that restarts the daemon at boot, which is useful on top of linger but does not replace it: a user unit is stopped with the session too when linger is off.
 
 On a macOS box there is no linger. The daemon keeps running after the ssh session closes. `devlanes daemon install` writes a LaunchAgent for login; it needs a GUI login session to load, so run it in a session where you are logged in on the console as well.
+
+A client that connects while no daemon runs on the box starts one there. To keep the box daemon under your own control, set this in the box's `~/.devlanes/config.yaml`:
+
+```yaml
+remote:
+  start_daemon: false
+```
+
+A client that connects while the daemon is stopped then shows `the devlanes daemon is not running on hetzner` in `remote ls` and keeps retrying. It connects once you start the daemon on the box with `devlanes daemon install` or any command that starts it, such as `devlanes start`. The setting is read at each connection, so it needs no restart.
 
 ### PATH for Docker and tools
 
@@ -104,7 +107,9 @@ curl -sS https://api.acme.localhost/healthz          # from the client, once the
 
 | Message | Cause | Fix |
 | --- | --- | --- |
-| `devlanes is not installed on hetzner` | not on the ssh `PATH` or in `~/.devlanes/bin` | `--install`, or move the binary |
+| `devlanes is not installed on hetzner` | not on the ssh `PATH` or in `~/.devlanes/bin` | install it on the box, or move the binary there, then connect again |
+| `the devlanes daemon is not running on hetzner` | `remote.start_daemon: false` on the box and its daemon is stopped | start it on the box (`devlanes daemon install` or `devlanes start`); the client keeps retrying |
+| `hetzner: a connection to port 20012 (acme@0:api) failed: …` | an `open_failed` warning: the box refused the connection, could not dial the port or did not answer, or the link was down | `remote ls` shows the port's `last_error`; start the unit on the box, or check that it listens on loopback |
 | `the box runs devlanes 0.4.1 and this machine 0.4.3` | different releases, same protocol | works; upgrade the box when convenient |
 | `the box runs … protocol 2 but this client speaks protocol 3` | releases too far apart | install the matching release on the box, then `devlanes daemon restart` there |
 | `port 5432 is in use on this machine by postgres (pid 812); not mirrored` | a local process holds the port | stop it, or mark the box container `hidden` |

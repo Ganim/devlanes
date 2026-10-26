@@ -5,8 +5,8 @@
 //! authenticates again. To keep that to one authentication per connect, the
 //! probe and the tunnel share the process: the box prints the probe and a
 //! sentinel line, then execs `devlanes tunnel --stdio`, and everything after
-//! the sentinel is mux traffic. Installing devlanes and a standalone
-//! [`SshTransport::probe`] are runs of their own.
+//! the sentinel is mux traffic. A standalone [`SshTransport::probe`] is a run
+//! of its own.
 //!
 //! Every `ssh.exe` starts inside a kill-on-close job, so whatever it starts
 //! (a `ProxyCommand`) ends with the session, and with the daemon if the
@@ -38,11 +38,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::askpass::{AskpassConfig, AskpassServer, SOCKET_ENV};
-use crate::bootstrap::{
-    self, BootstrapPlan, BootstrapPolicy, EXIT_ALREADY_INSTALLED, ManifestError, ReleaseManifest,
-    RemotePlatform, RemoteProbe,
-};
-use crate::sh_quote;
+use crate::probe::{self, INSTALL_DIR, RemoteProbe, SETUP_GUIDE};
+use crate::{ExitInfo, TunnelExit, sh_quote};
 
 /// Bytes of remote stderr kept for error messages.
 const STDERR_TAIL: usize = 4096;
@@ -53,9 +50,6 @@ const STDERR_KEPT: usize = 64 * 1024;
 
 /// Bound on what the box may print before the sentinel.
 const MAX_HEADER: u64 = 64 * 1024;
-
-/// Bound on an install run, which downloads the release on the box.
-const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// How long a failed ssh gets to report its exit status and last words.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
@@ -82,15 +76,6 @@ pub struct SshOptions {
     pub ssh_options: Vec<String>,
     /// Prompt relay; without it ssh runs with `BatchMode=yes`.
     pub askpass: Option<AskpassConfig>,
-    /// Releases the client may install on a box that lacks devlanes.
-    pub manifest: Option<ReleaseManifest>,
-    /// HTTPS URL of the release manifest, fetched when a box lacks devlanes and
-    /// no `manifest` was given.
-    pub manifest_url: Option<String>,
-    /// Release version the fetched manifest must describe: the client's own.
-    pub release_version: String,
-    /// Whether a missing binary is reported or installed.
-    pub bootstrap: BootstrapPolicy,
 }
 
 impl SshOptions {
@@ -104,10 +89,6 @@ impl SshOptions {
             auth_timeout: Duration::from_secs(120),
             ssh_options: Vec::new(),
             askpass: None,
-            manifest: None,
-            manifest_url: None,
-            release_version: devlanes_version::VERSION.to_owned(),
-            bootstrap: BootstrapPolicy::Report,
         }
     }
 }
@@ -141,18 +122,19 @@ pub enum SshError {
     /// The box answered the probe with unexpected output.
     #[error("unexpected probe output from the box: {0:?}")]
     Probe(String),
-    /// devlanes is missing on the box; the plan says what installing would do.
-    #[error("{}", .0.instructions())]
-    BootstrapRequired(Box<BootstrapPlan>),
-    /// The release manifest is unusable.
-    #[error(transparent)]
-    Manifest(#[from] ManifestError),
-    /// Installation was refused because a binary already exists.
-    #[error("devlanes already exists on the box; bootstrap never replaces an installed binary")]
-    AlreadyInstalled,
-    /// The install script failed on the box.
-    #[error("installing devlanes on the box failed: {0}")]
-    Install(String),
+    /// devlanes is neither on the box's `PATH` nor in `~/.devlanes/bin`.
+    #[error(
+        "devlanes is not installed on {0} (not on the ssh PATH or in ~/{INSTALL_DIR}); \
+         install it there, see {SETUP_GUIDE}"
+    )]
+    NotInstalled(String),
+    /// The box daemon is not running and the box's `remote.start_daemon` is off.
+    #[error(
+        "the devlanes daemon is not running on {0} and its config turns off starting it \
+         (`remote.start_daemon: false`); start it there with `devlanes daemon install` or \
+         any command that starts it, such as `devlanes start`"
+    )]
+    BoxDaemonStopped(String),
 }
 
 impl SshError {
@@ -160,12 +142,10 @@ impl SshError {
     pub fn is_permanent(&self) -> bool {
         match self {
             Self::Master { permanent, .. } => *permanent,
-            Self::ProgramMissing(_)
-            | Self::BootstrapRequired(_)
-            | Self::Manifest(_)
-            | Self::AlreadyInstalled
-            | Self::Install(_) => true,
-            Self::Io(_) | Self::AuthTimeout(_) | Self::Probe(_) => false,
+            Self::ProgramMissing(_) | Self::NotInstalled(_) => true,
+            Self::Io(_) | Self::AuthTimeout(_) | Self::Probe(_) | Self::BoxDaemonStopped(_) => {
+                false
+            }
         }
     }
 }
@@ -194,14 +174,6 @@ pub struct SshTransport {
     /// Set after the first tunnel opened: from then on a failing DNS lookup is a
     /// network blip (sleep, Wi-Fi change), not a misspelt host.
     connected: AtomicBool,
-}
-
-/// What one session run found.
-enum Started {
-    /// devlanes runs on the box and the stream carries the tunnel.
-    Tunnel(Box<SshStream>),
-    /// The box has no devlanes; the ssh process is gone.
-    Missing(RemoteProbe),
 }
 
 /// A running `ssh.exe`. Its job ends ssh and everything it started once
@@ -260,7 +232,7 @@ impl SshTransport {
         if let Some(probe) = self.remembered() {
             return Ok(probe);
         }
-        let script = bootstrap::probe_script(&self.options.remote_program);
+        let script = probe::probe_script(&self.options.remote_program);
         let output = self
             .run_script(&script, self.options.auth_timeout)
             .await?
@@ -270,38 +242,9 @@ impl SshTransport {
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
         let probe =
-            bootstrap::parse_probe(&stdout).ok_or_else(|| SshError::Probe(stdout.into_owned()))?;
+            probe::parse_probe(&stdout).ok_or_else(|| SshError::Probe(stdout.into_owned()))?;
         self.remember(Some(probe.clone()));
         Ok(probe)
-    }
-
-    /// Installs devlanes on the box as described by `plan`, in its own ssh run.
-    ///
-    /// Refuses when a binary exists already; restarting a box daemon is left to the user.
-    pub async fn bootstrap(&self, plan: &BootstrapPlan) -> Result<(), SshError> {
-        let artifact = plan
-            .artifact
-            .as_ref()
-            .ok_or_else(|| SshError::BootstrapRequired(Box::new(plan.clone())))?;
-        artifact.validate()?;
-        let script = bootstrap::install_script(artifact)?;
-        let output = self.run_script(&script, INSTALL_TIMEOUT).await?;
-        // A new probe must find the installed binary.
-        self.remember(None);
-        let output = output.ok_or_else(|| {
-            SshError::Install(format!(
-                "no result within {} seconds",
-                INSTALL_TIMEOUT.as_secs()
-            ))
-        })?;
-        if let Some(error) = self.ssh_failed(&output) {
-            return Err(error);
-        }
-        match output.status.code() {
-            Some(0) => Ok(()),
-            Some(EXIT_ALREADY_INSTALLED) => Err(SshError::AlreadyInstalled),
-            _ => Err(SshError::Install(tail(&output.stderr))),
-        }
     }
 
     /// Ends every session this transport started.
@@ -311,59 +254,17 @@ impl SshTransport {
         *sessions = CancellationToken::new();
     }
 
-    /// Opens the tunnel, bootstrapping if allowed.
+    /// Opens the tunnel.
     async fn open(&self) -> Result<SshStream, SshError> {
-        let stream = self.open_tunnel().await?;
+        let stream = self.start().await?;
         self.connected.store(true, Ordering::Relaxed);
         Ok(stream)
     }
 
-    /// [`SshTransport::open`] without the bookkeeping.
-    async fn open_tunnel(&self) -> Result<SshStream, SshError> {
-        let probe = match self.start().await? {
-            Started::Tunnel(stream) => return Ok(*stream),
-            Started::Missing(probe) => probe,
-        };
-        let plan = self.bootstrap_plan(probe.platform).await;
-        if self.options.bootstrap == BootstrapPolicy::Report || plan.artifact.is_none() {
-            return Err(SshError::BootstrapRequired(Box::new(plan)));
-        }
-        self.bootstrap(&plan).await?;
-        match self.start().await? {
-            Started::Tunnel(stream) => Ok(*stream),
-            Started::Missing(_) => Err(SshError::Install("binary not found after install".into())),
-        }
-    }
-
-    /// The release manifest: the configured one, else the one at `manifest_url`.
-    async fn manifest(&self) -> Result<Option<ReleaseManifest>, ManifestError> {
-        if let Some(manifest) = &self.options.manifest {
-            return Ok(Some(manifest.clone()));
-        }
-        match &self.options.manifest_url {
-            Some(url) => bootstrap::fetch_manifest(url, &self.options.release_version)
-                .await
-                .map(Some),
-            None => Ok(None),
-        }
-    }
-
-    /// What installing devlanes on a box of `platform` would take.
-    async fn bootstrap_plan(&self, platform: RemotePlatform) -> BootstrapPlan {
-        let (manifest, manifest_error) = match self.manifest().await {
-            Ok(manifest) => (manifest, None),
-            Err(error) => (None, Some(error.0)),
-        };
-        BootstrapPlan {
-            destination: self.destination.clone(),
-            artifact: manifest.as_ref().and_then(|m| m.select(&platform)).cloned(),
-            platform,
-            manifest_error,
-        }
-    }
-
-    /// Runs the session script: probe, sentinel, tunnel.
-    async fn start(&self) -> Result<Started, SshError> {
+    /// Runs the session script: probe, sentinel, tunnel. A box without
+    /// devlanes ends the session after the probe with
+    /// [`SshError::NotInstalled`].
+    async fn start(&self) -> Result<SshStream, SshError> {
         // Taken before ssh starts, so a `close` while it authenticates ends
         // this session too instead of leaving a tunnel opened after it.
         let closed = self
@@ -374,7 +275,7 @@ impl SshTransport {
         let token = crate::random_token()?;
         let start = format!("devlanes-probe-{token}");
         let end = format!("devlanes-tunnel-ready-{token}");
-        let script = bootstrap::session_script(&self.options.remote_program, &start, &end);
+        let script = probe::session_script(&self.options.remote_program, &start, &end);
         let askpass = self.askpass().await?;
         let (process, pipes) = self.spawn(&script, true, askpass.as_ref()).await?;
         let stdin = pipes
@@ -400,11 +301,12 @@ impl SshTransport {
                 return Err(self.ended_early(&process, stderr, printed).await);
             }
         };
-        let probe = bootstrap::parse_session_header(&lines, &start)
+        let probe = probe::parse_session_header(&lines, &start)
             .ok_or_else(|| SshError::Probe(lines.join("\n")))?;
-        self.remember(Some(probe.clone()));
-        if probe.program.is_none() {
-            return Ok(Started::Missing(probe));
+        let missing = probe.program.is_none();
+        self.remember(Some(probe));
+        if missing {
+            return Err(SshError::NotInstalled(self.destination.clone()));
         }
         let (exit_tx, exit_rx) = oneshot::channel();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
@@ -428,12 +330,13 @@ impl SshTransport {
             }
             drop(process);
         });
-        Ok(Started::Tunnel(Box::new(SshStream {
+        Ok(SshStream {
             io: Joined::new(stdout, stdin),
+            destination: self.destination.clone(),
             exit: Some(exit_rx),
             finished: None,
             _stop: stop_tx,
-        })))
+        })
     }
 
     /// The error for a session whose output ended before the sentinel. Exit
@@ -838,21 +741,16 @@ async fn collect_tail(mut reader: impl AsyncRead + Unpin) -> Vec<u8> {
     }
 }
 
-/// How the remote tunnel process ended.
-struct ExitInfo {
-    status: Result<ExitStatus, String>,
-    stderr: String,
-}
-
 /// The tunnel's standard streams as one duplex.
 ///
 /// At end of file it waits for ssh's exit status, so a crashed or missing
 /// `tunnel` command surfaces as an error carrying its stderr instead of a
-/// bare disconnect.
+/// bare disconnect, and a stopped box daemon as [`SshError::BoxDaemonStopped`].
 pub struct SshStream {
     io: Joined<BufReader<File>, File>,
+    destination: String,
     exit: Option<oneshot::Receiver<ExitInfo>>,
-    finished: Option<Result<(), String>>,
+    finished: Option<Option<TunnelExit>>,
     _stop: oneshot::Sender<()>,
 }
 
@@ -862,39 +760,18 @@ impl SshStream {
         if self.finished.is_none() {
             let outcome = match self.exit.as_mut() {
                 Some(exit) => match ready!(Pin::new(exit).poll(cx)) {
-                    Ok(info) => describe_exit(info),
-                    Err(_) => Ok(()),
+                    Ok(info) => TunnelExit::from_info(info),
+                    Err(_) => None,
                 },
-                None => Ok(()),
+                None => None,
             };
             self.exit = None;
             self.finished = Some(outcome);
         }
         match &self.finished {
-            Some(Err(message)) => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                message.clone(),
-            ))),
+            Some(Some(exit)) => Poll::Ready(Err(exit.to_io(&self.destination))),
             _ => Poll::Ready(Ok(())),
         }
-    }
-}
-
-/// Turns a tunnel exit into `Ok` for a clean exit or a message otherwise.
-fn describe_exit(info: ExitInfo) -> Result<(), String> {
-    let detail = if info.stderr.is_empty() {
-        String::new()
-    } else {
-        format!(": {}", info.stderr)
-    };
-    match info.status {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!(
-            "remote `devlanes tunnel --stdio` exited with {status}{detail}"
-        )),
-        Err(error) => Err(format!(
-            "remote `devlanes tunnel --stdio` failed: {error}{detail}"
-        )),
     }
 }
 

@@ -6,23 +6,14 @@ The SSH `Transport` for `devlanes remote connect`. It runs the system `ssh` (a C
 
 ```rust
 use std::sync::Arc;
-use devlanes_transport::{Session, SessionError, SessionOptions};
-use devlanes_transport_ssh::{AskpassConfig, PromptRelay, SshError, SshOptions, SshTransport};
+use devlanes_transport::{Session, SessionOptions};
+use devlanes_transport_ssh::{AskpassConfig, PromptRelay, SshOptions, SshTransport};
 
 async fn connect(home: &std::path::Path, relay: Arc<dyn PromptRelay>) -> Result<Session, Box<dyn std::error::Error>> {
     let mut options = SshOptions::new(home);
     options.askpass = Some(AskpassConfig::current_exe(relay)?);
     let transport = SshTransport::new("box.example.invalid", options);
-    match Session::connect(&transport, SessionOptions::new("devlanes 0.1.0")).await {
-        Err(SessionError::Transport(error)) => {
-            if let Some(SshError::BootstrapRequired(plan)) = error.downcast_ref::<SshError>() {
-                // After the user approves plan.instructions():
-                transport.bootstrap(plan).await?;
-            }
-            Err(error.into())
-        }
-        result => Ok(result?),
-    }
+    Ok(Session::connect(&transport, SessionOptions::new("devlanes 0.1.0")).await?)
 }
 ```
 
@@ -30,11 +21,10 @@ async fn connect(home: &std::path::Path, relay: Arc<dyn PromptRelay>) -> Result<
 
 ## API
 
-- `SshTransport`: `Transport` impl plus `probe`, `bootstrap` and `close`.
-- `SshOptions::new(devlanes_home)`: control files under `<home>/run/ssh`, extra `-o` options, askpass, manifest, bootstrap policy.
+- `SshTransport`: `Transport` impl plus `probe` and `close`.
+- `SshOptions::new(devlanes_home)`: control files under `<home>/run/ssh`, extra `-o` options, askpass.
 - `PromptRelay`: shows ssh prompts to the attached client.
-- `ReleaseManifest` and `BootstrapPlan`: what to install when the box has no `devlanes`.
-- `SshError::is_permanent`: separates rejected credentials or a missing binary from network failures.
+- `SshError::is_permanent`: separates rejected credentials or a missing binary from network failures and a stopped box daemon.
 
 ## Behaviour
 
@@ -42,7 +32,7 @@ The crate launches `ssh -M -f -N` itself and hands the socket to `openssh`, beca
 
 Only a session channel is used, so boxes with `AllowTcpForwarding no` work.
 
-Bootstrap installs to `$HOME/.devlanes/bin` only when no binary exists, verifying the manifest's SHA-256 on the box. It never replaces an installed binary, so a running box daemon is never upgraded; a protocol mismatch is reported with instructions.
+The probe looks for `devlanes` on the box's `PATH`, then in `$HOME/.devlanes/bin`. A box without it fails with the permanent `SshError::NotInstalled`; installing devlanes there is up to the user. A tunnel that exits with `devlanes_transport::EXIT_DAEMON_STOPPED` (the box daemon is stopped and `remote.start_daemon` is off there) becomes the temporary `SshError::BoxDaemonStopped`, so the link keeps retrying.
 
 The control socket path must stay under 100 bytes for macOS, so pass a short `control_dir` if `DEVLANES_HOME` is deep.
 

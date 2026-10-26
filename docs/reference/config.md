@@ -316,6 +316,13 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | `proxy.lan` | boolean | Accept connections from other devices on the network; defaults to false, which refuses every peer that is not this machine. Those devices must still resolve the hostnames to this machine and trust the CA. | `false` |
 | `proxy.via` | boolean | Add `Via: 1.1 devlanes.run` to every response the proxy forwards from a service (`1.1 devlanes.run (remote)` for lanes on a remote box), so a client can tell that devlanes sat in between. Defaults to true; set false if a client or test compares response headers exactly. | `true` |
 
+### remote
+
+| Path | Type | Description | Example |
+| --- | --- | --- | --- |
+| `remote` | object | Settings for this machine as a box that other machines reach with `devlanes remote connect`. | `{"start_daemon":false}` |
+| `remote.start_daemon` | boolean | Start the devlanes daemon when a client connects with `devlanes remote connect` and none is running here; defaults to true. Set false to keep the daemon under your own control (`devlanes daemon install` or `devlanes start`): a client that connects while it is stopped then reports that the box daemon is not running and keeps retrying until it runs. Read at each connection, so no restart is needed. | `true` |
+
 ### startup
 
 | Path | Type | Description | Example |

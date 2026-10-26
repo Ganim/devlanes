@@ -45,7 +45,7 @@ jobs:
             os: macos-latest
             native: false
           # 22.04 runners keep the glibc requirement at 2.35, so the binaries also
-          # run on Debian 12 and Ubuntu 22.04 hosts that SSH bootstrap installs onto.
+          # run on Debian 12 and Ubuntu 22.04 hosts.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             native: true

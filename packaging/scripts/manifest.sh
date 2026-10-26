@@ -1,8 +1,9 @@
 #!/bin/sh
 # Writes SHA256SUMS (every archive, the Windows .zip ones included) and
 # release-manifest.json (the .tar.gz archives) for the archives in DIST_DIR.
-# The manifest has the shape ReleaseManifest::from_json in crates/transport-ssh
-# accepts: HTTPS URLs, lowercase hex SHA-256, tar_gz members without `..`.
+# The daemon's update check reads the manifest's version; older clients'
+# `remote connect --install` also reads its archives: HTTPS URLs, lowercase hex
+# SHA-256, tar_gz members without `..`.
 set -eu
 
 if [ $# -ne 3 ]; then
@@ -52,8 +53,8 @@ for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu
 }$entry
 done
 
-# The Windows archives are listed in SHA256SUMS only: SSH bootstrap installs onto
-# Linux and macOS boxes, so the manifest names the .tar.gz archives alone.
+# The Windows archives are listed in SHA256SUMS only: older clients' SSH bootstrap
+# installs onto Linux and macOS boxes, so the manifest names the .tar.gz archives alone.
 for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
 	name=devlanes-$version-$target.zip
 	if [ ! -f "$dist/$name" ]; then
