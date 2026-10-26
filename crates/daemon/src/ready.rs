@@ -933,47 +933,59 @@ mod tests {
         // `/proc/<pid>/winpid` is the Windows PID behind an MSYS one.
         let script =
             "sleep 60 & cat /proc/$!/winpid > \"$MARK.tmp\" && mv \"$MARK.tmp\" \"$MARK\"; wait";
-        let watcher = {
-            let marker = marker.clone();
-            tokio::spawn(async move {
-                loop {
-                    if let Ok(text) = std::fs::read_to_string(&marker)
-                        && let Ok(pid) = text.trim().parse::<u32>()
-                        && let Ok(Some(identity)) = devlanes_sys::identity(pid)
-                    {
-                        return identity;
-                    }
-                    sleep(Duration::from_millis(50)).await;
-                }
-            })
-        };
-        // `sh.exe` on a loaded runner has taken more than 5 s to start the
-        // background sleep and write the marker; the attempt must outlast that,
-        // or nothing is left to check.
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let passed = timeout(
-            Duration::from_secs(40),
-            windows::cmd_succeeds(&shell, script, dir.path(), &env, deadline),
-        )
-        .await
-        .expect("the attempt ends at its deadline");
-        assert!(!passed);
-        let background = timeout(Duration::from_secs(5), watcher)
-            .await
-            .expect("the background sleep started")
-            .expect("watcher");
-        // Ending a job's processes is asynchronous; allow it a moment.
-        let mut alive = true;
-        for _ in 0..100 {
-            alive = devlanes_sys::matches(&background).unwrap_or(false);
-            if !alive {
-                break;
+        // `sh.exe` on a loaded runner has taken more than the 10 s an attempt
+        // may last to start the background sleep. With the clock paused, the
+        // attempt's blocking wait keeps tokio from advancing it, so the
+        // deadline passes only when the test advances it, after the sleep runs.
+        tokio::time::pause();
+        let attempt = tokio::spawn({
+            let cwd = dir.path().to_path_buf();
+            async move {
+                let deadline = Instant::now() + CMD_ATTEMPT;
+                windows::cmd_succeeds(&shell, script, &cwd, &env, deadline).await
             }
-            sleep(Duration::from_millis(50)).await;
+        });
+        // Real time from here on: the paused clock would not wait.
+        let background = tokio::task::spawn_blocking(move || {
+            let limit = std::time::Instant::now() + Duration::from_secs(60);
+            while std::time::Instant::now() < limit {
+                if let Ok(text) = std::fs::read_to_string(&marker)
+                    && let Ok(pid) = text.trim().parse::<u32>()
+                    && let Ok(Some(identity)) = devlanes_sys::identity(pid)
+                {
+                    return Some(identity);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            None
+        })
+        .await
+        .expect("watcher")
+        .expect("the background sleep started");
+        // The attempt may not have set its deadline yet when the marker
+        // appears; each advance passes whatever deadline it has set.
+        let limit = std::time::Instant::now() + Duration::from_secs(30);
+        while !attempt.is_finished() {
+            assert!(
+                std::time::Instant::now() < limit,
+                "the attempt ends at its deadline"
+            );
+            tokio::time::advance(CMD_ATTEMPT).await;
         }
-        if alive {
+        assert!(!attempt.await.expect("attempt"));
+        // Ending a job's processes is asynchronous; allow it a moment.
+        let alive = tokio::task::spawn_blocking(move || {
+            for _ in 0..100 {
+                if !devlanes_sys::matches(&background).unwrap_or(false) {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
             let _ = devlanes_sys::terminate_verified(&background, 1);
-        }
+            true
+        })
+        .await
+        .expect("liveness check");
         assert!(!alive, "the background sleep outlived its probe");
     }
 
