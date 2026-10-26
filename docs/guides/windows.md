@@ -30,7 +30,7 @@ cargo binstall downloads the same release build:
 cargo binstall --git https://github.com/devlanes-run/devlanes devlanes
 ```
 
-`npm install -g devlanes` installs the same build. Homebrew has no Windows build. Building from source (`cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes`) needs the Visual Studio Build Tools. There is no `devlanes-hosts` helper on Windows.
+`npm install -g devlanes`, `uv tool install devlanes`, `pipx install devlanes` and `pip install devlanes` install the same build. Homebrew has no Windows build. Building from source (`cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes`) needs the Visual Studio Build Tools. There is no `devlanes-hosts` helper on Windows.
 
 Run `devlanes doctor` once after installing. The home is `%USERPROFILE%\.devlanes` (`DEVLANES_HOME` overrides it; `HOME`, which Git Bash sets, is ignored). It must be private: only your account, SYSTEM and Administrators may have access, and `doctor` prints the `icacls` commands that fix a home others can reach. The daemon listens on a named pipe, `\\.\pipe\devlanes-<hash>`, that only your account can open; there is no `daemon.sock`.
 
@@ -177,7 +177,7 @@ Some terminals end every process they started when they close. `doctor` warns wh
 
 `install.ps1` upgrades while the daemon runs. Windows refuses to overwrite a running executable, so the script renames it to `devlanes.exe.old-<timestamp>` and installs next to it. `devlanes daemon restart` (which stops services) switches to the new version, and `devlanes doctor` or the next install deletes the old file once nothing runs it.
 
-cargo binstall, `cargo install` and npm cannot replace a running `devlanes.exe`. Run `devlanes daemon stop` first, which stops every unit, then the upgrade command. The update notice and `doctor` print the command for the way you installed.
+cargo binstall, `cargo install`, npm, uv, pipx and pip cannot replace a running `devlanes.exe`. Run `devlanes daemon stop` first, which stops every unit, then the upgrade command. The update notice and `doctor` print the command for the way you installed.
 
 ## Coding agents
 

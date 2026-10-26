@@ -3,7 +3,7 @@ name: Next
 # committed version and N counts the commits since the last stable tag, so it sorts after
 # the current release and before the next one. The build replaces the assets of the
 # rolling `next` prerelease, which `install.sh --channel next` installs.
-# Nothing else is published: npm, Homebrew and the website only ever get stable
+# Nothing else is published: npm, PyPI, Homebrew and the website only ever get stable
 # releases from release.yml.
 #
 # The last job of ci.yml calls it on pushes to main once every check passed, so its jobs

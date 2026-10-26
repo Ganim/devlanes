@@ -1,6 +1,6 @@
 # Packaging
 
-Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula and the npm packages all come from `.github/workflows/release.yml` and the scripts here; `.github/workflows/build.yml` builds the archives for it and for the `next` builds of `main`. `install.sh` and `install.ps1` at the repository root install from the same archives.
+Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula, the npm packages and the PyPI wheels all come from `.github/workflows/release.yml` and the scripts here; `.github/workflows/build.yml` builds the archives for it and for the `next` builds of `main`. `install.sh` and `install.ps1` at the repository root install from the same archives.
 
 | Path | Purpose |
 |---|---|
@@ -9,8 +9,9 @@ Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula an
 | `scripts/manifest.sh` | `SHA256SUMS` and `release-manifest.json` |
 | `homebrew/devlanes.rb`, `homebrew/render.sh` | Formula template and the script that fills in version and checksums |
 | `npm/devlanes/`, `npm/build.sh` | Launcher package and the script that builds all npm packages |
+| `pypi/build.py`, `pypi/README.md` | The script that builds the PyPI wheels, and their project description |
 | `scripts/check.sh` | Dry run of all of the above and `install.sh` against fake binaries; CI runs it |
-| `scripts/check.ps1` | PSScriptAnalyzer on the PowerShell scripts, `package.ps1`, `install.ps1` in Windows PowerShell 5.1 and PowerShell 7, and the npm launcher, against a fake `devlanes.exe`; CI runs it on Windows |
+| `scripts/check.ps1` | PSScriptAnalyzer on the PowerShell scripts, `package.ps1`, `install.ps1` in Windows PowerShell 5.1 and PowerShell 7, the npm launcher and the Windows wheel, against a fake `devlanes.exe`; CI runs it on Windows |
 
 ## Install channels
 
@@ -18,6 +19,7 @@ Release archives, checksums, the SSH bootstrap manifest, the Homebrew formula an
 |---|---|
 | Homebrew | `brew install devlanes-run/tap/devlanes` |
 | npm | `npm install -g devlanes` |
+| PyPI | `uv tool install devlanes`, `pipx install devlanes` or `pip install devlanes` |
 | cargo binstall | `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes` |
 | Script | `curl -fsSL https://devlanes.run/install.sh \| sh` |
 | Script (Windows, PowerShell) | `irm https://devlanes.run/install.ps1 \| iex` |
@@ -28,7 +30,7 @@ Every channel except the source build installs the release archives. Homebrew ha
 
 ## Next builds
 
-`.github/workflows/next.yml` builds every commit on `main` after the CI workflow passes on it, with the same `build.yml` as releases. It runs inside that commit's CI run, called by the last `ci.yml` job, so the build and publish show in the commit's checks as `CI / next / ...`; `gh workflow run next.yml` builds the tip of `main` by hand. The version is the current one with the patch bumped and `-next.N` added, where N counts the commits since the last stable tag: after 0.3.0 that's `0.3.1-next.14`, which sorts after 0.3.0 and before any release that follows. That version is written into the build only, never committed. The archives, `SHA256SUMS`, `release-manifest.json`, the schemas and `install.sh` then replace the assets of the GitHub prerelease `next`, whose tag moves to that commit. Only `install.sh` reads it: npm, Homebrew, cargo binstall and the website stay on stable releases, and a prerelease is never GitHub's `latest`. Only the tip of `main` is built and published: CI runs can finish out of order, so a run for an older commit stops before building, and the `tip` job skips `publish` for a build that finishes after `main` moved, which then records no deployment. Builds of different commits run side by side, and publishes wait for each other. `remote connect --install` from a `next` build fetches the `next` manifest, which only matches while that build is still the latest. Repository settings must not enable immutable releases, which forbid replacing assets. Each publish is a deployment to the `next` environment.
+`.github/workflows/next.yml` builds every commit on `main` after the CI workflow passes on it, with the same `build.yml` as releases. It runs inside that commit's CI run, called by the last `ci.yml` job, so the build and publish show in the commit's checks as `CI / next / ...`; `gh workflow run next.yml` builds the tip of `main` by hand. The version is the current one with the patch bumped and `-next.N` added, where N counts the commits since the last stable tag: after 0.3.0 that's `0.3.1-next.14`, which sorts after 0.3.0 and before any release that follows. That version is written into the build only, never committed. The archives, `SHA256SUMS`, `release-manifest.json`, the schemas and `install.sh` then replace the assets of the GitHub prerelease `next`, whose tag moves to that commit. Only `install.sh` reads it: npm, PyPI, Homebrew, cargo binstall and the website stay on stable releases, and a prerelease is never GitHub's `latest`. Only the tip of `main` is built and published: CI runs can finish out of order, so a run for an older commit stops before building, and the `tip` job skips `publish` for a build that finishes after `main` moved, which then records no deployment. Builds of different commits run side by side, and publishes wait for each other. `remote connect --install` from a `next` build fetches the `next` manifest, which only matches while that build is still the latest. Repository settings must not enable immutable releases, which forbid replacing assets. Each publish is a deployment to the `next` environment.
 
 ## Releasing
 
@@ -46,17 +48,18 @@ The release version is `bins/devlanes/Cargo.toml`'s. `.sampo/config.toml` keeps 
 | `test` | Runs the workspace tests on Linux, macOS and Windows, in parallel with `build` |
 | `build` | Runs `build.yml`. Its `build` job builds `devlanes` and `devlanes-hosts` for each macOS and Linux target, fails if the tag doesn't match the committed versions or if the committed config schemas differ from the generated ones, and packs the archive. Its `build-windows` job builds `devlanes.exe` for each Windows target, checks the schemas, runs `devlanes.exe --version`, fails if the executable imports the Visual C++ runtime (`dumpbin /dependents`), and packs the zip with `package.ps1` |
 | `npm-preflight` | Fails when the `devlanes` package or one of its `optionalDependencies` does not exist on the npm registry, before any draft release exists |
-| `release` | Writes `SHA256SUMS`, `release-manifest.json` and the formula, copies `schema.json`, `user-schema.json`, `install.sh` and `install.ps1`, attests the archives' build provenance, and uploads everything to a draft release. A rerun refills the draft and refuses to touch a published release |
+| `release` | Writes `SHA256SUMS`, `release-manifest.json` and the formula, builds the PyPI wheels as a workflow artifact and runs `twine check` on them, copies `schema.json`, `user-schema.json`, `install.sh` and `install.ps1`, attests the archives' build provenance, and uploads everything to a draft release. A rerun refills the draft and refuses to touch a published release |
 | `publish` | Publishes the draft |
 | `website` | Stable versions only. Triggers a rebuild of `devlanes-run/website`, which copies `install.sh`, `install.ps1`, `schema.json` and `user-schema.json` from the latest stable release to `https://devlanes.run/install.sh`, `https://devlanes.run/install.ps1`, `https://devlanes.run/v1/schema.json` and `https://devlanes.run/v1/user-schema.json` |
 | `homebrew-verify` | Stable versions only. Installs the rendered formula on macOS from the published release, then runs `brew audit` and `brew test` |
 | `homebrew-publish` | Commits `Formula/devlanes.rb` to `devlanes-run/homebrew-tap`. It keeps the tap's formula when that one belongs to a newer version |
 | `npm` | Builds the npm packages from the archives and publishes the platform packages, then `devlanes`. Stable versions go to the `latest` dist-tag, prereleases to `next`. Versions already on the registry are skipped |
+| `pypi` | Uploads the wheels that `release` built to PyPI. Runs for stable versions and for `-alpha`, `-beta` and `-rc` prereleases. Files already on PyPI are skipped |
 | `status` | Sets the `release` commit status to success, or to failure when a job failed or was cancelled |
 
 The release stays a draft until every asset is attached because Homebrew, npm, cargo binstall, `install.sh` and `install.ps1` all download from the public release URLs, and `releases/latest` must never point at a release with missing archives. Publishing in a separate job keeps that order visible and lets a failed upload be rerun against the draft.
 
-Each job that publishes somewhere deploys to a GitHub environment named after that place: `publish` to `github-release`, `website` to `website`, `homebrew-publish` to `homebrew` and `npm` to `npm`. `next.yml` deploys to `next`. The repository page lists the latest deployment of each, so a release that reached GitHub but not npm shows as such.
+Each job that publishes somewhere deploys to a GitHub environment named after that place: `publish` to `github-release`, `website` to `website`, `homebrew-publish` to `homebrew`, `npm` to `npm` and `pypi` to `pypi`. `next.yml` deploys to `next`. The repository page lists the latest deployment of each, so a release that reached GitHub but not npm shows as such.
 
 | Target | Runner | Notes |
 |---|---|---|
@@ -71,7 +74,7 @@ Each `.tar.gz` archive holds one directory, `devlanes-VERSION-TARGET/`, with `de
 
 Each Windows `.zip` archive holds the same directory with `devlanes.exe` and `LICENSE`, and nothing else: `devlanes-hosts` is Unix-only, `daemon install` starts `devlanes.exe daemon run` itself (its manifest keeps a console from opening at logon), and hostnames need no helper on Windows. `.cargo/config.toml` links the C runtime statically, so the executable runs without the Visual C++ Redistributable; `build-windows` checks its imports. `package.ps1` writes the entries in ordinal order with a fixed time (`SOURCE_DATE_EPOCH`, else the last commit's time), so the same binary gives the same zip with the same PowerShell (Windows PowerShell 5.1 and PowerShell 7 ship different zlib builds; the release uses PowerShell 7). The zips are listed in `SHA256SUMS` after the `.tar.gz` archives, and `release-manifest.json` stays Unix-only. The Windows executables are not signed yet.
 
-`devlanes daemon install` writes the path of the running executable into the launchd or systemd service (the HKCU Run key on Windows). When that path contains a version (a Homebrew Cellar directory, an npm package directory), rerun `devlanes daemon install` after upgrading.
+`devlanes daemon install` writes the path of the running executable into the launchd or systemd service (the HKCU Run key on Windows). When that path contains a version (a Homebrew Cellar directory, an npm package directory), rerun `devlanes daemon install` after upgrading. A `pip install` into a virtual environment ties the service to that environment.
 
 ## Verifying a download
 
@@ -91,6 +94,8 @@ gh attestation verify devlanes-0.1.0-x86_64-pc-windows-msvc.zip --repo devlanes-
 The `npm` job has no npm secret. Each package (`devlanes` and the `@devlanes/*` platform packages) trusts `devlanes-run/devlanes`, workflow `release.yml`, environment `npm`, so npm exchanges the job's OIDC token for a short-lived publish token and adds provenance. Renaming `release.yml` or the job's environment breaks publishing until each package's trusted publisher names the new one. The `0.0.0` versions of the `@devlanes/*` packages are empty placeholders; the launcher pins its optional dependencies to its own version, so nothing installs them.
 
 A trusted publisher can only be configured on a package that exists, so a new platform package is created by hand once: publish a `0.0.0` placeholder as its owner, then add the trusted publisher above, before the first release that lists it in `optionalDependencies`. `npm-preflight` stops a tag before a draft release is created when any listed package is missing from the registry.
+
+The `pypi` job has no PyPI secret either. The `devlanes` project on PyPI trusts `devlanes-run/devlanes`, workflow `release.yml`, environment `pypi`, and `pypa/gh-action-pypi-publish` adds PEP 740 attestations. The same renaming rule applies. Version `0.0.0` on PyPI is a placeholder that reserved the name; yank it once a real release is there, or pip falls back to it on platforms that have no wheel.
 
 ## Release manifest
 
@@ -155,6 +160,25 @@ The postinstall script `install.js` resolves the platform package from the `devl
 Any failure prints one line and keeps the launcher; the install still succeeds. The script does nothing on Windows and under Yarn: Plug'n'Play keeps packages in zip archives, and Yarn may rerun install scripts in a `node_modules` shared between platforms. Without the script (`--ignore-scripts`, or npm 12, pnpm and Bun, which run dependency scripts only when allowed) the launcher resolves the platform package, runs its `bin/devlanes` with inherited stdio and exits with the binary's status. SIGINT and SIGQUIT reach the binary from the terminal's process group; the launcher forwards SIGTERM and SIGHUP. On Windows the launcher, which npm's `devlanes.cmd` and `devlanes.ps1` shims run with Node, always runs `bin/devlanes.exe` from the platform package. Ctrl-C, Ctrl-Break and closing the console reach the binary through the shared console, so the launcher ignores SIGINT, SIGBREAK and SIGHUP and exits with the binary's exit code. An upgrade through npm replaces that `devlanes.exe`, which Windows refuses while the daemon runs from it, so on Windows the upgrade advice says to run `devlanes daemon stop` first (also for cargo and source builds, but not for `install.ps1`).
 
 `npm/build.sh VERSION DIST_DIR OUT_DIR` extracts the release archives (the `.zip` ones with `unzip`) into `OUT_DIR/devlanes-<os>-<cpu>/` and writes `OUT_DIR/devlanes/` with the version filled in and the schemas copied in. `scripts/check.sh` installs the packed tarballs into temporary prefixes with npm and checks that the bin is the binary after postinstall and the launcher with `--ignore-scripts`.
+
+## PyPI
+
+The `devlanes` project on PyPI has one wheel per target and no source distribution, so pip, uv and pipx install the release binaries and nothing else:
+
+| Target | Wheel tag |
+|---|---|
+| `aarch64-apple-darwin` | `py3-none-macosx_11_0_arm64` |
+| `x86_64-apple-darwin` | `py3-none-macosx_10_12_x86_64` |
+| `aarch64-unknown-linux-gnu` | `py3-none-manylinux_2_35_aarch64` |
+| `x86_64-unknown-linux-gnu` | `py3-none-manylinux_2_35_x86_64` |
+| `x86_64-pc-windows-msvc` | `py3-none-win_amd64` |
+| `aarch64-pc-windows-msvc` | `py3-none-win_arm64` |
+
+The macOS tags are Rust's default deployment targets, and the Linux ones are the glibc 2.35 baseline of the build runners. A platform without a wheel, such as Linux with musl, gets "no matching distribution" instead of a source build. A wheel holds the binaries under `devlanes-VERSION.data/scripts/`, which installers copy into the environment's `bin` directory (`Scripts` on Windows), so `devlanes-hosts` ends up next to `devlanes` as `certs trust --hosts` expects. On macOS and Linux, uv and pipx link their `bin` entries to the tool environment. On Windows, uv copies `devlanes.exe` into its bin directory, and the update notice finds the install through uv's receipt for the tool.
+
+PyPI versions follow PEP 440, so `pypi/build.py` maps the release version: `X.Y.Z` stays, `-alpha.N`, `-beta.N` and `-rc.N` become `aN`, `bN` and `rcN`, and a suffix without a number counts as 0 (so `-rc.0` is refused). A prerelease with another suffix skips the `pypi` job, and a stable version that fails the mapping fails the `release` job. Once a stable version is on PyPI, pip and uv only install prereleases when asked to, for example `pip install --pre devlanes`. `devlanes --version` keeps the SemVer spelling.
+
+`pypi/build.py VERSION DIST_DIR OUT_DIR` reads the binaries straight from the release archives and keeps their timestamps, so the same archives give the same wheels. `pypi/build.py --pep440 VERSION` prints the mapped version. `scripts/check.sh` checks the mapping, the entries and `RECORD` of every wheel, and installs the host's wheel into a venv; `scripts/check.ps1` builds the wheels and installs the Windows one into a venv.
 
 ## JSON Schemas
 

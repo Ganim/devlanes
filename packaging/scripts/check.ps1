@@ -2,8 +2,8 @@
 .SYNOPSIS
 Dry run of the Windows packaging: PSScriptAnalyzer on the PowerShell scripts,
 install.ps1's helpers, package.ps1, install.ps1 against a local release directory
-in Windows PowerShell 5.1 and PowerShell 7, and the npm launcher. CI runs it on
-Windows.
+in Windows PowerShell 5.1 and PowerShell 7, the npm launcher and the PyPI wheel. CI
+runs it on Windows.
 
 .DESCRIPTION
 The archives hold a fake devlanes.exe: a copy of cmd.exe with the version appended
@@ -18,7 +18,7 @@ first and writes them back at the end. Every child process has a timeout, after
 which it is killed with its own children.
 
 Needs PSScriptAnalyzer (Install-Module PSScriptAnalyzer -Scope CurrentUser), both
-powershell.exe and pwsh, and node.
+powershell.exe and pwsh, node and python.
 
 .EXAMPLE
 pwsh packaging/scripts/check.ps1
@@ -400,6 +400,47 @@ if (@($version, $dir) -ne ''mine'') { throw ''the session lost its own $version 
     Remove-Item -LiteralPath $platformDir -Recurse -Force
     $launch = Invoke-Process $node @((Join-Path $launcherDir 'devlanes'), '--version')
     Assert-True ($launch.Code -eq 1 -and $launch.Output.Contains('win32-arm64 and win32-x64')) "npm launcher without a platform package: $($launch.Output)"
+
+    # build.py needs every target's archive, so the macOS and Linux ones hold
+    # placeholders; pip then installs this machine's wheel into a venv. The version
+    # needs a PEP 440 form, which the -check ones above have not.
+    $wheelVersion = '0.0.3-rc.1'
+    $pypiDist = Join-Path $work 'pypi-dist'
+    $fakeExe = Join-Path $work "bin-$($versions[1])/devlanes.exe"
+    foreach ($windowsTarget in 'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc') {
+        $package = Invoke-Process (Get-Command pwsh -CommandType Application | Select-Object -First 1).Source @(
+            '-NoProfile', '-NonInteractive', '-File', $packageScript, '-Version', $wheelVersion,
+            '-Target', $windowsTarget, '-OutDir', $pypiDist, '-BinDir', (Split-Path $fakeExe))
+        Assert-Equal $package.Code 0 "package.ps1 for the wheels: $($package.Output)"
+    }
+    $stage = Join-Path $work 'pypi-stage'
+    foreach ($unixTarget in 'aarch64-apple-darwin', 'x86_64-apple-darwin', 'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-gnu') {
+        $name = "devlanes-$wheelVersion-$unixTarget"
+        New-Item -ItemType Directory -Path (Join-Path $stage $name) | Out-Null
+        foreach ($file in 'devlanes', 'devlanes-hosts', 'LICENSE') {
+            [IO.File]::WriteAllText((Join-Path $stage "$name/$file"), "placeholder $file`n")
+        }
+        # Windows' own bsdtar, not a tar from Git for Windows that may come first in PATH.
+        $tar = Invoke-Process (Join-Path $env:SystemRoot 'System32\tar.exe') @('-czf', (Join-Path $pypiDist "$name.tar.gz"), '-C', $stage, $name)
+        Assert-Equal $tar.Code 0 "tar for $($name): $($tar.Output)"
+    }
+    $python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
+    $wheels = Join-Path $work 'wheels'
+    $pep440 = Invoke-Process $python @((Join-Path $root 'packaging/pypi/build.py'), '--pep440', $wheelVersion)
+    Assert-Equal $pep440.Output.Trim() '0.0.3rc1' 'PEP 440 form of the wheel version'
+    $build = Invoke-Process $python @((Join-Path $root 'packaging/pypi/build.py'), $wheelVersion, $pypiDist, $wheels)
+    Assert-Equal $build.Code 0 "build.py: $($build.Output)"
+    Assert-Equal @(Get-ChildItem -LiteralPath $wheels -Filter '*.whl').Count 6 'number of wheels'
+    $venv = Join-Path $work 'venv'
+    $made = Invoke-Process $python @('-m', 'venv', $venv)
+    Assert-Equal $made.Code 0 "python -m venv: $($made.Output)"
+    $pip = Invoke-Process (Join-Path $venv 'Scripts/python.exe') @('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check',
+        '--no-index', '--find-links', $wheels, "devlanes==$($pep440.Output.Trim())")
+    Assert-Equal $pip.Code 0 "pip install of the wheel: $($pip.Output)"
+    $installedExe = Join-Path $venv 'Scripts/devlanes.exe'
+    Assert-Equal (Get-FileHash -LiteralPath $installedExe).Hash (Get-FileHash -LiteralPath $fakeExe).Hash 'devlanes.exe from the wheel'
+    $launch = Invoke-Process $installedExe @('/d', '/c', 'exit 7')
+    Assert-Equal $launch.Code 7 "devlanes.exe from the wheel runs: $($launch.Output)"
 } finally {
     if ($running -and -not $running.HasExited) { & taskkill.exe /PID $running.Id /T /F 2>&1 | Out-Null }
     Restore-UserPath $pathBefore

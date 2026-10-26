@@ -1,10 +1,11 @@
 #!/bin/sh
 # Dry run of the release scripts against fake binaries: package.sh and package.ps1
 # for every target, manifest.sh, the Homebrew formula, the npm packages (packed,
-# then installed from the tarballs on macOS and Linux arm64/x64) and install.sh from
-# a local release directory. Needs tar, gzip, unzip, jq, node, npm, curl and pwsh;
-# CI runs it on every push. check.ps1 covers package.ps1, install.ps1 and the
-# launcher on Windows.
+# then installed from the tarballs on macOS and Linux arm64/x64), the PyPI wheels
+# (installed into a venv) and install.sh from a local release directory. Needs tar,
+# gzip, unzip, jq, node, npm, python3 with venv, curl and pwsh, and on Linux glibc
+# 2.35 or later for pip to take the wheel; CI runs it on every push.
+# check.ps1 covers package.ps1, install.ps1, the launcher and the wheel on Windows.
 set -eu
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -15,7 +16,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-version=0.0.0-check
+# A prerelease that PyPI also takes, so the wheels come from the same archives.
+version=0.0.0-rc.1
 mkdir "$work/bin"
 for bin in devlanes devlanes-hosts; do
 	printf '#!/bin/sh\necho "%s %s"\n' "$bin" "$version" >"$work/bin/$bin"
@@ -87,6 +89,65 @@ if [ -f "$work/tgz/devlanes-$host-$version.tgz" ] && [ "${host%%-*}" != win32 ];
 	[ "$(head -n 1 "$work/prefix-noscripts/lib/node_modules/devlanes/bin/devlanes")" = "#!/usr/bin/env node" ]
 	[ "$("$work/prefix-noscripts/bin/devlanes" --version)" = "devlanes $version" ]
 fi
+
+pypi=$root/packaging/pypi/build.py
+pep440() { python3 "$pypi" --pep440 "$1"; }
+[ "$(pep440 1.2.3)" = 1.2.3 ]
+[ "$(pep440 1.2.3-alpha)" = 1.2.3a0 ]
+[ "$(pep440 1.2.3-beta.2)" = 1.2.3b2 ]
+[ "$(pep440 1.2.3-rc.10)" = 1.2.3rc10 ]
+for wrong in 1.2.3-next.4 1.2.3-check 1.2.3-rc1 1.2.3-rc.0 1.2; do
+	if pep440 "$wrong" >/dev/null 2>&1; then
+		echo "build.py --pep440 accepted $wrong" >&2
+		exit 1
+	fi
+done
+wheel_version=$(pep440 "$version")
+python3 "$pypi" "$version" "$work/dist" "$work/wheels" >/dev/null
+python3 "$pypi" "$version" "$work/dist" "$work/wheels-again" >/dev/null
+for wheel in "$work"/wheels/*.whl; do
+	cmp -s "$wheel" "$work/wheels-again/${wheel##*/}" || {
+		echo "${wheel##*/} differs between two builds" >&2
+		exit 1
+	}
+done
+set -- "$work"/wheels/*.whl
+[ $# -eq 6 ]
+data=devlanes-$wheel_version.data/scripts
+info=devlanes-$wheel_version.dist-info
+listed=$(unzip -Z1 "$work/wheels/devlanes-$wheel_version-py3-none-manylinux_2_35_x86_64.whl" | tr '\n' ' ')
+[ "$listed" = "$data/devlanes $data/devlanes-hosts $info/METADATA $info/WHEEL $info/licenses/LICENSE $info/RECORD " ] || {
+	echo "unexpected entries in the Linux wheel: $listed" >&2
+	exit 1
+}
+listed=$(unzip -Z1 "$work/wheels/devlanes-$wheel_version-py3-none-win_arm64.whl" | tr '\n' ' ')
+[ "$listed" = "$data/devlanes.exe $info/METADATA $info/WHEEL $info/licenses/LICENSE $info/RECORD " ] || {
+	echo "unexpected entries in the Windows wheel: $listed" >&2
+	exit 1
+}
+# Every file is in RECORD with its hash and size, as installers expect.
+python3 - "$work"/wheels/*.whl <<'EOF'
+import base64, csv, hashlib, io, sys, zipfile
+for path in sys.argv[1:]:
+    with zipfile.ZipFile(path) as wheel:
+        names = wheel.namelist()
+        record = next(name for name in names if name.endswith(".dist-info/RECORD"))
+        rows = list(csv.reader(io.StringIO(wheel.read(record).decode())))
+        assert sorted(row[0] for row in rows) == sorted(names), path
+        for name, digest, size in rows:
+            if name == record:
+                continue
+            body = wheel.read(name)
+            expected = base64.urlsafe_b64encode(hashlib.sha256(body).digest()).rstrip(b"=").decode()
+            assert digest == "sha256=" + expected and int(size) == len(body), f"{path}: {name}"
+EOF
+# pip picks this machine's wheel and puts both binaries, executable, in the venv's bin.
+python3 -m venv "$work/venv"
+"$work/venv/bin/python" -m pip install --quiet --disable-pip-version-check --no-index \
+	--find-links "$work/wheels" "devlanes==$wheel_version"
+cmp -s "$work/venv/bin/devlanes" "$work/bin/devlanes"
+[ "$("$work/venv/bin/devlanes" --version)" = "devlanes $version" ]
+[ "$("$work/venv/bin/devlanes-hosts")" = "devlanes-hosts $version" ]
 
 release=$work/release
 mkdir -p "$release/download/v$version" "$release/latest/download"

@@ -7,17 +7,18 @@ devlanes runs a project's dev environment once per Git worktree on macOS, Linux 
 ```sh
 brew install devlanes-run/tap/devlanes
 npm install -g devlanes
+uv tool install devlanes
 cargo binstall --git https://github.com/devlanes-run/devlanes devlanes
 curl -fsSL https://devlanes.run/install.sh | sh
 ```
 
-These install release builds for macOS or Linux (glibc), arm64 or x86_64. Homebrew, npm and `install.sh` install both `devlanes` and the `devlanes-hosts` helper; cargo binstall installs `devlanes`, and `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-hosts-helper` adds the helper. To build from source instead:
+These install release builds for macOS or Linux (glibc), arm64 or x86_64. `pipx install devlanes` works like uv, and `pip install devlanes` installs into a virtual environment; the update notice recognises pip only there, not in `pip install --user` or a system Python. Homebrew, npm, PyPI and `install.sh` install both `devlanes` and the `devlanes-hosts` helper; cargo binstall installs `devlanes`, and `cargo binstall --git https://github.com/devlanes-run/devlanes devlanes-hosts-helper` adds the helper. To build from source instead:
 
 ```sh
 cargo install --locked --git https://github.com/devlanes-run/devlanes devlanes devlanes-hosts-helper
 ```
 
-On Windows 11 24H2 or later, x64 or arm64, install from PowerShell; npm and cargo binstall work there too. [Windows](docs/guides/windows.md) lists the requirements and what differs:
+On Windows 11 24H2 or later, x64 or arm64, install from PowerShell; npm, uv and cargo binstall work there too. [Windows](docs/guides/windows.md) lists the requirements and what differs:
 
 ```powershell
 irm https://devlanes.run/install.ps1 | iex

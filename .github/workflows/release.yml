@@ -122,6 +122,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      pep440: ${{ steps.version.outputs.pep440 }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -142,6 +143,16 @@ jobs:
           echo "PRERELEASE=$prerelease" >> "$GITHUB_ENV"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          # PyPI orders only alpha, beta and rc prereleases; other suffixes skip it. A
+          # stable version always has a PEP 440 form, so a failure there is a bug.
+          if pep440=$(python3 packaging/pypi/build.py --pep440 "$version"); then
+            echo "pep440=$pep440" >> "$GITHUB_OUTPUT"
+          elif [ "$prerelease" = true ]; then
+            echo "::notice::$version has no PEP 440 form; PyPI is skipped"
+          else
+            echo "::error::build.py --pep440 failed for the stable version $version"
+            exit 1
+          fi
       - name: Checksums, release manifest and schemas
         run: |
           sh packaging/scripts/manifest.sh "$VERSION" dist \
@@ -175,6 +186,19 @@ jobs:
         with:
           name: formula
           path: formula/
+          if-no-files-found: error
+      # Built here rather than in the pypi job, so a broken wheel stops the release
+      # before the draft is published.
+      - name: PyPI wheels
+        if: steps.version.outputs.pep440 != ''
+        run: |
+          python3 packaging/pypi/build.py "$VERSION" dist wheels
+          pipx run --spec twine==7.0.0 twine check --strict wheels/*.whl
+      - if: steps.version.outputs.pep440 != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels
+          path: wheels/
           if-no-files-found: error
       - name: Upload to a draft release
         run: |
@@ -364,10 +388,34 @@ jobs:
             npm publish "$dir" --provenance --access public --tag "$tag"
           done
 
+  pypi:
+    needs: [release, publish]
+    if: needs.release.outputs.pep440 != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Trusted publishing, like npm: the project's publisher names this file and the
+    # `pypi` environment, and the action adds PEP 740 attestations.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/devlanes/${{ needs.release.outputs.pep440 }}/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wheels
+          path: wheels
+      # skip-existing lets a rerun finish a partly uploaded release.
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: wheels/
+          skip-existing: true
+
   # Settles the `release` status that tag-version posted. Jobs skipped for a prerelease
   # count as passed; rerunning failed jobs runs this one again.
   status:
-    needs: [tag-version, test, build, npm-preflight, release, publish, website, homebrew-verify, homebrew-publish, npm]
+    needs: [tag-version, test, build, npm-preflight, release, publish, website, homebrew-verify, homebrew-publish, npm, pypi]
     if: always() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 5
