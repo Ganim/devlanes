@@ -95,11 +95,11 @@ The connection belongs to your local daemon, not to the terminal: Ctrl-C detache
 
 ### Several boxes
 
-Connect to each box by its own name. Give every machine its own `ports.range`, for example `20000-24999` on the client, `25000-29999` on one box and `30000-32767` on the other, then `devlanes daemon restart` on each; lanes that already have ports keep them until `devlanes lane clean`. When two boxes run the same project, the box you connected first keeps the shared hostnames, and the other box's lane is listed under `skipped_lanes` in `remote ls` until the first one disconnects.
+Connect to each box by its own name. Give every machine its own `ports.range`, for example `20000-24999` on the client, `25000-29999` on one box and `30000-32767` on the other, then `devlanes daemon restart` on each; lanes that already have ports keep them until `devlanes lane clean`. When two boxes run the same project, the box you connected first keeps the shared hostnames, and the other box's lane is listed under `skipped_lanes` in `remote ls` until the first one stops serving them or disconnects. When the ranges of two connected boxes overlap, `remote ls` shows a warning on both while they do.
 
 ### Box proxy on another port
 
-A box whose proxy could not bind 443 (a VPS where unprivileged users cannot bind low ports) serves HTTPS on 8443 and puts that port in its URLs. The client then listens on 8443 too, on loopback only, and serves that box's hostnames there, so `https://web.acme.localhost:8443` opens unchanged. Nothing to configure. When something else holds that port on the client, `remote ls` says so; the box's hostnames still open on the client's own HTTPS port.
+A box whose proxy could not bind 443 (a VPS where unprivileged users cannot bind low ports) serves HTTPS on 8443 and puts that port in its URLs. The client then listens on 8443 too, on loopback only, and serves that box's hostnames there, so `https://web.acme.localhost:8443` opens unchanged. Nothing to configure. When the client cannot bind that port, because something else holds it or it is a low port the client's user may not bind, `remote ls` says so; the box's hostnames still open on the client's own HTTPS port.
 
 ### Windows clients
 
@@ -144,8 +144,9 @@ curl -sS https://api.acme.localhost/healthz          # from the client, once the
 | `lane acme@1 is not mirrored; this machine already serves acme-1.localhost` | a local lane of the same project uses that hostname | stop the local lane, or give one side another `project` name |
 | `lane acme@0 is not mirrored; box hetzner, connected earlier, already serves acme.localhost` | two connected boxes serve the same hostname | disconnect the other box or stop that lane there; the lane is mirrored once the name is free |
 | `port 20012 is in use on this machine by box hetzner (acme@0:api); not mirrored` | another connected box's mirror holds the port | give the boxes different `ports.range` values |
-| `the box's ports.range 20000-32767 overlaps this machine's (20000-32767); …` | both machines hand out ports from the same pool | set another `ports.range` in `~/.devlanes/config.yaml` on one machine, then `devlanes daemon restart` there |
-| `the box's URLs use HTTPS port 8443, which this machine cannot serve (in use by …); open its hostnames on port 443 instead` | another process holds the box's proxy port on the client | stop that process, then run `devlanes remote connect` for the box again; until then use the client's own HTTPS port |
+| `the box's ports.range 20000-32767 overlaps that of box hetzner (20000-32767), so …` | two connected boxes hand out ports from the same pool | set another `ports.range` in `~/.devlanes/config.yaml` on one box, then `devlanes daemon restart` there |
+| `the box's URLs use HTTPS port 8443, which this machine cannot serve: in use by …; open its hostnames on port 443 instead` | another process holds the box's proxy port on the client | stop that process; the client tries the port again every 30 seconds, or at once on `devlanes remote connect` for the box. Until then use the client's own HTTPS port |
+| `the box's URLs use HTTPS port 443, which this machine cannot serve: permission denied (low ports may need privileges); …` | the box's proxy runs on a low port that the client's user may not bind (on macOS the extra port binds loopback only, which needs root below 1024) | on Linux, allow low ports as [Ports 443 and 80](https.md#ports-443-and-80) describes, then `devlanes daemon restart`; otherwise use the client's own HTTPS port |
 | `linger off` | Linux box without `loginctl enable-linger` | run it on the box |
 | `ssh to hetzner failed (255): Permission denied` | no agent or key for the daemon's ssh | load the key, `devlanes daemon restart`, connect again |
 | `no ssh client found` | Windows without OpenSSH Client | add the optional feature, or put `ssh.exe` on `PATH` |

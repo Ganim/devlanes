@@ -160,7 +160,7 @@ async fn ssh_box_mirrors_routes_and_syncs() {
             &tmp.path.join("client"),
             "28500-28999",
             Some(Arc::new(EnvConnector)),
-            Some(Arc::new(ProxyRoutes::new(proxy, None))),
+            Some(Arc::new(ProxyRoutes::new(proxy, None, proxy_stop.clone()))),
         )
         .await;
 

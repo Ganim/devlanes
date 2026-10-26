@@ -28,7 +28,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
     sync::{OwnedSemaphorePermit, Semaphore, watch},
-    task::JoinSet,
+    task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -216,28 +216,31 @@ impl Proxy {
         }
     }
 
-    /// Binds `port` on `127.0.0.1` and `::1` (IPv4 only when this machine has no
-    /// IPv6) and serves TLS with `ca` there for [`Self::scoped`] routes of that
-    /// port until `shutdown`. Never falls back to another port: the routes' URLs
-    /// name this one. Must run inside a Tokio runtime.
+    /// Binds `port` on `127.0.0.1` and `::1` only (IPv4 only when this machine
+    /// has no IPv6) and serves TLS with `ca` there for [`Self::scoped`] routes of
+    /// that port until `shutdown`. Never falls back to another port: the routes'
+    /// URLs name this one. Returns the accept loops, which end with their
+    /// sockets closed once `shutdown` is cancelled. Must run inside a Tokio runtime.
     pub fn listen_scoped(
         &self,
         port: u16,
         ca: Arc<CertificateAuthority>,
         shutdown: CancellationToken,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<JoinHandle<()>>> {
         let scoped = self.scoped(port);
         let tls = scoped.tls_config(ca).map_err(io::Error::other)?;
         let listeners = crate::listener::bind_loopback(port)?;
-        for listener in listeners.listeners() {
-            let (proxy, tls, shutdown) = (scoped.clone(), tls.clone(), shutdown.clone());
-            tokio::spawn(async move {
-                if let Err(error) = proxy.serve_tls(listener, tls, shutdown).await {
-                    tracing::warn!(%error, port, "scoped https listener stopped");
-                }
-            });
-        }
-        Ok(())
+        Ok(listeners
+            .listeners()
+            .map(|listener| {
+                let (proxy, tls, shutdown) = (scoped.clone(), tls.clone(), shutdown.clone());
+                tokio::spawn(async move {
+                    if let Err(error) = proxy.serve_tls(listener, tls, shutdown).await {
+                        tracing::warn!(%error, port, "scoped https listener stopped");
+                    }
+                })
+            })
+            .collect())
     }
 
     /// Replaces the default limits; call before cloning the proxy or serving any listener.

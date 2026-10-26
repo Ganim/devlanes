@@ -532,9 +532,17 @@ impl Mirror {
                         } else {
                             None
                         };
+                        // This daemon itself: usually another box's mirror that bound
+                        // the port and has not listed it yet. Its reconcile wakes
+                        // this mirror once it has, and the check above names it.
+                        let own = pid == Some(std::process::id());
                         let message = if let Some((other, unit)) = &other_box {
                             format!(
                                 "port {port} is in use on this machine by box {other} ({unit}); not mirrored"
+                            )
+                        } else if own {
+                            format!(
+                                "port {port} is in use on this machine by this devlanes daemon; not mirrored"
                             )
                         } else if in_use {
                             let holder = match pid {
@@ -546,11 +554,21 @@ impl Mirror {
                             )
                         } else {
                             format!(
-                                "port {port} cannot be bound on {address}: {error}{}; not mirrored",
-                                denied_hint(&error)
+                                "port {port} cannot be bound on {address}: {}; not mirrored",
+                                bind_failure(&error)
                             )
                         };
-                        if !mirror.conflicts.contains_key(&address) {
+                        // Reported once per holder: again when another box, or
+                        // something other than a box, holds it now. A port this
+                        // daemon holds is only listed until a wake tells why.
+                        let holder_box = other_box.as_ref().map(|(other, _)| other.as_str());
+                        let known = mirror.conflicts.get(&address);
+                        let report = !own
+                            && known.is_none_or(|known| {
+                                known["box"].as_str() != holder_box
+                                    || known["pid"].as_u64() == Some(u64::from(std::process::id()))
+                            });
+                        if report {
                             tracing::warn!(host = %self.conn.name, %message, "cannot mirror port");
                             engine.bus.emit(
                                 wire::WARNING_EVENT,
@@ -846,24 +864,32 @@ pub(super) async fn process_name(pid: u32) -> String {
     .unwrap_or_else(|| "an unknown process".to_owned())
 }
 
-/// Nothing to add to a bind error on Unix.
-#[cfg(unix)]
-fn denied_hint(_error: &std::io::Error) -> &'static str {
-    ""
+/// A failed bind for warnings: the OS error, or for a denied one what usually
+/// denies it ([`denied_hint`]).
+pub(super) fn bind_failure(error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        denied_hint()
+    } else {
+        error.to_string()
+    }
 }
 
-/// Windows refuses binds inside its reserved port ranges with access denied,
-/// which reads like a permissions problem; name the ranges' command.
+/// On Unix, ports below 1024 (or below `ip_unprivileged_port_start` on Linux)
+/// need privileges, and macOS lets users bind them on the wildcard address only.
+#[cfg(unix)]
+fn denied_hint() -> String {
+    "permission denied (low ports may need privileges)".to_owned()
+}
+
+/// Windows needs no privileges for low ports but refuses binds inside its
+/// reserved port ranges with access denied, which reads like a permissions
+/// problem; name the ranges' command.
 #[cfg(windows)]
-fn denied_hint(error: &std::io::Error) -> String {
-    if error.kind() == std::io::ErrorKind::PermissionDenied {
-        format!(
-            " (the port may lie in a Windows reserved port range; `{}` lists them)",
-            crate::reserved_ports::LIST_COMMAND
-        )
-    } else {
-        String::new()
-    }
+fn denied_hint() -> String {
+    format!(
+        "access denied (the port may lie in a Windows reserved port range, which `{}` lists)",
+        crate::reserved_ports::LIST_COMMAND
+    )
 }
 
 /// Binds a mirror listener. `SO_REUSEADDR` only on Linux, where it merely skips

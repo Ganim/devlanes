@@ -20,12 +20,14 @@ clap = { version = "4", features = ["derive", "env"] }
 dunce = "1"
 futures-util = { version = "0.3", features = ["sink"] }
 getrandom = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 # preserve_order: JSON output follows struct field order, and the feature is pinned
 # here so per-crate and workspace builds don't disagree through feature unification.
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
 tracing = "0.1"
 tempfile = "3"

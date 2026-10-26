@@ -19,7 +19,7 @@ use std::{
     net::{IpAddr, Ipv6Addr},
     path::Path,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -43,6 +43,7 @@ use devlanes_transport::{
     memory::{MemoryTransport, memory_transport},
     serve,
 };
+use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -254,16 +255,22 @@ struct ProxyRoutes {
     /// With HTTPS: the port this machine reports as its own (nothing listens
     /// there) and the CA that box ports serve with.
     tls: Option<(u16, Arc<CertificateAuthority>)>,
-    box_ports: Mutex<BTreeMap<u16, CancellationToken>>,
+    box_ports: devlanes_proxy::ScopedPorts,
+    shutdown: CancellationToken,
 }
 
 impl ProxyRoutes {
-    /// Feeds `proxy`, with HTTPS on `tls` when set.
-    fn new(proxy: devlanes_proxy::Proxy, tls: Option<(u16, Arc<CertificateAuthority>)>) -> Self {
+    /// Feeds `proxy`, with HTTPS on `tls` when set; `shutdown` stops box ports.
+    fn new(
+        proxy: devlanes_proxy::Proxy,
+        tls: Option<(u16, Arc<CertificateAuthority>)>,
+        shutdown: CancellationToken,
+    ) -> Self {
         Self {
             proxy,
             tls,
-            box_ports: Mutex::new(BTreeMap::new()),
+            box_ports: devlanes_proxy::ScopedPorts::default(),
+            shutdown,
         }
     }
 }
@@ -282,17 +289,13 @@ impl RouteSink for ProxyRoutes {
         let Some((_, ca)) = &self.tls else {
             return Err(std::io::ErrorKind::Unsupported.into());
         };
-        let stop = CancellationToken::new();
-        self.proxy.listen_scoped(port, ca.clone(), stop.clone())?;
-        lock(&self.box_ports).insert(port, stop);
-        Ok(())
+        self.box_ports
+            .open(&self.proxy, port, ca.clone(), &self.shutdown)
     }
 
-    /// Stops a box port's listeners.
-    fn close_box_port(&self, port: u16) {
-        if let Some(stop) = lock(&self.box_ports).remove(&port) {
-            stop.cancel();
-        }
+    /// Stops a box port's listeners; resolves once they are closed.
+    fn close_box_port(&self, port: u16) -> BoxFuture<'static, ()> {
+        Box::pin(self.box_ports.close(port))
     }
 
     /// Converts and swaps the route table.
@@ -323,13 +326,6 @@ impl RouteSink for ProxyRoutes {
             self.proxy.replace_routes(table);
         }
     }
-}
-
-/// Locks a test mutex, ignoring poisoning.
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The client engine plus its plain-HTTP proxy port.
@@ -378,7 +374,7 @@ impl ClientSide {
             &tmp.path.join(name),
             ports,
             Some(connector),
-            Some(Arc::new(ProxyRoutes::new(proxy, tls))),
+            Some(Arc::new(ProxyRoutes::new(proxy, tls, proxy_stop.clone()))),
         )
         .await;
         Self {

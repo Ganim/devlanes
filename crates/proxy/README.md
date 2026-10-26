@@ -28,6 +28,7 @@ async fn serve(shutdown: CancellationToken) -> Result<(), Box<dyn std::error::Er
 - `Proxy::tls_config` and `serve_tls` use a shared CA with HTTP/1.1 and HTTP/2 ALPN.
 - `RouteState` selects the idle, starting, failed and reconnecting pages from `devlanes-pages`.
 - `Proxy::listener_health` reports each accept loop's `ListenerHealth`: whether it is running, its accept error count and the latest error.
+- `ScopedPorts::open` serves one extra HTTPS port on loopback with only the routes whose `listen_port` names it (a box's own HTTPS port); `close` resolves once its sockets are gone.
 - `Proxy::with_limits` replaces the default `ProxyLimits` (connection cap, header and idle timeouts, how long requests wait for starting services and reconnecting boxes, how long refused connections are retried).
 
 ## Config example

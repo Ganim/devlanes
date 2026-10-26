@@ -25,7 +25,7 @@ use devlanes_daemon::{
     },
 };
 use devlanes_proto::RpcError;
-use futures_util::stream::BoxStream;
+use futures_util::{future::BoxFuture, stream::BoxStream};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -705,7 +705,7 @@ async fn proxy(
         rejected: Mutex::new(Vec::new()),
         box_ca,
         shutdown,
-        box_ports: Mutex::new(BTreeMap::new()),
+        box_ports: devlanes_proxy::ScopedPorts::default(),
     }
 }
 
@@ -719,8 +719,8 @@ struct ProxyRoutes {
     box_ca: Option<Arc<devlanes_pki::CertificateAuthority>>,
     /// The daemon's shutdown, which also stops box ports.
     shutdown: CancellationToken,
-    /// Box HTTPS ports being served, each stopped by its token.
-    box_ports: Mutex<BTreeMap<u16, CancellationToken>>,
+    /// Box HTTPS ports being served.
+    box_ports: devlanes_proxy::ScopedPorts,
 }
 
 impl RouteSink for ProxyRoutes {
@@ -782,20 +782,27 @@ impl RouteSink for ProxyRoutes {
     }
 
     /// Bind results plus the accept loops' live health, the entries the last
-    /// snapshot dropped and the box HTTPS ports served (`box_https_ports`).
+    /// snapshot dropped and the box HTTPS ports served (`box_https_ports`:
+    /// `[{port, serving}]`, `serving` as for `https`).
     fn status(&self) -> Value {
-        let mut status = listener_status(&self.status, &self.proxy.listener_health());
+        let health = self.proxy.listener_health();
+        let mut status = listener_status(&self.status, &health);
         let rejected = self
             .rejected
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let box_ports: Vec<u16> = self
+        let box_ports: Vec<Value> = self
             .box_ports
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .keys()
-            .copied()
+            .ports()
+            .into_iter()
+            .map(|(port, running)| {
+                let healthy = health
+                    .iter()
+                    .filter(|listener| listener.tls && listener.address.port() == port)
+                    .all(|listener| listener.running && listener.last_error.is_none());
+                json!({"port": port, "serving": running && healthy})
+            })
             .collect();
         if let Some(map) = status.as_object_mut() {
             if !rejected.is_empty() {
@@ -816,26 +823,13 @@ impl RouteSink for ProxyRoutes {
                 "this machine serves no HTTPS",
             ));
         };
-        let mut ports = self.box_ports.lock().unwrap_or_else(|e| e.into_inner());
-        if ports.contains_key(&port) {
-            return Ok(());
-        }
-        let stop = self.shutdown.child_token();
-        self.proxy.listen_scoped(port, ca.clone(), stop.clone())?;
-        ports.insert(port, stop);
-        Ok(())
+        self.box_ports
+            .open(&self.proxy, port, ca.clone(), &self.shutdown)
     }
 
-    /// Stops the listeners of a box port.
-    fn close_box_port(&self, port: u16) {
-        let stop = self
-            .box_ports
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&port);
-        if let Some(stop) = stop {
-            stop.cancel();
-        }
+    /// Stops the listeners of a box port; resolves once they are closed.
+    fn close_box_port(&self, port: u16) -> BoxFuture<'static, ()> {
+        Box::pin(self.box_ports.close(port))
     }
 }
 
@@ -2240,7 +2234,7 @@ mod tests {
             rejected: Mutex::new(Vec::new()),
             box_ca: None,
             shutdown: CancellationToken::new(),
-            box_ports: Mutex::new(BTreeMap::new()),
+            box_ports: devlanes_proxy::ScopedPorts::default(),
         };
         sink.publish(vec![
             entry("web.acme.localhost", "acme@0", "web", 3000),

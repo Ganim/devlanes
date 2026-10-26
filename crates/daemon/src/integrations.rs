@@ -10,7 +10,7 @@ use devlanes_core::{
     ExitOutcome, LaunchSpec, OutputChunk, ProcessIdentity, StopPolicy, TerminalSize, Unit,
     contrib::{Contributor, ScriptRunner},
 };
-use futures_util::stream::BoxStream;
+use futures_util::{future::BoxFuture, stream::BoxStream};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -524,9 +524,11 @@ pub trait RouteSink: Send + Sync {
             "this proxy serves no extra ports",
         ))
     }
-    /// Stops serving a port [`Self::open_box_port`] opened.
-    fn close_box_port(&self, port: u16) {
+    /// Stops serving a port [`Self::open_box_port`] opened. The future resolves
+    /// once its listeners are closed, so the port can be opened again right after.
+    fn close_box_port(&self, port: u16) -> BoxFuture<'static, ()> {
         let _ = port;
+        Box::pin(async {})
     }
 }
 

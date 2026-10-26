@@ -35,10 +35,12 @@ pub fn bind_listeners(port: u16, fallback_port: u16, lan: bool) -> io::Result<Bo
     bind_listeners_with(port, fallback_port, lan, bind)
 }
 
-/// Binds `port` on loopback like [`bind_listeners`] without `lan`, and without a
-/// fallback: scoped listeners serve URLs that already name their port.
+/// Binds `port` on `127.0.0.1` and `::1` only, without a fallback: scoped
+/// listeners serve URLs that already name their port. Unlike [`bind_listeners`]
+/// it never binds the wildcard address, so on macOS a port below 1024 fails with
+/// permission denied unless the daemon runs as root.
 pub(crate) fn bind_loopback(port: u16) -> io::Result<BoundListeners> {
-    bind_pair(port, false, &bind)
+    bind_pair_at(port, false, &bind_reusable)
 }
 
 /// `bind_listeners` with an injectable socket binder, so tests can simulate missing IPv6.
@@ -101,6 +103,15 @@ fn bind_pair(
     bind: &impl Fn(SocketAddr) -> io::Result<TcpListener>,
 ) -> io::Result<BoundListeners> {
     let wildcard = lan || (cfg!(target_os = "macos") && port != 0 && port < 1024);
+    bind_pair_at(port, wildcard, bind)
+}
+
+/// [`bind_pair`] on the wildcard addresses or on loopback only.
+fn bind_pair_at(
+    port: u16,
+    wildcard: bool,
+    bind: &impl Fn(SocketAddr) -> io::Result<TcpListener>,
+) -> io::Result<BoundListeners> {
     let ipv4 = if wildcard {
         Ipv4Addr::UNSPECIFIED
     } else {
@@ -133,6 +144,19 @@ fn bind_pair(
 
 /// IPV6_V6ONLY prevents the IPv6 socket from competing with the IPv4 listener.
 fn bind(address: SocketAddr) -> io::Result<TcpListener> {
+    bind_socket(address, false)
+}
+
+/// [`bind`] with `SO_REUSEADDR` on Linux, where it merely skips `TIME_WAIT`, so
+/// a scoped port closed with connections still lingering can be opened again
+/// right away. Not on macOS, where it would let this listener shadow another
+/// process bound to the wildcard address instead of reporting the conflict.
+fn bind_reusable(address: SocketAddr) -> io::Result<TcpListener> {
+    bind_socket(address, cfg!(target_os = "linux"))
+}
+
+/// Binds and listens on `address`, with `SO_REUSEADDR` when `reuse` is set.
+fn bind_socket(address: SocketAddr, reuse: bool) -> io::Result<TcpListener> {
     let socket = Socket::new(
         Domain::for_address(address),
         Type::STREAM,
@@ -140,6 +164,9 @@ fn bind(address: SocketAddr) -> io::Result<TcpListener> {
     )?;
     if address.is_ipv6() {
         socket.set_only_v6(true)?;
+    }
+    if reuse {
+        socket.set_reuse_address(true)?;
     }
     #[cfg(windows)]
     exclusive_if_wildcard(&socket, address)?;

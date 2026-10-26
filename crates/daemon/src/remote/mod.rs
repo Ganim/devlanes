@@ -76,18 +76,36 @@ pub(crate) struct Remotes {
     /// Hands each new connection its place in connect order ([`HostConn::serial`]).
     next_serial: AtomicU64,
     /// Extra HTTPS ports the proxy serves for boxes whose proxy port differs from
-    /// this machine's ([`Inner::reconcile_box_ports`]): `None` while open, why
-    /// not while it cannot be opened. The lock also serializes reconciles.
-    box_ports: tokio::sync::Mutex<BTreeMap<u16, Option<BoxPortProblem>>>,
+    /// this machine's ([`Inner::reconcile_box_ports`]). The lock also serializes
+    /// opening and closing them.
+    box_ports: tokio::sync::Mutex<BoxPorts>,
+}
+
+/// How often box HTTPS ports that could not be opened are tried again: nothing
+/// tells the daemon when another process frees one.
+const BOX_PORT_RETRY: Duration = Duration::from_secs(30);
+
+/// The box HTTPS ports the proxy serves or failed to serve.
+#[derive(Default)]
+struct BoxPorts {
+    open: BTreeSet<u16>,
+    /// Ports a box needs that could not be opened, retried every [`BOX_PORT_RETRY`].
+    failed: BTreeSet<u16>,
+    /// The retry timer, while `failed` is not empty.
+    retry: Option<JoinHandle<()>>,
 }
 
 /// Why the proxy cannot serve a box's HTTPS port, as `proxy_port_in_use` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BoxPortProblem {
-    /// `in use by nginx (pid 812)`, or the bind error.
+    /// `in use by nginx (pid 812)`, or why the bind failed.
     holder: String,
     pid: Option<u32>,
 }
+
+/// The `remote.warning` code and `HostConn::warnings` key of a box whose
+/// `ports.range` overlaps another connected box's.
+const RANGE_OVERLAP: &str = "ports_range_overlap";
 
 impl Remotes {
     /// No box is connected and no tunnel serves a client, so an idle exit
@@ -592,6 +610,7 @@ impl Inner {
         if let Some(old) = old {
             old.close().await;
             self.remote.wake_others(old.serial);
+            self.refresh_range_overlaps();
         }
         let conn = self.open_host(host, identity)?;
         lock(&self.remote.hosts).insert(host.to_owned(), conn.clone());
@@ -689,6 +708,7 @@ impl Inner {
             names.push(conn.name.clone());
             self.remote.wake_others(conn.serial);
         }
+        self.refresh_range_overlaps();
         self.reconcile_box_ports().await;
         self.publish_routes();
         Ok(json!({"disconnected": names}))
@@ -863,7 +883,7 @@ impl Inner {
     }
 
     /// Closes every box connection; called on daemon shutdown so ssh masters exit.
-    pub(crate) async fn remote_shutdown(&self) {
+    pub(crate) async fn remote_shutdown(self: &Arc<Self>) {
         let hosts: Vec<Arc<HostConn>> = std::mem::take(&mut *lock(&self.remote.hosts))
             .into_values()
             .collect();
@@ -877,10 +897,10 @@ impl Inner {
     /// this machine's, so the URLs the box generated open here unchanged, and
     /// closes the ports no box needs anymore. A box keeps its port while it
     /// reconnects, like its mirrored ports. A port that cannot be opened is
-    /// retried on the next call and reported with `proxy_port_in_use` to each
-    /// box needing it, again only when the reason changes.
-    pub(super) async fn reconcile_box_ports(&self) {
-        let mut ports = self.remote.box_ports.lock().await;
+    /// retried on the next call and every [`BOX_PORT_RETRY`], and reported with
+    /// `proxy_port_in_use` to each box needing it, again only when the reason
+    /// changes. Looking up the holder can be slow, so it runs without the lock.
+    pub(super) async fn reconcile_box_ports(self: &Arc<Self>) {
         let own = self.integ.routes.https_port();
         let mut wanted: BTreeMap<u16, Vec<Arc<HostConn>>> = BTreeMap::new();
         for conn in self.remote.all() {
@@ -892,39 +912,62 @@ impl Inner {
                 _ => *lock(&conn.proxy_port) = None,
             }
         }
-        let stale: Vec<u16> = ports
-            .keys()
-            .copied()
-            .filter(|port| !wanted.contains_key(port))
-            .collect();
-        for port in stale {
-            if let Some(None) = ports.remove(&port) {
-                self.integ.routes.close_box_port(port);
+        let mut failures = Vec::new();
+        {
+            let mut ports = self.remote.box_ports.lock().await;
+            ports.failed.retain(|port| wanted.contains_key(port));
+            let stale: Vec<u16> = ports
+                .open
+                .iter()
+                .copied()
+                .filter(|port| !wanted.contains_key(port))
+                .collect();
+            for port in stale {
+                ports.open.remove(&port);
+                self.integ.routes.close_box_port(port).await;
+            }
+            for (port, conns) in &wanted {
+                if !ports.open.contains(port) {
+                    match self.integ.routes.open_box_port(*port) {
+                        Ok(()) => {
+                            ports.failed.remove(port);
+                            ports.open.insert(*port);
+                        }
+                        Err(error) => {
+                            ports.failed.insert(*port);
+                            failures.push((*port, error, conns.clone()));
+                            continue;
+                        }
+                    }
+                }
+                for conn in conns {
+                    *lock(&conn.proxy_port) = None;
+                }
+            }
+            if !ports.failed.is_empty() && ports.retry.is_none() {
+                ports.retry = Some(tokio::spawn(retry_box_ports(Arc::downgrade(self))));
             }
         }
         let Some(own) = own else { return };
-        for (port, conns) in wanted {
-            if ports.get(&port) == Some(&None) {
+        for (port, error, conns) in failures {
+            let problem = self.box_port_problem(port, &error).await;
+            let ports = self.remote.box_ports.lock().await;
+            // Opened by another reconcile while the holder was looked up.
+            if !ports.failed.contains(&port) {
                 continue;
             }
-            let problem = match self.integ.routes.open_box_port(port) {
-                Ok(()) => None,
-                Err(error) => Some(self.box_port_problem(port, &error).await),
-            };
             for conn in &conns {
-                let message = problem.as_ref().map(|problem| {
-                    format!(
-                        "the box's URLs use HTTPS port {port}, which this machine cannot serve ({}); open its hostnames on port {own} instead",
-                        problem.holder
-                    )
-                });
+                let message = format!(
+                    "the box's URLs use HTTPS port {port}, which this machine cannot serve: {}; open its hostnames on port {own} instead",
+                    problem.holder
+                );
                 let changed = {
                     let mut current = lock(&conn.proxy_port);
-                    let changed = *current != message;
-                    current.clone_from(&message);
+                    let changed = current.as_ref() != Some(&message);
+                    *current = Some(message.clone());
                     changed
                 };
-                if let (true, Some(problem), Some(message)) = (changed, &problem, message) {
+                if changed {
                     tracing::warn!(host = %conn.name, port, %message, "cannot serve the box's https port");
                     self.bus.emit(
                         wire::WARNING_EVENT,
@@ -940,16 +983,16 @@ impl Inner {
                     );
                 }
             }
-            ports.insert(port, problem);
+            drop(ports);
         }
     }
 
     /// What keeps the proxy from serving a box's HTTPS `port`: the process holding
-    /// it, or the bind error.
+    /// it, or why the bind failed.
     async fn box_port_problem(&self, port: u16, error: &std::io::Error) -> BoxPortProblem {
         if error.kind() != std::io::ErrorKind::AddrInUse {
             return BoxPortProblem {
-                holder: error.to_string(),
+                holder: mirror::bind_failure(error),
                 pid: None,
             };
         }
@@ -961,42 +1004,95 @@ impl Inner {
         BoxPortProblem { holder, pid }
     }
 
-    /// The `ports_range_overlap` finding for `conn`: its box's `ports.range`
-    /// overlaps this machine's or another connected box's. Lanes allocated on
-    /// both then can get the same ports, and only one side's can be mirrored.
-    fn range_overlap(&self, conn: &HostConn) -> Option<(&'static str, String, Value)> {
-        let range = lock(&conn.info).ports_range.clone()?;
-        let theirs = parse_range(&range)?;
-        let mut overlaps = Vec::new();
-        if let Ok(ours) = self.opts.user.ports.bounds()
-            && ranges_overlap(ours, theirs)
-        {
-            overlaps.push(format!("this machine's ({})", self.opts.user.ports.range));
+    /// Updates the `ports_range_overlap` finding of every live box, after a box
+    /// connected, reconnected or went away, and emits it where it appeared or
+    /// changed. Only boxes are compared: local allocations already keep clear
+    /// of box ports, while two boxes know nothing of each other's.
+    fn refresh_range_overlaps(&self) {
+        let (live, ended): (Vec<Arc<HostConn>>, Vec<Arc<HostConn>>) = self
+            .remote
+            .all()
+            .into_iter()
+            .partition(|conn| !conn.ended());
+        for conn in ended {
+            lock(&conn.warnings).remove(RANGE_OVERLAP);
         }
-        for other in self.remote.all() {
-            if other.serial == conn.serial || other.ended() {
-                continue;
-            }
-            let Some(other_range) = lock(&other.info).ports_range.clone() else {
-                continue;
+        for conn in &live {
+            let finding = range_overlap(conn, &live);
+            let changed = {
+                let mut warnings = lock(&conn.warnings);
+                match &finding {
+                    Some((message, _)) => {
+                        warnings.insert(RANGE_OVERLAP, message.clone()).as_ref() != Some(message)
+                    }
+                    None => {
+                        warnings.remove(RANGE_OVERLAP);
+                        false
+                    }
+                }
             };
-            if parse_range(&other_range).is_some_and(|bounds| ranges_overlap(bounds, theirs)) {
-                overlaps.push(format!("box {}'s ({other_range})", other.name));
+            if let (true, Some((message, mut data))) = (changed, finding) {
+                tracing::warn!(host = %conn.name, code = RANGE_OVERLAP, %message, "box warning");
+                if let Some(fields) = data.as_object_mut() {
+                    fields.insert("host".into(), json!(conn.name));
+                    fields.insert("code".into(), json!(RANGE_OVERLAP));
+                    fields.insert("message".into(), json!(message));
+                }
+                self.bus.emit(wire::WARNING_EVENT, data);
             }
         }
-        if overlaps.is_empty() {
-            return None;
-        }
-        let message = format!(
-            "the box's ports.range {range} overlaps {}; lanes can get the same ports on both, which are then not mirrored; give one machine a different ports.range",
-            overlaps.join(" and ")
-        );
-        Some((
-            "ports_range_overlap",
-            message,
-            json!({"range": range, "overlaps": overlaps}),
-        ))
     }
+}
+
+/// Tries the failed box HTTPS ports again every [`BOX_PORT_RETRY`] until none
+/// is left or the engine is gone. Boxed because `reconcile_box_ports` spawns it.
+fn retry_box_ports(engine: std::sync::Weak<Inner>) -> futures_util::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        loop {
+            tokio::time::sleep(BOX_PORT_RETRY).await;
+            let Some(inner) = engine.upgrade() else {
+                return;
+            };
+            {
+                let mut ports = inner.remote.box_ports.lock().await;
+                if ports.failed.is_empty() {
+                    // Cleared under the lock, so the next failure starts a new timer.
+                    ports.retry = None;
+                    return;
+                }
+            }
+            inner.reconcile_box_ports().await;
+        }
+    })
+}
+
+/// The `ports_range_overlap` finding for `conn` among the `live` boxes, as
+/// message and event fields: its box's `ports.range` overlaps another box's.
+/// Lanes allocated on both can then get the same ports, and only one box's
+/// can be mirrored.
+fn range_overlap(conn: &HostConn, live: &[Arc<HostConn>]) -> Option<(String, Value)> {
+    let range = lock(&conn.info).ports_range.clone()?;
+    let theirs = parse_range(&range)?;
+    let mut overlaps = Vec::new();
+    for other in live {
+        if other.serial == conn.serial {
+            continue;
+        }
+        let Some(other_range) = lock(&other.info).ports_range.clone() else {
+            continue;
+        };
+        if parse_range(&other_range).is_some_and(|bounds| ranges_overlap(bounds, theirs)) {
+            overlaps.push(format!("box {} ({other_range})", other.name));
+        }
+    }
+    if overlaps.is_empty() {
+        return None;
+    }
+    let message = format!(
+        "the box's ports.range {range} overlaps that of {}, so lanes on both can get the same ports and only one box's are mirrored here; give one box a different ports.range",
+        overlaps.join(" and ")
+    );
+    Some((message, json!({"range": range, "overlaps": overlaps})))
 }
 
 /// A `ports.range` value (`20000-32767`) as inclusive bounds, `None` when invalid.
@@ -1058,34 +1154,26 @@ async fn watch_link(engine: std::sync::Weak<Inner>, conn: Arc<HostConn>) {
                 tracing::warn!(%error, host = %conn.name, "cannot record remote host");
             }
             *lock(&conn.info) = session.box_info().clone();
-            let mut findings: Vec<(&'static str, String, Value)> = label_warnings(session.server())
-                .into_iter()
-                .map(|(code, message)| (code, message, json!({})))
-                .collect();
-            findings.extend(inner.range_overlap(&conn));
+            let findings = label_warnings(session.server());
             let known = {
                 let mut warnings = lock(&conn.warnings);
-                let known = std::mem::take(&mut *warnings);
-                warnings.extend(
-                    findings
-                        .iter()
-                        .map(|(code, message, _)| (*code, message.clone())),
-                );
+                let known = warnings.clone();
+                warnings.retain(|code, _| *code == RANGE_OVERLAP);
+                warnings.extend(findings.iter().cloned());
                 known
             };
             // A reconnect repeats a finding only in `remote ls`, not as an event.
-            for (code, message, mut data) in findings {
+            for (code, message) in findings {
                 if known.get(code) == Some(&message) {
                     continue;
                 }
                 tracing::warn!(host = %conn.name, code, %message, "box warning");
-                if let Some(fields) = data.as_object_mut() {
-                    fields.insert("host".into(), json!(conn.name));
-                    fields.insert("code".into(), json!(code));
-                    fields.insert("message".into(), json!(message));
-                }
-                inner.bus.emit(wire::WARNING_EVENT, data);
+                inner.bus.emit(
+                    wire::WARNING_EVENT,
+                    json!({"host": conn.name, "code": code, "message": message}),
+                );
             }
+            inner.refresh_range_overlaps();
             inner.reconcile_box_ports().await;
             // The mirror stamps the box's HTTPS port on its routes.
             conn.wake.notify_one();
@@ -1098,6 +1186,7 @@ async fn watch_link(engine: std::sync::Weak<Inner>, conn: Arc<HostConn>) {
                 session,
             )));
         } else if conn.ended() {
+            inner.refresh_range_overlaps();
             inner.reconcile_box_ports().await;
         }
         drop(inner);

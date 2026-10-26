@@ -2041,14 +2041,14 @@ fn box_collision_warnings_name_the_other_box() {
             json!({"host": "hetzner", "code": "proxy_port_in_use", "port": 8443,
             "own_port": 443, "holder": "in use by nginx (pid 812)", "message": "…"})
         ),
-        "warn hetzner: the box's URLs use HTTPS port 8443, which this machine cannot serve (in use by nginx (pid 812)); open its hostnames on port 443 instead\n"
+        "warn hetzner: the box's URLs use HTTPS port 8443, which this machine cannot serve: in use by nginx (pid 812); open its hostnames on port 443 instead\n"
     );
     assert_eq!(
         line(
             json!({"host": "beta", "code": "ports_range_overlap", "range": "20000-32767",
-            "overlaps": ["this machine's (20000-32767)", "box alpha's (20000-29999)"],
+            "overlaps": ["box alpha (20000-29999)", "box gamma (30000-32767)"],
             "message": "…"})
         ),
-        "warn beta: the box's ports.range 20000-32767 overlaps this machine's (20000-32767) and box alpha's (20000-29999); lanes can get the same ports on both, which are then not mirrored; give one machine a different ports.range\n"
+        "warn beta: the box's ports.range 20000-32767 overlaps that of box alpha (20000-29999) and box gamma (30000-32767), so lanes on both can get the same ports and only one box's are mirrored here; give one box a different ports.range\n"
     );
 }

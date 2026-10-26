@@ -184,8 +184,10 @@ impl RouteTable {
         self.lookup_in(host, None)
     }
 
-    /// [`Self::lookup`] among the routes a listener scoped to `scope` serves: those
-    /// whose `listen_port` is that port. `None` searches every route.
+    /// [`Self::lookup`] for a listener scoped to `scope`: the route that wins on
+    /// every listener, and only when its `listen_port` is that port. `None`
+    /// accepts every route. Picking the winner first keeps a scoped listener from
+    /// serving a box wildcard for a name a more specific local route owns.
     pub(crate) fn lookup_in(&self, host: &str, scope: Option<u16>) -> Option<&Route> {
         let host = host.trim_end_matches('.').to_ascii_lowercase();
         if host.starts_with("*.") || !valid_pattern(&host) {
@@ -193,8 +195,8 @@ impl RouteTable {
         }
         self.routes
             .iter()
-            .filter(|route| in_scope(route, scope))
             .find(|route| matches_host(&route.host, &host))
+            .filter(|route| in_scope(route, scope))
     }
 
     /// Exposes the snapshot for hosts listings and certificate policies.

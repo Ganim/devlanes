@@ -981,13 +981,13 @@ pub(crate) fn remote_warning(code: &str, data: &Value) -> String {
             field(data, "port")
         ),
         "proxy_port_in_use" => format!(
-            "{host}: the box's URLs use HTTPS port {}, which this machine cannot serve ({}); open its hostnames on port {} instead",
+            "{host}: the box's URLs use HTTPS port {}, which this machine cannot serve: {}; open its hostnames on port {} instead",
             field(data, "port"),
             super::clean(&field(data, "holder")),
             field(data, "own_port")
         ),
         "ports_range_overlap" => format!(
-            "{host}: the box's ports.range {} overlaps {}; lanes can get the same ports on both, which are then not mirrored; give one machine a different ports.range",
+            "{host}: the box's ports.range {} overlaps that of {}, so lanes on both can get the same ports and only one box's are mirrored here; give one box a different ports.range",
             field(data, "range"),
             list(data, "overlaps")
                 .iter()
