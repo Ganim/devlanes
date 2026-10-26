@@ -44,5 +44,10 @@ debug = "line-tables-only"
 # more than build time there.
 [profile.release]
 lto = "thin"
-codegen-units = 1
+# 4, not 1: a release always recompiles devlanes-daemon and the devlanes binary (their
+# versions change, so kache has no entry), and with 1 unit each compiles on one thread.
+# Measured on 0.5.0's code, rebuilding those crates took 4m13s with 1 unit, 1m32s with 4
+# and 1m28s with Cargo's default of 16, for a binary 8% (4) or 21% (16) bigger than with 1.
+# The macOS runners have 3 cores, so more units than 4 gain little.
+codegen-units = 4
 strip = true

@@ -116,6 +116,9 @@ runs:
         config=$RUNNER_TEMP/kache.toml
         {
           echo "[cache]"
+          # Records the key inputs of each compile, so a miss names what changed against an
+          # earlier build of the same crate in this job's event log.
+          echo "explain_miss = true"
           # remote_readonly would also stop a pull request from writing to its prefix.
           if [ "$WRITE" != true ] && [ "$PULL_REQUEST" != true ]; then echo "remote_readonly = true"; fi
           echo "[cache.remote]"
