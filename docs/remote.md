@@ -16,9 +16,9 @@ The connection belongs to your local daemon, not to the terminal. Ctrl-C on `rem
 
 devlanes uses the system `ssh` with one ControlMaster per box, so `~/.ssh/config`, agents, ProxyJump and certificates apply. Passphrase, OTP and host-key prompts appear in the terminal that runs `remote connect`, prefixed with the box's name. An idle master exits after 10 minutes. Over that master devlanes runs `devlanes tunnel --stdio` on the box, which needs only a session channel: `AllowTcpForwarding no` on the box is fine. Windows' OpenSSH has no ControlMaster, so a Windows client runs one `ssh` per connection and authenticates on every reconnect; [remote setup](guides/remote-setup.md#windows-clients) has the details.
 
-Install devlanes on the box yourself, with the same install methods as on any machine; it must be on the `PATH` of a non-interactive ssh session or in `~/.devlanes/bin`. Without it, `remote connect` fails with `devlanes is not installed on <box>` and stops retrying. devlanes never installs or upgrades anything on the box. A protocol mismatch fails with instructions, and a different release on the box is shown as a warning. [Remote setup](guides/remote-setup.md) walks through preparing a box.
+Install devlanes on the box yourself, with the same install methods as on any machine; it must be on the `PATH` of a non-interactive ssh session or in `~/.devlanes/bin`. Without it, the first `remote connect` fails with `devlanes is not installed on <box>` and stops; once a connection worked, a binary that is missing for a moment, such as during an upgrade, only makes the link retry. devlanes never installs or upgrades anything on the box. A protocol mismatch fails with instructions, and a different release on the box is shown as a warning. On Linux, run `sudo loginctl enable-linger "$USER"` on the box so its daemon survives logout; `remote ls` warns when linger is off. `devlanes daemon install` adds a user unit for boot, but a user unit is also stopped with the session unless linger is on. [Remote setup](guides/remote-setup.md) walks through preparing a box.
 
-When no daemon runs on the box, the connection starts one. Set `remote.start_daemon: false` in the box's user config to keep that under your control: the client then reports that the box daemon is not running and keeps retrying until you start it there (`devlanes daemon install`, or any command that starts it, such as `devlanes start`). On Linux, run `sudo loginctl enable-linger "$USER"` on the box so its daemon survives logout; `remote ls` warns when linger is off. `devlanes daemon install` adds a user unit for boot, but a user unit is also stopped with the session unless linger is on.
+When no daemon runs on the box, the connection starts one. Set `remote.start_daemon: false` in the box's user config to keep that under your control: the client then reports that the box daemon is not running and keeps retrying until you start it there with `devlanes daemon start`. A daemon started that way exits about 30 seconds after the last client or TUI leaves while nothing runs (`daemon.exit_when_idle`), so run `devlanes daemon install` on the box, or set `daemon.exit_when_idle: false` there, to keep it running.
 
 `devlanes status --json` on the box lists the clients connected to it under `clients`.
 
@@ -32,7 +32,14 @@ The box's hostnames join your local proxy. TLS is terminated with your local CA,
 
 New lanes, services and containers on the box appear live; removed ones are unbound. Connections to a unit that stops or becomes hidden are closed.
 
-A connection to a mirrored port that cannot reach the box's service is closed and reported: the box refused it (the unit is not running, is hidden or no longer listed), the box could not dial the port, the box did not answer, or the link stayed down for 10 seconds (`box hetzner is not connected`). `remote ls` shows the latest one as the port's `last_error` until a connection gets through, and an `open_failed` warning goes to `remote connect` and event subscribers, at most once a minute per port and reason.
+A connection to a mirrored port that cannot reach the box's service is closed and reported with one of these messages:
+
+- `the unit is not running on the box`, `the unit is hidden on the box` or `no running unit on the box has this port`: the box refused it.
+- `nothing on the box accepted it: <error>`: the unit is listed but nothing listens on the port on the box's loopback.
+- `the box did not answer in time`, `the link dropped while it opened` or `the link to the box was lost: <error>`.
+- `box hetzner is not connected: <error>`: the link stayed down for 10 seconds.
+
+`remote ls` shows the latest one as the port's `last_error` until a connection gets through, and an `open_failed` warning goes to `remote connect` and event subscribers, at most once a minute per port and reason. A failure on a port that `remote ls` does not list, reached only through a hostname's relay, shows only as the warning.
 
 ## Hidden
 
@@ -69,7 +76,7 @@ browser -> client proxy (TLS with the local CA)
 
 Raw TCP clients such as `psql` skip the proxy and start at the mirror listener.
 
-Each check happens on one side:
+The checks are split between the processes:
 
 - The client daemon checks the protocol version in the handshake and stops on a mismatch. A different release with the same protocol, and linger off on a Linux box, become warnings from the box's version label.
 - The tunnel follows the box daemon's events, reads `status --all` and `hosts` again after each change, and sends the client only the differences: lanes, units, states, ports and hostnames, never environments.
@@ -77,7 +84,7 @@ Each check happens on one side:
 - The client daemon decides what is bound and routed. Local lanes win: a box port inside a local port block is not bound, and a box lane with a hostname a local lane serves is skipped whole. Box hostnames outside `.localhost` and `hostnames.tld` are refused.
 - For a sync, the client sends the list of files it holds and the box compares it with its source, so only differences cross the link.
 
-Reconnects are the client daemon's job. It pings every 10 seconds and treats 20 seconds without an answer as a lost session, then retries with a backoff from half a second up to 30 seconds. Mirrored ports stay bound meanwhile, proxy routes show "Reconnecting", and a connection accepted while the link is down waits up to 10 seconds for it to come back. Each new session starts from the box's current registry and a fresh sync comparison. The link stops retrying only for failures that need you: rejected credentials, a changed host key, a host name that never resolved, devlanes missing on the box, or a protocol mismatch.
+Reconnects are the client daemon's job. It pings every 10 seconds and treats 20 seconds without an answer as a lost session, then retries with a backoff from half a second up to 30 seconds. Mirrored ports stay bound meanwhile, proxy routes show "Reconnecting", and a connection accepted while the link is down waits up to 10 seconds for it to come back. Each new session starts from the box's current registry and a fresh sync comparison. The link stops retrying for failures that need you: rejected credentials, a changed host key, a host name that never resolved, devlanes missing on the box before the first connection, a protocol mismatch, and local ssh problems (no ssh client on Windows, a control socket path that is too long).
 
 ## GUI tools as services
 
@@ -98,4 +105,4 @@ serve-sim (iOS simulators on a macOS box) and ws-scrcpy (Android screens in the 
 
 ## Limitations
 
-TCP only. UDP ports (DNS servers, WebRTC/TURN, QUIC, game servers) are not mirrored, because the connection has no datagram frames yet. The relay transport (`devlanes login`, no inbound SSH) comes later.
+TCP only. UDP ports (DNS servers, WebRTC/TURN, QUIC, game servers) are not mirrored, because the connection has no datagram frames yet.

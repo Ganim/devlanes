@@ -136,7 +136,8 @@ mod tests {
         assert!(!inner.is_permanent());
         let message = error.to_string();
         assert!(message.contains("acme"), "{message}");
-        assert!(message.contains("devlanes daemon install"), "{message}");
+        assert!(message.contains("`devlanes daemon start`"), "{message}");
+        assert!(message.contains("`devlanes daemon install`"), "{message}");
         let transport =
             devlanes_transport::TransportError::from(SshError::BoxDaemonStopped("acme".to_owned()));
         assert!(!transport.is_permanent());
@@ -148,17 +149,162 @@ mod tests {
         assert_eq!(TunnelExit::from_info(info(0)), None);
     }
 
-    /// A box without devlanes stops the link and points at the setup guide.
+    /// A box without devlanes points at the setup guide, and the error's
+    /// permanence decides whether the link stops.
     #[test]
-    fn a_missing_binary_is_permanent() {
-        let error = SshError::NotInstalled("acme".to_owned());
+    fn a_missing_binary_points_at_the_setup_guide() {
+        let error = SshError::NotInstalled {
+            destination: "acme".to_owned(),
+            permanent: true,
+        };
         assert!(error.is_permanent());
         let message = error.to_string();
         assert!(
             message.starts_with("devlanes is not installed on acme"),
             "{message}"
         );
-        assert!(message.contains("docs/guides/remote-setup.md"), "{message}");
+        assert!(
+            message.contains("docs/guides/remote-setup.md#on-the-box"),
+            "{message}"
+        );
         assert!(devlanes_transport::TransportError::from(error).is_permanent());
+    }
+
+    /// The first connect yields a pipe that fails like a tunnel whose box
+    /// daemon is stopped; later connects reach a working box.
+    struct StoppedThenRunning {
+        box_side: devlanes_transport::memory::MemoryTransport,
+        attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl devlanes_transport::Transport for StoppedThenRunning {
+        async fn connect(
+            &self,
+        ) -> Result<devlanes_transport::BoxDuplex, devlanes_transport::TransportError> {
+            if self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                return Ok(Box::new(Stopped));
+            }
+            self.box_side.connect().await
+        }
+    }
+
+    /// A tunnel that exited with the daemon-stopped status: every read fails.
+    struct Stopped;
+
+    impl tokio::io::AsyncRead for Stopped {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Err(TunnelExit::DaemonStopped.to_io("acme")))
+        }
+    }
+
+    impl tokio::io::AsyncWrite for Stopped {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Refuses every daemon request; the box side here serves only the handshake.
+    struct NoRpc;
+
+    #[async_trait::async_trait]
+    impl devlanes_transport::RpcHandler for NoRpc {
+        async fn call(
+            &self,
+            _request: serde_json::Value,
+            _input: devlanes_transport::RpcInput,
+        ) -> Result<devlanes_transport::RpcReplyStream, devlanes_transport::RpcError> {
+            Err(devlanes_transport::RpcError::new("unused"))
+        }
+    }
+
+    /// A stopped box daemon keeps the link retrying with the hint as its error,
+    /// and the link connects once the box serves again.
+    #[tokio::test]
+    async fn a_stopped_box_daemon_retries_until_it_runs() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use devlanes_transport::{
+            Backoff, BoxServices, Link, LinkState, LoopbackDialer, NoSync, RegistrySnapshot,
+            ServeOptions, SessionOptions, SharedRegistry,
+        };
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let (box_side, mut listener) = devlanes_transport::memory::memory_transport();
+            let serving = tokio::spawn(async move {
+                while let Some(stream) = listener.accept().await {
+                    let services = BoxServices {
+                        registry: Arc::new(SharedRegistry::new(RegistrySnapshot::default(), 4)),
+                        rpc: Arc::new(NoRpc),
+                        dialer: Arc::new(LoopbackDialer),
+                        sync: Arc::new(NoSync),
+                    };
+                    tokio::spawn(devlanes_transport::serve(
+                        stream,
+                        services,
+                        ServeOptions::new("box"),
+                    ));
+                }
+            });
+            let transport = Arc::new(StoppedThenRunning {
+                box_side,
+                attempts: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let link = Link::spawn(
+                transport,
+                SessionOptions::new("client"),
+                Backoff::new(Duration::from_millis(200), Duration::from_millis(200)),
+            );
+            let mut state = link.state();
+            let mut retried = None;
+            loop {
+                match &*state.borrow_and_update() {
+                    LinkState::Retrying { error, .. } if retried.is_none() => {
+                        retried = Some(error.clone());
+                    }
+                    LinkState::Connected(_) => break,
+                    LinkState::Failed { error } => panic!("the link gave up: {error}"),
+                    _ => {}
+                }
+                state.changed().await?;
+            }
+            let error = retried.ok_or("connected without retrying")?;
+            assert!(
+                error.contains("the devlanes daemon is not running on acme"),
+                "{error}"
+            );
+            assert!(error.contains("`devlanes daemon start`"), "{error}");
+            link.shutdown().await;
+            serving.abort();
+            Ok(())
+        })
+        .await?
     }
 }

@@ -124,15 +124,21 @@ pub enum SshError {
     Probe(String),
     /// devlanes is neither on the box's `PATH` nor in `~/.devlanes/bin`.
     #[error(
-        "devlanes is not installed on {0} (not on the ssh PATH or in ~/{INSTALL_DIR}); \
+        "devlanes is not installed on {destination} (not on the ssh PATH or in ~/{INSTALL_DIR}); \
          install it there, see {SETUP_GUIDE}"
     )]
-    NotInstalled(String),
+    NotInstalled {
+        /// The ssh destination.
+        destination: String,
+        /// Set before the first tunnel opened; afterwards the binary may only
+        /// be missing for a moment, such as during an upgrade on the box.
+        permanent: bool,
+    },
     /// The box daemon is not running and the box's `remote.start_daemon` is off.
     #[error(
-        "the devlanes daemon is not running on {0} and its config turns off starting it \
-         (`remote.start_daemon: false`); start it there with `devlanes daemon install` or \
-         any command that starts it, such as `devlanes start`"
+        "the devlanes daemon is not running on {0} and the box's user config turns off \
+         starting it (`remote.start_daemon: false`); run `devlanes daemon start` there, or \
+         `devlanes daemon install` to keep it running"
     )]
     BoxDaemonStopped(String),
 }
@@ -141,8 +147,8 @@ impl SshError {
     /// Reports whether reconnecting without user action is pointless.
     pub fn is_permanent(&self) -> bool {
         match self {
-            Self::Master { permanent, .. } => *permanent,
-            Self::ProgramMissing(_) | Self::NotInstalled(_) => true,
+            Self::Master { permanent, .. } | Self::NotInstalled { permanent, .. } => *permanent,
+            Self::ProgramMissing(_) => true,
             Self::Io(_) | Self::AuthTimeout(_) | Self::Probe(_) | Self::BoxDaemonStopped(_) => {
                 false
             }
@@ -306,7 +312,7 @@ impl SshTransport {
         let missing = probe.program.is_none();
         self.remember(Some(probe));
         if missing {
-            return Err(SshError::NotInstalled(self.destination.clone()));
+            return Err(self.not_installed());
         }
         let (exit_tx, exit_rx) = oneshot::channel();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
@@ -498,6 +504,15 @@ impl SshTransport {
     /// Whether no tunnel has opened yet.
     fn first(&self) -> bool {
         !self.connected.load(Ordering::Relaxed)
+    }
+
+    /// [`SshError::NotInstalled`] for this box: permanent until a tunnel once
+    /// opened, like a host name that does not resolve.
+    fn not_installed(&self) -> SshError {
+        SshError::NotInstalled {
+            destination: self.destination.clone(),
+            permanent: self.first(),
+        }
     }
 
     /// The probe the last run found.
@@ -1012,6 +1027,18 @@ mod tests {
             Ok(())
         })
         .await?
+    }
+
+    /// A box without devlanes stops the link only before the first tunnel;
+    /// later the binary may be missing for a moment during an upgrade.
+    #[test]
+    fn a_missing_binary_is_permanent_only_before_the_first_connection() {
+        let transport = SshTransport::new("box", SshOptions::new(r"C:\h"));
+        assert!(transport.not_installed().is_permanent());
+        transport.connected.store(true, Ordering::Relaxed);
+        let later = transport.not_installed();
+        assert!(!later.is_permanent());
+        assert!(!TransportError::from(later).is_permanent());
     }
 
     /// An ssh that never prints the sentinel fails the session once the

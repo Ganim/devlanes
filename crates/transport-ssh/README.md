@@ -32,7 +32,7 @@ The crate launches `ssh -M -f -N` itself and hands the socket to `openssh`, beca
 
 Only a session channel is used, so boxes with `AllowTcpForwarding no` work.
 
-The probe looks for `devlanes` on the box's `PATH`, then in `$HOME/.devlanes/bin`. A box without it fails with the permanent `SshError::NotInstalled`; installing devlanes there is up to the user. A tunnel that exits with `devlanes_transport::EXIT_DAEMON_STOPPED` (the box daemon is stopped and `remote.start_daemon` is off there) becomes the temporary `SshError::BoxDaemonStopped`, so the link keeps retrying.
+The probe looks for `devlanes` on the box's `PATH`, then in `$HOME/.devlanes/bin`. A box without it fails with `SshError::NotInstalled`, which is permanent until a tunnel has opened once and temporary afterwards (a binary briefly missing during an upgrade); installing devlanes there is up to the user. A tunnel that exits with `devlanes_transport::EXIT_DAEMON_STOPPED` (the box daemon is stopped and `remote.start_daemon` is off there) becomes the temporary `SshError::BoxDaemonStopped`, so the link keeps retrying.
 
 The control socket path must stay under 100 bytes for macOS, so pass a short `control_dir` if `DEVLANES_HOME` is deep.
 

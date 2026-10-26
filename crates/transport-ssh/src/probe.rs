@@ -8,7 +8,7 @@ pub const INSTALL_DIR: &str = ".devlanes/bin";
 
 /// Where the error for a box without devlanes points the user.
 pub(crate) const SETUP_GUIDE: &str =
-    "https://github.com/devlanes-run/devlanes/blob/main/docs/guides/remote-setup.md";
+    "https://github.com/devlanes-run/devlanes/blob/main/docs/guides/remote-setup.md#on-the-box";
 
 /// Normalized OS and architecture reported by `uname`.
 #[derive(Debug, Clone, PartialEq, Eq)]

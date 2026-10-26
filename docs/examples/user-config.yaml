@@ -102,7 +102,8 @@ tui:
 daemon:
   exit_when_idle: true
 # On a box: devlanes remote connect from another machine starts this machine's daemon
-# when none runs. false leaves that to you (devlanes daemon install or devlanes start);
-# the client then reports the stopped daemon and retries until it runs.
+# when none runs. false leaves that to you; the client then reports the stopped daemon
+# and retries until it runs. Run `devlanes daemon install` (or `devlanes daemon start`
+# with daemon.exit_when_idle: false) so the daemon keeps running between connections.
 remote:
   start_daemon: true

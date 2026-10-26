@@ -10,7 +10,19 @@ devlanes on the box is an ordinary install. It needs:
 - `git`, and Docker if the project has `infra`.
 - The `devlanes` binary on the `PATH` that a non-interactive ssh session gets, or at `~/.devlanes/bin/devlanes`. `remote connect` finds it with `sh -c 'command -v devlanes'`, which does not read `.bashrc` or `.zshrc`.
 
-Install it on the box the way you would on any machine, from an ssh shell there. The [README](../../README.md) lists the install methods. `install.sh` puts the binary in `~/.local/bin`, which a non-interactive ssh session may not have on its `PATH`: check with `ssh hetzner 'command -v devlanes'`, or install with `sh -s -- --dir ~/.devlanes/bin`, where `remote connect` also looks. Install the same release as on the client. `remote connect` never installs or upgrades devlanes on a box; without a binary it fails with `devlanes is not installed on hetzner` and stops retrying.
+Install the same release as on the client, from an ssh shell on the box. `install.sh` can put it in `~/.devlanes/bin`, where `remote connect` always looks; replace `X.Y.Z` with the version `devlanes --version` prints on the client:
+
+```sh
+curl -fsSL https://devlanes.run/install.sh | sh -s -- --version X.Y.Z --dir ~/.devlanes/bin
+```
+
+Without `--dir` it installs to `~/.local/bin`, which a non-interactive ssh session may not have on its `PATH`; check with `ssh hetzner 'command -v devlanes'` from the client. Homebrew, npm and cargo binstall work too (the [README](../../README.md) lists them). When their directory is not on that `PATH`, as with Homebrew's `/opt/homebrew/bin` on macOS, link the binary into `~/.devlanes/bin` from an interactive shell on the box:
+
+```sh
+mkdir -p ~/.devlanes/bin && ln -sf "$(command -v devlanes)" ~/.devlanes/bin/devlanes
+```
+
+`remote connect` never installs or upgrades devlanes on a box. Without a binary the first connection fails with `devlanes is not installed on hetzner` and stops retrying.
 
 Then, on the box:
 
@@ -42,7 +54,7 @@ remote:
   start_daemon: false
 ```
 
-A client that connects while the daemon is stopped then shows `the devlanes daemon is not running on hetzner` in `remote ls` and keeps retrying. It connects once you start the daemon on the box with `devlanes daemon install` or any command that starts it, such as `devlanes start`. The setting is read at each connection, so it needs no restart.
+A client that connects while the daemon is stopped then shows `the devlanes daemon is not running on hetzner` in `remote ls` and keeps retrying. It connects once you run `devlanes daemon start` on the box. A daemon started on demand like that exits about 30 seconds after the last client or TUI leaves while nothing runs, so run `devlanes daemon install` to keep it running, or set `daemon.exit_when_idle: false` in the same file. An invalid value under `remote` counts as `false`. The setting is read at each connection, so it needs no restart.
 
 ### PATH for Docker and tools
 
@@ -108,8 +120,11 @@ curl -sS https://api.acme.localhost/healthz          # from the client, once the
 | Message | Cause | Fix |
 | --- | --- | --- |
 | `devlanes is not installed on hetzner` | not on the ssh `PATH` or in `~/.devlanes/bin` | install it on the box, or move the binary there, then connect again |
-| `the devlanes daemon is not running on hetzner` | `remote.start_daemon: false` on the box and its daemon is stopped | start it on the box (`devlanes daemon install` or `devlanes start`); the client keeps retrying |
-| `hetzner: a connection to port 20012 (acme@0:api) failed: …` | an `open_failed` warning: the box refused the connection, could not dial the port or did not answer, or the link was down | `remote ls` shows the port's `last_error`; start the unit on the box, or check that it listens on loopback |
+| `the devlanes daemon is not running on hetzner` | `remote.start_daemon: false` on the box and its daemon is stopped | `devlanes daemon start` on the box, or `devlanes daemon install` to keep it running; the client keeps retrying |
+| `hetzner: a connection to port 20012 (acme@0:api) failed: the unit is not running on the box` | an `open_failed` warning; `remote ls` shows the same as the port's `last_error` | start the unit on the box |
+| `… failed: nothing on the box accepted it: connection refused` | the unit runs but does not listen on the box's loopback | make it listen on `127.0.0.1`, `::1` or a wildcard address |
+| `… failed: the box did not answer in time` or `the link dropped while it opened` | a slow or dropped link | try again; `remote ls` shows the link state |
+| `… failed: box hetzner is not connected: …` | the link stayed down for 10 seconds | the error after the colon says why |
 | `the box runs devlanes 0.4.1 and this machine 0.4.3` | different releases, same protocol | works; upgrade the box when convenient |
 | `the box runs … protocol 2 but this client speaks protocol 3` | releases too far apart | install the matching release on the box, then `devlanes daemon restart` there |
 | `port 5432 is in use on this machine by postgres (pid 812); not mirrored` | a local process holds the port | stop it, or mark the box container `hidden` |
@@ -120,4 +135,4 @@ curl -sS https://api.acme.localhost/healthz          # from the client, once the
 
 ## Limits
 
-TCP only: UDP ports are not mirrored. The connection is client to box only; the box never dials you. Commands are not forwarded (`devlanes --host`), so manage lanes in an ssh shell or an editor's remote terminal on the box. A relay transport that needs no inbound SSH is planned.
+TCP only: UDP ports are not mirrored. The connection is client to box only; the box never dials you. Commands are not forwarded (`devlanes --host`), so manage lanes in an ssh shell or an editor's remote terminal on the box.

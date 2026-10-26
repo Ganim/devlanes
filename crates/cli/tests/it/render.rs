@@ -1977,16 +1977,14 @@ fn failed_opens_are_one_line() {
             {"port": 20101, "lane": "acme@0", "unit": "web", "kind": "service",
              "addresses": ["127.0.0.1"], "conflicts": [], "relay": null,
              "last_error": {"reason": "not_running", "at_ms": now,
-                            "message": "the box refused the connection: target's unit is not running"}},
+                            "message": "the unit is not running on the box"}},
             {"port": 20102, "lane": "acme@0", "unit": "api", "kind": "service",
              "addresses": ["127.0.0.1"], "conflicts": [], "relay": null, "last_error": null},
         ],
     }], "truncated": false, "next_cursor": null});
     let text = render_text(Method::HostList, &hosts);
     assert!(
-        text.contains(
-            "last_error: the box refused the connection: target's unit is not running (not_running, just now)"
-        ),
+        text.contains("last_error: the unit is not running on the box (not_running, just now)"),
         "{text}"
     );
     assert_eq!(text.matches("last_error").count(), 3, "{text}");
@@ -1995,7 +1993,7 @@ fn failed_opens_are_one_line() {
         event: "remote.warning".into(),
         data: json!({"host": "hetzner", "code": "open_failed", "port": 20101, "lane": "acme@0",
             "unit": "web", "reason": "not_running",
-            "message": "the box refused the connection: target's unit is not running"}),
+            "message": "the unit is not running on the box"}),
     };
     let line = runtime(OutputMode::Agent)
         .reporter()
@@ -2004,6 +2002,6 @@ fn failed_opens_are_one_line() {
         .stdout;
     assert_eq!(
         line,
-        "warn hetzner: a connection to port 20101 (acme@0:web) failed: the box refused the connection: target's unit is not running\n"
+        "warn hetzner: a connection to port 20101 (acme@0:web) failed: the unit is not running on the box\n"
     );
 }

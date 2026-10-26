@@ -27,16 +27,18 @@ pub async fn run(action: Action) -> Result<u8, RpcError> {
 /// stdout carries only mux frames; failures go straight to stderr (whatever the
 /// output mode, since a JSON error on stdout would corrupt the pipe), and the
 /// client's SSH transport returns that text as the connection error. The user
-/// config's `remote.start_daemon` decides whether a stopped daemon is started;
-/// it is read leniently so an unrelated bad key does not cut clients off.
+/// config's `remote.start_daemon` decides whether a stopped daemon is started
+/// (see [`crate::user_config::tunnel_start_daemon`]).
 #[cfg(unix)]
 async fn tunnel() -> Result<u8, RpcError> {
     let result = match Paths::discover() {
         Ok(paths) => {
-            let start_daemon = crate::user_config::lenient(&paths)
-                .await
-                .remote
-                .start_daemon;
+            let read = paths.clone();
+            let (start_daemon, problems) =
+                tokio::task::spawn_blocking(move || crate::user_config::tunnel_start_daemon(&read))
+                    .await
+                    .unwrap_or((true, String::new()));
+            eprint!("{problems}");
             devlanes_tunnel::run_stdio(paths, start_daemon)
                 .await
                 .map_err(|error| (error.to_string(), error.exit_code()))

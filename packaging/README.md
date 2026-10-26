@@ -116,7 +116,7 @@ The `pypi` job has no PyPI secret either. The `devlanes` project on PyPI trusts 
 }
 ```
 
-A binary cannot embed the checksums of its own release archives, because they are computed after it is built, so the manifest is a release asset. The daemon's update check reads only the `version` of `releases/latest/download/release-manifest.json`. Releases before `remote connect --install` was removed download the manifest of their own version (`releases/download/vVERSION/release-manifest.json`, or the `next` one for a build of `main`) to install devlanes on a box, so every release keeps publishing it in this shape.
+A binary cannot embed the checksums of its own release archives, because they are computed after it is built, so the manifest is a release asset. The daemon's update check reads only the `version` of `releases/latest/download/release-manifest.json`. Older releases with `remote connect --install` read the manifest of their own version (`releases/download/vVERSION/release-manifest.json`, or the `next` one for a build of `main`) to install devlanes on a box. Keep publishing it in this shape so that still works.
 
 ## crates.io and cargo binstall
 

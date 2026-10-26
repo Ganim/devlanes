@@ -321,7 +321,7 @@ Every field of `devlanes.yaml` and of the per-user `config.yaml`, generated from
 | Path | Type | Description | Example |
 | --- | --- | --- | --- |
 | `remote` | object | Settings for this machine as a box that other machines reach with `devlanes remote connect`. | `{"start_daemon":false}` |
-| `remote.start_daemon` | boolean | Start the devlanes daemon when a client connects with `devlanes remote connect` and none is running here; defaults to true. Set false to keep the daemon under your own control (`devlanes daemon install` or `devlanes start`): a client that connects while it is stopped then reports that the box daemon is not running and keeps retrying until it runs. Read at each connection, so no restart is needed. | `true` |
+| `remote.start_daemon` | boolean | Start the devlanes daemon when a client connects with `devlanes remote connect` and none is running here; defaults to true. Set false to keep the daemon under your own control: a client that connects while it is stopped then reports that the box daemon is not running and keeps retrying until it runs. Start it with `devlanes daemon start`, but a daemon started on demand exits about 30 seconds after the last TUI or connected client leaves while nothing runs, so run `devlanes daemon install` or set `daemon.exit_when_idle: false` to keep it running. An invalid value here counts as false. Read at each connection, so no restart is needed. | `true` |
 
 ### startup
 

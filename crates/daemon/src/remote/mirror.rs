@@ -57,7 +57,10 @@ pub(super) struct View {
     /// Box hostnames outside the names this machine routes (`.localhost` or the
     /// configured TLD).
     pub refused_hosts: Vec<Value>,
-    /// The last failed open per box port, until the next successful one.
+    /// The last failed open per port listed in `ports`, until the next
+    /// successful one, shown there as `last_error`. A failed open through a
+    /// relay of a port that is not listed (a routed unit whose port is not
+    /// bound here) is reported only by its `open_failed` warning.
     pub open_errors: BTreeMap<u16, OpenFailure>,
     /// When the last `open_failed` warning per port and reason went out.
     pub warned: BTreeMap<(u16, &'static str), Instant>,
@@ -113,11 +116,38 @@ impl View {
             .collect()
     }
 
-    /// Records a failed open of `port` and reports whether its warning is due:
-    /// the first for this port and reason, or the first after [`OPEN_WARNING_EVERY`].
+    /// Whether `port` is one of the listed mirrored ports.
+    fn lists(&self, port: u16) -> bool {
+        self.ports
+            .iter()
+            .any(|entry| entry.get("port").and_then(Value::as_u64) == Some(u64::from(port)))
+    }
+
+    /// Drops failures of ports no longer listed, and warning times of ports
+    /// neither listed nor `relayed` or older than [`OPEN_WARNING_EVERY`], which
+    /// no longer hold a warning back.
+    fn prune(&mut self, now: Instant, relayed: impl Fn(u16) -> bool) {
+        let listed: BTreeSet<u16> = self
+            .ports
+            .iter()
+            .filter_map(|entry| entry.get("port").and_then(Value::as_u64))
+            .filter_map(|port| u16::try_from(port).ok())
+            .collect();
+        self.open_errors.retain(|port, _| listed.contains(port));
+        self.warned.retain(|(port, _), last| {
+            (listed.contains(port) || relayed(*port))
+                && now.duration_since(*last) < OPEN_WARNING_EVERY
+        });
+    }
+
+    /// Records a failed open of `port` (as `last_error` when the port is
+    /// listed) and reports whether its warning is due: the first for this port
+    /// and reason, or the first after [`OPEN_WARNING_EVERY`].
     fn record_failure(&mut self, port: u16, failure: OpenFailure, now: Instant) -> bool {
         let key = (port, failure.reason);
-        self.open_errors.insert(port, failure);
+        if self.lists(port) {
+            self.open_errors.insert(port, failure);
+        }
         let due = self
             .warned
             .get(&key)
@@ -545,9 +575,8 @@ impl Mirror {
             let changed = current.routes != view.routes;
             // Failed opens outlive a reconcile, but not the port they are about.
             view.open_errors = std::mem::take(&mut current.open_errors);
-            view.open_errors
-                .retain(|port, _| self.ports.contains_key(port) || self.relays.contains_key(port));
             view.warned = std::mem::take(&mut current.warned);
+            view.prune(Instant::now(), |port| self.relays.contains_key(&port));
             *current = view;
             changed
         };
@@ -730,7 +759,10 @@ async fn splice(stream: TcpStream, port: u16, conn: Arc<HostConn>, engine: Weak<
             // A disconnect in progress closes this listener anyway.
             None if conn.cancel.is_cancelled() => return,
             None => {
-                let message = format!("box {} is not connected", conn.name);
+                let message = match conn.link_error() {
+                    Some(error) => format!("box {} is not connected: {error}", conn.name),
+                    None => format!("box {} is not connected", conn.name),
+                };
                 open_failed(&engine, &conn, port, "not_connected", message);
                 return;
             }
@@ -747,32 +779,42 @@ async fn splice(stream: TcpStream, port: u16, conn: Arc<HostConn>, engine: Weak<
             }
         }
         Err(error) => {
-            let (reason, message) = open_error(&error);
+            let (reason, message) = open_error(&error, port);
             open_failed(&engine, &conn, port, reason, message);
         }
     }
 }
 
-/// The reason code and message of a failed open, as `last_error` shows them.
-fn open_error(error: &OpenError) -> (&'static str, String) {
+/// The reason code and message of a failed open of box port `port`, as
+/// `last_error` and the `open_failed` warning show them. The messages leave
+/// the port out, since both already name it.
+fn open_error(error: &OpenError, port: u16) -> (&'static str, String) {
     match error {
-        OpenError::Rejected { reason, message } => {
-            let reason = match reason {
-                RejectReason::NotRegistered => "not_registered",
-                RejectReason::Hidden => "hidden",
-                RejectReason::NotRunning => "not_running",
-                RejectReason::DialFailed => "dial_failed",
-            };
-            (reason, format!("the box refused the connection: {message}"))
-        }
-        OpenError::Timeout => ("timeout", "the box did not answer in time".to_owned()),
-        OpenError::Interrupted => (
-            "interrupted",
-            "the stream closed before the box answered".to_owned(),
-        ),
+        OpenError::Rejected { reason, message } => match reason {
+            RejectReason::NotRunning => {
+                ("not_running", "the unit is not running on the box".into())
+            }
+            RejectReason::Hidden => ("hidden", "the unit is hidden on the box".into()),
+            RejectReason::NotRegistered => (
+                "not_registered",
+                "no running unit on the box has this port".into(),
+            ),
+            RejectReason::DialFailed => {
+                // The box words it `dial port <port>: <error>` or `dial port <port> timed out`.
+                let detail = message
+                    .strip_prefix(&format!("dial port {port}"))
+                    .map_or(message.as_str(), |rest| rest.trim_start_matches(':').trim());
+                (
+                    "dial_failed",
+                    format!("nothing on the box accepted it: {detail}"),
+                )
+            }
+        },
+        OpenError::Timeout => ("timeout", "the box did not answer in time".into()),
+        OpenError::Interrupted => ("interrupted", "the link dropped while it opened".into()),
         OpenError::Session(_) | OpenError::Wire(_) => (
             "session_lost",
-            format!("the connection to the box was lost: {error}"),
+            format!("the link to the box was lost: {error}"),
         ),
     }
 }
@@ -854,5 +896,91 @@ mod tests {
         assert_eq!(ports[0]["last_error"]["message"], "not_running happened");
         view.open_errors.remove(&3001);
         assert_eq!(view.ports_json()[1]["last_error"], Value::Null);
+    }
+
+    /// A failure on a port that is not listed (a relay only) still warns but
+    /// keeps no `last_error`, which `remote ls` could not show.
+    #[test]
+    fn unlisted_ports_warn_without_a_last_error() {
+        let mut view = View {
+            ports: vec![json!({"port": 3000})],
+            ..View::default()
+        };
+        assert!(view.record_failure(4000, failure("not_running"), Instant::now()));
+        assert!(view.open_errors.is_empty());
+        assert!(view.warned.contains_key(&(4000, "not_running")));
+    }
+
+    /// Pruning keeps failures of listed ports and recent warning times of
+    /// listed or relayed ports; the rest goes.
+    #[test]
+    fn pruning_drops_gone_ports_and_old_warnings() {
+        let mut view = View {
+            ports: vec![json!({"port": 3000}), json!({"port": 3001})],
+            ..View::default()
+        };
+        let start = Instant::now();
+        view.record_failure(3000, failure("not_running"), start);
+        view.record_failure(3001, failure("timeout"), start + OPEN_WARNING_EVERY);
+        view.record_failure(4000, failure("not_running"), start + OPEN_WARNING_EVERY);
+        view.record_failure(5000, failure("not_running"), start + OPEN_WARNING_EVERY);
+        view.ports.pop();
+        view.prune(
+            start + OPEN_WARNING_EVERY + Duration::from_secs(1),
+            |port| port == 4000,
+        );
+        assert_eq!(view.open_errors.keys().copied().collect::<Vec<_>>(), [3000]);
+        assert_eq!(
+            view.warned.keys().copied().collect::<Vec<_>>(),
+            [(4000, "not_running")]
+        );
+    }
+
+    /// Each refusal reason gets its own wording, without the port; a dial
+    /// failure keeps the box's detail.
+    #[test]
+    fn open_errors_are_worded_per_reason() {
+        let rejected = |reason, message: &str| OpenError::Rejected {
+            reason,
+            message: message.to_owned(),
+        };
+        let cases = [
+            (
+                rejected(RejectReason::NotRunning, "target's unit is not running"),
+                "not_running",
+                "the unit is not running on the box",
+            ),
+            (
+                rejected(RejectReason::Hidden, "target belongs to a hidden unit"),
+                "hidden",
+                "the unit is hidden on the box",
+            ),
+            (
+                rejected(RejectReason::NotRegistered, "target is not registered"),
+                "not_registered",
+                "no running unit on the box has this port",
+            ),
+            (
+                rejected(
+                    RejectReason::DialFailed,
+                    "dial port 3000: connection refused",
+                ),
+                "dial_failed",
+                "nothing on the box accepted it: connection refused",
+            ),
+            (
+                rejected(RejectReason::DialFailed, "dial port 3000 timed out"),
+                "dial_failed",
+                "nothing on the box accepted it: timed out",
+            ),
+            (
+                OpenError::Interrupted,
+                "interrupted",
+                "the link dropped while it opened",
+            ),
+        ];
+        for (error, reason, message) in cases {
+            assert_eq!(open_error(&error, 3000), (reason, message.to_owned()));
+        }
     }
 }

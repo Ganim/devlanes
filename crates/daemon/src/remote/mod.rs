@@ -236,6 +236,14 @@ impl HostConn {
         tokio::time::timeout(limit, wait).await.ok().flatten()
     }
 
+    /// Why the link is down, while it retries or after it failed.
+    fn link_error(&self) -> Option<String> {
+        match &*self.state.borrow() {
+            LinkState::Retrying { error, .. } | LinkState::Failed { error } => Some(error.clone()),
+            _ => None,
+        }
+    }
+
     /// True once the link stopped for good, so `connect` must start a new one.
     fn ended(&self) -> bool {
         matches!(

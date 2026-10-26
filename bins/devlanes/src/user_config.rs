@@ -42,6 +42,37 @@ pub async fn lenient(paths: &Paths) -> UserConfig {
         .unwrap_or_default()
 }
 
+/// `remote.start_daemon` for `devlanes tunnel --stdio`, read leniently so an
+/// unrelated bad key does not cut clients off. A problem under `remote` turns
+/// starting off instead of falling back to the default `true`, so a mistyped
+/// `start_daemon: false` does not start a daemon the user meant to keep stopped.
+/// The second value is the stderr text for those problems, empty when there
+/// are none. Blocking.
+#[cfg(unix)]
+pub fn tunnel_start_daemon(paths: &Paths) -> (bool, String) {
+    start_daemon_of(lenient_file(&file(paths)))
+}
+
+/// [`tunnel_start_daemon`] for a lenient load's result.
+#[cfg(unix)]
+fn start_daemon_of((config, problems): (UserConfig, Vec<ConfigError>)) -> (bool, String) {
+    let remote: Vec<ConfigError> = problems
+        .into_iter()
+        .filter(|problem| {
+            problem.message.starts_with("remote.") || problem.message.starts_with("remote:")
+        })
+        .collect();
+    if remote.is_empty() {
+        return (config.remote.start_daemon, String::new());
+    }
+    let stderr = format!(
+        "devlanes tunnel: the remote settings of the user config are invalid, so the daemon \
+         is not started\n{}",
+        warnings(&remote)
+    );
+    (false, stderr)
+}
+
 /// The user config for settings that only change how output looks or whether
 /// the TUI opens. Read once per process, leniently, so one bad key does not reset
 /// the others; its problems go to stderr once as warnings.
@@ -170,6 +201,36 @@ mod tests {
         assert!(warning.starts_with("warning: "), "{warning}");
         assert!(warning.contains("is invalid at line 4"), "{warning}");
         assert_eq!(warning.lines().count(), 1);
+    }
+
+    /// A problem under `remote` turns the tunnel's daemon start off and is
+    /// reported; a problem elsewhere keeps the setting and stays quiet.
+    #[cfg(unix)]
+    #[test]
+    fn remote_problems_turn_starting_off() {
+        let parse = |source: &str| devlanes_config::parse_user_lenient("config.yaml", source);
+        assert_eq!(start_daemon_of(parse("")), (true, String::new()));
+        assert_eq!(
+            start_daemon_of(parse("remote:\n  start_daemon: false\n")),
+            (false, String::new())
+        );
+        assert_eq!(
+            start_daemon_of(parse("tui:\n  theme: neon\n")),
+            (true, String::new())
+        );
+        for source in [
+            "remote:\n  start_daemon: flase\n",
+            "remote:\n  start_deamon: false\n",
+            "remote: 5\n",
+        ] {
+            let (start, stderr) = start_daemon_of(parse(source));
+            assert!(!start, "{source}");
+            assert!(stderr.contains("the daemon is not started"), "{stderr}");
+            assert!(
+                stderr.contains("warning: config.yaml is invalid"),
+                "{stderr}"
+            );
+        }
     }
 
     /// The refusal renders like other config errors, on stderr in every output

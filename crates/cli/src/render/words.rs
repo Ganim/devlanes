@@ -934,7 +934,9 @@ fn more_errors(code: &str, data: &Value) -> Option<(String, Option<Hint>)> {
     })
 }
 
-/// A `remote.warning` event (`{host, code, lane?, hosts?, port?}`) as one line.
+/// A `remote.warning` event (`{host, code, lane?, unit?, hosts?, port?,
+/// reason?, message?}`, which fields depending on the code) as one line. Codes
+/// without their own wording show `message`.
 pub(crate) fn remote_warning(code: &str, data: &Value) -> String {
     let host = field(data, "host");
     let hosts = list(data, "hosts")
