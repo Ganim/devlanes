@@ -402,7 +402,11 @@ fn render_unit(
             lines.extend(stopped_lines(app, unit, Some(reason), width));
             details(frame, lines, area, app);
         }
-        (_, PaneMode::Logs(view)) => render_logs(theme, view, frame, area),
+        // Until the first page arrives the live screen stays, so the pane
+        // does not blank out between the two.
+        (_, PaneMode::Logs(view)) if !(view.loading && view.lines.is_empty()) => {
+            render_logs(theme, view, frame, area);
+        }
         (_, mode) => {
             let rows = u16::try_from(card.len()).unwrap_or(u16::MAX);
             let screen_area = if card.is_empty() || rows + 3 > area.height {
@@ -1415,23 +1419,29 @@ fn render_terminal(app: &App, attached: &Attached, frame: &mut Frame, area: Rect
 /// Stored log lines, newest at the bottom, scrolled by `view.offset`.
 fn render_logs(theme: &Theme, view: &LogView, frame: &mut Frame, area: Rect) {
     let height = usize::from(area.height);
-    let width = usize::from(area.width);
     if view.lines.is_empty() {
-        let text = if view.loading {
-            "Loading stored logs…"
-        } else {
-            "No stored logs for this unit yet."
-        };
-        frame.render_widget(Paragraph::new(text).style(theme.quiet()), area);
+        frame.render_widget(
+            Paragraph::new("No stored logs for this unit yet.").style(theme.quiet()),
+            area,
+        );
         return;
     }
     let end = view.lines.len().saturating_sub(view.offset);
     let start = end.saturating_sub(height);
-    let lines: Vec<Line> = view.lines[start..end]
-        .iter()
-        .map(|line| Line::from(clip(&clean(&line.text), width)))
-        .collect();
-    frame.render_widget(Paragraph::new(lines), area);
+    // The parser keeps escape sequences and control bytes inside its grid,
+    // so the stored colors reach the pane without `clean`.
+    let parser = crate::screen::stored_lines(
+        view.lines[start..end]
+            .iter()
+            .map(|line| line.styled.as_deref().unwrap_or(&line.text)),
+        area.height,
+        area.width,
+        start == 0,
+    );
+    let screen = ScreenView::new(parser.screen());
+    let mut cursor = Cursor::default();
+    cursor.hide();
+    frame.render_widget(PseudoTerminal::new(&screen).cursor(cursor), area);
 }
 
 /// Reverses the selected cells and marks the copy cursor.

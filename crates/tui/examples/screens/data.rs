@@ -429,23 +429,35 @@ pub fn screen(unit: &str) -> Vec<u8> {
 /// Stored log lines of a unit, oldest first, as `logs` returns them.
 pub fn log_page(unit: &str) -> Vec<LogLine> {
     (0..60)
-        .map(|seq| LogLine {
-            unit: unit.into(),
-            seq,
-            timestamp_ms: 1_761_040_000_000 + seq * 2_500,
-            text: if seq % 17 == 11 {
-                format!(
-                    "WARN slow query took {}ms: SELECT * FROM orders WHERE lane = $1",
-                    900 + seq
+        .map(|seq| {
+            let warn = seq % 17 == 11;
+            let (level, color, rest) = if warn {
+                (
+                    "WARN",
+                    33,
+                    format!(
+                        "slow query took {}ms: SELECT * FROM orders WHERE lane = $1",
+                        900 + seq
+                    ),
                 )
             } else {
-                format!(
-                    "INFO request id=req_{:05} route=/v1/orders status=200",
-                    4_000 + seq
+                (
+                    "INFO",
+                    32,
+                    format!(
+                        "request id=req_{:05} route=/v1/orders status=200",
+                        4_000 + seq
+                    ),
                 )
-            },
-            level: Some(if seq % 17 == 11 { "warn" } else { "info" }.into()),
-            styled: None,
+            };
+            LogLine {
+                unit: unit.into(),
+                seq,
+                timestamp_ms: 1_761_040_000_000 + seq * 2_500,
+                text: format!("{level} {rest}"),
+                level: Some(level.to_lowercase()),
+                styled: Some(format!("\x1b[{color}m{level}\x1b[0m {rest}\x1b[0m")),
+            }
         })
         .collect()
 }

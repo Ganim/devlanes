@@ -1051,7 +1051,6 @@ fn hints(app: &App) -> Vec<Hint> {
             return vec![
                 ("pgup pgdn", "scroll", KeyCode::PageUp),
                 ("esc", "back to live", KeyCode::Esc),
-                ("c", "select text", ch('c')),
             ];
         }
         _ => {}

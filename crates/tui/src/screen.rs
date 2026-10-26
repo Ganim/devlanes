@@ -55,13 +55,14 @@ impl TerminalScreen {
         self.parser.screen().scrollback()
     }
 
-    /// Scrolls by `delta` lines (positive is older) and reports whether the
-    /// request went past the oldest line held client-side.
-    pub fn scroll_by(&mut self, delta: isize) -> bool {
+    /// Scrolls by `delta` lines (positive is older). When the request went
+    /// past the oldest line held client-side, returns how many lines up from
+    /// the live view it asked for.
+    pub fn scroll_by(&mut self, delta: isize) -> Option<usize> {
         let current = self.scroll_offset();
         let wanted = current.saturating_add_signed(delta);
         self.parser.screen_mut().set_scrollback(wanted);
-        delta > 0 && self.scroll_offset() < wanted
+        (delta > 0 && self.scroll_offset() < wanted).then_some(wanted)
     }
 
     /// Returns to the live view.
@@ -80,6 +81,32 @@ impl TerminalScreen {
             .screen()
             .contents_between(first.0, first.1, last.0, last.1.saturating_add(1))
     }
+}
+
+/// Stored log lines (with their SGR colors when the store kept them) drawn as
+/// a terminal of `rows`x`columns` would: wrapped and colored like the live
+/// screen. The last line ends at the bottom; with `from_top` the first line
+/// starts at the top instead, so rows wrapped off the top never hide it.
+pub fn stored_lines<'a>(
+    lines: impl IntoIterator<Item = &'a str>,
+    rows: u16,
+    columns: u16,
+    from_top: bool,
+) -> vt100::Parser {
+    // At most a screen of lines is fed, so the scrollback stays small.
+    let mut parser = vt100::Parser::new(non_zero(rows), non_zero(columns), usize::MAX);
+    for (index, line) in lines.into_iter().enumerate() {
+        if index > 0 {
+            parser.process(b"\r\n");
+        }
+        parser.process(line.as_bytes());
+        // A line whose colors were cut off must not color the next one.
+        parser.process(b"\x1b[m");
+    }
+    if from_top {
+        parser.screen_mut().set_scrollback(usize::MAX);
+    }
+    parser
 }
 
 /// vt100 rejects zero dimensions; a hidden pane still keeps a 1x1 parser.

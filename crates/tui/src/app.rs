@@ -4704,11 +4704,14 @@ impl App {
             PaneMode::Copy(_) => {}
             PaneMode::Live => {
                 // A container's older lines stay with Docker; devlanes stores none.
-                if attached.screen.scroll_by(delta)
+                if let Some(wanted) = attached.screen.scroll_by(delta)
                     && attached.state != AttachState::Opening
                     && !attached.container
                 {
+                    // The stored lines continue from where the live screen
+                    // was scrolled to instead of starting again at the newest.
                     attached.mode = PaneMode::Logs(LogView {
+                        offset: wanted,
                         loading: true,
                         ..LogView::default()
                     });
@@ -4725,6 +4728,11 @@ impl App {
                     // Scrolling down past the newest stored line returns to the live screen.
                     attached.mode = PaneMode::Live;
                     attached.screen.scroll_to_bottom();
+                    return;
+                }
+                if view.loading && view.lines.is_empty() {
+                    // Nothing to clamp to yet; the first page clamps it.
+                    view.offset = view.offset.saturating_add_signed(delta);
                     return;
                 }
                 let max = view.lines.len().saturating_sub(height);
@@ -4754,6 +4762,7 @@ impl App {
         result: Result<Page<LogLine>, ApiError>,
         effects: &mut Vec<Effect>,
     ) {
+        let height = usize::from(self.pane_size().1);
         // A page for a unit that is no longer shown has no place to go.
         let Some(attached) = self.attached_mut(generation) else {
             return;
@@ -4776,6 +4785,9 @@ impl App {
                     view.lines = lines;
                 } else {
                     view.lines = page.items;
+                    // The offset carried over from the live screen may ask
+                    // for more lines than the first page holds.
+                    view.offset = view.offset.min(view.lines.len().saturating_sub(height));
                 }
             }
             Err(error) => self.api_error(&what, None, error, effects),
@@ -4791,6 +4803,11 @@ impl App {
         // The pane shows the container's facts then, not a grid to select in.
         if attached.container && matches!(attached.state, AttachState::Failed(_)) {
             self.set_notice("no logs to select: the pane says why".into());
+            return;
+        }
+        // Selection works on the live grid; entering it here would jump there.
+        if matches!(attached.mode, PaneMode::Logs(_)) {
+            self.set_notice("stored logs can't be selected: esc returns to live output".into());
             return;
         }
         let (rows, _) = attached.screen.size();
@@ -5549,12 +5566,13 @@ pub fn target_lane(target: &Target) -> &str {
     }
 }
 
-/// Newest lines of one unit, older than `cursor` when given.
+/// Newest lines of one unit, older than `cursor` when given, with their colors.
 fn log_query(lane: &str, unit: &str, cursor: Option<String>) -> LogQuery {
     LogQuery {
         units: vec![unit_ref(lane, unit)],
         tail: Some(LOG_PAGE),
         cursor,
+        styled: true,
         ..LogQuery::default()
     }
 }

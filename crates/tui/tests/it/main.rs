@@ -909,6 +909,100 @@ async fn copy_mode_copies_the_cursor_line() -> TestResult {
 }
 
 #[tokio::test]
+/// Scrolling past the pane's own scrollback shows the stored logs from about
+/// where the screen was scrolled to, wrapped and in their colors, and `c`
+/// does not jump back to the live screen.
+async fn stored_logs_keep_their_colors_and_the_scroll_position() -> TestResult {
+    use devlanes_proto::{LogLine, Page};
+    use devlanes_tui::app::PaneMode;
+    use ratatui::style::Color;
+    let api = FakeApi::with_lanes(mixed_lanes());
+    let (mut app, _) = loaded(&api, 100, 24).await;
+    let generation = select_unit(&mut app, "api").ok_or("api not reachable")?;
+    feed(&mut app, generation, b"newest\r\n");
+    let (width, height) = app.pane_size();
+    let page = usize::from(height / 2);
+    let effects = app.update(key(KeyCode::PageUp));
+    let query = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::FetchLogs { query, .. } => Some(query),
+            _ => None,
+        })
+        .ok_or(format!("no fetch: {effects:?}"))?;
+    assert!(query.styled, "colors are asked for");
+    let text = draw(&app)?.backend().to_string();
+    assert!(
+        text.contains("newest"),
+        "the live screen stays while loading: {text}"
+    );
+    let lines: Vec<LogLine> = (0..100)
+        .map(|seq| {
+            let text = if seq == 80 {
+                format!("long {}", "x".repeat(usize::from(width) + 10))
+            } else {
+                format!("line {seq:03}")
+            };
+            LogLine {
+                unit: "api".into(),
+                seq,
+                timestamp_ms: 0,
+                styled: Some(format!("\x1b[32m{text}\x1b[0m")),
+                text,
+                level: None,
+            }
+        })
+        .collect();
+    app.update(Msg::Logs {
+        generation,
+        older: false,
+        result: Ok(Page::complete(lines)),
+    });
+    let attached = app.attached.as_ref().ok_or("nothing attached")?;
+    let PaneMode::Logs(view) = &attached.mode else {
+        return Err(format!("not on stored logs: {:?}", attached.mode).into());
+    };
+    assert_eq!(view.offset, page);
+    let terminal = draw(&app)?;
+    let buffer = terminal.backend().buffer();
+    let text = terminal.backend().to_string();
+    assert!(
+        !text.contains('…'),
+        "lines wrap instead of being cut: {text}"
+    );
+    let xs = text.chars().filter(|&c| c == 'x').count();
+    assert!(xs >= usize::from(width) + 10, "{text}");
+    // The newest line shown sits `page` lines above the newest stored one.
+    let newest = format!("line {:03}", 99 - page);
+    let area = buffer.area;
+    let place = (area.top()..area.bottom())
+        .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            newest.chars().enumerate().all(|(i, c)| {
+                buffer
+                    .cell((x + i as u16, y))
+                    .is_some_and(|cell| cell.symbol() == c.to_string())
+            })
+        })
+        .ok_or(format!("{newest} not shown: {text}"))?;
+    assert_eq!(
+        buffer[place].fg,
+        Color::Indexed(2),
+        "stored colors are drawn"
+    );
+    let below = format!("line {:03}", 100 - page);
+    assert!(!text.contains(&below), "{text}");
+    app.update(key(KeyCode::Char('c')));
+    let attached = app.attached.as_ref().ok_or("nothing attached")?;
+    assert!(
+        matches!(attached.mode, PaneMode::Logs(_)),
+        "{:?}",
+        attached.mode
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn quit_asks_while_lanes_of_the_project_run() -> TestResult {
     use devlanes_tui::app::{Dialog, OnQuit};
     let api = FakeApi::with_lanes(mixed_lanes());
