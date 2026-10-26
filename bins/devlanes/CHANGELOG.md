@@ -1,5 +1,25 @@
 # devlanes
 
+## 0.5.0 — 2026-10-26
+
+### Minor changes
+
+- [edc8274](https://github.com/devlanes-run/devlanes/commit/edc8274b1423f7370cbaaae258f617037857edf3) Changed a plain `devlanes start` (and `s` on a lane in the TUI) to bring back the services the lane ran before, after a reboot, a daemon crash or `daemon stop`, including ones started by name.
+  
+  `devlanes stop` without units now also forgets the lane's profiles, so the next plain start uses the `default` profile. A plain start names the other lanes that ran so `devlanes lane resume` can bring them back, and `devlanes with` no longer changes what a lane brings back. Set `start.restore: false` in `~/.devlanes/config.yaml` to always start the `default` profile.
+
+### Patch changes
+
+- [6b60828](https://github.com/devlanes-run/devlanes/commit/6b608289d00c02d7f6181fad56def7e8546e3977) Added `devlanes config get`, `set` and `unset` to read and change the user config.yaml.
+- [0f71767](https://github.com/devlanes-run/devlanes/commit/0f717679acbf3f29729d193f68edf900853dac30) Fixed `install.ps1` failing with "Get-FileHash is not recognized" in Windows PowerShell started from PowerShell 7 or from a shell it started, such as Git Bash.
+- [488f5be](https://github.com/devlanes-run/devlanes/commit/488f5bee3ef717386e6ea4ece47870af144ce613) Changed http readiness timeouts to name the request that failed, such as `GET /-/health (Host: 127.0.0.1:20008) answered 404`, and to suggest `ready.http.host` alongside `path` and `status`.
+- [da2f753](https://github.com/devlanes-run/devlanes/commit/da2f7531a3069c65cb1de8a54a4c0542198f6ed9) Fixed `infra.setup` entries with a `container` running again at the next start after `devlanes run infra.setup.<name>`, a TUI run of the entry or a task step ran them, even when the container had not restarted.
+  
+  Starting a service in a running lane is also faster: devlanes plans only the services it starts and checks every setup entry's container with one Docker Compose lookup.
+- [9358913](https://github.com/devlanes-run/devlanes/commit/9358913dc7705cf14ec78ae44f957aad388bca01) Added a summary printed when the TUI closes: the devlanes banner, the lane shown last with its state, whether the daemon still runs, and the command that stops the lane while it runs.
+- [488f5be](https://github.com/devlanes-run/devlanes/commit/488f5bee3ef717386e6ea4ece47870af144ce613) Added `ready.http.host` to set the Host header an http readiness check sends, for apps that answer their health route only on their own hostname, such as `host: ${{ self.hosts[0] }}`.
+- [8e3a939](https://github.com/devlanes-run/devlanes/commit/8e3a9396b46ed150536bff85c2fd77575162cf26) Fixed the TUI pane losing its colors, cutting long lines and jumping back to the newest line when scrolling up past a service's or task's screen into its stored logs.
+
 ## 0.4.4 — 2026-10-26
 
 ### Patch changes

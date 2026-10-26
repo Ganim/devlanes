@@ -1,6 +1,6 @@
 # devlanes-client
 
-## 0.4.2 — 2026-10-26
+## 0.4.2 ... 0.5.0 — 2026-10-26
 
 Version bump only, to follow other packages.
 
