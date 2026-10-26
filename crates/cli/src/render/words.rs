@@ -803,13 +803,20 @@ fn more_errors(code: &str, data: &Value) -> Option<(String, Option<Hint>)> {
             with_message(format!("remote {}", field(data, "host"))),
             Some(Hint::command(["remote", "ls"])),
         ),
-        "client_identity" => (
-            with_message(
-                "cannot read or create remote-client-id in the devlanes home, which boxes list this machine by"
-                    .to_owned(),
-            ),
-            None,
-        ),
+        "client_identity" => {
+            let path = text(data, "path");
+            let file = if path.is_empty() {
+                "remote-client-id in the devlanes home".to_owned()
+            } else {
+                super::clean(&path)
+            };
+            (
+                with_message(format!(
+                    "cannot connect to a box: this machine's client id could not be read from or saved to {file}"
+                )),
+                None,
+            )
+        }
         "script_error" => (
             match data.get("file").and_then(Value::as_str) {
                 Some(file) => format!(

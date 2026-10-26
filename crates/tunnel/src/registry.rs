@@ -44,6 +44,9 @@ pub(crate) enum FeedError {
     /// The daemon ended the feed.
     #[error("the box daemon ended the registry feed")]
     Ended,
+    /// The tunnel could not encode its own `remote.registry` params.
+    #[error("encoding the remote.registry request: {0}")]
+    Params(serde_json::Error),
     /// An event did not have the shape of its name.
     #[error("the box daemon sent a malformed {event} event: {error}")]
     Malformed {
@@ -79,11 +82,9 @@ impl RegistrySource for DaemonRegistry {
                 name: client.name.clone(),
                 ..self.client.clone()
             }),
+            features: client.features.clone(),
         };
-        let params = serde_json::to_value(params).map_err(|error| FeedError::Malformed {
-            event: "remote.registry params".into(),
-            error,
-        })?;
+        let params = serde_json::to_value(params).map_err(FeedError::Params)?;
         daemon
             .begin_request(Method::RemoteRegistry, params, Context::default())
             .await
@@ -220,5 +221,52 @@ mod tests {
         ));
         let message = result.expect_err("unknown change").to_string();
         assert!(message.contains("remote.registry.change"), "{message}");
+    }
+
+    /// A box daemon from before `remote.registry` answers `unknown_method`,
+    /// which names the fix instead of the bare code. The request carries the
+    /// client's identity and the session's features.
+    #[tokio::test]
+    async fn an_old_daemon_is_named_with_the_fix() -> crate::test_daemon::TestResult {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let dir = tempfile::tempdir()?;
+            let paths = crate::test_daemon::home(dir.path())?;
+            let daemon = crate::test_daemon::answer_one(&paths, |_| Outcome::Error {
+                error: RpcError::new("unknown_method", json!({"method": "unknown"}), 2),
+            })
+            .await?;
+            let registry = DaemonRegistry::new(paths, RemoteClient::default());
+            let client = ClientInfo {
+                label: "devlanes test".into(),
+                id: "0123abcd".into(),
+                name: "laptop".into(),
+                features: vec!["mirror_report".into()],
+            };
+            let Err(error) = registry.subscribe(&client).await else {
+                panic!("an old daemon gave a feed");
+            };
+            assert!(
+                matches!(
+                    error.downcast_ref::<FeedError>(),
+                    Some(FeedError::OldDaemon)
+                ),
+                "{error}"
+            );
+            assert!(
+                error.to_string().contains("`devlanes daemon restart`"),
+                "{error}"
+            );
+            let request = daemon.await??;
+            assert_eq!(request.method, Method::RemoteRegistry);
+            let params: RegistryParams = serde_json::from_value(request.params)?;
+            let sent = params.client.ok_or("no client in the params")?;
+            assert_eq!(
+                (sent.id.as_str(), sent.name.as_str()),
+                ("0123abcd", "laptop")
+            );
+            assert_eq!(params.features, ["mirror_report"]);
+            Ok(())
+        })
+        .await?
     }
 }

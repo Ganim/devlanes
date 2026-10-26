@@ -11,7 +11,7 @@ use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::{Instant, timeout_at};
 
-use crate::wire::Prefixed;
+use crate::wire::{PROTOCOL_VERSION, Prefixed};
 
 /// The line the box's tunnel writes first, naming its protocol revision.
 pub const TUNNEL_PREAMBLE: &str = "devlanes-tunnel 4\n";
@@ -28,15 +28,13 @@ const LINE_ROOM: usize = 32;
 /// Bytes of dropped output an error message shows, from the end.
 const SHOWN: usize = 4096;
 
-/// A pipe positioned right after the preamble line.
+/// A pipe positioned right after a preamble line naming [`PROTOCOL_VERSION`].
 #[derive(Debug)]
 pub struct Preamble<S> {
     /// The pipe; bytes read past the preamble come first.
     pub stream: Prefixed<S>,
     /// Output dropped before the preamble, such as a login banner.
     pub header: Vec<u8>,
-    /// The box's protocol revision from the preamble line.
-    pub protocol: u32,
 }
 
 /// The pipe did not deliver a preamble line.
@@ -60,10 +58,10 @@ pub enum PreambleError {
         output: Vec<u8>,
     },
     /// Nothing arrived in time. The box may run a release from before the
-    /// preamble, whose tunnel waits for the client to speak first.
+    /// preamble (protocol 4), whose tunnel waits for the client to speak first.
     #[error(
         "`devlanes tunnel --stdio` did not answer within {}s; the box may run an older \
-         devlanes release than this machine, so install the same release on both{}",
+         devlanes release (protocol below 4), so install the same release on both machines{}",
         .waited.as_secs(),
         shown(.output)
     )]
@@ -71,6 +69,17 @@ pub enum PreambleError {
         /// How long the client waited.
         waited: Duration,
         /// Everything the box printed.
+        output: Vec<u8>,
+    },
+    /// The preamble names another protocol revision than [`PROTOCOL_VERSION`].
+    #[error(
+        "the box runs another devlanes release (protocol {found}) but this client speaks \
+         protocol {PROTOCOL_VERSION}; install the same release on both machines"
+    )]
+    Protocol {
+        /// The box's revision.
+        found: u32,
+        /// What the box printed before the preamble.
         output: Vec<u8>,
     },
     /// Reading the pipe failed, for example because the tunnel exited with an error.
@@ -91,7 +100,20 @@ impl PreambleError {
             Self::Ended { output }
             | Self::TooLong { output }
             | Self::Silent { output, .. }
+            | Self::Protocol { output, .. }
             | Self::Io { output, .. } => output,
+        }
+    }
+
+    /// Whether reconnecting without user action is pointless. `first` is set
+    /// until the transport's first successful open: before it, silence or a
+    /// flood of output comes from how the box is set up (an older release, a
+    /// chatty profile file); after it, they may pass, like a box under load.
+    pub fn is_permanent(&self, first: bool) -> bool {
+        match self {
+            Self::Protocol { .. } => true,
+            Self::Silent { .. } | Self::TooLong { .. } => first,
+            Self::Ended { .. } | Self::Io { .. } => false,
         }
     }
 }
@@ -114,21 +136,27 @@ fn shown(output: &[u8]) -> String {
 /// ends in the marker (output without a final newline glued to it) counts.
 /// Bytes already read past the line stay in [`Preamble::stream`]. A pipe that
 /// ends, fails, stays silent or exceeds [`PREAMBLE_LIMIT`] first is an error
-/// carrying what was dropped.
+/// carrying what was dropped, and so is a preamble naming another protocol
+/// revision than [`PROTOCOL_VERSION`] ([`PreambleError::Protocol`]).
 pub async fn read_preamble<S: AsyncRead + Unpin>(
     mut io: S,
     wait: Duration,
 ) -> Result<Preamble<S>, PreambleError> {
     let deadline = Instant::now() + wait;
     let mut buffer: Vec<u8> = Vec::new();
-    // Start of the first line not checked yet.
-    let mut scanned = 0;
+    let mut line_start = 0;
     let mut chunk = [0u8; 8192];
     loop {
-        while let Some(end) = buffer[scanned..].iter().position(|byte| *byte == b'\n') {
-            let line_end = scanned + end;
-            if let Some((start, protocol)) = marker(&buffer[scanned..line_end]) {
-                let header = buffer[..scanned + start].to_vec();
+        while let Some(end) = buffer[line_start..].iter().position(|byte| *byte == b'\n') {
+            let line_end = line_start + end;
+            if let Some((start, protocol)) = marker(&buffer[line_start..line_end]) {
+                let header = buffer[..line_start + start].to_vec();
+                if protocol != PROTOCOL_VERSION {
+                    return Err(PreambleError::Protocol {
+                        found: protocol,
+                        output: header,
+                    });
+                }
                 if !header.is_empty() {
                     tracing::debug!(
                         dropped = %String::from_utf8_lossy(&header),
@@ -139,10 +167,9 @@ pub async fn read_preamble<S: AsyncRead + Unpin>(
                 return Ok(Preamble {
                     stream: Prefixed::new(rest, io),
                     header,
-                    protocol,
                 });
             }
-            scanned = line_end + 1;
+            line_start = line_end + 1;
         }
         if buffer.len() > PREAMBLE_LIMIT + LINE_ROOM {
             return Err(PreambleError::TooLong { output: buffer });
@@ -187,7 +214,6 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
-    use crate::wire::PROTOCOL_VERSION;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -207,7 +233,6 @@ mod tests {
     async fn output_before_the_preamble_is_dropped() -> TestResult {
         let input = b"Last login: today\r\nwelcome\nmotd without newline devlanes-tunnel 4\r\nMUX";
         let mut found = read_preamble(&input[..], WAIT).await?;
-        assert_eq!(found.protocol, 4);
         assert_eq!(
             found.header,
             b"Last login: today\r\nwelcome\nmotd without newline ".to_vec()
@@ -284,10 +309,64 @@ mod tests {
             .await
             .expect_err("silence");
         assert!(matches!(error, PreambleError::Silent { .. }), "{error:?}");
+        let message = error.to_string();
+        assert!(message.contains("older devlanes release"), "{message}");
+        assert!(message.contains("protocol below 4"), "{message}");
         assert!(
-            error.to_string().contains("older devlanes release"),
-            "{error}"
+            message.contains("install the same release on both machines"),
+            "{message}"
         );
+    }
+
+    /// A box whose tunnel speaks another revision fails before the mux starts,
+    /// naming both revisions, and retrying cannot help.
+    #[tokio::test]
+    async fn another_protocol_fails_for_good() {
+        let found = PROTOCOL_VERSION + 1;
+        let input = format!("motd\ndevlanes-tunnel {found}\nMUX");
+        let error = read_preamble(input.as_bytes(), WAIT)
+            .await
+            .expect_err("another protocol");
+        assert!(
+            matches!(error, PreambleError::Protocol { found: f, .. } if f == found),
+            "{error:?}"
+        );
+        assert_eq!(error.output(), b"motd\n");
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!(
+                "(protocol {found}) but this client speaks protocol {PROTOCOL_VERSION}"
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains("install the same release on both machines"),
+            "{message}"
+        );
+        assert!(error.is_permanent(true));
+        assert!(error.is_permanent(false));
+    }
+
+    /// Silence and a flood of output stop the link only before the first
+    /// open; a pipe that ends or fails always retries.
+    #[test]
+    fn permanence_depends_on_the_first_open() {
+        let silent = PreambleError::Silent {
+            waited: WAIT,
+            output: Vec::new(),
+        };
+        assert!(silent.is_permanent(true));
+        assert!(!silent.is_permanent(false));
+        let flood = PreambleError::TooLong { output: Vec::new() };
+        assert!(flood.is_permanent(true));
+        assert!(!flood.is_permanent(false));
+        let ended = PreambleError::Ended { output: Vec::new() };
+        assert!(!ended.is_permanent(true));
+        let failed = PreambleError::Io {
+            source: io::Error::other("gone"),
+            output: Vec::new(),
+        };
+        assert!(!failed.is_permanent(true));
     }
 
     /// A failing pipe keeps its own error and adds what was printed.

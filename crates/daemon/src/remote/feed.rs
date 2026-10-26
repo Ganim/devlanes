@@ -9,7 +9,7 @@ use std::{sync::Arc, time::Duration};
 
 use devlanes_proto::{
     Event, LaneSummary, RpcError, events,
-    remote::{REGISTRY_CHANGE_EVENT, REGISTRY_SNAPSHOT_EVENT, RegistryParams},
+    remote::{REGISTRY_CHANGE_EVENT, REGISTRY_SNAPSHOT_EVENT, RegistryParams, RemoteClient},
 };
 use devlanes_transport::{
     HostHeader, HostInfo, LaneInfo, LaneKey, PortInfo, Registry, RegistryEvent, RegistrySnapshot,
@@ -18,7 +18,7 @@ use devlanes_transport::{
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
-use super::ClientGuard;
+use super::{ClientGuard, ClientKey};
 use crate::{
     Session,
     engine::{Inner, params},
@@ -64,6 +64,7 @@ impl Inner {
                 tokio::select! {
                     () = &mut settle => break,
                     () = disconnected.cancelled() => return Ok(json!({})),
+                    () = self.shutdown.cancelled() => return Ok(json!({})),
                     next = changes.recv() => match next {
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => lagged = true,
@@ -93,18 +94,48 @@ impl Inner {
 }
 
 impl ClientGuard {
-    /// Lists `client` in `status` until the guard drops.
-    fn add(engine: &Arc<Inner>, client: devlanes_proto::remote::RemoteClient) -> Self {
-        let id = engine
+    /// Lists `client` in `status` until the guard drops, replacing an entry
+    /// with the same id: a client that reconnects before the box noticed its
+    /// old connection drop is listed once.
+    fn add(engine: &Arc<Inner>, client: RemoteClient) -> Self {
+        let serial = engine
             .remote
             .next_client
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        lock(&engine.remote.clients).insert(id, client);
+        let client = RemoteClient {
+            id: clean(&client.id),
+            name: clean(&client.name),
+            ..client
+        };
+        let key = if client.id.is_empty() {
+            ClientKey::Anonymous(serial)
+        } else {
+            ClientKey::Id(client.id.clone())
+        };
+        lock(&engine.remote.clients).insert(key.clone(), (serial, client));
         Self {
             engine: engine.clone(),
-            id,
+            key,
+            serial,
         }
     }
+}
+
+/// Longest client id or name the box keeps, in bytes.
+const MAX_CLIENT_TEXT: usize = 256;
+
+/// `text` without control characters, cut to [`MAX_CLIENT_TEXT`] bytes. The
+/// box shows what clients send in `status`, so a client must not be able to
+/// fill it or put terminal escapes in it.
+fn clean(text: &str) -> String {
+    let mut cleaned = String::new();
+    for c in text.chars().filter(|c| !c.is_control()) {
+        if cleaned.len() + c.len_utf8() > MAX_CLIENT_TEXT {
+            break;
+        }
+        cleaned.push(c);
+    }
+    cleaned
 }
 
 /// Waits for a bus event that may change the registry: `Some(true)` when
@@ -240,6 +271,23 @@ pub(crate) fn build(lanes: Vec<LaneSummary>, routes: &[RouteEntry]) -> Registry 
 mod tests {
     use super::*;
     use crate::integrations::RouteStatus;
+
+    /// Client ids and names lose control characters and are cut on a
+    /// character boundary.
+    #[test]
+    fn client_text_is_cleaned_and_capped() {
+        assert_eq!(clean("lap\u{1b}[31mtop\n"), "lap[31mtop");
+        let long = "é".repeat(MAX_CLIENT_TEXT);
+        assert_eq!(
+            clean(&long).len(),
+            MAX_CLIENT_TEXT,
+            "128 two-byte characters fit"
+        );
+        assert_eq!(
+            clean(&format!("{}x", "a".repeat(MAX_CLIENT_TEXT))).len(),
+            MAX_CLIENT_TEXT
+        );
+    }
 
     #[test]
     fn maps_services_tasks_containers_hosts_and_hidden_flags() {

@@ -68,7 +68,7 @@ The tunnel offers the `extension` sync to the client that ran `devlanes remote c
 
 - The registry is the daemon's `remote.registry` feed: a snapshot, then each change, built from the same lanes as `status --all` and the same routes as `hosts`. It carries ports, hostnames and states, never environments or secrets. Hidden services and containers are listed but never mirrored; tasks are listed with their state only. A feed that ends or sends something malformed ends the session, and a daemon older than the tunnel is reported with the fix (`devlanes daemon restart`).
 - Data streams only dial loopback ports of running services and containers that are not hidden.
-- There is nothing to send the box a command with: remote is mirroring only.
+- A client cannot send the box daemon requests: remote is mirroring only.
 - Syncs stream the entries the daemon lists in `sync.status`; the client names an entry, never a path. It then sends the files it holds in batches and an end marker. Each batch is compared with the source on arrival and only its outcome is kept; after the marker the box sends new and changed files, then deletions. A client that leaves before the marker leaves nothing behind, so its next subscription starts over. Files over 256 MiB are skipped, and one client follows at most 16 syncs.
 - A daemon the tunnel starts does not inherit the SSH session's variables (`SSH_AUTH_SOCK` and friends). On Linux the handshake label says `(linger off)` when the box would stop it at logout.
 - With `start_daemon` false and no daemon running, the tunnel fails with `box daemon is not running` and exit status `devlanes_transport::EXIT_DAEMON_STOPPED`, which the client's SSH transport reports as temporary.

@@ -13,6 +13,8 @@
 
 mod registry;
 mod sync;
+#[cfg(test)]
+mod test_daemon;
 
 use std::sync::Arc;
 
@@ -24,7 +26,7 @@ use devlanes_transport::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 /// Login-session variables a daemon started by the tunnel must not keep: the
 /// daemon outlives the SSH session, and an agent socket would let its processes
@@ -52,7 +54,7 @@ pub enum TunnelError {
     Status(#[from] serde_json::Error),
     /// Writing the preamble to stdout failed.
     #[error("writing to the client: {0}")]
-    Stdout(#[from] std::io::Error),
+    Stdout(#[source] std::io::Error),
     /// The session with the client failed.
     #[error(transparent)]
     Serve(#[from] ServeError),
@@ -124,11 +126,10 @@ fn linger_off() -> bool {
 /// frames may reach stdout, so diagnostics belong on stderr, which ssh hands
 /// back to the client.
 pub async fn run_stdio(paths: Paths, start_daemon: bool) -> Result<(), TunnelError> {
-    let mut stdout = tokio::io::stdout();
-    stdout.write_all(TUNNEL_PREAMBLE.as_bytes()).await?;
-    stdout.flush().await?;
-    drop(daemon_client(&paths, start_daemon).await?);
-    let box_info = box_info(&paths).await?;
+    write_preamble(&mut tokio::io::stdout()).await?;
+    let mut daemon = daemon_client(&paths, start_daemon).await?;
+    let box_info = status_box_info(&mut daemon).await?;
+    drop(daemon);
     let client = RemoteClient {
         pid: std::process::id(),
         ssh: std::env::var("SSH_CONNECTION")
@@ -162,11 +163,23 @@ struct StatusFields {
     ports_range: Option<String>,
 }
 
+/// Writes [`TUNNEL_PREAMBLE`] to `out` and flushes it.
+async fn write_preamble(out: &mut (impl AsyncWrite + Unpin)) -> Result<(), TunnelError> {
+    out.write_all(TUNNEL_PREAMBLE.as_bytes())
+        .await
+        .map_err(TunnelError::Stdout)?;
+    out.flush().await.map_err(TunnelError::Stdout)
+}
+
 /// What the running box daemon behind `paths` tells clients about this box,
 /// for [`ServeOptions::box_info`]: its proxy's HTTPS port and `ports.range`.
 pub async fn box_info(paths: &Paths) -> Result<BoxInfo, TunnelError> {
-    let status = Client::connect(paths)
-        .await?
+    status_box_info(&mut Client::connect(paths).await?).await
+}
+
+/// [`box_info`] over an open connection to the box daemon.
+async fn status_box_info(daemon: &mut Client) -> Result<BoxInfo, TunnelError> {
+    let status = daemon
         .request(Method::DaemonStatus, json!({}), Context::default())
         .await?;
     let fields: StatusFields = serde_json::from_value(status)?;
@@ -235,5 +248,35 @@ mod tests {
         assert_eq!(error.to_string(), "box daemon is not running");
         assert_eq!(i32::from(error.exit_code()), EXIT_DAEMON_STOPPED);
         assert!(!paths.run.exists(), "nothing was prepared for a daemon");
+    }
+
+    /// The tunnel's output starts with the preamble line, so the client can
+    /// find it after whatever a login shell printed.
+    #[tokio::test]
+    async fn output_starts_with_the_preamble() -> Result<(), TunnelError> {
+        let mut out = Vec::new();
+        write_preamble(&mut out).await?;
+        assert_eq!(out, TUNNEL_PREAMBLE.as_bytes());
+        Ok(())
+    }
+
+    /// A box daemon from before `https_port` and `ports_range` existed leaves
+    /// the box info empty instead of failing the tunnel.
+    #[tokio::test]
+    async fn box_info_defaults_without_the_new_status_fields() -> test_daemon::TestResult {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempfile::tempdir()?;
+            let paths = test_daemon::home(dir.path())?;
+            let daemon = test_daemon::answer_one(&paths, |_| devlanes_proto::Outcome::Ok {
+                data: json!({"version": "0.3.0", "pid": 42}),
+            })
+            .await?;
+            let info = box_info(&paths).await?;
+            assert_eq!(info, BoxInfo::default());
+            let request = daemon.await??;
+            assert_eq!(request.method, Method::DaemonStatus);
+            Ok(())
+        })
+        .await?
     }
 }

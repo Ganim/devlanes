@@ -881,9 +881,11 @@ pub struct UnitPeak {
     pub peak_cpu_percent: Option<f64>,
 }
 
-/// Messages a client daemon exchanges with a box's `devlanes tunnel` over the remote
-/// mux. Remote is mirroring only: these are sync payloads and connection events,
-/// never daemon requests, environments or secrets.
+/// Remote operation: the messages a client daemon exchanges with a box's
+/// `devlanes tunnel` over the remote mux, and the `remote.registry` feed between
+/// that tunnel and its box daemon. Remote is mirroring only: these are sync
+/// payloads, registry updates and connection events, never daemon requests,
+/// environments or secrets.
 pub mod remote {
     use std::path::PathBuf;
 
@@ -1010,11 +1012,18 @@ pub mod remote {
     }
 
     /// Params of `remote.registry`.
+    ///
+    /// The feed reaches clients of other releases, which reject what they do
+    /// not know. A new unit kind, field meaning or event in the feed is sent
+    /// only to a client whose `features` names the feature that brought it.
     #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
     pub struct RegistryParams {
         /// The client the tunnel serves, listed by `status` while the request lasts.
         #[serde(default)]
         pub client: Option<RemoteClient>,
+        /// Remote protocol features the tunnel and its client both implement.
+        #[serde(default)]
+        pub features: Vec<String>,
     }
 
     /// First event of `remote.registry`, and again whenever the daemon could not

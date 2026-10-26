@@ -65,8 +65,9 @@ pub(crate) struct Remotes {
     /// Serializes connects so a replaced connection is gone before its successor
     /// binds the same ports.
     connecting: tokio::sync::Mutex<()>,
-    /// Box side: tunnels currently serving a client, for `status`.
-    clients: Mutex<BTreeMap<u64, RemoteClient>>,
+    /// Box side: tunnels currently serving a client, for `status`, each with
+    /// the serial of the [`ClientGuard`] that listed it.
+    clients: Mutex<BTreeMap<ClientKey, (u64, RemoteClient)>>,
     next_client: AtomicU64,
     /// What this machine sends every box, read from disk on the first connect.
     identity: tokio::sync::OnceCell<identity::ClientIdentity>,
@@ -419,16 +420,32 @@ struct DisconnectParams {
     host: Option<String>,
 }
 
+/// Where the box lists a client: under its id, so a reconnect replaces the
+/// entry its dropped connection left, or apart when it sent no id.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ClientKey {
+    Id(String),
+    Anonymous(u64),
+}
+
 /// Removes a tunnel from the box's client list when its registry feed ends.
 struct ClientGuard {
     engine: Arc<Inner>,
-    id: u64,
+    key: ClientKey,
+    serial: u64,
 }
 
 impl Drop for ClientGuard {
-    /// Forgets the tunnel.
+    /// Forgets the tunnel, unless a newer connection of the same client
+    /// replaced its entry.
     fn drop(&mut self) {
-        lock(&self.engine.remote.clients).remove(&self.id);
+        let mut clients = lock(&self.engine.remote.clients);
+        if clients
+            .get(&self.key)
+            .is_some_and(|(serial, _)| *serial == self.serial)
+        {
+            clients.remove(&self.key);
+        }
     }
 }
 
@@ -538,15 +555,26 @@ impl Inner {
     }
 
     /// The id and name this machine sends to boxes, created on first use.
+    /// Failing names the file: `client_identity` with `{message, path}`.
     async fn client_identity(&self) -> Result<identity::ClientIdentity, RpcError> {
         self.remote
             .identity
             .get_or_try_init(|| async {
                 let home = self.opts.home.clone();
+                let failed = |error: &dyn std::fmt::Display| {
+                    RpcError::new(
+                        "client_identity",
+                        json!({
+                            "message": error.to_string(),
+                            "path": self.opts.home.join(identity::ID_FILE),
+                        }),
+                        1,
+                    )
+                };
                 tokio::task::spawn_blocking(move || identity::load(&home))
                     .await
-                    .map_err(|error| crate::registry::internal("client_identity", error))?
-                    .map_err(|error| crate::registry::internal("client_identity", error))
+                    .map_err(|error| failed(&error))?
+                    .map_err(|error| failed(&error))
             })
             .await
             .cloned()
@@ -674,7 +702,10 @@ impl Inner {
         session: &Session,
     ) -> Result<Value, RpcError> {
         let mut result = self.status_method(value, context, session).await?;
-        let clients: Vec<RemoteClient> = lock(&self.remote.clients).values().cloned().collect();
+        let clients: Vec<RemoteClient> = lock(&self.remote.clients)
+            .values()
+            .map(|(_, client)| client.clone())
+            .collect();
         let hosts: Vec<Value> = self
             .remote
             .all()

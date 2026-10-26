@@ -123,23 +123,29 @@ pub enum SshError {
          `devlanes daemon install` to keep it running"
     )]
     BoxDaemonStopped(String),
-    /// The tunnel's output did not start with its preamble line.
-    #[error(transparent)]
-    Preamble(#[from] PreambleError),
+    /// The tunnel's output did not start with a preamble line of this protocol.
+    #[error("{error}")]
+    Preamble {
+        /// What went wrong.
+        error: PreambleError,
+        /// See [`PreambleError::is_permanent`].
+        permanent: bool,
+    },
 }
 
 impl SshError {
     /// Reports whether reconnecting without user action is pointless.
     pub fn is_permanent(&self) -> bool {
         match self {
-            Self::Master { permanent, .. } | Self::NotInstalled { permanent, .. } => *permanent,
+            Self::Master { permanent, .. }
+            | Self::NotInstalled { permanent, .. }
+            | Self::Preamble { permanent, .. } => *permanent,
             Self::ControlPathTooLong(_) => true,
             Self::Io(_)
             | Self::AuthTimeout(_)
             | Self::Ssh(_)
             | Self::Probe(_)
-            | Self::BoxDaemonStopped(_)
-            | Self::Preamble(_) => false,
+            | Self::BoxDaemonStopped(_) => false,
         }
     }
 }
@@ -228,7 +234,9 @@ impl SshTransport {
     /// preamble. The master is free for other connects meanwhile.
     async fn open(&self) -> Result<Prefixed<SshStream>, SshError> {
         let stream = self.open_tunnel().await?;
-        let preamble = read_preamble(stream, crate::PREAMBLE_WAIT).await?;
+        let preamble = read_preamble(stream, crate::PREAMBLE_WAIT)
+            .await
+            .map_err(|error| self.preamble_error(error))?;
         self.connected.store(true, Ordering::Relaxed);
         Ok(preamble.stream)
     }
@@ -252,6 +260,15 @@ impl SshTransport {
         SshError::NotInstalled {
             destination: self.destination.clone(),
             permanent: !self.connected.load(Ordering::Relaxed),
+        }
+    }
+
+    /// [`SshError::Preamble`] for this box, permanent as
+    /// [`PreambleError::is_permanent`] says before or after the first tunnel.
+    fn preamble_error(&self, error: PreambleError) -> SshError {
+        SshError::Preamble {
+            permanent: error.is_permanent(!self.connected.load(Ordering::Relaxed)),
+            error,
         }
     }
 
@@ -757,6 +774,34 @@ mod tests {
         assert!(transport.not_installed().is_permanent());
         transport.connected.store(true, Ordering::Relaxed);
         let later = transport.not_installed();
+        assert!(!later.is_permanent());
+        assert!(!TransportError::from(later).is_permanent());
+    }
+
+    /// A tunnel of another protocol stops the link at any time; a silent one
+    /// stops it only before the first tunnel opened.
+    #[test]
+    fn preamble_failures_follow_the_first_connection() {
+        let transport = SshTransport::new("box", SshOptions::new("/tmp/h"));
+        let protocol = || PreambleError::Protocol {
+            found: devlanes_transport::PROTOCOL_VERSION + 1,
+            output: Vec::new(),
+        };
+        let silent = || PreambleError::Silent {
+            waited: crate::PREAMBLE_WAIT,
+            output: Vec::new(),
+        };
+        assert!(transport.preamble_error(protocol()).is_permanent());
+        assert!(transport.preamble_error(silent()).is_permanent());
+        transport.connected.store(true, Ordering::Relaxed);
+        let mismatch = transport.preamble_error(protocol());
+        assert!(mismatch.is_permanent());
+        assert!(
+            mismatch.to_string().contains("install the same release"),
+            "{mismatch}"
+        );
+        assert!(TransportError::from(mismatch).is_permanent());
+        let later = transport.preamble_error(silent());
         assert!(!later.is_permanent());
         assert!(!TransportError::from(later).is_permanent());
     }

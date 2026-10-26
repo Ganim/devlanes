@@ -118,7 +118,8 @@ async fn large_sync_reconnects_send_only_differences() {
         eprintln!("skipping large_sync_reconnects_send_only_differences: no IPv6 loopback");
         return;
     }
-    tokio::time::timeout(LIMIT * 6, async {
+    // Windows CI takes close to five minutes.
+    tokio::time::timeout(LIMIT * 8, async {
         let tmp = temp();
         let main = repo(&tmp.path, "bigrepo", BIG);
         tokio::task::block_in_place(|| write_tree(&main.join("big")));

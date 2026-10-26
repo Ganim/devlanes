@@ -1102,18 +1102,33 @@ async fn registry_feed_follows_lanes_units_and_tasks() {
         let feeding = session.clone();
         let feed = tokio::spawn(async move { engine.handle(request, feeding).await });
         let mut registry = devlanes_transport::Registry::default();
-        // The first event is the snapshot, empty before any project registered.
-        assert!(
-            follow_feed(&mut frames, &mut registry, |_| true).await,
-            "no snapshot"
+        let first = tokio::time::timeout(SOON, frames.recv())
+            .await
+            .expect("the feed sent nothing")
+            .expect("the session closed");
+        let Frame::Control(Control::Event(first)) = first else {
+            panic!("the feed did not start with an event");
+        };
+        assert_eq!(
+            first.event,
+            devlanes_proto::remote::REGISTRY_SNAPSHOT_EVENT,
+            "{}",
+            first.data
+        );
+        registry.replace(
+            serde_json::from_value(first.data["snapshot"].clone()).expect("snapshot payload"),
         );
 
-        let status = h
-            .call(Method::Status, json!({"all": true}), Context::default())
-            .await
-            .expect("status");
-        assert_eq!(status["clients"][0]["id"], "0123abcd", "{status}");
-        assert_eq!(status["clients"][0]["name"], "laptop", "{status}");
+        let listed = eventually(SOON, || async {
+            let status = h
+                .call(Method::Status, json!({"all": true}), Context::default())
+                .await
+                .expect("status");
+            (status["clients"][0]["id"] == "0123abcd").then_some(status)
+        })
+        .await
+        .expect("the client is listed");
+        assert_eq!(listed["clients"][0]["name"], "laptop", "{listed}");
 
         h.call(Method::Start, json!({"units": ["web"]}), cx(&main))
             .await
@@ -1160,6 +1175,73 @@ async fn registry_feed_follows_lanes_units_and_tasks() {
 
         session.close();
         let _ = feed.await;
+        let status = h
+            .call(Method::Status, json!({"all": true}), Context::default())
+            .await
+            .expect("status");
+        assert!(status.get("clients").is_none(), "{status}");
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A client that reconnects before its old feed ended is listed once, as its
+/// newest connection, and the old feed ending does not unlist it. Control
+/// characters in what it sends are dropped.
+async fn a_reconnected_client_is_listed_once() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let h = engine_with(&tmp.path.join("box"), "23500-23999", None, None).await;
+        let feed = |session_id: u64, pid: u32| {
+            let (session, frames) = Session::local(session_id);
+            let request = Request {
+                id: 1,
+                method: Method::RemoteRegistry,
+                params: json!({"client": {
+                    "pid": pid, "since_ms": 0, "id": "0123abcd", "name": "lap\u{1b}top"
+                }}),
+                context: Context::default(),
+            };
+            let engine = h.engine.clone();
+            let feeding = session.clone();
+            let task = tokio::spawn(async move { engine.handle(request, feeding).await });
+            (session, frames, task)
+        };
+        let listed = |pid: u32| {
+            let h = &h;
+            async move {
+                eventually(SOON, || async {
+                    let status = h
+                        .call(Method::Status, json!({"all": true}), Context::default())
+                        .await
+                        .expect("status");
+                    (status["clients"][0]["pid"] == pid).then_some(status)
+                })
+                .await
+                .unwrap_or_else(|| panic!("pid {pid} was never listed"))
+            }
+        };
+
+        let (old, _old_frames, old_task) = feed(9_004, 7);
+        listed(7).await;
+        let (new, _new_frames, new_task) = feed(9_005, 8);
+        let status = listed(8).await;
+        let clients = status["clients"].as_array().expect("clients");
+        assert_eq!(clients.len(), 1, "{status}");
+        assert_eq!(clients[0]["name"], "laptop", "{status}");
+
+        old.close();
+        let _ = old_task.await;
+        let status = h
+            .call(Method::Status, json!({"all": true}), Context::default())
+            .await
+            .expect("status");
+        assert_eq!(status["clients"][0]["pid"], 8, "{status}");
+
+        new.close();
+        let _ = new_task.await;
         let status = h
             .call(Method::Status, json!({"all": true}), Context::default())
             .await

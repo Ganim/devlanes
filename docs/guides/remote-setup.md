@@ -126,8 +126,9 @@ curl -sS https://api.acme.localhost/healthz          # from the client, once the
 | `… failed: the box did not answer in time` or `the link dropped while it opened` | a slow or dropped link | try again; `remote ls` shows the link state |
 | `… failed: box hetzner is not connected: …` | the link stayed down for 10 seconds | the error after the colon says why |
 | `the box runs devlanes 0.4.1 and this machine 0.4.3` | different releases, same protocol | works; upgrade the box when convenient |
-| `the box runs … protocol 3 but this client speaks protocol 4` | releases too far apart | install the matching release on the box, then `devlanes daemon restart` there |
-| `` `devlanes tunnel --stdio` did not answer within 20s; the box may run an older devlanes release `` | the box's devlanes predates protocol 4, whose tunnel announces itself first | install the same release on both machines |
+| `the box runs … (protocol 5) but this client speaks protocol 4` | releases too far apart | install the same release on both machines, then `devlanes daemon restart` on the box |
+| `` `devlanes tunnel --stdio` did not answer within 20s; the box may run an older devlanes release (protocol below 4) `` | this client is newer than the box: the box's devlanes predates protocol 4, whose tunnel announces itself first | install the same release on both machines |
+| a mux or handshake error right after one machine was upgraded | this client predates protocol 4 and the box is newer: the client cannot read the line the box's tunnel starts with | install the same release on both machines |
 | ``the box daemon runs an older devlanes than `devlanes tunnel` `` | the box's binary was upgraded but its daemon still runs the old one | `devlanes daemon restart` on the box |
 | ``the box closed the connection before `devlanes tunnel --stdio` started; the box printed: …`` | the login shell exited or ran something else; its output follows | fix the shell's startup files, or the `ForceCommand` or `RemoteCommand` for this host |
 | ``the box printed more than 64 KiB before `devlanes tunnel --stdio` started`` | a profile file prints a lot on every login | make it quiet for non-interactive sessions |

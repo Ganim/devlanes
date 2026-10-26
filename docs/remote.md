@@ -20,7 +20,7 @@ Install devlanes on the box yourself, with the same install methods as on any ma
 
 When no daemon runs on the box, the connection starts one. Set `remote.start_daemon: false` in the box's user config to keep that under your control: the client then reports that the box daemon is not running and keeps retrying until you start it there with `devlanes daemon start`. A daemon started that way exits about 30 seconds after the last client or TUI leaves while nothing runs (`daemon.exit_when_idle`), so run `devlanes daemon install` on the box, or set `daemon.exit_when_idle: false` there, to keep it running.
 
-`devlanes status --json` on the box lists the clients connected to it under `clients`: each with its `id`, a random id the client machine keeps in `~/.devlanes/remote-client-id` so it stays the same across reconnects and restarts, its host `name`, and the tunnel's `pid`, `ssh` address and start time (`since_ms`).
+`devlanes status --json` on the box lists the clients connected to it under `clients`: each with its `id`, a random id the client machine keeps in `remote-client-id` in its devlanes home (`~/.devlanes` by default, `$DEVLANES_HOME` when set) so it stays the same across reconnects and restarts, its host `name`, and the tunnel's `pid`, `ssh` address and start time (`since_ms`).
 
 ## Mirroring
 
