@@ -14,11 +14,14 @@ pub enum CompletionKind {
     Project,
     Host,
     Profile,
+    /// Dotted user config keys (`tui.theme`), from the config schema; no daemon needed.
+    Setting,
 }
 
 /// Inject a short-timeout, existing-connection-only client at the composition root.
 pub trait CompletionSource: Send + Sync {
     /// Must never auto-spawn a daemon; an unavailable peer returns an empty list.
+    /// [`CompletionKind::Setting`] is answered without one.
     fn existing_daemon_candidates(&self, kind: CompletionKind, prefix: &str) -> Vec<String>;
 }
 
@@ -53,6 +56,7 @@ fn kind_of(id: &str) -> Option<CompletionKind> {
         "project" => CompletionKind::Project,
         "connect_host" | "disconnect_host" => CompletionKind::Host,
         "profiles" => CompletionKind::Profile,
+        "config_key" => CompletionKind::Setting,
         _ => return None,
     })
 }

@@ -139,6 +139,10 @@ fn entire_command_inventory_builds_actions() {
         ),
         (&["remote", "sync"], Some(Method::SyncStatus)),
         (&["config", "check"], Some(Method::ConfigCheck)),
+        (&["config", "get"], None),
+        (&["config", "get", "tui.theme"], None),
+        (&["config", "set", "tui.theme", "dark"], None),
+        (&["config", "unset", "tui.theme"], None),
         (&["doctor"], Some(Method::Doctor)),
         (&["daemon", "status"], Some(Method::DaemonStatus)),
         (&["daemon", "stop"], Some(Method::DaemonShutdown)),
@@ -201,6 +205,30 @@ fn infra_logs_sends_the_container_tail_and_follow() {
         (&followed["tail"], &followed["follow"]),
         (&json!(5), &json!(true))
     );
+}
+
+#[test]
+fn user_config_commands_stay_local_and_keep_values_as_typed() {
+    let local = |args: &[&str]| {
+        let cli = Cli::try_parse_from(std::iter::once("devlanes").chain(args.iter().copied()))
+            .expect("parses");
+        action(&cli, &runtime(&cli, OutputMode::Plain))
+    };
+    assert!(matches!(local(&["config", "get"]), Action::ConfigGet(None)));
+    assert!(matches!(
+        local(&["config", "get", "proxy"]),
+        Action::ConfigGet(Some(key)) if key == "proxy"
+    ));
+    // A negative number is the value, not a flag.
+    assert!(matches!(
+        local(&["config", "set", "proxy.https_port", "-1"]),
+        Action::ConfigSet { key, value } if key == "proxy.https_port" && value == "-1"
+    ));
+    assert!(matches!(
+        local(&["config", "unset", "tui.theme", "--json"]),
+        Action::ConfigUnset(key) if key == "tui.theme"
+    ));
+    assert!(Cli::try_parse_from(["devlanes", "config", "set", "tui.theme"]).is_err());
 }
 
 #[test]
@@ -1377,10 +1405,10 @@ impl CompletionSource for FakeCompletion {
     /// Simulates an existing daemon without giving completion any spawn capability.
     fn existing_daemon_candidates(&self, kind: CompletionKind, _prefix: &str) -> Vec<String> {
         self.0.fetch_add(1, Ordering::Relaxed);
-        if kind == CompletionKind::Unit {
-            vec!["api".into(), "web".into()]
-        } else {
-            vec![]
+        match kind {
+            CompletionKind::Unit => vec!["api".into(), "web".into()],
+            CompletionKind::Setting => vec!["tui.theme".into(), "proxy.https_port".into()],
+            _ => vec![],
         }
     }
 }
@@ -1415,6 +1443,13 @@ fn dynamic_completion_offers_commands_and_daemon_units() {
     assert!(units.contains(&"api".to_owned()), "{units:?}");
     assert!(units.contains(&"web".to_owned()), "{units:?}");
     assert_eq!(complete(&["debug", "why", "a"]), ["api"]);
+    assert_eq!(complete(&["config", "set", "tui"]), ["tui.theme"]);
+    assert_eq!(complete(&["config", "unset", "pro"]), ["proxy.https_port"]);
+    let keys = complete(&["config", "get", ""]);
+    assert!(
+        keys.contains(&"tui.theme".to_owned()) && keys.contains(&"proxy.https_port".to_owned()),
+        "{keys:?}"
+    );
 }
 
 #[test]
