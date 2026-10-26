@@ -1882,52 +1882,73 @@ impl InfraProvider for ContainerInfra {
         Ok(stream.boxed())
     }
 
-    /// `StartedAt` of a plain container or a shared/per-lane compose service.
-    async fn container_started_at(
+    /// `StartedAt` of plain containers and shared/per-lane compose services. The
+    /// shared project is resolved and each compose project listed once per call,
+    /// since every `config` and `ps` is a Compose process.
+    async fn containers_started_at(
         &self,
         spec: &InfraSpec,
-        container: &str,
-    ) -> Result<Option<String>, InfraError> {
+        containers: &[String],
+    ) -> Result<BTreeMap<String, String>, InfraError> {
         let Some(docker) = &self.docker else {
-            return Ok(None);
+            return Ok(BTreeMap::new());
         };
-        let name = if let Some(declared) = spec.containers.iter().find(|c| c.name == container) {
-            let scope = if declared.per_lane {
-                devlanes_infra_docker::Scope::Lane(spec.lane)
-            } else {
-                devlanes_infra_docker::Scope::Shared
-            };
-            devlanes_infra_docker::container_name(&spec.project, container, scope)
-        } else {
+        let mut shared_name: Option<String> = None;
+        let mut listed: BTreeMap<String, Vec<devlanes_infra_compose::ContainerStatus>> =
+            BTreeMap::new();
+        let mut names = Vec::new();
+        for container in containers {
+            if let Some(declared) = spec.containers.iter().find(|c| &c.name == container) {
+                let scope = if declared.per_lane {
+                    devlanes_infra_docker::Scope::Lane(spec.lane)
+                } else {
+                    devlanes_infra_docker::Scope::Shared
+                };
+                names.push((
+                    container,
+                    devlanes_infra_docker::container_name(&spec.project, container, scope),
+                ));
+                continue;
+            }
             let project = if spec.per_lane.iter().any(|s| s == container) {
                 devlanes_infra_compose::lane_project_name(&spec.project, spec.lane)
                     .map_err(compose_error)?
+            } else if let Some(name) = &shared_name {
+                name.clone()
             } else {
                 let (project, _) = self
                     .compose
                     .shared_project(&Self::shared(spec))
                     .await
                     .map_err(compose_error)?;
-                project.name.unwrap_or_default()
+                shared_name.insert(project.name.unwrap_or_default()).clone()
             };
-            let statuses = self
-                .compose
-                .cli()
-                .ps(&project)
-                .await
-                .map_err(compose_error)?;
-            match statuses
-                .into_iter()
-                .find(|status| status.service == container)
-            {
-                Some(status) => status.id,
-                None => return Ok(None),
+            if !listed.contains_key(&project) {
+                let statuses = self
+                    .compose
+                    .cli()
+                    .ps(&project)
+                    .await
+                    .map_err(compose_error)?;
+                listed.insert(project.clone(), statuses);
             }
-        };
-        match docker.client().inspect_container(&name, None).await {
-            Ok(inspect) => Ok(inspect.state.and_then(|state| state.started_at)),
-            Err(_) => Ok(None),
+            let found = listed
+                .get(&project)
+                .and_then(|statuses| statuses.iter().find(|s| &s.service == container));
+            if let Some(status) = found {
+                names.push((container, status.id.clone()));
+            }
         }
+        let inspected =
+            futures_util::future::join_all(names.into_iter().map(|(container, name)| async move {
+                let started = match docker.client().inspect_container(&name, None).await {
+                    Ok(inspect) => inspect.state.and_then(|state| state.started_at),
+                    Err(_) => None,
+                };
+                started.map(|at| (container.clone(), at))
+            }))
+            .await;
+        Ok(inspected.into_iter().flatten().collect())
     }
 
     /// Lists labelled containers so status can show them; never stops anything.

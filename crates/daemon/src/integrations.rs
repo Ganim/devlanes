@@ -366,13 +366,14 @@ pub trait InfraProvider: Send + Sync {
     async fn down(&self, spec: &InfraSpec) -> Result<Value, InfraError>;
     /// Removes the lane's own containers and volumes (`lane clean`).
     async fn remove_lane(&self, project: &str, lane: u32) -> Result<Value, InfraError>;
-    /// `StartedAt` of the container backing `container` (a compose service or plain
-    /// container name) as seen from this lane; `None` when it does not run.
-    async fn container_started_at(
+    /// `StartedAt` of the containers backing `containers` (compose service or plain
+    /// container names) as seen from this lane, by name; one that does not run is
+    /// absent. One call answers every setup entry of a start.
+    async fn containers_started_at(
         &self,
         spec: &InfraSpec,
-        container: &str,
-    ) -> Result<Option<String>, InfraError>;
+        containers: &[String],
+    ) -> Result<BTreeMap<String, String>, InfraError>;
     /// Output of the container `docker` ([`InfraContainer::docker`]), plain or compose,
     /// for `ready: {log}` and `infra.logs`. Nothing is stored; the engine keeps the logs.
     async fn container_logs(
@@ -434,12 +435,12 @@ impl InfraProvider for NoInfra {
         Ok(Value::Null)
     }
     /// No containers.
-    async fn container_started_at(
+    async fn containers_started_at(
         &self,
         _: &InfraSpec,
-        _: &str,
-    ) -> Result<Option<String>, InfraError> {
-        Ok(None)
+        _: &[String],
+    ) -> Result<BTreeMap<String, String>, InfraError> {
+        Ok(BTreeMap::new())
     }
     /// No containers.
     async fn adopt(&self, _: &[String]) -> Result<Value, InfraError> {

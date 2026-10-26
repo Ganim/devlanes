@@ -478,6 +478,161 @@ async fn run_infra_entries_keep_the_setup_record() {
     .expect("timeout");
 }
 
+const BACKED: &str = r#"project: backed
+infra:
+  containers:
+    db: { image: "postgres:16", ports: { pg: 5432 }, per_lane: true }
+  setup:
+    database: { run: "echo setup-db", container: db }
+services:
+  api: { run: "sleep" }
+  web: { run: "sleep" }
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+/// An entry backed by a container runs again only when that container
+/// restarted: a `run` of the entry records the container's start time like a
+/// start does, so a later start into the running lane leaves it alone.
+async fn setup_entry_reruns_only_after_its_container_restarted() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let main = repo(&tmp.path, "r", BACKED);
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                infra: true,
+                ..Setup::default()
+            },
+        )
+        .await;
+        let started_at = |at: &str| {
+            *h.infra.started_at.lock().expect("lock") = Some(at.to_owned());
+        };
+        started_at("2026-01-01T00:00:00Z");
+        assert!(start(&h, cx(&main), json!({"units": ["api"]})).await.ready);
+        assert_eq!(h.runner.journal.entries(), ["echo setup-db", "sleep"]);
+
+        h.call(
+            Method::Run,
+            json!({"task": "infra.setup.database"}),
+            cx(&main),
+        )
+        .await
+        .expect("run setup entry");
+        let web = start(&h, cx(&main), json!({"units": ["web"]})).await;
+        assert!(web.ready && !web.whole_lane, "{web:?}");
+        assert_eq!(
+            h.runner.journal.entries(),
+            ["echo setup-db", "sleep", "echo setup-db", "sleep"],
+            "the run recorded the container's start time"
+        );
+
+        h.call(Method::Stop, json!({"units": ["web"]}), cx(&main))
+            .await
+            .expect("stop web");
+        started_at("2026-01-01T01:00:00Z");
+        assert!(start(&h, cx(&main), json!({"units": ["web"]})).await.ready);
+        assert_eq!(
+            &h.runner.journal.entries()[4..],
+            ["echo setup-db", "sleep"],
+            "the restarted container lost the entry's effect"
+        );
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// A start into a running lane plans only the services it starts and the
+/// setup entries; a whole-lane start plans every unit.
+async fn start_into_running_lane_plans_only_its_services() {
+    tokio::time::timeout(LIMIT, async {
+        let tmp = temp();
+        let config = r#"project: planned
+infra:
+  containers:
+    db: { image: "postgres:16", ports: { pg: 5432 }, per_lane: true }
+  setup:
+    database: "echo setup-db"
+tasks:
+  migrate: { run: "echo migrate", when: lane.start }
+services:
+  api: { run: "sleep" }
+  web: { run: "printenv API_PORT; sleep", env: { API_PORT: "${{ services.api.port }}" } }
+  docs: { run: "sleep" }
+"#;
+        let main = repo(&tmp.path, "r", config);
+        let journal = crate::PlanJournal::default();
+        let h = harness(
+            &tmp.path.join("home"),
+            Setup {
+                infra: true,
+                contributors: vec![std::sync::Arc::new(journal.clone())],
+                ..Setup::default()
+            },
+        )
+        .await;
+        let planned = || {
+            let mut planned = journal.planned.entries();
+            planned.sort();
+            planned.dedup();
+            journal.planned.0.lock().expect("lock").clear();
+            planned
+        };
+        assert!(start(&h, cx(&main), json!({"units": ["api"]})).await.ready);
+        assert_eq!(
+            planned(),
+            [
+                "InfraCommand database",
+                "Service api",
+                "Service docs",
+                "Service web",
+                "Task migrate"
+            ]
+        );
+
+        let web = start(&h, cx(&main), json!({"units": ["web"]})).await;
+        assert!(web.ready && !web.whole_lane, "{web:?}");
+        assert_eq!(planned(), ["InfraCommand database", "Service web"]);
+        // Expressions still see the services that were not planned.
+        let lanes = status(&h, cx(&main), json!({})).await;
+        let api_port = lanes[0]
+            .units
+            .iter()
+            .find(|u| u.name == "api")
+            .and_then(|u| u.ports.get("default").copied())
+            .expect("api port");
+        let printed = eventually(Duration::from_secs(5), || async {
+            let logs = h
+                .call(
+                    Method::Logs,
+                    json!({"units": ["web"], "tail": 5}),
+                    cx(&main),
+                )
+                .await
+                .ok()?;
+            logs["items"][0]["text"].as_str().map(str::to_owned)
+        })
+        .await
+        .expect("web logged");
+        assert_eq!(printed, api_port.to_string());
+        assert_eq!(
+            h.runner.journal.entries(),
+            [
+                "echo setup-db",
+                "echo migrate",
+                "sleep",
+                "printenv API_PORT; sleep"
+            ],
+            "neither setup nor tasks ran again"
+        );
+        h.close().await;
+    })
+    .await
+    .expect("timeout");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 /// An entry run on a lane this daemon never started still gets the Compose
 /// env its `docker compose exec` needs.

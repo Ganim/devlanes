@@ -68,6 +68,32 @@ fn signal_number(signal: StopSignal) -> i32 {
 /// Identities handed out by the fake runner; far above real PIDs.
 static NEXT_PID: AtomicU32 = AtomicU32::new(4_000_000);
 
+/// Contributor that records `<kind> <name>` for every unit planned, so a test can
+/// see which units a resolution planned.
+#[derive(Default, Clone)]
+pub struct PlanJournal {
+    pub planned: Journal,
+}
+
+#[async_trait]
+impl devlanes_core::contrib::Contributor for PlanJournal {
+    fn id(&self) -> &'static str {
+        "plan-journal"
+    }
+
+    /// Records the unit; the draft is left as it is.
+    async fn apply(
+        &self,
+        _: &mut devlanes_core::contrib::LaunchDraft,
+        cx: &devlanes_core::contrib::ContribCx<'_>,
+    ) -> Result<(), Error> {
+        if let Ok(mut planned) = self.planned.0.lock() {
+            planned.push(format!("{:?} {}", cx.kind, cx.name));
+        }
+        Ok(())
+    }
+}
+
 /// Records every spawned script in order.
 #[derive(Default, Clone)]
 pub struct Journal(pub Arc<Mutex<Vec<String>>>);
@@ -633,12 +659,21 @@ impl InfraProvider for FakeInfra {
         self.record(format!("remove {lane}"));
         Ok(json!({"containers": []}))
     }
-    async fn container_started_at(
+    /// Every container started at the scripted time; none run without one.
+    async fn containers_started_at(
         &self,
         _: &InfraSpec,
-        _: &str,
-    ) -> Result<Option<String>, InfraError> {
-        Ok(self.started_at.lock().ok().and_then(|s| s.clone()))
+        containers: &[String],
+    ) -> Result<BTreeMap<String, String>, InfraError> {
+        let started = self.started_at.lock().ok().and_then(|s| s.clone());
+        Ok(started
+            .map(|at| {
+                containers
+                    .iter()
+                    .map(|container| (container.clone(), at.clone()))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
     /// The stored lines (the last `tail`), then live ones while following.
     async fn container_logs(

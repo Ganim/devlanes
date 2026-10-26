@@ -591,8 +591,24 @@ impl LanePhase for ResolvePhase {
 
     async fn run(&self, engine: &Arc<Inner>, cx: &mut StartCx) -> PhaseResult {
         engine.refresh_views_held(&cx.project, &cx.lane).await;
+        // A start that adds units to a running lane runs no tasks, so it plans only
+        // its services and the setup entries; planning every service can cost a
+        // contributor call each.
+        let only: Option<BTreeSet<String>> = (!cx.whole_lane && !cx.setup_only).then(|| {
+            cx.services
+                .iter()
+                .map(|name| format!("services.{name}"))
+                .chain(
+                    cx.config
+                        .infra
+                        .setup
+                        .keys()
+                        .map(|entry| format!("infra.setup.{entry}")),
+                )
+                .collect()
+        });
         match engine
-            .resolve_config(&cx.project, &cx.lane, cx.config.clone())
+            .resolve_config(&cx.project, &cx.lane, cx.config.clone(), only.as_ref())
             .await
         {
             Ok(resolved) => {
@@ -665,22 +681,20 @@ impl LanePhase for SetupPhase {
             Ok(records) => records,
             Err(error) => return PhaseResult::Error(store_error(error)),
         };
-        let spec = engine
-            .infra_spec(&cx.project, &cx.lane, &cx.infra_needs)
-            .await
-            .ok();
+        let containers: BTreeSet<String> = resolved
+            .setup
+            .values()
+            .filter_map(|command| command.container.clone())
+            .collect();
+        let started = engine
+            .containers_started_at(&cx.project, &cx.lane, &cx.infra_needs, containers)
+            .await;
         let mut pending: Vec<(String, Option<String>)> = Vec::new();
         for (name, command) in &resolved.setup {
-            let started_at = match (&command.container, &spec) {
-                (Some(container), Some(spec)) => engine
-                    .integ
-                    .infra
-                    .container_started_at(spec, container)
-                    .await
-                    .ok()
-                    .flatten(),
-                _ => None,
-            };
+            let started_at = command
+                .container
+                .as_ref()
+                .and_then(|container| started.get(container).cloned());
             let done = records.iter().find(|r| &r.entry == name);
             let current = match (done, &command.container) {
                 (None, _) => false,
@@ -1781,6 +1795,30 @@ impl Inner {
         self.task_event(reference, task, state, code, reason);
     }
 
+    /// `StartedAt` of the infra containers named by setup entries, by name; empty
+    /// when the infra spec or the engine is unavailable. `needs` only fills ports,
+    /// which the lookup does not read.
+    async fn containers_started_at(
+        self: &Arc<Self>,
+        project: &Arc<ProjectRt>,
+        lane: &Arc<LaneRt>,
+        needs: &[InfraPortNeed],
+        containers: BTreeSet<String>,
+    ) -> BTreeMap<String, String> {
+        if containers.is_empty() {
+            return BTreeMap::new();
+        }
+        let Ok(spec) = self.infra_spec(project, lane, needs).await else {
+            return BTreeMap::new();
+        };
+        let containers: Vec<String> = containers.into_iter().collect();
+        self.integ
+            .infra
+            .containers_started_at(&spec, &containers)
+            .await
+            .unwrap_or_default()
+    }
+
     /// Runs a setup/teardown entry as a task step, or on its own through `run`,
     /// and updates its done-record; `session` streams its output.
     #[allow(clippy::too_many_arguments)]
@@ -1815,9 +1853,23 @@ impl Inner {
         let lane_id = lane.st().record.as_ref().map(|r| r.id);
         if let Some(lane_id) = lane_id {
             if phase == "setup" && ok {
+                // The start's setup phase compares this with the container's
+                // `StartedAt`; left empty, the next start would run the entry again.
+                let started_at = match &command.container {
+                    Some(container) => self
+                        .containers_started_at(
+                            project,
+                            lane,
+                            &[],
+                            BTreeSet::from([container.clone()]),
+                        )
+                        .await
+                        .remove(container),
+                    None => None,
+                };
                 let _ = self
                     .store
-                    .record_setup(lane_id, entry.to_owned(), None)
+                    .record_setup(lane_id, entry.to_owned(), started_at)
                     .await;
             } else if phase == "teardown" && ok {
                 let _ = self
@@ -2663,7 +2715,7 @@ impl Inner {
             )
         })?;
         let resolved = self
-            .resolve_config(project, lane, config.clone())
+            .resolve_config(project, lane, config.clone(), None)
             .await
             .map_err(|e| with_ownership(e, &reference, &[]))?;
         // A previous daemon's process is replaced like a running one: terminate it
@@ -3189,7 +3241,7 @@ impl Inner {
             st.infra_containers = up.containers;
             st.setup_env = up.setup_env;
         }
-        self.resolve_config(&cx.project, &cx.lane, cx.config.clone())
+        self.resolve_config(&cx.project, &cx.lane, cx.config.clone(), None)
             .await
             .ok()
             .is_none_or(|resolved| resolved.infra_enabled)

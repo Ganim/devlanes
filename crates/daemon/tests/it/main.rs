@@ -52,7 +52,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-pub use fakes::{FakeInfra, FakeProcesses, FakeRunner};
+pub use fakes::{FakeInfra, FakeProcesses, FakeRunner, PlanJournal};
 
 /// Upper bound for every test body.
 pub const LIMIT: Duration = Duration::from_secs(60);
@@ -178,6 +178,8 @@ pub struct Setup {
     pub system: Option<Arc<dyn devlanes_core::gate::PressureSource>>,
     /// `EngineOptions::idle_exit`.
     pub idle_exit: Option<Duration>,
+    /// Contributors applied to every planned unit.
+    pub contributors: Vec<Arc<dyn devlanes_core::contrib::Contributor>>,
 }
 
 /// Opens an engine over `home` (reusing its state.db when present).
@@ -197,6 +199,7 @@ pub async fn harness(home: &Path, setup: Setup) -> Harness {
     integ.ca_permitted = setup.ca_permitted;
     integ.metrics = setup.metrics;
     integ.system_pressure = setup.system;
+    integ.contributors = setup.contributors;
     if let Some(ports) = setup.ports {
         integ.ports = ports;
     }

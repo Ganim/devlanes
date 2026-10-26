@@ -73,7 +73,14 @@ fn volumes(lab: &Lab, project: &str) -> Result<Vec<String>> {
 
 /// `start` in a worktree, with room for image pulls.
 fn start(lab: &Lab, cwd: &Path) -> Result<()> {
-    let command = lab.command(cwd, &["--timeout", "5m", "start"])?;
+    start_units(lab, cwd, &[])
+}
+
+/// `start <units>` in a worktree, with room for image pulls.
+fn start_units(lab: &Lab, cwd: &Path, units: &[&str]) -> Result<()> {
+    let mut args = vec!["--timeout", "5m", "start"];
+    args.extend(units);
+    let command = lab.command(cwd, &args)?;
     let output = lab.run(command, Duration::from_secs(360))?;
     let started = output.expect_code(0)?.json()?;
     assert_eq!(
@@ -195,5 +202,67 @@ fn docker_lanes_get_their_own_postgres_and_clean_drops_only_theirs() -> Result<(
         ],
     )?;
     assert_eq!(kept, "kept");
+    Ok(())
+}
+
+/// Setup entries backed by the lane's Postgres and the shared Redis, each
+/// appending its name to `{runs}`, and two services.
+const BACKED: &str = r#"project: fixture-pg-redis
+infra:
+  compose: compose.yaml
+  project_name: devlanes-fixture-pg-redis
+  per_lane: [postgres]
+  setup:
+    schema: { run: "echo schema >> '{runs}'", container: postgres }
+    cache: { run: "echo cache >> '{runs}'", container: redis }
+services:
+  api:
+    run: [fixture-server, --log-line, api-ready]
+    ready: { http: { path: /healthz } }
+  web:
+    run: [fixture-server, --log-line, web-ready]
+    ready: { http: { path: /healthz } }
+"#;
+
+/// Entries run on their own record their container's start time, so a later
+/// start of one service runs neither again; it reads both containers' start
+/// times from Docker.
+#[test]
+#[ignore = "needs docker"]
+fn docker_setup_entries_run_by_hand_stay_done() -> Result<()> {
+    let lab = Lab::docker_projects(
+        "compose-pg-redis",
+        &[SHARED, LANE_ZERO],
+        Duration::from_secs(600),
+    )?;
+    let runs = lab.home().join("setup-runs");
+    lab.write(
+        "devlanes.yaml",
+        &BACKED.replace("{runs}", &runs.to_string_lossy()),
+    )?;
+    let ran = || -> Vec<String> {
+        let mut lines: Vec<String> = std::fs::read_to_string(&runs)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        lines.sort();
+        lines
+    };
+    start(&lab, lab.repo())?;
+    assert_eq!(ran(), ["cache", "schema"]);
+
+    for entry in ["infra.setup.schema", "infra.setup.cache"] {
+        lab.devlanes(lab.repo(), &["run", entry])?.expect_code(0)?;
+    }
+    assert_eq!(ran(), ["cache", "cache", "schema", "schema"]);
+
+    lab.devlanes(lab.repo(), &["stop", "web"])?.expect_code(0)?;
+    start_units(&lab, lab.repo(), &["web"])?;
+    assert_eq!(
+        ran(),
+        ["cache", "cache", "schema", "schema"],
+        "the start found both entries done"
+    );
     Ok(())
 }

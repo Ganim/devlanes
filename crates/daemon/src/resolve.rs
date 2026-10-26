@@ -143,13 +143,15 @@ impl Inner {
 
     /// Like [`Self::resolve_full`], against `config` instead of the lane's current
     /// one: a start keeps planning what it selected even if the file reloads.
+    /// `only` limits the planned units as in [`devlanes_resolve::ResolveInput::only`].
     pub(crate) async fn resolve_config(
         self: &Arc<Self>,
         project: &Arc<ProjectRt>,
         lane: &Arc<LaneRt>,
         config: Arc<devlanes_config::ProjectConfig>,
+        only: Option<&BTreeSet<String>>,
     ) -> Result<Arc<ResolvedLane>, RpcError> {
-        self.resolve_planned(project, lane, None, Some(config), None, None)
+        self.resolve_planned(project, lane, None, Some(config), None, only)
             .await
     }
 
