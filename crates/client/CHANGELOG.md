@@ -1,5 +1,9 @@
 # devlanes-client
 
+## 0.4.2 — 2026-10-26
+
+Version bump only, to follow other packages.
+
 ## 0.4.1 — 2026-10-26
 
 ### Patch changes

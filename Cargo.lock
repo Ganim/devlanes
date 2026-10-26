@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-client"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "bytes",
  "devlanes-core",
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-daemon"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-hosts-helper"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "tempfile",
 ]
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-infra-docker"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bollard",
  "bytes",
@@ -1280,7 +1280,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-ipc"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bytes",
  "devlanes-proto",
@@ -1296,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-logs"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "devlanes-proto",
  "devlanes-sys-windows",
@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-metrics"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-metrics-docker"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "bollard",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-metrics-linux"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-metrics-macos"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-metrics-windows"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "devlanes-core",
@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-proto"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "devlanes-version",
  "serde",
@@ -1584,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-resolver-hosts"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "devlanes-hosts-helper",
@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-term"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "devlanes-proto",
@@ -1921,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-tui"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "ab_glyph",
  "async-trait",
@@ -1955,7 +1955,7 @@ dependencies = [
 
 [[package]]
 name = "devlanes-tunnel"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "async-trait",
  "bytes",
